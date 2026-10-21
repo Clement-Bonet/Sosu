@@ -313,6 +313,18 @@ static void test_body_errors(void) {
     expect_codes("class C { }\nvoid f(Arena* a) { C* c = a.new(C, 1); }", "E0336");
     expect_codes("void f(Arena* a) { a.reset(); }", "E0337");
     expect_codes("void f() { auto x = MB(); }", "E0338");
+
+    /* text (spec §4.1) and the prelude */
+    expect_codes("void f(Arena* a, u8[] data) {\n"
+                 "    u8* c = \"abc\".to_cstr(a);\n"
+                 "    str!Utf8Error text = str.from_bytes(data);\n"
+                 "    u8[] buffer = a.alloc_slice(u8, 16);\n"
+                 "}\n",
+                 "");
+    expect_codes("void f(u8[] data) { auto c = \"abc\".to_cstr(data); }", "E0336");
+    expect_codes("void f() { auto t = str.from_bytes(\"abc\"); }", "E0331");
+    expect_codes("void f(Arena* a) { auto s = a.alloc_slice(u8); }", "E0336");
+    expect_codes("enum Utf8Error { Mine }\nUtf8Error f() { return Mine; }", "");
 }
 
 static void test_packages(void) {

@@ -80,7 +80,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   sema_body   semantic analysis of function bodies
   codegen     C code generation
 src/sosuc/    command-line driver
-lib/          the `core` and `std` packages (mostly empty for now), and the C runtime (lib/runtime)
+lib/          the `core` and `std` packages, written in Sosu (std.io: files), and the C runtime (lib/runtime)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end
 docs/         specification and error codes
 ```

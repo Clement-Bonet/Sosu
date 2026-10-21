@@ -154,10 +154,10 @@ static void expect_program(const char *dir, const char *codes, size_t units, siz
 }
 
 static void test_program(void) {
-    expect_program("tests/packages/app", "", 4, 3);
-    expect_program("tests/packages/geometry", "", 2, 1);
-    expect_program("tests/packages/bad_imports", "E0410 E0411 E0412 E0410", 1, 2);
-    expect_program("tests/packages/bad_deps", "E0406 E0405 E0415 E0407", 1, 3);
+    expect_program("tests/packages/app", "", 5, 4); /* + core.prelude, loaded with every program */
+    expect_program("tests/packages/geometry", "", 3, 2);
+    expect_program("tests/packages/bad_imports", "E0410 E0411 E0412 E0410", 2, 3);
+    expect_program("tests/packages/bad_deps", "E0406 E0405 E0415 E0407", 2, 4);
 
     Program program;
     program_load(&program, "tests/packages/app", "nowhere");

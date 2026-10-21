@@ -1,5 +1,6 @@
 #include "sosu_rt.h"
 
+#include <errno.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,6 +86,52 @@ void sosu_arena_free(sosu_arena *arena) {
     }
     free(arena->state);
     arena->state = NULL;
+}
+
+void *sosu_arena_alloc_array(sosu_arena *arena, size_t size, uint64_t count, const char *loc) {
+    if (count != 0 && size > SIZE_MAX / count) sosu_fail(loc, "allocation too large");
+    return sosu_arena_alloc(arena, size * (size_t)count, loc);
+}
+
+/* ---- Text ---- */
+
+uint8_t *sosu_str_to_cstr(sosu_arena *arena, sosu_str text, const char *loc) {
+    uint8_t *copy = sosu_arena_alloc(arena, text.len + 1, loc); /* zeroed: ends with NUL */
+    if (text.len) memcpy(copy, text.ptr, text.len);
+    return copy;
+}
+
+bool sosu_utf8_valid(const uint8_t *s, size_t length) {
+    size_t i = 0;
+    while (i < length) {
+        uint32_t c = s[i];
+        size_t n;
+        uint32_t min;
+        if (c < 0x80) { i++; continue; }
+        else if ((c & 0xE0) == 0xC0) { n = 2; c &= 0x1F; min = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { n = 3; c &= 0x0F; min = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { n = 4; c &= 0x07; min = 0x10000; }
+        else return false;
+        if (length - i < n) return false;
+        for (size_t k = 1; k < n; k++) {
+            if ((s[i + k] & 0xC0) != 0x80) return false;
+            c = (c << 6) | (s[i + k] & 0x3F);
+        }
+        if (c < min || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) return false;
+        i += n;
+    }
+    return true;
+}
+
+int32_t sosu_errno(void) { return (int32_t)errno; }
+
+int64_t sosu_file_size(void *file) {
+    FILE *f = file;
+    long start = ftell(f);
+    if (start < 0 || fseek(f, 0, SEEK_END) != 0) return -1;
+    long end = ftell(f);
+    if (fseek(f, start, SEEK_SET) != 0) return -1;
+    return end < 0 ? -1 : (int64_t)(end - start);
 }
 
 /* ---- Classes ---- */

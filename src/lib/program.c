@@ -245,6 +245,21 @@ static void resolve_imports(Program *program, Unit *unit) {
 
 /* ---- Program ---- */
 
+/* `core.prelude`, loaded with every program (spec §5.3); nothing if the library is absent
+   (an import of `core` or `std` then reports it). */
+static void load_prelude(Program *program) {
+    char *root = normalized_join(program->lib_dir, "core");
+    Package *core = find_package(program, root);
+    bool missing = false;
+    if (!core) core = load_package(program, root, true, &missing);
+    if (core) {
+        char *file = normalized_join(core->root, "src/prelude.sosu");
+        if (!find_unit(program, file)) load_unit(program, core, sosu_strdup("core.prelude"), file);
+        free(file);
+    }
+    free(root);
+}
+
 bool program_load(Program *program, const char *dir, const char *lib_dir) {
     memset(program, 0, sizeof *program);
     program->lib_dir = path_normalize(lib_dir);
@@ -274,6 +289,7 @@ bool program_load(Program *program, const char *dir, const char *lib_dir) {
         return false;
     }
 
+    load_prelude(program);
     /* Resolving imports loads new units, which are resolved in turn. */
     for (size_t i = 0; i < program->units.count; i++) resolve_imports(program, program->units.items[i]);
     return program->diags.error_count == 0;
@@ -295,6 +311,7 @@ bool program_load_text(Program *program, const char *text, const char *lib_dir) 
     memset(unit, 0, sizeof *unit);
     source_from_string(&unit->file, "test.sosu", text);
     finish_unit(program, unit, package, sosu_strdup("test.main"));
+    load_prelude(program);
     for (size_t i = 0; i < program->units.count; i++) resolve_imports(program, program->units.items[i]);
     return program->diags.error_count == 0;
 }
