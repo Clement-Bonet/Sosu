@@ -1,0 +1,26 @@
+// login.ui.sosu
+import app.login;
+
+window LoginWindow(LoginState* state) {
+    title: "Login"
+    width: 400
+    height: 300
+
+    Column(gap: 8, padding: 16) {
+        Text("Name")
+        TextField(bind: state.name)
+        Row(gap: 8, align: End) {
+            Button("Cancel", on_click: state.cancel)
+            Button("OK", on_click: state.submit, enabled: state.name.len > 0)
+        }
+    }
+}
+
+style Muted { color: Gray }
+
+component TaskRow(Task* t) {
+    Row(gap: 8) {
+        Checkbox(bind: t.done)
+        Text(t.title, style: t.done ? Muted : Normal)
+    }
+}

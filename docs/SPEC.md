@@ -1,0 +1,663 @@
+# Sosu — Specification v0
+
+Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
+
+## 1. Goals
+
+- Native, low-level, statically typed language.
+- Syntax readable for a C++/C# developer.
+- Cross-platform: Windows, Linux, macOS, Android, iOS (see §11).
+- Memory-frugal: no GC, no reference counting.
+- Declarative user interface, provided by packages (see §10).
+- Compiler with no dependency other than the libc.
+
+## 2. Design principles
+
+1. No hidden cost: no implicit allocation or copy.
+2. Value types (`struct`) are the foundation; class instances live in arenas (see §5.2).
+3. Immutable by default (`mut` to modify).
+4. Syntax that is simple to parse (no generics in v0).
+5. The whole language is in English: keywords, standard library, std identifiers, compiler messages.
+6. Symbols inherited from C/C++, with their inconsistencies fixed (see §5.1).
+7. Local readability: a fragment of code can be understood without knowing the whole project (no implicit conversion, no hidden control flow, no undefined behavior).
+8. Absence and failure are in the types (`T?`, `T!E`), never in exceptions or implicit null pointers.
+9. Small core, one way to do things: no overloading, no macros, no preprocessor.
+10. Intent is checkable: contracts and tests are part of the language (see §7).
+11. The same code for every platform: everything that depends on the OS is isolated in packages (see §8 and §10).
+
+## 3. Lexicon
+
+- Comments: `// line` and `/* block */`.
+- Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
+- v0 keywords (English):
+  `struct class interface enum import extern pub return if else while for in break continue defer mut auto true false as match try requires ensures test uses result unsafe virtual override self base`
+- Reserved for later: `comptime`.
+- Contextual words of `.ui.sosu` files (not reserved elsewhere): `window`, `component`, `style`, `theme`.
+- Predefined constructors (not reserved): `some`, `none`, `ok`, `err`.
+- Literals: integers (`42`, `0xFF`, `0b1010`), floats (`3.14`), strings (`"..."`), characters (`'a'`).
+
+## 4. Types
+
+| Category | Types |
+|---|---|
+| Integers | `i8 i16 i32 i64 u8 u16 u32 u64 isize usize` |
+| Floats | `f32 f64` |
+| Others | `bool char void` |
+| String | `str` (valid UTF-8, pointer + length, not owned) |
+| Pointer | `T*` (never null; possibly absent pointer: `T*?`) |
+| Option | `T?` (values `some(x)` or `none`) |
+| Result | `T!E` (values `ok(x)` or `err(e)`) |
+| Array | `T[N]` (fixed size), `T[]` (view: pointer + length) |
+| User-defined | `struct`, `enum` (sum types, see §7.1) |
+
+Conversions: always explicit with `as` (`x as f32`).
+
+### 4.1 Text and UTF-8
+
+- A `str` always holds valid UTF-8, without a null terminator; its length is in bytes.
+- `char` is a Unicode code point (32 bits).
+- Iteration: `for (char c in s.chars())`; byte access: `s.bytes[i]`.
+- Building a `str` from arbitrary bytes can fail: `str.from_bytes(u8[]) -> str!Utf8Error`.
+- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(u8*)` is `unsafe`).
+
+## 5. Declarations and syntax
+
+C/C++ style: type first. `auto` for inference.
+
+```sosu
+import std.io;
+
+struct Point {
+    f32 x;
+    f32 y;
+
+    f32 length() { return sqrt(x * x + y * y); }
+}
+
+i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+i32 main() uses io {
+    i32 n = 3;            // immutable
+    mut i32 total = 0;    // mutable
+    for (i32 i in 0..n) {
+        total += add(i, 1);
+    }
+    auto p = Point{ x: 3.0, y: 4.0 };
+    print("length = {}", p.length());
+    return 0;
+}
+```
+
+Parsing note: a statement starting with `Ident Ident` is a declaration, otherwise an expression
+(enough as long as there are no generics).
+
+Control flow: `if / else`, `while`, `for (init; cond; step)`, `for (T x in a..b)`, `break`, `continue`.
+
+Lambdas (v1): `(i32 a) => a + 1`; the body is an expression or a `{ ... }` block.
+
+### 5.1 Symbols and operators
+
+C/C++ base, with these fixes:
+
+| Inconsistency in C/C++ | Sosu rule |
+|---|---|
+| `.` and `->` | `.` only, pointers are dereferenced automatically |
+| `&` = reference, address-of and bitwise AND | no references; `&x` (unary) = address, `a & b` (binary) = bitwise AND |
+| `a & b == c` badly parenthesized by default | bitwise operators bind tighter than comparisons |
+| `if (x = 1)` accepted | assignment is a statement, not an expression |
+| `++` / `--`, undefined evaluation order | removed (`x += 1`); evaluation is left to right, defined |
+| `i32* a, b`: `b` is not a pointer | one variable per declaration |
+| `int a[4]`, `int (*f)(int)` | type always on the left: `i32[4]`, `fn(i32) -> i32` |
+| `::` and `.` | `.` only (modules, members) |
+| `const`, `static`, `volatile`... | `mut` only in v0 |
+| implicit conversions | `as` only |
+| undefined signed overflow | never undefined: in debug, an error (stops with a message); in release, modulo 2^n arithmetic; explicit `wrapping_*`, `checked_*` (returns `T?`) and `saturating_*` operations; division by zero = stop |
+| `switch` with fall-through | replaced by an exhaustive `match`, without fall-through (see §7.1) |
+| comma operator | removed |
+| `if (c) x;` without braces | braces are mandatory |
+| `a < b < c` accepted (unexpected meaning) | compile error |
+
+Operators:
+- Arithmetic: `+ - * / %`
+- Comparison: `== != < <= > >=`
+- Logical: `&& || !`
+- Bitwise: `& | ^ ~ << >>` (`>>` arithmetic on signed, logical on unsigned)
+- Assignment (statement): `= += -= *= /= %= &= |= ^= <<= >>=`
+- Access: `.` `[]`; address / dereference: `&` `*`
+- Conversion: `as`; conversion to a subclass: `as?` (returns `T*?`); ranges: `..` (exclusive), `..=` (inclusive); ternary: `?:`
+
+Precedence (tightest first):
+
+1. Postfix: `()` `[]` `.`
+2. Unary: `! ~ - & *` and `as`
+3. `* / %`
+4. `+ -`
+5. `<< >>`
+6. `&`
+7. `^`
+8. `|`
+9. `== != < <= > >=` (not chainable)
+10. `&&`
+11. `||`
+12. `?:`
+
+### 5.2 Classes, inheritance and interfaces
+
+`struct`: value type, copied, no inheritance. `class`: instance allocated in an arena, handled through a pointer (`T*`), never copied.
+
+```sosu
+interface Drawable {
+    void draw(Render* r) uses io;
+}
+
+class Widget : Drawable {
+    f32 x;
+    f32 y;
+
+    void init(f32 x, f32 y) { self.x = x; self.y = y; }
+
+    virtual void on_click() uses io { }
+    override void draw(Render* r) uses io { /* ... */ }
+}
+
+class Button : Widget {
+    str label;
+
+    void init(str label) { base.init(0.0, 0.0); self.label = label; }
+
+    override void on_click() uses io { /* ... */ }
+}
+
+Button* b = arena.new(Button, "OK");
+Widget* w = b as Widget*;     // to the parent class
+w.on_click();                  // virtual call (announced by `virtual`)
+Button* back = w as? Button*; // `as?` returns Button*?
+```
+
+- **Single inheritance and interfaces**: `class Dog : Animal, Walker`. At most one parent class, which must come first; the other elements are interfaces.
+- **Methods are non-virtual by default** (direct call). `virtual` allows overriding; `override` is mandatory to override a method or implement an interface method, and it is an error if there is nothing to override. The cost of a virtual call therefore only appears where the code announces it.
+- **Construction**: an `init(...)` method; `arena.new(Type, args)` allocates then calls `init`. The `init` of a derived class starts with `base.init(...)`. `self` is the instance, `base` the parent class.
+- **Fields**: assignable in `init`; elsewhere, they must be declared `mut`.
+- **No destructor** in v0: external resources are released with `defer`, memory with the arena.
+- **Conversions**: to the parent class or an interface with `as`; to a subclass with `as?` (checked at run time, returns `T*?`).
+- **Interfaces**: signatures only; only classes implement them (see §14.2).
+
+## 6. Memory
+
+- No GC, no reference counting.
+- **Arenas**: a first-class allocator.
+
+```sosu
+Arena arena = Arena.new(1 * MB);
+defer arena.free();                 // runs at the end of the scope
+
+Point* p = arena.alloc(Point);      // lives until arena.free()
+```
+
+- `alloc` stops the program with a message when memory runs out; `try_alloc` returns `T*?` to handle that case yourself.
+- `defer`: runs a statement when leaving the scope (in reverse order).
+- **Move by default** for types owning a resource; explicit copy with `.copy()`.
+- Plain `struct`s (without a resource) are copied by value.
+- No hidden allocation: no global allocator; every function that allocates explicitly receives an `Arena*`.
+- No borrow checker in v0: safety relies on arenas and `defer`.
+- Research track (v1): a simple region rule checked by the compiler, without lifetime parameters. A pointer coming from an arena can neither be stored in a structure that outlives the arena, nor be returned beyond its scope.
+
+## 7. Reliability and readability
+
+### 7.1 Sum types and `match`
+
+An `enum` can carry data. `match` must be exhaustive: a forgotten case is a compile error. `_` is the default case, written explicitly. An arm is an expression or a block.
+
+```sosu
+enum Shape {
+    Circle(f32 radius),
+    Rect(f32 w, f32 h),
+    Empty,
+}
+
+f32 area(Shape s) {
+    return match (s) {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+        Empty => 0.0,
+    };
+}
+```
+
+### 7.2 Options and errors
+
+No exceptions, no implicit `null`. Absence is `T?`, failure is `T!E` (`E` is an ordinary `enum`). `try` propagates the error to the caller and makes that early return visible.
+
+```sosu
+enum ParseError { Empty, NotANumber }
+
+i32!ParseError parse(str s) { ... }
+
+i32!ParseError twice(str s) {
+    i32 n = try parse(s);       // on error: return err(...)
+    return ok(n * 2);
+}
+
+i32? find(i32[] items, i32 target) { ... }   // some(index) or none
+```
+
+### 7.3 Contracts and tests
+
+```sosu
+i32 clamp(i32 x, i32 lo, i32 hi)
+    requires lo <= hi
+    ensures result >= lo && result <= hi
+{
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+test "clamp stays in range" {
+    assert(clamp(15, 0, 10) == 10);
+}
+```
+
+- `requires` / `ensures`: checked in debug mode (stops with a clear message), configurable in release (`--contracts=check|off`).
+- `test`: built-in test block, run by `sosuc test`.
+
+### 7.4 Effects visible in signatures
+
+- Allocation: visible through the `Arena*` parameter (see §6).
+- Failure: visible through `!E` in the return type.
+- Interactions with the outside world: `uses` clause, checked by the compiler from v0.
+
+Predefined effects:
+
+| Effect | Covers |
+|---|---|
+| `io` | console, files, network, windows and display |
+| `time` | reading the clock |
+| `random` | random generators |
+| `threads` | creating threads, channels, locks |
+
+Rules:
+
+- A function only calls functions whose effects are included in its own; without `uses`, it has no effect.
+- Effects are always written, never inferred: the signature is enough to know them.
+- They are part of the function type (`fn(i32) -> i32 uses io`). An overriding method (`override`) cannot add an effect to the method it overrides.
+- `extern "C"` functions declare their effects by hand; `unsafe` does not bypass effects.
+- `test` blocks may use every effect.
+- Known limitation: no effect polymorphism in v0. A higher-order library function (`map`, for example) only accepts callbacks without effects; generics (v1) will make it possible to abstract over them.
+
+```sosu
+void log(str msg) uses io { ... }
+
+i32 main() uses io {
+    log("hello");
+    return 0;
+}
+```
+
+### 7.5 Compiler diagnostics
+
+Each error has a stable code, a precise position, an explanation and, when possible, a suggested fix. Two formats: readable text and JSON (`--format=json`).
+
+```
+error[E0312]: non-exhaustive match
+  --> shapes.sosu:14:12
+   |
+14 |     return match (s) {
+   |            ^^^^^ missing case: Empty
+   = help: add `Empty => ...` or `_ => ...`
+```
+
+### 7.6 Canonical formatter and minimal core
+
+- `sosuc fmt`: a single style, no configuration option.
+- No function or operator overloading, no macros, no preprocessor, no exceptions, no implicit conversion.
+
+### 7.7 `unsafe` and debug checks
+
+- `unsafe { ... }` is the only place where pointer arithmetic, raw pointer conversions (`p as T*`) or unwrapped calls to C are allowed. A function marked `unsafe` can only be called from an `unsafe` block.
+- Outside `unsafe`, a `T*` always points to a valid value.
+- In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, contracts.
+- In release, bounds stay checked by default (`--checks=off` disables them); contracts and overflows are not.
+
+```sosu
+unsafe {
+    u8* p = base as u8*;
+    u8 first = *(p + 4);
+}
+```
+
+## 8. Engine, library and packages
+
+Rule: the **compiler** contains what cannot be written in Sosu, the **library** what can be written in Sosu, and **packages** everything heavy or optional.
+
+| Level | Content |
+|---|---|
+| Compiler | basic types, `struct`, `enum`, `match`, `T?`, `T!E`, `try`, `defer`, contracts, `test`, `unsafe`, C interop, intrinsics (`sizeof`, `alignof`, memory operations), modules, `fmt`, diagnostics |
+| `core` (no OS, no libc) | `min` / `max` / `abs`, checked arithmetic, `str` and slice utilities, `Arena`, `assert` |
+| `std` (OS layer) | files, input / output, `print`, time, environment, processes, `std.app` (application data, cache and document folders, mobile sandbox included), randomness |
+| Packages | `platform`, `render`, `ui`, networking, HTTP, JSON, regex, audio, 2D graphics, cryptography, C bindings |
+
+- Without generics, `Vec<T>` and `HashMap<K, V>` cannot be written in Sosu: v0 is limited to slices and arenas; containers arrive with generics (v1, monomorphized).
+- Modules and packages: see §8.1.
+
+### 8.1 Packages and manifest
+
+A package is a folder with a `sosu.toml` manifest (a subset of TOML):
+
+```
+myapp/
+  sosu.toml
+  src/
+    main.sosu
+    login.ui.sosu
+  tests/
+```
+
+```toml
+[package]
+name = "myapp"
+version = "0.1.0"
+
+[dependencies]
+ui = { git = "https://git.example/sosu-ui", tag = "v0.1.0" }
+shared = { path = "../shared" }
+```
+
+- `import` starts with the package name: `import ui.button;` refers to `src/button.sosu` in the `ui` package; `import myapp.login;` refers to a file of the current package. `core` and `std` are implicit.
+- Visibility: private by default; `pub` exports a type, a function or a method.
+- Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
+- In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
+- No circular dependencies between packages.
+- `platform`, `render` and `ui` are packages like any other.
+
+## 9. C interop
+
+```sosu
+extern "C" {
+    i32 puts(u8* s);
+}
+```
+
+- `struct`s are compatible with the C layout.
+- An `extern` call is `unsafe`, unless it is wrapped in a safe function.
+- `sosuc bindgen` (v1): generates declarations from C headers (functions, structs, enums, constants). In v0, bindings are written by hand.
+
+## 10. User interface
+
+The UI is a set of packages, never compiler syntax. Three layers, each replaceable:
+
+| Layer | Role | v0 choice |
+|---|---|---|
+| `platform` | window, events, touch input, clipboard, cursor, high-density screens, lifecycle | SDL3 (alternative: `sokol_app`) |
+| `render` | rectangles, lines, text, images | software rendering (pixel buffer), then GPU (Metal, Vulkan, D3D or SDL_GPU) |
+| `ui` | layout, widgets, state, declarative syntax | widgets drawn by Sosu, identical rendering everywhere |
+
+- SDL3 handles Windows, Linux, macOS, Android and iOS. Its interface stays narrow so that custom backends can be added later (Win32, Cocoa, X11 / Wayland, UIKit, native Android).
+- Text is the real difficulty: `stb_truetype` or FreeType at first; fonts, HiDPI and international input (IME) must be planned from the start.
+- Accessibility (screen readers): to be planned, outside v0.
+
+### 10.1 Events and loop
+
+Events are a sum `enum`, handled by an exhaustive `match`. On mobile, the OS owns the main loop: the `platform` runtime therefore owns it on every platform, and the program provides callbacks.
+
+```sosu
+enum Event {
+    Quit,
+    Resized(i32 w, i32 h),
+    Key(Key key, bool down),
+    TextInput(str text),
+    MouseMove(f32 x, f32 y),
+    Click(f32 x, f32 y, Button button),
+    Touch(i32 id, TouchPhase phase, f32 x, f32 y),
+    SafeAreaChanged(f32 top, f32 right, f32 bottom, f32 left),
+    Suspend,        // application in the background: save the state, stop rendering
+    Resume,
+    LowMemory,      // free the cache arenas
+}
+
+void on_event(App* app, Event e) uses io {
+    match (e) {
+        Quit => { app.running = false; },
+        Resized(w, h) => { app.ui.resize(w, h); },
+        Suspend => { app.save(); },
+        _ => { app.ui.handle(e); },
+    }
+}
+
+i32 main() uses io {
+    auto config = AppConfig{ title: "Hello", width: 800, height: 600 };
+    return platform.run(config, on_init, on_event, on_frame);
+}
+```
+
+A window has its own arena; a per-frame arena is reset at every frame for the widget tree.
+
+### 10.2 `.ui.sosu` interface files
+
+Windows and components are described in `.ui.sosu` files, separate from the logic. The format is inspired by XAML, but lighter: braces, no tags, no namespaces. Sketch: the exact grammar will be settled with the `ui` package.
+
+```sosu
+// login.ui.sosu
+import app.login;
+
+window LoginWindow(LoginState* state) {
+    title: "Login"
+    width: 400
+    height: 300
+
+    Column(gap: 8, padding: 16) {
+        Text("Name")
+        TextField(bind: state.name)
+        Row(gap: 8, align: End) {
+            Button("Cancel", on_click: state.cancel)
+            Button("OK", on_click: state.submit, enabled: state.name.len > 0)
+        }
+    }
+}
+```
+
+Reusable components, lists and styles:
+
+```sosu
+// tasks.ui.sosu
+import app.tasks;
+
+style Muted { color: Gray }
+
+component TaskRow(Task* t) {
+    Row(gap: 8) {
+        Checkbox(bind: t.done)
+        Text(t.title, style: t.done ? Muted : Normal)
+    }
+}
+
+window TaskWindow(TaskState* state) {
+    title: "Tasks"
+
+    List {
+        for (Task* t in state.tasks) {
+            TaskRow(t)
+        }
+    }
+}
+```
+
+Rules:
+
+- A node is written `Type(arguments) { children }`. The children and properties of a window are separated by line breaks; named arguments (`name: value`) are separated by commas.
+- Values are ordinary Sosu expressions, checked by the compiler. An `enum` value is written without qualifier when the expected type is known (`align: End`).
+- `bind:` creates a two-way binding; its target must be mutable (`mut` field).
+- Data comes from typed parameters of the window or component. No data context, no code-behind, no converters (an expression is enough).
+- `if`, `for` and `match` are used directly in the tree, with the Sosu syntax.
+- Grids are set with `row`, `col` and `span`, without attached properties.
+- Styles and themes: named `style` and `theme` blocks.
+- The description is re-evaluated when the state changes, in the frame arena (see §10.1). No change notification and no dependency properties.
+
+XAML equivalents:
+
+| XAML | `.ui.sosu` |
+|---|---|
+| opening and closing tags | braces |
+| namespaces (`xmlns`) | `import` |
+| `Grid.Row="1"` | `row: 1` |
+| `{Binding Path=Name, Mode=TwoWay}` | `bind: state.name` |
+| `DataContext` and code-behind | typed parameters |
+| `IValueConverter` | Sosu expression |
+| `DataTemplate` | `for`, `if`, `match` |
+| `INotifyPropertyChanged` | re-evaluation from the state |
+| `ResourceDictionary` | `style`, `theme` |
+| `UserControl` | `component` |
+
+Compilation:
+
+- `sosuc` translates each `.ui.sosu` into ordinary Sosu functions that build the tree in the frame arena. `#line` directives point errors back to the interface file.
+- No reflection and no run-time parsing: an unknown property is a compile error, with a suggestion.
+- This translator is part of the tooling of the `ui` package, not of the compiler core.
+- Hot reload (changing the interface without recompiling): possible later, by interpreting the file during development.
+
+### 10.3 Mobile specifics
+
+- Touch screens: `Touch` events, gestures in `ui`.
+- Safe areas (notches, system bars): `SafeAreaChanged`.
+- Orientation, virtual keyboard and varying screen sizes: adaptive layout in `ui`.
+- Lifecycle: `Suspend` / `Resume` / `LowMemory`; on iOS, rendering must stop in the background.
+
+### 10.4 Milestones
+
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`.
+2. The same program on the Android emulator, then on the iOS simulator.
+3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
+
+## 11. Targets and compilation
+
+### 11.1 Targets
+
+Target name: `--target <os>-<arch>`.
+
+| Target | Architectures | Format | Required tooling (step 1, through C) |
+|---|---|---|---|
+| `windows` | x64, arm64 | PE | clang or MSVC |
+| `linux` | x64, arm64 | ELF | gcc or clang |
+| `macos` | arm64, x64 | Mach-O | clang (Xcode Command Line Tools) |
+| `android` | arm64 (x64 for the emulator) | ELF `.so` | Android NDK + SDK; APK / AAB packaging through Gradle |
+| `ios` | arm64 (+ arm64 simulator) | Mach-O | Xcode (clang + iOS SDK); a Mac is required |
+
+Order: Android first (tooling usable on any OS), iOS next.
+
+The web (WebAssembly) is not planned for v0; it can be added as a target later.
+
+### 11.2 Mobile: how it works
+
+- The Sosu program is compiled into a library (`.so` on Android, static library on iOS), loaded by a small host project (Android activity, Xcode project). SDL3 provides this host code; in v0, project templates are provided by hand, and `sosuc package --target android|ios` (v1) generates them.
+- Sosu compiles ahead of time (AOT): no problem with the ban on run-time generated code on iOS.
+- Files: always through `std.app` (sandbox), never hard-coded paths.
+- Permissions and native APIs (camera, notifications, purchases...): dedicated packages, with host code (JNI on Android, Objective-C on iOS); outside v0.
+- Zero dependencies applies to the compiler, not to mobile: the NDK, Xcode, signing and the stores remain mandatory. Even the future custom backend (step 2) will produce ARM64, but linking, signing and packaging will go through the official tools. The C backend is therefore the realistic path for mobile, and deserves to be kept as a permanent option.
+
+### 11.3 Backends
+
+1. Step 1: `sosuc` generates C99, compiled by `cc` (or by the target platform's compiler). The generated C contains `#line` directives, so that errors and the debugger point to the lines of the `.sosu` files.
+2. Step 2: custom x86-64 / ARM64 backend (ELF, Mach-O, PE) on the same IR.
+3. Step 3: self-hosting (Sosu compiles Sosu).
+
+### 11.4 Compiler as a library, and commands
+
+The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including a future language server (LSP) for completion in editors.
+
+- `sosuc build [--target <os>-<arch>]`: compiles (cross-compiling depending on the available tooling).
+- `sosuc run`: compiles and runs in one command (useful for learning and workshops).
+- `sosuc test`, `sosuc fmt`.
+- `sosuc package` and `sosuc bindgen`: v1.
+
+## 12. Grammar (v0 subset, EBNF)
+
+```
+program     = { import | decl } ;
+import      = "import" path ";" ;
+decl        = [ "pub" ] ( struct | class | interface | enum | function ) | extern | test ;
+class       = "class" IDENT [ ":" IDENT { "," IDENT } ] "{" { field | method } "}" ;
+method      = [ "pub" ] [ "virtual" | "override" ] function ;
+interface   = "interface" IDENT "{" { function_sig [ "uses" IDENT { "," IDENT } ] ";" } "}" ;
+test        = "test" STRING block ;
+enum        = "enum" IDENT "{" variant { "," variant } [ "," ] "}" ;
+variant     = IDENT [ "(" params ")" ] ;
+extern      = "extern" STRING "{" { function_sig [ "uses" IDENT { "," IDENT } ] ";" } "}" ;
+struct      = "struct" IDENT "{" { field | function } "}" ;
+field       = type IDENT [ "=" expr ] ";" ;
+function    = [ "unsafe" ] function_sig [ "uses" IDENT { "," IDENT } ] { contract } block ;
+function_sig = type IDENT "(" [ params ] ")" ;
+contract    = ( "requires" | "ensures" ) expr ;
+params      = param { "," param } ;
+param       = type IDENT ;
+type        = [ "mut" ] base { "*" | "?" | "[" [ INT ] "]" | "!" base } ;
+block       = "{" { stmt } "}" ;
+stmt        = vardecl | expr ";" | if | while | for | return | defer | match | unsafe | block ;
+unsafe      = "unsafe" block ;
+match       = "match" "(" expr ")" "{" arm { "," arm } [ "," ] "}" ;
+arm         = pattern "=>" ( expr | block ) ;
+pattern     = "_" | IDENT [ "(" IDENT { "," IDENT } ")" ] ;
+vardecl     = ( type | "auto" ) IDENT "=" expr ";" ;
+expr        = assignment ;
+```
+
+(Operator precedence: see §5.1.)
+
+`.ui.sosu` files (sketch):
+
+```
+ui_file     = { import | window | component | style | theme } ;
+window      = "window" IDENT "(" [ params ] ")" "{" { prop } node "}" ;
+component   = "component" IDENT "(" [ params ] ")" "{" node "}" ;
+style       = "style" IDENT "{" prop { "," prop } "}" ;
+theme       = "theme" IDENT "{" { prop | style } "}" ;
+prop        = IDENT ":" expr ;
+node        = IDENT [ "(" [ arg { "," arg } ] ")" ] [ "{" { node | if | for | match } "}" ] ;
+arg         = [ IDENT ":" ] expr ;
+```
+
+Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with nodes in their blocks.
+
+## 13. Roadmap
+
+1. Lexer (C)
+2. Parser (recursive descent) -> AST, import resolution by package (manifest)
+3. Semantic analysis and type checking (including `match` exhaustiveness, inheritance and effects)
+4. C generation, with `#line` (virtual tables for classes)
+5. C interop, "Hello window" on desktop (SDL3)
+6. Arenas, `defer`, move, `unsafe`, debug checks
+7. Tooling: `sosuc fmt`, `sosuc test`, `sosuc run`, JSON diagnostics, contracts
+8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
+9. Mobile: Android (NDK, emulator), then iOS (simulator), with the same code
+10. Generics (monomorphized), `Vec` / `HashMap` containers
+11. `sosuc bindgen`, `sosuc package`, cross-compilation
+12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
+13. Research: `comptime`, effect polymorphism, regions, concurrency, language server (LSP)
+14. Self-hosting
+
+## 14. Decisions and open questions
+
+### 14.1 Decisions made
+
+- Object model: `struct` (value) and `class` (single inheritance + interfaces); non-virtual methods by default, explicit `virtual` and `override` (§5.2).
+- Modules: named packages from v0, with a manifest (§8.1).
+- Effects: `uses` clause from v0 (§7.4).
+- Mobile: Android first, iOS next (§11.1).
+- Contracts: checked in debug, ignored in release.
+- Array bounds: checked in release by default, can be disabled (`--checks=off`).
+- Integer overflow: an error in debug, modulo arithmetic in release.
+- Function overloading: excluded.
+- Concurrency: threads and message channels, an arena belongs to a single thread, UI on the main thread.
+- Program entry: callbacks provided to the `platform` runtime, which owns the main loop.
+- `.ui.sosu` syntax: only in dedicated files in v0.
+- Interface hot reload: after v0.
+
+### 14.2 Open questions
+
+- Manifest format: a subset of TOML (`sosu.toml`)? (proposed: yes)
+- Source of dependencies in v0: local path or Git repository, without a central registry? (proposed: yes)
+- Effect polymorphism (higher-order functions): to be handled with generics in v1? (proposed: yes)
+- Abstract classes: unnecessary, interfaces are enough? (proposed: yes)
+- Can a `struct` implement an interface? (proposed: no in v0, reserved for classes)
+- Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)

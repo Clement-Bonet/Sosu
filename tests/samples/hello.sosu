@@ -1,0 +1,23 @@
+import std.io;
+
+struct Point {
+    f32 x;
+    f32 y;
+
+    f32 length() { return sqrt(x * x + y * y); }
+}
+
+i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+i32 main() uses io {
+    i32 n = 3;            // immutable
+    mut i32 total = 0;    // mutable
+    for (i32 i in 0..n) {
+        total += add(i, 1);
+    }
+    auto p = Point{ x: 3.0, y: 4.0 };
+    print("length = {}", p.length());
+    return 0;
+}

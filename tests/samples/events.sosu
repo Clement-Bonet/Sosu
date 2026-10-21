@@ -1,0 +1,38 @@
+enum Event {
+    Quit,
+    Resized(i32 w, i32 h),
+    Key(Key key, bool down),
+    TextInput(str text),
+    Touch(i32 id, TouchPhase phase, f32 x, f32 y),
+    Suspend,
+    Resume,
+}
+
+void on_event(App* app, Event e) uses io {
+    match (e) {
+        Quit => { app.running = false; },
+        Resized(w, h) => { app.ui.resize(w, h); },
+        Suspend => { app.save(); },
+        _ => { app.ui.handle(e); },
+    }
+}
+
+i32 main() uses io {
+    auto config = AppConfig{ title: "Hello", width: 800, height: 600 };
+    return platform.run(config, on_init, on_event, on_frame);
+}
+
+i32? find(i32[] items, i32 target) {
+    for (mut usize i = 0; i < items.len; i += 1) {
+        if (items[i] == target) {
+            return some(i as i32);
+        } else if (i > 1000) {
+            break;
+        }
+    }
+    return none;
+}
+
+fn(i32) -> i32 uses io pick(bool fast, fn(i32) -> i32 uses io f) {
+    return fast ? f : f;
+}

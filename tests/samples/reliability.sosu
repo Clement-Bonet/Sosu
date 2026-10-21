@@ -1,0 +1,50 @@
+enum Shape {
+    Circle(f32 radius),
+    Rect(f32 w, f32 h),
+    Empty,
+}
+
+f32 area(Shape s) {
+    return match (s) {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+        Empty => 0.0,
+    };
+}
+
+enum ParseError { Empty, NotANumber }
+
+i32!ParseError twice(str s) {
+    i32 n = try parse(s);
+    return ok(n * 2);
+}
+
+i32 clamp(i32 x, i32 lo, i32 hi)
+    requires lo <= hi
+    ensures result >= lo && result <= hi
+{
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+test "clamp stays in range" {
+    assert(clamp(15, 0, 10) == 10);
+}
+
+extern "C" {
+    i32 puts(u8* s);
+}
+
+void memory() {
+    Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    Point* p = arena.alloc(Point);
+    unsafe {
+        u8* q = p as u8*;
+        u8 first = *(q + 4);
+    }
+    u32 mask = (0xFF & 0b1010) << 2;
+    char c = '\u{E9}';
+    str s = "caf\u{E9} \"quoted\"\n";
+}

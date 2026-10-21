@@ -1,0 +1,271 @@
+#include <stdlib.h>
+#include <string.h>
+
+#include "parser.h"
+#include "test.h"
+
+typedef struct {
+    SourceFile file;
+    TokenList tokens;
+    DiagList diags;
+    Arena arena;
+    char *dump;
+} Parsed;
+
+/* Runs `print` into a string. */
+static char *capture(void (*print)(const void *node, const SourceFile *file, FILE *out),
+                     const void *node, const SourceFile *file) {
+    FILE *out = tmpfile();
+    if (!out) return sosu_strdup("<tmpfile failed>");
+    print(node, file, out);
+    long size = ftell(out);
+    rewind(out);
+    char *text = sosu_alloc((size_t)size + 1);
+    size_t n = fread(text, 1, (size_t)size, out);
+    text[n] = '\0';
+    fclose(out);
+    return text;
+}
+
+static void print_expr(const void *node, const SourceFile *file, FILE *out) { ast_print_expr(node, file, out); }
+static void print_module(const void *node, const SourceFile *file, FILE *out) { ast_print_module(node, file, out); }
+
+static void parse_text(Parsed *out, const char *text, bool expression) {
+    memset(out, 0, sizeof *out);
+    source_from_string(&out->file, "test.sosu", text);
+    lex_file(&out->file, &out->tokens, &out->diags);
+    if (expression) {
+        Expr *expr = parse_expression(&out->file, &out->tokens, &out->arena, &out->diags);
+        out->dump = capture(print_expr, expr, &out->file);
+    } else {
+        Module *module = parse_module(&out->file, &out->tokens, &out->arena, &out->diags);
+        out->dump = capture(print_module, module, &out->file);
+    }
+}
+
+static void parsed_free(Parsed *parsed) {
+    free(parsed->dump);
+    arena_free(&parsed->arena);
+    diag_free(&parsed->diags);
+    token_list_free(&parsed->tokens);
+    source_free(&parsed->file);
+}
+
+static void expect_dump(const char *text, bool expression, const char *expected) {
+    Parsed parsed;
+    parse_text(&parsed, text, expression);
+    CHECK(parsed.diags.count == 0, "`%s`: unexpected %s: %s", text,
+          parsed.diags.count ? parsed.diags.items[0].code : "", parsed.diags.count ? parsed.diags.items[0].message : "");
+    CHECK(strcmp(parsed.dump, expected) == 0, "`%s`:\n  got      %s\n  expected %s", text, parsed.dump, expected);
+    parsed_free(&parsed);
+}
+
+static void expect_expr(const char *text, const char *expected) { expect_dump(text, true, expected); }
+static void expect_module(const char *text, const char *expected) { expect_dump(text, false, expected); }
+
+/* Checks the first diagnostic of a module and how many were reported. */
+static void expect_error(const char *text, const char *code, size_t line, size_t column, size_t count) {
+    Parsed parsed;
+    parse_text(&parsed, text, false);
+    CHECK(parsed.diags.count == count, "`%s`: %zu diagnostics, expected %zu", text, parsed.diags.count, count);
+    if (parsed.diags.count > 0) {
+        const Diagnostic *d = &parsed.diags.items[0];
+        size_t l, c;
+        source_position(&parsed.file, d->offset, &l, &c);
+        CHECK(strcmp(d->code, code) == 0, "`%s`: expected %s, got %s (%s)", text, code, d->code, d->message);
+        CHECK(l == line && c == column, "`%s`: expected %s at %zu:%zu, got %zu:%zu (%s)", text, code, line, column,
+              l, c, d->message);
+    }
+    parsed_free(&parsed);
+}
+
+static void test_precedence(void) {
+    expect_expr("1 + 2 * 3", "(+ 1 (* 2 3))");
+    expect_expr("a - b - c", "(- (- a b) c)");
+    expect_expr("a & b == c", "(== (& a b) c)");
+    expect_expr("a | b ^ c & d", "(| a (^ b (& c d)))");
+    expect_expr("x << 1 + 2", "(<< x (+ 1 2))");
+    expect_expr("a || b && c == d", "(|| a (&& b (== c d)))");
+    expect_expr("!a && -b < ~c", "(&& (! a) (< (- b) (~ c)))");
+    expect_expr("c ? a : b ? d : e", "(?: c a (?: b d e))");
+    expect_expr("0..n + 1", "(.. 0 (+ n 1))");
+    expect_expr("1..=10", "(..= 1 10)");
+    expect_expr("(a + b) * c", "(* (+ a b) c)");
+    expect_expr("(a < b) == c", "(== (< a b) c)");
+}
+
+static void test_casts(void) {
+    expect_expr("x as f32", "(as x f32)");
+    expect_expr("-x as f32", "(as (- x) f32)");
+    expect_expr("a * b as f32", "(* a (as b f32))");
+    expect_expr("x as i32 * 2", "(* (as x i32) 2)");
+    expect_expr("p as u8*", "(as p u8*)");
+    expect_expr("(p as u8*) + 4", "(+ (as p u8*) 4)");
+    expect_expr("w as? Button*", "(as? w Button*)");
+    expect_expr("x as bool ? a : b", "(?: (as x bool) a b)");
+    expect_expr("x as i32?", "(as x i32?)");
+}
+
+static void test_postfix(void) {
+    expect_expr("a.b.c(1, 2)[i]", "(index (call (. (. a b) c) 1 2) i)");
+    expect_expr("*(p + 4)", "(* (+ p 4))");
+    expect_expr("&x.y", "(& (. x y))");
+    expect_expr("try parse(s)", "(try (call parse s))");
+    expect_expr("Point{ x: 3.0, y: 4.0 }", "(lit Point (x 3.0) (y 4.0))");
+    expect_expr("geo.Point{ x: 1, }", "(lit geo.Point (x 1))");
+    expect_expr("arena.new(Button, \"OK\")", "(call (. arena new) Button \"OK\")");
+    expect_expr("self.x + base.y", "(+ (. self x) (. base y))");
+    expect_expr("s.bytes[0] == 'a'", "(== (index (. s bytes) 0) 'a')");
+    expect_expr("match (s) { Circle(r) => r * r, Empty => 0.0, _ => 1.0 }",
+                "(match s\n  (arm Circle(r) (* r r))\n  (arm Empty 0.0)\n  (arm _ 1.0))");
+}
+
+static void test_statements(void) {
+    expect_module("i32 main() uses io {\n"
+                  "    i32 n = 3;\n"
+                  "    mut i32 total = 0;\n"
+                  "    for (i32 i in 0..n) { total += add(i, 1); }\n"
+                  "    auto p = Point{ x: 3.0, y: 4.0 };\n"
+                  "    return 0;\n"
+                  "}\n",
+                  "(fn i32 main () (uses io)\n"
+                  "  (block\n"
+                  "    (var i32 n 3)\n"
+                  "    (var mut i32 total 0)\n"
+                  "    (for-in i32 i (.. 0 n)\n"
+                  "      (block\n"
+                  "        (+= total (call add i 1))))\n"
+                  "    (var auto p (lit Point (x 3.0) (y 4.0)))\n"
+                  "    (return 0)))\n");
+    expect_module("void f() {\n"
+                  "    if (a) { x = 1; } else if (b) { x = 2; } else { x = 3; }\n"
+                  "    while (x < 10) { x *= 2; continue; }\n"
+                  "    for (mut i32 i = 0; i < 3; i += 1) { break; }\n"
+                  "    for (;;) { return; }\n"
+                  "    defer arena.free();\n"
+                  "    unsafe { u8 first = *(q + 4); }\n"
+                  "}\n",
+                  "(fn void f ()\n"
+                  "  (block\n"
+                  "    (if a\n"
+                  "      (block\n"
+                  "        (= x 1))\n"
+                  "      (if b\n"
+                  "        (block\n"
+                  "          (= x 2))\n"
+                  "        (block\n"
+                  "          (= x 3))))\n"
+                  "    (while (< x 10)\n"
+                  "      (block\n"
+                  "        (*= x 2)\n"
+                  "        (continue)))\n"
+                  "    (for (var mut i32 i 0) (< i 3) (+= i 1)\n"
+                  "      (block\n"
+                  "        (break)))\n"
+                  "    (for _ _ _\n"
+                  "      (block\n"
+                  "        (return)))\n"
+                  "    (defer (call (. arena free)))\n"
+                  "    (unsafe (block\n"
+                  "      (var u8 first (* (+ q 4)))))))\n");
+    expect_module("void f() { Point* p = a.alloc(Point); u8[4] b = x; i32!E r = g(); fn(i32) -> i32 uses io h = k; }",
+                  "(fn void f ()\n"
+                  "  (block\n"
+                  "    (var Point* p (call (. a alloc) Point))\n"
+                  "    (var u8[4] b x)\n"
+                  "    (var i32!E r (call g))\n"
+                  "    (var fn(i32) -> i32 uses io h k)))\n");
+}
+
+static void test_declarations(void) {
+    expect_module("import std.io;\n"
+                  "pub struct Point { f32 x; pub mut f32 y = 0.0; f32 length() { return x; } }\n",
+                  "(import std.io)\n"
+                  "(struct pub Point\n"
+                  "  (field f32 x)\n"
+                  "  (field pub mut f32 y 0.0)\n"
+                  "  (fn f32 length ()\n"
+                  "    (block\n"
+                  "      (return x))))\n");
+    expect_module("interface Drawable { void draw(Render* r) uses io; }\n"
+                  "class Button : Widget, Drawable {\n"
+                  "    str label;\n"
+                  "    virtual void on_click() uses io { }\n"
+                  "    override void draw(Render* r) uses io { }\n"
+                  "}\n",
+                  "(interface Drawable\n"
+                  "  (fn void draw ((Render* r)) (uses io)))\n"
+                  "(class Button (: Widget Drawable)\n"
+                  "  (field str label)\n"
+                  "  (fn virtual void on_click () (uses io)\n"
+                  "    (block))\n"
+                  "  (fn override void draw ((Render* r)) (uses io)\n"
+                  "    (block)))\n");
+    expect_module("enum Shape { Circle(f32 radius), Rect(f32 w, f32 h), Empty, }",
+                  "(enum Shape\n"
+                  "  Circle((f32 radius))\n"
+                  "  Rect((f32 w) (f32 h))\n"
+                  "  Empty)\n");
+    expect_module("i32 clamp(i32 x, i32 lo, i32 hi)\n"
+                  "    requires lo <= hi\n"
+                  "    ensures result >= lo && result <= hi\n"
+                  "{ return x; }\n",
+                  "(fn i32 clamp ((i32 x) (i32 lo) (i32 hi))\n"
+                  "  (requires (<= lo hi))\n"
+                  "  (ensures (&& (>= result lo) (<= result hi)))\n"
+                  "  (block\n"
+                  "    (return x)))\n");
+    expect_module("extern \"C\" { i32 puts(u8* s); }\n"
+                  "unsafe void poke(mut u8* p) { }\n"
+                  "test \"works\" { assert(true); }\n",
+                  "(extern \"C\"\n"
+                  "  (fn i32 puts ((u8* s))))\n"
+                  "(fn unsafe void poke ((mut u8* p))\n"
+                  "  (block))\n"
+                  "(test \"works\"\n"
+                  "  (block\n"
+                  "    (call assert true)))\n");
+}
+
+static void test_errors(void) {
+    expect_error("void f() { x = 1 }", "E0200", 1, 18, 1);
+    expect_error("void f() {\n    x = 1\n    y = 2;\n}", "E0200", 2, 10, 1);
+    expect_error("void f() { g(; }", "E0201", 1, 14, 1);
+    expect_error("void f() { Point* = 3; }", "E0201", 1, 19, 1);
+    expect_error("void f() { auto x = 1 + ; }", "E0201", 1, 25, 1);
+    expect_error("i32 x = 3;", "E0203", 1, 1, 1);
+    expect_error("+ void", "E0203", 1, 1, 1);
+    expect_error("void f() { if (a < b < c) { } }", "E0204", 1, 22, 1);
+    expect_error("void f() { if (x = 1) { y = 2; } }", "E0205", 1, 18, 1);
+    expect_error("void f() { a = b = c; }", "E0205", 1, 18, 1);
+    expect_error("void f() { if (a) return; }", "E0206", 1, 19, 1);
+    expect_error("void f() { while (a) x += 1; }", "E0206", 1, 22, 1);
+    expect_error("void f() { i32 x; }", "E0207", 1, 16, 1);
+    expect_error("void f() { auto g = (i32 a) => a + 1; }", "E0208", 1, 21, 1);
+    expect_error("void f() { i32 a, b = 0; }", "E0209", 1, 17, 1);
+    expect_error("void f() { p->x = 1; }", "E0210", 1, 13, 1);
+    expect_error("void f() { i32 a[4] = x; }", "E0211", 1, 17, 1);
+    expect_error("struct S { virtual void f() { } }", "E0212", 1, 12, 1);
+    expect_error("pub import std.io;", "E0212", 1, 1, 1);
+    expect_error("struct S : Base { }", "E0213", 1, 10, 1);
+    expect_error("void f() { auto x = if (a) { 1 }; }", "E0201", 1, 21, 1);
+}
+
+static void test_recovery(void) {
+    /* One error per broken statement, and the following ones are still parsed. */
+    expect_error("void f() {\n    x = ;\n    y = 2;\n    z = );\n}\nvoid g() { }", "E0201", 2, 9, 2);
+    expect_error("struct A { i32 }\nstruct B { f32 x; }\nvoid g() { h(; }", "E0200", 1, 16, 2);
+    /* Lexer errors do not cascade into parser errors. */
+    expect_error("void f() { x++; y = #; }", "E0110", 1, 13, 2);
+}
+
+int main(void) {
+    test_precedence();
+    test_casts();
+    test_postfix();
+    test_statements();
+    test_declarations();
+    test_errors();
+    test_recovery();
+    return test_summary("parser tests");
+}
