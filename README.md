@@ -88,6 +88,17 @@ docs/         specification and error codes
 `sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
 (which is `lib/` for `build/sosuc`).
 
+## Branches
+
+- `main`: stable. It only receives `dev`, through a pull request.
+- `dev`: integration of the finished features.
+- `feature/<name>`: one branch per feature, created from `dev` and merged back into `dev`
+  through a pull request.
+
+The CI (`.github/workflows/ci.yml`) checks every pull request into `dev` or `main` on Linux
+(gcc and clang) and Windows (MSVC), so that a branch is merged only once it builds and passes the
+tests everywhere.
+
 ## Documentation
 
 - [docs/SPEC.md](docs/SPEC.md): the language. Points the first draft left open were settled while
