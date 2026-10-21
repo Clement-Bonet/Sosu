@@ -25,6 +25,8 @@ test: all
 	./build/sema_tests
 	./build/program_tests ./build/sosuc
 	./build/sosuc check tests/packages/app
+	./build/sosuc check packages/platform
+	./build/sosuc check examples/window
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@echo "samples: ok"

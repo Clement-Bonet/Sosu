@@ -1,0 +1,98 @@
+// platform.app: run a window (spec §10.1). The runtime owns the main loop and calls the
+// program back: on each event, then on each frame.
+import platform.sdl;
+
+pub struct Config {
+    pub str title;
+    pub i32 width;
+    pub i32 height;
+}
+
+pub enum Event {
+    Quit,
+    Resized(i32 width, i32 height),
+    Key(u32 code, bool down),   // SDL key codes: 27 is Escape
+}
+
+pub struct Color {
+    pub u8 r;
+    pub u8 g;
+    pub u8 b;
+    pub u8 a = 255;
+}
+
+pub struct Rect {
+    pub f32 x;
+    pub f32 y;
+    pub f32 w;
+    pub f32 h;
+}
+
+// What `on_frame` draws on.
+pub struct Canvas {
+    sdl.Renderer* renderer;
+
+    pub void clear(Color color) uses io {
+        sdl.set_color(renderer, color.r, color.g, color.b, color.a);
+        sdl.clear(renderer);
+    }
+
+    pub void fill(Rect rect, Color color) uses io {
+        sdl.set_color(renderer, color.r, color.g, color.b, color.a);
+        sdl.fill_rect(renderer, rect.x, rect.y, rect.w, rect.h);
+    }
+}
+
+Event? translate(sdl.Event* event) {
+    if (event.kind == 0x100) {   // SDL_EVENT_QUIT
+        return some(Quit);
+    }
+    if (event.kind == 0x206) {   // SDL_EVENT_WINDOW_RESIZED
+        return some(Resized(event.word5 as i32, event.word6 as i32));
+    }
+    if (event.kind == 0x300 || event.kind == 0x301) {   // SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP
+        return some(Key(event.word7, event.kind == 0x300));
+    }
+    return none;
+}
+
+// Opens the window and runs until `on_event` returns false. Returns the exit code.
+pub i32 run(Config config, fn(Event) -> bool uses io on_event, fn(Canvas*) -> void uses io on_frame) uses io {
+    Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    if (!sdl.init_video()) {
+        return 1;
+    }
+    defer sdl.quit();
+
+    sdl.Window* window = match (sdl.create_window(&arena, config.title, config.width, config.height)) {
+        some(created) => created,
+        none => { return 1; },
+    };
+    defer sdl.destroy_window(window);
+    sdl.Renderer* renderer = match (sdl.create_renderer(window)) {
+        some(created) => created,
+        none => { return 1; },
+    };
+    defer sdl.destroy_renderer(renderer);
+
+    sdl.Event* event = arena.alloc(sdl.Event);
+    Canvas canvas = Canvas{ renderer: renderer };
+    mut bool running = true;
+    while (running) {
+        while (sdl.poll(event)) {
+            match (translate(event)) {
+                some(e) => {
+                    if (!on_event(e)) {
+                        running = false;
+                    }
+                },
+                none => { },
+            }
+        }
+        on_frame(&canvas);
+        sdl.present(renderer);
+        sdl.delay(16);
+    }
+    return 0;
+}

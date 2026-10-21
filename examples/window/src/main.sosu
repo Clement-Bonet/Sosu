@@ -1,0 +1,23 @@
+// A window with a colored rectangle; closes with the window button or Escape.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/window`.
+import std.io;
+import platform.app;
+
+bool on_event(app.Event e) uses io {
+    return match (e) {
+        Quit => false,
+        Key(code, down) => code != 27,   // Escape
+        Resized(width, height) => true,
+    };
+}
+
+void on_frame(app.Canvas* canvas) uses io {
+    canvas.clear(app.Color{ r: 30, g: 30, b: 46 });
+    canvas.fill(app.Rect{ x: 220.0, y: 140.0, w: 360.0, h: 220.0 }, app.Color{ r: 255, g: 140, b: 0 });
+}
+
+i32 main() uses io {
+    i32 status = app.run(app.Config{ title: "Sosu", width: 800, height: 600 }, on_event, on_frame);
+    io.print("window closed ({})", status);
+    return status;
+}
