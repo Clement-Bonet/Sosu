@@ -1,0 +1,94 @@
+// Classes, interfaces and arenas (spec §5.2, §6): run with `sosuc run`.
+import std.io;
+
+struct Point {
+    f32 x;
+    f32 y;
+}
+
+interface Shape {
+    f32 area();
+    str name();
+}
+
+class Widget {
+    mut f32 x;
+    i32 id;
+
+    void init(f32 x, i32 id) {
+        self.x = x;
+        self.id = id;
+    }
+
+    virtual void on_click() uses io {
+        io.print("widget {} clicked", id);
+    }
+
+    void move_by(f32 dx) {
+        x = x + dx;
+    }
+}
+
+class Button : Widget, Shape {
+    str label;
+
+    void init(str label) {
+        base.init(0.0, 7);
+        self.label = label;
+    }
+
+    override void on_click() uses io {
+        io.print("button {} clicked", label);
+        base.on_click();
+    }
+
+    override f32 area() { return 2.0 * 3.0; }
+    override str name() { return label; }
+}
+
+class IconButton : Button {
+    void init() {
+        base.init("icon");
+    }
+
+    override f32 area() { return 1.0; }
+}
+
+void describe(Shape* s) uses io {
+    io.print("{} has area {}", s.name(), s.area());
+}
+
+i32 main() uses io {
+    Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+
+    Point* p = arena.alloc(Point);
+    io.print("point {} {}", p.x, p.y);
+
+    Button* b = arena.new(Button, "OK");
+    Widget* w = b as Widget*;
+    w.on_click();
+    w.move_by(2.5);
+    io.print("x = {}", w.x);
+
+    describe(b as Shape*);
+    IconButton* icon = arena.new(IconButton);
+    describe(icon as Shape*);
+    Widget* plain = arena.new(Widget, 1.0, 1);
+    plain.on_click();
+
+    match (w as? Button*) {
+        some(found) => io.print("w is the button {}", found.label),
+        none => io.print("w is not a button"),
+    }
+    match (plain as? Button*) {
+        some(found) => io.print("plain is the button {}", found.label),
+        none => io.print("plain is not a button"),
+    }
+    Point*? maybe = arena.try_alloc(Point);
+    match (maybe) {
+        some(q) => io.print("allocated"),
+        none => io.print("out of memory"),
+    }
+    return 0;
+}

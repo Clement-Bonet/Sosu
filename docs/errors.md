@@ -91,12 +91,13 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0351 | invalid `io.print` | format and values do not match, value that cannot be printed |
 | E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)` |
 | E0353 | address of a temporary value | `&g()` |
+| E0354 | invalid arena allocation | `a.alloc(3)`, `a.alloc(Node)` with a pointer inside, `a.alloc(SomeClass)` |
 
 ## Code generation
 
 | Code | Message | Example |
 |---|---|---|
-| E0501 | code generation does not support classes and interfaces yet | `sosuc run` on a package with a class (they need arenas, roadmap step 6) |
+| E0501 | (no longer used: classes and interfaces are generated since arenas exist) | |
 | E0502 | no valid `main` | `sosuc run` on a library, or `i32 main(i32 x)` |
 
 ## Packages and imports

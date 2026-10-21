@@ -69,6 +69,16 @@ void show(i32!ParseError r) uses io {
     }
 }
 
+// `while (true)` with `break`: the function still needs its own `return`.
+i32 first_even() {
+    mut i32 n = 1;
+    while (true) {
+        if (n % 2 == 0) { break; }
+        n += 1;
+    }
+    return n;
+}
+
 i32 main() uses io {
     io.print("Hello, Sosu!");
     io.print("area = {}", area(Shape.Rect(2.0, 3.5)));
@@ -107,5 +117,13 @@ i32 main() uses io {
     i64 big = 3000000000;
     io.print("big = {}", big * 2);
     io.print("{}", total > 20 ? "large" : "small");
+
+    mut i32 letters = 0;
+    for (char c in "été".chars()) {
+        letters += 1;
+        io.print("{}", c);
+    }
+    io.print("{} letters, {} bytes", letters, "été".len);
+    io.print("first even = {}", first_even());
     return 0;
 }

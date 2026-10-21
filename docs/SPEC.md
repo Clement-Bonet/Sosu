@@ -238,6 +238,9 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 ```
 
 - `alloc` stops the program with a message when memory runs out; `try_alloc` returns `T*?` to handle that case yourself.
+- `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
+- The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
+- Until moves exist (below), copying an `Arena` value shares its blocks: free it once, through one name.
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
 - Plain `struct`s (without a resource) are copied by value.
@@ -361,6 +364,7 @@ error[E0312]: non-exhaustive match
 - Outside `unsafe`, a `T*` always points to a valid value.
 - In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, contracts.
 - In release, bounds stay checked by default (`--checks=off` disables them); contracts and overflows are not.
+- Options of `sosuc build`, `run` and `test`: `--release` (optimized C, modulo arithmetic, no contracts), `--checks=on|off` (indexes), `--contracts=check|off` (`requires` / `ensures`). Division by zero always stops the program, as do `assert` failures.
 
 ```sosu
 unsafe {

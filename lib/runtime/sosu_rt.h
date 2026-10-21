@@ -17,6 +17,37 @@ typedef struct {
 /* Stops the program (or the current test) with a message: `loc` is "file:line:column". */
 void sosu_fail(const char *loc, const char *message);
 
+/* Arenas (spec §6): blocks of memory freed at once. Allocations are zeroed. */
+typedef struct sosu_arena_state sosu_arena_state;
+typedef struct {
+    sosu_arena_state *state;
+} sosu_arena;
+
+sosu_arena sosu_arena_new(uint64_t block_size, const char *loc);
+void *sosu_arena_alloc(sosu_arena *arena, size_t size, const char *loc); /* stops the program if out of memory */
+void *sosu_arena_try_alloc(sosu_arena *arena, size_t size);             /* NULL if out of memory */
+void sosu_arena_free(sosu_arena *arena);
+
+/* Classes (spec §5.2). Every object starts with a pointer to its class's table of virtual
+   methods, which itself starts with this description of the class. */
+typedef struct {
+    const void *id;    /* address identifying an interface */
+    const void *table; /* its methods for this class */
+} sosu_iface;
+
+typedef struct sosu_class sosu_class;
+struct sosu_class {
+    const sosu_class *parent;
+    const char *name;
+    const sosu_iface *interfaces;
+    size_t interface_count;
+};
+
+#define SOSU_CLASS_OF(object) (*(const sosu_class *const *)(object))
+
+const void *sosu_find_interface(const sosu_class *klass, const void *id);
+bool sosu_instance_of(const sosu_class *klass, const sosu_class *target);
+
 /* io.print */
 void sosu_print_str(sosu_str text);
 void sosu_print_i64(int64_t value);
@@ -27,6 +58,8 @@ void sosu_print_char(uint32_t value);
 void sosu_print_end(void);
 
 bool sosu_str_eq(sosu_str a, sosu_str b);
+/* Decodes the code point at *pos (valid UTF-8) and moves *pos after it: `s.chars()`. */
+uint32_t sosu_next_char(sosu_str text, size_t *pos);
 
 /* `sosuc test`: runs one test block; returns false if it failed. */
 bool sosu_run_test(void (*test)(void), const char *name);

@@ -26,6 +26,9 @@ static void usage(FILE *out) {
           "\n"
           "options:\n"
           "  --format=text|json   diagnostics format (default: text)\n"
+          "  --release            optimized build: no overflow checks, no contracts (spec 7.7)\n"
+          "  --checks=on|off      index checks (on by default, also in release)\n"
+          "  --contracts=check|off  requires / ensures (checked by default, off in release)\n"
           "  --version            print the compiler version\n",
           out);
 }
@@ -142,6 +145,11 @@ typedef enum {
     MODE_TEST,
 } BuildMode;
 
+typedef struct {
+    bool release; /* optimized C, no overflow checks or contracts by default */
+    CodegenOptions checks;
+} BuildOptions;
+
 /* A path in the form the system shell expects. */
 static char *native_path(const char *path) {
     char *result = sosu_strdup(path);
@@ -171,7 +179,7 @@ static bool write_file(const char *path, const char *text) {
 }
 
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
-static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib) {
+static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize) {
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
@@ -196,13 +204,13 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
             "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul || goto :no_cl\r\n"
             ":have_cl\r\n"
-            "cl /nologo /std:c11 /utf-8 /W0 /Zi /Od /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\" "
+            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\" "
             ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n"
             "exit /b 0\r\n"
             ":no_cl\r\n"
             "echo sosuc: no C compiler found: install Visual Studio with the C++ tools, or set SOSU_CC 1>&2\r\n"
             "exit /b 2\r\n",
-            rt, dir, dir, out, c, rt_c, dir, dir);
+            optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, dir, dir);
         bool written = write_file(bat, script);
         char *native_bat = native_path(bat);
         command = written ? sosu_format("\"%s\"", native_bat) : NULL;
@@ -224,7 +232,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
 #endif
     {
         (void)build_dir;
-        command = sosu_format("\"%s\" -std=c99 -g -O0 -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"", cc && cc[0] ? cc : "cc", runtime,
+        command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"", cc && cc[0] ? cc : "cc", optimize ? "-O2" : "-O0", runtime,
                               c_file, runtime_c, exe);
     }
     int status = run_command(command);
@@ -234,7 +242,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     return status == 0;
 }
 
-static int command_build(const char *dir, const char *argv0, DiagFormat format, BuildMode mode) {
+static int command_build(const char *dir, const char *argv0, DiagFormat format, BuildMode mode, const BuildOptions *options) {
     char *lib = library_dir(argv0);
     Program program;
     Sema sema = {0};
@@ -242,7 +250,7 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
     bool ok = program_load(&program, dir, lib);
     if (ok) ok = sema_check(&sema, &program);
     if (ok) {
-        source = codegen_program(&sema, &program, mode == MODE_TEST ? CODEGEN_TESTS : CODEGEN_PROGRAM);
+        source = codegen_program(&sema, &program, mode == MODE_TEST ? CODEGEN_TESTS : CODEGEN_PROGRAM, options->checks);
         ok = source != NULL;
     }
     if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
@@ -274,7 +282,7 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
         if (!write_file(c_file, source)) {
             fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
             status = 2;
-        } else if (!compile_c(build_dir, c_file, exe, lib)) {
+        } else if (!compile_c(build_dir, c_file, exe, lib, options->release)) {
             fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
             status = 2;
         } else if (mode == MODE_BUILD) {
@@ -318,11 +326,20 @@ int main(int argc, char **argv) {
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
+    BuildOptions options = { false, { true, true, true } };
+    int checks = -1;    /* --checks: -1 when not given */
+    int contracts = -1; /* --contracts */
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--format=text") == 0) {
             format = FORMAT_TEXT;
         } else if (strcmp(argv[i], "--format=json") == 0) {
             format = FORMAT_JSON;
+        } else if (strcmp(argv[i], "--release") == 0) {
+            options.release = true;
+        } else if (strcmp(argv[i], "--checks=on") == 0 || strcmp(argv[i], "--checks=off") == 0) {
+            checks = argv[i][10] == 'n';
+        } else if (strcmp(argv[i], "--contracts=check") == 0 || strcmp(argv[i], "--contracts=off") == 0) {
+            contracts = argv[i][12] == 'c';
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "sosuc: unknown option `%s`\n", argv[i]);
             return 2;
@@ -334,6 +351,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* spec §7.7: release keeps the bounds checks only */
+    options.checks.overflow_checks = !options.release;
+    options.checks.contracts = contracts >= 0 ? contracts == 1 : !options.release;
+    options.checks.bounds_checks = checks != 0;
+
     if (strcmp(command, "check") == 0) return command_check(path ? path : ".", argv[0], format);
     if (strcmp(command, "lex") == 0 || strcmp(command, "parse") == 0) {
         if (!path) {
@@ -342,9 +364,9 @@ int main(int argc, char **argv) {
         }
         return command[0] == 'l' ? command_lex(path, format) : command_parse(path, format);
     }
-    if (strcmp(command, "build") == 0) return command_build(path ? path : ".", argv[0], format, MODE_BUILD);
-    if (strcmp(command, "run") == 0) return command_build(path ? path : ".", argv[0], format, MODE_RUN);
-    if (strcmp(command, "test") == 0) return command_build(path ? path : ".", argv[0], format, MODE_TEST);
+    if (strcmp(command, "build") == 0) return command_build(path ? path : ".", argv[0], format, MODE_BUILD, &options);
+    if (strcmp(command, "run") == 0) return command_build(path ? path : ".", argv[0], format, MODE_RUN, &options);
+    if (strcmp(command, "test") == 0) return command_build(path ? path : ".", argv[0], format, MODE_TEST, &options);
     if (strcmp(command, "fmt") == 0) {
         fprintf(stderr, "sosuc: `%s` is not implemented yet\n", command);
         return 2;

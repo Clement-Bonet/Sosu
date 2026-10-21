@@ -33,6 +33,7 @@ void types_init(TypeTable *table) {
     add_builtin(table, T_BOOL, "bool");
     add_builtin(table, T_CHAR, "char");
     add_builtin(table, T_STR, "str");
+    add_builtin(table, T_ARENA, "Arena");
     add_integer(table, "i8", 8, true);
     add_integer(table, "i16", 16, true);
     add_integer(table, "i32", 32, true);

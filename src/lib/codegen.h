@@ -11,8 +11,15 @@ typedef enum {
     CODEGEN_TESTS,   /* runs the `test` blocks of the root package */
 } CodegenMode;
 
+/* Run-time checks (spec §7.7). Debug: all on. Release: bounds only, unless `--checks=off`. */
+typedef struct {
+    bool overflow_checks; /* off: integer arithmetic is modulo 2^n */
+    bool bounds_checks;   /* array and slice indexes */
+    bool contracts;       /* `requires` and `ensures` */
+} CodegenOptions;
+
 /* Generates the C source of a checked program. Returns NULL after reporting to
    program->diags what code generation does not support yet. */
-char *codegen_program(Sema *sema, Program *program, CodegenMode mode);
+char *codegen_program(Sema *sema, Program *program, CodegenMode mode, CodegenOptions options);
 
 #endif

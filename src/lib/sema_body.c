@@ -37,7 +37,7 @@ static Type *check_expr(Body *b, Expr *e, Type *expected);
 static void check_stmt(Body *b, Stmt *stmt);
 static void check_block(Body *b, Stmt *block);
 
-static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs" };
+static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB" };
 
 /* ---- Helpers ---- */
 
@@ -294,6 +294,11 @@ static Ref resolve_ref(Body *b, Expr *e, Type *expected) {
             ref.info = outer.type->as.info;
             return ref;
         }
+        if (outer.type->tag == T_ARENA && name_is(name, "new")) {
+            ref.kind = REF_BUILTIN;
+            ref.builtin = "Arena.new";
+            return ref;
+        }
         if (outer.type->tag == T_ENUM) {
             error_at(b, "E0337", name.offset, name.length, "`%.*s` has no variant `%.*s`", NAME_ARGS(outer.type->name),
                      NAME_ARGS(name));
@@ -364,6 +369,9 @@ static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
         error_expr(b, "E0333", e, "`%s` is a module, not a value", ref.module->module);
         return error_type(b);
     case REF_BUILTIN:
+        if (strcmp(ref.builtin, "KB") == 0 || strcmp(ref.builtin, "MB") == 0 || strcmp(ref.builtin, "GB") == 0) {
+            return builtin(b, "usize");
+        }
         if (strcmp(ref.builtin, "none") == 0) {
             if (expected && (expected->tag == T_OPTION || is_error(expected))) return expected;
             Diagnostic *d = error_expr(b, "E0342", e, "the type of `none` is unknown here");
@@ -484,11 +492,20 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
 
-    if (strcmp(name, "none") == 0) {
-        Diagnostic *d = error_expr(b, "E0338", callee, "`none` is a value, not a function");
-        diag_help(d, "write `none` without parentheses");
+    if (strcmp(name, "none") == 0 || name[1] == 'B') { /* none, KB, MB, GB */
+        Diagnostic *d = error_expr(b, "E0338", callee, "`%s` is a value, not a function", name);
+        diag_help(d, "write `%s` without parentheses", name);
         check_args_loosely(b, e);
-        return expected ? expected : error_type(b);
+        return strcmp(name, "none") == 0 && expected ? expected : error_type(b);
+    }
+    if (strcmp(name, "Arena.new") == 0) {
+        if (count != 1) {
+            error_expr(b, "E0336", callee, "`Arena.new` takes the size of its blocks, e.g. `Arena.new(1 * MB)`");
+            check_args_loosely(b, e);
+        } else {
+            check_expect(b, args[0], builtin(b, "usize"));
+        }
+        return builtin(b, "Arena");
     }
     bool is_ok = strcmp(name, "ok") == 0;
     bool void_ok = is_ok && expected && expected->tag == T_RESULT && expected->as.result.value->tag == T_VOID;
@@ -592,6 +609,142 @@ static bool is_print(const Expr *callee, Ref object) {
            name_is(callee->as.field.name, "print");
 }
 
+/* ---- Arenas (spec §6) ---- */
+
+/* A type given as an argument: `arena.alloc(Point)`, `arena.new(shapes.Circle, ...)`.
+   NULL if the expression is not a type name. */
+static Type *type_argument(Body *b, Expr *arg) {
+    Name names[2];
+    size_t count = 0;
+    const Expr *e = arg;
+    if (e->kind == EXPR_FIELD) {
+        names[1] = e->as.field.name;
+        e = e->as.field.object;
+        count = 1;
+    }
+    if (e->kind != EXPR_NAME) return NULL;
+    names[0] = e->as.name;
+    if (count == 1) count = 2;
+    else count = 1;
+    Path path = { names, count };
+    return sema_resolve_named(b->s, b->unit, path, arg->offset, arg->length);
+}
+
+/* True if all-zero memory is a valid value of `type` (no pointer, which is never null). */
+static bool zeroable(const Type *type) {
+    switch (type->tag) {
+    case T_POINTER: case T_FN: case T_ARENA: case T_INTERFACE:
+        return false;
+    case T_ARRAY:
+        return zeroable(type->as.array.element);
+    case T_RESULT:
+        return zeroable(type->as.result.error); /* zero is `err` with the first variant */
+    case T_ENUM: {
+        const VariantInfo *first = type->as.info->variant_count ? &type->as.info->variants[0] : NULL;
+        for (size_t i = 0; first && i < first->field_count; i++) {
+            if (!zeroable(first->fields[i])) return false;
+        }
+        return true;
+    }
+    case T_STRUCT:
+    case T_CLASS:
+        for (const TypeInfo *t = type->as.info; t; t = t->parent) {
+            for (size_t i = 0; i < t->field_count; i++) {
+                if (!zeroable(t->fields[i].type)) return false;
+            }
+        }
+        return true;
+    default:
+        return true; /* numbers, bool, char, str, options */
+    }
+}
+
+static Type *call_arena(Body *b, Expr *e, Name name) {
+    Expr *callee = e->as.call.callee;
+    Expr **args = e->as.call.args;
+    size_t count = e->as.call.arg_count;
+    callee->resolution = RESOLVED_BUILTIN;
+    TypeNames n = {0};
+
+    if (name_is(name, "free")) {
+        callee->target = "arena.free";
+        if (count) error_expr(b, "E0336", callee, "`free` takes no argument");
+        check_args_loosely(b, e);
+        return void_type(b);
+    }
+    bool is_alloc = name_is(name, "alloc");
+    bool is_try = name_is(name, "try_alloc");
+    bool is_new = name_is(name, "new");
+    if (!is_alloc && !is_try && !is_new) {
+        Diagnostic *d = error_at(b, "E0337", name.offset, name.length, "`Arena` has no method `%.*s`", NAME_ARGS(name));
+        diag_help(d, "the methods of an arena are `alloc`, `try_alloc`, `new` and `free` (spec §6)");
+        check_args_loosely(b, e);
+        return error_type(b);
+    }
+    callee->target = is_alloc ? "arena.alloc" : is_try ? "arena.try_alloc" : "arena.new";
+    Type *type = count ? type_argument(b, args[0]) : NULL;
+    if (!type) {
+        Diagnostic *d = error_expr(b, "E0354", count ? args[0] : e, "`%.*s` takes the type to allocate first",
+                                   NAME_ARGS(name));
+        diag_help(d, "e.g. `arena.%.*s(Point)`", NAME_ARGS(name));
+        for (size_t i = count ? 1 : 0; i < count; i++) check_expr(b, args[i], NULL);
+        return error_type(b);
+    }
+    args[0]->type = type;
+    if (is_error(type)) {
+        for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
+        return error_type(b);
+    }
+    Type *pointer = type_pointer(&b->s->types, type);
+
+    if (is_new) {
+        if (type->tag != T_CLASS && type->tag != T_STRUCT) {
+            error_expr(b, "E0354", args[0], "`arena.new` creates a class or a struct, not a `%s`", tn(&n, type));
+            release_names(&n);
+            for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
+            return error_type(b);
+        }
+        Name init_name = { "init", 4, 0 };
+        MethodInfo *init = find_method(type->as.info, init_name);
+        if (init) {
+            Type *fn = init->type;
+            if (count - 1 != fn->as.fn.param_count) {
+                error_expr(b, "E0336", callee, "`%.*s.init` takes %zu argument%s, but %zu %s given",
+                           NAME_ARGS(type->name), fn->as.fn.param_count, fn->as.fn.param_count == 1 ? "" : "s",
+                           count - 1, count - 1 == 1 ? "was" : "were");
+                for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
+            } else {
+                for (size_t i = 1; i < count; i++) check_expect(b, args[i], fn->as.fn.params[i - 1]);
+            }
+            report_missing_effects(b, callee, fn->as.fn.effects, "`init`");
+        } else if (count > 1) {
+            error_expr(b, "E0336", callee, "`%.*s` has no `init` method: `arena.new` takes no other argument",
+                       NAME_ARGS(type->name));
+            for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
+        } else if (!zeroable(type)) {
+            Diagnostic *d = error_expr(b, "E0354", args[0], "`%.*s` has no `init` method, and zeroed memory is not a valid `%.*s`",
+                                       NAME_ARGS(type->name), NAME_ARGS(type->name));
+            diag_help(d, "it contains a pointer, which is never null: add an `init` method that gives it a value");
+        }
+        return pointer;
+    }
+
+    if (count != 1) {
+        error_expr(b, "E0336", callee, "`%.*s` takes only the type to allocate", NAME_ARGS(name));
+        for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
+    }
+    if (type->tag == T_CLASS || type->tag == T_INTERFACE) {
+        Diagnostic *d = error_expr(b, "E0354", args[0], "a class is created with `arena.new`, which calls its `init`");
+        diag_help(d, "write `arena.new(%.*s, ...)`", NAME_ARGS(type->name));
+    } else if (!zeroable(type)) {
+        Diagnostic *d = error_expr(b, "E0354", args[0], "`%.*s` gives zeroed memory, which is not a valid `%s`",
+                                   NAME_ARGS(name), tn(&n, type));
+        diag_help(d, "it contains a pointer, which is never null: use a struct with `init` and `arena.new`, or `T*?`");
+    }
+    release_names(&n);
+    return is_try ? type_option(&b->s->types, pointer) : pointer;
+}
+
 static Type *call_method(Body *b, Expr *e, Type *expected) {
     Expr *callee = e->as.call.callee;
     Name name = callee->as.field.name;
@@ -621,6 +774,13 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
             callee->type = field->type;
             return call_with(b, e, field->type, name, false);
         }
+    }
+    if (base->tag == T_ARENA) return call_arena(b, e, name);
+    if (base->tag == T_STR && name_is(name, "chars")) {
+        Diagnostic *d = error_expr(b, "E0352", e, "`chars()` can only be used in a `for` loop");
+        diag_help(d, "write `for (char c in s.chars()) { ... }` (spec §4.1)");
+        check_args_loosely(b, e);
+        return error_type(b);
     }
     TypeNames n = {0};
     error_at(b, "E0337", name.offset, name.length, "`%s` has no method `%.*s`", tn(&n, base), NAME_ARGS(name));
@@ -1338,6 +1498,34 @@ static void check_assign(Body *b, Stmt *stmt) {
 
 /* ---- Statements ---- */
 
+/* True if `stmt` contains a `break` for the enclosing loop (not for a nested one). */
+static bool contains_break(const Stmt *stmt) {
+    if (!stmt) return false;
+    switch (stmt->kind) {
+    case STMT_BREAK:
+        return true;
+    case STMT_BLOCK:
+        for (size_t i = 0; i < stmt->as.block.count; i++) {
+            if (contains_break(stmt->as.block.items[i])) return true;
+        }
+        return false;
+    case STMT_IF:
+        return contains_break(stmt->as.if_.then_block) || contains_break(stmt->as.if_.else_stmt);
+    case STMT_UNSAFE:
+        return contains_break(stmt->as.inner);
+    case STMT_EXPR: {
+        const Expr *e = stmt->as.expr;
+        if (e->kind != EXPR_MATCH) return false;
+        for (size_t i = 0; i < e->as.match.arm_count; i++) {
+            if (contains_break(e->as.match.arms[i].block)) return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
 static bool always_returns(const Stmt *stmt) {
     if (!stmt) return false;
     switch (stmt->kind) {
@@ -1352,8 +1540,9 @@ static bool always_returns(const Stmt *stmt) {
         return always_returns(stmt->as.if_.then_block) && always_returns(stmt->as.if_.else_stmt);
     case STMT_UNSAFE:
         return always_returns(stmt->as.inner);
-    case STMT_WHILE:
-        return stmt->as.while_.cond->kind == EXPR_BOOL && stmt->as.while_.cond->as.bool_value;
+    case STMT_WHILE: /* `while (true)` only ends with `break` */
+        return stmt->as.while_.cond->kind == EXPR_BOOL && stmt->as.while_.cond->as.bool_value &&
+               !contains_break(stmt->as.while_.body);
     case STMT_EXPR: {
         const Expr *e = stmt->as.expr;
         if (e->kind != EXPR_MATCH || e->as.match.arm_count == 0) return false;
@@ -1404,6 +1593,11 @@ static void check_expr_stmt(Body *b, Expr *e) {
     }
 }
 
+static bool is_chars_call(const Expr *e) {
+    return e->kind == EXPR_CALL && e->as.call.arg_count == 0 && e->as.call.callee->kind == EXPR_FIELD &&
+           name_is(e->as.call.callee->as.field.name, "chars");
+}
+
 static void check_for_in(Body *b, Stmt *stmt) {
     Type *declared = stmt->as.for_in.type ? sema_resolve_type(b->s, b->unit, stmt->as.for_in.type, POSITION_VALUE) : NULL;
     Expr *iterable = stmt->as.for_in.iterable;
@@ -1421,9 +1615,27 @@ static void check_for_in(Body *b, Stmt *stmt) {
             element = lt;
         }
     } else {
-        Type *type = check_expr(b, iterable, NULL);
-        Type *base = type->tag == T_POINTER ? type->as.inner : type;
-        if (base->tag == T_ARRAY) {
+        Type *type = NULL;
+        if (is_chars_call(iterable)) {
+            /* `for (char c in s.chars())`: the code points of a string (spec §4.1) */
+            Expr *callee = iterable->as.call.callee;
+            Type *text = check_expr(b, callee->as.field.object, NULL);
+            if (text->tag == T_POINTER) text = text->as.inner;
+            if (text->tag == T_STR || is_error(text)) {
+                callee->resolution = RESOLVED_BUILTIN;
+                callee->target = "chars";
+                iterable->type = text;
+                element = is_error(text) ? text : builtin(b, "char");
+            } else {
+                type = check_expr(b, iterable, NULL); /* a `chars()` method of a struct or class */
+            }
+        } else {
+            type = check_expr(b, iterable, NULL);
+        }
+        Type *base = !type ? error_type(b) : type->tag == T_POINTER ? type->as.inner : type;
+        if (!type) {
+            /* already handled */
+        } else if (base->tag == T_ARRAY) {
             element = base->as.array.element;
         } else if (base->tag == T_SLICE) {
             element = base->as.inner;

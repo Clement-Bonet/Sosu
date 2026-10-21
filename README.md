@@ -13,8 +13,11 @@ English is the working language of the project: code, comments, compiler message
 |---|---|
 | 1. Lexer | done |
 | 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
-| 3. Semantic analysis | done for the language of §5 to §7, except arenas (`Arena`, `arena.new`), which come with step 6 |
-| 4. C code generation | done, except classes and interfaces (they need arenas, step 6) |
+| 3. Semantic analysis | done for the language of §5 to §7 |
+| 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
+| 5. C interop, SDL3 window | `extern "C"` done; no window yet |
+| 6. Arenas, defer, move, unsafe, checks | done, except moves (`.copy()`) |
+| 7. Tooling | `run`, `test`, JSON diagnostics, contracts and `--release` done; `fmt` to do |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -30,7 +33,7 @@ build.bat        :: builds build\sosuc.exe and the test programs
 build.bat test   :: builds, then runs the tests
 ```
 
-Linux / macOS (gcc or clang):
+Linux / macOS (gcc or clang; checked on every push by GitHub Actions, see `.github/workflows/ci.yml`):
 
 ```sh
 make
@@ -41,6 +44,7 @@ make test
 
 ```
 sosuc run tests/programs/basics     # a package folder (default: the current folder)
+sosuc run tests/programs/classes --release   # optimized: no overflow checks nor contracts
 sosuc test tests/programs/testing   # runs its `test` blocks
 sosuc build tests/programs/basics   # writes build/basics.c and build/basics(.exe)
 sosuc check tests/packages/app      # checks without compiling

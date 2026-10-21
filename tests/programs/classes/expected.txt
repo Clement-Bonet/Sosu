@@ -1,0 +1,10 @@
+point 0.0 0.0
+button OK clicked
+widget 7 clicked
+x = 2.5
+OK has area 6.0
+icon has area 1.0
+widget 1 clicked
+w is the button OK
+plain is not a button
+allocated

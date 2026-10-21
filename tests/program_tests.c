@@ -9,15 +9,18 @@
    Usage (from the repository root): program_tests <path to sosuc> */
 
 typedef struct {
-    const char *command;
+    const char *command; /* with its options */
     const char *program;
+    const char *expected; /* file in the program folder */
     int exit_code;
 } Case;
 
 static const Case cases[] = {
-    { "run", "basics", 0 },
-    { "run", "overflow", 101 },
-    { "test", "testing", 1 },
+    { "run", "basics", "expected.txt", 0 },
+    { "run", "overflow", "expected.txt", 101 },
+    { "run", "classes", "expected.txt", 0 },
+    { "run --release", "overflow", "expected_release.txt", 0 },
+    { "test", "testing", "expected.txt", 1 },
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */
@@ -65,7 +68,7 @@ int main(int argc, char **argv) {
         CHECK(status == c->exit_code, "%s %s: exit code %d, expected %d (see build/%s.err)", c->command, c->program,
               status, c->exit_code, c->program);
 
-        snprintf(expected_path, sizeof expected_path, "tests/programs/%s/expected.txt", c->program);
+        snprintf(expected_path, sizeof expected_path, "tests/programs/%s/%s", c->program, c->expected);
         char *actual = read_text(output);
         char *expected = read_text(expected_path);
         CHECK(actual && expected && strcmp(actual, expected) == 0, "%s %s: output differs\n--- got:\n%s--- expected:\n%s",

@@ -14,6 +14,7 @@ typedef enum {
     T_BOOL,
     T_CHAR,
     T_STR,
+    T_ARENA, /* the built-in `Arena` (spec §6) */
     T_INT,
     T_FLOAT,
     T_POINTER,

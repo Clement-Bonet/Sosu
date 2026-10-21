@@ -274,6 +274,11 @@ static void test_body_errors(void) {
     expect_codes("i32 f(bool c) { if (c) { return 1; } }", "E0346");
     expect_codes("void f() { return 1; }", "E0346");
     expect_codes("i32 f() { return; }", "E0346");
+    expect_codes("i32 f() { while (true) { break; } }", "E0346");
+    expect_codes("i32 f() { while (true) { } }", "");
+    expect_codes("void f(str s) { auto c = s.chars(); }", "E0352");
+    expect_codes("void f(str s) { for (char c in s.chars()) { } }", "");
+    expect_codes("void f(str s) { for (u8 c in s.chars()) { } }", "E0331");
     expect_codes("void f(i32 x) { i32 x = 2; }", "E0347");
     expect_codes("void f() { i32 a = 1; { i32 a = 2; } }", "E0347");
     expect_codes("void f() { i32 a = 1; } void g() { i32 a = 2; }", "");
@@ -289,6 +294,25 @@ static void test_body_errors(void) {
     expect_codes("void f() { auto r = 0..10; }", "E0352");
     expect_codes("void f(str s) { for (char c in s) { } }", "E0352");
     expect_codes("i32 g() { return 1; }\nvoid f() { i32* p = &g(); }", "E0353");
+
+    /* arenas */
+    expect_codes("struct P { f32 x; }\nclass C { i32 n; void init(i32 n) { self.n = n; } }\n"
+                 "void f() {\n"
+                 "    Arena a = Arena.new(64 * KB);\n"
+                 "    defer a.free();\n"
+                 "    P* p = a.alloc(P);\n"
+                 "    P*? q = a.try_alloc(P);\n"
+                 "    C* c = a.new(C, 3);\n"
+                 "    i32* n = a.alloc(i32);\n"
+                 "}\n",
+                 "");
+    expect_codes("struct P { }\nvoid f(Arena* a) { P* p = a.alloc(3); }", "E0354");
+    expect_codes("struct N { N* next; }\nvoid f(Arena* a) { N* n = a.alloc(N); }", "E0354");
+    expect_codes("class C { }\nvoid f(Arena* a) { C* c = a.alloc(C); }", "E0354");
+    expect_codes("class C { void init(i32 n) { } }\nvoid f(Arena* a) { C* c = a.new(C); }", "E0336");
+    expect_codes("class C { }\nvoid f(Arena* a) { C* c = a.new(C, 1); }", "E0336");
+    expect_codes("void f(Arena* a) { a.reset(); }", "E0337");
+    expect_codes("void f() { auto x = MB(); }", "E0338");
 }
 
 static void test_packages(void) {

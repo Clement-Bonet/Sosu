@@ -62,6 +62,7 @@ typedef struct {
     Buf protos; /* function prototypes */
     Buf code;   /* function definitions */
     VEC(TypeEntry) types;
+    CodegenOptions options;
 } Gen;
 
 typedef struct {
@@ -227,6 +228,7 @@ static const char *c_type(Gen *g, const Type *type) {
     case T_BOOL: return "bool";
     case T_CHAR: return "uint32_t";
     case T_STR: return "sosu_str";
+    case T_ARENA: return "sosu_arena";
     case T_INT: return int_c_type(type);
     case T_FLOAT: return type->as.float_bits == 32 ? "float" : "double";
     case T_POINTER: {
@@ -246,6 +248,81 @@ static const char *c_type(Gen *g, const Type *type) {
 static const char *value_type(Gen *g, const Type *type) {
     define_type(g, type);
     return c_type(g, type);
+}
+
+/* ---- Classes ----
+   An object starts with its parent object (field `base`), or for a root class with a
+   pointer `vt` to its class's table of virtual methods. That table starts likewise with
+   its parent's table, or with the sosu_class description; then come the slots of the
+   virtual methods the class introduces. An interface pointer is the object pointer; its
+   methods are found through the interface tables of the class (sosu_find_interface). */
+
+/* `virtual`, or `override` of an interface method only: the method gets a new slot. */
+static bool introduces_slot(const MethodInfo *method) {
+    if (method->owner->type->tag != T_CLASS) return false;
+    if (method->decl->method_kind == METHOD_VIRTUAL) return true;
+    return method->decl->method_kind == METHOD_OVERRIDE &&
+           (!method->overridden || method->overridden->owner->type->tag != T_CLASS);
+}
+
+/* The method that introduced the slot of `method`, or NULL if it is not virtual. */
+static const MethodInfo *slot_of(const MethodInfo *method) {
+    if (method->owner->type->tag != T_CLASS || method->decl->method_kind == METHOD_PLAIN) return NULL;
+    while (method->overridden && method->overridden->owner->type->tag == T_CLASS) method = method->overridden;
+    return method;
+}
+
+static const TypeInfo *root_of(const TypeInfo *cls) {
+    while (cls->parent) cls = cls->parent;
+    return cls;
+}
+
+/* The method `name` of `cls`, or of its nearest parent that has one. */
+static const MethodInfo *method_of(const TypeInfo *cls, Name name) {
+    for (const TypeInfo *t = cls; t; t = t->parent) {
+        for (size_t i = 0; i < t->method_count; i++) {
+            if (name_eq(t->methods[i].decl->name, name)) return &t->methods[i];
+        }
+    }
+    return NULL;
+}
+
+/* `base.` repeated: from an object to the part of a parent class that declares `field`. */
+static char *field_path(const TypeInfo *cls, Name field) {
+    Buf path = {0};
+    buf_puts(&path, "");
+    for (const TypeInfo *t = cls; t; t = t->parent) {
+        for (size_t i = 0; i < t->field_count; i++) {
+            if (name_eq(t->fields[i].name, field)) return path.items;
+        }
+        buf_puts(&path, "base.");
+    }
+    return path.items;
+}
+
+/* C parameters `<self> *self, P0 a0, ...` for a method of type `fn`. */
+static char *method_params(Gen *g, const char *self_type, const Type *fn) {
+    Buf params = {0};
+    buf_printf(&params, "%s *self", self_type);
+    for (size_t i = 0; i < fn->as.fn.param_count; i++) {
+        buf_printf(&params, ", %s a%zu", value_type(g, fn->as.fn.params[i]), i);
+    }
+    return params.items;
+}
+
+static const char *return_type(Gen *g, const Type *fn) {
+    return fn->as.fn.ret->tag == T_VOID ? "void" : value_type(g, fn->as.fn.ret);
+}
+
+/* The slots of a class table, or the methods of an interface table. */
+static void table_slots(Gen *g, Buf *out, const TypeInfo *info, const char *self_type) {
+    for (size_t i = 0; i < info->method_count; i++) {
+        const MethodInfo *method = &info->methods[i];
+        if (info->type->tag == T_CLASS && !introduces_slot(method)) continue;
+        char *params = method_params(g, self_type, method->type);
+        buf_printf(out, "    %s (*m_%.*s)(%s);\n", return_type(g, method->type), NAME_ARGS(method->decl->name), params);
+        free(params);
+    }
 }
 
 static void define_type(Gen *g, const Type *type) {
@@ -302,6 +379,35 @@ static void define_type(Gen *g, const Type *type) {
     case T_SLICE:
         buf_printf(&body, "    %s *ptr;\n    size_t len;\n", c_type(g, type->as.inner));
         break;
+    case T_CLASS: {
+        const TypeInfo *info = type->as.info;
+        Buf table = {0};
+        if (info->parent) {
+            const char *parent = value_type(g, info->parent->type);
+            buf_printf(&table, "    %s__vt base;\n", parent);
+            buf_printf(&body, "    %s base;\n", parent);
+        } else {
+            buf_puts(&table, "    sosu_class info;\n");
+            buf_printf(&body, "    const %s__vt *vt;\n", name);
+        }
+        table_slots(g, &table, info, name);
+        buf_printf(&g->fwd, "typedef struct %s__vt %s__vt;\n", name, name);
+        buf_printf(&g->defs, "struct %s__vt {\n%s};\n\n", name, table.items);
+        free(table.items);
+        for (size_t i = 0; i < info->field_count; i++) {
+            buf_printf(&body, "    %s f_%.*s;\n", value_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
+        }
+        break;
+    }
+    case T_INTERFACE: {
+        Buf table = {0};
+        table_slots(g, &table, type->as.info, name);
+        buf_printf(&g->fwd, "typedef struct %s__it %s__it;\n", name, name);
+        buf_printf(&g->defs, "struct %s__it {\n%s    char unused;\n};\n\n", name, table.items ? table.items : "");
+        free(table.items);
+        buf_puts(&body, "    char unused;\n");
+        break;
+    }
     default:
         break;
     }
@@ -532,11 +638,21 @@ static char *gen_variant(Fn *f, const Expr *e, const TypeInfo *info, size_t inde
 static char *gen_name(Fn *f, Expr *e) {
     switch (e->resolution) {
     case RESOLVED_LOCAL: return sosu_format("v_%.*s", NAME_ARGS(e->as.name));
-    case RESOLVED_SELF_FIELD: return sosu_format("v_self->f_%.*s", NAME_ARGS(e->as.name));
+    case RESOLVED_SELF_FIELD: {
+        char *path = f->self_info->type->tag == T_CLASS ? field_path(f->self_info, e->as.name) : sosu_strdup("");
+        char *result = sosu_format("v_self->%sf_%.*s", path, NAME_ARGS(e->as.name));
+        free(path);
+        return result;
+    }
     case RESOLVED_FN: return fn_c_name(e->target);
     case RESOLVED_VARIANT: return gen_variant(f, e, e->target, e->target_index, NULL);
-    case RESOLVED_BUILTIN: /* none */
-        return sosu_format("((%s){ .has = false })", value_type(f->g, e->type));
+    case RESOLVED_BUILTIN: {
+        const char *name = e->target;
+        if (strcmp(name, "KB") == 0) return sosu_strdup("((uint64_t)1024ULL)");
+        if (strcmp(name, "MB") == 0) return sosu_strdup("((uint64_t)1048576ULL)");
+        if (strcmp(name, "GB") == 0) return sosu_strdup("((uint64_t)1073741824ULL)");
+        return sosu_format("((%s){ .has = false })", value_type(f->g, e->type)); /* none */
+    }
     default: return sosu_strdup("0");
     }
 }
@@ -569,8 +685,23 @@ static const char *c_operator(TokenKind op) {
 }
 
 /* `a op b` for an arithmetic or bitwise operator (also used by `+=`...). */
+/* Unsigned type in which modulo arithmetic on `type` is computed without undefined
+   behavior (8 and 16 bits would be promoted to `int`). */
+static const char *wrapping_type(const Type *type) {
+    return type->as.integer.bits <= 32 ? "uint32_t" : "uint64_t";
+}
+
+static bool is_wrapping(TokenKind op) {
+    return op == TOK_PLUS || op == TOK_PLUS_EQ || op == TOK_MINUS || op == TOK_MINUS_EQ || op == TOK_STAR ||
+           op == TOK_STAR_EQ;
+}
+
 static char *arithmetic(Fn *f, TokenKind op, const Type *type, const char *a, const char *b, size_t offset) {
     const char *helper = op_helper(op);
+    if (type->tag == T_INT && is_wrapping(op) && !f->g->options.overflow_checks) {
+        const char *wide = wrapping_type(type);
+        return sosu_format("((%s)((%s)%s %s (%s)%s))", c_type(f->g, type), wide, a, c_operator(op), wide, b);
+    }
     if (type->tag == T_INT && helper) {
         char *where = loc(f, offset);
         char *result;
@@ -584,6 +715,17 @@ static char *arithmetic(Fn *f, TokenKind op, const Type *type, const char *a, co
     }
     if (type->tag == T_INT) return sosu_format("((%s)(%s %s %s))", c_type(f->g, type), a, c_operator(op), b);
     return sosu_format("(%s %s %s)", a, c_operator(op), b);
+}
+
+static char *negate(Fn *f, const Type *type, const char *value, size_t offset) {
+    if (type->tag != T_INT) return sosu_format("(-%s)", value);
+    if (!f->g->options.overflow_checks) {
+        return sosu_format("((%s)(0u - (%s)%s))", c_type(f->g, type), wrapping_type(type), value);
+    }
+    char *where = loc(f, offset);
+    char *result = sosu_format("sosu_neg_%.*s(%s, %s)", NAME_ARGS(type->name), value, where);
+    free(where);
+    return result;
 }
 
 /* `&&`, `||` and `?:` evaluate their right side only when needed: if it emits
@@ -684,13 +826,7 @@ static char *gen_unary(Fn *f, Expr *e) {
     char *result;
     switch (e->as.unary.op) {
     case TOK_MINUS:
-        if (e->type->tag == T_INT) {
-            char *where = loc(f, e->offset);
-            result = sosu_format("sosu_neg_%.*s(%s, %s)", NAME_ARGS(e->type->name), value, where);
-            free(where);
-        } else {
-            result = sosu_format("(-%s)", value);
-        }
+        result = negate(f, e->type, value, e->offset);
         break;
     case TOK_BANG: result = sosu_format("(!%s)", value); break;
     case TOK_TILDE: result = sosu_format("((%s)~%s)", c_type(f->g, e->type), value); break;
@@ -721,6 +857,20 @@ static char *gen_cast(Fn *f, Expr *e) {
     return result;
 }
 
+/* `x as? T*`: the class of the object decides, at run time. */
+static char *gen_try_cast(Fn *f, Expr *e) {
+    const Type *target = e->type->as.inner->as.inner;
+    char *object = materialize(f, e->as.cast.value->type, gen_expr(f, e->as.cast.value));
+    const char *option = value_type(f->g, e->type);
+    const char *cls = value_type(f->g, target);
+    char *result = new_temp(f);
+    emit(f, "%s %s = { false };", option, result);
+    emit(f, "if (sosu_instance_of(SOSU_CLASS_OF(%s), (const sosu_class *)&%s__vtable)) %s = (%s){ true, (%s *)%s };",
+         object, cls, result, option, cls, object);
+    free(object);
+    return result;
+}
+
 static char *gen_index(Fn *f, Expr *e) {
     Expr *operands[2] = { e->as.index.object, e->as.index.index };
     char **values = gen_operands(f, operands, 2);
@@ -733,7 +883,9 @@ static char *gen_index(Fn *f, Expr *e) {
     char *where = loc(f, e->offset);
     char *result;
     const char *access = through_pointer ? "->" : ".";
-    if (base->tag == T_ARRAY) {
+    if (!f->g->options.bounds_checks) {
+        result = sosu_format("%s%s%s[(size_t)%s]", values[0], access, base->tag == T_ARRAY ? "items" : "ptr", values[1]);
+    } else if (base->tag == T_ARRAY) {
         result = sosu_format("%s%sitems[%s((%s)%s, %llu, %s)]", values[0], access, helper, cast, values[1],
                              (unsigned long long)base->as.array.size, where);
     } else {
@@ -771,7 +923,9 @@ static char *gen_field(Fn *f, Expr *e) {
         result = sosu_format("((%s){ (uint8_t *)%s.ptr, %s.len })", value_type(f->g, e->type), text, text);
         free(text);
     } else {
-        result = sosu_format("%s%sf_%.*s", value, access, NAME_ARGS(name));
+        char *path = base->tag == T_CLASS ? field_path(base->as.info, name) : sosu_strdup("");
+        result = sosu_format("%s%s%sf_%.*s", value, access, path, NAME_ARGS(name));
+        free(path);
     }
     free(value);
     return result;
@@ -864,14 +1018,7 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
         /* min, max, abs: operands are read twice, so they are stored first */
         char *a = materialize(f, args[0]->type, sosu_strdup(values[0]));
         if (strcmp(name, "abs") == 0) {
-            char *negated;
-            if (e->type->tag == T_INT) {
-                char *where = loc(f, e->offset);
-                negated = sosu_format("sosu_neg_%.*s(%s, %s)", NAME_ARGS(e->type->name), a, where);
-                free(where);
-            } else {
-                negated = sosu_format("(-%s)", a);
-            }
+            char *negated = negate(f, e->type, a, e->offset);
             result = sosu_format("(%s < 0 ? %s : %s)", a, negated, a);
             free(negated);
         } else {
@@ -885,13 +1032,98 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
     return result;
 }
 
+/* Arena.new(size), arena.alloc(T), arena.try_alloc(T), arena.new(T, ...), arena.free() */
+static char *gen_arena_call(Fn *f, Expr *e, const char *name) {
+    Expr **args = e->as.call.args;
+    size_t count = e->as.call.arg_count;
+    char *where = loc(f, e->offset);
+    char *result = NULL;
+    if (strcmp(name, "Arena.new") == 0) {
+        char *size = gen_expr(f, args[0]);
+        result = materialize(f, e->type, sosu_format("sosu_arena_new(%s, %s)", size, where));
+        free(size);
+        free(where);
+        return result;
+    }
+    char *arena = address_of(f, e->as.call.callee->as.field.object);
+    if (strcmp(name, "arena.free") == 0) {
+        emit(f, "sosu_arena_free(%s);", arena);
+        free(arena);
+        free(where);
+        return NULL;
+    }
+    const Type *type = args[0]->type;
+    const char *ctype = value_type(f->g, type);
+    if (strcmp(name, "arena.try_alloc") == 0) {
+        char *pointer = new_temp(f);
+        emit(f, "%s *%s = (%s *)sosu_arena_try_alloc(%s, sizeof(%s));", ctype, pointer, ctype, arena, ctype);
+        result = materialize(f, e->type, sosu_format("((%s){ %s != NULL, %s })", value_type(f->g, e->type), pointer, pointer));
+        free(pointer);
+    } else {
+        char **values = gen_operands(f, args + 1, count - 1);
+        result = materialize(f, e->type, sosu_format("((%s *)sosu_arena_alloc(%s, sizeof(%s), %s))", ctype, arena, ctype, where));
+        if (strcmp(name, "arena.new") == 0) {
+            if (type->tag == T_CLASS) {
+                const char *root = c_type(f->g, root_of(type->as.info)->type);
+                emit(f, "((%s *)%s)->vt = (const %s__vt *)&%s__vtable;", root, result, root, ctype);
+            }
+            Name init_name = { "init", 4, 0 };
+            const MethodInfo *init = method_of(type->as.info, init_name);
+            if (init) {
+                Buf call_args = {0};
+                for (size_t i = 0; i + 1 < count; i++) buf_printf(&call_args, ", %s", values[i]);
+                char *function = method_c_name(f->g, init);
+                emit(f, "%s((%s *)%s%s);", function, c_type(f->g, init->owner->type), result,
+                     call_args.items ? call_args.items : "");
+                free(function);
+                free(call_args.items);
+            }
+        }
+        free_values(values, count - 1);
+    }
+    free(arena);
+    free(where);
+    return result;
+}
+
+/* The function and `self` of a call to a method of a class or an interface: a slot of
+   the class table for a virtual method (except through `base`), else a direct call. */
+static void class_call(Fn *f, const MethodInfo *method, const char *object, bool through_base, char **function,
+                       char **self) {
+    const TypeInfo *owner = method->owner;
+    Name name = method->decl->name;
+    if (owner->type->tag == T_INTERFACE) {
+        *function = method_c_name(f->g, method); /* the dispatcher */
+        *self = sosu_format("((%s *)%s)", c_type(f->g, owner->type), object);
+        return;
+    }
+    const MethodInfo *slot = through_base ? NULL : slot_of(method);
+    if (slot) {
+        const char *introducer = c_type(f->g, slot->owner->type);
+        const char *root = c_type(f->g, root_of(slot->owner)->type);
+        *function = sosu_format("((const %s__vt *)((%s *)%s)->vt)->m_%.*s", introducer, root, object, NAME_ARGS(name));
+        *self = sosu_format("((%s *)%s)", introducer, object);
+    } else {
+        *function = method_c_name(f->g, method);
+        *self = sosu_format("((%s *)%s)", c_type(f->g, owner->type), object);
+    }
+}
+
+static bool is_object(const Type *type) {
+    return type->tag == T_CLASS || type->tag == T_INTERFACE;
+}
+
 static char *gen_call(Fn *f, Expr *e) {
     Expr *callee = e->as.call.callee;
     if (callee->resolution == RESOLVED_PRINT) {
         gen_print(f, e);
         return NULL;
     }
-    if (callee->resolution == RESOLVED_BUILTIN) return gen_builtin_call(f, e, callee->target);
+    if (callee->resolution == RESOLVED_BUILTIN) {
+        const char *name = callee->target;
+        if (strncmp(name, "arena.", 6) == 0 || strcmp(name, "Arena.new") == 0) return gen_arena_call(f, e, name);
+        return gen_builtin_call(f, e, name);
+    }
 
     size_t count = e->as.call.arg_count;
     char *function;
@@ -899,13 +1131,29 @@ static char *gen_call(Fn *f, Expr *e) {
     switch (callee->resolution) {
     case RESOLVED_FN: function = fn_c_name(callee->target); break;
     case RESOLVED_SELF_METHOD:
-        function = method_c_name(f->g, callee->target);
-        self = sosu_strdup("v_self");
+        if (f->self_info->type->tag == T_CLASS) {
+            class_call(f, callee->target, "v_self", false, &function, &self);
+        } else {
+            function = method_c_name(f->g, callee->target);
+            self = sosu_strdup("v_self");
+        }
         break;
-    case RESOLVED_METHOD:
-        function = method_c_name(f->g, callee->target);
-        self = address_of(f, callee->as.field.object);
+    case RESOLVED_METHOD: {
+        Expr *object = callee->as.field.object;
+        const Type *type = object->type;
+        if (type->tag == T_POINTER && is_object(type->as.inner)) {
+            char *value = gen_expr(f, object);
+            if (object->kind != EXPR_NAME && object->kind != EXPR_SELF && object->kind != EXPR_BASE) {
+                value = materialize(f, type, value); /* read twice by a virtual call */
+            }
+            class_call(f, callee->target, value, object->kind == EXPR_BASE, &function, &self);
+            free(value);
+        } else {
+            function = method_c_name(f->g, callee->target);
+            self = address_of(f, object);
+        }
         break;
+    }
     case RESOLVED_VARIANT: {
         char **values = gen_operands(f, e->as.call.args, count);
         char *result = gen_variant(f, e, callee->target, callee->target_index, values);
@@ -1040,7 +1288,7 @@ static void gen_defers(Fn *f, int above_depth) {
 
 /* Checks `ensures` (with `result` bound to the returned value), runs every `defer`, returns. */
 static void gen_return(Fn *f, char *value, size_t offset) {
-    if (f->fn) {
+    if (f->fn && f->g->options.contracts) {
         for (size_t i = 0; i < f->fn->contract_count; i++) {
             const Contract *contract = &f->fn->contracts[i];
             if (contract->kind != CONTRACT_ENSURES) continue;
@@ -1091,6 +1339,7 @@ static char *gen_expr(Fn *f, Expr *e) {
     case EXPR_BOOL: return sosu_strdup(e->as.bool_value ? "true" : "false");
     case EXPR_NAME: return gen_name(f, e);
     case EXPR_SELF: return sosu_strdup("v_self");
+    case EXPR_BASE: return sosu_format("((%s)v_self)", c_type(f->g, e->type));
     case EXPR_RESULT: return sosu_strdup("v_result");
     case EXPR_UNARY: return gen_unary(f, e);
     case EXPR_BINARY: return gen_binary(f, e);
@@ -1102,7 +1351,8 @@ static char *gen_expr(Fn *f, Expr *e) {
     case EXPR_STRUCT_LIT: return gen_struct_literal(f, e);
     case EXPR_MATCH: return gen_match(f, e, false);
     case EXPR_TRY: return gen_try(f, e);
-    default: return sosu_strdup("0"); /* rejected earlier: base, as?, ranges */
+    case EXPR_TRY_CAST: return gen_try_cast(f, e);
+    default: return sosu_strdup("0"); /* rejected earlier: ranges outside `for` */
     }
 }
 
@@ -1182,6 +1432,25 @@ static void gen_for_in(Fn *f, const Stmt *stmt) {
         }
         free(start);
         free(end);
+    } else if (iterable->kind == EXPR_CALL && iterable->as.call.callee->resolution == RESOLVED_BUILTIN) {
+        /* s.chars() */
+        Expr *object = iterable->as.call.callee->as.field.object;
+        char *value = gen_expr(f, object);
+        if (object->type->tag == T_POINTER) {
+            char *deref = sosu_format("(*%s)", value);
+            free(value);
+            value = deref;
+        }
+        char *text = materialize(f, builtin(f->g, "str"), value);
+        char *pos = new_temp(f);
+        emit(f, "size_t %s = 0;", pos);
+        push_loop(f, -1);
+        emit(f, "while (%s < %s.len) {", pos, text);
+        emit(f, "    uint32_t v_%.*s = sosu_next_char(%s, &%s);", NAME_ARGS(name), text, pos);
+        gen_block(f, stmt->as.for_in.body);
+        emit(f, "}");
+        free(text);
+        free(pos);
     } else {
         const Type *type = iterable->type;
         char *value = gen_expr(f, iterable);
@@ -1379,7 +1648,7 @@ static void gen_body(Gen *g, Unit *unit, const char *header, const FnDecl *fn, T
     f.ret = ret;
     f.self_info = self_info;
     buf_printf(&code, "%s {\n", header);
-    if (fn) {
+    if (fn && g->options.contracts) {
         for (size_t i = 0; i < fn->contract_count; i++) {
             const Contract *contract = &fn->contracts[i];
             if (contract->kind != CONTRACT_REQUIRES) continue;
@@ -1417,6 +1686,7 @@ static void gen_function(Gen *g, FnInfo *fn) {
 }
 
 static void gen_method(Gen *g, TypeInfo *info, MethodInfo *method) {
+    if (!method->decl->body) return; /* interface signatures: see gen_tables */
     char *name = method_c_name(g, method);
     char *header = signature(g, name, method->type, method->decl, info);
     buf_printf(&g->protos, "%s;\n", header);
@@ -1425,22 +1695,139 @@ static void gen_method(Gen *g, TypeInfo *info, MethodInfo *method) {
     free(name);
 }
 
-static void report(Gen *g, const Unit *unit, const char *code, Name name, const char *message, const char *help) {
-    Diagnostic *d = diag_error(&g->program->diags, code, &unit->file, name.offset, name.length, "%s", message);
-    if (help) diag_help(d, "%s", help);
+/* ---- Class and interface tables ---- */
+
+/* A function with the signature of a slot (`self` typed as `self_type`) that calls `impl`:
+   directly for a class table, through the class table for an interface table (a subclass
+   may override `impl`). */
+static void gen_thunk(Gen *g, Buf *out, const char *name, const char *self_type, const MethodInfo *impl, bool dispatch) {
+    char *params = method_params(g, self_type, impl->type);
+    const MethodInfo *slot = dispatch ? slot_of(impl) : NULL;
+    const TypeInfo *owner = slot ? slot->owner : impl->owner;
+    Buf args = {0};
+    buf_printf(&args, "(%s *)self", c_type(g, owner->type));
+    for (size_t i = 0; i < impl->type->as.fn.param_count; i++) buf_printf(&args, ", a%zu", i);
+    char *target = slot ? sosu_format("((const %s__vt *)((%s *)self)->vt)->m_%.*s", c_type(g, owner->type),
+                                      c_type(g, root_of(owner)->type), NAME_ARGS(impl->decl->name))
+                        : method_c_name(g, impl);
+    bool returns = impl->type->as.fn.ret->tag != T_VOID;
+    buf_printf(out, "static %s %s(%s) {\n    %s%s(%s);\n}\n\n", return_type(g, impl->type), name, params,
+               returns ? "return " : "", target, args.items);
+    free(target);
+    free(args.items);
+    free(params);
 }
 
-/* Constructs code generation does not handle yet. */
-static bool check_supported(Gen *g) {
-    bool ok = true;
-    for (size_t i = 0; i < g->s->type_infos.count; i++) {
-        TypeInfo *info = g->s->type_infos.items[i];
-        if (info->type->tag != T_CLASS && info->type->tag != T_INTERFACE) continue;
-        report(g, info->unit, "E0501", info->name, "code generation does not support classes and interfaces yet",
-               "they need arenas to be created (roadmap step 6); `sosuc check` already checks them");
-        ok = false;
+static char *slot_function(Gen *g, const TypeInfo *cls, const TypeInfo *level, const MethodInfo *slot) {
+    const MethodInfo *impl = method_of(cls, slot->decl->name);
+    if (impl->owner == level) return method_c_name(g, impl);
+    return sosu_format("%s__in_%s__%.*s", c_type(g, cls->type), c_type(g, level->type), NAME_ARGS(slot->decl->name));
+}
+
+/* The initializer of the table of `cls`, for its part `level` (`cls` or a parent). */
+static void table_init(Gen *g, Buf *out, const TypeInfo *cls, const TypeInfo *level) {
+    const char *name = c_type(g, cls->type);
+    buf_puts(out, "{ ");
+    if (level->parent) {
+        table_init(g, out, cls, level->parent);
+    } else {
+        char *parent = cls->parent ? sosu_format("(const sosu_class *)&%s__vtable", c_type(g, cls->parent->type))
+                                   : sosu_strdup("NULL");
+        char *interfaces = cls->interface_count ? sosu_format("%s__interfaces", name) : sosu_strdup("NULL");
+        buf_printf(out, "{ %s, \"%.*s\", %s, %zu }", parent, NAME_ARGS(cls->name), interfaces, cls->interface_count);
+        free(parent);
+        free(interfaces);
     }
-    return ok;
+    for (size_t i = 0; i < level->method_count; i++) {
+        if (!introduces_slot(&level->methods[i])) continue;
+        char *function = slot_function(g, cls, level, &level->methods[i]);
+        buf_printf(out, ", %s", function);
+        free(function);
+    }
+    buf_puts(out, " }");
+}
+
+static size_t class_depth(const TypeInfo *cls) {
+    size_t depth = 0;
+    for (const TypeInfo *t = cls->parent; t; t = t->parent) depth++;
+    return depth;
+}
+
+static void gen_tables(Gen *g, Buf *out) {
+    /* interfaces: an identity, and a dispatcher per method */
+    for (size_t i = 0; i < g->s->type_infos.count; i++) {
+        const TypeInfo *info = g->s->type_infos.items[i];
+        if (info->type->tag != T_INTERFACE) continue;
+        const char *name = value_type(g, info->type);
+        buf_printf(out, "static const char %s__id = 0;\n\n", name);
+        for (size_t j = 0; j < info->method_count; j++) {
+            const MethodInfo *method = &info->methods[j];
+            char *params = method_params(g, name, method->type);
+            Buf args = {0};
+            buf_puts(&args, "self");
+            for (size_t k = 0; k < method->type->as.fn.param_count; k++) buf_printf(&args, ", a%zu", k);
+            char *function = method_c_name(g, method);
+            buf_printf(out,
+                       "static %s %s(%s) {\n"
+                       "    const %s__it *table = (const %s__it *)sosu_find_interface(SOSU_CLASS_OF(self), &%s__id);\n"
+                       "    %stable->m_%.*s(%s);\n}\n\n",
+                       return_type(g, method->type), function, params, name, name, name,
+                       method->type->as.fn.ret->tag == T_VOID ? "" : "return ", NAME_ARGS(method->decl->name), args.items);
+            free(function);
+            free(args.items);
+            free(params);
+        }
+    }
+
+    /* classes, parents first: interface tables, thunks, then the class table */
+    size_t max_depth = 0;
+    for (size_t i = 0; i < g->s->type_infos.count; i++) {
+        const TypeInfo *info = g->s->type_infos.items[i];
+        if (info->type->tag == T_CLASS && class_depth(info) > max_depth) max_depth = class_depth(info);
+    }
+    for (size_t depth = 0; depth <= max_depth; depth++) {
+        for (size_t i = 0; i < g->s->type_infos.count; i++) {
+            const TypeInfo *cls = g->s->type_infos.items[i];
+            if (cls->type->tag != T_CLASS || class_depth(cls) != depth) continue;
+            const char *name = value_type(g, cls->type);
+
+            Buf entries = {0};
+            for (size_t j = 0; j < cls->interface_count; j++) {
+                const TypeInfo *interface = cls->interfaces[j];
+                const char *iname = value_type(g, interface->type);
+                Buf slots = {0};
+                for (size_t k = 0; k < interface->method_count; k++) {
+                    Name method_name = interface->methods[k].decl->name;
+                    char *thunk = sosu_format("%s__as_%s__%.*s", name, iname, NAME_ARGS(method_name));
+                    gen_thunk(g, out, thunk, iname, method_of(cls, method_name), true);
+                    buf_printf(&slots, "%s, ", thunk);
+                    free(thunk);
+                }
+                buf_printf(out, "static const %s__it %s__as_%s = { %s0 };\n\n", iname, name, iname,
+                           slots.items ? slots.items : "");
+                buf_printf(&entries, "%s{ &%s__id, &%s__as_%s }", j ? ", " : "", iname, name, iname);
+                free(slots.items);
+            }
+            if (entries.items) buf_printf(out, "static const sosu_iface %s__interfaces[] = { %s };\n\n", name, entries.items);
+            free(entries.items);
+
+            for (const TypeInfo *level = cls; level; level = level->parent) {
+                for (size_t k = 0; k < level->method_count; k++) {
+                    const MethodInfo *slot = &level->methods[k];
+                    if (!introduces_slot(slot)) continue;
+                    const MethodInfo *impl = method_of(cls, slot->decl->name);
+                    if (impl->owner == level) continue;
+                    char *thunk = slot_function(g, cls, level, slot);
+                    gen_thunk(g, out, thunk, c_type(g, level->type), impl, false);
+                    free(thunk);
+                }
+            }
+            Buf init = {0};
+            table_init(g, &init, cls, cls);
+            buf_printf(out, "static const %s__vt %s__vtable = %s;\n\n", name, name, init.items);
+            free(init.items);
+        }
+    }
 }
 
 static FnInfo *find_main(Gen *g) {
@@ -1452,11 +1839,12 @@ static FnInfo *find_main(Gen *g) {
     return NULL;
 }
 
-char *codegen_program(Sema *s, Program *program, CodegenMode mode) {
+char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOptions options) {
     Gen g = {0};
     g.s = s;
     g.program = program;
-    if (!check_supported(&g)) return NULL;
+    g.options = options;
+
 
     FnInfo *main_fn = NULL;
     Unit *entry = program->units.items[0];
@@ -1529,6 +1917,9 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode) {
         free(runs.items);
     }
 
+    Buf tables = {0};
+    gen_tables(&g, &tables);
+
     /* Types first named while generating code are defined now (before the code in the output). */
     for (size_t i = 0; i < g.types.count; i++) define_type(&g, g.types.items[i].type);
 
@@ -1537,6 +1928,7 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode) {
     if (g.fwd.items) buf_printf(&out, "%s\n", g.fwd.items);
     if (g.defs.items) buf_puts(&out, g.defs.items);
     if (g.protos.items) buf_printf(&out, "%s\n", g.protos.items);
+    if (tables.items) buf_puts(&out, tables.items);
     if (g.code.items) buf_puts(&out, g.code.items);
     buf_puts(&out, main_code.items);
 
@@ -1545,6 +1937,7 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode) {
     free(g.defs.items);
     free(g.protos.items);
     free(g.code.items);
+    free(tables.items);
     for (size_t i = 0; i < g.types.count; i++) free(g.types.items[i].name);
     free(g.types.items);
     return out.items;
