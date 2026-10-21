@@ -1,0 +1,12 @@
+# Window, events and drawing (spec §10), on SDL3.
+# On Windows, run fetch-sdl3.ps1 once to download SDL3 into vendor/.
+[package]
+name = "platform"
+version = "0.1.0"
+
+[link]
+libs = ["SDL3"]
+
+[link.windows]
+paths = ["vendor/SDL3/lib/x64"]
+copy = ["vendor/SDL3/lib/x64/SDL3.dll"]

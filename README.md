@@ -15,7 +15,7 @@ English is the working language of the project: code, comments, compiler message
 | 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
 | 3. Semantic analysis | done for the language of §5 to §7 |
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
-| 5. C interop, SDL3 window | `extern "C"` and linking of C libraries (`[link]` in sosu.toml) done; no window yet |
+| 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows) |
 | 6. Arenas, defer, move, unsafe, checks | done, except moves (`.copy()`) |
 | 7. Tooling | `run`, `test`, JSON diagnostics, contracts and `--release` done; `fmt` to do |
 
@@ -87,6 +87,29 @@ docs/         specification and error codes
 
 `sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
 (which is `lib/` for `build/sosuc`).
+
+## A window (milestone 1 of spec §10.4)
+
+`packages/platform` opens a window and draws with SDL3; `examples/window` uses it. On Windows:
+
+```bat
+powershell -ExecutionPolicy Bypass -File packages\platform\fetch-sdl3.ps1   :: once: SDL3 3.4.18, checked by SHA-256
+build\sosuc run examples\window
+```
+
+The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On Linux and macOS,
+`platform` links the SDL3 installed on the system (a script will come with the CI support).
+
+## Branches
+
+- `main`: stable. It only receives `dev`, through a pull request.
+- `dev`: integration of the finished features.
+- `feature/<name>`: one branch per feature, created from `dev` and merged back into `dev`
+  through a pull request.
+
+The CI (`.github/workflows/ci.yml`) checks every pull request into `dev` or `main` on Linux
+(gcc and clang) and Windows (MSVC), so that a branch is merged only once it builds and passes the
+tests everywhere.
 
 ## Documentation
 
