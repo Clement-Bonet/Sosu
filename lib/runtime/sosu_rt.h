@@ -34,10 +34,9 @@ void *sosu_arena_alloc_array(sosu_arena *arena, size_t size, uint64_t count, con
 uint8_t *sosu_str_to_cstr(sosu_arena *arena, sosu_str text, const char *loc); /* s.to_cstr(arena) */
 bool sosu_utf8_valid(const uint8_t *bytes, size_t length);                   /* str.from_bytes */
 
-/* For std, which is written in Sosu on the C library: what C hides behind macros or
-   types whose size depends on the system. */
-int32_t sosu_errno(void);
-int64_t sosu_file_size(void *file); /* FILE*; -1 if unknown */
+/* sosu_rt.c also defines `sosu_errno` and `sosu_file_size` for std.io, which declares them
+   itself with `extern "C"` (with its own types): they are not declared here, so that the
+   two declarations cannot conflict. */
 
 /* Classes (spec §5.2). Every object starts with a pointer to its class's table of virtual
    methods, which itself starts with this description of the class. */
