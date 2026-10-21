@@ -37,7 +37,8 @@ static Type *check_expr(Body *b, Expr *e, Type *expected);
 static void check_stmt(Body *b, Stmt *stmt);
 static void check_block(Body *b, Stmt *block);
 
-static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB" };
+static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB",
+                                             "wrapping_add", "wrapping_sub", "wrapping_mul" };
 
 /* ---- Helpers ---- */
 
@@ -539,7 +540,8 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
     }
     bool is_ok = strcmp(name, "ok") == 0;
     bool void_ok = is_ok && expected && expected->tag == T_RESULT && expected->as.result.value->tag == T_VOID;
-    size_t wanted = strcmp(name, "min") == 0 || strcmp(name, "max") == 0 ? 2 : void_ok ? 0 : 1;
+    bool two = strcmp(name, "min") == 0 || strcmp(name, "max") == 0 || strncmp(name, "wrapping_", 9) == 0;
+    size_t wanted = two ? 2 : void_ok ? 0 : 1;
     if (count != wanted) {
         error_expr(b, "E0336", callee, "`%s` takes %zu argument%s, but %zu %s given", name, wanted, wanted == 1 ? "" : "s",
                    count, count == 1 ? "was" : "were");
@@ -585,13 +587,15 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         }
         return type;
     }
-    /* min, max */
+    /* min, max, and wrapping_add, wrapping_sub, wrapping_mul (modulo 2^n, spec §5.1) */
+    bool wrapping = strncmp(name, "wrapping_", 9) == 0;
     Type *lt, *rt;
     check_pair(b, args[0], args[1], expected, &lt, &rt);
-    if (!is_error(lt) && !is_error(rt) && (!is_numeric(lt) || lt != rt)) {
+    bool valid = wrapping ? lt->tag == T_INT : is_numeric(lt);
+    if (!is_error(lt) && !is_error(rt) && (!valid || lt != rt)) {
         TypeNames n = {0};
-        error_expr(b, "E0334", e, "`%s` needs two numbers of the same type, found `%s` and `%s`", name, tn(&n, lt),
-                   tn(&n, rt));
+        error_expr(b, "E0334", e, "`%s` needs two %s of the same type, found `%s` and `%s`", name,
+                   wrapping ? "integers" : "numbers", tn(&n, lt), tn(&n, rt));
         release_names(&n);
     }
     return lt;

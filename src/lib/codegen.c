@@ -1014,6 +1014,10 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
         emit(f, "sosu_check(%s, %s, \"assertion failed: \" %s);", values[0], where, text);
         free(where);
         free(text);
+    } else if (strncmp(name, "wrapping_", 9) == 0) {
+        const char *op = strcmp(name, "wrapping_add") == 0 ? "+" : strcmp(name, "wrapping_sub") == 0 ? "-" : "*";
+        const char *wide = wrapping_type(e->type);
+        result = sosu_format("((%s)((%s)%s %s (%s)%s))", c_type(f->g, e->type), wide, values[0], op, wide, values[1]);
     } else {
         /* min, max, abs: operands are read twice, so they are stored first */
         char *a = materialize(f, args[0]->type, sosu_strdup(values[0]));
