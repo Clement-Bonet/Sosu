@@ -1,0 +1,135 @@
+// platform.sdl: the part of SDL3 that `platform` uses, declared by hand (spec §9).
+// The C declarations stay private; the functions below wrap them in safe Sosu.
+
+pub struct Window { }
+pub struct Renderer { }
+
+// SDL_Event: 128 bytes, read through the fields of the events `platform` handles.
+pub struct Event {
+    pub u32 kind;      // SDL_EventType
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    pub u32 word5;     // window events: data1; keyboard events: keyboard id
+    pub u32 word6;     // window events: data2; keyboard events: scancode
+    pub u32 word7;     // keyboard events: key code
+    u8[96] rest;
+}
+
+pub struct FRect {
+    f32 x;
+    f32 y;
+    f32 w;
+    f32 h;
+}
+
+// A C string (NUL-terminated) built from a `str`.
+struct CString {
+    mut u8[256] bytes;
+}
+
+extern "C" {
+    bool SDL_Init(u32 flags) uses io;
+    void SDL_Quit() uses io;
+    Window* SDL_CreateWindow(u8* title, i32 w, i32 h, u64 flags) uses io;
+    void SDL_DestroyWindow(Window* window) uses io;
+    Renderer* SDL_CreateRenderer(Window* window, u8* name) uses io;
+    void SDL_DestroyRenderer(Renderer* renderer) uses io;
+    bool SDL_PollEvent(Event* event) uses io;
+    bool SDL_SetRenderDrawColor(Renderer* renderer, u8 r, u8 g, u8 b, u8 a) uses io;
+    bool SDL_RenderClear(Renderer* renderer) uses io;
+    bool SDL_RenderFillRect(Renderer* renderer, FRect* rect) uses io;
+    bool SDL_RenderPresent(Renderer* renderer) uses io;
+    void SDL_Delay(u32 ms) uses io;
+}
+
+pub bool init_video() uses io {
+    mut bool ok = false;
+    unsafe {
+        ok = SDL_Init(0x20);   // SDL_INIT_VIDEO
+    }
+    return ok;
+}
+
+pub void quit() uses io {
+    unsafe {
+        SDL_Quit();
+    }
+}
+
+// A resizable window, or none if SDL cannot create it.
+pub Window*? create_window(Arena* arena, str title, i32 width, i32 height) uses io {
+    CString* text = arena.alloc(CString);
+    usize length = min(title.len, 255);
+    for (mut usize i = 0; i < length; i += 1) {
+        text.bytes[i] = title.bytes[i];
+    }
+    unsafe {
+        Window* window = SDL_CreateWindow(&text.bytes as u8*, width, height, 0x20);   // SDL_WINDOW_RESIZABLE
+        if ((window as u64) == 0) {
+            return none;
+        }
+        return some(window);
+    }
+}
+
+pub void destroy_window(Window* window) uses io {
+    unsafe {
+        SDL_DestroyWindow(window);
+    }
+}
+
+pub Renderer*? create_renderer(Window* window) uses io {
+    unsafe {
+        Renderer* renderer = SDL_CreateRenderer(window, 0 as u8*);
+        if ((renderer as u64) == 0) {
+            return none;
+        }
+        return some(renderer);
+    }
+}
+
+pub void destroy_renderer(Renderer* renderer) uses io {
+    unsafe {
+        SDL_DestroyRenderer(renderer);
+    }
+}
+
+pub bool poll(Event* event) uses io {
+    mut bool found = false;
+    unsafe {
+        found = SDL_PollEvent(event);
+    }
+    return found;
+}
+
+pub void set_color(Renderer* renderer, u8 r, u8 g, u8 b, u8 a) uses io {
+    unsafe {
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+    }
+}
+
+pub void clear(Renderer* renderer) uses io {
+    unsafe {
+        SDL_RenderClear(renderer);
+    }
+}
+
+pub void fill_rect(Renderer* renderer, f32 x, f32 y, f32 w, f32 h) uses io {
+    FRect rect = FRect{ x: x, y: y, w: w, h: h };
+    unsafe {
+        SDL_RenderFillRect(renderer, &rect);
+    }
+}
+
+pub void present(Renderer* renderer) uses io {
+    unsafe {
+        SDL_RenderPresent(renderer);
+    }
+}
+
+pub void delay(u32 ms) uses io {
+    unsafe {
+        SDL_Delay(ms);
+    }
+}

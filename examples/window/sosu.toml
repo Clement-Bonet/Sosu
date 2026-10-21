@@ -1,0 +1,7 @@
+# Milestone 1 of spec §10.4: a window, a colored rectangle, closed cleanly on Quit.
+[package]
+name = "window"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
