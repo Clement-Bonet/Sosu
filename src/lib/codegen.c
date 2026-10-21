@@ -1059,6 +1059,14 @@ static char *gen_arena_call(Fn *f, Expr *e, const char *name) {
         emit(f, "%s *%s = (%s *)sosu_arena_try_alloc(%s, sizeof(%s));", ctype, pointer, ctype, arena, ctype);
         result = materialize(f, e->type, sosu_format("((%s){ %s != NULL, %s })", value_type(f->g, e->type), pointer, pointer));
         free(pointer);
+    } else if (strcmp(name, "arena.alloc_slice") == 0) {
+        char *length = materialize(f, args[1]->type, gen_expr(f, args[1]));
+        char *pointer = new_temp(f);
+        emit(f, "%s *%s = (%s *)sosu_arena_alloc_array(%s, sizeof(%s), %s, %s);", ctype, pointer, ctype, arena, ctype,
+             length, where);
+        result = materialize(f, e->type, sosu_format("((%s){ %s, (size_t)%s })", value_type(f->g, e->type), pointer, length));
+        free(pointer);
+        free(length);
     } else {
         char **values = gen_operands(f, args + 1, count - 1);
         result = materialize(f, e->type, sosu_format("((%s *)sosu_arena_alloc(%s, sizeof(%s), %s))", ctype, arena, ctype, where));
@@ -1082,6 +1090,33 @@ static char *gen_arena_call(Fn *f, Expr *e, const char *name) {
         free_values(values, count - 1);
     }
     free(arena);
+    free(where);
+    return result;
+}
+
+/* s.to_cstr(arena), str.from_bytes(bytes) */
+static char *gen_str_call(Fn *f, Expr *e, const char *name) {
+    Expr **args = e->as.call.args;
+    char *where = loc(f, e->offset);
+    char *result;
+    if (strcmp(name, "str.to_cstr") == 0) {
+        Expr *object = e->as.call.callee->as.field.object;
+        char *text = materialize(f, builtin(f->g, "str"), gen_expr(f, object));
+        char *arena = address_of(f, args[0]);
+        result = materialize(f, e->type, sosu_format("sosu_str_to_cstr(%s, %s, %s)", arena, text, where));
+        free(text);
+        free(arena);
+    } else { /* str.from_bytes */
+        char *bytes = materialize(f, args[0]->type, gen_expr(f, args[0]));
+        const char *type = value_type(f->g, e->type);
+        const char *error = value_type(f->g, e->type->as.result.error);
+        result = new_temp(f);
+        emit(f, "%s %s;", type, result);
+        emit(f, "if (sosu_utf8_valid(%s.ptr, %s.len)) %s = (%s){ .ok = true, .as.value = { %s.ptr, %s.len } };", bytes,
+             bytes, result, type, bytes, bytes);
+        emit(f, "else %s = (%s){ .ok = false, .as.error = (%s){ .tag = 0 } };", result, type, error);
+        free(bytes);
+    }
     free(where);
     return result;
 }
@@ -1122,6 +1157,7 @@ static char *gen_call(Fn *f, Expr *e) {
     if (callee->resolution == RESOLVED_BUILTIN) {
         const char *name = callee->target;
         if (strncmp(name, "arena.", 6) == 0 || strcmp(name, "Arena.new") == 0) return gen_arena_call(f, e, name);
+        if (strncmp(name, "str.", 4) == 0) return gen_str_call(f, e, name);
         return gen_builtin_call(f, e, name);
     }
 

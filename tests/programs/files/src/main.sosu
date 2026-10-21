@@ -1,0 +1,49 @@
+// std.io files, and text conversions (spec §4.1, §8): run with `sosuc run`.
+import std.io;
+
+str describe(io.IoError e) {
+    return match (e) {
+        NotFound => "not found",
+        PermissionDenied => "permission denied",
+        InvalidUtf8 => "not UTF-8 text",
+        Other => "other error",
+    };
+}
+
+i32 main() uses io {
+    Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    str path = "tests/programs/files/build/note.txt";
+
+    match (io.write_file(&arena, path, "Written by Sosu, read back: été")) {
+        ok => io.print("written"),
+        err(e) => io.print("write failed: {}", describe(e)),
+    }
+    match (io.read_file(&arena, path)) {
+        ok(text) => io.print("read: {} ({} bytes)", text, text.len),
+        err(e) => io.print("read failed: {}", describe(e)),
+    }
+    match (io.read_file(&arena, "tests/programs/files/missing.txt")) {
+        ok(text) => io.print("unexpected: {}", text),
+        err(e) => io.print("missing file: {}", describe(e)),
+    }
+
+    u8[] bytes = arena.alloc_slice(u8, 2);
+    bytes[0] = 79;   // 'O'
+    bytes[1] = 75;   // 'K'
+    match (str.from_bytes(bytes)) {
+        ok(text) => io.print("from_bytes: {}", text),
+        err(e) => io.print("from_bytes: invalid"),
+    }
+    bytes[1] = 255;
+    match (str.from_bytes(bytes)) {
+        ok(text) => io.print("from_bytes: {}", text),
+        err(e) => io.print("from_bytes: invalid UTF-8"),
+    }
+
+    u8* c = "abc".to_cstr(&arena);
+    unsafe {
+        io.print("to_cstr: {} {} {} then {}", *c, *(c + 1), *(c + 2), *(c + 3));
+    }
+    return 0;
+}

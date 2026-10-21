@@ -1,0 +1,6 @@
+written
+read: Written by Sosu, read back: été (33 bytes)
+missing file: not found
+from_bytes: OK
+from_bytes: invalid UTF-8
+to_cstr: 97 98 99 then 0

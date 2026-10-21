@@ -204,6 +204,10 @@ static Ref lookup_name(Body *b, Name name, Type *expected) {
         return ref;
     }
     Symbol *sym = sema_scope_find(sema_scope(b->s, b->unit), name);
+    if (!sym && b->s->prelude && b->unit != b->s->prelude) { /* public names of core.prelude */
+        sym = sema_scope_find(sema_scope(b->s, b->s->prelude), name);
+        if (sym && (!sym->is_pub || sym->kind == SYM_MODULE)) sym = NULL;
+    }
     if (sym) {
         switch (sym->kind) {
         case SYM_FN: ref.kind = REF_FN; ref.fn = sym->fn; break;
@@ -297,6 +301,11 @@ static Ref resolve_ref(Body *b, Expr *e, Type *expected) {
         if (outer.type->tag == T_ARENA && name_is(name, "new")) {
             ref.kind = REF_BUILTIN;
             ref.builtin = "Arena.new";
+            return ref;
+        }
+        if (outer.type->tag == T_STR && name_is(name, "from_bytes")) {
+            ref.kind = REF_BUILTIN;
+            ref.builtin = "str.from_bytes";
             return ref;
         }
         if (outer.type->tag == T_ENUM) {
@@ -487,6 +496,16 @@ static Type *call_variant(Body *b, Expr *e, const TypeInfo *info, size_t index) 
     return info->type;
 }
 
+/* A public type of core.prelude, e.g. `Utf8Error`. */
+static Type *prelude_type(Body *b, const char *name, const Expr *at) {
+    Name wanted = { name, strlen(name), 0 };
+    Symbol *sym = b->s->prelude ? sema_scope_find(sema_scope(b->s, b->s->prelude), wanted) : NULL;
+    if (sym && sym->kind == SYM_TYPE) return sym->type_info->type;
+    Diagnostic *d = error_expr(b, "E0414", at, "`%s` is missing: the standard library was not found", name);
+    diag_help(d, "it is declared in `core/src/prelude.sosu`; set SOSU_HOME to the folder of the Sosu installation");
+    return error_type(b);
+}
+
 static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
     Expr *callee = e->as.call.callee;
     Expr **args = e->as.call.args;
@@ -497,6 +516,17 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         diag_help(d, "write `%s` without parentheses", name);
         check_args_loosely(b, e);
         return strcmp(name, "none") == 0 && expected ? expected : error_type(b);
+    }
+    if (strcmp(name, "str.from_bytes") == 0) {
+        /* str.from_bytes(u8[]) -> str!Utf8Error (spec §4.1) */
+        if (count != 1) {
+            error_expr(b, "E0336", callee, "`str.from_bytes` takes the bytes to check, e.g. `str.from_bytes(data)`");
+            check_args_loosely(b, e);
+        } else {
+            check_expect(b, args[0], type_slice(&b->s->types, builtin(b, "u8")));
+        }
+        Type *error = prelude_type(b, "Utf8Error", callee);
+        return is_error(error) ? error : type_result(&b->s->types, builtin(b, "str"), error);
     }
     if (strcmp(name, "Arena.new") == 0) {
         if (count != 1) {
@@ -675,13 +705,14 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
     bool is_alloc = name_is(name, "alloc");
     bool is_try = name_is(name, "try_alloc");
     bool is_new = name_is(name, "new");
-    if (!is_alloc && !is_try && !is_new) {
+    bool is_slice = name_is(name, "alloc_slice");
+    if (!is_alloc && !is_try && !is_new && !is_slice) {
         Diagnostic *d = error_at(b, "E0337", name.offset, name.length, "`Arena` has no method `%.*s`", NAME_ARGS(name));
-        diag_help(d, "the methods of an arena are `alloc`, `try_alloc`, `new` and `free` (spec §6)");
+        diag_help(d, "the methods of an arena are `alloc`, `alloc_slice`, `try_alloc`, `new` and `free` (spec §6)");
         check_args_loosely(b, e);
         return error_type(b);
     }
-    callee->target = is_alloc ? "arena.alloc" : is_try ? "arena.try_alloc" : "arena.new";
+    callee->target = is_alloc ? "arena.alloc" : is_try ? "arena.try_alloc" : is_new ? "arena.new" : "arena.alloc_slice";
     Type *type = count ? type_argument(b, args[0]) : NULL;
     if (!type) {
         Diagnostic *d = error_expr(b, "E0354", count ? args[0] : e, "`%.*s` takes the type to allocate first",
@@ -729,7 +760,15 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
         return pointer;
     }
 
-    if (count != 1) {
+    if (is_slice) {
+        if (count != 2) {
+            error_expr(b, "E0336", callee, "`alloc_slice` takes the type and the number of elements, e.g. "
+                                           "`arena.alloc_slice(u8, 64)`");
+            for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
+        } else {
+            check_expect(b, args[1], builtin(b, "usize"));
+        }
+    } else if (count != 1) {
         error_expr(b, "E0336", callee, "`%.*s` takes only the type to allocate", NAME_ARGS(name));
         for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
     }
@@ -742,6 +781,7 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
         diag_help(d, "it contains a pointer, which is never null: use a struct with `init` and `arena.new`, or `T*?`");
     }
     release_names(&n);
+    if (is_slice) return type_slice(&b->s->types, type);
     return is_try ? type_option(&b->s->types, pointer) : pointer;
 }
 
@@ -776,6 +816,19 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
         }
     }
     if (base->tag == T_ARENA) return call_arena(b, e, name);
+    if (base->tag == T_STR && name_is(name, "to_cstr")) {
+        /* s.to_cstr(arena): a NUL-terminated copy for C (spec §4.1) */
+        callee->resolution = RESOLVED_BUILTIN;
+        callee->target = "str.to_cstr";
+        Type *arena = e->as.call.arg_count == 1 ? check_expr(b, e->as.call.args[0], NULL) : NULL;
+        Type *arena_base = arena && arena->tag == T_POINTER ? arena->as.inner : arena;
+        if (!arena_base || (arena_base->tag != T_ARENA && !is_error(arena_base))) {
+            Diagnostic *d = error_expr(b, "E0336", e, "`to_cstr` takes the arena that holds the copy");
+            diag_help(d, "write `text.to_cstr(arena)` (spec §4.1)");
+            if (!arena) check_args_loosely(b, e);
+        }
+        return type_pointer(&b->s->types, builtin(b, "u8"));
+    }
     if (base->tag == T_STR && name_is(name, "chars")) {
         Diagnostic *d = error_expr(b, "E0352", e, "`chars()` can only be used in a `for` loop");
         diag_help(d, "write `for (char c in s.chars()) { ... }` (spec §4.1)");
