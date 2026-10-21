@@ -107,6 +107,7 @@ struct Expr {
     ExprKind kind;
     size_t offset;
     size_t length;
+    struct Type *type; /* set by semantic analysis */
     union {
         uint64_t int_value;
         uint32_t char_value;

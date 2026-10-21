@@ -82,7 +82,7 @@ struct Point {
     f32 x;
     f32 y;
 
-    f32 length() { return sqrt(x * x + y * y); }
+    f32 length_squared() { return x * x + y * y; }
 }
 
 i32 add(i32 a, i32 b) {
@@ -96,7 +96,7 @@ i32 main() uses io {
         total += add(i, 1);
     }
     auto p = Point{ x: 3.0, y: 4.0 };
-    io.print("length = {}", p.length());
+    io.print("length² = {}", p.length_squared());
     return 0;
 }
 ```
@@ -206,6 +206,21 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **No destructor** in v0: external resources are released with `defer`, memory with the arena.
 - **Conversions**: to the parent class or an interface with `as`; to a subclass with `as?` (checked at run time, returns `T*?`).
 - **Interfaces**: signatures only; only classes implement them (see §14.2).
+
+### 5.3 Names, values and typing rules
+
+- **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
+- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`. They are part of the compiler, since they work for several types and Sosu v0 has no generics.
+- **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
+- **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
+- **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
+- **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned.
+- **Enum values** are written `Shape.Circle(1.0)` or `Shape.Empty`; the name of the enum may be left out when the expected type is known (`Shape s = Circle(1.0);`), as in `match` patterns.
+- **Statements**: an expression statement must be a call or a `match`; `x == 1;` is an error. The value of a call returning `T!E` must be used (with `try`, `match`, or a variable).
+- **Functions** that return a value must end every path with `return`.
+- **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`.
+- **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `u8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as u8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
+- **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`.
 
 ## 6. Memory
 

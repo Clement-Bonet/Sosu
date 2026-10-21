@@ -65,7 +65,7 @@ static void test_valid(void) {
     expect_codes("", "");
     expect_codes("struct Point { f32 x; f32 y; f32 length() { return x; } }\n"
                  "enum ParseError { Empty, NotANumber(str text) }\n"
-                 "i32!ParseError parse(str s) { return 0; }\n"
+                 "i32!ParseError parse(str s) { return ok(0); }\n"
                  "i32? find(i32[] items, i32 target) { return none; }\n"
                  "void apply(fn(i32) -> i32 uses io f, u8[4] bytes, Point*? p) { }\n"
                  "struct Node { i32 value; Node* next; }\n",
@@ -148,6 +148,149 @@ static void test_duplicates(void) {
     expect_codes("interface I { }\nclass C : I, I { }", "E0319");
 }
 
+static void test_valid_bodies(void) {
+    expect_codes("import std.io;\n"
+                 "enum Shape { Circle(f32 radius), Rect(f32 w, f32 h), Empty, }\n"
+                 "f32 area(Shape s) {\n"
+                 "    return match (s) {\n"
+                 "        Circle(r) => 3.14159 * r * r,\n"
+                 "        Rect(w, h) => w * h,\n"
+                 "        Empty => 0.0,\n"
+                 "    };\n"
+                 "}\n"
+                 "Shape unit() { return Circle(1.0); }\n"
+                 "Shape nothing() { return Shape.Empty; }\n"
+                 "enum ParseError { Empty, NotANumber }\n"
+                 "i32!ParseError parse(str s) {\n"
+                 "    if (s.len == 0) { return err(Empty); }\n"
+                 "    return ok(42);\n"
+                 "}\n"
+                 "i32!ParseError twice(str s) {\n"
+                 "    i32 n = try parse(s);\n"
+                 "    return ok(n * 2);\n"
+                 "}\n"
+                 "void!ParseError validate(str s) { i32 n = try parse(s); return ok(); }\n"
+                 "i32? find(i32[] items, i32 target) {\n"
+                 "    for (mut usize i = 0; i < items.len; i += 1) {\n"
+                 "        if (items[i] == target) { return some(i as i32); }\n"
+                 "    }\n"
+                 "    return none;\n"
+                 "}\n"
+                 "i32 clamp(i32 x, i32 lo, i32 hi)\n"
+                 "    requires lo <= hi\n"
+                 "    ensures result >= lo && result <= hi\n"
+                 "{\n"
+                 "    if (x < lo) { return lo; }\n"
+                 "    if (x > hi) { return hi; }\n"
+                 "    return x;\n"
+                 "}\n"
+                 "test \"clamp stays in range\" { assert(clamp(15, 0, 10) == 10); }\n"
+                 "i32 sum(i32[] values) {\n"
+                 "    mut i32 total = 0;\n"
+                 "    for (i32 v in values) { total += v; }\n"
+                 "    for (i32 i in 0..10) { total += i; }\n"
+                 "    return total;\n"
+                 "}\n"
+                 "struct Point { mut f32 x; f32 y; f32 length_squared() { return x * x + y * y; } }\n"
+                 "void nudge(Point* p) { p.x = p.x + 1.0; }\n"
+                 "void literals() uses io {\n"
+                 "    u8 small = 255;\n"
+                 "    i64 big = 3000000000;\n"
+                 "    i8 negative = -128;\n"
+                 "    auto inferred = 3;\n"
+                 "    f32 f = 2.5;\n"
+                 "    u32 mask = (0xFF & 0b1010) << 2;\n"
+                 "    char c = 'a';\n"
+                 "    i32 code = c as i32;\n"
+                 "    bool flag = !(small > 3) || big == 0;\n"
+                 "    i32 m = max(code, 10);\n"
+                 "    auto ratio = f as f64 / 2.0;\n"
+                 "    mut Point p = Point{ x: 3.0, y: 4.0 };\n"
+                 "    p.x = 1.0;\n"
+                 "    io.print(\"{} {} {}\", p.length_squared(), flag, ratio);\n"
+                 "}\n"
+                 "void raw(i32* p) { unsafe { u8* q = p as u8*; u8 first = *(q + 4); } }\n",
+                 "");
+    expect_codes("import std.io;\n"
+                 "class Widget {\n"
+                 "    f32 x;\n"
+                 "    void init(f32 x) { self.x = x; }\n"
+                 "    virtual void on_click() uses io { io.print(\"clicked at {}\", x); }\n"
+                 "}\n"
+                 "class Button : Widget {\n"
+                 "    str label;\n"
+                 "    void init(str label) { base.init(0.0); self.label = label; }\n"
+                 "    override void on_click() uses io { base.on_click(); }\n"
+                 "}\n"
+                 "void use(Button* b) uses io {\n"
+                 "    Widget* w = b as Widget*;\n"
+                 "    w.on_click();\n"
+                 "    Button*? back = w as? Button*;\n"
+                 "}\n",
+                 "");
+}
+
+static void test_body_errors(void) {
+    expect_codes("void f() { g(); }", "E0330");
+    expect_help("void f() { i32 count = 1; i32 x = cuont; }", "E0330", "did you mean `count`?");
+    expect_codes("void f() { i32 x = true; }", "E0331");
+    expect_help("void f() { i64 a = 1; i32 b = a; }", "E0331", "conversions are explicit: write `... as i32`");
+    expect_codes("void f() { f32 x = 3; }", "E0331");
+    expect_codes("void f() { u8 x = 256; }", "E0332");
+    expect_codes("void f() { i8 x = -129; }", "E0332");
+    expect_codes("void f() { auto x = 3000000000; }", "E0332");
+    expect_codes("struct P { }\nvoid f() { auto x = P; }", "E0333");
+    expect_codes("void f() { i32 a = 1; i64 b = 2; auto c = a + b; }", "E0334");
+    expect_codes("void f() { auto c = true + 1; }", "E0334");
+    expect_codes("void f() { str s = \"a\"; auto c = s[0]; }", "E0334");
+    expect_codes("void f() { i32 x = 1; x = 2; }", "E0335");
+    expect_codes("struct P { f32 x; }\nvoid f(P* p) { p.x = 1.0; }", "E0335");
+    expect_codes("struct P { mut f32 x; }\nvoid f() { P p = P{ x: 1.0 }; p.x = 2.0; }", "E0335");
+    expect_codes("i32 g(i32 a) { return a; }\nvoid f() { g(1, 2); }", "E0336");
+    expect_codes("struct P { f32 x; }\nf32 f(P p) { return p.y; }", "E0337");
+    expect_codes("struct P { }\nvoid f(P p) { p.go(); }", "E0337");
+    expect_codes("void f() { i32 x = 1; x(); }", "E0338");
+    expect_codes("void f() { bool b = 3.0 as bool; }", "E0339");
+    expect_codes("import std.io;\nvoid f() { io.print(\"hi\"); }", "E0340");
+    expect_help("void g() uses time { }\nvoid f() { g(); }", "E0340", "add `uses time` to the signature of `f` (spec §7.4)");
+    expect_codes("unsafe void g() { }\nvoid f() { g(); }", "E0341");
+    expect_codes("extern \"C\" { i32 puts(u8* s); }\nvoid f(u8* s) { puts(s); }", "E0341");
+    expect_codes("void f(u8* p) { u8* q = p + 1; }", "E0341");
+    expect_codes("void f(i32* p) { u8* q = p as u8*; }", "E0341");
+    expect_codes("void f() { auto x = none; }", "E0342");
+    expect_codes("void f() { auto r = ok(1); }", "E0342");
+    expect_codes("enum E { A, B }\nvoid g() { }\nvoid f(E e) { match (e) { A => g(), C => g(), _ => g() } }", "E0343");
+    expect_codes("void g() { }\nvoid f(i32 x) { match (x) { _ => g() } }", "E0343");
+    expect_codes("enum E { A }\nvoid g() { }\nvoid f(E e) { match (e) { A => g(), _ => g() } }", "E0343");
+    expect_codes("enum E { A(i32 x) }\nvoid g() { }\nvoid f(E e) { match (e) { A => g() } }", "E0343");
+    expect_codes("enum E { A, B }\ni32 f(E e) { return match (e) { A => 1, B => { } }; }", "E0343");
+    expect_codes("enum E { A, B, C }\ni32 f(E e) { return match (e) { A => 1, B => 2 }; }", "E0312");
+    expect_codes("i32 f(i32? x) { return match (x) { some(v) => v }; }", "E0312");
+    expect_codes("void f() { break; }", "E0344");
+    expect_codes("void f() { defer { return; } }", "E0344");
+    expect_codes("i32 g() { return 1; }\nvoid f() { auto x = try g(); }", "E0345");
+    expect_codes("enum A { X }\nenum B { Y }\ni32!A g() { return ok(1); }\ni32!B f() { i32 x = try g(); return ok(x); }",
+                 "E0345");
+    expect_codes("i32 f(bool c) { if (c) { return 1; } }", "E0346");
+    expect_codes("void f() { return 1; }", "E0346");
+    expect_codes("i32 f() { return; }", "E0346");
+    expect_codes("void f(i32 x) { i32 x = 2; }", "E0347");
+    expect_codes("void f() { i32 a = 1; { i32 a = 2; } }", "E0347");
+    expect_codes("void f() { i32 a = 1; } void g() { i32 a = 2; }", "");
+    expect_codes("void f(i32 x) { x == 1; }", "E0348");
+    expect_codes("enum E { A }\ni32!E g() { return ok(1); }\nvoid f() { g(); }", "E0348");
+    expect_codes("void f() { auto s = self; }", "E0349");
+    expect_codes("void f() { auto r = result; }", "E0349");
+    expect_codes("struct P { f32 x; f32 y; }\nvoid f() { P p = P{ x: 1.0 }; }", "E0350");
+    expect_codes("struct P { f32 x; }\nvoid f() { P p = P{ x: 1.0, z: 2.0 }; }", "E0350");
+    expect_codes("struct P { f32 x; f32 y = 0.0; }\nvoid f() { P p = P{ x: 1.0 }; }", "");
+    expect_codes("import std.io;\nvoid f() uses io { io.print(\"{} {}\", 1); }", "E0351");
+    expect_codes("import std.io;\nstruct P { }\nvoid f(P p) uses io { io.print(\"{}\", p); }", "E0351");
+    expect_codes("void f() { auto r = 0..10; }", "E0352");
+    expect_codes("void f(str s) { for (char c in s) { } }", "E0352");
+    expect_codes("i32 g() { return 1; }\nvoid f() { i32* p = &g(); }", "E0353");
+}
+
 static void test_packages(void) {
     expect_package("tests/packages/app", "");
     expect_package("tests/packages/geometry", "");
@@ -160,6 +303,8 @@ int main(void) {
     test_types();
     test_classes();
     test_duplicates();
+    test_valid_bodies();
+    test_body_errors();
     test_packages();
     return test_summary("sema tests");
 }

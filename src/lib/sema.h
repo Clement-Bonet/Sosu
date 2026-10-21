@@ -4,9 +4,10 @@
 #include "program.h"
 #include "types.h"
 
-/* Semantic analysis. This first part checks declarations: names and imports, types,
-   classes (inheritance, `virtual` / `override`, interfaces) and visibility. Function
-   bodies are checked by the next part. */
+/* Semantic analysis (spec §5 to §7). sema.c checks declarations: names and imports,
+   types, classes (inheritance, `virtual` / `override`, interfaces) and visibility.
+   sema_body.c checks the bodies of functions, methods and tests, and records the type
+   of every expression in Expr.type. */
 
 typedef struct MethodInfo MethodInfo;
 

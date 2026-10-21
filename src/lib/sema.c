@@ -1,4 +1,4 @@
-#include "sema.h"
+#include "sema_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -294,12 +294,6 @@ static unsigned resolve_effects(Sema *s, Unit *unit, Path effects) {
     return mask;
 }
 
-typedef enum {
-    POSITION_VALUE,   /* a variable, field or parameter type */
-    POSITION_RETURN,  /* a return type: `void` is allowed */
-    POSITION_POINTEE, /* behind `*`: classes and interfaces are allowed */
-} TypePosition;
-
 static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition position) {
     switch (te->kind) {
     case TYPE_NAME: {
@@ -332,7 +326,9 @@ static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition 
         return type_array(&s->types, element, te->as.array.size);
     }
     case TYPE_RESULT: {
-        Type *value = resolve_type(s, unit, te->as.result.value, POSITION_VALUE);
+        /* `void!E` is the return type of a function that returns nothing but can fail. */
+        Type *value = resolve_type(s, unit, te->as.result.value,
+                                   position == POSITION_RETURN ? POSITION_RETURN : POSITION_VALUE);
         Type *error = resolve_type(s, unit, te->as.result.error, POSITION_VALUE);
         if (error->tag != T_ENUM && error->tag != T_ERROR) {
             const TypeExpr *ete = te->as.result.error;
@@ -671,7 +667,12 @@ static void check_override(Sema *s, TypeInfo *cls, MethodInfo *method) {
 }
 
 static void check_class(Sema *s, TypeInfo *cls) {
-    for (size_t i = 0; i < cls->method_count; i++) check_override(s, cls, &cls->methods[i]);
+    /* `init` is a constructor: each class has its own, which calls `base.init(...)` (spec §5.2). */
+    for (size_t i = 0; i < cls->method_count; i++) {
+        Name name = cls->methods[i].decl->name;
+        if (name.length == 4 && memcmp(name.text, "init", 4) == 0) continue;
+        check_override(s, cls, &cls->methods[i]);
+    }
 
     for (size_t i = 0; i < cls->interface_count; i++) {
         TypeInfo *interface = cls->interfaces[i];
@@ -723,7 +724,29 @@ bool sema_check(Sema *s, Program *program) {
         TypeInfo *info = s->type_infos.items[i];
         if (info->decl->kind == DECL_CLASS) check_class(s, info);
     }
+    sema_check_bodies(s);
     return program->diags.error_count == errors_before;
+}
+
+/* ---- Shared with sema_body.c ---- */
+
+Diagnostic *sema_verror(Sema *s, const Unit *unit, const char *code, size_t offset, size_t length,
+                        const char *fmt, va_list args) {
+    return diag_verror(&s->program->diags, code, &unit->file, offset, length, fmt, args);
+}
+
+bool sema_name_eq(Name a, Name b) { return name_eq(a, b); }
+size_t sema_edit_distance(Name a, Name b) { return edit_distance(a, b); }
+size_t sema_line_of(const Unit *unit, size_t offset) { return line_of(unit, offset); }
+Scope *sema_scope(Sema *s, const Unit *unit) { return scope_of(s, unit); }
+Symbol *sema_scope_find(Scope *scope, Name name) { return scope_find(scope, name); }
+
+Type *sema_resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition position) {
+    return resolve_type(s, unit, te, position);
+}
+
+Type *sema_resolve_named(Sema *s, Unit *unit, Path path, size_t offset, size_t length) {
+    return resolve_named(s, unit, path, offset, length);
 }
 
 void sema_free(Sema *s) {

@@ -13,11 +13,12 @@ English is the working language of the project: code, comments, compiler message
 |---|---|
 | 1. Lexer | done |
 | 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
-| 3. Semantic analysis | in progress: declarations, types, classes and visibility are checked; function bodies are not yet |
+| 3. Semantic analysis | done for the language of §5 to §7, except arenas (`Arena`, `arena.new`), which come with step 6 |
 | 4. C code generation | to do |
 
-For now, `sosuc check` loads a package, its dependencies and every imported module, then checks the
-declarations (semantic analysis runs once the program parses without errors). `sosuc lex <file>` prints the tokens of a file and `sosuc parse <file>`
+For now, `sosuc check` loads a package, its dependencies and every imported module, then checks
+declarations and function bodies: types, mutability, effects, `unsafe`, `match` exhaustiveness, `try`,
+contracts (semantic analysis runs once the program parses without errors). `sosuc lex <file>` prints the tokens of a file and `sosuc parse <file>`
 its syntax tree (as S-expressions). `.ui.sosu` files are not parsed by the compiler: their translator
 will belong to the `ui` package (spec §10.2).
 
@@ -65,7 +66,8 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   manifest    sosu.toml parser
   program     loading of packages, dependencies and imported modules
   types       semantic types (interned)
-  sema        semantic analysis
+  sema        semantic analysis of declarations
+  sema_body   semantic analysis of function bodies
 src/sosuc/    command-line driver
 lib/          the `core` and `std` packages (empty modules for now)
 tests/        unit tests, .sosu samples taken from the spec, test packages

@@ -57,7 +57,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0309 | a type contains itself by value | `struct A { A a; }` |
 | E0310 | invalid parent class or interface | `class C : SomeStruct`, the parent class not first |
 | E0311 | inheritance cycle | `class A : B {}` and `class B : A {}` |
-| E0312 | non-exhaustive match (reserved, spec §7.5) | |
+| E0312 | non-exhaustive match | `match` on `Shape` without `Empty` nor `_` |
 | E0313 | `override` with nothing to override | |
 | E0314 | redefinition without `override` | `void f()` in a subclass when the parent has `virtual void f()` |
 | E0315 | overriding a method that is not virtual | |
@@ -67,6 +67,30 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0319 | declared twice (field, method, variant, parameter, interface) | `void f(i32 a, i32 a)` |
 | E0320 | unknown effect | `uses disk` |
 | E0321 | class or interface used by value | `Widget w;` instead of `Widget* w;` |
+| E0330 | unknown name | `cuont` (did you mean `count`?) |
+| E0331 | type mismatch | `i32 b = a;` with `a: i64`, `f32 x = 3;` |
+| E0332 | number literal out of range | `u8 x = 256;` |
+| E0333 | not a value | a type, a module or a method used as a value |
+| E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing a `str` |
+| E0335 | cannot assign | a variable or a field that is not `mut` |
+| E0336 | wrong number of arguments or variant fields | `g(1, 2)` for `g(i32 a)` |
+| E0337 | no such field, method or variant | `p.y` on a struct without `y` |
+| E0338 | not a function | `x()` with `x: i32`, `Point(...)` |
+| E0339 | invalid conversion | `3.0 as bool`, `as?` to a type that is not a subclass |
+| E0340 | missing effect | calling a `uses io` function from a function without `uses io` |
+| E0341 | unsafe operation outside `unsafe` | calling C, pointer arithmetic, `p as u8*` |
+| E0342 | type cannot be inferred | `auto x = none;`, `auto r = ok(1);` |
+| E0343 | invalid `match` | unknown case, case matched twice, unreachable arm, wrong number of bindings |
+| E0344 | `break`, `continue` or `return` out of place | `break` outside a loop, `return` in `defer` |
+| E0345 | invalid `try` | `try` on a value that is not `T!E`, or in a function with another error type |
+| E0346 | missing or unexpected return value | a path without `return`, `return 1;` in a `void` function |
+| E0347 | name already used by a local | `i32 x` when a parameter is named `x` |
+| E0348 | expression without effect, or unused result | `x == 1;`, a `T!E` call whose result is ignored |
+| E0349 | `self`, `base` or `result` out of place | `self` outside a method |
+| E0350 | invalid struct literal | missing or unknown field |
+| E0351 | invalid `io.print` | format and values do not match, value that cannot be printed |
+| E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)` |
+| E0353 | address of a temporary value | `&g()` |
 
 ## Packages and imports
 
