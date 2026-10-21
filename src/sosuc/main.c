@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "codegen.h"
 #include "path.h"
 #include "sema.h"
 
@@ -18,9 +19,9 @@ static void usage(FILE *out) {
           "  check   check a package (default: current folder), its dependencies and modules\n"
           "  lex     print the tokens of a file (debugging)\n"
           "  parse   print the syntax tree of a file (debugging)\n"
-          "  build   compile (not implemented yet)\n"
-          "  run     compile and run (not implemented yet)\n"
-          "  test    run the test blocks (not implemented yet)\n"
+          "  build   compile a package into build/<name> (through C)\n"
+          "  run     compile and run a package\n"
+          "  test    compile and run the test blocks of a package\n"
           "  fmt     format source files (not implemented yet)\n"
           "\n"
           "options:\n"
@@ -133,6 +134,173 @@ static int command_check(const char *dir, const char *argv0, DiagFormat format) 
     return status;
 }
 
+/* ---- build, run, test ---- */
+
+typedef enum {
+    MODE_BUILD,
+    MODE_RUN,
+    MODE_TEST,
+} BuildMode;
+
+/* A path in the form the system shell expects. */
+static char *native_path(const char *path) {
+    char *result = sosu_strdup(path);
+#ifdef _WIN32
+    for (char *c = result; *c; c++) {
+        if (*c == '/') *c = '\\';
+    }
+#endif
+    return result;
+}
+
+static int run_command(const char *command) {
+    fflush(stdout);
+    fflush(stderr);
+    int status = system(command);
+#ifndef _WIN32
+    if (status != -1) status = (status >> 8) & 0xFF; /* exit code from the wait status */
+#endif
+    return status;
+}
+
+static bool write_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = fputs(text, file) >= 0;
+    return fclose(file) == 0 && ok;
+}
+
+/* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
+static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib) {
+    char *runtime = path_join(lib, "runtime");
+    char *runtime_c = path_join(runtime, "sosu_rt.c");
+    const char *cc = getenv("SOSU_CC");
+    char *command;
+#ifdef _WIN32
+    if (!cc || !cc[0]) {
+        /* MSVC, found like build.bat does when cl.exe is not already on the PATH */
+        char *bat = path_join(build_dir, "compile.bat");
+        char *dir = native_path(build_dir);
+        char *rt = native_path(runtime);
+        char *rt_c = native_path(runtime_c);
+        char *c = native_path(c_file);
+        char *out = native_path(exe);
+        char *script = sosu_format(
+            "@echo off\r\n"
+            "where cl >nul 2>nul && goto :have_cl\r\n"
+            "set \"VSWHERE=%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\\vswhere.exe\"\r\n"
+            "if not exist \"%%VSWHERE%%\" goto :no_cl\r\n"
+            "for /f \"usebackq tokens=*\" %%%%i in (`\"%%VSWHERE%%\" -latest -products * -requires "
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set \"VSDIR=%%%%i\"\r\n"
+            "if not defined VSDIR goto :no_cl\r\n"
+            "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
+            "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul || goto :no_cl\r\n"
+            ":have_cl\r\n"
+            "cl /nologo /std:c11 /utf-8 /W0 /Zi /Od /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\" "
+            ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n"
+            "exit /b 0\r\n"
+            ":no_cl\r\n"
+            "echo sosuc: no C compiler found: install Visual Studio with the C++ tools, or set SOSU_CC 1>&2\r\n"
+            "exit /b 2\r\n",
+            rt, dir, dir, out, c, rt_c, dir, dir);
+        bool written = write_file(bat, script);
+        char *native_bat = native_path(bat);
+        command = written ? sosu_format("\"%s\"", native_bat) : NULL;
+        free(native_bat);
+        free(script);
+        free(bat);
+        free(dir);
+        free(rt);
+        free(rt_c);
+        free(c);
+        free(out);
+        if (!command) {
+            fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
+            free(runtime);
+            free(runtime_c);
+            return false;
+        }
+    } else
+#endif
+    {
+        (void)build_dir;
+        command = sosu_format("\"%s\" -std=c99 -g -O0 -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"", cc && cc[0] ? cc : "cc", runtime,
+                              c_file, runtime_c, exe);
+    }
+    int status = run_command(command);
+    free(command);
+    free(runtime);
+    free(runtime_c);
+    return status == 0;
+}
+
+static int command_build(const char *dir, const char *argv0, DiagFormat format, BuildMode mode) {
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    bool ok = program_load(&program, dir, lib);
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, mode == MODE_TEST ? CODEGEN_TESTS : CODEGEN_PROGRAM);
+        ok = source != NULL;
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+
+    int status = program.fatal ? 2 : 1;
+    if (ok) {
+        const Package *root = program.packages.items[0];
+        char *build_dir = path_join(root->root, "build");
+        char *native_dir = native_path(build_dir);
+#ifdef _WIN32
+        char *mkdir = sosu_format("if not exist \"%s\" mkdir \"%s\"", native_dir, native_dir);
+#else
+        char *mkdir = sosu_format("mkdir -p \"%s\"", native_dir);
+#endif
+        run_command(mkdir);
+        free(mkdir);
+        free(native_dir);
+
+        char *name = sosu_format(mode == MODE_TEST ? "%s_tests" : "%s", root->name);
+        char *file = sosu_format("%s.c", name);
+        char *c_file = path_join(build_dir, file);
+#ifdef _WIN32
+        char *exe_name = sosu_format("%s.exe", name);
+#else
+        char *exe_name = sosu_strdup(name);
+#endif
+        char *exe = path_join(build_dir, exe_name);
+        if (!write_file(c_file, source)) {
+            fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
+            status = 2;
+        } else if (!compile_c(build_dir, c_file, exe, lib)) {
+            fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
+            status = 2;
+        } else if (mode == MODE_BUILD) {
+            printf("built %s\n", exe);
+            status = 0;
+        } else {
+            char *native_exe = native_path(exe);
+            char *command = sosu_format("\"%s\"", native_exe);
+            status = run_command(command);
+            free(command);
+            free(native_exe);
+        }
+        free(exe);
+        free(exe_name);
+        free(c_file);
+        free(file);
+        free(name);
+        free(build_dir);
+    }
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(stderr);
@@ -174,8 +342,10 @@ int main(int argc, char **argv) {
         }
         return command[0] == 'l' ? command_lex(path, format) : command_parse(path, format);
     }
-    if (strcmp(command, "build") == 0 || strcmp(command, "run") == 0 ||
-        strcmp(command, "test") == 0 || strcmp(command, "fmt") == 0) {
+    if (strcmp(command, "build") == 0) return command_build(path ? path : ".", argv[0], format, MODE_BUILD);
+    if (strcmp(command, "run") == 0) return command_build(path ? path : ".", argv[0], format, MODE_RUN);
+    if (strcmp(command, "test") == 0) return command_build(path ? path : ".", argv[0], format, MODE_TEST);
+    if (strcmp(command, "fmt") == 0) {
         fprintf(stderr, "sosuc: `%s` is not implemented yet\n", command);
         return 2;
     }

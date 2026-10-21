@@ -220,7 +220,10 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Functions** that return a value must end every path with `return`.
 - **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`.
 - **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `u8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as u8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
-- **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`.
+- **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`. It ends the line. A float always prints with a dot (`25.0`).
+- **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`.
+- **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as u8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
+- **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only.
 
 ## 6. Memory
 
@@ -610,9 +613,11 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including a future language server (LSP) for completion in editors.
 
-- `sosuc build [--target <os>-<arch>]`: compiles (cross-compiling depending on the available tooling).
+- `sosuc build [--target <os>-<arch>]`: compiles (cross-compiling depending on the available tooling). The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target` is not implemented yet.
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
-- `sosuc test`, `sosuc fmt`.
+- `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
+- `sosuc check`: checks a package without compiling it.
+- `sosuc fmt`: not implemented yet.
 - `sosuc package` and `sosuc bindgen`: v1.
 
 ## 12. Grammar (v0, EBNF)

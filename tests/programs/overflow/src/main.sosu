@@ -1,0 +1,13 @@
+// Integer overflow stops the program (spec §5.1): run with `sosuc run`, exit code 101.
+import std.io;
+
+i32 add(i32 a, i32 b) {
+    return a + b;
+}
+
+i32 main() uses io {
+    io.print("before");
+    i32 x = add(2147483647, 1);
+    io.print("after {}", x);
+    return 0;
+}

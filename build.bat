@@ -21,6 +21,7 @@ cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\lexer_tests.exe src
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\parser_tests.exe src\lib\*.c tests\parser_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\package_tests.exe src\lib\*.c tests\package_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\sema_tests.exe src\lib\*.c tests\sema_tests.c || exit /b 1
+cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\program_tests.exe tests\program_tests.c || exit /b 1
 
 if /i not "%1"=="test" exit /b 0
 
@@ -28,6 +29,7 @@ build\lexer_tests.exe || exit /b 1
 build\parser_tests.exe || exit /b 1
 build\package_tests.exe || exit /b 1
 build\sema_tests.exe || exit /b 1
+build\program_tests.exe build\sosuc.exe || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)

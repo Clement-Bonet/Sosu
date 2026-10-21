@@ -92,6 +92,13 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)` |
 | E0353 | address of a temporary value | `&g()` |
 
+## Code generation
+
+| Code | Message | Example |
+|---|---|---|
+| E0501 | code generation does not support classes and interfaces yet | `sosuc run` on a package with a class (they need arenas, roadmap step 6) |
+| E0502 | no valid `main` | `sosuc run` on a library, or `i32 main(i32 x)` |
+
 ## Packages and imports
 
 | Code | Message | Example |

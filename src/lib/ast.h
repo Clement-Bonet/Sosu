@@ -103,11 +103,27 @@ typedef struct {
     Stmt *block; /* ...or a block */
 } MatchArm;
 
+/* What a name, a member or a callee refers to, recorded by semantic analysis. */
+typedef enum {
+    RESOLVED_NONE,        /* an ordinary value */
+    RESOLVED_LOCAL,       /* a variable or parameter */
+    RESOLVED_SELF_FIELD,  /* a field of `self` used without `self.` (target: FieldInfo) */
+    RESOLVED_SELF_METHOD, /* a method of `self` called without `self.` (target: MethodInfo) */
+    RESOLVED_FN,          /* target: FnInfo */
+    RESOLVED_METHOD,      /* `value.method(...)` (target: MethodInfo) */
+    RESOLVED_VARIANT,     /* target: TypeInfo of the enum, target_index: the variant */
+    RESOLVED_BUILTIN,     /* target: the name, e.g. "some" */
+    RESOLVED_PRINT,       /* io.print */
+} Resolution;
+
 struct Expr {
     ExprKind kind;
     size_t offset;
     size_t length;
     struct Type *type; /* set by semantic analysis */
+    Resolution resolution;
+    const void *target;
+    size_t target_index;
     union {
         uint64_t int_value;
         uint32_t char_value;

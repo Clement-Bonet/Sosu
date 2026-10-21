@@ -1,0 +1,12 @@
+// A library with tests: run with `sosuc test`, one test fails on purpose.
+i32 square(i32 x) {
+    return x * x;
+}
+
+test "square of 3" {
+    assert(square(3) == 9);
+}
+
+test "wrong on purpose" {
+    assert(square(2) == 5);
+}

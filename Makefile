@@ -5,7 +5,7 @@ CPPFLAGS += -Isrc/lib
 
 LIB_SRC := $(wildcard src/lib/*.c)
 LIB_HDR := $(wildcard src/lib/*.h)
-TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests
+TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/program_tests
 
 all: build/sosuc $(TESTS)
 
@@ -23,6 +23,7 @@ test: all
 	./build/parser_tests
 	./build/package_tests
 	./build/sema_tests
+	./build/program_tests ./build/sosuc
 	./build/sosuc check tests/packages/app
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done

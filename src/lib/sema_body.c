@@ -324,8 +324,26 @@ static Type *variant_value(Body *b, Expr *e, const TypeInfo *info, size_t index)
     return info->type;
 }
 
+/* Records in `e` what it refers to, for code generation. */
+static void record(Expr *e, Ref ref) {
+    switch (ref.kind) {
+    case REF_LOCAL: e->resolution = RESOLVED_LOCAL; break;
+    case REF_FIELD: e->resolution = RESOLVED_SELF_FIELD; e->target = ref.field; break;
+    case REF_METHOD: e->resolution = RESOLVED_SELF_METHOD; e->target = ref.method; break;
+    case REF_FN: e->resolution = RESOLVED_FN; e->target = ref.fn; break;
+    case REF_BUILTIN: e->resolution = RESOLVED_BUILTIN; e->target = ref.builtin; break;
+    case REF_VARIANT:
+        e->resolution = RESOLVED_VARIANT;
+        e->target = ref.info;
+        e->target_index = ref.variant;
+        break;
+    default: e->resolution = RESOLVED_NONE; break;
+    }
+}
+
 /* The type of a path used as a value. */
 static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
+    record(e, ref);
     switch (ref.kind) {
     case REF_LOCAL: return ref.local->type;
     case REF_FIELD: return ref.field->type;
@@ -594,6 +612,8 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
                 diag_help(d, "declare it `pub` in `%.*s`", NAME_ARGS(method->owner->name));
             }
             callee->type = method->type;
+            callee->resolution = RESOLVED_METHOD;
+            callee->target = method;
             return call_with(b, e, method->type, name, method->decl->is_unsafe);
         }
         FieldInfo *field = find_field(info, name);
@@ -614,7 +634,10 @@ static Type *check_call(Body *b, Expr *e, Type *expected) {
     if (callee->kind == EXPR_FIELD && (callee->as.field.object->kind == EXPR_NAME ||
                                        callee->as.field.object->kind == EXPR_FIELD)) {
         Ref object = resolve_ref(b, callee->as.field.object, NULL);
-        if (is_print(callee, object)) return call_print(b, e);
+        if (is_print(callee, object)) {
+            callee->resolution = RESOLVED_PRINT;
+            return call_print(b, e);
+        }
     }
     if (callee->kind != EXPR_NAME && callee->kind != EXPR_FIELD) {
         Type *type = check_expr(b, callee, NULL);
@@ -630,6 +653,7 @@ static Type *check_call(Body *b, Expr *e, Type *expected) {
     }
 
     Ref ref = resolve_ref(b, callee, expected);
+    record(callee, ref);
     Name name = callee->kind == EXPR_NAME ? callee->as.name : callee->as.field.name;
     switch (ref.kind) {
     case REF_VALUE:
@@ -755,7 +779,12 @@ static void report_operands(Body *b, Expr *e, const char *need, Type *lt, Type *
 
 static bool is_comparable(const Type *type) {
     switch (type->tag) {
-    case T_INT: case T_FLOAT: case T_BOOL: case T_CHAR: case T_STR: case T_POINTER: case T_ENUM: case T_ERROR:
+    case T_ENUM: /* enums without data; the others are compared with `match` */
+        for (size_t i = 0; i < type->as.info->variant_count; i++) {
+            if (type->as.info->variants[i].field_count > 0) return false;
+        }
+        return true;
+    case T_INT: case T_FLOAT: case T_BOOL: case T_CHAR: case T_STR: case T_POINTER: case T_ERROR:
         return true;
     default:
         return false;
@@ -780,7 +809,11 @@ static Type *check_binary(Body *b, Expr *e, Type *expected) {
             return lt;
         }
         if (is_error(lt) || is_error(rt)) return is_error(lt) ? rt : lt;
-        if (!is_numeric(lt) || lt != rt) report_operands(b, e, "two numbers of the same type", lt, rt);
+        if (op == TOK_PERCENT && (lt->tag != T_INT || lt != rt)) {
+            report_operands(b, e, "two integers of the same type", lt, rt);
+        } else if (!is_numeric(lt) || lt != rt) {
+            report_operands(b, e, "two numbers of the same type", lt, rt);
+        }
         return lt;
     case TOK_EQ_EQ: case TOK_BANG_EQ:
         check_pair(b, left, right, NULL, &lt, &rt);
@@ -1288,7 +1321,7 @@ static void check_assign(Body *b, Stmt *stmt) {
     }
     Type *vt = check_expr(b, value, tt->tag == T_POINTER ? NULL : tt);
     if (is_error(tt) || is_error(vt)) return;
-    bool bitwise = op == TOK_AMP_EQ || op == TOK_PIPE_EQ || op == TOK_CARET_EQ;
+    bool bitwise = op == TOK_AMP_EQ || op == TOK_PIPE_EQ || op == TOK_CARET_EQ || op == TOK_PERCENT_EQ;
     bool pointer_step = tt->tag == T_POINTER && vt->tag == T_INT && (op == TOK_PLUS_EQ || op == TOK_MINUS_EQ);
     if (pointer_step) {
         if (b->unsafe_depth == 0) error_expr(b, "E0341", value, "pointer arithmetic is only allowed in an `unsafe` block");

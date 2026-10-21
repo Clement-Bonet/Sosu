@@ -1,0 +1,4 @@
+test square of 3 ... ok
+test wrong on purpose ... FAILED
+
+2 tests, 1 passed, 1 failed

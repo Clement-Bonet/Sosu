@@ -14,13 +14,12 @@ English is the working language of the project: code, comments, compiler message
 | 1. Lexer | done |
 | 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
 | 3. Semantic analysis | done for the language of §5 to §7, except arenas (`Arena`, `arena.new`), which come with step 6 |
-| 4. C code generation | to do |
+| 4. C code generation | done, except classes and interfaces (they need arenas, step 6) |
 
-For now, `sosuc check` loads a package, its dependencies and every imported module, then checks
-declarations and function bodies: types, mutability, effects, `unsafe`, `match` exhaustiveness, `try`,
-contracts (semantic analysis runs once the program parses without errors). `sosuc lex <file>` prints the tokens of a file and `sosuc parse <file>`
-its syntax tree (as S-expressions). `.ui.sosu` files are not parsed by the compiler: their translator
-will belong to the `ui` package (spec §10.2).
+`sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
+`#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
+contracts at run time. `sosuc check` checks a package without compiling it. `.ui.sosu` files are not
+parsed by the compiler: their translator will belong to the `ui` package (spec §10.2).
 
 ## Building
 
@@ -41,13 +40,20 @@ make test
 ## Usage
 
 ```
-sosuc check tests/packages/app      # a package folder (default: the current folder)
-sosuc lex tests/samples/hello.sosu
-sosuc parse tests/samples/hello.sosu
-sosuc parse file.sosu --format=json   # JSON diagnostics on stderr
+sosuc run tests/programs/basics     # a package folder (default: the current folder)
+sosuc test tests/programs/testing   # runs its `test` blocks
+sosuc build tests/programs/basics   # writes build/basics.c and build/basics(.exe)
+sosuc check tests/packages/app      # checks without compiling
+sosuc lex tests/samples/hello.sosu  # tokens of a file (debugging)
+sosuc parse tests/samples/hello.sosu --format=json   # syntax tree; JSON diagnostics on stderr
 ```
 
-Exit codes: 0 = success, 1 = errors in the source code, 2 = usage or I/O error.
+The C compiler is MSVC on Windows (found automatically, no Developer Prompt needed), `cc` elsewhere,
+or the one named by `SOSU_CC` (gcc or clang style).
+
+Exit codes of `sosuc`: 0 = success, 1 = errors in the source code (or a failed test), 2 = usage, I/O
+or C compiler error. `sosuc run` returns the exit code of the program; a run-time error (overflow,
+index out of bounds, failed contract) stops it with the code 101.
 
 ## Layout
 
@@ -68,9 +74,10 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   types       semantic types (interned)
   sema        semantic analysis of declarations
   sema_body   semantic analysis of function bodies
+  codegen     C code generation
 src/sosuc/    command-line driver
-lib/          the `core` and `std` packages (empty modules for now)
-tests/        unit tests, .sosu samples taken from the spec, test packages
+lib/          the `core` and `std` packages (mostly empty for now), and the C runtime (lib/runtime)
+tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end
 docs/         specification and error codes
 ```
 

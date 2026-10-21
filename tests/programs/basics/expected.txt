@@ -1,0 +1,20 @@
+Hello, Sosu!
+area = 7.0
+circle = 3.0
+length² = 52.0
+ok 14
+error: empty
+error: not a digit
+clamp = 10
+3
+2
+1
+lift-off
+found at 2
+odd sum = 25
+i = 1
+i = 2
+i = 3
+15 -3 é true
+big = 6000000000
+large
