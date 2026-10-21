@@ -20,6 +20,7 @@ static const Case cases[] = {
     { "run", "overflow", "expected.txt", 101 },
     { "run", "classes", "expected.txt", 0 },
     { "run", "linking", "expected.txt", 0 },
+    { "run", "files", "expected.txt", 0 },
     { "run --release", "overflow", "expected_release.txt", 0 },
     { "test", "testing", "expected.txt", 1 },
 };

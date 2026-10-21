@@ -27,6 +27,17 @@ sosu_arena sosu_arena_new(uint64_t block_size, const char *loc);
 void *sosu_arena_alloc(sosu_arena *arena, size_t size, const char *loc); /* stops the program if out of memory */
 void *sosu_arena_try_alloc(sosu_arena *arena, size_t size);             /* NULL if out of memory */
 void sosu_arena_free(sosu_arena *arena);
+/* `count` elements of `size` bytes (arena.alloc_slice); stops the program on overflow. */
+void *sosu_arena_alloc_array(sosu_arena *arena, size_t size, uint64_t count, const char *loc);
+
+/* Text (spec §4.1) */
+uint8_t *sosu_str_to_cstr(sosu_arena *arena, sosu_str text, const char *loc); /* s.to_cstr(arena) */
+bool sosu_utf8_valid(const uint8_t *bytes, size_t length);                   /* str.from_bytes */
+
+/* For std, which is written in Sosu on the C library: what C hides behind macros or
+   types whose size depends on the system. */
+int32_t sosu_errno(void);
+int64_t sosu_file_size(void *file); /* FILE*; -1 if unknown */
 
 /* Classes (spec §5.2). Every object starts with a pointer to its class's table of virtual
    methods, which itself starts with this description of the class. */

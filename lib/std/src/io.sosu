@@ -1,3 +1,107 @@
-// std.io: console and file input / output (spec §8).
-// `io.print(format, values...)` is built into the compiler (spec §5.3).
-// The rest is written once code generation exists (roadmap step 4).
+// std.io: console and files (spec §8). Written in Sosu on the C library, like any package
+// using `extern "C"`; `io.print(format, values...)` is built into the compiler (spec §5.3).
+
+pub enum IoError {
+    NotFound,
+    PermissionDenied,
+    InvalidUtf8,   // read_file: the file is not text (str is always valid UTF-8)
+    Other,
+}
+
+// FILE* of the C library.
+struct CFile { }
+
+extern "C" {
+    CFile* fopen(u8* path, u8* mode) uses io;
+    i32 fclose(CFile* file) uses io;
+    usize fread(u8* buffer, usize size, usize count, CFile* file) uses io;
+    usize fwrite(u8* buffer, usize size, usize count, CFile* file) uses io;
+    // From the Sosu runtime: errno is a macro, and the C types of file offsets differ by system.
+    i32 sosu_errno() uses io;
+    i64 sosu_file_size(CFile* file) uses io;
+}
+
+IoError last_error() uses io {
+    mut i32 code = 0;
+    unsafe {
+        code = sosu_errno();
+    }
+    if (code == 2) {   // ENOENT
+        return NotFound;
+    }
+    if (code == 13) {   // EACCES
+        return PermissionDenied;
+    }
+    return Other;
+}
+
+// Opens a file with a C mode ("rb", "wb"...), or none with the error in `error`.
+CFile*? open(Arena* arena, str path, str mode) uses io {
+    u8* c_path = path.to_cstr(arena);
+    u8* c_mode = mode.to_cstr(arena);
+    unsafe {
+        CFile* file = fopen(c_path, c_mode);
+        if ((file as u64) == 0) {
+            return none;
+        }
+        return some(file);
+    }
+}
+
+void close(CFile* file) uses io {
+    unsafe {
+        fclose(file);
+    }
+}
+
+// The whole content of a text file, allocated in `arena`.
+pub str!IoError read_file(Arena* arena, str path) uses io {
+    CFile* file = match (open(arena, path, "rb")) {
+        some(opened) => opened,
+        none => { return err(last_error()); },
+    };
+    defer close(file);
+
+    mut i64 size = 0;
+    unsafe {
+        size = sosu_file_size(file);
+    }
+    if (size < 0) {
+        return err(Other);
+    }
+    if (size == 0) {
+        return ok("");
+    }
+    u8[] bytes = arena.alloc_slice(u8, size as usize);
+    mut usize read = 0;
+    unsafe {
+        read = fread(&bytes[0], 1, bytes.len, file);
+    }
+    if (read != bytes.len) {
+        return err(Other);
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(text) => ok(text),
+        err(e) => err(InvalidUtf8),
+    };
+}
+
+// Replaces the content of a file (created if needed) with `text`.
+pub void!IoError write_file(Arena* arena, str path, str text) uses io {
+    CFile* file = match (open(arena, path, "wb")) {
+        some(opened) => opened,
+        none => { return err(last_error()); },
+    };
+    defer close(file);
+    if (text.len == 0) {
+        return ok();
+    }
+    mut usize written = 0;
+    unsafe {
+        written = fwrite(&text.bytes[0], 1, text.len, file);
+    }
+    if (written != text.len) {
+        return err(Other);
+    }
+    return ok();
+}

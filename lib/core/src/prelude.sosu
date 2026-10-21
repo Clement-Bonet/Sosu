@@ -1,0 +1,7 @@
+// core.prelude: loaded with every program. Its public names are used without import, after
+// the names of the module (spec §5.3). Keep it small.
+
+// The error of `str.from_bytes`: the bytes are not valid UTF-8 (spec §4.1).
+pub enum Utf8Error {
+    Invalid,
+}

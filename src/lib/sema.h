@@ -84,6 +84,7 @@ typedef struct {
     TypeTable types;
     Arena arena;
     Scope *scopes; /* one per unit, aligned with program->units */
+    Unit *prelude; /* core.prelude: its public names are used without import, or NULL */
     struct { TypeInfo **items; size_t count; size_t cap; } type_infos;
     struct { FnInfo **items; size_t count; size_t cap; } fns;
 } Sema;

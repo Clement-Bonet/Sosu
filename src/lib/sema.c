@@ -234,6 +234,10 @@ static Type *resolve_named(Sema *s, Unit *unit, Path path, size_t offset, size_t
         Type *builtin = type_builtin(&s->types, first.text, first.length);
         if (builtin) return builtin;
         Symbol *sym = scope_find(scope, first);
+        if (!sym && s->prelude && unit != s->prelude) { /* public names of core.prelude */
+            sym = scope_find(scope_of(s, s->prelude), first);
+            if (sym && !sym->is_pub) sym = NULL;
+        }
         if (sym && sym->kind == SYM_TYPE) return sym->type_info->type;
         if (sym) {
             report_not_a_type(s, unit, sym, first);
@@ -699,7 +703,10 @@ bool sema_check(Sema *s, Program *program) {
     memset(s->scopes, 0, program->units.count * sizeof *s->scopes);
     size_t errors_before = program->diags.error_count;
 
-    for (size_t i = 0; i < program->units.count; i++) collect(s, program->units.items[i]);
+    for (size_t i = 0; i < program->units.count; i++) {
+        if (strcmp(program->units.items[i]->module, "core.prelude") == 0) s->prelude = program->units.items[i];
+        collect(s, program->units.items[i]);
+    }
 
     for (size_t i = 0; i < s->type_infos.count; i++) {
         TypeInfo *info = s->type_infos.items[i];

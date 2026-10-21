@@ -69,7 +69,7 @@ Conversions: always explicit with `as` (`x as f32`).
 - `char` is a Unicode code point (32 bits).
 - Iteration: `for (char c in s.chars())`; byte access: `s.bytes[i]`.
 - Building a `str` from arbitrary bytes can fail: `str.from_bytes(u8[]) -> str!Utf8Error`.
-- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(u8*)` is `unsafe`).
+- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(u8*)` is `unsafe`). `to_cstr` takes an `Arena` or an `Arena*` and returns a `u8*` ending with a NUL byte. `Utf8Error` (one variant, `Invalid`) is declared in `core.prelude`. `str.from_cstr` is not implemented yet.
 
 ## 5. Declarations and syntax
 
@@ -211,6 +211,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 
 - **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
 - **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`. They are part of the compiler, since they work for several types and Sosu v0 has no generics.
+- **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
 - **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
@@ -240,6 +241,7 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - `alloc` stops the program with a message when memory runs out; `try_alloc` returns `T*?` to handle that case yourself.
 - `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
 - The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
+- `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only.
 - Until moves exist (below), copying an `Arena` value shares its blocks: free it once, through one name.
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
@@ -386,6 +388,13 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 
 - Without generics, `Vec<T>` and `HashMap<K, V>` cannot be written in Sosu: v0 is limited to slices and arenas; containers arrive with generics (v1, monomorphized).
 - Modules and packages: see §8.1.
+
+### 8.0 The standard library in v0
+
+`core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` two small functions where C differs between systems (`errno`, file sizes). Available so far:
+
+- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
+- `core.prelude`: `Utf8Error` (§5.3).
 
 ### 8.1 Packages and manifest
 
