@@ -10,13 +10,14 @@ English is the working language of the project: code, comments, compiler message
 | Step (roadmap §13) | Status |
 |---|---|
 | 1. Lexer | done |
-| 2. Parser -> AST | done (except import resolution and the `sosu.toml` manifest) |
+| 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
 | 3. Semantic analysis | to do |
 | 4. C code generation | to do |
 
-For now, `sosuc lex <file>` prints the tokens and `sosuc parse <file>` the syntax tree (as
-S-expressions), along with the diagnostics. `.ui.sosu` files are not parsed by the compiler: their
-translator will belong to the `ui` package (spec §10.2).
+For now, `sosuc check` loads a package, its dependencies and every imported module, and reports
+the errors found up to parsing. `sosuc lex <file>` prints the tokens of a file and `sosuc parse <file>`
+its syntax tree (as S-expressions). `.ui.sosu` files are not parsed by the compiler: their translator
+will belong to the `ui` package (spec §10.2).
 
 ## Building
 
@@ -37,6 +38,7 @@ make test
 ## Usage
 
 ```
+sosuc check tests/packages/app      # a package folder (default: the current folder)
 sosuc lex tests/samples/hello.sosu
 sosuc parse tests/samples/hello.sosu
 sosuc parse file.sosu --format=json   # JSON diagnostics on stderr
@@ -57,10 +59,17 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   arena       arena allocator for compiler data
   ast         syntax tree and its printer
   parser      syntax analysis (recursive descent)
+  path        file path helpers
+  manifest    sosu.toml parser
+  program     loading of packages, dependencies and imported modules
 src/sosuc/    command-line driver
-tests/        unit tests and .sosu samples taken from the spec
+lib/          the `core` and `std` packages (empty modules for now)
+tests/        unit tests, .sosu samples taken from the spec, test packages
 docs/         specification and error codes
 ```
+
+`sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
+(which is `lib/` for `build/sosuc`).
 
 ## Lexer decisions
 
@@ -95,3 +104,16 @@ The grammar in §12 is a subset; the rest was settled as follows:
 - `defer` takes a simple statement or a block.
 - After an error, the parser resynchronizes (end of statement, member or declaration, or closing
   bracket): one mistake gives one message.
+
+## Package decisions
+
+Spec §8.1 describes packages; these points were settled here:
+
+- `sosu.toml` accepts comments, strings and one-line inline tables; `[package]` requires `name` and
+  `version`. Package and dependency names are identifiers, since `import` uses them.
+- The entry file is `src/main.sosu` for an application, or `src/lib.sosu` for a library. Only the
+  modules reachable by `import` from it are loaded (libc cannot list a folder).
+- `import pkg.a.b;` loads `src/a/b.sosu` of `pkg`, which must be the current package, one of its
+  dependencies, or `core` / `std`. `import pkg;` alone is an error.
+- Modules of a package may import each other; packages may not depend on each other in a cycle.
+- Git dependencies are parsed but not fetched yet (E0405), so `sosu.lock` does not exist yet.

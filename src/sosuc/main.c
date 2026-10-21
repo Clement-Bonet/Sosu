@@ -1,8 +1,10 @@
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "parser.h"
+#include "path.h"
+#include "program.h"
 
 typedef enum {
     FORMAT_TEXT,
@@ -10,9 +12,10 @@ typedef enum {
 } DiagFormat;
 
 static void usage(FILE *out) {
-    fputs("usage: sosuc <command> [options] <file>\n"
+    fputs("usage: sosuc <command> [options] [path]\n"
           "\n"
           "commands:\n"
+          "  check   load a package (default: current folder), its dependencies and modules\n"
           "  lex     print the tokens of a file (debugging)\n"
           "  parse   print the syntax tree of a file (debugging)\n"
           "  build   compile (not implemented yet)\n"
@@ -98,6 +101,32 @@ static int command_parse(const char *path, DiagFormat format) {
     return status;
 }
 
+/* Folder of the `core` and `std` packages: $SOSU_HOME/lib, or ../lib next to sosuc. */
+static char *library_dir(const char *argv0) {
+    const char *home = getenv("SOSU_HOME");
+    if (home && home[0]) return path_join(home, "lib");
+    char *bin = path_dirname(argv0);
+    char *lib = path_join(bin, "../lib");
+    free(bin);
+    return lib;
+}
+
+static int command_check(const char *dir, const char *argv0, DiagFormat format) {
+    char *lib = library_dir(argv0);
+    Program program;
+    bool ok = program_load(&program, dir, lib);
+    free(lib);
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+    if (ok) {
+        printf("checked %zu module%s in %zu package%s\n", program.units.count, program.units.count == 1 ? "" : "s",
+               program.packages.count, program.packages.count == 1 ? "" : "s");
+    }
+    int status = program.fatal ? 2 : ok ? 0 : 1;
+    program_free(&program);
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(stderr);
@@ -131,6 +160,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (strcmp(command, "check") == 0) return command_check(path ? path : ".", argv[0], format);
     if (strcmp(command, "lex") == 0 || strcmp(command, "parse") == 0) {
         if (!path) {
             fputs("sosuc: missing file\n", stderr);

@@ -1,0 +1,7 @@
+# An application using a local dependency.
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+geometry = { path = "../geometry" }

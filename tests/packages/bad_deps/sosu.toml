@@ -1,0 +1,9 @@
+[package]
+name = "bad_deps"
+version = "0.1.0"
+
+[dependencies]
+geo = { path = "../geometry" }
+remote = { git = "https://git.example/remote", tag = "v1.0.0" }
+lost = { path = "../nowhere" }
+cycle = { path = "../cycle" }

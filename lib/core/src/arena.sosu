@@ -1,0 +1,2 @@
+// core.arena: the arena allocator (spec §6).
+// Empty until code generation exists (roadmap step 4).

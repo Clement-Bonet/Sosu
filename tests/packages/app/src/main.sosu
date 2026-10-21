@@ -1,0 +1,7 @@
+import std.io;
+import app.shapes;
+import geometry.vector;
+
+i32 main() uses io {
+    return 0;
+}

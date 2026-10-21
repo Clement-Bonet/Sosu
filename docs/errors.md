@@ -1,6 +1,7 @@
 # Error codes
 
-Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` semantic analysis.
+Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` semantic analysis,
+`E04xx` packages and imports.
 
 ## Lexer
 
@@ -40,3 +41,23 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0211 | the array size belongs to the type | `i32 a[4]` instead of `i32[4] a` |
 | E0212 | modifier not allowed here | `virtual` in a `struct`, `pub import` |
 | E0213 | only classes can have a parent class or interfaces | `struct S : Base` |
+
+## Packages and imports
+
+| Code | Message | Example |
+|---|---|---|
+| E0401 | invalid sosu.toml syntax | `name "app"`, unterminated string, `name = 3` |
+| E0402 | unknown section or key | `[tools]`, `author = "..."`, `branch = "main"` in a dependency |
+| E0403 | missing section or key | no `[package]`, no `name` or `version` |
+| E0404 | invalid dependency | `x = "../x"`, no source, `path` and `git` together, `git` without `tag` or `rev` |
+| E0405 | git dependencies are not supported yet | `ui = { git = "...", tag = "v1" }` |
+| E0406 | the package is not named like its dependency key | `geo = { path = "../geometry" }` |
+| E0407 | circular dependency between packages | `a` depends on `b`, which depends on `a` |
+| E0408 | duplicate key or dependency | `name` written twice |
+| E0409 | invalid or reserved package name | `my-app`, a package named `std` |
+| E0410 | unknown package | `import ui.button;` without `ui` in [dependencies] |
+| E0411 | module not found | `import app.missing;` without `src/missing.sosu` |
+| E0412 | the import does not name a module | `import std;` |
+| E0413 | two different packages have the same name | two dependencies both named `shared` |
+| E0414 | the standard library was not found | `lib/std` missing, `SOSU_HOME` wrong |
+| E0415 | no package at the dependency path | `x = { path = "../nowhere" }` |

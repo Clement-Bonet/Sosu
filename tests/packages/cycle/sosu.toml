@@ -1,0 +1,6 @@
+[package]
+name = "cycle"
+version = "0.1.0"
+
+[dependencies]
+bad_deps = { path = "../bad_deps" }
