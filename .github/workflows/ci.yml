@@ -1,9 +1,12 @@
 name: CI
 
+# main: stable; dev: integration; feature/*: one branch per feature, merged into dev
+# through a pull request. Pull requests are checked before they are merged.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
+    branches: [main, dev]
 
 jobs:
   linux:
