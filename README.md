@@ -15,7 +15,7 @@ English is the working language of the project: code, comments, compiler message
 | 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
 | 3. Semantic analysis | done for the language of §5 to §7 |
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
-| 5. C interop, SDL3 window | `extern "C"` done; no window yet |
+| 5. C interop, SDL3 window | `extern "C"` and linking of C libraries (`[link]` in sosu.toml) done; no window yet |
 | 6. Arenas, defer, move, unsafe, checks | done, except moves (`.copy()`) |
 | 7. Tooling | `run`, `test`, JSON diagnostics, contracts and `--release` done; `fmt` to do |
 

@@ -8,7 +8,10 @@ typedef enum {
     SECTION_PACKAGE,
     SECTION_DEPENDENCIES,
     SECTION_UNKNOWN,
+    SECTION_LINK,
 } Section;
+
+const char *const link_section_names[LINK_SECTION_COUNT] = { "", "windows", "linux", "macos", "android", "ios" };
 
 typedef struct {
     const SourceFile *file;
@@ -18,6 +21,8 @@ typedef struct {
     DiagList *diags;
     Manifest *manifest;
     Section section;
+    int link;                /* SECTION_LINK: LINK_ALL, LINK_WINDOWS... */
+    unsigned seen_sections;  /* bits, to report a section written twice */
     bool has_package;
     size_t package_offset; /* `[package]` header */
     size_t errors_before;
@@ -220,24 +225,94 @@ static void parse_header(Toml *t) {
     skip_spaces(t);
     size_t key_start, key_length;
     if (!parse_key(t, &key_start, &key_length)) return;
+    while (cur(t) == '.') { /* [link.windows] */
+        t->pos++;
+        size_t part_start, part_length;
+        if (!parse_key(t, &part_start, &part_length)) return;
+        key_length = t->pos - key_start;
+    }
     skip_spaces(t);
     if (cur(t) != ']') {
         error_at(t, "E0401", t->pos, 1, "expected `]`");
         return;
     }
     t->pos++;
+    Section section = SECTION_UNKNOWN;
+    int link = -1;
     if (key_is(t, key_start, key_length, "package")) {
-        t->section = SECTION_PACKAGE;
+        section = SECTION_PACKAGE;
         t->has_package = true;
         t->package_offset = start;
     } else if (key_is(t, key_start, key_length, "dependencies")) {
-        t->section = SECTION_DEPENDENCIES;
+        section = SECTION_DEPENDENCIES;
     } else {
-        t->section = SECTION_UNKNOWN;
+        for (int i = 0; i < LINK_SECTION_COUNT; i++) {
+            char *name = i == LINK_ALL ? sosu_strdup("link") : sosu_format("link.%s", link_section_names[i]);
+            if (key_is(t, key_start, key_length, name)) link = i;
+            free(name);
+        }
+        if (link >= 0) section = SECTION_LINK;
+    }
+    t->section = section;
+    t->link = link;
+    if (section == SECTION_UNKNOWN) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown section [%.*s]",
                                  (int)key_length, t->s + key_start);
-        diag_help(d, "sosu.toml contains [package] and [dependencies]");
+        diag_help(d, "sosu.toml contains [package], [dependencies], [link] and [link.<target>] "
+                     "(windows, linux, macos, android, ios)");
+        return;
     }
+    unsigned bit = 1u << (section == SECTION_LINK ? 3 + link : section);
+    if (t->seen_sections & bit) {
+        error_at(t, "E0408", key_start, key_length, "the section [%.*s] appears twice", (int)key_length,
+                 t->s + key_start);
+    }
+    t->seen_sections |= bit;
+}
+
+/* `["a", "b"]` on one line, into `list`. */
+static bool parse_string_array(Toml *t, StringList *list) {
+    if (cur(t) != '[') {
+        error_at(t, "E0401", t->pos, 1, "expected a list of strings, e.g. `[\"SDL3\"]`");
+        return false;
+    }
+    t->pos++;
+    skip_spaces(t);
+    while (cur(t) != ']') {
+        char *item = parse_string(t);
+        if (!item) return false;
+        SOSU_VEC_PUSH(list, item);
+        skip_spaces(t);
+        if (cur(t) == ',') {
+            t->pos++;
+            skip_spaces(t);
+        } else if (cur(t) != ']') {
+            error_at(t, "E0401", t->pos, 1, "expected `,` or `]` in the list");
+            return false;
+        }
+    }
+    t->pos++;
+    return true;
+}
+
+static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
+    LinkSection *section = &t->manifest->link[t->link];
+    StringList *list = key_is(t, key_start, key_length, "libs")         ? &section->libs
+                     : key_is(t, key_start, key_length, "paths")        ? &section->paths
+                     : key_is(t, key_start, key_length, "frameworks")   ? &section->frameworks
+                     : key_is(t, key_start, key_length, "copy")         ? &section->copy
+                     : NULL;
+    if (!list) {
+        Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [%s]", (int)key_length,
+                                 t->s + key_start, t->link == LINK_ALL ? "link" : "link.<target>");
+        diag_help(d, "a link section contains `libs`, `paths`, `frameworks` and `copy`");
+        return;
+    }
+    if (list->count > 0) {
+        error_at(t, "E0408", key_start, key_length, "duplicate key `%.*s`", (int)key_length, t->s + key_start);
+        return;
+    }
+    parse_string_array(t, list);
 }
 
 static void parse_line(Toml *t) {
@@ -264,6 +339,7 @@ static void parse_line(Toml *t) {
         return;
     }
     case SECTION_PACKAGE: parse_package_entry(t, key_start, key_length); break;
+    case SECTION_LINK: parse_link_entry(t, key_start, key_length); break;
     case SECTION_DEPENDENCIES: parse_dependency(t, key_start, key_length); break;
     case SECTION_UNKNOWN: /* already reported: ignore its content */
         while (t->pos < t->len && t->s[t->pos] != '\n') t->pos++;
@@ -351,5 +427,13 @@ void manifest_free(Manifest *manifest) {
         free(dep->rev);
     }
     free(manifest->deps.items);
+    for (int i = 0; i < LINK_SECTION_COUNT; i++) {
+        StringList *lists[] = { &manifest->link[i].libs, &manifest->link[i].paths, &manifest->link[i].frameworks,
+                                &manifest->link[i].copy };
+        for (size_t j = 0; j < 4; j++) {
+            for (size_t k = 0; k < lists[j]->count; k++) free(lists[j]->items[k]);
+            free(lists[j]->items);
+        }
+    }
     memset(manifest, 0, sizeof *manifest);
 }

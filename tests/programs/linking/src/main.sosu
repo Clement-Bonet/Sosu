@@ -1,0 +1,19 @@
+// A C library declared in sosu.toml (spec §8.1): run with `sosuc run`.
+import std.io;
+
+extern "C" {
+    f64 cos(f64 x);
+}
+
+f64 safe_cos(f64 x) {
+    mut f64 value = 0.0;
+    unsafe {
+        value = cos(x);
+    }
+    return value;
+}
+
+i32 main() uses io {
+    io.print("cos(0) = {}", safe_cos(0.0));
+    return 0;
+}

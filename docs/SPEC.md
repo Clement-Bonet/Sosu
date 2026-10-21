@@ -416,7 +416,7 @@ shared = { path = "../shared" }
 - The entry file of a package is `src/main.sosu` for an application, or `src/lib.sosu` for a library. The compiler loads the modules reachable by `import` from it.
 - The modules of a package may import each other.
 - The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`.
-- `sosu.toml` syntax: comments (`#`), strings, and one-line inline tables of strings. `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
+- `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
 - In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
@@ -434,6 +434,28 @@ extern "C" {
 - `struct`s are compatible with the C layout.
 - An `extern` call is `unsafe`, unless it is wrapped in a safe function.
 - `sosuc bindgen` (v1): generates declarations from C headers (functions, structs, enums, constants). In v0, bindings are written by hand.
+- The Sosu declarations must match the C ones exactly (`int` is `i32`, a C struct is a Sosu `struct` with the same fields in the same order): the C compiler never sees the C headers.
+
+### 9.1 Linking C libraries
+
+C libraries are declared in the `sosu.toml` of the package that uses them, never in the source code, so that the code stays the same on every target (principle 11):
+
+```toml
+[link]                          # every target
+libs = ["SDL3"]                 # SDL3.lib with MSVC, -lSDL3 with gcc and clang
+
+[link.windows]                  # added on one target: windows, linux, macos, android, ios
+paths = ["vendor/SDL3/lib/x64"] # where the linker looks, relative to the package
+copy = ["vendor/SDL3/lib/x64/SDL3.dll"]
+
+[link.macos]
+frameworks = ["Cocoa"]
+```
+
+- `libs`: library names, translated for the C compiler; `paths`: folders searched by the linker; `frameworks`: macOS and iOS frameworks; `copy`: files placed next to the program (a DLL must be beside the `.exe` on Windows).
+- Paths are relative to the package, never absolute, so that the manifest works on every machine.
+- Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
+- The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
 
 ## 10. User interface
 
@@ -735,6 +757,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Source of dependencies in v0: local path or Git repository, without a central registry. Local paths are implemented; Git sources are parsed but not fetched yet.
 - A `struct` cannot implement an interface in v0 (reserved for classes); the parser rejects `struct S : I`.
 - Imported names are qualified by the module name: `vector.Vec2`, `io.print(...)` (§8.1).
+- C libraries are declared in `sosu.toml` only ([link] sections, §9.1), not in the source code.
 - Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
 
 ### 14.2 Open questions

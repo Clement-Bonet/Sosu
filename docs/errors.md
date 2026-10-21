@@ -105,13 +105,13 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | Code | Message | Example |
 |---|---|---|
 | E0401 | invalid sosu.toml syntax | `name "app"`, unterminated string, `name = 3` |
-| E0402 | unknown section or key | `[tools]`, `author = "..."`, `branch = "main"` in a dependency |
+| E0402 | unknown section or key | `[tools]`, `[link.beos]`, `author = "..."`, `branch = "main"` in a dependency |
 | E0403 | missing section or key | no `[package]`, no `name` or `version` |
 | E0404 | invalid dependency | `x = "../x"`, no source, `path` and `git` together, `git` without `tag` or `rev` |
 | E0405 | git dependencies are not supported yet | `ui = { git = "...", tag = "v1" }` |
 | E0406 | the package is not named like its dependency key | `geo = { path = "../geometry" }` |
 | E0407 | circular dependency between packages | `a` depends on `b`, which depends on `a` |
-| E0408 | duplicate key or dependency | `name` written twice |
+| E0408 | duplicate key, dependency or section | `name` written twice, `[link]` twice |
 | E0409 | invalid or reserved package name | `my-app`, a package named `std` |
 | E0410 | unknown package | `import ui.button;` without `ui` in [dependencies] |
 | E0411 | module not found | `import app.missing;` without `src/missing.sosu` |

@@ -1,0 +1,13 @@
+# Links a C library on each system, and copies a file next to the program.
+[package]
+name = "linking"
+version = "0.1.0"
+
+[link]
+copy = ["data/message.txt"]
+
+[link.linux]
+libs = ["m"]          # cos() is in libm
+
+[link.windows]
+libs = ["user32"]     # not needed by cos(), but checks the MSVC link options

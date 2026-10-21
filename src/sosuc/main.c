@@ -178,8 +178,128 @@ static bool write_file(const char *path, const char *text) {
     return fclose(file) == 0 && ok;
 }
 
+/* ---- Linking (the [link] sections of sosu.toml) ---- */
+
+#if defined(_WIN32)
+#define HOST_LINK LINK_WINDOWS
+#elif defined(__APPLE__)
+#define HOST_LINK LINK_MACOS
+#else
+#define HOST_LINK LINK_LINUX
+#endif
+
+typedef struct {
+    StringList libs;
+    StringList paths; /* relative to the current folder */
+    StringList frameworks;
+    StringList copy;
+} Links;
+
+static void add_unique(StringList *list, char *item) {
+    for (size_t i = 0; i < list->count; i++) {
+        if (strcmp(list->items[i], item) == 0) {
+            free(item);
+            return;
+        }
+    }
+    SOSU_VEC_PUSH(list, item);
+}
+
+static char *package_path(const Package *package, const char *relative) {
+    char *joined = path_join(package->root, relative);
+    char *result = path_normalize(joined);
+    free(joined);
+    return result;
+}
+
+/* [link] and [link.<host>] of every package: a dependency's libraries reach the program. */
+static void collect_links(const Program *program, Links *links) {
+    memset(links, 0, sizeof *links);
+    int sections[] = { LINK_ALL, HOST_LINK };
+    for (size_t i = 0; i < program->packages.count; i++) {
+        const Package *package = program->packages.items[i];
+        for (size_t s = 0; s < 2; s++) {
+            const LinkSection *link = &package->manifest.link[sections[s]];
+            for (size_t j = 0; j < link->libs.count; j++) add_unique(&links->libs, sosu_strdup(link->libs.items[j]));
+            for (size_t j = 0; j < link->paths.count; j++) add_unique(&links->paths, package_path(package, link->paths.items[j]));
+            for (size_t j = 0; j < link->frameworks.count; j++) {
+                add_unique(&links->frameworks, sosu_strdup(link->frameworks.items[j]));
+            }
+            for (size_t j = 0; j < link->copy.count; j++) add_unique(&links->copy, package_path(package, link->copy.items[j]));
+        }
+    }
+}
+
+static void free_links(Links *links) {
+    StringList *lists[] = { &links->libs, &links->paths, &links->frameworks, &links->copy };
+    for (size_t i = 0; i < 4; i++) {
+        for (size_t j = 0; j < lists[i]->count; j++) free(lists[i]->items[j]);
+        free(lists[i]->items);
+    }
+}
+
+static void append(char **text, const char *fmt, const char *value) {
+    char *part = sosu_format(fmt, value);
+    char *joined = sosu_format("%s%s", *text, part);
+    free(*text);
+    free(part);
+    *text = joined;
+}
+
+/* The arguments that make the C compiler link the libraries. */
+static char *link_arguments(const Links *links, bool msvc) {
+    char *args = sosu_strdup("");
+    if (msvc) {
+        if (links->libs.count == 0 && links->paths.count == 0) return args;
+        append(&args, "%s", " /link");
+        for (size_t i = 0; i < links->paths.count; i++) {
+            char *native = native_path(links->paths.items[i]);
+            append(&args, " /LIBPATH:\"%s\"", native);
+            free(native);
+        }
+        for (size_t i = 0; i < links->libs.count; i++) append(&args, " \"%s.lib\"", links->libs.items[i]);
+        return args;
+    }
+    for (size_t i = 0; i < links->paths.count; i++) append(&args, " -L\"%s\"", links->paths.items[i]);
+    for (size_t i = 0; i < links->libs.count; i++) append(&args, " -l%s", links->libs.items[i]);
+    for (size_t i = 0; i < links->frameworks.count; i++) append(&args, " -framework %s", links->frameworks.items[i]);
+    return args;
+}
+
+static bool copy_file(const char *from, const char *to) {
+    FILE *in = fopen(from, "rb");
+    if (!in) return false;
+    FILE *out = fopen(to, "wb");
+    if (!out) {
+        fclose(in);
+        return false;
+    }
+    char buffer[8192];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buffer, 1, sizeof buffer, in)) > 0) ok &= fwrite(buffer, 1, n, out) == n;
+    ok &= !ferror(in);
+    fclose(in);
+    return fclose(out) == 0 && ok;
+}
+
+/* The files of `copy` go next to the program (DLLs on Windows...). */
+static bool copy_files(const Links *links, const char *build_dir) {
+    for (size_t i = 0; i < links->copy.count; i++) {
+        const char *from = links->copy.items[i];
+        const char *slash = strrchr(from, '/');
+        char *to = path_join(build_dir, slash ? slash + 1 : from);
+        bool ok = copy_file(from, to);
+        if (!ok) fprintf(stderr, "sosuc: cannot copy `%s` (listed in `copy` of a [link] section) to `%s`\n", from, to);
+        free(to);
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
-static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize) {
+static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize,
+                      const Links *links) {
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
@@ -193,6 +313,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         char *rt_c = native_path(runtime_c);
         char *c = native_path(c_file);
         char *out = native_path(exe);
+        char *link_args = link_arguments(links, true);
         char *script = sosu_format(
             "@echo off\r\n"
             "where cl >nul 2>nul && goto :have_cl\r\n"
@@ -204,13 +325,13 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
             "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul || goto :no_cl\r\n"
             ":have_cl\r\n"
-            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\" "
+            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\"%s "
             ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n"
             "exit /b 0\r\n"
             ":no_cl\r\n"
             "echo sosuc: no C compiler found: install Visual Studio with the C++ tools, or set SOSU_CC 1>&2\r\n"
             "exit /b 2\r\n",
-            optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, dir, dir);
+            optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, link_args, dir, dir);
         bool written = write_file(bat, script);
         char *native_bat = native_path(bat);
         command = written ? sosu_format("\"%s\"", native_bat) : NULL;
@@ -222,6 +343,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         free(rt_c);
         free(c);
         free(out);
+        free(link_args);
         if (!command) {
             fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
             free(runtime);
@@ -232,8 +354,10 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
 #endif
     {
         (void)build_dir;
-        command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"", cc && cc[0] ? cc : "cc", optimize ? "-O2" : "-O0", runtime,
-                              c_file, runtime_c, exe);
+        char *link_args = link_arguments(links, false);
+        command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"%s", cc && cc[0] ? cc : "cc",
+                              optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, exe, link_args);
+        free(link_args);
     }
     int status = run_command(command);
     free(command);
@@ -279,11 +403,15 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
         char *exe_name = sosu_strdup(name);
 #endif
         char *exe = path_join(build_dir, exe_name);
+        Links links;
+        collect_links(&program, &links);
         if (!write_file(c_file, source)) {
             fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
             status = 2;
-        } else if (!compile_c(build_dir, c_file, exe, lib, options->release)) {
+        } else if (!compile_c(build_dir, c_file, exe, lib, options->release, &links)) {
             fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
+            status = 2;
+        } else if (!copy_files(&links, build_dir)) {
             status = 2;
         } else if (mode == MODE_BUILD) {
             printf("built %s\n", exe);
@@ -295,6 +423,7 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
             free(command);
             free(native_exe);
         }
+        free_links(&links);
         free(exe);
         free(exe_name);
         free(c_file);

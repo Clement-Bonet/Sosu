@@ -19,6 +19,7 @@ static const Case cases[] = {
     { "run", "basics", "expected.txt", 0 },
     { "run", "overflow", "expected.txt", 101 },
     { "run", "classes", "expected.txt", 0 },
+    { "run", "linking", "expected.txt", 0 },
     { "run --release", "overflow", "expected_release.txt", 0 },
     { "test", "testing", "expected.txt", 1 },
 };
@@ -76,5 +77,10 @@ int main(int argc, char **argv) {
         free(actual);
         free(expected);
     }
+
+    /* `copy` of the [link] section of tests/programs/linking */
+    char *copied = read_text("tests/programs/linking/build/message.txt");
+    CHECK(copied && strstr(copied, "Copied next to the program"), "linking: message.txt was not copied to build/");
+    free(copied);
     return test_summary("program tests");
 }
