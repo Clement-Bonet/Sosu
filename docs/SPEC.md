@@ -210,7 +210,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 ### 5.3 Names, values and typing rules
 
 - **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
-- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`. They are part of the compiler, since they work for several types and Sosu v0 has no generics.
+- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet). They are part of the compiler, since they work for several types and Sosu v0 has no generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
@@ -394,6 +394,8 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 `core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` two small functions where C differs between systems (`errno`, file sizes). Available so far:
 
 - `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
+- `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`.
+- `std.random`: `random.Rng`, a generator holding its state (SplitMix64; not for cryptography): `next()` (64 bits), `below(bound)`, `between(low, high)`, `unit()` (a float in [0, 1)). `random.seeded(seed)` gives the same numbers for the same seed, without effect; `random.from_system()` seeds it differently on each run, with the effect `random`.
 - `core.prelude`: `Utf8Error` (§5.3).
 
 ### 8.1 Packages and manifest

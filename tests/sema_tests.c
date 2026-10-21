@@ -325,6 +325,14 @@ static void test_body_errors(void) {
     expect_codes("void f() { auto t = str.from_bytes(\"abc\"); }", "E0331");
     expect_codes("void f(Arena* a) { auto s = a.alloc_slice(u8); }", "E0336");
     expect_codes("enum Utf8Error { Mine }\nUtf8Error f() { return Mine; }", "");
+
+    /* wrapping operations (spec §5.1), std.time and std.random effects */
+    expect_codes("u64 f(u64 a) { return wrapping_mul(wrapping_add(a, 1), 3); }", "");
+    expect_codes("f64 f(f64 a) { return wrapping_add(a, 1.0); }", "E0334");
+    expect_codes("void f(u8 a, u16 b) { auto c = wrapping_sub(a, b); }", "E0334");
+    expect_codes("import std.time;\nvoid f() { time.sleep_ms(10); }", "E0340");
+    expect_codes("import std.random;\nu64 f() { random.Rng r = random.seeded(1); return r.next(); }", "");
+    expect_codes("import std.random;\nvoid f() { random.Rng r = random.from_system(); }", "E0340");
 }
 
 static void test_packages(void) {
