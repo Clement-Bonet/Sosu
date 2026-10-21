@@ -208,6 +208,20 @@ static void print_expr(Printer *pr, const Expr *expr, int indent) {
         print_expr(pr, expr->as.inner, indent);
         fputc(')', out);
         break;
+    case EXPR_ARRAY:
+        if (expr->as.array.repeat) {
+            fputs("(repeat ", out);
+            print_expr(pr, expr->as.array.repeat, indent);
+            fprintf(out, " %llu)", (unsigned long long)expr->as.array.repeat_count);
+            break;
+        }
+        fputs("(array", out);
+        for (size_t i = 0; i < expr->as.array.count; i++) {
+            fputc(' ', out);
+            print_expr(pr, expr->as.array.items[i], indent);
+        }
+        fputc(')', out);
+        break;
     }
 }
 

@@ -111,6 +111,9 @@ static void test_postfix(void) {
     expect_expr("*(p + 4)", "(* (+ p 4))");
     expect_expr("&x.y", "(& (. x y))");
     expect_expr("try parse(s)", "(try (call parse s))");
+    expect_expr("[1, 2, 3,]", "(array 1 2 3)");
+    expect_expr("[0; 64]", "(repeat 0 64)");
+    expect_expr("[a + 1, f(x)][i]", "(index (array (+ a 1) (call f x)) i)");
     expect_expr("Point{ x: 3.0, y: 4.0 }", "(lit Point (x 3.0) (y 4.0))");
     expect_expr("geo.Point{ x: 1, }", "(lit geo.Point (x 1))");
     expect_expr("arena.new(Button, \"OK\")", "(call (. arena new) Button \"OK\")");

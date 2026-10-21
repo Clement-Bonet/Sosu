@@ -406,7 +406,7 @@ static TypeExpr *parse_base_type(Parser *p) {
 static bool starts_operand(TokenKind kind) {
     switch (kind) {
     case TOK_IDENT: case TOK_INT: case TOK_FLOAT: case TOK_STRING: case TOK_CHAR: case TOK_LPAREN:
-    case TOK_KW_TRUE: case TOK_KW_FALSE: case TOK_KW_SELF: case TOK_KW_BASE: case TOK_KW_RESULT:
+    case TOK_KW_TRUE: case TOK_KW_FALSE: case TOK_KW_SELF: case TOK_KW_BASE:
     case TOK_KW_TRY: case TOK_KW_MATCH:
     case TOK_MINUS: case TOK_BANG: case TOK_TILDE: case TOK_AMP: case TOK_STAR:
         return true;
@@ -599,6 +599,33 @@ static Expr *parse_match(Parser *p) {
     return close_expr(p, expr);
 }
 
+/* `[a, b, c]` (trailing comma allowed) or `[value; count]` with a literal count. */
+static Expr *parse_array(Parser *p) {
+    Expr *expr = new_expr(p, EXPR_ARRAY, advance(p)->offset);
+    bool saved = p->no_struct_literal;
+    p->no_struct_literal = false;
+    VEC(Expr *) items = {0};
+    if (!check(p, TOK_RBRACKET)) {
+        Expr *first = parse_expr(p);
+        if (accept(p, TOK_SEMICOLON)) {
+            expr->as.array.repeat = first;
+            if (check(p, TOK_INT)) expr->as.array.repeat_count = advance(p)->int_value;
+            else report_expected(p, "E0200", "the number of elements (an integer literal)", false);
+        } else {
+            SOSU_VEC_PUSH(&items, first);
+            while (accept(p, TOK_COMMA) && !check(p, TOK_RBRACKET)) {
+                Expr *item = parse_expr(p);
+                SOSU_VEC_PUSH(&items, item);
+            }
+        }
+    }
+    expect_closing(p, TOK_RBRACKET);
+    p->no_struct_literal = saved;
+    expr->as.array.count = items.count;
+    expr->as.array.items = FINISH(p, items);
+    return close_expr(p, expr);
+}
+
 /* `(...) =>` starts a lambda, planned for v1. */
 static bool at_lambda(const Parser *p) {
     size_t depth = 0;
@@ -654,7 +681,6 @@ static Expr *parse_primary(Parser *p) {
         break;
     case TOK_KW_SELF: expr = new_expr(p, EXPR_SELF, token->offset); break;
     case TOK_KW_BASE: expr = new_expr(p, EXPR_BASE, token->offset); break;
-    case TOK_KW_RESULT: expr = new_expr(p, EXPR_RESULT, token->offset); break;
     case TOK_IDENT:
         expr = new_expr(p, EXPR_NAME, token->offset);
         expr->as.name = make_name(p, token);
@@ -674,6 +700,8 @@ static Expr *parse_primary(Parser *p) {
     }
     case TOK_KW_MATCH:
         return parse_match(p);
+    case TOK_LBRACKET:
+        return parse_array(p);
     case TOK_KW_IF: {
         Diagnostic *d = error_at(p, "E0201", token->offset, token->length, "`if` is a statement, not an expression");
         diag_help(d, "use the conditional operator: `cond ? a : b`");
