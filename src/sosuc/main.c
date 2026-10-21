@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "path.h"
-#include "program.h"
+#include "sema.h"
 
 typedef enum {
     FORMAT_TEXT,
@@ -15,7 +15,7 @@ static void usage(FILE *out) {
     fputs("usage: sosuc <command> [options] [path]\n"
           "\n"
           "commands:\n"
-          "  check   load a package (default: current folder), its dependencies and modules\n"
+          "  check   check a package (default: current folder), its dependencies and modules\n"
           "  lex     print the tokens of a file (debugging)\n"
           "  parse   print the syntax tree of a file (debugging)\n"
           "  build   compile (not implemented yet)\n"
@@ -116,6 +116,12 @@ static int command_check(const char *dir, const char *argv0, DiagFormat format) 
     Program program;
     bool ok = program_load(&program, dir, lib);
     free(lib);
+    /* Semantic analysis only runs on a program that parsed without errors, to avoid cascades. */
+    if (ok) {
+        Sema sema;
+        ok = sema_check(&sema, &program);
+        sema_free(&sema);
+    }
     if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
     print_diagnostics(&program.diags, format);
     if (ok) {

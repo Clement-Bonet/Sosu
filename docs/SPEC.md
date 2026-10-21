@@ -27,14 +27,25 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 ## 3. Lexicon
 
-- Comments: `// line` and `/* block */`.
+- Source files are UTF-8 (a leading BOM is allowed). Identifiers and symbols are ASCII; other characters only appear in strings, characters and comments.
+- Comments: `// line` and `/* block */`. Block comments do not nest.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - v0 keywords (English):
   `struct class interface enum import extern pub return if else while for in break continue defer mut auto true false as match try requires ensures test uses result unsafe virtual override self base`
 - Reserved for later: `comptime`.
 - Contextual words of `.ui.sosu` files (not reserved elsewhere): `window`, `component`, `style`, `theme`.
 - Predefined constructors (not reserved): `some`, `none`, `ok`, `err`.
+- `fn` is not a keyword: `fn(` in a type starts a function type (§5.1).
 - Literals: integers (`42`, `0xFF`, `0b1010`), floats (`3.14`), strings (`"..."`), characters (`'a'`).
+
+### 3.1 Literals in detail
+
+- Integers: decimal, hexadecimal (`0x`, lowercase prefix) or binary (`0b`), at most 2^64 - 1. A decimal literal cannot start with `0` (`007` is an error): C reads it as octal, Sosu has no octal literals.
+- Floats: digits, a dot and digits (`3.14`), and an optional exponent (`1e5`, `2.5e-3`, lowercase `e`). A digit is required after the dot, so `0..n` is a range and `3.abs()` a method call.
+- No type suffix: `300u8` is an error, the conversion is written `300 as u8`.
+- Strings stay on one line. Escapes, in strings and characters: `\n \t \r \0 \\ \' \"`, `\xNN` (ASCII only, `\x00` to `\x7F`, so that a `str` stays valid UTF-8) and `\u{N}` (1 to 6 hexadecimal digits, a Unicode scalar value).
+- A character literal holds exactly one code point.
+- `++`, `--` and `::` are recognized only to report an error that gives the Sosu form (§5.1).
 
 ## 4. Types
 
@@ -85,13 +96,17 @@ i32 main() uses io {
         total += add(i, 1);
     }
     auto p = Point{ x: 3.0, y: 4.0 };
-    print("length = {}", p.length());
+    io.print("length = {}", p.length());
     return 0;
 }
 ```
 
 Parsing note: a statement starting with `Ident Ident` is a declaration, otherwise an expression
-(enough as long as there are no generics).
+(enough as long as there are no generics). More precisely, a statement is a declaration when it
+starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `u8[4] buf`, `i32!E r`).
+
+Every variable receives its value where it is declared: `i32 x;` is an error. There are no global
+variables in v0.
 
 Control flow: `if / else`, `while`, `for (init; cond; step)`, `for (T x in a..b)`, `break`, `continue`.
 
@@ -141,7 +156,15 @@ Precedence (tightest first):
 9. `== != < <= > >=` (not chainable)
 10. `&&`
 11. `||`
-12. `?:`
+12. `..` `..=` (not chainable: `0..n + 1` is `0..(n + 1)`)
+13. `?:`
+
+Details:
+
+- `as` applies to the result of the unary operators: `-x as f32` is `(-x) as f32`.
+- After `as`, `*` and `?` belong to the type unless an operand follows: `p as u8*` converts to a pointer, `x as i32 * 2` multiplies, `x as bool ? a : b` is a conditional.
+- A struct literal is written `Point{ x: 1.0, y: 2.0 }` (trailing comma allowed). It cannot appear in `requires` / `ensures`, where the brace opens the function body.
+- Function types: `fn(i32, i32) -> i32 uses io`; the arrow and the return type are mandatory (`-> void`). In a function type, the `uses` list only continues after a comma with a predefined effect (§7.4), so that the comma is not confused with a parameter separator.
 
 ### 5.2 Classes, inheritance and interfaces
 
@@ -208,7 +231,7 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 
 ### 7.1 Sum types and `match`
 
-An `enum` can carry data. `match` must be exhaustive: a forgotten case is a compile error. `_` is the default case, written explicitly. An arm is an expression or a block.
+An `enum` can carry data. `match` must be exhaustive: a forgotten case is a compile error. `_` is the default case, written explicitly. An arm is an expression or a block; arms are separated by commas. Patterns are `_`, `Variant` and `Variant(a, b)`. `match` is an expression; used as a statement, it ends with its `}` (no `;`).
 
 ```sosu
 enum Shape {
@@ -366,6 +389,12 @@ shared = { path = "../shared" }
 ```
 
 - `import` starts with the package name: `import ui.button;` refers to `src/button.sosu` in the `ui` package; `import myapp.login;` refers to a file of the current package. `core` and `std` are implicit.
+- An import is used through the last name of its path, so that the origin of every name is visible where it is used (principle 7): after `import geometry.vector;`, the code writes `vector.Vec2` and `vector.length(v)`; after `import std.io;`, `io.print(...)`. The names of the current module are used directly. Two imports cannot end with the same name, and a declaration cannot have the name of an import.
+- More generally, `import pkg.a.b;` refers to `src/a/b.sosu` of `pkg`, which must be the current package, one of its dependencies, or `core` / `std`. `import pkg;` alone is an error: an import always names a module.
+- The entry file of a package is `src/main.sosu` for an application, or `src/lib.sosu` for a library. The compiler loads the modules reachable by `import` from it.
+- The modules of a package may import each other.
+- The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`.
+- `sosu.toml` syntax: comments (`#`), strings, and one-line inline tables of strings. `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
 - In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
@@ -571,38 +600,64 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc test`, `sosuc fmt`.
 - `sosuc package` and `sosuc bindgen`: v1.
 
-## 12. Grammar (v0 subset, EBNF)
+## 12. Grammar (v0, EBNF)
+
+This is the grammar implemented by `sosuc`. `mut` belongs to declarations (variables, fields,
+parameters), not to types.
 
 ```
-program     = { import | decl } ;
-import      = "import" path ";" ;
-decl        = [ "pub" ] ( struct | class | interface | enum | function ) | extern | test ;
-class       = "class" IDENT [ ":" IDENT { "," IDENT } ] "{" { field | method } "}" ;
-method      = [ "pub" ] [ "virtual" | "override" ] function ;
-interface   = "interface" IDENT "{" { function_sig [ "uses" IDENT { "," IDENT } ] ";" } "}" ;
-test        = "test" STRING block ;
-enum        = "enum" IDENT "{" variant { "," variant } [ "," ] "}" ;
-variant     = IDENT [ "(" params ")" ] ;
-extern      = "extern" STRING "{" { function_sig [ "uses" IDENT { "," IDENT } ] ";" } "}" ;
-struct      = "struct" IDENT "{" { field | function } "}" ;
-field       = type IDENT [ "=" expr ] ";" ;
-function    = [ "unsafe" ] function_sig [ "uses" IDENT { "," IDENT } ] { contract } block ;
-function_sig = type IDENT "(" [ params ] ")" ;
-contract    = ( "requires" | "ensures" ) expr ;
-params      = param { "," param } ;
-param       = type IDENT ;
-type        = [ "mut" ] base { "*" | "?" | "[" [ INT ] "]" | "!" base } ;
-block       = "{" { stmt } "}" ;
-stmt        = vardecl | expr ";" | if | while | for | return | defer | match | unsafe | block ;
-unsafe      = "unsafe" block ;
-match       = "match" "(" expr ")" "{" arm { "," arm } [ "," ] "}" ;
-arm         = pattern "=>" ( expr | block ) ;
-pattern     = "_" | IDENT [ "(" IDENT { "," IDENT } ")" ] ;
-vardecl     = ( type | "auto" ) IDENT "=" expr ";" ;
-expr        = assignment ;
-```
+program      = { import | decl } ;
+import       = "import" path ";" ;
+path         = IDENT { "." IDENT } ;
+decl         = [ "pub" ] ( struct | class | interface | enum | function ) | extern | test ;
 
-(Operator precedence: see §5.1.)
+struct       = "struct" IDENT "{" { member } "}" ;
+class        = "class" IDENT [ ":" path { "," path } ] "{" { member } "}" ;
+member       = [ "pub" ] ( field | [ "virtual" | "override" ] function ) ;  (* virtual / override: classes only *)
+field        = [ "mut" ] type IDENT [ "=" expr ] ";" ;
+interface    = "interface" IDENT "{" { signature } "}" ;
+enum         = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
+variant      = IDENT [ "(" [ type IDENT { "," type IDENT } ] ")" ] ;
+extern       = "extern" STRING "{" { signature } "}" ;
+test         = "test" STRING block ;
+
+function     = [ "unsafe" ] type IDENT "(" [ params ] ")" [ effects ] { contract } block ;
+signature    = [ "unsafe" ] type IDENT "(" [ params ] ")" [ effects ] ";" ;
+params       = param { "," param } ;
+param        = [ "mut" ] type IDENT ;
+effects      = "uses" IDENT { "," IDENT } ;
+contract     = ( "requires" | "ensures" ) expr ;
+
+type         = base_type { "*" | "?" | "[" [ INT ] "]" | "!" base_type } ;
+base_type    = path | "fn" "(" [ type { "," type } ] ")" "->" type [ effects ] ;
+
+block        = "{" { stmt } "}" ;
+stmt         = block | var_decl ";" | simple ";" | if | while | for | return
+             | "break" ";" | "continue" ";" | "defer" ( block | simple ";" )
+             | "unsafe" block | match ;
+var_decl     = [ "mut" ] ( type | "auto" ) IDENT "=" expr ;
+simple       = expr [ assign_op expr ] ;
+assign_op    = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+if           = "if" "(" expr ")" block [ "else" ( if | block ) ] ;
+while        = "while" "(" expr ")" block ;
+for          = "for" "(" [ "mut" ] ( type | "auto" ) IDENT "in" expr ")" block
+             | "for" "(" [ var_decl | simple ] ";" [ expr ] ";" [ simple ] ")" block ;
+return       = "return" [ expr ] ";" ;
+
+expr         = range [ "?" expr ":" expr ] ;
+range        = binary [ ( ".." | "..=" ) binary ] ;
+binary       = cast { binary_op cast } ;           (* precedence: §5.1 *)
+cast         = prefix { "as" [ "?" ] type } ;
+prefix       = ( "-" | "!" | "~" | "&" | "*" | "try" ) prefix | postfix ;
+postfix      = primary { call | "[" expr "]" | "." IDENT | struct_lit } ;
+call         = "(" [ expr { "," expr } [ "," ] ] ")" ;
+struct_lit   = "{" [ IDENT ":" expr { "," IDENT ":" expr } [ "," ] ] "}" ;  (* after a path *)
+primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base" | "result"
+             | IDENT | "(" expr ")" | match ;
+match        = "match" "(" expr ")" "{" [ arm { "," arm } [ "," ] ] "}" ;
+arm          = pattern "=>" ( block | expr ) ;
+pattern      = "_" | path [ "(" [ IDENT { "," IDENT } ] ")" ] ;
+```
 
 `.ui.sosu` files (sketch):
 
@@ -652,12 +707,17 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Program entry: callbacks provided to the `platform` runtime, which owns the main loop.
 - `.ui.sosu` syntax: only in dedicated files in v0.
 - Interface hot reload: after v0.
+- Manifest format: a subset of TOML (`sosu.toml`, §8.1), implemented.
+- Source of dependencies in v0: local path or Git repository, without a central registry. Local paths are implemented; Git sources are parsed but not fetched yet.
+- A `struct` cannot implement an interface in v0 (reserved for classes); the parser rejects `struct S : I`.
+- Imported names are qualified by the module name: `vector.Vec2`, `io.print(...)` (§8.1).
+- Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
 
 ### 14.2 Open questions
 
-- Manifest format: a subset of TOML (`sosu.toml`)? (proposed: yes)
-- Source of dependencies in v0: local path or Git repository, without a central registry? (proposed: yes)
 - Effect polymorphism (higher-order functions): to be handled with generics in v1? (proposed: yes)
 - Abstract classes: unnecessary, interfaces are enough? (proposed: yes)
-- Can a `struct` implement an interface? (proposed: no in v0, reserved for classes)
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
+- Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
+- `result` and `test` are keywords, so they cannot name a variable or a function. (proposed: keep them reserved)
+- Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)

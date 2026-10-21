@@ -1,0 +1,14 @@
+pub struct Circle {
+    f32 radius;
+}
+
+struct Secret {
+}
+
+pub struct Square {
+    f32 side;
+}
+
+pub f32 area(Circle c) {
+    return 0.0;
+}

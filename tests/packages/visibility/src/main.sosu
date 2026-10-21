@@ -1,0 +1,10 @@
+import visibility.shapes;
+import visibility.util;
+import visibility.extra.util;
+
+struct Scene {
+    shapes.Circle c;
+    shapes.Secret s;
+    shapes.Squar q;
+    shapes.area a;
+}

@@ -33,6 +33,7 @@ typedef struct {
 
 /* One source file: a module, named after its package and path (`app.shapes.circle`). */
 struct Unit {
+    size_t index; /* position in Program.units */
     char *module;
     Package *package;
     SourceFile file;
@@ -55,6 +56,9 @@ typedef struct {
    `src/main.sosu` (an application) or `src/lib.sosu` (a library).
    Returns true if no error was reported. */
 bool program_load(Program *program, const char *dir, const char *lib_dir);
+/* A program made of one module (`test.main`, file `test.sosu`) given as text; it can
+   import `core` and `std`. Used by the tests. */
+bool program_load_text(Program *program, const char *text, const char *lib_dir);
 void program_free(Program *program);
 
 #endif

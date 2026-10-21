@@ -2,6 +2,14 @@ import std.io;
 import app.shapes;
 import geometry.vector;
 
+vector.Vec2 origin() {
+    return vector.Vec2{ x: 0.0, y: 0.0 };
+}
+
+shapes.Shape unit_circle() {
+    return shapes.Shape.Circle(1.0);
+}
+
 i32 main() uses io {
     return 0;
 }

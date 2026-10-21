@@ -42,6 +42,32 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0212 | modifier not allowed here | `virtual` in a `struct`, `pub import` |
 | E0213 | only classes can have a parent class or interfaces | `struct S : Base` |
 
+## Semantic analysis
+
+| Code | Message | Example |
+|---|---|---|
+| E0301 | name already declared, or a built-in type | `struct A {}` twice, `struct i32 {}` |
+| E0302 | name already used by an import | `import a.util; import b.util;`, `import std.io; struct io {}` |
+| E0303 | unknown type or module | `Pont p;` (did you mean `Point`?), `io.File f;` |
+| E0304 | not a type | a function or a module used as a type |
+| E0305 | private to its module | `shapes.Secret` without `pub struct Secret` |
+| E0306 | `void` can only be a return type | `void x;`, `void f(void x)` |
+| E0307 | the error type of `T!E` must be an enum | `i32!str` |
+| E0308 | an array has at least one element | `i32[0]` |
+| E0309 | a type contains itself by value | `struct A { A a; }` |
+| E0310 | invalid parent class or interface | `class C : SomeStruct`, the parent class not first |
+| E0311 | inheritance cycle | `class A : B {}` and `class B : A {}` |
+| E0312 | non-exhaustive match (reserved, spec §7.5) | |
+| E0313 | `override` with nothing to override | |
+| E0314 | redefinition without `override` | `void f()` in a subclass when the parent has `virtual void f()` |
+| E0315 | overriding a method that is not virtual | |
+| E0316 | override with a different signature | `override void f(i64 x)` for `virtual void f(i32 x)` |
+| E0317 | override adds an effect | `override void f() uses io` for `virtual void f()` |
+| E0318 | interface method not implemented | `class C : Drawable {}` without `draw` |
+| E0319 | declared twice (field, method, variant, parameter, interface) | `void f(i32 a, i32 a)` |
+| E0320 | unknown effect | `uses disk` |
+| E0321 | class or interface used by value | `Widget w;` instead of `Widget* w;` |
+
 ## Packages and imports
 
 | Code | Message | Example |

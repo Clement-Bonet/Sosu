@@ -11,11 +11,11 @@ English is the working language of the project: code, comments, compiler message
 |---|---|
 | 1. Lexer | done |
 | 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
-| 3. Semantic analysis | to do |
+| 3. Semantic analysis | in progress: declarations, types, classes and visibility are checked; function bodies are not yet |
 | 4. C code generation | to do |
 
-For now, `sosuc check` loads a package, its dependencies and every imported module, and reports
-the errors found up to parsing. `sosuc lex <file>` prints the tokens of a file and `sosuc parse <file>`
+For now, `sosuc check` loads a package, its dependencies and every imported module, then checks the
+declarations (semantic analysis runs once the program parses without errors). `sosuc lex <file>` prints the tokens of a file and `sosuc parse <file>`
 its syntax tree (as S-expressions). `.ui.sosu` files are not parsed by the compiler: their translator
 will belong to the `ui` package (spec §10.2).
 
@@ -62,6 +62,8 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   path        file path helpers
   manifest    sosu.toml parser
   program     loading of packages, dependencies and imported modules
+  types       semantic types (interned)
+  sema        semantic analysis
 src/sosuc/    command-line driver
 lib/          the `core` and `std` packages (empty modules for now)
 tests/        unit tests, .sosu samples taken from the spec, test packages
@@ -71,49 +73,19 @@ docs/         specification and error codes
 `sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
 (which is `lib/` for `build/sosuc`).
 
-## Lexer decisions
+## Documentation
 
-Points the spec left open, settled here (see [docs/errors.md](docs/errors.md)):
+- [docs/SPEC.md](docs/SPEC.md): the language. Points the first draft left open were settled while
+  writing the compiler and are part of it now: literals (§3.1), operators and struct literals (§5.1),
+  `match` (§7.1), packages and imports (§8.1), the full grammar (§12), decisions and open
+  questions (§14).
+- [docs/errors.md](docs/errors.md): every error code, with an example.
 
-- `++`, `--` and `::` are recognized only to report an explicit error with the fix.
-- No leading zero (`007`): in C it means octal, a source of confusion.
-- No type suffix on literals (`300u8`): the error suggests `300 as u8`.
-- Float exponents: `1e5`, `2.5e-3` (lowercase only).
-- Escapes: `\n \t \r \0 \\ \' \"`, `\xNN` limited to ASCII (so that strings stay valid UTF-8) and `\u{...}`.
-- Strings cannot span lines; `/* */` comments do not nest.
-- `as?` is lexed as `as` followed by `?`; the parser combines them.
-- `fn` (function types, §5.1) is not in the keyword list: the lexer treats it as an identifier.
+## Compiler notes
 
-## Parser decisions
-
-The grammar in §12 is a subset; the rest was settled as follows:
-
-- A statement starting with `Type name` is a declaration (§5); a type can be `a.b.C`, `T*`, `T?`,
-  `T[N]`, `T[]`, `T!E` or `fn(A, B) -> R uses io`.
-- A variable always gets a value when declared (`i32 x;` is an error), as in the grammar.
-- Precedence follows §5.1. `as` has the precedence of the unary operators and applies to their
-  result: `-x as f32` is `(-x) as f32`. After `as`, `*` and `?` are type suffixes unless an operand
-  follows: `x as i32 * 2` multiplies, `p as u8*` converts.
-- `..` and `..=` sit between `||` and `?:`, and do not chain: `0..n + 1` is `0..(n + 1)`.
-- Struct literal: `Point{ x: 1.0, y: 2.0 }`, trailing comma allowed. It is not allowed in
-  `requires` / `ensures`, where the brace opens the function body.
-- `match` is an expression; as a statement it ends with its `}`. Arms are separated by commas.
-  Patterns: `_`, `Variant`, `Variant(a, b)` (no literals yet).
-- In a function type, the `uses` list only continues after a comma with a predefined effect
-  (`io`, `time`, `random`, `threads`), so that it is not confused with the next parameter.
-- `defer` takes a simple statement or a block.
-- After an error, the parser resynchronizes (end of statement, member or declaration, or closing
-  bracket): one mistake gives one message.
-
-## Package decisions
-
-Spec §8.1 describes packages; these points were settled here:
-
-- `sosu.toml` accepts comments, strings and one-line inline tables; `[package]` requires `name` and
-  `version`. Package and dependency names are identifiers, since `import` uses them.
-- The entry file is `src/main.sosu` for an application, or `src/lib.sosu` for a library. Only the
-  modules reachable by `import` from it are loaded (libc cannot list a folder).
-- `import pkg.a.b;` loads `src/a/b.sosu` of `pkg`, which must be the current package, one of its
-  dependencies, or `core` / `std`. `import pkg;` alone is an error.
-- Modules of a package may import each other; packages may not depend on each other in a cycle.
-- Git dependencies are parsed but not fetched yet (E0405), so `sosu.lock` does not exist yet.
+- Diagnostics: one stable code each, a position, an explanation and, when possible, the fix. After
+  an error, the lexer and the parser resume (end of statement, member or declaration, or closing
+  bracket), so one mistake gives one message.
+- The syntax trees live in an arena freed at once; names point into the source text.
+- Only libc is used: the compiler cannot list a folder, so it loads the modules reachable by
+  `import` from the entry file.

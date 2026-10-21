@@ -1,6 +1,6 @@
 import geometry.vector;
 
-enum Shape {
+pub enum Shape {
     Circle(f32 radius),
     Empty,
 }

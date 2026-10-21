@@ -129,6 +129,16 @@ static Unit *find_unit(const Program *program, const char *path) {
     return NULL;
 }
 
+/* Lexes and parses a unit whose file is loaded, and adds it to the program. */
+static void finish_unit(Program *program, Unit *unit, Package *package, char *module) {
+    unit->index = program->units.count;
+    unit->module = module;
+    unit->package = package;
+    lex_file(&unit->file, &unit->tokens, &program->diags);
+    unit->ast = parse_module(&unit->file, &unit->tokens, &program->arena, &program->diags);
+    SOSU_VEC_PUSH(&program->units, unit);
+}
+
 /* Reads, lexes and parses a module. Returns NULL if the file cannot be read. */
 static Unit *load_unit(Program *program, Package *package, char *module, const char *path) {
     Unit *unit = sosu_alloc(sizeof *unit);
@@ -138,11 +148,7 @@ static Unit *load_unit(Program *program, Package *package, char *module, const c
         free(module);
         return NULL;
     }
-    unit->module = module;
-    unit->package = package;
-    lex_file(&unit->file, &unit->tokens, &program->diags);
-    unit->ast = parse_module(&unit->file, &unit->tokens, &program->arena, &program->diags);
-    SOSU_VEC_PUSH(&program->units, unit);
+    finish_unit(program, unit, package, module);
     return unit;
 }
 
@@ -269,6 +275,26 @@ bool program_load(Program *program, const char *dir, const char *lib_dir) {
     }
 
     /* Resolving imports loads new units, which are resolved in turn. */
+    for (size_t i = 0; i < program->units.count; i++) resolve_imports(program, program->units.items[i]);
+    return program->diags.error_count == 0;
+}
+
+bool program_load_text(Program *program, const char *text, const char *lib_dir) {
+    memset(program, 0, sizeof *program);
+    program->lib_dir = path_normalize(lib_dir);
+
+    Package *package = sosu_alloc(sizeof *package);
+    memset(package, 0, sizeof *package);
+    package->name = sosu_strdup("test");
+    package->root = sosu_strdup("<memory>");
+    package->deps = sosu_alloc(0);
+    package->state = PACKAGE_LOADED;
+    SOSU_VEC_PUSH(&program->packages, package);
+
+    Unit *unit = sosu_alloc(sizeof *unit);
+    memset(unit, 0, sizeof *unit);
+    source_from_string(&unit->file, "test.sosu", text);
+    finish_unit(program, unit, package, sosu_strdup("test.main"));
     for (size_t i = 0; i < program->units.count; i++) resolve_imports(program, program->units.items[i]);
     return program->diags.error_count == 0;
 }
