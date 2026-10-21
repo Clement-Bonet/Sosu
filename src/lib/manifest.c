@@ -262,7 +262,8 @@ static void parse_header(Toml *t) {
                      "(windows, linux, macos, android, ios)");
         return;
     }
-    unsigned bit = 1u << (section == SECTION_LINK ? 3 + link : section);
+    int index = section == SECTION_LINK ? 3 + link : (int)section; /* link sections after the others */
+    unsigned bit = 1u << index;
     if (t->seen_sections & bit) {
         error_at(t, "E0408", key_start, key_length, "the section [%.*s] appears twice", (int)key_length,
                  t->s + key_start);
