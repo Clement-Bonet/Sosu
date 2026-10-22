@@ -4,7 +4,9 @@ struct Point {
     f32 x;
     f32 y;
 
-    f32 length() { return sqrt(x * x + y * y); }
+    f32 length() {
+        return sqrt(x * x + y * y);
+    }
 }
 
 i32 add(i32 a, i32 b) {
@@ -12,8 +14,8 @@ i32 add(i32 a, i32 b) {
 }
 
 i32 main() uses io {
-    i32 n = 3;            // immutable
-    mut i32 total = 0;    // mutable
+    i32 n = 3;  // immutable
+    mut i32 total = 0;  // mutable
     for (i32 i in 0..n) {
         total += add(i, 1);
     }

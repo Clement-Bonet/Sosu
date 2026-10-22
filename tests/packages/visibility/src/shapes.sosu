@@ -2,8 +2,7 @@ pub struct Circle {
     f32 radius;
 }
 
-struct Secret {
-}
+struct Secret { }
 
 pub struct Square {
     f32 side;

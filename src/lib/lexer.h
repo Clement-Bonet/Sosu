@@ -17,4 +17,19 @@ typedef struct {
 bool lex_file(const SourceFile *file, TokenList *tokens, DiagList *diags);
 void token_list_free(TokenList *tokens);
 
+typedef struct {
+    size_t offset; /* span of the comment, `//` or `/*` included */
+    size_t length;
+    bool own_line; /* nothing but spaces before it on its line */
+} Comment;
+
+typedef struct {
+    Comment *items;
+    size_t count;
+    size_t cap;
+} CommentList;
+
+/* lex_file that also records the comments, in order (used by the formatter). */
+bool lex_file_comments(const SourceFile *file, TokenList *tokens, CommentList *comments, DiagList *diags);
+
 #endif

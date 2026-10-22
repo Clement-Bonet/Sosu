@@ -364,7 +364,15 @@ error[E0312]: non-exhaustive match
 
 ### 7.6 Canonical formatter and minimal core
 
-- `sosuc fmt`: a single style, no configuration option.
+- `sosuc fmt`: a single style, no configuration option. It prints the file from its syntax tree, so a file must parse to be formatted, and puts every comment back where it was. The style:
+  - 4 spaces of indentation; `{` at the end of the line, `}` on its own line; a non-empty block always spans several lines, an empty one is `{ }`;
+  - one statement per line; spaces around binary operators and after commas, none inside parentheses or brackets; struct literals on one line: `Point{ x: 1.0, y: 2.0 }`;
+  - parentheses only where the precedence needs them (`(a + b) * c`, `-(x as f32)`, `(p as u8*) + 1`);
+  - at most one blank line, where the source has one; none after `{`;
+  - a comment on its own line stays on its own line; a comment after code stays at the end of the line, after two spaces;
+  - a function with contracts puts each `requires` / `ensures` on its own line and `{` alone below them;
+  - an enum written on one line stays on one line; otherwise one variant per line, each followed by a comma;
+  - long lines are not broken in v0.
 - No function or operator overloading, no macros, no preprocessor, no exceptions, no implicit conversion.
 
 ### 7.7 `unsafe` and debug checks
@@ -661,7 +669,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
-- `sosuc fmt`: not implemented yet.
+- `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
 - `sosuc package` and `sosuc bindgen`: v1.
 
 ## 12. Grammar (v0, EBNF)
