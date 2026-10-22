@@ -26,8 +26,10 @@ jobs:
       - name: Install SDL3
         timeout-minutes: 5  # a stalled apt mirror fails the job instead of hanging it
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libsdl3-dev
+          # a stalled mirror gives up after 30 s and is retried, instead of hanging the job
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update
+          sudo apt-get $APT install -y --no-install-recommends libsdl3-dev
       # The dummy video driver needs no screen: the window opens, draws a frame and closes itself.
       - name: Window test (platform)
         timeout-minutes: 3
