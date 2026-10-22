@@ -4,6 +4,6 @@ version = "0.1.0"
 
 [dependencies]
 geo = { path = "../geometry" }
-remote = { git = "https://git.example/remote", tag = "v1.0.0" }
+remote = { git = "../no_such_repository", tag = "v1.0.0" }  # the clone fails: E0405
 lost = { path = "../nowhere" }
 cycle = { path = "../cycle" }

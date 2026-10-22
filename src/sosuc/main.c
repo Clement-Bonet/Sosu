@@ -7,6 +7,7 @@
 #include "fmt.h"
 #include "path.h"
 #include "sema.h"
+#include "shell.h"
 
 typedef enum {
     FORMAT_TEXT,
@@ -151,27 +152,6 @@ typedef struct {
     CodegenOptions checks;
 } BuildOptions;
 
-/* A path in the form the system shell expects. */
-static char *native_path(const char *path) {
-    char *result = sosu_strdup(path);
-#ifdef _WIN32
-    for (char *c = result; *c; c++) {
-        if (*c == '/') *c = '\\';
-    }
-#endif
-    return result;
-}
-
-static int run_command(const char *command) {
-    fflush(stdout);
-    fflush(stderr);
-    int status = system(command);
-#ifndef _WIN32
-    if (status != -1) status = (status >> 8) & 0xFF; /* exit code from the wait status */
-#endif
-    return status;
-}
-
 static bool write_file(const char *path, const char *text) {
     FILE *file = fopen(path, "wb");
     if (!file) return false;
@@ -254,7 +234,7 @@ static char *link_arguments(const Links *links, bool msvc) {
         if (links->libs.count == 0 && links->paths.count == 0) return args;
         append(&args, "%s", " /link");
         for (size_t i = 0; i < links->paths.count; i++) {
-            char *native = native_path(links->paths.items[i]);
+            char *native = shell_path(links->paths.items[i]);
             append(&args, " /LIBPATH:\"%s\"", native);
             free(native);
         }
@@ -309,11 +289,11 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     if (!cc || !cc[0]) {
         /* MSVC, found like build.bat does when cl.exe is not already on the PATH */
         char *bat = path_join(build_dir, "compile.bat");
-        char *dir = native_path(build_dir);
-        char *rt = native_path(runtime);
-        char *rt_c = native_path(runtime_c);
-        char *c = native_path(c_file);
-        char *out = native_path(exe);
+        char *dir = shell_path(build_dir);
+        char *rt = shell_path(runtime);
+        char *rt_c = shell_path(runtime_c);
+        char *c = shell_path(c_file);
+        char *out = shell_path(exe);
         char *link_args = link_arguments(links, true);
         char *script = sosu_format(
             "@echo off\r\n"
@@ -334,7 +314,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             "exit /b 2\r\n",
             optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, link_args, dir, dir);
         bool written = write_file(bat, script);
-        char *native_bat = native_path(bat);
+        char *native_bat = shell_path(bat);
         command = written ? sosu_format("\"%s\"", native_bat) : NULL;
         free(native_bat);
         free(script);
@@ -360,7 +340,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
                               optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, exe, link_args);
         free(link_args);
     }
-    int status = run_command(command);
+    int status = shell_run(command);
     free(command);
     free(runtime);
     free(runtime_c);
@@ -385,15 +365,7 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
     if (ok) {
         const Package *root = program.packages.items[0];
         char *build_dir = path_join(root->root, "build");
-        char *native_dir = native_path(build_dir);
-#ifdef _WIN32
-        char *mkdir = sosu_format("if not exist \"%s\" mkdir \"%s\"", native_dir, native_dir);
-#else
-        char *mkdir = sosu_format("mkdir -p \"%s\"", native_dir);
-#endif
-        run_command(mkdir);
-        free(mkdir);
-        free(native_dir);
+        shell_make_dir(build_dir);
 
         char *name = sosu_format(mode == MODE_TEST ? "%s_tests" : "%s", root->name);
         char *file = sosu_format("%s.c", name);
@@ -418,9 +390,9 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
             printf("built %s\n", exe);
             status = 0;
         } else {
-            char *native_exe = native_path(exe);
+            char *native_exe = shell_path(exe);
             char *command = sosu_format("\"%s\"", native_exe);
-            status = run_command(command);
+            status = shell_run(command);
             free(command);
             free(native_exe);
         }

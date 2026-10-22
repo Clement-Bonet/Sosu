@@ -1,6 +1,7 @@
 #ifndef SOSU_PROGRAM_H
 #define SOSU_PROGRAM_H
 
+#include "git.h"
 #include "manifest.h"
 #include "parser.h"
 
@@ -50,10 +51,14 @@ typedef struct {
     DiagList diags;
     char *lib_dir;  /* folder of the `core` and `std` packages */
     char *fatal;    /* an error with no position in a file (missing root package), or NULL */
+    char *deps_dir; /* where git dependencies are cloned: `build/deps` of the root package */
+    LockFile lock;  /* sosu.lock of the root package, as read */
+    LockFile used;  /* the commits of the git dependencies loaded */
 } Program;
 
 /* Loads the package in `dir`, its dependencies and its modules, starting from
-   `src/main.sosu` (an application) or `src/lib.sosu` (a library).
+   `src/main.sosu` (an application) or `src/lib.sosu` (a library). Git dependencies are
+   cloned if needed, and `sosu.lock` is updated when their commits change.
    Returns true if no error was reported. */
 bool program_load(Program *program, const char *dir, const char *lib_dir);
 /* A program made of one module (`test.main`, file `test.sosu`) given as text; it can
