@@ -110,7 +110,9 @@ static size_t comment_count(const char *text) {
 }
 
 static const char *const files[] = {
-    "tests/programs/basics/src/main.sosu", "tests/programs/classes/src/main.sosu",
+    "tests/programs/basics/src/main.sosu", "tests/programs/basics/src/defaults.sosu",
+    "tests/programs/classes/src/main.sosu", "packages/ui/src/widgets.sosu", "packages/ui/src/lib.sosu",
+    "examples/form/src/main.sosu",
     "tests/programs/files/src/main.sosu", "tests/programs/clock_random/src/main.sosu",
     "tests/programs/arrays/src/main.sosu", "tests/programs/copies/src/main.sosu",
     "tests/programs/linking/src/main.sosu", "tests/programs/testing/src/lib.sosu",

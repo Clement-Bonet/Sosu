@@ -18,7 +18,7 @@ English is the working language of the project: code, comments, compiler message
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
-| 8. `platform` / `render` / `ui` | in progress: window, keyboard and mouse events, drawing in a canvas of pixels, text (8 by 8 font); `ui` next |
+| 8. `platform` / `render` / `ui` | in progress: window, keyboard, mouse and text events, drawing in a canvas of pixels, text (8 by 8 font), widgets in immediate mode (`ui`); the `.ui.sosu` translator next |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -113,6 +113,14 @@ sudo apt install libsdl3-dev    # Ubuntu 25.04 or later, Debian 13 or later
 
 `tests/window` opens a window, draws one frame and closes itself. The CI runs it on Linux and
 Windows with `SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
+
+`packages/ui` adds widgets in immediate mode: at each frame, the program describes its interface
+from its state (`if (f.button("Greet")) { ... }`). `examples/form` is a small form with a text
+field, a checkbox and buttons:
+
+```sh
+./build/sosuc run examples/form
+```
 
 ## Branches
 

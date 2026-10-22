@@ -1,0 +1,6 @@
+// Default values of fields, used from another module: they are generated from this file.
+pub struct Style {
+    pub f32 size = 1.5;
+    pub str name = "plain";
+    pub char mark = '*';
+}

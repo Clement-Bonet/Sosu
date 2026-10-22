@@ -582,7 +582,8 @@ static bool has_call(const Expr *e) {
     case EXPR_CAST: case EXPR_TRY_CAST: return has_call(e->as.cast.value);
     case EXPR_TERNARY:
         return has_call(e->as.ternary.cond) || has_call(e->as.ternary.then_expr) || has_call(e->as.ternary.else_expr);
-    case EXPR_INDEX: return has_call(e->as.index.object) || has_call(e->as.index.index);
+    case EXPR_INDEX: /* a view `x[a..b]` emits its checks */
+        return e->as.index.index->kind == EXPR_RANGE || has_call(e->as.index.object) || has_call(e->as.index.index);
     case EXPR_FIELD: return has_call(e->as.field.object);
     case EXPR_STRUCT_LIT:
         for (size_t i = 0; i < e->as.struct_lit.field_count; i++) {
@@ -959,7 +960,41 @@ static char *gen_try_cast(Fn *f, Expr *e) {
     return result;
 }
 
+/* x[a..b]: a slice of the elements a to b - 1 of an array or a slice */
+static char *gen_view(Fn *f, Expr *e) {
+    Expr *object = e->as.index.object;
+    Expr *range = e->as.index.index;
+    const Type *type = object->type;
+    bool through_pointer = type->tag == T_POINTER;
+    const Type *base = through_pointer ? type->as.inner : type;
+    char *holder;
+    if (base->tag == T_ARRAY) {
+        holder = address_of(f, object); /* a pointer to the array */
+    } else {
+        holder = materialize(f, type, gen_expr(f, object));
+    }
+    const char *access = base->tag == T_ARRAY || through_pointer ? "->" : ".";
+    char *start = materialize(f, range->as.range.start->type, gen_expr(f, range->as.range.start));
+    char *end = materialize(f, range->as.range.end->type, gen_expr(f, range->as.range.end));
+    char *length = base->tag == T_ARRAY ? sosu_format("%llu", (unsigned long long)base->as.array.size)
+                                        : sosu_format("%s%slen", holder, access);
+    if (f->g->options.bounds_checks) {
+        char *where = loc(f, e->offset);
+        emit(f, "sosu_check_view(%s, %s, %s, %s);", start, end, length, where);
+        free(where);
+    }
+    char *result = materialize(f, e->type, sosu_format("((%s){ %s%s%s + %s, (size_t)(%s - %s) })", value_type(f->g, e->type),
+                                                       holder, access, base->tag == T_ARRAY ? "items" : "ptr", start, end,
+                                                       start));
+    free(holder);
+    free(start);
+    free(end);
+    free(length);
+    return result;
+}
+
 static char *gen_index(Fn *f, Expr *e) {
+    if (e->as.index.index->kind == EXPR_RANGE) return gen_view(f, e);
     Expr *operands[2] = { e->as.index.object, e->as.index.index };
     char **values = gen_operands(f, operands, 2);
     const Type *type = operands[0]->type;
@@ -1057,7 +1092,14 @@ static char *gen_struct_literal(Fn *f, Expr *e) {
         for (size_t i = 0; i < count; i++) {
             if (name_eq(e->as.struct_lit.fields[i].name, name)) value = values[i];
         }
-        char *fallback = value ? NULL : gen_expr(f, info->fields[j].decl->init);
+        char *fallback = NULL;
+        if (!value) {
+            /* the default value is written in the module of the type, maybe not this one */
+            Unit *here = f->unit;
+            f->unit = info->unit;
+            fallback = gen_expr(f, info->fields[j].decl->init);
+            f->unit = here;
+        }
         buf_printf(&fields, "%s.f_%.*s = %s", j ? ", " : "", NAME_ARGS(name), value ? value : fallback);
         free(fallback);
     }

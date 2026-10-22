@@ -58,7 +58,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 | Pointer | `T*` (never null; possibly absent pointer: `T*?`) |
 | Option | `T?` (values `some(x)` or `none`) |
 | Result | `T!E` (values `ok(x)` or `err(e)`) |
-| Array | `T[N]` (fixed size), `T[]` (view: pointer + length) |
+| Array | `T[N]` (fixed size), `T[]` (view: pointer + length); `x[a..b]` is the view of the elements `a` to `b - 1` of an array or a view |
 | User-defined | `struct`, `enum` (sum types, see §7.1) |
 
 Conversions: always explicit with `as` (`x as f32`).
@@ -215,7 +215,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
 - **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
-- **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned.
+- **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned. A view `x[a..b]` shares the elements of `x` without copying them (checked: `a <= b <= x.len`); taking one of an array is like taking its address, so the array must be `mut`.
 - **Taking an address** `&x` follows the same rules, since the pointer allows writing: `x` must be `mut` (and a field must be `mut`). Pointers that only allow reading may come later.
 - **Array literals**: `[1, 2, 3]` (trailing comma allowed) and `[value; count]` (count: an integer literal). The element type comes from the expected array type, or else from the first element; the number of elements must match the type (`i32[3] a = [1, 2];` is an error).
 - **`result`** is not a keyword: in `ensures` it names the returned value; everywhere else it is an ordinary name.
@@ -630,11 +630,14 @@ Compilation:
 
 ### 10.4 Milestones
 
-1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). The events are `Quit`, `Resized`, `Key`, `MouseMove`, `Click` and `Release`; `app.request_quit()` closes the window as the window button does.
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). The events are `Quit`, `Resized`, `Key`, `MouseMove`, `Click`, `Release` and `TextInput` (its `str` lives until the end of the frame); `app.request_quit()` closes the window as the window button does.
    - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `line`, `text` and `at`, all clipped to the canvas. `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen.
    - Text: `render.font` is a built-in 8 by 8 font for printable ASCII (font8x8, public domain); other characters are drawn as a box. `surface.text(x, y, text, color, scale)` draws each pixel of the font as a `scale` by `scale` square, `\n` starts a new line (`font.line_height()`: 10 pixels of the font), and `canvas.text_size(text, scale)` gives the size of the text. Proportional TrueType fonts (§10) can come later behind the same call.
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
+   - First part, without the `.ui.sosu` file: the `ui` package and `examples/form`. Without lambdas (v1), a widget cannot call the program back: `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame under each other, or side by side between `row()` and `end_row()`.
+   - Widgets: `label`, `title`, `button` (true when clicked), `checkbox(text, bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8.
+   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` will generate these calls.
 
 ## 11. Targets and compilation
 

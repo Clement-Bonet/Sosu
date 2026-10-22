@@ -26,6 +26,18 @@ i32 main() uses io {
     i32* n = owner.alloc(i32);
     io.print("moved arena works: {}", *n == 0);
 
+    // views: `x[a..b]` shares the elements, without copying them
+    mut i32[5] five = [1, 2, 3, 4, 5];
+    i32[] middle = five[1..4];
+    middle[0] = 20;
+    i32[] inner = middle[1..3];
+    io.print("view: {} {} {} {} {}", middle.len, five[1], middle[2], inner[1], five[1..1].len);
+    str word = match (str.from_bytes("hello".bytes[1..4])) {
+        ok(text) => text,
+        err(e) => "?",
+    };
+    io.print("bytes 1 to 3 of hello: {}", word);
+
     i32 result = 42;  // `result` is a name like any other outside `ensures`
     io.print("result = {}", result);
     return 0;

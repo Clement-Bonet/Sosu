@@ -92,6 +92,12 @@ static inline size_t sosu_uindex(uint64_t index, size_t length, const char *loc)
     return (size_t)index;
 }
 
+/* x[start..end]: start <= end <= length */
+static inline void sosu_check_view(uint64_t start, uint64_t end, size_t length, const char *loc) {
+    if (start > end) sosu_fail(loc, "view `x[a..b]` with a > b");
+    if (end > length) sosu_fail(loc, "view out of bounds");
+}
+
 #define SOSU_SIGNED(T, C, MIN, MAX, BITS)                                                       \
     static inline C sosu_add_##T(C a, C b, const char *loc) {                                    \
         if ((b > 0 && a > MAX - b) || (b < 0 && a < MIN - b)) sosu_fail(loc, "integer overflow in `+`"); \
