@@ -1,6 +1,7 @@
 // render.canvas: a buffer of pixels and what draws in it: rectangles, lines, text, blending.
 // Coordinates are in pixels, from the top left corner; what falls outside is clipped.
 import render.font;
+import render.truetype;
 
 pub struct Color {
     pub u8 r;
@@ -101,6 +102,34 @@ pub struct Canvas {
                 }
             }
             pen_x += step;
+        }
+    }
+
+    // `text` in a TrueType font of `size` pixels per em; (x, y) is the top left corner of its
+    // first line. `\n` starts a new line, `font.line_height(size)` lower.
+    pub void text_with(truetype.Font* face, f32 size, f32 x, f32 y, str text, Color color) {
+        mut f32 pen = x;
+        mut f32 baseline = y + face.ascent(size);
+        for (char c in text.chars()) {
+            if (c == '\n') {
+                pen = x;
+                baseline += face.line_height(size);
+                continue;
+            }
+            u32 glyph = face.glyph_of(c);
+            truetype.GlyphImage* image = face.image(glyph, size);
+            i32 left = (pen + 0.5) as i32 + image.left;
+            i32 top = (baseline + 0.5) as i32 - image.top;
+            for (mut i32 row = 0; row < image.height; row += 1) {
+                for (mut i32 column = 0; column < image.width; column += 1) {
+                    u32 coverage = image.coverage[(row * image.width + column) as usize] as u32;
+                    if (coverage != 0) {
+                        u8 alpha = (color.a as u32 * coverage / 255) as u8;
+                        blend(left + column, top + row, Color{ r: color.r, g: color.g, b: color.b, a: alpha });
+                    }
+                }
+            }
+            pen += face.advance(glyph, size);
         }
     }
 

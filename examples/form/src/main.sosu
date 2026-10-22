@@ -1,8 +1,11 @@
 // A form (spec §10.4, milestone 3): its interface is in screen.ui.sosu, its state in
 // state.sosu. This file runs the window and passes it the input. Closes with Escape.
-// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/form`.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/form`
+// from the root of the repository, where the font is found.
+import std.io;
 import platform.app;
 import render.canvas;
+import render.truetype;
 import ui.widgets;
 import form.screen;
 import form.state;
@@ -60,6 +63,15 @@ i32 main() uses io {
     defer arena.free();
     state.Form* form = arena.new(state.Form);
     App* handler = arena.new(App, form);
+    // the font of the widgets: Noto Sans, or else the built-in 8 by 8 font
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(noto) => {
+            handler.ui.font = some(noto);
+        },
+        err(e) => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
     widgets.Window window = screen.GreeterConfig();
     return app.run(app.Config{ title: window.title, width: window.width, height: window.height }, handler as app.Handler*);
 }

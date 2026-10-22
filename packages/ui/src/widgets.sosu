@@ -6,6 +6,7 @@
 // pressed and the text field that has the focus. `Frame` places the widgets of one frame,
 // one under the other, or side by side between `row()` and `end_row()`.
 import render.canvas;
+import render.truetype;
 
 // Text typed or edited: at most 256 bytes of UTF-8.
 pub struct TextBuffer {
@@ -90,6 +91,10 @@ pub struct Ui {
     // the keyboard (-1: none). Widgets are numbered in the order of the calls.
     mut i32 active = -1;
     mut i32 focus = -1;
+
+    // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
+    // em for each step of scale: 18 for labels, 27 for titles.
+    pub mut truetype.Font*? font = none;
 
     // The input, as `platform.app` gives it.
     pub void mouse_move(f32 x, f32 y) {
@@ -215,16 +220,16 @@ pub struct Frame {
 
     // Text, at the size of the widgets (font at scale 2).
     pub void label(str text) {
-        canvas.Rect size = canvas.text_size(text, 2);
+        canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w, max(size.h, height));
-        surface.text(r.x, r.y + 8.0, text, ink(), 2);
+        write(r.x, r.y, height, text, ink(), 2);
     }
 
     // Bigger text (font at scale 3).
     pub void title(str text) {
-        canvas.Rect size = canvas.text_size(text, 3);
+        canvas.Rect size = measure(text, 3);
         canvas.Rect r = place(size.w, size.h + 8.0);
-        surface.text(r.x, r.y, text, ink(), 3);
+        write(r.x, r.y, size.h, text, ink(), 3);
     }
 
     // Returns true when it is clicked: pressed, then released over it.
@@ -235,24 +240,24 @@ pub struct Frame {
     // A button that can be disabled: dimmed, and never clicked.
     pub bool button_enabled(str text, bool enabled) {
         i32 id = take_id();
-        canvas.Rect size = canvas.text_size(text, 2);
+        canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w + 32.0, height);
         if (!enabled) {
             surface.fill(r, well());
-            surface.text(r.x + 16.0, r.y + 8.0, text, face(false, false), 2);
+            write(r.x + 16.0, r.y, height, text, face(false, false), 2);
             return false;
         }
         bool clicked = click(id, r);
         bool hot = over(r);
         surface.fill(r, face(hot, ui.active == id && hot));
-        surface.text(r.x + 16.0, r.y + 8.0, text, ink(), 2);
+        write(r.x + 16.0, r.y, height, text, ink(), 2);
         return clicked;
     }
 
     // A box that `value` checks or not; returns true when it changes it.
     pub bool checkbox(str text, bool* value) {
         i32 id = take_id();
-        canvas.Rect size = canvas.text_size(text, 2);
+        canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w + 32.0, height);
         bool clicked = click(id, r);
         if (clicked) {
@@ -263,7 +268,7 @@ pub struct Frame {
         if (*value) {
             surface.fill(canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 }, accent());
         }
-        surface.text(r.x + 32.0, r.y + 8.0, text, ink(), 2);
+        write(r.x + 32.0, r.y, height, text, ink(), 2);
         return clicked;
     }
 
@@ -293,11 +298,14 @@ pub struct Frame {
         surface.fill(r, well());
         surface.stroke(r, focused ? accent() : face(over(r), false), 2.0);
         // what fits, ending with the last characters typed
-        usize fits = max((width - 16.0) / 16.0 - 1.0, 0.0) as usize;
-        str shown = text.tail(fits);
-        surface.text(r.x + 8.0, r.y + 8.0, shown, ink(), 2);
+        mut usize count = text.count();
+        while (count > 0 && measure(text.tail(count), 2).w > width - 20.0) {
+            count -= 1;
+        }
+        str shown = text.tail(count);
+        write(r.x + 8.0, r.y, height, shown, ink(), 2);
         if (focused) {
-            f32 end = r.x + 8.0 + canvas.text_size(shown, 2).w;
+            f32 end = r.x + 8.0 + measure(shown, 2).w;
             surface.fill(canvas.Rect{ x: end + 1.0, y: r.y + 6.0, w: 2.0, h: 20.0 }, accent());
         }
         return entered;
@@ -316,6 +324,27 @@ pub struct Frame {
         ui.typed.len = 0;
         ui.erased = 0;
         ui.entered = false;
+    }
+
+    // The size of `text` at `scale`, in the font of `ui`, or else the built-in one.
+    canvas.Rect measure(str text, i32 scale) {
+        return match (ui.font) {
+            some(f) => canvas.Rect{ x: 0.0, y: 0.0, w: f.measure(text, 9.0 * scale as f32), h: f.line_height(9.0 * scale as f32) },
+            none => canvas.text_size(text, scale),
+        };
+    }
+
+    // `text` at `scale`, from x, in the middle of a box `box` high from y.
+    void write(f32 x, f32 y, f32 box, str text, canvas.Color color, i32 scale) {
+        f32 top = y + (box - measure(text, scale).h) / 2.0;
+        match (ui.font) {
+            some(f) => {
+                surface.text_with(f, 9.0 * scale as f32, x, top, text, color);
+            },
+            none => {
+                surface.text(x, top, text, color, scale);
+            },
+        }
     }
 
     i32 take_id() {
@@ -486,5 +515,34 @@ test "a disabled button is never clicked" {
     ui.mouse_button(false);
     mut Frame f = begin(&ui, &surface, 10.0, 10.0);
     assert(!f.button_enabled("OK", false));
+    f.finish();
+}
+
+test "the widgets use the font of ui" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    truetype.Font* noto = match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(f) => f,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer noto.close();
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    canvas.Rect bitmap = f.measure("iiii", 2);  // 8 by 8: every character as wide
+    ui.font = some(noto);
+    canvas.Rect proportional = f.measure("iiii", 2);
+    assert(proportional.w < bitmap.w / 2.0);
+    f.label("Hello");
+    mut u32 drawn = 0;
+    for (mut i32 y = 0; y < 32; y += 1) {
+        for (mut i32 x = 0; x < 60; x += 1) {
+            drawn += surface.at(x, y) != 0 ? 1 : 0;
+        }
+    }
+    assert(drawn > 50);
     f.finish();
 }
