@@ -18,7 +18,7 @@ bool lex_file(const SourceFile *file, TokenList *tokens, DiagList *diags);
 void token_list_free(TokenList *tokens);
 
 typedef struct {
-    size_t offset; /* span of the comment, `//` or `/*` included */
+    size_t offset; /* span of the whole comment, its opening characters included */
     size_t length;
     bool own_line; /* nothing but spaces before it on its line */
 } Comment;
