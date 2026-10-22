@@ -108,10 +108,11 @@ static size_t comment_count(const char *text) {
 static const char *const files[] = {
     "tests/programs/basics/src/main.sosu", "tests/programs/classes/src/main.sosu",
     "tests/programs/files/src/main.sosu", "tests/programs/clock_random/src/main.sosu",
-    "tests/programs/arrays/src/main.sosu", "tests/programs/linking/src/main.sosu",
-    "tests/programs/testing/src/lib.sosu", "packages/platform/src/app.sosu", "packages/platform/src/sdl.sosu",
-    "examples/window/src/main.sosu", "tests/window/src/main.sosu", "lib/std/src/io.sosu", "lib/std/src/time.sosu",
-    "lib/std/src/random.sosu", "lib/core/src/prelude.sosu", "tests/samples/hello.sosu", "tests/samples/classes.sosu",
+    "tests/programs/arrays/src/main.sosu", "tests/programs/copies/src/main.sosu",
+    "tests/programs/linking/src/main.sosu", "tests/programs/testing/src/lib.sosu",
+    "packages/platform/src/app.sosu", "packages/platform/src/sdl.sosu", "examples/window/src/main.sosu",
+    "tests/window/src/main.sosu", "lib/std/src/io.sosu", "lib/std/src/time.sosu", "lib/std/src/random.sosu",
+    "lib/core/src/prelude.sosu", "tests/samples/hello.sosu", "tests/samples/classes.sosu",
     "tests/samples/reliability.sosu", "tests/samples/events.sosu",
 };
 

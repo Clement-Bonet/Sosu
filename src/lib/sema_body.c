@@ -108,42 +108,12 @@ static void report_mismatch(Body *b, const Expr *e, Type *expected, Type *found)
 
 /* ---- Moves (spec §6) ---- */
 
-/* True for the types that own a resource: `Arena`, and the values containing one. They are
-   moved, not copied. */
-static bool owns_resource(const Type *type) {
-    switch (type->tag) {
-    case T_ARENA:
-        return true;
-    case T_ARRAY:
-        return owns_resource(type->as.array.element);
-    case T_OPTION:
-        return owns_resource(type->as.inner);
-    case T_RESULT:
-        return owns_resource(type->as.result.value) || owns_resource(type->as.result.error);
-    case T_STRUCT:
-        for (size_t i = 0; i < type->as.info->field_count; i++) {
-            if (owns_resource(type->as.info->fields[i].type)) return true;
-        }
-        return false;
-    case T_ENUM:
-        for (size_t i = 0; i < type->as.info->variant_count; i++) {
-            const VariantInfo *variant = &type->as.info->variants[i];
-            for (size_t j = 0; j < variant->field_count; j++) {
-                if (owns_resource(variant->fields[j])) return true;
-            }
-        }
-        return false;
-    default:
-        return false;
-    }
-}
-
 static Local *find_local(Body *b, Name name);
 
 /* `e` is used as a value that goes elsewhere (a variable, an argument, a field, a returned
    value...): a variable owning a resource is moved, and cannot be used afterwards. */
 static void consume(Body *b, Expr *e) {
-    if (!e->type || !owns_resource(e->type)) return;
+    if (!e->type || !type_owns_resource(e->type)) return;
     if (e->kind == EXPR_TERNARY) {
         consume(b, e->as.ternary.then_expr);
         consume(b, e->as.ternary.else_expr);
@@ -906,6 +876,14 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
             return call_with(b, e, field->type, name, false);
         }
     }
+    if (name_is(name, "copy") && type_owns_resource(base)) {
+        /* x.copy(): its arenas are new and empty (same block size); the rest is copied (spec §6) */
+        callee->resolution = RESOLVED_BUILTIN;
+        callee->target = "copy";
+        if (e->as.call.arg_count) error_expr(b, "E0336", callee, "`copy` takes no argument");
+        check_args_loosely(b, e);
+        return base;
+    }
     if (base->tag == T_ARENA) return call_arena(b, e, name);
     if (base->tag == T_STR && name_is(name, "to_cstr")) {
         /* s.to_cstr(arena): a NUL-terminated copy for C (spec §4.1) */
@@ -927,7 +905,8 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
         return error_type(b);
     }
     TypeNames n = {0};
-    error_at(b, "E0337", name.offset, name.length, "`%s` has no method `%.*s`", tn(&n, base), NAME_ARGS(name));
+    Diagnostic *d = error_at(b, "E0337", name.offset, name.length, "`%s` has no method `%.*s`", tn(&n, base), NAME_ARGS(name));
+    if (name_is(name, "copy")) diag_help(d, "a value without an `Arena` is copied by value: use it directly (spec §6)");
     release_names(&n);
     check_args_loosely(b, e);
     return error_type(b);
@@ -1278,7 +1257,7 @@ static Type *check_array(Body *b, Expr *e, Type *expected) {
     if (e->as.array.repeat) {
         Expr *value = e->as.array.repeat;
         element = element ? check_expect(b, value, element) : check_expr(b, value, NULL);
-        if (owns_resource(element)) {
+        if (type_owns_resource(element)) {
             error_expr(b, "E0356", value, "a value that owns a resource cannot be repeated");
         }
         size = e->as.array.repeat_count;
