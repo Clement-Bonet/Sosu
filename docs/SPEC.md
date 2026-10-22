@@ -769,7 +769,7 @@ Foundations, to build first, since most planned widgets rely on them:
 
 Order: the editing core and formatted one-line fields, then `Radio` (quick once the translator exists), `List` with scrolling, `TextArea`, and `Dropdown` with the layer above. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus, images (`render` would then draw images).
 
-Two limits of v0 apply to every text widget: the built-in font only draws ASCII (other characters are kept, and drawn as boxes until TrueType fonts), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
+Two limits of v0 apply to every text widget: without a TrueType font (`ui.font`), the built-in font only draws ASCII (other characters are kept, and drawn as boxes), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
 
 ## 11. Targets and compilation
 
