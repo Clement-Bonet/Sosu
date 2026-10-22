@@ -248,10 +248,12 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - An `Arena` owns its blocks: it is moved, not copied (below).
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
-  - In v0, the types owning a resource are `Arena` and the values containing one (struct fields, array elements, option and result values, enum variant fields). They have no `.copy()`.
+  - In v0, the types owning a resource are `Arena` and the values containing one (struct fields, array elements, option and result values, enum variant fields).
   - Using such a variable as a value (initializing a variable, assigning, passing it by value, returning it, putting it in a literal) moves it: the variable can no longer be used afterwards, until it is assigned again. Calling its methods, taking its address and reading its fields do not move it.
   - The check follows the order of the source: after a move in a branch, the variable is no longer usable after the `if`. A variable declared outside a loop cannot be moved inside it.
   - A value cannot be moved out of a field, an element or a pointer: pass a pointer instead.
+  - `x.copy()` gives a new value without moving `x` (also through a pointer). Each `Arena` in it is a new, empty arena with the same block size; every other member is copied as is. Pointers are copied too, so they still point into the arenas of `x`: they stay valid only as long as those arenas. Copying a freed arena stops the program. A struct may declare its own `copy` method, which is called instead.
+  - Values without a resource have no `.copy()`: they are already copied by value.
 - Plain `struct`s (without a resource) are copied by value.
 - No hidden allocation: no global allocator; every function that allocates explicitly receives an `Arena*`.
 - No borrow checker in v0: safety relies on arenas and `defer`.
@@ -628,7 +630,7 @@ Compilation:
 
 ### 10.4 Milestones
 
-1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows with `packages/platform` and `examples/window`. Its v0 interface is simpler than the sketch of §10.1, since there are no generics to carry the application state: `app.run(config, on_event, on_frame)`, where `on_event` returns `false` to stop and `on_frame` draws on an `app.Canvas*` (`clear`, `fill`).
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Its v0 interface is simpler than the sketch of §10.1, since there are no generics to carry the application state: `app.run(config, on_event, on_frame)`, where `on_event` returns `false` to stop and `on_frame` draws on an `app.Canvas*` (`clear`, `fill`); `app.request_quit()` closes the window as the window button does.
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
 
@@ -790,7 +792,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - C libraries are declared in `sosu.toml` only ([link] sections, §9.1), not in the source code.
 - Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
 - Array literals `[a, b]` and `[value; n]`; `&x` requires `mut x`; `result` is contextual (only in `ensures`) (§5.3).
-- Moves: `Arena` and the values containing one are moved, checked in the order of the source (§6).
+- Moves: `Arena` and the values containing one are moved, checked in the order of the source; `.copy()` duplicates them with new, empty arenas (§6).
 
 ### 14.2 Open questions
 

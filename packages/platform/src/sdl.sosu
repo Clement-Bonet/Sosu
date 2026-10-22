@@ -36,6 +36,7 @@ extern "C" {
     Renderer* SDL_CreateRenderer(Window* window, u8* name) uses io;
     void SDL_DestroyRenderer(Renderer* renderer) uses io;
     bool SDL_PollEvent(Event* event) uses io;
+    bool SDL_PushEvent(Event* event) uses io;
     bool SDL_SetRenderDrawColor(Renderer* renderer, u8 r, u8 g, u8 b, u8 a) uses io;
     bool SDL_RenderClear(Renderer* renderer) uses io;
     bool SDL_RenderFillRect(Renderer* renderer, FRect* rect) uses io;
@@ -101,6 +102,14 @@ pub bool poll(Event* event) uses io {
         found = SDL_PollEvent(event);
     }
     return found;
+}
+
+// Queues an SDL_EVENT_QUIT, as if the user had closed the window.
+pub void push_quit() uses io {
+    mut Event event = Event{ kind: 0x100, reserved: 0, timestamp: 0, window: 0, word5: 0, word6: 0, word7: 0, rest: [0; 96] };
+    unsafe {
+        SDL_PushEvent(&event);
+    }
 }
 
 pub void set_color(Renderer* renderer, u8 r, u8 g, u8 b, u8 a) uses io {

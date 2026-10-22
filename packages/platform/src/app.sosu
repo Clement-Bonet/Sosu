@@ -56,6 +56,11 @@ Event? translate(sdl.Event* event) {
     return none;
 }
 
+// Asks the window to close: `on_event` then receives `Quit`, as for the window button.
+pub void request_quit() uses io {
+    sdl.push_quit();
+}
+
 // Opens the window and runs until `on_event` returns false. Returns the exit code.
 pub i32 run(Config config, fn(Event) -> bool uses io on_event, fn(Canvas*) -> void uses io on_frame) uses io {
     mut Arena arena = Arena.new(16 * KB);

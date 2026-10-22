@@ -348,6 +348,19 @@ static void test_body_errors(void) {
     expect_codes("void g(Arena* a) { }\nvoid f() { mut Arena a = Arena.new(1 * KB); g(&a); g(&a); a.free(); }", "");
     expect_codes("struct P { f32 x; }\nvoid f() { P a = P{ x: 1.0 }; P b = a; P c = a; }", "");   /* copied */
 
+    /* x.copy(): new arenas, and the original is not moved */
+    expect_codes("struct H { Arena a; i32 n; }\nvoid f(H h) { H c = h.copy(); H d = h; }", "");
+    expect_codes("struct H { Arena a; }\nvoid f(H* h) { H c = h.copy(); }", "");
+    expect_codes("void f() { mut Arena a = Arena.new(1 * KB); while (true) { Arena c = a.copy(); } }", "");
+    expect_codes("void f(H?[2] h) { H?[2] c = h.copy(); }\nstruct H { Arena a; }", "");
+    expect_codes("void f() { Arena a = Arena.new(1 * KB); Arena b = a; Arena c = a.copy(); }", "E0356");
+    expect_codes("void f(Arena a) { Arena c = a.copy(1); }", "E0336");
+    expect_codes("struct P { f32 x; }\nvoid f(P p) { P c = p.copy(); }", "E0337");   /* copied by value already */
+    expect_codes("void f(i32 x) { i32 c = x.copy(); }", "E0337");
+    expect_codes("struct H { Arena a; }\nvoid f(H h) { auto c = h.copy(); H d = c; }", "");
+    expect_help("struct P { f32 x; }\nvoid f(P p) { P c = p.copy(); }", "E0337",
+                "a value without an `Arena` is copied by value: use it directly (spec §6)");
+
     /* wrapping operations (spec §5.1), std.time and std.random effects */
     expect_codes("u64 f(u64 a) { return wrapping_mul(wrapping_add(a, 1), 3); }", "");
     expect_codes("f64 f(f64 a) { return wrapping_add(a, 1.0); }", "E0334");
