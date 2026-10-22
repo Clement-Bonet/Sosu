@@ -23,13 +23,17 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build and test
         run: make test
+      # Sosu declares the SDL functions itself and needs no header: the library is enough
+      # (libsdl3-dev pulls in some 170 packages, slow when the mirror is). The link libSDL3.so,
+      # which -lSDL3 looks for, comes with libsdl3-dev: it is made by hand.
       - name: Install SDL3
-        timeout-minutes: 5  # a stalled apt mirror fails the job instead of hanging it
+        timeout-minutes: 8  # a stalled apt mirror fails the job instead of hanging it
         run: |
-          # a stalled mirror gives up after 30 s and is retried, instead of hanging the job
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           sudo apt-get $APT update
-          sudo apt-get $APT install -y --no-install-recommends libsdl3-dev
+          sudo apt-get $APT install -y --no-install-recommends libsdl3-0
+          sudo ln -sf "$(ls /usr/lib/x86_64-linux-gnu/libSDL3.so.0)" /usr/local/lib/libSDL3.so
+          sudo ldconfig
       # The dummy video driver needs no screen: the window opens, draws a frame and closes itself.
       - name: Window test (platform)
         timeout-minutes: 3
