@@ -16,7 +16,7 @@ English is the working language of the project: code, comments, compiler message
 | 3. Semantic analysis | done for the language of §5 to §7 |
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows) |
-| 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it; no `.copy()` yet) |
+| 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps

@@ -52,6 +52,7 @@ typedef struct {
     const Type *type;
     char *name;
     bool defined;
+    char *copier; /* the function behind `.copy()`, once generated */
 } TypeEntry;
 
 typedef struct {
@@ -202,7 +203,7 @@ static const char *struct_name(Gen *g, const Type *type) {
         mangle(g, &code, type);
         name = code.items;
     }
-    TypeEntry added = { type, name, false };
+    TypeEntry added = { type, name, false, NULL };
     SOSU_VEC_PUSH(&g->types, added);
     if (type->tag == T_FN) {
         Buf params = {0};
@@ -235,7 +236,7 @@ static const char *c_type(Gen *g, const Type *type) {
         TypeEntry *entry = find_type(g, type);
         if (entry) return entry->name;
         char *name = sosu_format("%s*", c_type(g, type->as.inner));
-        TypeEntry added = { type, name, true };
+        TypeEntry added = { type, name, true, NULL };
         SOSU_VEC_PUSH(&g->types, added);
         return name;
     }
@@ -413,6 +414,87 @@ static void define_type(Gen *g, const Type *type) {
     }
     buf_printf(&g->defs, "struct %s {\n%s};\n\n", name, body.items ? body.items : "");
     free(body.items);
+}
+
+/* ---- Copies (x.copy(), spec §6) ----
+   A value owning a resource is copied member by member; each `Arena` in it becomes a new,
+   empty arena with the same block size. */
+
+static const char *copy_function(Gen *g, const Type *type);
+
+/* `to = from.copy()` for a part of a value, if that part owns a resource. */
+static void copy_part(Gen *g, Buf *out, const char *indent, const Type *type, const char *to, const char *from) {
+    if (!type_owns_resource(type)) return;
+    if (type->tag == T_ARENA) {
+        buf_printf(out, "%s%s = sosu_arena_copy(&%s, loc);\n", indent, to, from);
+    } else {
+        buf_printf(out, "%s%s = %s(&%s, loc);\n", indent, to, copy_function(g, type), from);
+    }
+}
+
+/* The C function that copies a value of `type` (not `Arena`), generated on first use. */
+static const char *copy_function(Gen *g, const Type *type) {
+    const char *ctype = value_type(g, type);
+    if (find_type(g, type)->copier) return find_type(g, type)->copier;
+    Buf body = {0};
+    switch (type->tag) {
+    case T_STRUCT: {
+        const TypeInfo *info = type->as.info;
+        for (size_t i = 0; i < info->field_count; i++) {
+            char *to = sosu_format("r.f_%.*s", NAME_ARGS(info->fields[i].name));
+            char *from = sosu_format("v->f_%.*s", NAME_ARGS(info->fields[i].name));
+            copy_part(g, &body, "    ", info->fields[i].type, to, from);
+            free(to);
+            free(from);
+        }
+        break;
+    }
+    case T_ENUM: {
+        const TypeInfo *info = type->as.info;
+        buf_puts(&body, "    switch (v->tag) {\n");
+        for (size_t i = 0; i < info->variant_count; i++) {
+            const VariantInfo *variant = &info->variants[i];
+            Buf parts = {0};
+            for (size_t j = 0; j < variant->field_count; j++) {
+                char *to = sosu_format("r.as.v_%.*s.f%zu", NAME_ARGS(variant->name), j);
+                char *from = sosu_format("v->as.v_%.*s.f%zu", NAME_ARGS(variant->name), j);
+                copy_part(g, &parts, "        ", variant->fields[j], to, from);
+                free(to);
+                free(from);
+            }
+            if (parts.items) buf_printf(&body, "    case %zu:\n%s        break;\n", i, parts.items);
+            free(parts.items);
+        }
+        buf_puts(&body, "    default:\n        break;\n    }\n");
+        break;
+    }
+    case T_OPTION:
+        buf_puts(&body, "    if (v->has) {\n");
+        copy_part(g, &body, "        ", type->as.inner, "r.value", "v->value");
+        buf_puts(&body, "    }\n");
+        break;
+    case T_RESULT:
+        buf_puts(&body, "    if (v->ok) {\n");
+        copy_part(g, &body, "        ", type->as.result.value, "r.as.value", "v->as.value");
+        buf_puts(&body, "    } else {\n");
+        copy_part(g, &body, "        ", type->as.result.error, "r.as.error", "v->as.error");
+        buf_puts(&body, "    }\n");
+        break;
+    case T_ARRAY:
+        buf_printf(&body, "    for (size_t i = 0; i < %llu; i++) {\n", (unsigned long long)type->as.array.size);
+        copy_part(g, &body, "        ", type->as.array.element, "r.items[i]", "v->items[i]");
+        buf_puts(&body, "    }\n");
+        break;
+    default:
+        break;
+    }
+    char *name = sosu_format("sosu_copy_%s", ctype);
+    buf_printf(&g->protos, "static %s %s(const %s *v, const char *loc);\n", ctype, name, ctype);
+    buf_printf(&g->code, "static %s %s(const %s *v, const char *loc) {\n    %s r = *v;\n%s    return r;\n}\n\n", ctype, name,
+               ctype, ctype, body.items ? body.items : "");
+    free(body.items);
+    find_type(g, type)->copier = name;
+    return name;
 }
 
 /* ---- Statement output ---- */
@@ -1128,6 +1210,18 @@ static char *gen_arena_call(Fn *f, Expr *e, const char *name) {
     return result;
 }
 
+/* x.copy(), on a value owning a resource or a pointer to one */
+static char *gen_copy(Fn *f, Expr *e) {
+    Expr *object = e->as.call.callee->as.field.object;
+    char *from = address_of(f, object);
+    char *where = loc(f, e->offset);
+    char *value = e->type->tag == T_ARENA ? sosu_format("sosu_arena_copy(%s, %s)", from, where)
+                                          : sosu_format("%s(%s, %s)", copy_function(f->g, e->type), from, where);
+    free(from);
+    free(where);
+    return materialize(f, e->type, value);
+}
+
 /* s.to_cstr(arena), str.from_bytes(bytes) */
 static char *gen_str_call(Fn *f, Expr *e, const char *name) {
     Expr **args = e->as.call.args;
@@ -1192,6 +1286,7 @@ static char *gen_call(Fn *f, Expr *e) {
         const char *name = callee->target;
         if (strncmp(name, "arena.", 6) == 0 || strcmp(name, "Arena.new") == 0) return gen_arena_call(f, e, name);
         if (strncmp(name, "str.", 4) == 0) return gen_str_call(f, e, name);
+        if (strcmp(name, "copy") == 0) return gen_copy(f, e);
         return gen_builtin_call(f, e, name);
     }
 
@@ -2009,7 +2104,10 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
     free(g.protos.items);
     free(g.code.items);
     free(tables.items);
-    for (size_t i = 0; i < g.types.count; i++) free(g.types.items[i].name);
+    for (size_t i = 0; i < g.types.count; i++) {
+        free(g.types.items[i].name);
+        free(g.types.items[i].copier);
+    }
     free(g.types.items);
     return out.items;
 }

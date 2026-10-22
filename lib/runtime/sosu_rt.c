@@ -130,6 +130,11 @@ void *sosu_arena_alloc(sosu_arena *arena, size_t size, const char *loc) {
     return memory;
 }
 
+sosu_arena sosu_arena_copy(const sosu_arena *arena, const char *loc) {
+    if (!arena->state) sosu_fail(loc, "arena used after `free`");
+    return sosu_arena_new(arena->state->block_size, loc);
+}
+
 void sosu_arena_free(sosu_arena *arena) {
     if (!arena->state) return;
     sosu_block *block = arena->state->head;

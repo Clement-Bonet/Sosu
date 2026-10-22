@@ -27,6 +27,8 @@ sosu_arena sosu_arena_new(uint64_t block_size, const char *loc);
 void *sosu_arena_alloc(sosu_arena *arena, size_t size, const char *loc); /* stops the program if out of memory */
 void *sosu_arena_try_alloc(sosu_arena *arena, size_t size);             /* NULL if out of memory */
 void sosu_arena_free(sosu_arena *arena);
+/* arena.copy(): a new, empty arena with the same block size */
+sosu_arena sosu_arena_copy(const sosu_arena *arena, const char *loc);
 /* `count` elements of `size` bytes (arena.alloc_slice); stops the program on overflow. */
 void *sosu_arena_alloc_array(sosu_arena *arena, size_t size, uint64_t count, const char *loc);
 
