@@ -86,12 +86,14 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0346 | missing or unexpected return value | a path without `return`, `return 1;` in a `void` function |
 | E0347 | name already used by a local | `i32 x` when a parameter is named `x` |
 | E0348 | expression without effect, or unused result | `x == 1;`, a `T!E` call whose result is ignored |
-| E0349 | `self`, `base` or `result` out of place | `self` outside a method |
+| E0349 | `self`, `base` or `result` out of place | `self` outside a method, `result` in a function returning nothing |
 | E0350 | invalid struct literal | missing or unknown field |
 | E0351 | invalid `io.print` | format and values do not match, value that cannot be printed |
 | E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)` |
 | E0353 | address of a temporary value | `&g()` |
 | E0354 | invalid arena allocation | `a.alloc(3)`, `a.alloc(Node)` with a pointer inside, `a.alloc(SomeClass)` |
+| E0355 | wrong number of elements in an array literal | `i32[3] a = [1, 2];` |
+| E0356 | use of a moved value, or invalid move | `Arena b = a;` then `a.free()`, a move inside a loop, out of a field |
 
 ## Code generation
 

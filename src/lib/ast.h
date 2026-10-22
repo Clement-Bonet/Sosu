@@ -75,6 +75,7 @@ typedef enum {
     EXPR_STRUCT_LIT, /* Point{ x: 1.0, y: 2.0 } */
     EXPR_MATCH,
     EXPR_TRY,
+    EXPR_ARRAY, /* [1, 2, 3] or [0; 64] */
 } ExprKind;
 
 typedef struct {
@@ -140,6 +141,8 @@ struct Expr {
         struct { Expr *object; Name name; } field;
         struct { TypeExpr *type; FieldInit *fields; size_t field_count; } struct_lit;
         struct { Expr *subject; MatchArm *arms; size_t arm_count; } match;
+        /* [items...], or [repeat; repeat_count] when `repeat` is not NULL */
+        struct { Expr **items; size_t count; Expr *repeat; uint64_t repeat_count; } array;
     } as;
 };
 

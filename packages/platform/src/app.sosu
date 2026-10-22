@@ -58,7 +58,7 @@ Event? translate(sdl.Event* event) {
 
 // Opens the window and runs until `on_event` returns false. Returns the exit code.
 pub i32 run(Config config, fn(Event) -> bool uses io on_event, fn(Canvas*) -> void uses io on_frame) uses io {
-    Arena arena = Arena.new(16 * KB);
+    mut Arena arena = Arena.new(16 * KB);
     defer arena.free();
     if (!sdl.init_video()) {
         return 1;
@@ -77,7 +77,7 @@ pub i32 run(Config config, fn(Event) -> bool uses io on_event, fn(Canvas*) -> vo
     defer sdl.destroy_renderer(renderer);
 
     sdl.Event* event = arena.alloc(sdl.Event);
-    Canvas canvas = Canvas{ renderer: renderer };
+    mut Canvas canvas = Canvas{ renderer: renderer };
     mut bool running = true;
     while (running) {
         while (sdl.poll(event)) {

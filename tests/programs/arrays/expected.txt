@@ -1,0 +1,5 @@
+sum = 10
+0 7 8
+grid = 3
+moved arena works: true
+result = 42

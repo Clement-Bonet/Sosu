@@ -31,7 +31,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 - Comments: `// line` and `/* block */`. Block comments do not nest.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - v0 keywords (English):
-  `struct class interface enum import extern pub return if else while for in break continue defer mut auto true false as match try requires ensures test uses result unsafe virtual override self base`
+  `struct class interface enum import extern pub return if else while for in break continue defer mut auto true false as match try requires ensures test uses unsafe virtual override self base`
 - Reserved for later: `comptime`.
 - Contextual words of `.ui.sosu` files (not reserved elsewhere): `window`, `component`, `style`, `theme`.
 - Predefined constructors (not reserved): `some`, `none`, `ok`, `err`.
@@ -216,6 +216,9 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
 - **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
 - **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned.
+- **Taking an address** `&x` follows the same rules, since the pointer allows writing: `x` must be `mut` (and a field must be `mut`). Pointers that only allow reading may come later.
+- **Array literals**: `[1, 2, 3]` (trailing comma allowed) and `[value; count]` (count: an integer literal). The element type comes from the expected array type, or else from the first element; the number of elements must match the type (`i32[3] a = [1, 2];` is an error).
+- **`result`** is not a keyword: in `ensures` it names the returned value; everywhere else it is an ordinary name.
 - **Enum values** are written `Shape.Circle(1.0)` or `Shape.Empty`; the name of the enum may be left out when the expected type is known (`Shape s = Circle(1.0);`), as in `match` patterns.
 - **Statements**: an expression statement must be a call or a `match`; `x == 1;` is an error. The value of a call returning `T!E` must be used (with `try`, `match`, or a variable).
 - **Functions** that return a value must end every path with `return`.
@@ -242,9 +245,13 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
 - The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
 - `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only.
-- Until moves exist (below), copying an `Arena` value shares its blocks: free it once, through one name.
+- An `Arena` owns its blocks: it is moved, not copied (below).
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
+  - In v0, the types owning a resource are `Arena` and the values containing one (struct fields, array elements, option and result values, enum variant fields). They have no `.copy()`.
+  - Using such a variable as a value (initializing a variable, assigning, passing it by value, returning it, putting it in a literal) moves it: the variable can no longer be used afterwards, until it is assigned again. Calling its methods, taking its address and reading its fields do not move it.
+  - The check follows the order of the source: after a move in a branch, the variable is no longer usable after the `if`. A variable declared outside a loop cannot be moved inside it.
+  - A value cannot be moved out of a field, an element or a pointer: pass a pointer instead.
 - Plain `struct`s (without a resource) are copied by value.
 - No hidden allocation: no global allocator; every function that allocates explicitly receives an `Arena*`.
 - No borrow checker in v0: safety relies on arenas and `defer`.
@@ -709,8 +716,9 @@ prefix       = ( "-" | "!" | "~" | "&" | "*" | "try" ) prefix | postfix ;
 postfix      = primary { call | "[" expr "]" | "." IDENT | struct_lit } ;
 call         = "(" [ expr { "," expr } [ "," ] ] ")" ;
 struct_lit   = "{" [ IDENT ":" expr { "," IDENT ":" expr } [ "," ] ] "}" ;  (* after a path *)
-primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base" | "result"
-             | IDENT | "(" expr ")" | match ;
+primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base"
+             | IDENT | "(" expr ")" | match | array ;
+array        = "[" [ expr ( ";" INT | { "," expr } [ "," ] ) ] "]" ;   (* [1, 2, 3] or [0; 64] *)
 match        = "match" "(" expr ")" "{" [ arm { "," arm } [ "," ] ] "}" ;
 arm          = pattern "=>" ( block | expr ) ;
 pattern      = "_" | path [ "(" [ IDENT { "," IDENT } ] ")" ] ;
@@ -770,6 +778,8 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Imported names are qualified by the module name: `vector.Vec2`, `io.print(...)` (§8.1).
 - C libraries are declared in `sosu.toml` only ([link] sections, §9.1), not in the source code.
 - Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
+- Array literals `[a, b]` and `[value; n]`; `&x` requires `mut x`; `result` is contextual (only in `ensures`) (§5.3).
+- Moves: `Arena` and the values containing one are moved, checked in the order of the source (§6).
 
 ### 14.2 Open questions
 
@@ -777,5 +787,4 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Abstract classes: unnecessary, interfaces are enough? (proposed: yes)
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
-- `result` and `test` are keywords, so they cannot name a variable or a function. (proposed: keep them reserved)
 - Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)

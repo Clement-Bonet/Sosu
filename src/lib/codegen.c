@@ -507,6 +507,12 @@ static bool has_call(const Expr *e) {
             if (has_call(e->as.struct_lit.fields[i].value)) return true;
         }
         return false;
+    case EXPR_ARRAY:
+        if (e->as.array.repeat) return has_call(e->as.array.repeat);
+        for (size_t i = 0; i < e->as.array.count; i++) {
+            if (has_call(e->as.array.items[i])) return true;
+        }
+        return false;
     default: return false;
     }
 }
@@ -928,6 +934,30 @@ static char *gen_field(Fn *f, Expr *e) {
         free(path);
     }
     free(value);
+    return result;
+}
+
+/* [a, b, c] as a compound literal; [value; n] fills a temporary in a loop. */
+static char *gen_array(Fn *f, Expr *e) {
+    const char *type = value_type(f->g, e->type);
+    if (e->as.array.repeat) {
+        Expr *repeat = e->as.array.repeat;
+        char *value = materialize(f, repeat->type, gen_expr(f, repeat));
+        char *result = new_temp(f);
+        char *index = new_temp(f);
+        emit(f, "%s %s;", type, result);
+        emit(f, "for (size_t %s = 0; %s < %llu; %s++) %s.items[%s] = %s;", index, index,
+             (unsigned long long)e->as.array.repeat_count, index, result, index, value);
+        free(value);
+        free(index);
+        return result;
+    }
+    char **values = gen_operands(f, e->as.array.items, e->as.array.count);
+    Buf items = {0};
+    for (size_t i = 0; i < e->as.array.count; i++) buf_printf(&items, "%s%s", i ? ", " : "", values[i]);
+    char *result = sosu_format("((%s){ { %s } })", type, items.items);
+    free(items.items);
+    free_values(values, e->as.array.count);
     return result;
 }
 
@@ -1389,6 +1419,7 @@ static char *gen_expr(Fn *f, Expr *e) {
     case EXPR_INDEX: return gen_index(f, e);
     case EXPR_FIELD: return gen_field(f, e);
     case EXPR_STRUCT_LIT: return gen_struct_literal(f, e);
+    case EXPR_ARRAY: return gen_array(f, e);
     case EXPR_MATCH: return gen_match(f, e, false);
     case EXPR_TRY: return gen_try(f, e);
     case EXPR_TRY_CAST: return gen_try_cast(f, e);

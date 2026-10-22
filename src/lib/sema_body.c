@@ -15,6 +15,9 @@ typedef struct {
     Name name;
     Type *type;
     bool is_mut;
+    bool moved;          /* a value owning a resource that was moved away (spec §6) */
+    size_t moved_offset; /* where */
+    int loop_depth;      /* loops around its declaration */
 } Local;
 
 typedef struct {
@@ -30,10 +33,13 @@ typedef struct {
     int unsafe_depth;
     int loop_depth;
     int defer_depth;
+    bool taking_address; /* `&x`: the checks of assignment apply */
+    bool assigning;      /* the target of `=`: a moved variable may receive a new value */
     VEC(Local) locals;
 } Body;
 
 static Type *check_expr(Body *b, Expr *e, Type *expected);
+static void check_assignable(Body *b, Expr *target);
 static void check_stmt(Body *b, Stmt *stmt);
 static void check_block(Body *b, Stmt *block);
 
@@ -100,6 +106,68 @@ static void report_mismatch(Body *b, const Expr *e, Type *expected, Type *found)
     release_names(&n);
 }
 
+/* ---- Moves (spec §6) ---- */
+
+/* True for the types that own a resource: `Arena`, and the values containing one. They are
+   moved, not copied. */
+static bool owns_resource(const Type *type) {
+    switch (type->tag) {
+    case T_ARENA:
+        return true;
+    case T_ARRAY:
+        return owns_resource(type->as.array.element);
+    case T_OPTION:
+        return owns_resource(type->as.inner);
+    case T_RESULT:
+        return owns_resource(type->as.result.value) || owns_resource(type->as.result.error);
+    case T_STRUCT:
+        for (size_t i = 0; i < type->as.info->field_count; i++) {
+            if (owns_resource(type->as.info->fields[i].type)) return true;
+        }
+        return false;
+    case T_ENUM:
+        for (size_t i = 0; i < type->as.info->variant_count; i++) {
+            const VariantInfo *variant = &type->as.info->variants[i];
+            for (size_t j = 0; j < variant->field_count; j++) {
+                if (owns_resource(variant->fields[j])) return true;
+            }
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
+static Local *find_local(Body *b, Name name);
+
+/* `e` is used as a value that goes elsewhere (a variable, an argument, a field, a returned
+   value...): a variable owning a resource is moved, and cannot be used afterwards. */
+static void consume(Body *b, Expr *e) {
+    if (!e->type || !owns_resource(e->type)) return;
+    if (e->kind == EXPR_TERNARY) {
+        consume(b, e->as.ternary.then_expr);
+        consume(b, e->as.ternary.else_expr);
+        return;
+    }
+    if (e->kind == EXPR_NAME && e->resolution == RESOLVED_LOCAL) {
+        Local *local = find_local(b, e->as.name);
+        if (!local || local->moved) return;
+        if (b->loop_depth > local->loop_depth) {
+            Diagnostic *d = error_expr(b, "E0356", e, "`%.*s` would be moved at each iteration of the loop",
+                                       NAME_ARGS(local->name));
+            diag_help(d, "after the first iteration, it no longer has its value: move it before the loop, or pass a pointer");
+        }
+        local->moved = true;
+        local->moved_offset = e->offset;
+        return;
+    }
+    if (e->kind == EXPR_NAME || e->kind == EXPR_FIELD || e->kind == EXPR_INDEX ||
+        (e->kind == EXPR_UNARY && e->as.unary.op == TOK_STAR)) {
+        Diagnostic *d = error_expr(b, "E0356", e, "a value that owns a resource cannot be moved out of where it is stored");
+        diag_help(d, "pass a pointer to it instead");
+    }
+}
+
 /* Checks `e` and reports it if its type is not `expected`. */
 static Type *check_expect(Body *b, Expr *e, Type *expected) {
     Type *type = check_expr(b, e, expected);
@@ -124,7 +192,7 @@ static void declare_local(Body *b, Name name, Type *type, bool is_mut) {
                                  NAME_ARGS(name));
         diag_help(d, "the first declaration is on line %zu: choose another name", sema_line_of(b->unit, existing->name.offset));
     }
-    Local local = { name, type, is_mut };
+    Local local = { name, type, is_mut, false, 0, b->loop_depth };
     SOSU_VEC_PUSH(&b->locals, local);
 }
 
@@ -360,7 +428,13 @@ static void record(Expr *e, Ref ref) {
 static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
     record(e, ref);
     switch (ref.kind) {
-    case REF_LOCAL: return ref.local->type;
+    case REF_LOCAL:
+        if (ref.local->moved && !b->assigning) {
+            Diagnostic *d = error_expr(b, "E0356", e, "`%.*s` was moved", NAME_ARGS(ref.local->name));
+            diag_help(d, "it moved on line %zu: a value that owns a resource (an `Arena`...) has one owner at a "
+                         "time; pass a pointer to lend it instead", sema_line_of(b->unit, ref.local->moved_offset));
+        }
+        return ref.local->type;
     case REF_FIELD: return ref.field->type;
     case REF_FN: return ref.fn->type;
     case REF_VARIANT: return variant_value(b, e, ref.info, ref.variant);
@@ -471,7 +545,10 @@ static Type *call_with(Body *b, Expr *e, Type *fn, Name name, bool is_unsafe) {
         check_args_loosely(b, e);
         return fn->as.fn.ret;
     }
-    for (size_t i = 0; i < count; i++) check_expect(b, e->as.call.args[i], fn->as.fn.params[i]);
+    for (size_t i = 0; i < count; i++) {
+        check_expect(b, e->as.call.args[i], fn->as.fn.params[i]);
+        consume(b, e->as.call.args[i]);
+    }
 
     char what[96];
     snprintf(what, sizeof what, "calling `%.*s`", NAME_ARGS(name));
@@ -493,7 +570,10 @@ static Type *call_variant(Body *b, Expr *e, const TypeInfo *info, size_t index) 
         check_args_loosely(b, e);
         return info->type;
     }
-    for (size_t i = 0; i < count; i++) check_expect(b, e->as.call.args[i], variant->fields[i]);
+    for (size_t i = 0; i < count; i++) {
+        check_expect(b, e->as.call.args[i], variant->fields[i]);
+        consume(b, e->as.call.args[i]);
+    }
     return info->type;
 }
 
@@ -552,6 +632,7 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
     if (strcmp(name, "some") == 0) {
         if (expected && expected->tag == T_OPTION) {
             check_expect(b, args[0], expected->as.inner);
+            consume(b, args[0]);
             return expected;
         }
         Type *type = check_expr(b, args[0], NULL);
@@ -570,7 +651,10 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
             check_args_loosely(b, e);
             return error_type(b);
         }
-        if (count == 1) check_expect(b, args[0], is_ok ? expected->as.result.value : expected->as.result.error);
+        if (count == 1) {
+            check_expect(b, args[0], is_ok ? expected->as.result.value : expected->as.result.error);
+            consume(b, args[0]);
+        }
         return expected;
     }
     if (strcmp(name, "assert") == 0) {
@@ -749,7 +833,10 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
                            count - 1, count - 1 == 1 ? "was" : "were");
                 for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
             } else {
-                for (size_t i = 1; i < count; i++) check_expect(b, args[i], fn->as.fn.params[i - 1]);
+                for (size_t i = 1; i < count; i++) {
+                    check_expect(b, args[i], fn->as.fn.params[i - 1]);
+                    consume(b, args[i]);
+                }
             }
             report_missing_effects(b, callee, fn->as.fn.effects, "`init`");
         } else if (count > 1) {
@@ -1100,6 +1187,10 @@ static Type *check_unary(Body *b, Expr *e, Type *expected) {
             error_expr(b, "E0353", e, "cannot take the address of a temporary value");
             type = error_type(b);
         } else if (!is_error(type)) {
+            /* the pointer allows writing: the value must be mutable (spec §5.3) */
+            b->taking_address = true;
+            check_assignable(b, operand);
+            b->taking_address = false;
             type = type_pointer(&b->s->types, type);
         }
         break;
@@ -1179,6 +1270,47 @@ static Type *check_index(Body *b, Expr *e) {
     return result;
 }
 
+/* `[a, b, c]` and `[value; count]`: the element type comes from the expected array type,
+   or else from the first element. */
+static Type *check_array(Body *b, Expr *e, Type *expected) {
+    Type *element = expected && expected->tag == T_ARRAY ? expected->as.array.element : NULL;
+    uint64_t size;
+    if (e->as.array.repeat) {
+        Expr *value = e->as.array.repeat;
+        element = element ? check_expect(b, value, element) : check_expr(b, value, NULL);
+        if (owns_resource(element)) {
+            error_expr(b, "E0356", value, "a value that owns a resource cannot be repeated");
+        }
+        size = e->as.array.repeat_count;
+    } else {
+        for (size_t i = 0; i < e->as.array.count; i++) {
+            Expr *item = e->as.array.items[i];
+            if (element) check_expect(b, item, element);
+            else element = check_expr(b, item, NULL);
+            consume(b, item);
+        }
+        size = e->as.array.count;
+    }
+    if (size == 0) {
+        error_expr(b, "E0308", e, "an array has at least one element");
+        return error_type(b);
+    }
+    if (!element || is_error(element)) return error_type(b);
+    if (element->tag == T_VOID) {
+        error_expr(b, "E0331", e, "the elements of this array have no value");
+        return error_type(b);
+    }
+    if (expected && expected->tag == T_ARRAY && expected->as.array.size != size) {
+        TypeNames n = {0};
+        Diagnostic *d = error_expr(b, "E0355", e, "the array has %llu element%s, but `%s` has %llu", (unsigned long long)size,
+                                   size == 1 ? "" : "s", tn(&n, expected), (unsigned long long)expected->as.array.size);
+        diag_help(d, "give every element, or repeat one value: `[value; %llu]`", (unsigned long long)expected->as.array.size);
+        release_names(&n);
+        return expected;
+    }
+    return type_array(&b->s->types, element, size);
+}
+
 static Type *check_struct_literal(Body *b, Expr *e) {
     const TypeExpr *te = e->as.struct_lit.type;
     Type *type = sema_resolve_named(b->s, b->unit, te->as.name, te->offset, te->length);
@@ -1208,6 +1340,7 @@ static Type *check_struct_literal(Body *b, Expr *e) {
         if (given[index]) error_at(b, "E0350", name.offset, name.length, "the field `%.*s` is given twice", NAME_ARGS(name));
         given[index] = true;
         check_expect(b, inits[i].value, info->fields[index].type);
+        consume(b, inits[i].value);
     }
     for (size_t j = 0; j < info->field_count; j++) {
         if (given[j] || info->fields[j].decl->init) continue;
@@ -1366,6 +1499,10 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
     case EXPR_BOOL:
         return builtin(b, "bool");
     case EXPR_NAME:
+        if (b->in_ensures && name_is(e->as.name, "result")) { /* contextual: the returned value */
+            e->kind = EXPR_RESULT;
+            return check_expr_kind(b, e, expected);
+        }
         return value_of_ref(b, e, lookup_name(b, e->as.name, expected), expected);
     case EXPR_SELF:
     case EXPR_BASE: {
@@ -1384,9 +1521,10 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
         return type_pointer(&b->s->types, b->self_info->type);
     }
     case EXPR_RESULT:
-        if (!b->in_ensures || b->ret->tag == T_VOID) {
-            Diagnostic *d = error_expr(b, "E0349", e, "`result` can only be used in `ensures`");
-            diag_help(d, "it is the value returned by a function that returns one");
+        if (b->ret->tag == T_VOID) {
+            Diagnostic *d = error_expr(b, "E0349", e, "`%.*s` returns nothing: `result` has no value here",
+                                       NAME_ARGS(b->fn_name));
+            diag_help(d, "in `ensures`, `result` is the value returned by the function");
             return error_type(b);
         }
         return b->ret;
@@ -1421,6 +1559,8 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
         return check_struct_literal(b, e);
     case EXPR_MATCH:
         return check_match(b, e, expected, false);
+    case EXPR_ARRAY:
+        return check_array(b, e, expected);
     case EXPR_TRY: {
         Type *type = check_expr(b, e->as.inner, NULL);
         if (is_error(type)) return type;
@@ -1470,7 +1610,8 @@ static void check_assignable(Body *b, Expr *target) {
         if (ref.kind == REF_LOCAL) {
             if (!ref.local->is_mut) {
                 Diagnostic *d = error_expr(b, "E0335", target, "`%.*s` is not mutable", NAME_ARGS(target->as.name));
-                diag_help(d, "declare it with `mut` to change it");
+                if (b->taking_address) diag_help(d, "declare it with `mut`: through its address, it can be changed");
+                else diag_help(d, "declare it with `mut` to change it");
             }
         } else if (ref.kind == REF_FIELD) {
             if (!field_is_assignable(b, ref.field)) {
@@ -1520,10 +1661,17 @@ static void check_assign(Body *b, Stmt *stmt) {
     Expr *target = stmt->as.assign.target;
     Expr *value = stmt->as.assign.value;
     TokenKind op = stmt->as.assign.op;
+    b->assigning = op == TOK_EQ && target->kind == EXPR_NAME; /* a moved variable can get a new value */
     Type *tt = check_expr(b, target, NULL);
+    b->assigning = false;
     check_assignable(b, target);
     if (op == TOK_EQ) {
         check_expect(b, value, tt);
+        consume(b, value);
+        if (target->kind == EXPR_NAME && target->resolution == RESOLVED_LOCAL) {
+            Local *local = find_local(b, target->as.name);
+            if (local) local->moved = false;
+        }
         return;
     }
     if (op == TOK_SHL_EQ || op == TOK_SHR_EQ) {
@@ -1631,6 +1779,7 @@ static void check_var(Body *b, Stmt *stmt) {
             type = error_type(b);
         }
     }
+    consume(b, init);
     declare_local(b, stmt->as.var.name, type, stmt->as.var.is_mut);
 }
 
@@ -1710,8 +1859,8 @@ static void check_for_in(Body *b, Stmt *stmt) {
         release_names(&n);
     }
     size_t mark = b->locals.count;
+    b->loop_depth++; /* the loop variable is new at each iteration */
     declare_local(b, stmt->as.for_in.name, declared ? declared : element, stmt->as.for_in.is_mut);
-    b->loop_depth++;
     check_block(b, stmt->as.for_in.body);
     b->loop_depth--;
     b->locals.count = mark;
@@ -1731,6 +1880,7 @@ static void check_return(Body *b, Stmt *stmt) {
             return;
         }
         check_expect(b, value, b->ret);
+        consume(b, value);
     } else if (b->ret->tag != T_VOID && !is_error(b->ret)) {
         TypeNames n = {0};
         Diagnostic *d = error_at(b, "E0346", stmt->offset, stmt->length, "`%.*s` must return a `%s`",
@@ -1822,7 +1972,8 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
     init_body(&b, s, unit, self_info, fn->name, typed ? type->as.fn.ret : s->types.error, typed ? type->as.fn.effects : 0);
     b.in_init = self_info && name_is(fn->name, "init");
     for (size_t i = 0; i < fn->param_count; i++) {
-        Local param = { fn->params[i].name, typed ? type->as.fn.params[i] : s->types.error, fn->params[i].is_mut };
+        Local param = { fn->params[i].name, typed ? type->as.fn.params[i] : s->types.error, fn->params[i].is_mut,
+                        false, 0, 0 };
         SOSU_VEC_PUSH(&b.locals, param); /* duplicates were reported with the declarations (E0319) */
     }
     for (size_t i = 0; i < fn->contract_count; i++) {

@@ -11,7 +11,7 @@ str describe(io.IoError e) {
 }
 
 i32 main() uses io {
-    Arena arena = Arena.new(4 * KB);
+    mut Arena arena = Arena.new(4 * KB);
     defer arena.free();
     str path = "tests/programs/files/build/note.txt";
 

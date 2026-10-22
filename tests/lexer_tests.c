@@ -62,7 +62,7 @@ static void test_basics(void) {
     expect_kinds("\xEF\xBB\xBFx", (TokenKind[]){ TOK_IDENT, TOK_EOF });
     expect_kinds("struct Point mut x _ some window comptimeX result",
                  (TokenKind[]){ TOK_KW_STRUCT, TOK_IDENT, TOK_KW_MUT, TOK_IDENT, TOK_IDENT, TOK_IDENT,
-                                TOK_IDENT, TOK_IDENT, TOK_KW_RESULT, TOK_EOF });
+                                TOK_IDENT, TOK_IDENT, TOK_IDENT, TOK_EOF }); /* `result` is contextual */
     expect_kinds("a // comment\n b /* block\n comment */ c",
                  (TokenKind[]){ TOK_IDENT, TOK_IDENT, TOK_IDENT, TOK_EOF });
     expect_kinds("// é ü 😀", (TokenKind[]){ TOK_EOF });

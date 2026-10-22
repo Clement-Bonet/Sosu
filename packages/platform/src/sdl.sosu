@@ -116,7 +116,7 @@ pub void clear(Renderer* renderer) uses io {
 }
 
 pub void fill_rect(Renderer* renderer, f32 x, f32 y, f32 w, f32 h) uses io {
-    FRect rect = FRect{ x: x, y: y, w: w, h: h };
+    mut FRect rect = FRect{ x: x, y: y, w: w, h: h };
     unsafe {
         SDL_RenderFillRect(renderer, &rect);
     }
