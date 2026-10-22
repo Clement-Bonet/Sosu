@@ -18,6 +18,7 @@ English is the working language of the project: code, comments, compiler message
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
+| 8. `platform` / `render` / `ui` | in progress: window, keyboard and mouse events, drawing in a canvas of pixels; text and `ui` next |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -92,7 +93,10 @@ docs/         specification and error codes
 
 ## A window (milestone 1 of spec §10.4)
 
-`packages/platform` opens a window and draws with SDL3; `examples/window` uses it. On Windows:
+`packages/platform` opens a window with SDL3 and hands the program its events and a canvas of
+pixels each frame; `packages/render` draws in that canvas, in Sosu (rectangles, borders, lines,
+transparency). `examples/window` uses both: the arrows move a rectangle, a click puts it under the
+mouse. The program keeps its state in a class that implements `app.Handler`. On Windows:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File packages\platform\fetch-sdl3.ps1   :: once: SDL3 3.4.18, checked by SHA-256

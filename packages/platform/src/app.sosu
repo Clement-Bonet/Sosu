@@ -1,6 +1,8 @@
 // platform.app: run a window (spec §10.1). The runtime owns the main loop and calls the
-// program back: on each event, then on each frame.
+// program back through its `Handler`: on each event, then on each frame, to draw on a
+// `render.canvas.Canvas` the size of the window.
 import platform.sdl;
+import render.canvas;
 
 pub struct Config {
     pub str title;
@@ -8,50 +10,52 @@ pub struct Config {
     pub i32 height;
 }
 
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+    Other,
+}
+
 pub enum Event {
     Quit,
     Resized(i32 width, i32 height),
-    Key(u32 code, bool down),  // SDL key codes: 27 is Escape
+    Key(u32 code, bool down),  // SDL key codes: 27 is Escape, 0x4000004F to 0x40000052 the arrows
+    MouseMove(f32 x, f32 y),
+    Click(f32 x, f32 y, Button button),  // a button pressed
+    Release(f32 x, f32 y, Button button),  // a button released
 }
 
-pub struct Color {
-    pub u8 r;
-    pub u8 g;
-    pub u8 b;
-    pub u8 a = 255;
+// What a program implements: its state lives in the class that implements it.
+pub interface Handler {
+    // Returns false to close the window.
+    bool on_event(Event e) uses io;
+    void on_frame(canvas.Canvas* surface) uses io;
 }
 
-pub struct Rect {
-    pub f32 x;
-    pub f32 y;
-    pub f32 w;
-    pub f32 h;
-}
-
-// What `on_frame` draws on.
-pub struct Canvas {
-    sdl.Renderer* renderer;
-
-    pub void clear(Color color) uses io {
-        sdl.set_color(renderer, color.r, color.g, color.b, color.a);
-        sdl.clear(renderer);
-    }
-
-    pub void fill(Rect rect, Color color) uses io {
-        sdl.set_color(renderer, color.r, color.g, color.b, color.a);
-        sdl.fill_rect(renderer, rect.x, rect.y, rect.w, rect.h);
-    }
+Button button_of(u8 index) {
+    return index == 1 ? Left : index == 2 ? Middle : index == 3 ? Right : Other;
 }
 
 Event? translate(sdl.Event* event) {
-    if (event.kind == 0x100) {  // SDL_EVENT_QUIT
+    u32 kind = event.kind;
+    if (kind == 0x100) {  // SDL_EVENT_QUIT
         return some(Quit);
     }
-    if (event.kind == 0x206) {  // SDL_EVENT_WINDOW_RESIZED
+    if (kind == 0x206) {  // SDL_EVENT_WINDOW_RESIZED
         return some(Resized(event.word5 as i32, event.word6 as i32));
     }
-    if (event.kind == 0x300 || event.kind == 0x301) {  // SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP
-        return some(Key(event.word7, event.kind == 0x300));
+    if (kind == 0x300 || kind == 0x301) {  // SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP
+        return some(Key(event.word7, kind == 0x300));
+    }
+    if (kind == 0x400) {  // SDL_EVENT_MOUSE_MOTION
+        sdl.MouseMotion* motion = sdl.as_motion(event);
+        return some(MouseMove(motion.x, motion.y));
+    }
+    if (kind == 0x401 || kind == 0x402) {  // SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP
+        sdl.MouseButton* press = sdl.as_button(event);
+        Button button = button_of(press.button);
+        return some(kind == 0x401 ? Click(press.x, press.y, button) : Release(press.x, press.y, button));
     }
     return none;
 }
@@ -62,7 +66,7 @@ pub void request_quit() uses io {
 }
 
 // Opens the window and runs until `on_event` returns false. Returns the exit code.
-pub i32 run(Config config, fn(Event) -> bool uses io on_event, fn(Canvas*) -> void uses io on_frame) uses io {
+pub i32 run(Config config, Handler* handler) uses io {
     mut Arena arena = Arena.new(16 * KB);
     defer arena.free();
     if (!sdl.init_video()) {
@@ -85,21 +89,51 @@ pub i32 run(Config config, fn(Event) -> bool uses io on_event, fn(Canvas*) -> vo
     };
     defer sdl.destroy_renderer(renderer);
 
+    // The pixels of the window: rebuilt, with their arena, when its size changes.
+    mut Arena pixels = Arena.new(1 * MB);
+    defer pixels.free();
+    mut canvas.Canvas surface = canvas.create(&pixels, config.width, config.height);
+    mut sdl.Texture* texture = match (sdl.create_texture(renderer, config.width, config.height)) {
+        some(created) => created,
+        none => {
+            return 1;
+        },
+    };
+    defer sdl.destroy_texture(texture);
+
     sdl.Event* event = arena.alloc(sdl.Event);
-    mut Canvas canvas = Canvas{ renderer: renderer };
     mut bool running = true;
     while (running) {
         while (sdl.poll(event)) {
             match (translate(event)) {
                 some(e) => {
-                    if (!on_event(e)) {
+                    match (e) {
+                        Resized(width, height) => {
+                            pixels.free();
+                            pixels = Arena.new(1 * MB);
+                            surface = canvas.create(&pixels, width, height);
+                            sdl.destroy_texture(texture);
+                            texture = match (sdl.create_texture(renderer, max(width, 1), max(height, 1))) {
+                                some(created) => created,
+                                none => {
+                                    return 1;
+                                },
+                            };
+                        },
+                        _ => { },
+                    }
+                    if (!handler.on_event(e)) {
                         running = false;
                     }
                 },
                 none => { },
             }
         }
-        on_frame(&canvas);
+        if (!running) {
+            break;
+        }
+        handler.on_frame(&surface);
+        sdl.show_pixels(renderer, texture, surface.pixels, surface.width);
         sdl.present(renderer);
         sdl.delay(16);
     }

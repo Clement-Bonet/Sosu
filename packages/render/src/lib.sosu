@@ -1,0 +1,2 @@
+// render: drawing into a buffer of pixels (spec §10). Programs import `render.canvas`.
+import render.canvas;

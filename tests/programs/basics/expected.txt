@@ -1,6 +1,9 @@
 Hello, Sosu!
 area = 7.0
 circle = 3.0
+round: true false
+empty
+not empty
 length² = 52.0
 ok 14
 error: empty

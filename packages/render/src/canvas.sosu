@@ -1,0 +1,180 @@
+// render.canvas: a buffer of pixels and what draws in it: rectangles, lines, blending.
+// Coordinates are in pixels, from the top left corner; what falls outside is clipped.
+
+pub struct Color {
+    pub u8 r;
+    pub u8 g;
+    pub u8 b;
+    pub u8 a = 255;  // 0: transparent, 255: opaque
+}
+
+pub struct Rect {
+    pub f32 x;
+    pub f32 y;
+    pub f32 w;
+    pub f32 h;
+}
+
+// `width * height` pixels, row by row, each 0xAARRGGBB.
+pub struct Canvas {
+    pub i32 width;
+    pub i32 height;
+    pub u32[] pixels;
+
+    pub void clear(Color color) {
+        u32 value = pack(color);
+        for (mut usize i = 0; i < pixels.len; i += 1) {
+            pixels[i] = value;
+        }
+    }
+
+    // Fills a rectangle, blended with what is below when the color is not opaque.
+    pub void fill(Rect rect, Color color) {
+        i32 x0 = clamp(rect.x, width);
+        i32 y0 = clamp(rect.y, height);
+        i32 x1 = clamp(rect.x + rect.w, width);
+        i32 y1 = clamp(rect.y + rect.h, height);
+        for (mut i32 y = y0; y < y1; y += 1) {
+            for (mut i32 x = x0; x < x1; x += 1) {
+                blend(x, y, color);
+            }
+        }
+    }
+
+    // The border of a rectangle, `thickness` pixels wide, inside the rectangle.
+    pub void stroke(Rect rect, Color color, f32 thickness) {
+        f32 t = min(thickness, min(rect.w, rect.h) / 2.0);
+        fill(Rect{ x: rect.x, y: rect.y, w: rect.w, h: t }, color);
+        fill(Rect{ x: rect.x, y: rect.y + rect.h - t, w: rect.w, h: t }, color);
+        fill(Rect{ x: rect.x, y: rect.y + t, w: t, h: rect.h - 2.0 * t }, color);
+        fill(Rect{ x: rect.x + rect.w - t, y: rect.y + t, w: t, h: rect.h - 2.0 * t }, color);
+    }
+
+    // A line one pixel wide, from (x0, y0) to (x1, y1) included (Bresenham).
+    pub void line(i32 x0, i32 y0, i32 x1, i32 y1, Color color) {
+        i32 dx = abs(x1 - x0);
+        i32 dy = -abs(y1 - y0);
+        i32 sx = x0 < x1 ? 1 : -1;
+        i32 sy = y0 < y1 ? 1 : -1;
+        mut i32 x = x0;
+        mut i32 y = y0;
+        mut i32 error = dx + dy;
+        while (true) {
+            blend(x, y, color);
+            if (x == x1 && y == y1) {
+                break;
+            }
+            i32 twice = 2 * error;
+            if (twice >= dy) {
+                error += dy;
+                x += sx;
+            }
+            if (twice <= dx) {
+                error += dx;
+                y += sy;
+            }
+        }
+    }
+
+    // The pixel at (x, y), or 0 outside the canvas.
+    pub u32 at(i32 x, i32 y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return 0;
+        }
+        return pixels[(y * width + x) as usize];
+    }
+
+    void blend(i32 x, i32 y, Color color) {
+        if (x < 0 || y < 0 || x >= width || y >= height || color.a == 0) {
+            return;
+        }
+        usize i = (y * width + x) as usize;
+        if (color.a == 255) {
+            pixels[i] = pack(color);
+            return;
+        }
+        u32 below = pixels[i];
+        u32 a = color.a as u32;
+        u32 r = mix(color.r as u32, below >> 16 & 0xFF, a);
+        u32 g = mix(color.g as u32, below >> 8 & 0xFF, a);
+        u32 b = mix(color.b as u32, below & 0xFF, a);
+        pixels[i] = 0xFF000000 | r << 16 | g << 8 | b;
+    }
+}
+
+// A canvas of `width * height` pixels in `arena`, transparent black.
+pub Canvas create(Arena* arena, i32 width, i32 height) {
+    usize count = (max(width, 0) * max(height, 0)) as usize;
+    return Canvas{ width: max(width, 0), height: max(height, 0), pixels: arena.alloc_slice(u32, count) };
+}
+
+pub u32 pack(Color color) {
+    return color.a as u32 << 24 | color.r as u32 << 16 | color.g as u32 << 8 | color.b as u32;
+}
+
+// `over` drawn with opacity `a` (0 to 255) on `below`, rounded.
+u32 mix(u32 over, u32 below, u32 a) {
+    return (over * a + below * (255 - a) + 127) / 255;
+}
+
+// A coordinate in [0, limit], rounded down.
+i32 clamp(f32 value, i32 limit) {
+    if (value <= 0.0) {
+        return 0;
+    }
+    if (value >= limit as f32) {
+        return limit;
+    }
+    return value as i32;
+}
+
+test "clear and fill" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Canvas c = create(&arena, 4, 3);
+    c.clear(Color{ r: 0, g: 0, b: 0 });
+    c.fill(Rect{ x: 1.0, y: 1.0, w: 2.0, h: 5.0 }, Color{ r: 255, g: 0, b: 0 });
+    assert(c.at(0, 0) == 0xFF000000);
+    assert(c.at(1, 1) == 0xFFFF0000);
+    assert(c.at(2, 2) == 0xFFFF0000);
+    assert(c.at(3, 2) == 0xFF000000);
+    assert(c.at(1, 5) == 0);  // outside
+}
+
+test "fill is clipped" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Canvas c = create(&arena, 3, 3);
+    c.fill(Rect{ x: -10.0, y: -10.0, w: 100.0, h: 11.0 }, Color{ r: 0, g: 0, b: 255 });
+    assert(c.at(0, 0) == 0xFF0000FF);
+    assert(c.at(2, 0) == 0xFF0000FF);
+    assert(c.at(0, 1) == 0);
+    c.fill(Rect{ x: 5.0, y: 5.0, w: 1.0, h: 1.0 }, Color{ r: 0, g: 0, b: 255 });
+}
+
+test "blending" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Canvas c = create(&arena, 1, 1);
+    c.clear(Color{ r: 0, g: 0, b: 200 });
+    c.fill(Rect{ x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, Color{ r: 255, g: 255, b: 0, a: 128 });
+    assert(c.at(0, 0) == 0xFF808064);
+    c.fill(Rect{ x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, Color{ r: 255, g: 255, b: 255, a: 0 });
+    assert(c.at(0, 0) == 0xFF808064);
+}
+
+test "lines and strokes" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Canvas c = create(&arena, 5, 5);
+    Color white = Color{ r: 255, g: 255, b: 255 };
+    c.line(0, 0, 4, 4, white);
+    assert(c.at(0, 0) == 0xFFFFFFFF && c.at(2, 2) == 0xFFFFFFFF && c.at(4, 4) == 0xFFFFFFFF);
+    assert(c.at(1, 0) == 0);
+    c.line(4, 0, -20, 0, white);  // clipped
+    assert(c.at(0, 0) == 0xFFFFFFFF && c.at(3, 0) == 0xFFFFFFFF);
+    c.clear(Color{ r: 0, g: 0, b: 0, a: 0 });
+    c.stroke(Rect{ x: 0.0, y: 0.0, w: 5.0, h: 5.0 }, white, 1.0);
+    assert(c.at(0, 2) == 0xFFFFFFFF && c.at(4, 2) == 0xFFFFFFFF && c.at(2, 4) == 0xFFFFFFFF);
+    assert(c.at(2, 2) == 0);
+}
