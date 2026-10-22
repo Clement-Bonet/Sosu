@@ -25,11 +25,18 @@ class App : app.Handler {
             Quit => {
                 return false;
             },
-            Key(code, down) => {
+            Key(code, down, mods) => {
                 if (code == 27) {
                     return false;
                 }
-                ui.key(code, down);
+                bool ctrl = mods.ctrl || mods.command;  // Cmd on macOS
+                if (down && ctrl && code == 118) {  // Ctrl+V: the clipboard, typed
+                    mut Arena paste = Arena.new(4 * KB);
+                    defer paste.free();
+                    ui.type_text(app.clipboard(&paste));
+                } else {
+                    ui.key(code, down, mods.shift, ctrl);
+                }
             },
             MouseMove(x, y) => {
                 ui.mouse_move(x, y);
@@ -55,6 +62,15 @@ class App : app.Handler {
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Greeter(&f, form);
         f.finish();
+        // what Ctrl+C or Ctrl+X copied goes to the clipboard
+        match (ui.take_copied()) {
+            some(text) => {
+                mut Arena copy = Arena.new(4 * KB);
+                defer copy.free();
+                app.set_clipboard(&copy, text);
+            },
+            none => { },
+        }
     }
 }
 

@@ -17,12 +17,42 @@ pub struct Rect {
     pub f32 h;
 }
 
+// A rectangle of whole pixels, from (x0, y0) included to (x1, y1) excluded.
+struct Clip {
+    mut i32 x0 = 0;
+    mut i32 y0 = 0;
+    mut i32 x1 = 0;
+    mut i32 y1 = 0;
+}
+
 // `width * height` pixels, row by row, each 0xAARRGGBB.
 pub struct Canvas {
     pub i32 width;
     pub i32 height;
     pub u32[] pixels;
+    // Drawing stays inside `clip`: the whole canvas, or the rectangles pushed, intersected.
+    mut Clip clip = Clip{ };
+    mut Clip[16] saved = [Clip{ }; 16];
+    mut usize depth = 0;
 
+    // From now on, drawing stays inside `rect` too, until `pop_clip()`.
+    pub void push_clip(Rect rect) {
+        if (depth < 16) {
+            saved[depth] = clip;
+        }
+        depth += 1;
+        clip = Clip{ x0: max(clip.x0, clamp(rect.x, width)), y0: max(clip.y0, clamp(rect.y, height)), x1: min(clip.x1, clamp(rect.x + rect.w, width)), y1: min(clip.y1, clamp(rect.y + rect.h, height)) };
+    }
+
+    pub void pop_clip() {
+        if (depth == 0) {
+            return;
+        }
+        depth -= 1;
+        clip = depth < 16 ? saved[depth] : clip;
+    }
+
+    // Fills the whole canvas, whatever the clip.
     pub void clear(Color color) {
         u32 value = pack(color);
         for (mut usize i = 0; i < pixels.len; i += 1) {
@@ -32,10 +62,10 @@ pub struct Canvas {
 
     // Fills a rectangle, blended with what is below when the color is not opaque.
     pub void fill(Rect rect, Color color) {
-        i32 x0 = clamp(rect.x, width);
-        i32 y0 = clamp(rect.y, height);
-        i32 x1 = clamp(rect.x + rect.w, width);
-        i32 y1 = clamp(rect.y + rect.h, height);
+        i32 x0 = max(clamp(rect.x, width), clip.x0);
+        i32 y0 = max(clamp(rect.y, height), clip.y0);
+        i32 x1 = min(clamp(rect.x + rect.w, width), clip.x1);
+        i32 y1 = min(clamp(rect.y + rect.h, height), clip.y1);
         for (mut i32 y = y0; y < y1; y += 1) {
             for (mut i32 x = x0; x < x1; x += 1) {
                 blend(x, y, color);
@@ -151,7 +181,7 @@ pub struct Canvas {
     }
 
     void blend(i32 x, i32 y, Color color) {
-        if (x < 0 || y < 0 || x >= width || y >= height || color.a == 0) {
+        if (x < clip.x0 || y < clip.y0 || x >= clip.x1 || y >= clip.y1 || color.a == 0) {
             return;
         }
         usize i = (y * width + x) as usize;
@@ -189,7 +219,8 @@ pub Rect text_size(str text, i32 scale) {
 // A canvas of `width * height` pixels in `arena`, transparent black.
 pub Canvas create(Arena* arena, i32 width, i32 height) {
     usize count = (max(width, 0) * max(height, 0)) as usize;
-    return Canvas{ width: max(width, 0), height: max(height, 0), pixels: arena.alloc_slice(u32, count) };
+    Clip all = Clip{ x0: 0, y0: 0, x1: max(width, 0), y1: max(height, 0) };
+    return Canvas{ width: max(width, 0), height: max(height, 0), pixels: arena.alloc_slice(u32, count), clip: all };
 }
 
 pub u32 pack(Color color) {
@@ -292,4 +323,25 @@ test "text size" {
     assert(size.w == 48.0 && size.h == 36.0);
     Rect empty = text_size("", 1);
     assert(empty.w == 0.0 && empty.h == 8.0);
+}
+
+test "clipping" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut Canvas c = create(&arena, 10, 10);
+    Color red = Color{ r: 255, g: 0, b: 0 };
+    c.push_clip(Rect{ x: 2.0, y: 2.0, w: 4.0, h: 4.0 });
+    c.fill(Rect{ x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, red);
+    assert(c.at(2, 2) == 0xFFFF0000 && c.at(5, 5) == 0xFFFF0000);
+    assert(c.at(1, 2) == 0 && c.at(6, 5) == 0 && c.at(5, 6) == 0);
+    c.push_clip(Rect{ x: 4.0, y: 0.0, w: 10.0, h: 10.0 });  // intersected: x 4 to 6
+    c.line(0, 3, 9, 3, Color{ r: 0, g: 0, b: 255 });
+    assert(c.at(3, 3) == 0xFFFF0000 && c.at(4, 3) == 0xFF0000FF && c.at(6, 3) == 0);
+    c.pop_clip();
+    c.text(0.0, 0.0, "AAAA", Color{ r: 0, g: 255, b: 0 }, 1);  // only inside 2 to 6
+    assert(c.at(0, 2) == 0);
+    c.pop_clip();
+    c.pop_clip();  // nothing pushed: ignored
+    c.fill(Rect{ x: 8.0, y: 8.0, w: 1.0, h: 1.0 }, red);
+    assert(c.at(8, 8) == 0xFFFF0000);
 }

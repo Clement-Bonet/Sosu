@@ -5,11 +5,13 @@ pub class Form {
     pub mut widgets.TextBuffer name;
     pub mut widgets.TextBuffer message;
     pub mut bool shout;
+    pub mut widgets.TextBuffer birthday;
 
     void init() {
         name = widgets.TextBuffer{ };
         message = widgets.TextBuffer{ };
         shout = false;
+        birthday = widgets.TextBuffer{ };
     }
 
     pub void greet() {

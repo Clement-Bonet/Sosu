@@ -24,6 +24,7 @@ window Greeter(state.Form* form) {
         } else {
             Text("Nobody greeted yet")
         }
+        TextField(bind: form.age, width: 80, accept: Digits, max: 3)
         Row(gap: 2) {
             for (i32 i in 0..form.greeted) {
                 Text("*")

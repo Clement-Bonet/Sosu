@@ -17,10 +17,20 @@ pub enum Button {
     Other,
 }
 
+// The keys held with another key.
+pub struct Mods {
+    pub bool shift;
+    pub bool ctrl;
+    pub bool alt;
+    pub bool command;  // Cmd on macOS, the Windows key on Windows
+}
+
 pub enum Event {
     Quit,
     Resized(i32 width, i32 height),
-    Key(u32 code, bool down),  // SDL key codes: 27 is Escape, 0x4000004F to 0x40000052 the arrows
+    // SDL key codes: 27 is Escape, 0x4000004F to 0x40000052 the arrows, `a` to `z` 97 to 122.
+    // A key held down repeats its `down` event.
+    Key(u32 code, bool down, Mods mods),
     MouseMove(f32 x, f32 y),
     Click(f32 x, f32 y, Button button),  // a button pressed
     Release(f32 x, f32 y, Button button),  // a button released
@@ -48,7 +58,10 @@ Event? translate(sdl.Event* event, Arena* frame) {
         return some(Resized(event.word5 as i32, event.word6 as i32));
     }
     if (kind == 0x300 || kind == 0x301) {  // SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP
-        return some(Key(event.word7, kind == 0x300));
+        sdl.Keyboard* key = sdl.as_keyboard(event);
+        u32 m = key.mods as u32;
+        Mods mods = Mods{ shift: m & 0x3 != 0, ctrl: m & 0xC0 != 0, alt: m & 0x300 != 0, command: m & 0xC00 != 0 };
+        return some(Key(key.key, kind == 0x300, mods));
     }
     if (kind == 0x400) {  // SDL_EVENT_MOUSE_MOTION
         sdl.MouseMotion* motion = sdl.as_motion(event);
@@ -63,6 +76,16 @@ Event? translate(sdl.Event* event, Arena* frame) {
         return some(TextInput(sdl.text_of(frame, event)));
     }
     return none;
+}
+
+// The text of the clipboard, copied into `arena`, or "".
+pub str clipboard(Arena* arena) uses io {
+    return sdl.clipboard_text(arena);
+}
+
+// Puts `text` on the clipboard (`arena` holds its C copy).
+pub void set_clipboard(Arena* arena, str text) uses io {
+    sdl.set_clipboard_text(arena, text);
 }
 
 // Asks the window to close: `on_event` then receives `Quit`, as for the window button.

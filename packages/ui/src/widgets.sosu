@@ -73,6 +73,102 @@ pub struct TextBuffer {
         }
         return found;
     }
+
+    // Editing, at byte offsets that start a character (0 and `len` included).
+
+    // The text from byte `from` to byte `to`.
+    pub str slice(usize from, usize to) {
+        usize end = min(to, len);
+        return match (str.from_bytes(bytes[min(from, end)..end])) {
+            ok(valid) => valid,
+            err(e) => "",
+        };
+    }
+
+    // Where the character after the one at `at` starts.
+    pub usize next(usize at) {
+        mut usize i = min(at + 1, len);
+        while (i < len && bytes[i] & 0xC0 == 0x80) {
+            i += 1;
+        }
+        return i;
+    }
+
+    // Where the character before `at` starts.
+    pub usize previous(usize at) {
+        if (at == 0) {
+            return 0;
+        }
+        mut usize i = min(at, len) - 1;
+        while (i > 0 && bytes[i] & 0xC0 == 0x80) {
+            i -= 1;
+        }
+        return i;
+    }
+
+    // Inserts `text` at `at`; false, and nothing changes, if it does not fit.
+    pub bool insert(usize at, str text) {
+        if (len + text.len > 256 || at > len) {
+            return false;
+        }
+        for (mut usize i = len; i > at; i -= 1) {
+            bytes[i - 1 + text.len] = bytes[i - 1];
+        }
+        for (usize i in 0..text.len) {
+            bytes[at + i] = text.bytes[i];
+        }
+        len += text.len;
+        return true;
+    }
+
+    // Removes the bytes from `from` to `to`.
+    pub void remove(usize from, usize to) {
+        usize end = min(to, len);
+        usize start = min(from, end);
+        usize removed = end - start;
+        for (mut usize i = start; i + removed < len; i += 1) {
+            bytes[i] = bytes[i + removed];
+        }
+        len -= removed;
+    }
+}
+
+// The key codes of SDL that text fields use (`platform.app` gives them as they are).
+u32 key_backspace() {
+    return 8;
+}
+
+u32 key_enter() {
+    return 13;
+}
+
+u32 key_delete() {
+    return 127;
+}
+
+u32 key_right() {
+    return 0x4000004F;
+}
+
+u32 key_left() {
+    return 0x40000050;
+}
+
+u32 key_home() {
+    return 0x4000004A;
+}
+
+u32 key_end() {
+    return 0x4000004D;
+}
+
+// Something typed for the text field that has the keyboard: text, or a key.
+struct Edit {
+    mut u32 key = 0;  // 0: the text `from` to `to` of `Ui.typed`
+    mut usize from = 0;
+    mut usize to = 0;
+    mut bool shift = false;
+    mut bool ctrl = false;
 }
 
 // The state of an interface between frames.
@@ -83,14 +179,22 @@ pub struct Ui {
     mut bool down = false;  // the left button is held
     mut bool pressed = false;  // it went down
     mut bool released = false;  // it went up
-    mut TextBuffer typed = TextBuffer{ };
-    mut i32 erased = 0;  // Backspace presses
-    mut bool entered = false;  // Enter was pressed
+    mut TextBuffer typed = TextBuffer{ };  // the text of the edits
+    mut Edit[64] edits = [Edit{ }; 64];  // in the order they came
+    mut usize edit_count = 0;
 
     // Between frames: the widget pressed and not yet released, the text field that has
     // the keyboard (-1: none). Widgets are numbered in the order of the calls.
     mut i32 active = -1;
     mut i32 focus = -1;
+    // In the text field that has the keyboard: the cursor and the other end of the selection
+    // (byte offsets), and how far its text is scrolled to keep the cursor in view.
+    mut usize cursor = 0;
+    mut usize anchor = 0;
+    mut f32 scroll = 0.0;
+    // What Ctrl+C or Ctrl+X copied, for the program to put on the clipboard.
+    mut TextBuffer copied = TextBuffer{ };
+    mut bool has_copied = false;
 
     // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
     // em for each step of scale: 18 for labels, 27 for titles.
@@ -112,21 +216,114 @@ pub struct Ui {
         down = is_down;
     }
 
+    // Typed text, or the text of the clipboard for a paste (Ctrl+V).
     pub void type_text(str text) {
-        typed.append(text);
+        usize from = typed.len;
+        if (edit_count < 64 && typed.insert(from, text)) {
+            edits[edit_count] = Edit{ from: from, to: typed.len };
+            edit_count += 1;
+        }
     }
 
-    // A key, with the key codes of SDL: Backspace (8) and Enter (13) edit the text fields.
-    pub void key(u32 code, bool is_down) {
-        if (!is_down) {
-            return;
-        }
-        if (code == 8) {
-            erased += 1;
-        } else if (code == 13) {
-            entered = true;
+    // A key, with the key codes of SDL, and whether Shift and Ctrl (Cmd on macOS) are held.
+    // Text fields use Left, Right, Home, End (Shift to select), Backspace, Delete, Enter, and
+    // Ctrl+A, Ctrl+C and Ctrl+X.
+    pub void key(u32 code, bool is_down, bool shift, bool ctrl) {
+        if (is_down && edit_count < 64) {
+            edits[edit_count] = Edit{ key: code, shift: shift, ctrl: ctrl };
+            edit_count += 1;
         }
     }
+
+    // What Ctrl+C or Ctrl+X copied since the last call, for the clipboard.
+    pub str? take_copied() {
+        if (!has_copied) {
+            return none;
+        }
+        has_copied = false;
+        return some(copied.text());
+    }
+}
+
+// ---- Formats of text fields ----
+
+// What a text field accepts, character by character.
+pub enum Accept {
+    Any,
+    Digits,  // 0 to 9
+    Integer,  // digits, and `-` first
+    Decimal,  // digits, `-` first, and one separator, `.` or `,`
+}
+
+pub struct Format {
+    pub Accept accept = Any;
+    pub usize max = 0;  // characters at most; 0: as many as fit
+    // 9: a digit, A: a letter, *: any character; the other characters are written as they
+    // are, when the cursor reaches them (`99/99/9999` for a date). Empty: no mask.
+    pub str mask = "";
+}
+
+str text_of(u8[] bytes) {
+    return match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
+}
+
+// Where the character after the one at byte `at` of `text` starts.
+usize next_char(str text, usize at) {
+    mut usize i = at + 1;
+    while (i < text.len && text.bytes[i] & 0xC0 == 0x80) {
+        i += 1;
+    }
+    return min(i, text.len);
+}
+
+usize chars_in(str text) {
+    mut usize count = 0;
+    for (char c in text.chars()) {
+        count += 1;
+    }
+    return count;
+}
+
+bool is_digit(u8 b) {
+    return b >= 48 && b <= 57;
+}
+
+// A letter: ASCII, or any character beyond it (é, ß, ж...).
+bool is_letter(u8 b) {
+    return b >= 65 && b <= 90 || b >= 97 && b <= 122 || b >= 0xC0;
+}
+
+bool is_slot(u8 m) {
+    return m == 57 || m == 65 || m == 42;  // 9, A, *
+}
+
+// Whether a character starting with byte `first` can go in the slot `m` of a mask.
+bool fits_slot(u8 m, u8 first) {
+    return m == 42 || m == 57 && is_digit(first) || m == 65 && is_letter(first);
+}
+
+// Whether a character starting with byte `first` can go at `at` in `text`.
+bool accepts(Accept accept, u8 first, TextBuffer* text, usize at) {
+    bool minus = first == 45 && at == 0 && !has_byte(text, 45);
+    bool separator = (first == 46 || first == 44) && !has_byte(text, 46) && !has_byte(text, 44);
+    return match (accept) {
+        Any => true,
+        Digits => is_digit(first),
+        Integer => is_digit(first) || minus,
+        Decimal => is_digit(first) || minus || separator,
+    };
+}
+
+bool has_byte(TextBuffer* text, u8 b) {
+    for (usize i in 0..text.len) {
+        if (text.bytes[i] == b) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The colors of the widgets.
@@ -277,38 +474,168 @@ pub struct Frame {
         return checkbox("", value);
     }
 
-    // A text field `width` pixels wide. A click gives it the keyboard; returns true when
-    // Enter is pressed in it.
+    // A text field `width` pixels wide. A click gives it the keyboard and places the cursor,
+    // dragging selects; returns true when Enter is pressed in it.
     pub bool text_field(TextBuffer* text, f32 width) {
+        return text_field_with(text, width, Format{ });
+    }
+
+    // The same, keeping only what `format` accepts.
+    pub bool text_field_with(TextBuffer* text, f32 width, Format format) {
         i32 id = take_id();
         canvas.Rect r = place(width, height);
+        canvas.Rect inner = canvas.Rect{ x: r.x + 8.0, y: r.y, w: max(width - 16.0, 0.0), h: height };
         if (ui.pressed && over(r)) {
-            ui.focus = id;
+            if (ui.focus != id) {
+                ui.focus = id;
+                ui.scroll = 0.0;
+            }
             focus_taken = true;
+            ui.active = id;
+            ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll);
+            ui.anchor = ui.cursor;
+        } else if (ui.focus == id && ui.active == id && ui.down) {
+            ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll);  // dragging selects
         }
         bool focused = ui.focus == id;
         mut bool entered = false;
         if (focused) {
-            text.append(ui.typed.text());
-            for (mut i32 i = 0; i < ui.erased; i += 1) {
-                text.erase_last();
-            }
-            entered = ui.entered;
+            // the text may have changed since the last frame (a Clear button)
+            ui.cursor = min(ui.cursor, text.len);
+            ui.anchor = min(ui.anchor, text.len);
+            entered = edit(text, format);
         }
+
         surface.fill(r, well());
         surface.stroke(r, focused ? accent() : face(over(r), false), 2.0);
-        // what fits, ending with the last characters typed
-        mut usize count = text.count();
-        while (count > 0 && measure(text.tail(count), 2).w > width - 20.0) {
-            count -= 1;
+        surface.push_clip(canvas.Rect{ x: inner.x - 2.0, y: r.y + 2.0, w: inner.w + 4.0, h: r.h - 4.0 });
+        f32 caret = measure(text.slice(0, focused ? ui.cursor : 0), 2).w;
+        if (focused) {  // keep the cursor in view
+            if (caret - ui.scroll > inner.w - 2.0) {
+                ui.scroll = caret - inner.w + 2.0;
+            }
+            if (caret < ui.scroll) {
+                ui.scroll = caret;
+            }
         }
-        str shown = text.tail(count);
-        write(r.x + 8.0, r.y, height, shown, ink(), 2);
+        f32 shift = focused ? ui.scroll : 0.0;
+        if (focused && ui.anchor != ui.cursor) {
+            f32 a = measure(text.slice(0, min(ui.anchor, ui.cursor)), 2).w;
+            f32 b = measure(text.slice(0, max(ui.anchor, ui.cursor)), 2).w;
+            canvas.Color selected = canvas.Color{ r: 137, g: 180, b: 250, a: 90 };
+            surface.fill(canvas.Rect{ x: inner.x + a - shift, y: r.y + 6.0, w: b - a, h: 20.0 }, selected);
+        }
+        write(inner.x - shift, r.y, height, text.text(), ink(), 2);
         if (focused) {
-            f32 end = r.x + 8.0 + measure(shown, 2).w;
-            surface.fill(canvas.Rect{ x: end + 1.0, y: r.y + 6.0, w: 2.0, h: 20.0 }, accent());
+            surface.fill(canvas.Rect{ x: inner.x + caret - shift, y: r.y + 6.0, w: 2.0, h: 20.0 }, accent());
+        }
+        surface.pop_clip();
+        return entered;
+    }
+
+    // The byte offset of the character boundary nearest to `x`, from the start of the text.
+    usize index_at(TextBuffer* text, f32 x) {
+        mut usize at = 0;
+        while (at < text.len) {
+            usize after = text.next(at);
+            f32 left = measure(text.slice(0, at), 2).w;
+            f32 right = measure(text.slice(0, after), 2).w;
+            if (x < (left + right) / 2.0) {
+                return at;
+            }
+            at = after;
+        }
+        return text.len;
+    }
+
+    // Applies the edits of the frame to the text field that has the keyboard, in order.
+    // Returns true if Enter was pressed.
+    bool edit(TextBuffer* text, Format format) {
+        mut bool entered = false;
+        for (usize i in 0..ui.edit_count) {
+            Edit e = ui.edits[i];
+            usize start = min(ui.anchor, ui.cursor);
+            usize end = max(ui.anchor, ui.cursor);
+            if (e.key == 0) {
+                type_into(text, ui.typed.slice(e.from, e.to), format);
+            } else if (e.ctrl && e.key == 97) {  // Ctrl+A: all
+                ui.anchor = 0;
+                ui.cursor = text.len;
+            } else if (e.ctrl && (e.key == 99 || e.key == 120)) {  // Ctrl+C, Ctrl+X
+                if (start != end) {
+                    ui.copied.set(text.slice(start, end));
+                    ui.has_copied = true;
+                    if (e.key == 120) {
+                        erase_selection(text);
+                    }
+                }
+            } else if (e.key == key_backspace() || e.key == key_delete()) {
+                if (start == end) {
+                    ui.anchor = e.key == key_backspace() ? text.previous(ui.cursor) : text.next(ui.cursor);
+                }
+                erase_selection(text);
+            } else if (e.key == key_left() || e.key == key_right()) {
+                bool left = e.key == key_left();
+                if (start != end && !e.shift) {
+                    ui.cursor = left ? start : end;  // the selection ends where the arrow points
+                } else {
+                    ui.cursor = left ? text.previous(ui.cursor) : text.next(ui.cursor);
+                }
+                if (!e.shift) {
+                    ui.anchor = ui.cursor;
+                }
+            } else if (e.key == key_home() || e.key == key_end()) {
+                ui.cursor = e.key == key_home() ? 0 : text.len;
+                if (!e.shift) {
+                    ui.anchor = ui.cursor;
+                }
+            } else if (e.key == key_enter()) {
+                entered = true;
+            }
         }
         return entered;
+    }
+
+    void erase_selection(TextBuffer* text) {
+        usize start = min(ui.anchor, ui.cursor);
+        text.remove(start, max(ui.anchor, ui.cursor));
+        ui.cursor = start;
+        ui.anchor = start;
+    }
+
+    // Typed text, at the cursor, instead of the selection: each character that `format`
+    // accepts, with the fixed characters of its mask written on the way.
+    void type_into(TextBuffer* text, str typed, Format format) {
+        erase_selection(text);
+        mut usize at = 0;
+        while (at < typed.len) {
+            usize after = next_char(typed, at);
+            str piece = text_of(typed.bytes[at..after]);
+            at = after;
+            if (format.mask.len > 0) {
+                mut usize position = chars_in(text.slice(0, ui.cursor));
+                while (position < format.mask.len && !is_slot(format.mask.bytes[position])) {
+                    str fixed = text_of(format.mask.bytes[position..position + 1]);
+                    if (!text.insert(ui.cursor, fixed)) {
+                        return;
+                    }
+                    ui.cursor += 1;
+                    position += 1;
+                }
+                if (position >= format.mask.len || !fits_slot(format.mask.bytes[position], piece.bytes[0])) {
+                    continue;
+                }
+            } else if (!accepts(format.accept, piece.bytes[0], text, ui.cursor)) {
+                continue;
+            }
+            if (format.max > 0 && text.count() >= format.max) {
+                return;
+            }
+            if (text.insert(ui.cursor, piece)) {
+                ui.cursor += piece.len;
+            }
+        }
+        ui.anchor = ui.cursor;
     }
 
     // Ends the frame: the input it used is consumed.
@@ -322,8 +649,7 @@ pub struct Frame {
         ui.pressed = false;
         ui.released = false;
         ui.typed.len = 0;
-        ui.erased = 0;
-        ui.entered = false;
+        ui.edit_count = 0;
     }
 
     // The size of `text` at `scale`, in the font of `ui`, or else the built-in one.
@@ -460,8 +786,8 @@ test "a text field takes the keyboard when clicked" {
     ui.mouse_button(true);
     ui.mouse_button(false);
     ui.type_text("Ada");
-    ui.key(8, true);
-    ui.key(13, true);
+    ui.key(8, true, false, false);
+    ui.key(13, true, false, false);
     f = begin(&ui, &surface, 0.0, 0.0);
     assert(f.text_field(&name, 200.0));  // Enter
     f.finish();
@@ -545,4 +871,118 @@ test "the widgets use the font of ui" {
     }
     assert(drawn > 50);
     f.finish();
+}
+
+// Runs one frame with a text field 200 pixels wide at (0, 0), and the input given so far.
+bool field_frame(Ui* ui, canvas.Canvas* surface, TextBuffer* text, Format format) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    bool entered = f.text_field_with(text, 200.0, format);
+    f.finish();
+    return entered;
+}
+
+void press(Ui* ui, u32 key, bool shift, bool ctrl) {
+    ui.key(key, true, shift, ctrl);
+    ui.key(key, false, shift, ctrl);  // released keys are ignored
+}
+
+test "editing a text field" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    mut TextBuffer t = TextBuffer{ };
+    Format any = Format{ };
+    // a click gives the keyboard; typing, moving and typing again, in order
+    ui.mouse_move(10.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    ui.type_text("held");
+    press(&ui, key_left(), false, false);
+    press(&ui, key_left(), false, false);
+    ui.type_text("\u{e9}");
+    field_frame(&ui, &surface, &t, any);
+    assert(t.text().len == 6 && ui.cursor == 4);  // "heéld": é is 2 bytes
+    // Shift+Home selects to the start, typing replaces the selection
+    press(&ui, key_home(), true, false);
+    ui.type_text("W");
+    field_frame(&ui, &surface, &t, any);
+    assert(t.len == 3 && t.bytes[0] == 87 && ui.cursor == 1);  // "Wld"
+    // Backspace and Delete, with and without a selection
+    press(&ui, key_delete(), false, false);
+    press(&ui, key_end(), false, false);
+    press(&ui, key_backspace(), false, false);
+    field_frame(&ui, &surface, &t, any);
+    assert(t.len == 1 && ui.cursor == 1);  // "W"
+    ui.type_text("orld");
+    press(&ui, 97, false, true);  // Ctrl+A
+    press(&ui, 99, false, true);  // Ctrl+C
+    press(&ui, key_right(), false, false);  // the selection ends: the cursor at its end
+    field_frame(&ui, &surface, &t, any);
+    assert(t.len == 5 && ui.cursor == 5 && ui.anchor == 5);
+    bool copied = match (ui.take_copied()) {
+        some(text) => text.len == 5,
+        none => false,
+    };
+    assert(copied && !ui.has_copied);
+    press(&ui, key_left(), true, false);
+    press(&ui, key_left(), true, false);
+    press(&ui, 120, false, true);  // Ctrl+X: "ld"
+    press(&ui, key_enter(), false, false);
+    assert(field_frame(&ui, &surface, &t, any));
+    assert(t.len == 3 && ui.copied.len == 2);  // "Wor"
+}
+
+test "the mouse places the cursor and selects" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    mut TextBuffer t = TextBuffer{ };
+    t.set("abcdef");  // the built-in font: 16 pixels per character, from x = 8
+    ui.mouse_move(8.0 + 2.0 * 16.0 + 3.0, 10.0);  // nearer to the boundary after `b`
+    ui.mouse_button(true);
+    field_frame(&ui, &surface, &t, Format{ });
+    assert(ui.cursor == 2 && ui.anchor == 2);
+    ui.mouse_move(8.0 + 5.0 * 16.0 - 2.0, 10.0);  // dragging, the button still held
+    field_frame(&ui, &surface, &t, Format{ });
+    assert(ui.cursor == 5 && ui.anchor == 2);
+    ui.mouse_button(false);
+    field_frame(&ui, &surface, &t, Format{ });
+    assert(ui.active == -1 && ui.focus == 0);
+}
+
+test "formats" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(10.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+
+    mut TextBuffer digits = TextBuffer{ };
+    ui.type_text("a1-2.3 4");
+    field_frame(&ui, &surface, &digits, Format{ accept: Digits, max: 3 });
+    assert(digits.len == 3 && digits.bytes[0] == 49 && digits.bytes[2] == 51);  // "123"
+
+    mut TextBuffer integer = TextBuffer{ };
+    ui.type_text("-12-3");
+    field_frame(&ui, &surface, &integer, Format{ accept: Integer });
+    assert(integer.len == 4);  // "-123": the second `-` is refused
+
+    mut TextBuffer decimal = TextBuffer{ };
+    ui.type_text("3,14.15");
+    field_frame(&ui, &surface, &decimal, Format{ accept: Decimal });
+    assert(decimal.len == 6 && decimal.bytes[1] == 44);  // "3,1415": one separator
+
+    mut TextBuffer date = TextBuffer{ };
+    ui.type_text("2512x2026/7");
+    field_frame(&ui, &surface, &date, Format{ mask: "99/99/9999" });
+    assert(date.len == 10 && date.bytes[2] == 47 && date.bytes[5] == 47);  // "25/12/2026"
+
+    mut TextBuffer code = TextBuffer{ };
+    ui.type_text("ab12");
+    field_frame(&ui, &surface, &code, Format{ mask: "AA-99" });
+    assert(code.len == 5 && code.bytes[2] == 45);  // "ab-12"
 }
