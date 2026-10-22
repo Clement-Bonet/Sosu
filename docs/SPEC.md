@@ -448,6 +448,9 @@ shared = { path = "../shared" }
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
 - In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
+- A Git dependency names a `tag` or a `rev` (a commit, possibly abbreviated); a branch is not accepted, since it moves. The compiler calls the `git` command, which must be installed: the repository is cloned into `build/deps/<name>-<commit>` of the root package, once per commit. A URL without a scheme (`../ui`, `C:/repos/ui`) is a local repository, relative to the package that declares it.
+- `sosu.lock`, next to the `sosu.toml` of the root package, is written by the compiler and kept in version control. One line per Git dependency of the program, transitive ones included: `<name> <url> tag|rev <tag or rev> <commit>`. While a dependency keeps its URL and its `tag` or `rev`, the commit of the lock is used, even if the tag has moved since, and nothing is fetched once the clone exists. Changing the `tag` or `rev` fetches the new version and updates the lock; it is not written when a dependency has an error. The locks of the dependencies themselves are not read.
+- URLs, tags and revs are passed to the shell: they may contain letters, digits and `-._~:/@+=,` only (and `\` in URLs).
 - No circular dependencies between packages.
 - `platform`, `render` and `ui` are packages like any other.
 

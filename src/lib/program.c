@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "path.h"
+#include "shell.h"
 
 static Diagnostic *report(Program *program, const char *code, const SourceFile *file, size_t offset, size_t length,
                           const char *fmt, ...) {
@@ -36,17 +37,56 @@ static Package *find_package(const Program *program, const char *root) {
 
 static Package *load_package(Program *program, const char *root, bool builtin, bool *missing);
 
+/* The folder of a git dependency, cloned at the commit of sosu.lock if it has one; NULL
+   after reporting a failure. */
+static char *fetch_git(Program *program, Package *package, const Dependency *dep) {
+    const SourceFile *file = &package->manifest_file;
+    const char *kind = dep->tag ? "tag" : "rev";
+    const char *ref = dep->tag ? dep->tag : dep->rev;
+    if (!ref) return NULL; /* invalid, already reported */
+    const char *problem = git_check_source(dep->git, ref);
+    if (problem) {
+        Diagnostic *d = report(program, "E0404", file, dep->offset, dep->length, "dependency `%s`: %s", dep->name, problem);
+        diag_help(d, "URLs, tags and revs may use letters, digits and `-._~:/@+=,`");
+        return NULL;
+    }
+    if (!program->deps_dir) {
+        report(program, "E0405", file, dep->offset, dep->length, "git dependencies need a package folder");
+        return NULL;
+    }
+    /* A local URL is relative to the package, like a `path`. */
+    char *url = git_is_local(dep->git) ? normalized_join(package->root, dep->git) : sosu_strdup(dep->git);
+    const LockEntry *locked = lock_find(&program->lock, dep->name, dep->git, kind, ref);
+    char *commit;
+    char *error;
+    char *root = git_fetch(program->deps_dir, dep->name, url, kind, ref, locked ? locked->commit : NULL, &commit, &error);
+    if (root) {
+        lock_set(&program->used, dep->name, dep->git, kind, ref, commit);
+    } else {
+        Diagnostic *d = report(program, "E0405", file, dep->offset, dep->length, "cannot fetch the dependency `%s`",
+                               dep->name);
+        diag_help(d, "%s", error);
+    }
+    free(url);
+    free(commit);
+    free(error);
+    return root;
+}
+
 /* Loads the package a dependency points to, and checks it. */
 static Package *load_dependency(Program *program, Package *package, const Dependency *dep) {
     const SourceFile *file = &package->manifest_file;
+    char *root;
     if (dep->git) {
-        Diagnostic *d = report(program, "E0405", file, dep->offset, dep->length, "git dependencies are not supported yet");
-        diag_help(d, "clone the repository and use `%s = { path = \"...\" }` for now", dep->name);
-        return NULL;
+        root = fetch_git(program, package, dep);
+        if (!root) return NULL;
+    } else if (dep->path) {
+        root = normalized_join(package->root, dep->path);
+    } else {
+        return NULL; /* invalid, already reported */
     }
-    if (!dep->path) return NULL; /* invalid, already reported */
+    const char *source = dep->git ? dep->git : dep->path;
 
-    char *root = normalized_join(package->root, dep->path);
     Package *child = find_package(program, root);
     if (child && child->state == PACKAGE_LOADING) {
         Diagnostic *d = report(program, "E0407", file, dep->offset, dep->length,
@@ -68,8 +108,9 @@ static Package *load_dependency(Program *program, Package *package, const Depend
 
     if (strcmp(child->name, dep->name) != 0) {
         Diagnostic *d = report(program, "E0406", file, dep->offset, dep->length,
-                               "the package at `%s` is named `%s`, not `%s`", dep->path, child->name, dep->name);
-        diag_help(d, "the key is the name used by `import`: write `%s = { path = \"%s\" }`", child->name, dep->path);
+                               "the package at `%s` is named `%s`, not `%s`", source, child->name, dep->name);
+        diag_help(d, "the key is the name used by `import`: write `%s = { %s = \"%s\"%s }`", child->name,
+                  dep->git ? "git" : "path", source, dep->git ? ", ..." : "");
         return NULL;
     }
     for (size_t i = 0; i < program->packages.count; i++) {
@@ -264,15 +305,21 @@ bool program_load(Program *program, const char *dir, const char *lib_dir) {
     memset(program, 0, sizeof *program);
     program->lib_dir = path_normalize(lib_dir);
     char *root = path_normalize(dir);
+    char *lock_path = path_join(root, "sosu.lock");
+    program->deps_dir = path_join(root, "build/deps");
+    lock_read(&program->lock, lock_path);
 
     bool missing;
     Package *package = load_package(program, root, false, &missing);
-    if (!package) {
-        program->fatal = sosu_format("no sosu.toml in `%s`", root);
-        free(root);
-        return false;
-    }
+    if (!package) program->fatal = sosu_format("no sosu.toml in `%s`", root);
     free(root);
+    /* The lock follows the git dependencies, unless a dependency has an error. */
+    if (package && program->diags.error_count == 0 && !lock_equal(&program->lock, &program->used) &&
+        (program->used.count || shell_file_exists(lock_path)) && !lock_write(&program->used, lock_path)) {
+        program->fatal = sosu_format("cannot write `%s`", lock_path);
+    }
+    free(lock_path);
+    if (program->fatal) return false;
 
     const char *entries[] = { "main", "lib" };
     Unit *entry = NULL;
@@ -340,5 +387,8 @@ void program_free(Program *program) {
     arena_free(&program->arena);
     free(program->lib_dir);
     free(program->fatal);
+    free(program->deps_dir);
+    lock_free(&program->lock);
+    lock_free(&program->used);
     memset(program, 0, sizeof *program);
 }

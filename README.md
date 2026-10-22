@@ -12,7 +12,7 @@ English is the working language of the project: code, comments, compiler message
 | Step (roadmap §13) | Status |
 |---|---|
 | 1. Lexer | done |
-| 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
+| 2. Parser -> AST, packages and imports | done (local and git dependencies, `sosu.lock`) |
 | 3. Semantic analysis | done for the language of §5 to §7 |
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |

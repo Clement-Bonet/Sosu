@@ -1,8 +1,10 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "path.h"
 #include "program.h"
+#include "shell.h"
 #include "test.h"
 
 /* Run from the repository root: the test packages are in tests/packages. */
@@ -185,9 +187,121 @@ static void test_program(void) {
     program_free(&program);
 }
 
+/* ---- Git dependencies: a local repository, built in build/git_test ---- */
+
+static void write_text(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    CHECK(file != NULL, "cannot write %s", path);
+    if (!file) return;
+    fputs(text, file);
+    fclose(file);
+}
+
+static bool git(const char *args) {
+    char *command = sosu_format("git -C build/git_test/shapes -c user.name=test -c user.email=test@example.com %s"
+#ifdef _WIN32
+                                " >nul 2>nul",
+#else
+                                " >/dev/null 2>&1",
+#endif
+                                args);
+    int status = shell_run(command);
+    free(command);
+    return status == 0;
+}
+
+static void write_app(const char *source) {
+    char *manifest = sosu_format("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nshapes = { %s }\n",
+                                 source);
+    write_text("build/git_test/app/sosu.toml", manifest);
+    free(manifest);
+}
+
+/* The folder of `shapes` in the program: build/deps/shapes-<commit>. */
+static char *shapes_root(const Program *program) {
+    for (size_t i = 0; i < program->packages.count; i++) {
+        if (strcmp(program->packages.items[i]->name, "shapes") == 0) return sosu_strdup(program->packages.items[i]->root);
+    }
+    return sosu_strdup("");
+}
+
+static char *load_shapes(const char *what, const char *codes) {
+    Program program;
+    program_load(&program, "build/git_test/app", "lib");
+    CHECK(!program.fatal, "%s: fatal error: %s", what, program.fatal ? program.fatal : "");
+    check_codes(what, &program.diags, codes);
+    char *root = shapes_root(&program);
+    program_free(&program);
+    return root;
+}
+
+static char *read_lock(void) {
+    SourceFile file;
+    if (!source_load(&file, "build/git_test/app/sosu.lock")) return sosu_strdup("");
+    char *text = sosu_strdup(file.text);
+    source_free(&file);
+    return text;
+}
+
+static void test_git(void) {
+    shell_remove_dir("build/git_test");
+    shell_make_dir("build/git_test/shapes/src");
+    shell_make_dir("build/git_test/app/src");
+    write_text("build/git_test/shapes/sosu.toml", "[package]\nname = \"shapes\"\nversion = \"1.0.0\"\n");
+    write_text("build/git_test/shapes/src/lib.sosu", "pub i32 sides() {\n    return 3;\n}\n");
+    write_text("build/git_test/app/src/main.sosu", "import shapes.lib;\n\ni32 main() {\n    return lib.sides();\n}\n");
+    bool ready = git("init --quiet") && git("add .") && git("commit --quiet -m one") && git("tag v1");
+    CHECK(ready, "cannot create the test repository (is git installed?)");
+    if (!ready) return;
+
+    write_app("git = \"../shapes\", tag = \"v1\"");
+    char *first = load_shapes("git tag", "");
+    CHECK(strstr(first, "build/git_test/app/build/deps/shapes-") != NULL, "cloned into build/deps: %s", first);
+    char *lock = read_lock();
+    CHECK(strncmp(lock, "# ", 2) == 0 && strstr(lock, "\nshapes ../shapes tag v1 "), "sosu.lock written:\n%s", lock);
+    free(lock);
+
+    /* The tag moves: the lock keeps the first commit. */
+    write_text("build/git_test/shapes/src/lib.sosu", "pub i32 sides() {\n    return 4;\n}\n");
+    CHECK(git("commit --quiet -am two") && git("tag -f v1") && git("tag v2"), "second commit");
+    char *again = load_shapes("git tag, locked", "");
+    CHECK(strcmp(first, again) == 0, "the lock is used: %s, then %s", first, again);
+
+    /* Another tag: fetched, and the lock follows. */
+    write_app("git = \"../shapes\", tag = \"v2\"");
+    char *second = load_shapes("git tag changed", "");
+    CHECK(second[0] && strcmp(first, second) != 0, "a new tag gives a new commit: %s", second);
+    lock = read_lock();
+    CHECK(strstr(lock, "\nshapes ../shapes tag v2 ") != NULL, "sosu.lock updated:\n%s", lock);
+    free(lock);
+
+    /* A rev: a commit, short or full. */
+    const char *commit = strrchr(first, '-') + 1;
+    char *source = sosu_format("git = \"../shapes\", rev = \"%.8s\"", commit);
+    write_app(source);
+    char *by_rev = load_shapes("git rev", "");
+    CHECK(strcmp(by_rev, first) == 0, "rev %.8s: %s", commit, by_rev);
+
+    write_app("git = \"../shapes\", tag = \"v9\"");
+    free(load_shapes("missing tag", "E0405"));
+    write_app("git = \"../shapes\", tag = \"v1 && echo\"");
+    free(load_shapes("unsafe tag", "E0404"));
+    write_app("git = \"../sh\\\"apes\", tag = \"v1\"");
+    free(load_shapes("unsafe url", "E0404"));
+    write_app("git = \"$(evil)\", tag = \"v1\"");
+    free(load_shapes("unsafe url", "E0404"));
+
+    free(source);
+    free(by_rev);
+    free(second);
+    free(again);
+    free(first);
+}
+
 int main(void) {
     test_paths();
     test_manifest();
     test_program();
+    test_git();
     return test_summary("package tests");
 }
