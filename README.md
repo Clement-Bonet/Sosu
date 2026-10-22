@@ -77,7 +77,9 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   ast         syntax tree and its printer
   parser      syntax analysis (recursive descent)
   path        file path helpers
+  shell       commands run through the system shell (C compiler, git)
   manifest    sosu.toml parser
+  git         git dependencies and sosu.lock
   program     loading of packages, dependencies and imported modules
   types       semantic types (interned)
   sema        semantic analysis of declarations
@@ -85,23 +87,48 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   codegen     C code generation
 src/sosuc/    command-line driver
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
-tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end
+packages/     platform (window and events, on SDL3), render (pixels, shapes, text), ui (widgets)
+examples/     window (shapes, keyboard and mouse), form (widgets)
+tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
+              and window (a window test run by the CI)
 docs/         specification and error codes
 ```
 
 `sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
 (which is `lib/` for `build/sosuc`).
 
-## A window (milestone 1 of spec §10.4)
+## Dependencies
 
-`packages/platform` opens a window with SDL3 and hands the program its events and a canvas of
-pixels each frame; `packages/render` draws in that canvas, in Sosu (rectangles, borders, lines, text,
-transparency). `examples/window` uses both: the arrows move a rectangle, a click puts it under the
-mouse. The program keeps its state in a class that implements `app.Handler`. On Windows:
+A package lists its dependencies in `sosu.toml` (spec §8.1), from a folder or a Git repository:
+
+```toml
+[dependencies]
+shared = { path = "../shared" }
+ui = { git = "https://github.com/someone/sosu-ui", tag = "v0.1.0" }
+```
+
+Git dependencies are cloned with `git` into `build/deps/` of the package, and `sosu.lock` keeps
+their exact commit: keep it in version control.
+
+## Windows and widgets (spec §10)
+
+Three packages, written in Sosu:
+
+- `packages/platform` opens a window with SDL3 and hands the program its events (keyboard, mouse,
+  typed text) and a canvas of pixels each frame. The program keeps its state in a class that
+  implements `app.Handler`.
+- `packages/render` draws in that canvas: rectangles, borders, lines, transparency, and text with
+  a built-in 8 by 8 font.
+- `packages/ui` adds widgets in immediate mode: at each frame, the program describes its interface
+  from its state (`if (f.button("Greet")) { ... }`).
+
+`examples/window` moves a rectangle with the arrows and the mouse; `examples/form` is a small form
+with a text field, a checkbox and buttons. On Windows:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File packages\platform\fetch-sdl3.ps1   :: once: SDL3 3.4.18, checked by SHA-256
 build\sosuc run examples\window
+build\sosuc run examples\form
 ```
 
 The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On Linux,
@@ -110,18 +137,12 @@ The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On 
 ```sh
 sudo apt install libsdl3-dev    # Ubuntu 25.04 or later, Debian 13 or later
 ./build/sosuc run examples/window
-```
-
-`tests/window` opens a window, draws one frame and closes itself. The CI runs it on Linux and
-Windows with `SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
-
-`packages/ui` adds widgets in immediate mode: at each frame, the program describes its interface
-from its state (`if (f.button("Greet")) { ... }`). `examples/form` is a small form with a text
-field, a checkbox and buttons:
-
-```sh
 ./build/sosuc run examples/form
 ```
+
+The tests of `render` and `ui` need no screen (`sosuc test packages/render`, `sosuc test
+packages/ui`). `tests/window` opens a window, draws one frame and closes itself: the CI runs it on
+Linux and Windows with `SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
 
 ## Branches
 
@@ -138,7 +159,8 @@ tests everywhere.
 
 - [docs/SPEC.md](docs/SPEC.md): the language. Points the first draft left open were settled while
   writing the compiler and are part of it now: literals (§3.1), operators and struct literals (§5.1),
-  `match` (§7.1), packages and imports (§8.1), the full grammar (§12), decisions and open
+  moves and `.copy()` (§6), `match` (§7.1), packages, imports and `sosu.lock` (§8.1), the v0
+  interface of `platform`, `render` and `ui` (§10.4), the full grammar (§12), decisions and open
   questions (§14).
 - [docs/errors.md](docs/errors.md): every error code, with an example.
 
@@ -149,4 +171,5 @@ tests everywhere.
   bracket), so one mistake gives one message.
 - The syntax trees live in an arena freed at once; names point into the source text.
 - Only libc is used: the compiler cannot list a folder, so it loads the modules reachable by
-  `import` from the entry file.
+  `import` from the entry file. It calls the C compiler and `git` through the system shell, like a
+  user would.
