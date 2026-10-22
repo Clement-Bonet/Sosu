@@ -1,5 +1,6 @@
 // Covers the language that code generation supports: run with `sosuc run`.
 import std.io;
+import basics.defaults;
 
 enum Shape {
     Circle(f32 radius),
@@ -114,6 +115,8 @@ i32 first_even() {
 
 i32 main() uses io {
     io.print("Hello, Sosu!");
+    defaults.Style style = defaults.Style{ };
+    io.print("style: {} {} {}", style.size, style.name, style.mark);
     io.print("area = {}", area(Shape.Rect(2.0, 3.5)));
     io.print("circle = {}", area(Circle(1.0)));
     io.print("round: {} {}", round(Circle(1.0)), round(Empty));

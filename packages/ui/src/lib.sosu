@@ -1,0 +1,2 @@
+// ui: widgets in immediate mode (spec §10). Programs import `ui.widgets`.
+import ui.widgets;

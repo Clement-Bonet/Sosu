@@ -1226,8 +1226,44 @@ static Type *check_field(Body *b, Expr *e, Type *expected) {
     return error_type(b);
 }
 
+/* `x[a..b]`: a view of the elements a to b - 1 of an array or a slice. */
+static Type *check_slicing(Body *b, Expr *e, Type *object) {
+    Type *base = object->tag == T_POINTER ? object->as.inner : object;
+    Expr *range = e->as.index.index;
+    Type *usize = builtin(b, "usize");
+    check_expect(b, range->as.range.start, usize);
+    check_expect(b, range->as.range.end, usize);
+    range->type = usize;
+    if (base->tag == T_ARRAY) {
+        if (object->tag != T_POINTER && is_place(e->as.index.object)) {
+            /* the view allows writing, like `&x`: the array must be mutable */
+            b->taking_address = true;
+            check_assignable(b, e->as.index.object);
+            b->taking_address = false;
+        } else if (object->tag != T_POINTER) {
+            error_expr(b, "E0353", e, "cannot take a view of a temporary array");
+        }
+        return type_slice(&b->s->types, base->as.array.element);
+    }
+    if (base->tag == T_SLICE) return base;
+    if (!is_error(base)) {
+        TypeNames n = {0};
+        Diagnostic *d = error_expr(b, "E0334", e, "a `%s` cannot be sliced", tn(&n, base));
+        if (base->tag == T_STR) diag_help(d, "slice its bytes: `s.bytes[a..b]` (spec §4.1)");
+        release_names(&n);
+    }
+    return error_type(b);
+}
+
 static Type *check_index(Body *b, Expr *e) {
     Type *object = check_expr(b, e->as.index.object, NULL);
+    if (e->as.index.index->kind == EXPR_RANGE) {
+        if (e->as.index.index->as.range.inclusive) {
+            Diagnostic *d = error_expr(b, "E0352", e->as.index.index, "a view takes a range without its end: `a..b`");
+            diag_help(d, "to include the element b, write `x[a..b + 1]`");
+        }
+        return check_slicing(b, e, object);
+    }
     Type *base = object->tag == T_POINTER ? object->as.inner : object;
     Type *index = check_expr(b, e->as.index.index, builtin(b, "usize"));
     TypeNames n = {0};
@@ -1620,6 +1656,11 @@ static void check_assignable(Body *b, Expr *target) {
         return;
     }
     case EXPR_INDEX: {
+        if (target->as.index.index->kind == EXPR_RANGE) {
+            Diagnostic *d = error_expr(b, "E0335", target, "a view `x[a..b]` cannot be assigned");
+            diag_help(d, "assign its elements, one by one");
+            return;
+        }
         Type *type = target->as.index.object->type;
         if (type && type->tag == T_ARRAY) check_assignable(b, target->as.index.object);
         return;

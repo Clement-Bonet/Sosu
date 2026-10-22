@@ -1,0 +1,9 @@
+# A form with widgets (spec §10.4, milestone 3, without the .ui.sosu file yet).
+[package]
+name = "form"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }

@@ -1,0 +1,91 @@
+// A form (spec §10.4, milestone 3): a text field, buttons and a checkbox, described again
+// at each frame from the state of `Form`. Closes with the window button or Escape.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/form`.
+import std.io;
+import platform.app;
+import render.canvas;
+import ui.widgets;
+
+class Form : app.Handler {
+    mut widgets.Ui ui;
+    mut widgets.TextBuffer name;
+    mut widgets.TextBuffer message;
+    mut bool shout;
+
+    void init() {
+        ui = widgets.Ui{ };
+        name = widgets.TextBuffer{ };
+        message = widgets.TextBuffer{ };
+        shout = false;
+    }
+
+    // The input goes to the widgets.
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Key(code, down) => {
+                if (code == 27) {
+                    return false;
+                }
+                ui.key(code, down);
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        mut widgets.Frame f = widgets.begin(&ui, surface, 32.0, 32.0);
+        f.title("Hello");
+        f.label("Your name:");
+        bool entered = f.text_field(&name, 336.0);
+        f.checkbox("Shout", &shout);
+        f.space(8.0);
+        f.row();
+        if (f.button("Clear")) {
+            name.set("");
+            message.set("");
+        }
+        if (f.button("Greet") || entered) {
+            greet();
+        }
+        f.end_row();
+        f.space(8.0);
+        f.label(message.text());
+        f.finish();
+    }
+
+    void greet() {
+        if (name.count() == 0) {
+            message.set("Type a name first.");
+            return;
+        }
+        message.set(shout ? "HELLO, " : "Hello, ");
+        message.append(name.text());
+        message.append(shout ? "!!!" : ".");
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Form* form = arena.new(Form);
+    return app.run(app.Config{ title: "Sosu form", width: 400, height: 380 }, form as app.Handler*);
+}

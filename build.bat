@@ -37,6 +37,8 @@ build\sosuc.exe check packages\platform || exit /b 1
 build\sosuc.exe check examples\window || exit /b 1
 build\sosuc.exe check tests\window || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1
+build\sosuc.exe test packages\ui || exit /b 1
+build\sosuc.exe check examples\form || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

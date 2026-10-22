@@ -45,6 +45,16 @@ pub struct MouseButton {
     pub f32 y;
 }
 
+// SDL_TextInputEvent: `text` is a UTF-8 C string owned by SDL until the next event.
+struct TextInput {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    u32 padding;
+    u8* text;
+}
+
 pub struct Texture { }
 
 pub struct FRect {
@@ -77,6 +87,35 @@ extern "C" {
     void SDL_DestroyTexture(Texture* texture) uses io;
     bool SDL_UpdateTexture(Texture* texture, FRect* rect, u8* pixels, i32 pitch) uses io;
     bool SDL_RenderTexture(Renderer* renderer, Texture* texture, FRect* source, FRect* target) uses io;
+    bool SDL_StartTextInput(Window* window) uses io;
+}
+
+// Asks for text input events: the typed characters, after the keyboard layout and the
+// input methods. On a phone, this shows the virtual keyboard.
+pub void start_text_input(Window* window) uses io {
+    unsafe {
+        SDL_StartTextInput(window);
+    }
+}
+
+// The text of an SDL_EVENT_TEXT_INPUT, copied into `arena` (at most 255 bytes).
+pub str text_of(Arena* arena, Event* event) {
+    mut u8[] bytes = arena.alloc_slice(u8, 0);
+    unsafe {
+        u8* text = (event as TextInput*).text;
+        mut usize length = 0;
+        while (length < 255 && *(text + length) != 0) {
+            length += 1;
+        }
+        bytes = arena.alloc_slice(u8, length);
+        for (mut usize i = 0; i < length; i += 1) {
+            bytes[i] = *(text + i);
+        }
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
 }
 
 // The mouse events, read from the bytes of an SDL_Event.
