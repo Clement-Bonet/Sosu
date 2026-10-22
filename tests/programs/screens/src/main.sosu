@@ -37,7 +37,7 @@ i32 main() uses io {
     click(&ui, 50.0, 110.0);  // the text field takes the keyboard
     ui.type_text("Ada");
     frame(&ui, &surface, form);
-    ui.key(13, true);  // Enter: on_enter
+    ui.key(13, true, false, false);  // Enter: on_enter
     frame(&ui, &surface, form);
     io.print("{} ({})", form.message.text(), form.greeted);
 

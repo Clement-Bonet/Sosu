@@ -702,6 +702,7 @@ Translation in v0:
 | `Text(s)`, `Title(s)`, `Space(n)` | `f.label(s)`, `f.title(s)`, `f.space(n)` |
 | `Button(s, on_click: h, enabled: c)` | `if (f.button_enabled(s, c)) { h(); }`; `h` is a function or a method (`state.save`), or a call (`state.save(1)`) |
 | `TextField(bind: x, width: w, on_enter: h)` | `if (f.text_field(&x, w)) { h(); }`; `bind:` is required, `width` is 200 by default |
+| `TextField(bind: x, accept: Digits, max: n, mask: m)` | `f.text_field_with(&x, w, widgets.Format{ accept: widgets.Accept.Digits, max: n, mask: m })`: `accept:` names a variant of `widgets.Accept` |
 | `Checkbox(s, bind: x, on_change: h)` | `if (f.checkbox(s, &x)) { h(); }`; without `s`, `f.checkbox_alone(&x)` |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples.
@@ -729,8 +730,8 @@ children     = "{" { item } "}" ;
 
 ### 10.4 Milestones
 
-1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). The events are `Quit`, `Resized`, `Key`, `MouseMove`, `Click`, `Release` and `TextInput` (its `str` lives until the end of the frame); `app.request_quit()` closes the window as the window button does.
-   - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `line`, `text` and `at`, all clipped to the canvas. `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen.
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). The events are `Quit`, `Resized`, `Key(code, down, mods)` (`app.Mods`: `shift`, `ctrl`, `alt`, `command`; a key held repeats its `down`), `MouseMove`, `Click`, `Release` and `TextInput` (its `str` lives until the end of the frame); `app.request_quit()` closes the window as the window button does, `app.clipboard(arena)` and `app.set_clipboard(arena, text)` read and write the clipboard.
+   - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `line`, `text` and `at`, all clipped to the canvas, and to the rectangles of `push_clip(rect)` until `pop_clip()` (16 levels; `clear` ignores them). `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen.
    - Text: `render.font` is a built-in 8 by 8 font for printable ASCII (font8x8, public domain); other characters are drawn as a box. `surface.text(x, y, text, color, scale)` draws each pixel of the font as a `scale` by `scale` square, `\n` starts a new line (`font.line_height()`: 10 pixels of the font), and `canvas.text_size(text, scale)` gives the size of the text. It needs no file, and stays the font of last resort.
    - TrueType fonts: `render.truetype` reads `.ttf` files and draws their glyphs in Sosu, antialiased, at any size. `truetype.load(arena, path)` gives a `Font*` (or `Unreadable`, `NotTrueType`); `surface.text_with(font, size, x, y, text, color)` draws text whose first line has its top at y, `size` being in pixels per em; `font.measure(text, size)`, `font.line_height(size)` and `font.ascent(size)` measure it. All of Unicode that the font covers is drawn (accented letters are composite glyphs); a character it does not have gets its missing glyph.
      - Reading: the tables `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf` and `cmap` (formats 4 and 12), through checked reads: a damaged file gives wrong glyphs, never a read outside of its bytes. Drawing: the outlines (lines and quadratic curves, composite glyphs moved and scaled) accumulate the area they cover under each pixel; the image of a glyph is kept per size (256 images at most, then forgotten), and `close()` frees them.
@@ -739,8 +740,10 @@ children     = "{" { item } "}" ;
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target. Done on the desktop: `examples/form` describes its window in `screen.ui.sosu` (§10.2), and `tests/programs/screens` drives such a window with simulated input, without a screen.
    - The `ui` package: without lambdas (v1), a widget cannot call the program back, so `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame in nested columns and rows (`column(gap, padding)`, `row_with(gap, padding)`, `end()`; `row()` and `end_row()` for a row with the default gap).
-   - Widgets: `label`, `title`, `button` and `button_enabled` (true when clicked), `checkbox(text, bool*)` and `checkbox_alone(bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8. `widgets.Window` holds what a window of a `.ui.sosu` file says about itself.
-   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` generates the calls to the widgets.
+   - Widgets: `label`, `title`, `button` and `button_enabled` (true when clicked), `checkbox(text, bool*)` and `checkbox_alone(bool*)`, `text_field(TextBuffer*, width)` and `text_field_with(TextBuffer*, width, Format)` (true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8. `widgets.Window` holds what a window of a `.ui.sosu` file says about itself.
+   - Text fields: a click gives the keyboard and places the cursor, dragging selects. Left and Right (with Shift: selecting), Home, End, Backspace and Delete edit at the cursor; Ctrl+A selects all, Ctrl+C and Ctrl+X copy (`ui.take_copied()` gives the text, for `app.set_clipboard`), and a paste is typed text (`ui.type_text(app.clipboard(arena))`). The text is clipped to the field and scrolls to keep the cursor in view. The input of a frame is replayed in order (typing, then a key, then typing again).
+   - Formats: `Format{ accept, max, mask }`. `accept` is `Any`, `Digits`, `Integer` (and `-` first) or `Decimal` (and `-` first, and one `.` or `,`); `max` limits the characters; a mask such as `99/99/9999` takes a digit for `9`, a letter for `A`, anything for `*`, and writes its other characters when the cursor reaches them. What does not fit is not typed.
+   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key(code, down, shift, ctrl)`), so its tests run without SDL, and puts what it copies on the clipboard (`examples/form` shows the few lines). The translator of `.ui.sosu` generates the calls to the widgets.
 
 Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file (§10.2), each one with a method of `widgets.Frame` behind it.
 
@@ -750,8 +753,8 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `Button` | available | `enabled:` dims it and ignores clicks |
 | `Checkbox` | available | with or without a label |
 | `Column`, `Row`, `Space` | available | nested, with `gap` and `padding` |
-| `TextField` (one line) | basic | typing and erasing at the end only, 256 bytes; to do: the editing core below, and formats |
-| `TextField` with a format | planned | `accept:` filters what is typed (`Digits`, `Integer`, `Decimal`, a mask such as `"99999"`), `max:` limits the length |
+| `TextField` (one line) | available | the editing core: cursor, selection, clipboard, scrolling; 256 bytes |
+| `TextField` with a format | available | `accept:` (`Digits`, `Integer`, `Decimal`), `max:`, `mask:` (`"99/99/9999"`) |
 | `NumberField` | planned | bound to a number, not to text: `NumberField(bind: quantity)`, with `min:` and `max:`; one widget per type until generics (`i64`, `f64`) |
 | `MoneyField` | planned | bound to an integer of minor units (`i64` cents), never to a float; `symbol:` and `decimal:` given explicitly (`symbol: "€", decimal: ","`) rather than read from the locale of the system |
 | `TextArea` (several lines) | planned | the same editing core, plus Up / Down, line wrapping and scrolling; `rows:` gives its height; text in a buffer that grows in an arena |
@@ -761,13 +764,13 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 
 Foundations, to build first, since most planned widgets rely on them:
 
-1. Clipping in `render`: a stack of clip rectangles on the `Canvas`, so that nothing overflows a field, a list or a text area.
-2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat.
+1. Clipping in `render`: a stack of clip rectangles on the `Canvas`, so that nothing overflows a field, a list or a text area. Done.
+2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat. Done (key repeat comes from the system); not yet: moving by word (Ctrl+Left), undo.
 3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`.
 4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame.
 5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform`.
 
-Order: the editing core and formatted one-line fields, then `Radio` (quick once the translator exists), `List` with scrolling, `TextArea`, and `Dropdown` with the layer above. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus, images (`render` would then draw images).
+Order: the editing core and formatted one-line fields (done), then `Radio` (quick once the translator exists), `List` with scrolling, `TextArea`, and `Dropdown` with the layer above. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus, images (`render` would then draw images).
 
 Two limits of v0 apply to every text widget: without a TrueType font (`ui.font`), the built-in font only draws ASCII (other characters are kept, and drawn as boxes), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
 

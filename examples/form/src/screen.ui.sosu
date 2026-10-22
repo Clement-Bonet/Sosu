@@ -5,12 +5,14 @@ import form.state;
 window Greeter(state.Form* form) {
     title: "Sosu form"
     width: 400
-    height: 380
+    height: 460
 
     Column(gap: 8, padding: 32) {
         Title("Hello")
         Text("Your name:")
         TextField(bind: form.name, width: 336, on_enter: form.greet)
+        Text("Birthday:")
+        TextField(bind: form.birthday, width: 160, mask: "99/99/9999")
         Checkbox("Shout", bind: form.shout)
         Space(8)
         Row(gap: 8) {

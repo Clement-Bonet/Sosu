@@ -1355,7 +1355,7 @@ typedef struct {
     const char *name;
     size_t values;        /* values in order, before the properties */
     bool optional;        /* the value can be left out (a checkbox without a label) */
-    const char *props[4]; /* NULL-terminated */
+    const char *props[8]; /* NULL-terminated */
     bool children;        /* `{ ... }` after the arguments */
 } UiNodeKind;
 
@@ -1366,7 +1366,7 @@ static const UiNodeKind ui_nodes[] = {
     { "Title", 1, false, { NULL }, false },
     { "Space", 1, false, { NULL }, false },
     { "Button", 1, false, { "on_click", "enabled", NULL }, false },
-    { "TextField", 0, false, { "bind", "width", "on_enter", NULL }, false },
+    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
 };
 
@@ -1551,6 +1551,39 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
     return true;
 }
 
+/* `widgets.Format{ accept: widgets.Accept.Digits, max: 10, mask: "..." }` from the properties of a
+   TextField, or NULL when it has none of them. `accept: Digits` names a variant of
+   `widgets.Accept`: it is qualified here, since the type is known. */
+static Expr *ui_format(Parser *p, const UiArgs *args, size_t offset, size_t length) {
+    static const char *const names[] = { "accept", "max", "mask" };
+    VEC(FieldInit) fields = {0};
+    for (size_t i = 0; i < 3; i++) {
+        Expr *value = ui_prop(args, names[i]);
+        if (!value) continue;
+        if (i == 0 && value->kind == EXPR_NAME) {
+            Expr *module = ui_expr(p, EXPR_NAME, value->offset, value->length);
+            module->as.name = ui_name("widgets", value->offset);
+            Expr *type = ui_expr(p, EXPR_FIELD, value->offset, value->length);
+            type->as.field.object = module;
+            type->as.field.name = ui_name("Accept", value->offset);
+            Expr *variant = ui_expr(p, EXPR_FIELD, value->offset, value->length);
+            variant->as.field.object = type;
+            variant->as.field.name = value->as.name;
+            value = variant;
+        }
+        FieldInit field;
+        field.name = ui_name(names[i], value->offset);
+        field.value = value;
+        SOSU_VEC_PUSH(&fields, field);
+    }
+    if (!fields.count) return NULL;
+    Expr *literal = ui_expr(p, EXPR_STRUCT_LIT, offset, length);
+    literal->as.struct_lit.type = ui_type(p, offset, "widgets", "Format");
+    literal->as.struct_lit.field_count = fields.count;
+    literal->as.struct_lit.fields = FINISH(p, fields);
+    return literal;
+}
+
 /* A component used as a node: `TaskRow(t)` calls `TaskRow(ui_frame, t)`. */
 static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_t start, size_t length) {
     if (args->props.count) {
@@ -1629,8 +1662,10 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
         } else if (name_text_is(node, "TextField")) {
-            Expr *call_args[2] = { ui_address(p, ui_prop(&args, "bind")), ui_float(p, ui_prop(&args, "width"), start, 200) };
-            Expr *field = ui_frame_call(p, start, length, "text_field", call_args, 2);
+            Expr *call_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_float(p, ui_prop(&args, "width"), start, 200),
+                                   ui_format(p, &args, start, length) };
+            Expr *field = ui_frame_call(p, start, length, call_args[2] ? "text_field_with" : "text_field", call_args,
+                                        call_args[2] ? 3 : 2);
             SOSU_VEC_PUSH(out, ui_when(p, field, ui_prop(&args, "on_enter")));
         } else if (name_text_is(node, "Checkbox")) {
             Expr *bound = ui_address(p, ui_prop(&args, "bind"));

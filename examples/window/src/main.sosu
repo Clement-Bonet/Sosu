@@ -24,7 +24,7 @@ class Demo : app.Handler {
             Quit => {
                 return false;
             },
-            Key(code, down) => {
+            Key(code, down, mods) => {
                 if (code == 27) {
                     return false;
                 }

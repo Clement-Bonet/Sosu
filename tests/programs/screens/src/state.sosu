@@ -6,12 +6,14 @@ pub class Form {
     pub mut widgets.TextBuffer message;
     pub mut bool shout;
     pub mut i32 greeted;
+    pub mut widgets.TextBuffer age;
 
     void init() {
         name = widgets.TextBuffer{ };
         message = widgets.TextBuffer{ };
         shout = false;
         greeted = 0;
+        age = widgets.TextBuffer{ };
     }
 
     pub void greet() {

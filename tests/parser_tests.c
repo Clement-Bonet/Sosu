@@ -327,6 +327,12 @@ static void test_ui_files(void) {
               "      (block\n"
               "        (call (. ui_frame space) 4)\n"
               "        (call (. other Row) ui_frame t i)))))\n");
+    expect_ui("component C(T* t) {\n    TextField(bind: t.date, mask: \"99/99/9999\", accept: Digits, max: 10)\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame text_field_with) (& (. t date)) 200.0 "
+              "(lit widgets.Format (accept (. (. widgets Accept) Digits)) (max 10) (mask \"99/99/9999\")))))\n"
+              "(import ui.widgets)\n");
 
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
     expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);
