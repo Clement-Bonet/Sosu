@@ -566,12 +566,14 @@ The UI is a set of packages, never compiler syntax. Three layers, each replaceab
 | `ui` | layout, widgets, state, declarative syntax | widgets drawn by Sosu, identical rendering everywhere |
 
 - SDL3 handles Windows, Linux, macOS, Android and iOS. Its interface stays narrow so that custom backends can be added later (Win32, Cocoa, X11 / Wayland, UIKit, native Android).
-- Text is the real difficulty: `stb_truetype` or FreeType at first; fonts, HiDPI and international input (IME) must be planned from the start.
+- Text is the real difficulty. v0 starts with a built-in 8 by 8 bitmap font (ASCII, §10.4); proportional fonts will come through `stb_truetype` or FreeType behind the same call. HiDPI and international input (IME) must be planned from the start: typed text already arrives as `TextInput` (UTF-8), after the keyboard layout and the input methods.
 - Accessibility (screen readers): to be planned, outside v0.
 
 ### 10.1 Events and loop
 
 Events are a sum `enum`, handled by an exhaustive `match`. On mobile, the OS owns the main loop: the `platform` runtime therefore owns it on every platform, and the program provides callbacks.
+
+The sketch below is the target. What v0 implements (§10.4) passes the callbacks as an `app.Handler`, and has the events `Quit`, `Resized`, `Key`, `TextInput`, `MouseMove`, `Click` and `Release`; touch, safe areas and the lifecycle come with mobile.
 
 ```sosu
 enum Event {
@@ -855,17 +857,19 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Integer overflow: an error in debug, modulo arithmetic in release.
 - Function overloading: excluded.
 - Concurrency: threads and message channels, an arena belongs to a single thread, UI on the main thread.
-- Program entry: callbacks provided to the `platform` runtime, which owns the main loop.
+- Program entry: the `platform` runtime owns the main loop and calls the program back through the interface `app.Handler`, implemented by a class that holds the state (§10.4).
 - `.ui.sosu` syntax: only in dedicated files in v0.
 - Interface hot reload: after v0.
 - Manifest format: a subset of TOML (`sosu.toml`, §8.1), implemented.
-- Source of dependencies in v0: local path or Git repository, without a central registry. Local paths are implemented; Git sources are parsed but not fetched yet.
+- Source of dependencies in v0: local path or Git repository (`tag` or `rev`), without a central registry. Both are implemented; Git dependencies are cloned with the `git` command and pinned by `sosu.lock` (§8.1).
 - A `struct` cannot implement an interface in v0 (reserved for classes); the parser rejects `struct S : I`.
 - Imported names are qualified by the module name: `vector.Vec2`, `io.print(...)` (§8.1).
 - C libraries are declared in `sosu.toml` only ([link] sections, §9.1), not in the source code.
 - Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
 - Array literals `[a, b]` and `[value; n]`; `&x` requires `mut x`; `result` is contextual (only in `ensures`) (§5.3).
 - Moves: `Arena` and the values containing one are moved, checked in the order of the source; `.copy()` duplicates them with new, empty arenas (§6).
+- Views `x[a..b]` of arrays and slices, without copy, bounds checked; a view of an array needs it `mut`, like `&x` (§4, §5.3).
+- User interface (§10.4): `render` draws in software into a buffer of pixels, with a built-in 8 by 8 font; `ui` works in immediate mode (no lambdas in v0) and does not depend on `platform`, so that it is tested without a screen.
 
 ### 14.2 Open questions
 
