@@ -56,6 +56,15 @@ void close(CFile* file) uses io {
 
 // The whole content of a text file, allocated in `arena`.
 pub str!IoError read_file(Arena* arena, str path) uses io {
+    u8[] bytes = try read_bytes(arena, path);
+    return match (str.from_bytes(bytes)) {
+        ok(text) => ok(text),
+        err(e) => err(InvalidUtf8),
+    };
+}
+
+// The whole content of a file, as bytes (a font, an image...), allocated in `arena`.
+pub u8[]!IoError read_bytes(Arena* arena, str path) uses io {
     CFile* file = match (open(arena, path, "rb")) {
         some(opened) => opened,
         none => {
@@ -71,10 +80,10 @@ pub str!IoError read_file(Arena* arena, str path) uses io {
     if (size < 0) {
         return err(Other);
     }
-    if (size == 0) {
-        return ok("");
-    }
     u8[] bytes = arena.alloc_slice(u8, size as usize);
+    if (size == 0) {
+        return ok(bytes);
+    }
     mut usize read = 0;
     unsafe {
         read = fread(&bytes[0], 1, bytes.len, file);
@@ -82,10 +91,7 @@ pub str!IoError read_file(Arena* arena, str path) uses io {
     if (read != bytes.len) {
         return err(Other);
     }
-    return match (str.from_bytes(bytes)) {
-        ok(text) => ok(text),
-        err(e) => err(InvalidUtf8),
-    };
+    return ok(bytes);
 }
 
 // Replaces the content of a file (created if needed) with `text`.
