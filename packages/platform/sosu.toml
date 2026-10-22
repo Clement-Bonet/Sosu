@@ -10,3 +10,6 @@ libs = ["SDL3"]
 [link.windows]
 paths = ["vendor/SDL3/lib/x64"]
 copy = ["vendor/SDL3/lib/x64/SDL3.dll"]
+
+[dependencies]
+render = { path = "../render" }

@@ -1401,12 +1401,14 @@ static char *gen_match(Fn *f, Expr *e, bool statement) {
         result = new_temp(f);
         emit(f, "%s %s;", value_type(f->g, e->type), result);
     }
+    bool wildcard = false;
     for (size_t a = 0; a < e->as.match.arm_count; a++) {
         const MatchArm *arm = &e->as.match.arms[a];
         const Pattern *pattern = &arm->pattern;
         size_t index = 0;
         if (pattern->kind == PATTERN_WILDCARD) {
             emit(f, a ? "} else {" : "{");
+            wildcard = true;
         } else {
             char *condition = arm_condition(f, subject, type, pattern, &index);
             emit(f, a ? "} else if (%s) {" : "if (%s) {", condition);
@@ -1431,7 +1433,9 @@ static char *gen_match(Fn *f, Expr *e, bool statement) {
         }
         f->indent--;
     }
-    if (e->as.match.arm_count > 0) {
+    if (wildcard) {
+        emit(f, "}"); /* `_` is the last arm (sema): nothing can be left unmatched */
+    } else if (e->as.match.arm_count > 0) {
         char *where = loc(f, e->offset);
         emit(f, "} else {");
         emit(f, "    sosu_fail(%s, \"no arm matched\");", where);

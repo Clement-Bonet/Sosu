@@ -5,3 +5,4 @@ version = "0.1.0"
 
 [dependencies]
 platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }

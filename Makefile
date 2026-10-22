@@ -29,6 +29,7 @@ test: all
 	./build/sosuc check packages/platform
 	./build/sosuc check examples/window
 	./build/sosuc check tests/window
+	./build/sosuc test packages/render
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@echo "samples: ok"

@@ -16,6 +16,37 @@ pub struct Event {
     u8[96] rest;
 }
 
+// SDL_MouseMotionEvent, the same 128 bytes seen differently.
+pub struct MouseMotion {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    u32 which;
+    u32 state;
+    pub f32 x;
+    pub f32 y;
+    f32 xrel;
+    f32 yrel;
+}
+
+// SDL_MouseButtonEvent.
+pub struct MouseButton {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    u32 which;
+    pub u8 button;  // 1: left, 2: middle, 3: right
+    bool down;
+    u8 clicks;
+    u8 padding;
+    pub f32 x;
+    pub f32 y;
+}
+
+pub struct Texture { }
+
 pub struct FRect {
     f32 x;
     f32 y;
@@ -42,6 +73,52 @@ extern "C" {
     bool SDL_RenderFillRect(Renderer* renderer, FRect* rect) uses io;
     bool SDL_RenderPresent(Renderer* renderer) uses io;
     void SDL_Delay(u32 ms) uses io;
+    Texture* SDL_CreateTexture(Renderer* renderer, u32 format, i32 access, i32 w, i32 h) uses io;
+    void SDL_DestroyTexture(Texture* texture) uses io;
+    bool SDL_UpdateTexture(Texture* texture, FRect* rect, u8* pixels, i32 pitch) uses io;
+    bool SDL_RenderTexture(Renderer* renderer, Texture* texture, FRect* source, FRect* target) uses io;
+}
+
+// The mouse events, read from the bytes of an SDL_Event.
+pub MouseMotion* as_motion(Event* event) {
+    unsafe {
+        return event as MouseMotion*;
+    }
+}
+
+pub MouseButton* as_button(Event* event) {
+    unsafe {
+        return event as MouseButton*;
+    }
+}
+
+// A texture of `width * height` pixels 0xAARRGGBB that the program updates, or none.
+pub Texture*? create_texture(Renderer* renderer, i32 width, i32 height) uses io {
+    unsafe {
+        // SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING
+        Texture* texture = SDL_CreateTexture(renderer, 0x16362004, 1, width, height);
+        if (texture as u64 == 0) {
+            return none;
+        }
+        return some(texture);
+    }
+}
+
+pub void destroy_texture(Texture* texture) uses io {
+    unsafe {
+        SDL_DestroyTexture(texture);
+    }
+}
+
+// Copies `pixels` (`width` per row) into the texture, then draws it over the whole window.
+pub void show_pixels(Renderer* renderer, Texture* texture, u32[] pixels, i32 width) uses io {
+    if (pixels.len == 0) {
+        return;
+    }
+    unsafe {
+        SDL_UpdateTexture(texture, 0 as FRect*, &pixels[0] as u8*, width * 4);
+        SDL_RenderTexture(renderer, texture, 0 as FRect*, 0 as FRect*);
+    }
 }
 
 pub bool init_video() uses io {

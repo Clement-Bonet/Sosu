@@ -630,7 +630,8 @@ Compilation:
 
 ### 10.4 Milestones
 
-1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Its v0 interface is simpler than the sketch of §10.1, since there are no generics to carry the application state: `app.run(config, on_event, on_frame)`, where `on_event` returns `false` to stop and `on_frame` draws on an `app.Canvas*` (`clear`, `fill`); `app.request_quit()` closes the window as the window button does.
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). The events are `Quit`, `Resized`, `Key`, `MouseMove`, `Click` and `Release`; `app.request_quit()` closes the window as the window button does.
+   - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `line` and `at`, all clipped to the canvas. `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen. Text comes next.
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
 

@@ -1,23 +1,38 @@
-// Draws one frame, then asks to close: `run` must return 0 after the `Quit` event.
+// Draws one frame, checks a pixel of it, then asks to close: `run` must return 0 after `Quit`.
 import std.io;
 import platform.app;
+import render.canvas;
 
-bool on_event(app.Event e) uses io {
-    return match (e) {
-        Quit => false,
-        Key(code, down) => true,
-        Resized(width, height) => true,
-    };
-}
+class Once : app.Handler {
+    mut i32 frames;
+    mut bool drawn;
 
-void on_frame(app.Canvas* canvas) uses io {
-    canvas.clear(app.Color{ r: 30, g: 30, b: 46 });
-    canvas.fill(app.Rect{ x: 10.0, y: 10.0, w: 100.0, h: 50.0 }, app.Color{ r: 255, g: 140, b: 0 });
-    app.request_quit();
+    void init() {
+        frames = 0;
+        drawn = false;
+    }
+
+    override bool on_event(app.Event e) uses io {
+        return match (e) {
+            Quit => false,
+            _ => true,
+        };
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        surface.fill(canvas.Rect{ x: 10.0, y: 10.0, w: 100.0, h: 50.0 }, canvas.Color{ r: 255, g: 140, b: 0 });
+        drawn = surface.width == 320 && surface.at(20, 20) == 0xFFFF8C00;
+        frames += 1;
+        app.request_quit();
+    }
 }
 
 i32 main() uses io {
-    i32 status = app.run(app.Config{ title: "Sosu test", width: 320, height: 240 }, on_event, on_frame);
-    io.print("window closed ({})", status);
-    return status;
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    Once* once = arena.new(Once);
+    i32 status = app.run(app.Config{ title: "Sosu test", width: 320, height: 240 }, once as app.Handler*);
+    io.print("window closed ({}), frames: {}, drawn: {}", status, once.frames, once.drawn);
+    return once.drawn && once.frames == 1 ? status : 1;
 }
