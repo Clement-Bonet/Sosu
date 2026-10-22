@@ -84,10 +84,6 @@ static int command_lex(const char *path, DiagFormat format) {
 }
 
 static int command_parse(const char *path, DiagFormat format) {
-    if (has_suffix(path, ".ui.sosu")) {
-        fprintf(stderr, "sosuc: `.ui.sosu` files are translated by the `ui` package, which does not exist yet\n");
-        return 2;
-    }
     SourceFile file;
     if (!load(&file, path)) return 2;
 
@@ -95,7 +91,9 @@ static int command_parse(const char *path, DiagFormat format) {
     DiagList diags = {0};
     Arena arena = {0};
     lex_file(&file, &tokens, &diags);
-    Module *module = parse_module(&file, &tokens, &arena, &diags);
+    /* an interface file shows the functions it becomes (spec §10.2) */
+    Module *module = program_is_ui_file(path) ? parse_ui_module(&file, &tokens, &arena, &diags)
+                                              : parse_module(&file, &tokens, &arena, &diags);
     ast_print_module(module, &file, stdout);
     print_diagnostics(&diags, format);
     int status = diags.error_count ? 1 : 0;
@@ -450,7 +448,7 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
     for (int i = 0; i < count; i++) {
         const char *path = paths[i];
         if (has_suffix(path, ".ui.sosu")) {
-            fprintf(stderr, "sosuc: `%s`: `.ui.sosu` files are formatted by the `ui` package (not available yet)\n", path);
+            fprintf(stderr, "sosuc: `%s`: `.ui.sosu` files have no formatter yet\n", path);
             continue;
         }
         if (has_suffix(path, ".sosu")) {
@@ -466,7 +464,10 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
             const Package *root = program.packages.items[0];
             for (size_t j = 0; j < program.units.count; j++) {
                 const Unit *unit = program.units.items[j];
-                if (unit->package == root) status |= format_file(unit->file.path, check);
+                /* interface files have no formatter yet: the one of .sosu files would break them */
+                if (unit->package == root && !program_is_ui_file(unit->file.path)) {
+                    status |= format_file(unit->file.path, check);
+                }
             }
         }
         program_free(&program);

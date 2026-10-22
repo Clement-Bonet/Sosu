@@ -1,0 +1,25 @@
+// The state of the form, and what its buttons do. Its interface is in screen.ui.sosu.
+import ui.widgets;
+
+pub class Form {
+    pub mut widgets.TextBuffer name;
+    pub mut widgets.TextBuffer message;
+    pub mut bool shout;
+
+    void init() {
+        name = widgets.TextBuffer{ };
+        message = widgets.TextBuffer{ };
+        shout = false;
+    }
+
+    pub void greet() {
+        message.set(shout ? "HELLO, " : "Hello, ");
+        message.append(name.text());
+        message.append(shout ? "!!!" : ".");
+    }
+
+    pub void clear() {
+        name.set("");
+        message.set("");
+    }
+}

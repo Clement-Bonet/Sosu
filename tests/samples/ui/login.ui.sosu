@@ -1,4 +1,4 @@
-// login.ui.sosu
+// login.ui.sosu: the window of spec §10.2, as v0 translates it (`sosuc parse`)
 import app.login;
 
 window LoginWindow(LoginState* state) {
@@ -9,18 +9,26 @@ window LoginWindow(LoginState* state) {
     Column(gap: 8, padding: 16) {
         Text("Name")
         TextField(bind: state.name)
-        Row(gap: 8, align: End) {
+        Row(gap: 8) {
             Button("Cancel", on_click: state.cancel)
-            Button("OK", on_click: state.submit, enabled: state.name.len > 0)
+            Button("OK", on_click: state.submit, enabled: state.name.count() > 0)
         }
     }
 }
 
-style Muted { color: Gray }
-
 component TaskRow(Task* t) {
     Row(gap: 8) {
         Checkbox(bind: t.done)
-        Text(t.title, style: t.done ? Muted : Normal)
+        Text(t.title)
+    }
+}
+
+window TaskWindow(TaskState* state) {
+    title: "Tasks"
+
+    Column(gap: 4) {
+        for (Task* t in state.tasks) {
+            TaskRow(t)
+        }
     }
 }

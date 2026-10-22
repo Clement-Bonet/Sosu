@@ -262,7 +262,87 @@ static void test_recovery(void) {
     expect_error("void f() { x++; y = #; }", "E0110", 1, 13, 2);
 }
 
+/* ---- .ui.sosu files: what they become, and their errors ---- */
+
+static void parse_ui(Parsed *out, const char *text) {
+    memset(out, 0, sizeof *out);
+    source_from_string(&out->file, "test.ui.sosu", text);
+    lex_file(&out->file, &out->tokens, &out->diags);
+    Module *module = parse_ui_module(&out->file, &out->tokens, &out->arena, &out->diags);
+    out->dump = capture(print_module, module, &out->file);
+}
+
+static void expect_ui(const char *text, const char *expected) {
+    Parsed parsed;
+    parse_ui(&parsed, text);
+    CHECK(parsed.diags.count == 0, "`%s`: unexpected %s: %s", text, parsed.diags.count ? parsed.diags.items[0].code : "",
+          parsed.diags.count ? parsed.diags.items[0].message : "");
+    CHECK(strcmp(parsed.dump, expected) == 0, "`%s`:\n  got\n%s  expected\n%s", text, parsed.dump, expected);
+    parsed_free(&parsed);
+}
+
+static void expect_ui_error(const char *text, const char *code, size_t line, size_t column) {
+    Parsed parsed;
+    parse_ui(&parsed, text);
+    CHECK(parsed.diags.count == 1, "`%s`: %zu diagnostics, expected 1", text, parsed.diags.count);
+    if (parsed.diags.count > 0) {
+        const Diagnostic *d = &parsed.diags.items[0];
+        size_t l, c;
+        source_position(&parsed.file, d->offset, &l, &c);
+        CHECK(strcmp(d->code, code) == 0 && l == line && c == column, "`%s`: expected %s at %zu:%zu, got %s at %zu:%zu (%s)",
+              text, code, line, column, d->code, l, c, d->message);
+    }
+    parsed_free(&parsed);
+}
+
+static void test_ui_files(void) {
+    expect_ui("window W(S* s) {\n    title: \"Hi\"\n    Column(gap: 4) {\n        Text(\"a\")\n"
+              "        Button(\"OK\", on_click: s.ok, enabled: s.ready)\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame column) 4 0.0)\n"
+              "    (call (. ui_frame label) \"a\")\n"
+              "    (if (call (. ui_frame button_enabled) \"OK\" (. s ready))\n"
+              "      (block\n"
+              "        (call (. s ok))))\n"
+              "    (call (. ui_frame end))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window (title \"Hi\")))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("import ui.widgets;\ncomponent C(T* t) uses io {\n    if (t.on) {\n        Checkbox(bind: t.on)\n"
+              "    } else {\n        TextField(bind: t.text, width: 90.5, on_enter: t.go(1))\n    }\n"
+              "    for (i32 i in 0..t.n) {\n        Space(4)\n        other.Row(t, i)\n    }\n}\n",
+              "(import ui.widgets)\n"
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t)) (uses io)\n"
+              "  (block\n"
+              "    (if (. t on)\n"
+              "      (block\n"
+              "        (call (. ui_frame checkbox_alone) (& (. t on))))\n"
+              "      (block\n"
+              "        (if (call (. ui_frame text_field) (& (. t text)) 90.5)\n"
+              "          (block\n"
+              "            (call (. t go) 1)))))\n"
+              "    (for-in i32 i (.. 0 (. t n))\n"
+              "      (block\n"
+              "        (call (. ui_frame space) 4)\n"
+              "        (call (. other Row) ui_frame t i)))))\n");
+
+    expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
+    expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);
+    expect_ui_error("window W() {\n    Text(\"a\", \"b\")\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    TextField(width: 9)\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Text(\"a\")\n    title: \"late\"\n}\n", "E0215", 3, 5);
+    expect_ui_error("component C() {\n    width: 3\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Row(align: End) { }\n}\n", "E0216", 2, 9);
+    expect_ui_error("window W() {\n    Mine(size: 2)\n}\n", "E0215", 2, 10);
+    expect_ui_error("window W() {\n    Text(\"a\") { }\n}\n", "E0215", 2, 15);
+    expect_ui_error("style Muted { color: Gray }\nwindow W() { }\n", "E0216", 1, 1);
+    expect_ui_error("struct S { }\n", "E0203", 1, 1);
+}
+
 int main(void) {
+    test_ui_files();
     test_precedence();
     test_casts();
     test_postfix();

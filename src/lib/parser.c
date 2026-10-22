@@ -1320,3 +1320,563 @@ Expr *parse_expression(const SourceFile *file, const TokenList *tokens, Arena *a
     if (!check(&p, TOK_EOF)) report_expected(&p, "E0200", "end of expression", true);
     return expr;
 }
+
+/* ---- .ui.sosu files (spec §10.2) ----
+   A `window` or a `component` becomes a function that describes it with the widgets of
+   `ui.widgets`, run at each frame (immediate mode):
+
+       window Hello(State* s) {               pub void Hello(widgets.Frame* ui_frame, State* s) {
+           Column(gap: 8) {                       ui_frame.column(8 as f32, 0 as f32);
+               Text("Hi")                         ui_frame.label("Hi");
+               Button("OK", on_click: s.ok)       if (ui_frame.button("OK")) { s.ok(); }
+           }                                      ui_frame.end();
+       }                                      }
+
+   A window also gets `pub widgets.Window HelloConfig()`, from its properties (`title`,
+   `width`, `height`). The nodes keep the positions of the .ui.sosu file: errors found
+   later (types, effects) point to it. */
+
+typedef VEC(Stmt *) StmtVec;
+typedef VEC(Expr *) ExprVec;
+
+/* `name: value` in the arguments of a node */
+typedef struct {
+    Name name;
+    Expr *value;
+} UiProp;
+
+typedef struct {
+    ExprVec values; /* the values given in order */
+    VEC(UiProp) props;
+} UiArgs;
+
+/* The widgets written in a .ui.sosu file, and what they accept. */
+typedef struct {
+    const char *name;
+    size_t values;        /* values in order, before the properties */
+    bool optional;        /* the value can be left out (a checkbox without a label) */
+    const char *props[4]; /* NULL-terminated */
+    bool children;        /* `{ ... }` after the arguments */
+} UiNodeKind;
+
+static const UiNodeKind ui_nodes[] = {
+    { "Column", 0, false, { "gap", "padding", NULL }, true },
+    { "Row", 0, false, { "gap", "padding", NULL }, true },
+    { "Text", 1, false, { NULL }, false },
+    { "Title", 1, false, { NULL }, false },
+    { "Space", 1, false, { NULL }, false },
+    { "Button", 1, false, { "on_click", "enabled", NULL }, false },
+    { "TextField", 0, false, { "bind", "width", "on_enter", NULL }, false },
+    { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
+};
+
+static void ui_parse_children(Parser *p, StmtVec *out);
+
+static bool name_text_is(Name name, const char *text) {
+    return name.length == strlen(text) && memcmp(name.text, text, name.length) == 0;
+}
+
+static bool names_equal(Name a, Name b) {
+    return a.length == b.length && memcmp(a.text, b.text, a.length) == 0;
+}
+
+/* A name that is not in the source (`ui_frame`, `label`...), placed at `offset`. */
+static Name ui_name(const char *text, size_t offset) {
+    Name name;
+    name.text = text;
+    name.length = strlen(text);
+    name.offset = offset;
+    return name;
+}
+
+static Expr *ui_expr(Parser *p, ExprKind kind, size_t offset, size_t length) {
+    Expr *expr = new_expr(p, kind, offset);
+    expr->length = length;
+    return expr;
+}
+
+/* `name`, or `module.name` */
+static TypeExpr *ui_type(Parser *p, size_t offset, const char *module, const char *name) {
+    TypeExpr *type = new_type(p, TYPE_NAME, offset);
+    Name names[2] = { ui_name(module ? module : name, offset), ui_name(name, offset) };
+    type->as.name.count = module ? 2 : 1;
+    type->as.name.items = arena_copy(p->arena, module ? names : names + 1, type->as.name.count * sizeof *names);
+    return type;
+}
+
+/* `ui_frame.method(args...)`, placed at the node `at_offset`, `at_length` */
+static Expr *ui_frame_call(Parser *p, size_t at_offset, size_t at_length, const char *method, Expr **args,
+                           size_t count) {
+    Expr *frame = ui_expr(p, EXPR_NAME, at_offset, at_length);
+    frame->as.name = ui_name("ui_frame", at_offset);
+    Expr *callee = ui_expr(p, EXPR_FIELD, at_offset, at_length);
+    callee->as.field.object = frame;
+    callee->as.field.name = ui_name(method, at_offset);
+    Expr *call = ui_expr(p, EXPR_CALL, at_offset, at_length);
+    call->as.call.callee = callee;
+    call->as.call.arg_count = count;
+    call->as.call.args = arena_alloc(p->arena, (count ? count : 1) * sizeof *args);
+    if (count) memcpy(call->as.call.args, args, count * sizeof *args);
+    return call;
+}
+
+/* A number of pixels: `8` stands for `8.0`; `fallback` when it is absent. An added float
+   literal has no text in the source: its value is in `int_value` (see codegen). */
+static Expr *ui_float(Parser *p, Expr *value, size_t offset, uint64_t fallback) {
+    if (!value) {
+        value = ui_expr(p, EXPR_FLOAT, offset, 0);
+        value->as.int_value = fallback;
+    } else if (value->kind == EXPR_INT) {
+        value->kind = EXPR_FLOAT; /* its text, `8`, is a valid C number */
+    }
+    return value;
+}
+
+static Expr *ui_address(Parser *p, Expr *value) {
+    Expr *address = ui_expr(p, EXPR_UNARY, value->offset, value->length);
+    address->as.unary.op = TOK_AMP;
+    address->as.unary.operand = value;
+    return address;
+}
+
+static Stmt *ui_stmt(Parser *p, Expr *expr) {
+    Stmt *stmt = new_stmt(p, STMT_EXPR, expr->offset);
+    stmt->length = expr->length;
+    stmt->as.expr = expr;
+    return stmt;
+}
+
+static Stmt *ui_block(Parser *p, StmtVec *items, size_t offset, size_t length) {
+    Stmt *block = new_stmt(p, STMT_BLOCK, offset);
+    block->length = length;
+    block->as.block.count = items->count;
+    block->as.block.items = FINISH(p, *items);
+    return block;
+}
+
+/* `if (widget) { handler(); }`: `on_click: s.ok` calls `s.ok()`; `s.ok(1)` is called as is. */
+static Stmt *ui_when(Parser *p, Expr *widget, Expr *handler) {
+    if (!handler) return ui_stmt(p, widget);
+    Expr *call = handler;
+    if (handler->kind != EXPR_CALL) {
+        call = ui_expr(p, EXPR_CALL, handler->offset, handler->length);
+        call->as.call.callee = handler;
+        call->as.call.args = arena_alloc(p->arena, sizeof(Expr *));
+    }
+    StmtVec items = {0};
+    SOSU_VEC_PUSH(&items, ui_stmt(p, call));
+    Stmt *stmt = new_stmt(p, STMT_IF, widget->offset);
+    stmt->length = widget->length;
+    stmt->as.if_.cond = widget;
+    stmt->as.if_.then_block = ui_block(p, &items, handler->offset, handler->length);
+    return stmt;
+}
+
+/* `(value, name: value, ...)` */
+static void ui_parse_args(Parser *p, UiArgs *args) {
+    memset(args, 0, sizeof *args);
+    if (!expect(p, TOK_LPAREN)) return;
+    if (!check(p, TOK_RPAREN)) {
+        do {
+            if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_COLON) {
+                UiProp prop;
+                prop.name = make_name(p, advance(p));
+                advance(p);
+                prop.value = parse_expr(p);
+                SOSU_VEC_PUSH(&args->props, prop);
+            } else {
+                Expr *value = parse_expr(p);
+                SOSU_VEC_PUSH(&args->values, value);
+            }
+        } while (accept(p, TOK_COMMA));
+    }
+    expect_closing(p, TOK_RPAREN);
+}
+
+/* Properties of the spec (§10.2) that v0 does not implement yet. */
+static bool ui_planned_property(Name name) {
+    return name_text_is(name, "style") || name_text_is(name, "align") || name_text_is(name, "row") ||
+           name_text_is(name, "col") || name_text_is(name, "span");
+}
+
+/* The value of the property `name`, or NULL. */
+static Expr *ui_prop(const UiArgs *args, const char *name) {
+    for (size_t i = 0; i < args->props.count; i++) {
+        if (name_text_is(args->props.items[i].name, name)) return args->props.items[i].value;
+    }
+    return NULL;
+}
+
+/* Checks the values and properties given to a widget. */
+static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const UiArgs *args) {
+    if (args->values.count != kind->values && !(kind->optional && args->values.count == 0)) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length,
+                                 "`%s` takes %zu value%s before its properties, not %zu", kind->name, kind->values,
+                                 kind->values == 1 ? "" : "s", args->values.count);
+        if (kind->values == 1) diag_help(d, "write `%s(value, ...)`", kind->name);
+        else diag_help(d, "give it properties only: `%s(name: value)`", kind->name);
+        return false;
+    }
+    for (size_t i = 0; i < args->props.count; i++) {
+        Name prop = args->props.items[i].name;
+        for (size_t j = 0; j < i; j++) {
+            if (names_equal(args->props.items[j].name, prop)) {
+                error_at(p, "E0215", prop.offset, prop.length, "`%.*s` is given twice", (int)prop.length, prop.text);
+                return false;
+            }
+        }
+        bool known = false;
+        for (size_t j = 0; kind->props[j]; j++) known = known || name_text_is(prop, kind->props[j]);
+        if (known) continue;
+        if (ui_planned_property(prop)) {
+            error_at(p, "E0216", prop.offset, prop.length, "`%.*s:` is not supported yet", (int)prop.length, prop.text);
+            return false;
+        }
+        Diagnostic *d = error_at(p, "E0215", prop.offset, prop.length, "`%s` has no property `%.*s`", kind->name,
+                                 (int)prop.length, prop.text);
+        char list[128] = "";
+        for (size_t j = 0; kind->props[j]; j++) {
+            if (j) strcat(list, ", ");
+            strcat(list, kind->props[j]);
+        }
+        if (list[0]) diag_help(d, "its properties are: %s", list);
+        else diag_help(d, "it has no properties");
+        return false;
+    }
+    if ((strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "Checkbox") == 0) && !ui_prop(args, "bind")) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
+        diag_help(d, "bind it to a `mut` field: `%s(bind: state.value)`", kind->name);
+        return false;
+    }
+    return true;
+}
+
+/* A component used as a node: `TaskRow(t)` calls `TaskRow(ui_frame, t)`. */
+static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_t start, size_t length) {
+    if (args->props.count) {
+        Name prop = args->props.items[0].name;
+        Diagnostic *d = error_at(p, "E0215", prop.offset, prop.length, "a component takes its arguments in order");
+        diag_help(d, "remove `%.*s:`, and give the values in the order of its parameters", (int)prop.length, prop.text);
+    }
+    if (check(p, TOK_LBRACE)) {
+        error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column` and `Row` contain other nodes");
+        skip_balanced_braces(p);
+    }
+    Expr *callee = ui_expr(p, EXPR_NAME, path.items[0].offset, path.items[0].length);
+    callee->as.name = path.items[0];
+    for (size_t i = 1; i < path.count; i++) {
+        Expr *field = ui_expr(p, EXPR_FIELD, start, path.items[i].offset + path.items[i].length - start);
+        field->as.field.object = callee;
+        field->as.field.name = path.items[i];
+        callee = field;
+    }
+    Expr *frame = ui_expr(p, EXPR_NAME, start, length);
+    frame->as.name = ui_name("ui_frame", start);
+    ExprVec values = {0};
+    SOSU_VEC_PUSH(&values, frame);
+    for (size_t i = 0; i < args->values.count; i++) SOSU_VEC_PUSH(&values, args->values.items[i]);
+    Expr *call = ui_expr(p, EXPR_CALL, start, length);
+    call->as.call.callee = callee;
+    call->as.call.arg_count = values.count;
+    call->as.call.args = FINISH(p, values);
+    SOSU_VEC_PUSH(out, ui_stmt(p, call));
+}
+
+/* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
+static void ui_parse_node(Parser *p, StmtVec *out) {
+    size_t start = cur(p)->offset;
+    Path path = parse_path(p);
+    Name node = path.items[path.count - 1];
+    UiArgs args;
+    ui_parse_args(p, &args);
+    size_t length = span_from(p, start);
+
+    const UiNodeKind *kind = NULL;
+    for (size_t i = 0; path.count == 1 && i < sizeof ui_nodes / sizeof *ui_nodes; i++) {
+        if (name_text_is(node, ui_nodes[i].name)) kind = &ui_nodes[i];
+    }
+    if (!kind) {
+        ui_component(p, out, path, &args, start, length);
+    } else {
+        bool valid = ui_check_args(p, kind, node, &args);
+        if (kind->children != check(p, TOK_LBRACE)) {
+            if (kind->children) {
+                report_expected(p, "E0215", "`{` and the nodes it contains", false);
+            } else {
+                error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column` and `Row` contain other nodes");
+                skip_balanced_braces(p);
+            }
+            valid = false;
+        }
+        Expr *value = args.values.count ? args.values.items[0] : NULL;
+        if (!valid) {
+            if (kind->children && check(p, TOK_LBRACE)) ui_parse_children(p, out);
+        } else if (kind->children) {
+            Expr *layout[2] = { ui_float(p, ui_prop(&args, "gap"), start, 8), ui_float(p, ui_prop(&args, "padding"), start, 0) };
+            const char *open = name_text_is(node, "Row") ? "row_with" : "column";
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, layout, 2)));
+            ui_parse_children(p, out);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end", NULL, 0)));
+        } else if (name_text_is(node, "Text") || name_text_is(node, "Title")) {
+            const char *method = name_text_is(node, "Text") ? "label" : "title";
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, method, &value, 1)));
+        } else if (name_text_is(node, "Space")) {
+            Expr *size = ui_float(p, value, start, 0);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "space", &size, 1)));
+        } else if (name_text_is(node, "Button")) {
+            Expr *enabled = ui_prop(&args, "enabled");
+            Expr *call_args[2] = { value, enabled };
+            Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
+            SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "TextField")) {
+            Expr *call_args[2] = { ui_address(p, ui_prop(&args, "bind")), ui_float(p, ui_prop(&args, "width"), start, 200) };
+            Expr *field = ui_frame_call(p, start, length, "text_field", call_args, 2);
+            SOSU_VEC_PUSH(out, ui_when(p, field, ui_prop(&args, "on_enter")));
+        } else if (name_text_is(node, "Checkbox")) {
+            Expr *bound = ui_address(p, ui_prop(&args, "bind"));
+            Expr *call_args[2] = { value, bound };
+            Expr *box = value ? ui_frame_call(p, start, length, "checkbox", call_args, 2)
+                              : ui_frame_call(p, start, length, "checkbox_alone", &bound, 1);
+            SOSU_VEC_PUSH(out, ui_when(p, box, ui_prop(&args, "on_change")));
+        }
+    }
+    free(args.values.items);
+    free(args.props.items);
+}
+
+/* A node, an `if` or a `for` in a window, a component, a `Column` or a `Row`. */
+static void ui_parse_item(Parser *p, StmtVec *out) {
+    if (check(p, TOK_KW_IF)) {
+        Stmt *stmt = new_stmt(p, STMT_IF, advance(p)->offset);
+        stmt->as.if_.cond = parse_condition(p);
+        StmtVec then_items = {0};
+        size_t then_start = cur(p)->offset;
+        ui_parse_children(p, &then_items);
+        stmt->as.if_.then_block = ui_block(p, &then_items, then_start, span_from(p, then_start));
+        if (accept(p, TOK_KW_ELSE)) {
+            StmtVec else_items = {0};
+            size_t else_start = cur(p)->offset;
+            if (check(p, TOK_KW_IF)) ui_parse_item(p, &else_items);
+            else ui_parse_children(p, &else_items);
+            stmt->as.if_.else_stmt = ui_block(p, &else_items, else_start, span_from(p, else_start));
+        }
+        SOSU_VEC_PUSH(out, close_stmt(p, stmt));
+        return;
+    }
+    if (check(p, TOK_KW_FOR)) {
+        Stmt *stmt = new_stmt(p, STMT_FOR_IN, advance(p)->offset);
+        expect(p, TOK_LPAREN);
+        parse_binding(p, &stmt->as.for_in.is_mut, &stmt->as.for_in.type, &stmt->as.for_in.name);
+        if (!accept(p, TOK_KW_IN)) report_expected(p, "E0200", "`in` (a .ui.sosu file loops over a range or a slice)", false);
+        stmt->as.for_in.iterable = parse_expr(p);
+        expect_closing(p, TOK_RPAREN);
+        StmtVec items = {0};
+        size_t body_start = cur(p)->offset;
+        ui_parse_children(p, &items);
+        stmt->as.for_in.body = ui_block(p, &items, body_start, span_from(p, body_start));
+        SOSU_VEC_PUSH(out, close_stmt(p, stmt));
+        return;
+    }
+    if (check(p, TOK_IDENT)) {
+        ui_parse_node(p, out);
+        return;
+    }
+    const Token *token = cur(p);
+    char found[64];
+    describe_token(p, token, found, sizeof found);
+    Diagnostic *d = error_at(p, "E0214", token->offset, token->length, "expected a node, `if` or `for`, found %s", found);
+    diag_help(d, "a node is written `Type(arguments)`: `Text(\"Hello\")`, `Column(gap: 8) { ... }`");
+}
+
+static size_t line_of(const Parser *p, size_t offset) {
+    size_t line, column;
+    source_position(p->file, offset, &line, &column);
+    return line;
+}
+
+/* After an error in an item: skip to the next line, where the next item starts. */
+static void ui_sync(Parser *p, size_t line) {
+    p->panic = false;
+    while (!check(p, TOK_EOF) && !check(p, TOK_RBRACE) && line_of(p, cur(p)->offset) <= line) {
+        if (check(p, TOK_LBRACE)) skip_balanced_braces(p);
+        else advance(p);
+    }
+}
+
+/* `{ items }` */
+static void ui_parse_children(Parser *p, StmtVec *out) {
+    if (!expect(p, TOK_LBRACE)) return;
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        size_t before = p->pos;
+        size_t line = line_of(p, cur(p)->offset);
+        ui_parse_item(p, out);
+        if (p->panic) ui_sync(p, line);
+        if (p->pos == before) advance(p);
+    }
+    expect(p, TOK_RBRACE);
+}
+
+/* `name: value` in the body of a window. Returns false if it is not one of its properties. */
+static bool ui_window_property(Parser *p, bool is_window, bool after_nodes, FieldInit *setting) {
+    setting->name = make_name(p, advance(p));
+    advance(p);
+    setting->value = parse_expr(p);
+    Name name = setting->name;
+    if (!is_window) {
+        Diagnostic *d = error_at(p, "E0215", name.offset, name.length, "a component has no properties");
+        diag_help(d, "only a `window` has properties: title, width, height");
+        return false;
+    }
+    if (!name_text_is(name, "title") && !name_text_is(name, "width") && !name_text_is(name, "height")) {
+        Diagnostic *d = error_at(p, "E0215", name.offset, name.length, "a window has no property `%.*s`",
+                                 (int)name.length, name.text);
+        diag_help(d, "its properties are: title, width, height");
+        return false;
+    }
+    if (after_nodes) {
+        error_at(p, "E0215", name.offset, name.length, "the properties of a window come before its nodes");
+        return false;
+    }
+    return true;
+}
+
+/* `pub widgets.Window NameConfig() { return widgets.Window{ properties }; }` */
+static Decl *ui_window_config(Parser *p, const Decl *window, FieldInit *settings, size_t count) {
+    const FnDecl *fn = &window->as.fn;
+    Decl *decl = arena_alloc(p->arena, sizeof *decl);
+    *decl = *window;
+    FnDecl *config = &decl->as.fn;
+    char *name = arena_alloc(p->arena, fn->name.length + sizeof "Config");
+    memcpy(name, fn->name.text, fn->name.length);
+    memcpy(name + fn->name.length, "Config", sizeof "Config");
+    config->name = ui_name(name, fn->name.offset);
+    config->ret = ui_type(p, fn->offset, "widgets", "Window");
+    config->params = NULL;
+    config->param_count = 0;
+    memset(&config->effects, 0, sizeof config->effects);
+
+    Expr *literal = ui_expr(p, EXPR_STRUCT_LIT, fn->name.offset, fn->name.length);
+    literal->as.struct_lit.type = ui_type(p, fn->name.offset, "widgets", "Window");
+    literal->as.struct_lit.field_count = count;
+    literal->as.struct_lit.fields = arena_alloc(p->arena, (count ? count : 1) * sizeof *settings);
+    if (count) memcpy(literal->as.struct_lit.fields, settings, count * sizeof *settings);
+    Stmt *ret = new_stmt(p, STMT_RETURN, fn->name.offset);
+    ret->length = fn->name.length;
+    ret->as.expr = literal;
+    StmtVec body = {0};
+    SOSU_VEC_PUSH(&body, ret);
+    config->body = ui_block(p, &body, fn->body->offset, fn->body->length);
+    return decl;
+}
+
+/* `window Name(params) [uses ...] { properties, then nodes }`, or `component ...` without properties. */
+static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) {
+    const Token *keyword = advance(p);
+    bool is_window = token_is(p, keyword, "window");
+    Decl *decl = arena_alloc(p->arena, sizeof *decl);
+    decl->kind = DECL_FN;
+    decl->is_pub = true;
+    decl->offset = keyword->offset;
+    FnDecl *fn = &decl->as.fn;
+    fn->is_pub = true;
+    fn->offset = keyword->offset;
+    fn->ret = ui_type(p, keyword->offset, NULL, "void");
+    expect_name(p, &fn->name, is_window ? "a window name" : "a component name");
+    Param *params;
+    size_t param_count;
+    parse_params(p, &params, &param_count, false);
+    if (accept(p, TOK_KW_USES)) fn->effects = parse_effects(p, false);
+    /* the first parameter: `widgets.Frame* ui_frame` */
+    fn->param_count = param_count + 1;
+    fn->params = arena_alloc(p->arena, fn->param_count * sizeof *fn->params);
+    fn->params[0].type = new_type(p, TYPE_POINTER, keyword->offset);
+    fn->params[0].type->as.inner = ui_type(p, keyword->offset, "widgets", "Frame");
+    fn->params[0].name = ui_name("ui_frame", keyword->offset);
+    if (param_count) memcpy(fn->params + 1, params, param_count * sizeof *params);
+
+    VEC(FieldInit) settings = {0};
+    StmtVec items = {0};
+    size_t body_start = cur(p)->offset;
+    if (expect(p, TOK_LBRACE)) {
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            size_t before = p->pos;
+            size_t line = line_of(p, cur(p)->offset);
+            if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_COLON) {
+                FieldInit setting;
+                if (ui_window_property(p, is_window, items.count > 0, &setting)) SOSU_VEC_PUSH(&settings, setting);
+            } else {
+                ui_parse_item(p, &items);
+            }
+            if (p->panic) ui_sync(p, line);
+            if (p->pos == before) advance(p);
+        }
+        expect(p, TOK_RBRACE);
+    }
+    fn->body = ui_block(p, &items, body_start, span_from(p, body_start));
+    fn->length = span_from(p, fn->offset);
+    decl->length = fn->length;
+
+    VEC(Decl *) out = { *decls, *count, *cap };
+    SOSU_VEC_PUSH(&out, decl);
+    if (is_window) SOSU_VEC_PUSH(&out, ui_window_config(p, decl, settings.items, settings.count));
+    *decls = out.items;
+    *count = out.count;
+    *cap = out.cap;
+    free(settings.items);
+}
+
+static bool ui_imports_widgets(const Decl *decl) {
+    return decl->kind == DECL_IMPORT && decl->as.import.count == 2 && name_text_is(decl->as.import.items[0], "ui") &&
+           name_text_is(decl->as.import.items[1], "widgets");
+}
+
+Module *parse_ui_module(const SourceFile *file, const TokenList *tokens, Arena *arena, DiagList *diags) {
+    Parser p;
+    init_parser(&p, file, tokens, arena, diags);
+    VEC(Decl *) decls = {0};
+    bool widgets = false;
+    while (!check(&p, TOK_EOF)) {
+        size_t before = p.pos;
+        const Token *token = cur(&p);
+        if (check(&p, TOK_KW_IMPORT)) {
+            Decl *decl = parse_declaration(&p);
+            if (decl) {
+                widgets = widgets || ui_imports_widgets(decl);
+                SOSU_VEC_PUSH(&decls, decl);
+            }
+        } else if (token_is(&p, token, "window") || token_is(&p, token, "component")) {
+            ui_parse_view(&p, &decls.items, &decls.count, &decls.cap);
+        } else if (token_is(&p, token, "style") || token_is(&p, token, "theme")) {
+            Diagnostic *d = error_at(&p, "E0216", token->offset, token->length, "`%.*s` blocks are not supported yet",
+                                     (int)token->length, file->text + token->offset);
+            diag_help(d, "styles will come with the themes of the `ui` package");
+            while (!check(&p, TOK_EOF) && !check(&p, TOK_LBRACE)) advance(&p);
+            skip_balanced_braces(&p);
+            p.panic = false;
+        } else {
+            char found[64];
+            describe_token(&p, token, found, sizeof found);
+            Diagnostic *d = error_at(&p, "E0203", token->offset, token->length, "expected a declaration, found %s", found);
+            diag_help(d, "a .ui.sosu file contains `import`, `window` and `component`");
+            /* skip it whole: up to its block, included */
+            while (!check(&p, TOK_EOF) && !check(&p, TOK_LBRACE) && !check(&p, TOK_KW_IMPORT)) advance(&p);
+            if (check(&p, TOK_LBRACE)) skip_balanced_braces(&p);
+            p.panic = false;
+        }
+        if (p.panic) sync_declaration(&p);
+        if (p.pos == before) advance(&p);
+    }
+    if (!widgets) {
+        /* the generated code uses `widgets.Frame`: `import ui.widgets;` is implied */
+        Decl *import = arena_alloc(arena, sizeof *import);
+        import->kind = DECL_IMPORT;
+        Name names[2] = { ui_name("ui", 0), ui_name("widgets", 0) };
+        import->as.import.count = 2;
+        import->as.import.items = arena_copy(arena, names, sizeof names);
+        SOSU_VEC_PUSH(&decls, import);
+    }
+    Module *module = arena_alloc(arena, sizeof *module);
+    module->count = decls.count;
+    module->decls = finish_vec(&p, decls.items, decls.count, sizeof *decls.items);
+    return module;
+}

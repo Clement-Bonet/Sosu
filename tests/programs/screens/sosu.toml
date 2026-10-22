@@ -1,0 +1,8 @@
+# A screen described in a .ui.sosu file (spec §10.2), driven without a window.
+[package]
+name = "screens"
+version = "0.1.0"
+
+[dependencies]
+render = { path = "../../../packages/render" }
+ui = { path = "../../../packages/ui" }

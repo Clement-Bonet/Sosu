@@ -18,12 +18,13 @@ English is the working language of the project: code, comments, compiler message
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
-| 8. `platform` / `render` / `ui` | in progress: window, keyboard, mouse and text events, drawing in a canvas of pixels, text (8 by 8 font), widgets in immediate mode (`ui`); the `.ui.sosu` translator next |
+| 8. `platform` / `render` / `ui` | done on the desktop: window, keyboard, mouse and text events, drawing in a canvas of pixels, text (8 by 8 font), widgets in immediate mode (`ui`), `.ui.sosu` interface files (no styles yet) |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
-contracts at run time. `sosuc check` checks a package without compiling it. `.ui.sosu` files are not
-parsed by the compiler: their translator will belong to the `ui` package (spec §10.2).
+contracts at run time. `sosuc check` checks a package without compiling it. A `.ui.sosu` interface
+file is a module like the others: `sosuc` turns its windows and components into functions that call
+the widgets of `ui` (spec §10.2).
 
 ## Building
 

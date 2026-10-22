@@ -1544,6 +1544,9 @@ static char *gen_expr(Fn *f, Expr *e) {
     switch (e->kind) {
     case EXPR_INT: return gen_int(f, e->type, e->as.int_value, false);
     case EXPR_FLOAT:
+        if (e->length == 0) { /* added by the translation of a .ui.sosu file: a whole number */
+            return sosu_format("((%s)%llu)", c_type(f->g, e->type), (unsigned long long)e->as.int_value);
+        }
         return sosu_format("((%s)%.*s)", c_type(f->g, e->type), (int)e->length, f->unit->file.text + e->offset);
     case EXPR_STRING: return gen_string(f, e);
     case EXPR_CHAR: return sosu_format("((uint32_t)%u)", (unsigned)e->as.char_value);

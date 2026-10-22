@@ -66,4 +66,7 @@ bool program_load(Program *program, const char *dir, const char *lib_dir);
 bool program_load_text(Program *program, const char *text, const char *lib_dir);
 void program_free(Program *program);
 
+/* True for an interface file, `*.ui.sosu` (spec §10.2). */
+bool program_is_ui_file(const char *path);
+
 #endif

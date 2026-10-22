@@ -1,0 +1,54 @@
+// Drives the screen of screen.ui.sosu with simulated input, frame after frame.
+import std.io;
+import render.canvas;
+import ui.widgets;
+import screens.screen;
+import screens.state;
+
+void frame(widgets.Ui* ui, canvas.Canvas* surface, state.Form* form) {
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    screen.Greeter(&f, form);
+    f.finish();
+}
+
+void click(widgets.Ui* ui, f32 x, f32 y) {
+    ui.mouse_move(x, y);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 320);
+    mut widgets.Ui ui = widgets.Ui{ };
+    state.Form* form = arena.new(state.Form);
+
+    widgets.Window window = screen.GreeterConfig();
+    io.print("window: {} {}x{}", window.title, window.width, window.height);
+
+    // The layout, padding 16 and gap 8: Title 16-48, Text 56-88, TextField 96-128,
+    // Checkbox 136-168, the buttons 176-208 (Clear: x 16-128, Greet: x 136-248).
+    click(&ui, 136.0 + 20.0, 190.0);  // Greet, disabled while the name is empty
+    frame(&ui, &surface, form);
+    io.print("greeted: {}", form.greeted);
+
+    click(&ui, 50.0, 110.0);  // the text field takes the keyboard
+    ui.type_text("Ada");
+    frame(&ui, &surface, form);
+    ui.key(13, true);  // Enter: on_enter
+    frame(&ui, &surface, form);
+    io.print("{} ({})", form.message.text(), form.greeted);
+
+    click(&ui, 30.0, 150.0);  // Shout
+    frame(&ui, &surface, form);
+    click(&ui, 136.0 + 20.0, 190.0);  // Greet
+    frame(&ui, &surface, form);
+    io.print("{} ({}), shout: {}", form.message.text(), form.greeted, form.shout);
+
+    click(&ui, 40.0, 190.0);  // Clear
+    frame(&ui, &surface, form);
+    io.print("after Clear: name {}, message {}", form.name.count(), form.message.count());
+    return 0;
+}
