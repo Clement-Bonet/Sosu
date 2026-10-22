@@ -488,6 +488,73 @@ frameworks = ["Cocoa"]
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
 
+### 9.2 Using Sosu from other languages (planned)
+
+Status: design, not implemented yet. The grammar of §12 will gain `export` when it is.
+
+A library written in Sosu is offered to other languages through the C ABI, which they all know how to call: C and C++ directly, C# with P/Invoke, Java with the FFM API (or JNI), Python with `ctypes` or `cffi`, Rust, Go, Swift. `sosuc` produces a C library and its header; each language uses its own tools on them. The compiler contains nothing specific to C#, Java or any other language.
+
+```sosu
+// geometry/src/lib.sosu
+pub struct Vec2 {
+    pub f32 x;
+    pub f32 y;
+}
+
+export "C" f32 geometry_dot(Vec2 a, Vec2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+```
+
+```c
+/* build/geometry.h, generated */
+typedef struct geometry_Vec2 { float x; float y; } geometry_Vec2;
+float geometry_dot(geometry_Vec2 a, geometry_Vec2 b);
+```
+
+Exported functions:
+
+- `export "C"` marks a function of the top level that the library offers. Its C name is its Sosu name, unchanged: the author chooses it, usually prefixed with the name of the library, since C has a single namespace. Two exports with the same name are an error; a C keyword or a name starting with `sosu_` is refused.
+- Methods are not exported: a function takes the object instead (`export "C" void doc_close(Doc* d)`).
+- Types allowed in the signature of an export, whose C form the header gives:
+  - integers, floats and `bool` (`int32_t`, `float`, `bool`...), `char` (`uint32_t`, a Unicode scalar value);
+  - `struct`s whose fields are all allowed (C layout, §9), and pointers to the allowed types;
+  - `str` (`sosu_str`: `const uint8_t *ptr; size_t len;`, UTF-8, not terminated by a NUL) and `T[]` (`ptr` and `len`);
+  - a pointer to a class, as an opaque pointer (`typedef struct geometry_Shape geometry_Shape;`): the host only passes it back to exported functions;
+  - function types made of allowed types, for callbacks into the host.
+- Not allowed in v0: `T?`, `T!E`, `enum`s (with or without data), `Arena` by value, interfaces. An export translates them (a `bool` result and an out pointer, an error code...).
+- Effects and contracts are kept: an export can have any `uses` clause (the host is outside the effect system, as C is), and its `requires` are checked on entry, like any call from the host.
+
+Building:
+
+- `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/<name>.a`, or `.lib` with MSVC); `--lib=shared` into a shared one (`.so`, `.dll` with its import library, `.dylib`). Both come with `build/<name>.h`.
+- The header is plain C99 (`stdint.h`, `stdbool.h`, `stddef.h`), usable from C++ (`extern "C"` guards). It declares the exports, and the types they use under the name `<package>_<Type>`. The `#line` directives stay in the C code of the library: a debugger shows the `.sosu` files.
+- The runtime (`sosu_rt.c`) is compiled into the library. In a shared library, its symbols, and those of the generated code, are hidden: only the exports are visible.
+- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list next to it, since the host links them.
+- Mobile (§11.2) uses the same output: the Android activity loads a shared library, the Xcode project links a static one.
+
+Run-time errors:
+
+- In a program, a run-time error (overflow, index out of bounds, failed contract) stops it with the code 101. A library must not stop the process of its host: each export runs under a guard, as `sosuc test` already does for each test. After an error, the export returns a zero value, and `<package>_error()` gives the message, or NULL if the last call succeeded. The message is kept per thread.
+- After an error, what the failed call was building is left as it is, and its `defer`s did not run: the host should discard the objects that call used.
+
+Memory and threads:
+
+- What Sosu allocates lives in its arenas, and is freed by Sosu, never by the host. A library offers pairs of functions: `doc_open` creates an object that owns its arena, `doc_close` frees it. A `str` or a `T[]` returned to the host stays valid until the arena that holds it is freed.
+- Memory of the host passed to an export (a buffer, a `str`) is only read or written during the call: Sosu keeps no pointer to it afterwards (a rule that v0 does not check).
+- Sosu has no global variables: a library is reentrant, and two threads can call it at the same time on objects of their own (an arena belongs to one thread, §14.1).
+
+Use from other languages (nothing to add to the compiler):
+
+| Language | How it calls the library | From the header |
+|---|---|---|
+| C, C++ | `#include "geometry.h"`, then link | as is |
+| C# | `[LibraryImport("geometry")]`, `[StructLayout(LayoutKind.Sequential)]` | ClangSharp, or by hand |
+| Java (22 and later) | FFM API (`java.lang.foreign`) | `jextract` |
+| Java (older), Android | JNI, through a small C file | by hand |
+| Python | `ctypes` or `cffi` | `cffi` reads the header |
+| Rust, Go, Swift | `extern "C"`, cgo, a module map | `bindgen`, cgo, Swift's C importer |
+
 ## 10. User interface
 
 The UI is a set of packages, never compiler syntax. Three layers, each replaceable:
@@ -659,7 +726,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 ### 11.2 Mobile: how it works
 
-- The Sosu program is compiled into a library (`.so` on Android, static library on iOS), loaded by a small host project (Android activity, Xcode project). SDL3 provides this host code; in v0, project templates are provided by hand, and `sosuc package --target android|ios` (v1) generates them.
+- The Sosu program is compiled into a library (`.so` on Android, static library on iOS; `sosuc build --lib`, §9.2), loaded by a small host project (Android activity, Xcode project). SDL3 provides this host code; in v0, project templates are provided by hand, and `sosuc package --target android|ios` (v1) generates them.
 - Sosu compiles ahead of time (AOT): no problem with the ban on run-time generated code on iOS.
 - Files: always through `std.app` (sandbox), never hard-coded paths.
 - Permissions and native APIs (camera, notifications, purchases...): dedicated packages, with host code (JNI on Android, Objective-C on iOS); outside v0.
@@ -680,6 +747,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
 - `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
+- `sosuc build --lib[=shared]` (planned, §9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages and for mobile.
 - `sosuc package` and `sosuc bindgen`: v1.
 
 ## 12. Grammar (v0, EBNF)
@@ -767,7 +835,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 6. Arenas, `defer`, move, `unsafe`, debug checks
 7. Tooling: `sosuc fmt`, `sosuc test`, `sosuc run`, JSON diagnostics, contracts
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
-9. Mobile: Android (NDK, emulator), then iOS (simulator), with the same code
+9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code
 10. Generics (monomorphized), `Vec` / `HashMap` containers
 11. `sosuc bindgen`, `sosuc package`, cross-compilation
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
@@ -806,3 +874,13 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
 - Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)
+
+Libraries for other languages (§9.2):
+
+- C names of the exports: the Sosu name as written, or prefixed with the package automatically (`geometry_dot` from `dot`)? (proposed: as written, the author chooses; a collision with another library is a link error, as in C)
+- Errors in an export: a guard and `<package>_error()`, or an error code in every exported signature? (proposed: the guard; an export that wants to report its own errors returns them, as a C function would)
+- The guard leaves the `defer`s of the failed call unrun. Run them (unwinding the frames) or accept it in v0? (proposed: accept it; the host discards what the call used)
+- `enum`s without data at the boundary, as `uint32_t` constants in the header? And `T?`, `T!E`? (proposed: enums without data yes, with their constants; options and results no, in v0)
+- Several Sosu libraries in the same process: shared libraries hide their runtime, but two static ones would define it twice. (proposed: a static library comes with a separate `sosu_rt` library, linked once by the host)
+- The message of the last error is kept per thread, which needs C11 (`_Thread_local`) or a compiler extension (`__declspec(thread)` with MSVC), while the generated C is C99. (proposed: use them where available; this is the only part of the runtime outside C99)
+- Bindings for C# or Java generated by `sosuc` (`sosuc bindgen --to=csharp`)? (proposed: no; the header and the existing tools (`jextract`, ClangSharp, `cffi`) are enough, and keep the compiler free of any other language)
