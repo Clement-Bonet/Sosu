@@ -709,7 +709,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
-- `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI). `.ui.sosu` files are left as they are: they have no formatter yet.
+- `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
 - `sosuc package` and `sosuc bindgen`: v1.
 
 ## 12. Grammar (v0, EBNF)
