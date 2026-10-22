@@ -639,6 +639,35 @@ Compilation:
    - Widgets: `label`, `title`, `button` (true when clicked), `checkbox(text, bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8.
    - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` will generate these calls.
 
+Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file (§10.2), each one with a method of `widgets.Frame` behind it.
+
+| Widget | State | Design |
+|---|---|---|
+| `Text`, `Title` (labels) | available | |
+| `Button` | available | `enabled:` dims it and ignores clicks |
+| `Checkbox` | available | with or without a label |
+| `Column`, `Row`, `Space` | available | nested, with `gap` and `padding` |
+| `TextField` (one line) | basic | typing and erasing at the end only, 256 bytes; to do: the editing core below, and formats |
+| `TextField` with a format | planned | `accept:` filters what is typed (`Digits`, `Integer`, `Decimal`, a mask such as `"99999"`), `max:` limits the length |
+| `NumberField` | planned | bound to a number, not to text: `NumberField(bind: quantity)`, with `min:` and `max:`; one widget per type until generics (`i64`, `f64`) |
+| `MoneyField` | planned | bound to an integer of minor units (`i64` cents), never to a float; `symbol:` and `decimal:` given explicitly (`symbol: "€", decimal: ","`) rather than read from the locale of the system |
+| `TextArea` (several lines) | planned | the same editing core, plus Up / Down, line wrapping and scrolling; `rows:` gives its height; text in a buffer that grows in an arena |
+| `Radio` | planned | `Radio("Small", bind: size, value: Small)`: the translator generates the comparison and the assignment for the `enum` (a `match`), so the widget itself needs no generics |
+| `List` | planned | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames |
+| `Dropdown` | planned | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it |
+
+Foundations, to build first, since most planned widgets rely on them:
+
+1. Clipping in `render`: a stack of clip rectangles on the `Canvas`, so that nothing overflows a field, a list or a text area.
+2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat.
+3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`.
+4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame.
+5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform`.
+
+Order: the editing core and formatted one-line fields, then `Radio` (quick once the translator exists), `List` with scrolling, `TextArea`, and `Dropdown` with the layer above. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus, images (`render` would then draw images).
+
+Two limits of v0 apply to every text widget: the built-in font only draws ASCII (other characters are kept, and drawn as boxes until TrueType fonts), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
+
 ## 11. Targets and compilation
 
 ### 11.1 Targets
@@ -806,3 +835,14 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
 - Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)
+
+Widgets of `ui` (§10.4):
+
+- Identity of the widgets: they are numbered in the order of the calls, so a widget that appears (`if`) or a list that grows (`for`) shifts the numbers of those after it, and the focus or the pressed button can jump to another one. (proposed: the translator gives each node a number from its place in the `.ui.sosu` file, combined with the index of the loops around it; code written by hand passes its own)
+- Formats of numbers and money: read from the locale of the system, or given explicitly? (proposed: explicit in v0, `decimal: ","`; the same program then shows the same thing everywhere, and tests do not depend on the machine)
+- Money: an integer of minor units (`i64` cents), or a decimal type of the language? (proposed: `i64` minor units in v0; a currency with 3 decimals gives `places: 3`)
+- `NumberField` without generics: one widget per type (`i64`, `f64`), or a text field and a conversion by the program? (proposed: one per type until generics, then a single generic one)
+- `Radio` and `Dropdown` compare values of an `enum`: the translator generates a `match`, or the language gains `==` on `enum`s without data? (proposed: `==` on `enum`s without data, useful everywhere; the translator uses it)
+- Text that grows: a `TextBuffer` that owns an arena is moved, not copied (§6). Acceptable for a field of a state class? (proposed: yes; the state is a class, handled through a pointer, so nothing has to be copied)
+- The layer above answers clicks from its rectangle at the previous frame: one frame late when a dropdown opens. (proposed: accept it; it is the usual price of immediate mode)
+- Accessibility (screen readers) needs the tree of widgets, which immediate mode does not keep. (proposed: later; the frame could record its widgets as it draws them)
