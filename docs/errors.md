@@ -41,6 +41,9 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0211 | the array size belongs to the type | `i32 a[4]` instead of `i32[4] a` |
 | E0212 | modifier not allowed here | `virtual` in a `struct`, `pub import` |
 | E0213 | only classes can have a parent class or interfaces | `struct S : Base` |
+| E0214 | expected a node in a `.ui.sosu` file | `42` among the nodes of a window |
+| E0215 | invalid node or property in a `.ui.sosu` file | `Button("OK", on_tap: f)`, `TextField()` without `bind:`, `Text("a") { }`, a property after the nodes |
+| E0216 | not supported yet in a `.ui.sosu` file | `style` blocks, `align:`, `row:` / `col:` / `span:` |
 
 ## Semantic analysis
 
@@ -71,10 +74,10 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0331 | type mismatch | `i32 b = a;` with `a: i64`, `f32 x = 3;` |
 | E0332 | number literal out of range | `u8 x = 256;` |
 | E0333 | not a value | a type, a module or a method used as a value |
-| E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing a `str` |
-| E0335 | cannot assign | a variable or a field that is not `mut` |
+| E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing or slicing a `str` |
+| E0335 | cannot assign | a variable or a field that is not `mut`, `&a` or `a[0..2]` of an array that is not `mut`, `v[0..2] = w` |
 | E0336 | wrong number of arguments or variant fields | `g(1, 2)` for `g(i32 a)` |
-| E0337 | no such field, method or variant | `p.y` on a struct without `y` |
+| E0337 | no such field, method or variant | `p.y` on a struct without `y`, `.copy()` on a value without an `Arena` |
 | E0338 | not a function | `x()` with `x: i32`, `Point(...)` |
 | E0339 | invalid conversion | `3.0 as bool`, `as?` to a type that is not a subclass |
 | E0340 | missing effect | calling a `uses io` function from a function without `uses io` |
@@ -89,8 +92,8 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0349 | `self`, `base` or `result` out of place | `self` outside a method, `result` in a function returning nothing |
 | E0350 | invalid struct literal | missing or unknown field |
 | E0351 | invalid `io.print` | format and values do not match, value that cannot be printed |
-| E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)` |
-| E0353 | address of a temporary value | `&g()` |
+| E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)`, `v[0..=2]` |
+| E0353 | address or view of a temporary value | `&g()`, `g()[0..2]` when `g` returns an array |
 | E0354 | invalid arena allocation | `a.alloc(3)`, `a.alloc(Node)` with a pointer inside, `a.alloc(SomeClass)` |
 | E0355 | wrong number of elements in an array literal | `i32[3] a = [1, 2];` |
 | E0356 | use of a moved value, or invalid move | `Arena b = a;` then `a.free()`, a move inside a loop, out of a field |

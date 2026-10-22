@@ -144,35 +144,73 @@ canvas.Color well() {
     return canvas.Color{ r: 24, g: 24, b: 37 };
 }
 
+// What a window of a `.ui.sosu` file says about itself (spec §10.2).
+pub struct Window {
+    pub str title = "Sosu";
+    pub i32 width = 640;
+    pub i32 height = 480;
+}
+
+// A column or a row of widgets, being placed.
+struct Layout {
+    mut bool horizontal = false;
+    mut f32 x = 0.0;  // where the next widget goes
+    mut f32 y = 0.0;
+    mut f32 left = 0.0;  // where its widgets start, inside its padding
+    mut f32 top = 0.0;
+    mut f32 right = 0.0;  // how far its widgets go
+    mut f32 bottom = 0.0;
+    mut f32 gap = 8.0;
+    mut f32 padding = 0.0;
+}
+
 // The widgets of one frame, drawn on `surface`.
 pub struct Frame {
     Ui* ui;
     canvas.Canvas* surface;
-    mut f32 x;  // where the next widget goes
-    mut f32 y;
-    f32 left;  // where the column starts
-    mut f32 row_height = 0.0;  // the tallest widget of the current row
-    mut bool in_row = false;
+    // The layouts open, the frame itself first: a column, or a row inside, and so on.
+    mut Layout[16] layouts = [Layout{ }; 16];
+    mut usize depth = 0;
     mut i32 next_id = 0;
     mut bool focus_taken = false;  // a text field took the focus in this frame
-    f32 gap = 8.0;
     f32 height = 32.0;  // of a line of widgets
+
+    // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
+    // until `end()`; the column then takes its place in the layout that holds it.
+    pub void column(f32 gap, f32 padding) {
+        open(false, gap, padding);
+    }
+
+    // The same, side by side.
+    pub void row_with(f32 gap, f32 padding) {
+        open(true, gap, padding);
+    }
+
+    pub void end() {
+        if (depth == 0) {
+            return;
+        }
+        Layout done = layouts[depth];
+        depth -= 1;
+        place(done.right - done.left + 2.0 * done.padding, done.bottom - done.top + 2.0 * done.padding);
+    }
 
     // The widgets that follow go side by side, until `end_row()`.
     pub void row() {
-        in_row = true;
-        row_height = 0.0;
+        open(true, 8.0, 0.0);
     }
 
     pub void end_row() {
-        in_row = false;
-        x = left;
-        y += row_height + gap;
+        end();
     }
 
-    // Empty space under the last widget.
+    // Empty space after the last widget.
     pub void space(f32 size) {
-        y += size;
+        if (layouts[depth].horizontal) {
+            layouts[depth].x += size;
+        } else {
+            layouts[depth].y += size;
+        }
     }
 
     // Text, at the size of the widgets (font at scale 2).
@@ -191,9 +229,19 @@ pub struct Frame {
 
     // Returns true when it is clicked: pressed, then released over it.
     pub bool button(str text) {
+        return button_enabled(text, true);
+    }
+
+    // A button that can be disabled: dimmed, and never clicked.
+    pub bool button_enabled(str text, bool enabled) {
         i32 id = take_id();
         canvas.Rect size = canvas.text_size(text, 2);
         canvas.Rect r = place(size.w + 32.0, height);
+        if (!enabled) {
+            surface.fill(r, well());
+            surface.text(r.x + 16.0, r.y + 8.0, text, face(false, false), 2);
+            return false;
+        }
         bool clicked = click(id, r);
         bool hot = over(r);
         surface.fill(r, face(hot, ui.active == id && hot));
@@ -217,6 +265,11 @@ pub struct Frame {
         }
         surface.text(r.x + 32.0, r.y + 8.0, text, ink(), 2);
         return clicked;
+    }
+
+    // The same box, without a label.
+    pub bool checkbox_alone(bool* value) {
+        return checkbox("", value);
     }
 
     // A text field `width` pixels wide. A click gives it the keyboard; returns true when
@@ -271,14 +324,26 @@ pub struct Frame {
         return id;
     }
 
-    // The place of the next widget, of size `w` by `h`.
+    void open(bool horizontal, f32 gap, f32 padding) {
+        if (depth == 15) {
+            return;  // too deep: the widgets stay in the current layout
+        }
+        f32 x = layouts[depth].x + padding;
+        f32 y = layouts[depth].y + padding;
+        depth += 1;
+        layouts[depth] = Layout{ horizontal: horizontal, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, padding: padding };
+    }
+
+    // The place of the next widget, of size `w` by `h`, in the current layout.
     canvas.Rect place(f32 w, f32 h) {
-        canvas.Rect r = canvas.Rect{ x: x, y: y, w: w, h: h };
-        if (in_row) {
-            x += w + gap;
-            row_height = max(row_height, h);
+        Layout l = layouts[depth];
+        canvas.Rect r = canvas.Rect{ x: l.x, y: l.y, w: w, h: h };
+        layouts[depth].right = max(l.right, l.x + w);
+        layouts[depth].bottom = max(l.bottom, l.y + h);
+        if (l.horizontal) {
+            layouts[depth].x += w + l.gap;
         } else {
-            y += h + gap;
+            layouts[depth].y += h + l.gap;
         }
         return r;
     }
@@ -298,7 +363,9 @@ pub struct Frame {
 
 // The widgets of a frame, from (x, y) downwards. End it with `finish()`.
 pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
-    return Frame{ ui: ui, surface: surface, x: x, y: y, left: x };
+    mut Frame f = Frame{ ui: ui, surface: surface };
+    f.layouts[0] = Layout{ x: x, y: y, left: x, top: y, right: x, bottom: y };
+    return f;
 }
 
 test "text buffer" {
@@ -380,4 +447,44 @@ test "a text field takes the keyboard when clicked" {
     assert(f.checkbox("Done", &done) && done);
     f.finish();
     assert(ui.focus == -1);
+}
+
+test "layouts nest" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 10.0, 10.0);
+    f.row_with(4.0, 0.0);
+    f.column(2.0, 0.0);
+    canvas.Rect a = f.place(16.0, 32.0);
+    canvas.Rect b = f.place(20.0, 32.0);
+    f.end();  // the column: 20 wide, 66 high
+    canvas.Rect c = f.place(10.0, 10.0);
+    f.end();
+    canvas.Rect d = f.place(10.0, 10.0);
+    assert(a.x == 10.0 && a.y == 10.0 && b.x == 10.0 && b.y == 44.0);
+    assert(c.x == 34.0 && c.y == 10.0);
+    assert(d.x == 10.0 && d.y == 84.0);
+
+    f.column(0.0, 5.0);  // padding on every side
+    canvas.Rect e = f.place(10.0, 10.0);
+    f.end();
+    canvas.Rect g = f.place(10.0, 10.0);
+    assert(e.x == 15.0 && e.y == 107.0 && g.y == 130.0);  // the column, 20 high, starts at 102
+    f.end();  // nothing open: ignored
+    f.finish();
+}
+
+test "a disabled button is never clicked" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 200, 100);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(20.0, 20.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    mut Frame f = begin(&ui, &surface, 10.0, 10.0);
+    assert(!f.button_enabled("OK", false));
+    f.finish();
 }

@@ -488,6 +488,73 @@ frameworks = ["Cocoa"]
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
 
+### 9.2 Using Sosu from other languages (planned)
+
+Status: design, not implemented yet. The grammar of §12 will gain `export` when it is.
+
+A library written in Sosu is offered to other languages through the C ABI, which they all know how to call: C and C++ directly, C# with P/Invoke, Java with the FFM API (or JNI), Python with `ctypes` or `cffi`, Rust, Go, Swift. `sosuc` produces a C library and its header; each language uses its own tools on them. The compiler contains nothing specific to C#, Java or any other language.
+
+```sosu
+// geometry/src/lib.sosu
+pub struct Vec2 {
+    pub f32 x;
+    pub f32 y;
+}
+
+export "C" f32 geometry_dot(Vec2 a, Vec2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+```
+
+```c
+/* build/geometry.h, generated */
+typedef struct geometry_Vec2 { float x; float y; } geometry_Vec2;
+float geometry_dot(geometry_Vec2 a, geometry_Vec2 b);
+```
+
+Exported functions:
+
+- `export "C"` marks a function of the top level that the library offers. Its C name is its Sosu name, unchanged: the author chooses it, usually prefixed with the name of the library, since C has a single namespace. Two exports with the same name are an error; a C keyword or a name starting with `sosu_` is refused.
+- Methods are not exported: a function takes the object instead (`export "C" void doc_close(Doc* d)`).
+- Types allowed in the signature of an export, whose C form the header gives:
+  - integers, floats and `bool` (`int32_t`, `float`, `bool`...), `char` (`uint32_t`, a Unicode scalar value);
+  - `struct`s whose fields are all allowed (C layout, §9), and pointers to the allowed types;
+  - `str` (`sosu_str`: `const uint8_t *ptr; size_t len;`, UTF-8, not terminated by a NUL) and `T[]` (`ptr` and `len`);
+  - a pointer to a class, as an opaque pointer (`typedef struct geometry_Shape geometry_Shape;`): the host only passes it back to exported functions;
+  - function types made of allowed types, for callbacks into the host.
+- Not allowed in v0: `T?`, `T!E`, `enum`s (with or without data), `Arena` by value, interfaces. An export translates them (a `bool` result and an out pointer, an error code...).
+- Effects and contracts are kept: an export can have any `uses` clause (the host is outside the effect system, as C is), and its `requires` are checked on entry, like any call from the host.
+
+Building:
+
+- `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/<name>.a`, or `.lib` with MSVC); `--lib=shared` into a shared one (`.so`, `.dll` with its import library, `.dylib`). Both come with `build/<name>.h`.
+- The header is plain C99 (`stdint.h`, `stdbool.h`, `stddef.h`), usable from C++ (`extern "C"` guards). It declares the exports, and the types they use under the name `<package>_<Type>`. The `#line` directives stay in the C code of the library: a debugger shows the `.sosu` files.
+- The runtime (`sosu_rt.c`) is compiled into the library. In a shared library, its symbols, and those of the generated code, are hidden: only the exports are visible.
+- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list next to it, since the host links them.
+- Mobile (§11.2) uses the same output: the Android activity loads a shared library, the Xcode project links a static one.
+
+Run-time errors:
+
+- In a program, a run-time error (overflow, index out of bounds, failed contract) stops it with the code 101. A library must not stop the process of its host: each export runs under a guard, as `sosuc test` already does for each test. After an error, the export returns a zero value, and `<package>_error()` gives the message, or NULL if the last call succeeded. The message is kept per thread.
+- After an error, what the failed call was building is left as it is, and its `defer`s did not run: the host should discard the objects that call used.
+
+Memory and threads:
+
+- What Sosu allocates lives in its arenas, and is freed by Sosu, never by the host. A library offers pairs of functions: `doc_open` creates an object that owns its arena, `doc_close` frees it. A `str` or a `T[]` returned to the host stays valid until the arena that holds it is freed.
+- Memory of the host passed to an export (a buffer, a `str`) is only read or written during the call: Sosu keeps no pointer to it afterwards (a rule that v0 does not check).
+- Sosu has no global variables: a library is reentrant, and two threads can call it at the same time on objects of their own (an arena belongs to one thread, §14.1).
+
+Use from other languages (nothing to add to the compiler):
+
+| Language | How it calls the library | From the header |
+|---|---|---|
+| C, C++ | `#include "geometry.h"`, then link | as is |
+| C# | `[LibraryImport("geometry")]`, `[StructLayout(LayoutKind.Sequential)]` | ClangSharp, or by hand |
+| Java (22 and later) | FFM API (`java.lang.foreign`) | `jextract` |
+| Java (older), Android | JNI, through a small C file | by hand |
+| Python | `ctypes` or `cffi` | `cffi` reads the header |
+| Rust, Go, Swift | `extern "C"`, cgo, a module map | `bindgen`, cgo, Swift's C importer |
+
 ## 10. User interface
 
 The UI is a set of packages, never compiler syntax. Three layers, each replaceable:
@@ -499,12 +566,14 @@ The UI is a set of packages, never compiler syntax. Three layers, each replaceab
 | `ui` | layout, widgets, state, declarative syntax | widgets drawn by Sosu, identical rendering everywhere |
 
 - SDL3 handles Windows, Linux, macOS, Android and iOS. Its interface stays narrow so that custom backends can be added later (Win32, Cocoa, X11 / Wayland, UIKit, native Android).
-- Text is the real difficulty: `stb_truetype` or FreeType at first; fonts, HiDPI and international input (IME) must be planned from the start.
+- Text is the real difficulty. v0 starts with a built-in 8 by 8 bitmap font (ASCII, §10.4); proportional fonts will come through `stb_truetype` or FreeType behind the same call. HiDPI and international input (IME) must be planned from the start: typed text already arrives as `TextInput` (UTF-8), after the keyboard layout and the input methods.
 - Accessibility (screen readers): to be planned, outside v0.
 
 ### 10.1 Events and loop
 
 Events are a sum `enum`, handled by an exhaustive `match`. On mobile, the OS owns the main loop: the `platform` runtime therefore owns it on every platform, and the program provides callbacks.
+
+The sketch below is the target. What v0 implements (§10.4) passes the callbacks as an `app.Handler`, and has the events `Quit`, `Resized`, `Key`, `TextInput`, `MouseMove`, `Click` and `Release`; touch, safe areas and the lifecycle come with mobile.
 
 ```sosu
 enum Event {
@@ -540,7 +609,7 @@ A window has its own arena; a per-frame arena is reset at every frame for the wi
 
 ### 10.2 `.ui.sosu` interface files
 
-Windows and components are described in `.ui.sosu` files, separate from the logic. The format is inspired by XAML, but lighter: braces, no tags, no namespaces. Sketch: the exact grammar will be settled with the `ui` package.
+Windows and components are described in `.ui.sosu` files, separate from the logic. The format is inspired by XAML, but lighter: braces, no tags, no namespaces. The examples below show the whole design; what v0 translates is listed under *Translation in v0*, after the rules.
 
 ```sosu
 // login.ui.sosu
@@ -616,10 +685,40 @@ XAML equivalents:
 
 Compilation:
 
-- `sosuc` translates each `.ui.sosu` into ordinary Sosu functions that build the tree in the frame arena. `#line` directives point errors back to the interface file.
+- `sosuc` translates each `.ui.sosu` into ordinary Sosu functions, which describe the interface with the widgets of the `ui` package at each frame (immediate mode, §10.4). The translation builds the syntax tree directly, with the positions of the interface file: the type checker's errors point to it, without `#line`.
 - No reflection and no run-time parsing: an unknown property is a compile error, with a suggestion.
-- This translator is part of the tooling of the `ui` package, not of the compiler core.
+- The translator lives next to the parser, whose expressions it reuses, and only knows the interface of `ui.widgets`; the type checker and the code generator see ordinary functions.
 - Hot reload (changing the interface without recompiling): possible later, by interpreting the file during development.
+
+Translation in v0:
+
+- `import app.screen;` loads `src/screen.sosu`, or else `src/screen.ui.sosu`. The package must depend on `ui`; `import ui.widgets;` is implied.
+- `window Name(params) [uses ...] { properties, then nodes }` becomes `pub void Name(widgets.Frame* ui_frame, params)`. Its properties `title`, `width` and `height` become `pub widgets.Window NameConfig()`, which the program passes to `platform` (`app.Config`). `component Name(params) { nodes }` becomes the same function, without properties. A node `Name(values)`, or `module.Name(values)`, calls a component, its values in order.
+- Nodes, and what they become (`f` stands for `ui_frame`); a number of pixels can be written `8` for `8.0`:
+
+| Node | Becomes |
+|---|---|
+| `Column(gap: g, padding: p) { ... }`, `Row(...)` | `f.column(g, p)` (or `f.row_with(g, p)`), the nodes, `f.end()`; `gap` is 8 and `padding` 0 by default |
+| `Text(s)`, `Title(s)`, `Space(n)` | `f.label(s)`, `f.title(s)`, `f.space(n)` |
+| `Button(s, on_click: h, enabled: c)` | `if (f.button_enabled(s, c)) { h(); }`; `h` is a function or a method (`state.save`), or a call (`state.save(1)`) |
+| `TextField(bind: x, width: w, on_enter: h)` | `if (f.text_field(&x, w)) { h(); }`; `bind:` is required, `width` is 200 by default |
+| `Checkbox(s, bind: x, on_change: h)` | `if (f.checkbox(s, &x)) { h(); }`; without `s`, `f.checkbox_alone(&x)` |
+
+- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples.
+- Not yet: `style` and `theme` blocks, `style:`, `align:`, grids (`row:`, `col:`, `span:`), `List`, `bind:` on other widgets than `TextField` and `Checkbox` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+
+Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
+
+```ebnf
+ui_file      = { import | view } ;
+view         = ( "window" | "component" ) IDENT params [ effects ] "{" { property } { item } "}" ;
+property     = IDENT ":" expr ;                                (* window only: title, width, height *)
+item         = node | "if" "(" expr ")" children [ "else" ( item | children ) ]
+             | "for" "(" [ "mut" ] ( type | "auto" ) IDENT "in" expr ")" children ;
+node         = path "(" [ argument { "," argument } ] ")" [ children ] ;
+argument     = IDENT ":" expr | expr ;
+children     = "{" { item } "}" ;
+```
 
 ### 10.3 Mobile specifics
 
@@ -634,10 +733,10 @@ Compilation:
    - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `line`, `text` and `at`, all clipped to the canvas. `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen.
    - Text: `render.font` is a built-in 8 by 8 font for printable ASCII (font8x8, public domain); other characters are drawn as a box. `surface.text(x, y, text, color, scale)` draws each pixel of the font as a `scale` by `scale` square, `\n` starts a new line (`font.line_height()`: 10 pixels of the font), and `canvas.text_size(text, scale)` gives the size of the text. Proportional TrueType fonts (§10) can come later behind the same call.
 2. The same program on the Android emulator, then on the iOS simulator.
-3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
-   - First part, without the `.ui.sosu` file: the `ui` package and `examples/form`. Without lambdas (v1), a widget cannot call the program back: `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame under each other, or side by side between `row()` and `end_row()`.
-   - Widgets: `label`, `title`, `button` (true when clicked), `checkbox(text, bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8.
-   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` will generate these calls.
+3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target. Done on the desktop: `examples/form` describes its window in `screen.ui.sosu` (§10.2), and `tests/programs/screens` drives such a window with simulated input, without a screen.
+   - The `ui` package: without lambdas (v1), a widget cannot call the program back, so `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame in nested columns and rows (`column(gap, padding)`, `row_with(gap, padding)`, `end()`; `row()` and `end_row()` for a row with the default gap).
+   - Widgets: `label`, `title`, `button` and `button_enabled` (true when clicked), `checkbox(text, bool*)` and `checkbox_alone(bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8. `widgets.Window` holds what a window of a `.ui.sosu` file says about itself.
+   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` generates the calls to the widgets.
 
 Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file (§10.2), each one with a method of `widgets.Frame` behind it.
 
@@ -688,7 +787,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 ### 11.2 Mobile: how it works
 
-- The Sosu program is compiled into a library (`.so` on Android, static library on iOS), loaded by a small host project (Android activity, Xcode project). SDL3 provides this host code; in v0, project templates are provided by hand, and `sosuc package --target android|ios` (v1) generates them.
+- The Sosu program is compiled into a library (`.so` on Android, static library on iOS; `sosuc build --lib`, §9.2), loaded by a small host project (Android activity, Xcode project). SDL3 provides this host code; in v0, project templates are provided by hand, and `sosuc package --target android|ios` (v1) generates them.
 - Sosu compiles ahead of time (AOT): no problem with the ban on run-time generated code on iOS.
 - Files: always through `std.app` (sandbox), never hard-coded paths.
 - Permissions and native APIs (camera, notifications, purchases...): dedicated packages, with host code (JNI on Android, Objective-C on iOS); outside v0.
@@ -709,6 +808,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
 - `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
+- `sosuc build --lib[=shared]` (planned, §9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages and for mobile.
 - `sosuc package` and `sosuc bindgen`: v1.
 
 ## 12. Grammar (v0, EBNF)
@@ -796,7 +896,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 6. Arenas, `defer`, move, `unsafe`, debug checks
 7. Tooling: `sosuc fmt`, `sosuc test`, `sosuc run`, JSON diagnostics, contracts
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
-9. Mobile: Android (NDK, emulator), then iOS (simulator), with the same code
+9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code
 10. Generics (monomorphized), `Vec` / `HashMap` containers
 11. `sosuc bindgen`, `sosuc package`, cross-compilation
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
@@ -816,17 +916,19 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Integer overflow: an error in debug, modulo arithmetic in release.
 - Function overloading: excluded.
 - Concurrency: threads and message channels, an arena belongs to a single thread, UI on the main thread.
-- Program entry: callbacks provided to the `platform` runtime, which owns the main loop.
+- Program entry: the `platform` runtime owns the main loop and calls the program back through the interface `app.Handler`, implemented by a class that holds the state (§10.4).
 - `.ui.sosu` syntax: only in dedicated files in v0.
 - Interface hot reload: after v0.
 - Manifest format: a subset of TOML (`sosu.toml`, §8.1), implemented.
-- Source of dependencies in v0: local path or Git repository, without a central registry. Local paths are implemented; Git sources are parsed but not fetched yet.
+- Source of dependencies in v0: local path or Git repository (`tag` or `rev`), without a central registry. Both are implemented; Git dependencies are cloned with the `git` command and pinned by `sosu.lock` (§8.1).
 - A `struct` cannot implement an interface in v0 (reserved for classes); the parser rejects `struct S : I`.
 - Imported names are qualified by the module name: `vector.Vec2`, `io.print(...)` (§8.1).
 - C libraries are declared in `sosu.toml` only ([link] sections, §9.1), not in the source code.
 - Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
 - Array literals `[a, b]` and `[value; n]`; `&x` requires `mut x`; `result` is contextual (only in `ensures`) (§5.3).
 - Moves: `Arena` and the values containing one are moved, checked in the order of the source; `.copy()` duplicates them with new, empty arenas (§6).
+- Views `x[a..b]` of arrays and slices, without copy, bounds checked; a view of an array needs it `mut`, like `&x` (§4, §5.3).
+- User interface (§10.4): `render` draws in software into a buffer of pixels, with a built-in 8 by 8 font; `ui` works in immediate mode (no lambdas in v0) and does not depend on `platform`, so that it is tested without a screen.
 
 ### 14.2 Open questions
 
@@ -835,6 +937,16 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
 - Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)
+
+Libraries for other languages (§9.2):
+
+- C names of the exports: the Sosu name as written, or prefixed with the package automatically (`geometry_dot` from `dot`)? (proposed: as written, the author chooses; a collision with another library is a link error, as in C)
+- Errors in an export: a guard and `<package>_error()`, or an error code in every exported signature? (proposed: the guard; an export that wants to report its own errors returns them, as a C function would)
+- The guard leaves the `defer`s of the failed call unrun. Run them (unwinding the frames) or accept it in v0? (proposed: accept it; the host discards what the call used)
+- `enum`s without data at the boundary, as `uint32_t` constants in the header? And `T?`, `T!E`? (proposed: enums without data yes, with their constants; options and results no, in v0)
+- Several Sosu libraries in the same process: shared libraries hide their runtime, but two static ones would define it twice. (proposed: a static library comes with a separate `sosu_rt` library, linked once by the host)
+- The message of the last error is kept per thread, which needs C11 (`_Thread_local`) or a compiler extension (`__declspec(thread)` with MSVC), while the generated C is C99. (proposed: use them where available; this is the only part of the runtime outside C99)
+- Bindings for C# or Java generated by `sosuc` (`sosuc bindgen --to=csharp`)? (proposed: no; the header and the existing tools (`jextract`, ClangSharp, `cffi`) are enough, and keep the compiler free of any other language)
 
 Widgets of `ui` (§10.4):
 
