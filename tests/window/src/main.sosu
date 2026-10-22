@@ -1,0 +1,23 @@
+// Draws one frame, then asks to close: `run` must return 0 after the `Quit` event.
+import std.io;
+import platform.app;
+
+bool on_event(app.Event e) uses io {
+    return match (e) {
+        Quit => false,
+        Key(code, down) => true,
+        Resized(width, height) => true,
+    };
+}
+
+void on_frame(app.Canvas* canvas) uses io {
+    canvas.clear(app.Color{ r: 30, g: 30, b: 46 });
+    canvas.fill(app.Rect{ x: 10.0, y: 10.0, w: 100.0, h: 50.0 }, app.Color{ r: 255, g: 140, b: 0 });
+    app.request_quit();
+}
+
+i32 main() uses io {
+    i32 status = app.run(app.Config{ title: "Sosu test", width: 320, height: 240 }, on_event, on_frame);
+    io.print("window closed ({})", status);
+    return status;
+}

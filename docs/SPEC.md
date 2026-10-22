@@ -627,7 +627,7 @@ Compilation:
 
 ### 10.4 Milestones
 
-1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows with `packages/platform` and `examples/window`. Its v0 interface is simpler than the sketch of §10.1, since there are no generics to carry the application state: `app.run(config, on_event, on_frame)`, where `on_event` returns `false` to stop and `on_frame` draws on an `app.Canvas*` (`clear`, `fill`).
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Its v0 interface is simpler than the sketch of §10.1, since there are no generics to carry the application state: `app.run(config, on_event, on_frame)`, where `on_event` returns `false` to stop and `on_frame` draws on an `app.Canvas*` (`clear`, `fill`); `app.request_quit()` closes the window as the window button does.
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
 
