@@ -1,0 +1,58 @@
+// `.copy()` on values that own an `Arena` (spec §6): run with `sosuc run`. Each arena of
+// the copy is new and empty, with the same block size; the other members are copied.
+import std.io;
+
+struct Pool {
+    Arena arena;
+    str name;
+    mut i32 used;
+}
+
+enum Slot {
+    Empty,
+    Full(Pool pool, i32 weight),
+}
+
+i32 weight(Slot* slot) {
+    return match (*slot) {
+        Empty => 0,
+        Full(pool, w) => w,
+    };
+}
+
+i32 main() uses io {
+    mut Pool a = Pool{ arena: Arena.new(1 * KB), name: "first", used: 2 };
+    defer a.arena.free();
+    i32* n = a.arena.alloc(i32);
+    *n = 5;
+
+    mut Pool b = a.copy();  // `a` is not moved: both can be used
+    defer b.arena.free();
+    b.used += 1;
+    i32* m = b.arena.alloc(i32);
+    io.print("{} {} {} {} {}", b.name, a.used, b.used, *n, *m);
+
+    mut Arena first = Arena.new(64);
+    defer first.free();
+    mut Arena second = first.copy();
+    defer second.free();
+    second.alloc(i64);
+    io.print("arena copied: {}", *first.alloc(i64) == 0);
+
+    mut Pool[2] pools = [a.copy(), b.copy()];
+    defer pools[0].arena.free();
+    defer pools[1].arena.free();
+    io.print("array: {} {}", pools[0].used, pools[1].used);
+
+    mut Pool? maybe = some(a.copy());
+    mut Pool? other = maybe.copy();
+    io.print("option: {}", match (other) {
+        some(pool) => pool.used,
+        none => 0,
+    });
+
+    mut Slot slot = Full(a.copy(), 9);
+    mut Slot same = slot.copy();
+    io.print("enum: {} {}", weight(&slot), weight(&same));
+    return 0;
+}

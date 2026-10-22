@@ -109,8 +109,8 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0401 | invalid sosu.toml syntax | `name "app"`, unterminated string, `name = 3` |
 | E0402 | unknown section or key | `[tools]`, `[link.beos]`, `author = "..."`, `branch = "main"` in a dependency |
 | E0403 | missing section or key | no `[package]`, no `name` or `version` |
-| E0404 | invalid dependency | `x = "../x"`, no source, `path` and `git` together, `git` without `tag` or `rev` |
-| E0405 | git dependencies are not supported yet | `ui = { git = "...", tag = "v1" }` |
+| E0404 | invalid dependency | `x = "../x"`, no source, `path` and `git` together, `git` without `tag` or `rev`, a `"` or `$` in the URL or tag |
+| E0405 | cannot fetch a git dependency | wrong URL, no such tag or rev, `git` not installed |
 | E0406 | the package is not named like its dependency key | `geo = { path = "../geometry" }` |
 | E0407 | circular dependency between packages | `a` depends on `b`, which depends on `a` |
 | E0408 | duplicate key, dependency or section | `name` written twice, `[link]` twice |

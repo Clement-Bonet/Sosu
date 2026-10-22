@@ -12,11 +12,11 @@ English is the working language of the project: code, comments, compiler message
 | Step (roadmap §13) | Status |
 |---|---|
 | 1. Lexer | done |
-| 2. Parser -> AST, packages and imports | done (local dependencies only, no git yet) |
+| 2. Parser -> AST, packages and imports | done (local and git dependencies, `sosu.lock`) |
 | 3. Semantic analysis | done for the language of §5 to §7 |
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
-| 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows) |
-| 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it; no `.copy()` yet) |
+| 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |
+| 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
@@ -99,8 +99,16 @@ powershell -ExecutionPolicy Bypass -File packages\platform\fetch-sdl3.ps1   :: o
 build\sosuc run examples\window
 ```
 
-The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On Linux and macOS,
-`platform` links the SDL3 installed on the system (a script will come with the CI support).
+The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On Linux,
+`platform` links the SDL3 installed on the system (3.2 or later):
+
+```sh
+sudo apt install libsdl3-dev    # Ubuntu 25.04 or later, Debian 13 or later
+./build/sosuc run examples/window
+```
+
+`tests/window` opens a window, draws one frame and closes itself. The CI runs it on Linux and
+Windows with `SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
 
 ## Branches
 

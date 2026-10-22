@@ -93,4 +93,8 @@ typedef struct {
 bool sema_check(Sema *sema, Program *program);
 void sema_free(Sema *sema);
 
+/* True for the types that own a resource: `Arena`, and the values containing one. They are
+   moved, not copied, and duplicated with `.copy()` (spec §6). */
+bool type_owns_resource(const Type *type);
+
 #endif

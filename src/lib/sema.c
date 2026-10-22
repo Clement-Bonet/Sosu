@@ -693,6 +693,36 @@ static void check_class(Sema *s, TypeInfo *cls) {
     }
 }
 
+/* ---- Resources (spec §6) ---- */
+
+bool type_owns_resource(const Type *type) {
+    switch (type->tag) {
+    case T_ARENA:
+        return true;
+    case T_ARRAY:
+        return type_owns_resource(type->as.array.element);
+    case T_OPTION:
+        return type_owns_resource(type->as.inner);
+    case T_RESULT:
+        return type_owns_resource(type->as.result.value) || type_owns_resource(type->as.result.error);
+    case T_STRUCT:
+        for (size_t i = 0; i < type->as.info->field_count; i++) {
+            if (type_owns_resource(type->as.info->fields[i].type)) return true;
+        }
+        return false;
+    case T_ENUM:
+        for (size_t i = 0; i < type->as.info->variant_count; i++) {
+            const VariantInfo *variant = &type->as.info->variants[i];
+            for (size_t j = 0; j < variant->field_count; j++) {
+                if (type_owns_resource(variant->fields[j])) return true;
+            }
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
 /* ---- Entry point ---- */
 
 bool sema_check(Sema *s, Program *program) {
