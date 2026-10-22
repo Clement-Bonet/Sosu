@@ -6,18 +6,28 @@ class Widget : Drawable {
     f32 x;
     f32 y;
 
-    void init(f32 x, f32 y) { self.x = x; self.y = y; }
+    void init(f32 x, f32 y) {
+        self.x = x;
+
+        self.y = y;
+    }
 
     virtual void on_click() uses io { }
-    override void draw(Render* r) uses io { /* ... */ }
+    override void draw(Render* r) uses io {  /* ... */
+    }
 }
 
 class Button : Widget {
     str label;
 
-    void init(str label) { base.init(0.0, 0.0); self.label = label; }
+    void init(str label) {
+        base.init(0.0, 0.0);
 
-    override void on_click() uses io { /* ... */ }
+        self.label = label;
+    }
+
+    override void on_click() uses io {  /* ... */
+    }
 }
 
 void demo(Arena* arena) {

@@ -6,8 +6,8 @@ import std.time;
 
 i32 main() uses io, time, random {
     mut random.Rng rng = random.seeded(0);
-    io.print("{}", rng.next());   // SplitMix64 from 0: 16294208416658607535
-    io.print("{}", rng.next());   // then 7960286522194355700
+    io.print("{}", rng.next());  // SplitMix64 from 0: 16294208416658607535
+    io.print("{}", rng.next());  // then 7960286522194355700
 
     mut i32 outside = 0;
     for (i32 i in 0..1000) {

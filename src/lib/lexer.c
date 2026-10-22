@@ -11,6 +11,7 @@ typedef struct {
     size_t len;
     size_t pos;
     TokenList *tokens;
+    CommentList *comments; /* NULL unless formatting */
     DiagList *diags;
 } Lexer;
 
@@ -82,14 +83,31 @@ static int32_t advance_char(Lexer *lx) {
 
 /* ---- Whitespace and comments ---- */
 
+/* Comments are kept only for the formatter (lex_file_comments). */
+static void record_comment(Lexer *lx, size_t start, size_t end) {
+    if (!lx->comments) return;
+    size_t line_start = start;
+    while (line_start > 0 && lx->src[line_start - 1] != '\n') line_start--;
+    bool own_line = true;
+    for (size_t i = line_start; i < start; i++) {
+        if (lx->src[i] != ' ' && lx->src[i] != '\t') own_line = false;
+    }
+    Comment comment = { start, end - start, own_line };
+    SOSU_VEC_PUSH(lx->comments, comment);
+}
+
 static void skip_trivia(Lexer *lx) {
     while (!at_end(lx)) {
         char c = lx->src[lx->pos];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             lx->pos++;
         } else if (c == '/' && peek(lx, 1) == '/') {
+            size_t start = lx->pos;
             lx->pos += 2;
             while (!at_end(lx) && lx->src[lx->pos] != '\n') advance_char(lx);
+            size_t end = lx->pos;
+            while (end > start && lx->src[end - 1] == '\r') end--;
+            record_comment(lx, start, end);
         } else if (c == '/' && peek(lx, 1) == '*') {
             size_t start = lx->pos;
             lx->pos += 2;
@@ -105,6 +123,7 @@ static void skip_trivia(Lexer *lx) {
                 }
                 advance_char(lx);
             }
+            record_comment(lx, start, lx->pos);
         } else {
             return;
         }
@@ -473,11 +492,16 @@ static void lex_symbol(Lexer *lx) {
 /* ---- Entry point ---- */
 
 bool lex_file(const SourceFile *file, TokenList *tokens, DiagList *diags) {
+    return lex_file_comments(file, tokens, NULL, diags);
+}
+
+bool lex_file_comments(const SourceFile *file, TokenList *tokens, CommentList *comments, DiagList *diags) {
     Lexer lx = {0};
     lx.file = file;
     lx.src = file->text;
     lx.len = file->length;
     lx.tokens = tokens;
+    lx.comments = comments;
     lx.diags = diags;
     size_t errors_before = diags->error_count;
 

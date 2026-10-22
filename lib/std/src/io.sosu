@@ -4,7 +4,7 @@
 pub enum IoError {
     NotFound,
     PermissionDenied,
-    InvalidUtf8,   // read_file: the file is not text (str is always valid UTF-8)
+    InvalidUtf8,  // read_file: the file is not text (str is always valid UTF-8)
     Other,
 }
 
@@ -26,10 +26,10 @@ IoError last_error() uses io {
     unsafe {
         code = sosu_errno();
     }
-    if (code == 2) {   // ENOENT
+    if (code == 2) {  // ENOENT
         return NotFound;
     }
-    if (code == 13) {   // EACCES
+    if (code == 13) {  // EACCES
         return PermissionDenied;
     }
     return Other;
@@ -41,7 +41,7 @@ CFile*? open(Arena* arena, str path, str mode) uses io {
     u8* c_mode = mode.to_cstr(arena);
     unsafe {
         CFile* file = fopen(c_path, c_mode);
-        if ((file as u64) == 0) {
+        if (file as u64 == 0) {
             return none;
         }
         return some(file);
@@ -58,7 +58,9 @@ void close(CFile* file) uses io {
 pub str!IoError read_file(Arena* arena, str path) uses io {
     CFile* file = match (open(arena, path, "rb")) {
         some(opened) => opened,
-        none => { return err(last_error()); },
+        none => {
+            return err(last_error());
+        },
     };
     defer close(file);
 
@@ -90,7 +92,9 @@ pub str!IoError read_file(Arena* arena, str path) uses io {
 pub void!IoError write_file(Arena* arena, str path, str text) uses io {
     CFile* file = match (open(arena, path, "wb")) {
         some(opened) => opened,
-        none => { return err(last_error()); },
+        none => {
+            return err(last_error());
+        },
     };
     defer close(file);
     if (text.len == 0) {
