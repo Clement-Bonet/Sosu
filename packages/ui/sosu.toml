@@ -1,0 +1,8 @@
+# Widgets in immediate mode (spec §10), drawn with `render`. It does not depend on
+# `platform`: the program passes it the input, and its tests run without a screen.
+[package]
+name = "ui"
+version = "0.1.0"
+
+[dependencies]
+render = { path = "../render" }

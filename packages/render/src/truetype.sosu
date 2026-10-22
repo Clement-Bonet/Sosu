@@ -1,0 +1,725 @@
+// render.truetype: TrueType fonts (.ttf files), read and drawn in Sosu (spec §10.4).
+//
+// The tables of the file are read where they are, through checked reads: a damaged font
+// gives empty or wrong glyphs, never a read outside of its bytes. A glyph is drawn into a
+// coverage map (0 to 255 per pixel, antialiased) the first time it is needed at a size, and
+// `Font` keeps the images it drew. Not handled yet: hinting (the instructions of the font
+// are ignored), kerning, and CFF outlines (.otf files).
+import std.io;
+
+pub enum FontError {
+    Unreadable,  // the file cannot be read
+    NotTrueType,  // not a TrueType font, or one of its tables is missing or damaged
+}
+
+// ---- Reading the file: big-endian numbers, 0 outside of its bytes ----
+
+u32 byte_at(u8[] data, u64 at) {
+    return at < data.len as u64 ? data[at] as u32 : 0;
+}
+
+u32 u16_at(u8[] data, u64 at) {
+    return byte_at(data, at) << 8 | byte_at(data, at + 1);
+}
+
+i32 i16_at(u8[] data, u64 at) {
+    u16 bits = u16_at(data, at) as u16;
+    return bits as i16 as i32;
+}
+
+u32 u32_at(u8[] data, u64 at) {
+    return u16_at(data, at) << 16 | u16_at(data, at + 2);
+}
+
+// A number in 2.14 fixed point (the scales of composite glyphs).
+f32 f2dot14_at(u8[] data, u64 at) {
+    return i16_at(data, at) as f32 / 16384.0;
+}
+
+// The offset of the table `tag`, or 0 if it is missing or does not fit in the file.
+u64 find_table(u8[] data, str tag) {
+    u32 count = u16_at(data, 4);
+    for (u32 i in 0..count) {
+        u64 record = 12 + 16 * i as u64;
+        mut bool same = true;
+        for (u64 k in 0..4) {
+            same = same && byte_at(data, record + k) == tag.bytes[k] as u32;
+        }
+        if (same) {
+            u64 offset = u32_at(data, record + 8) as u64;
+            u64 length = u32_at(data, record + 12) as u64;
+            return offset + length <= data.len as u64 ? offset : 0;
+        }
+    }
+    return 0;
+}
+
+// ---- From characters to glyphs: the `cmap` table ----
+
+struct CharMap {
+    u64 offset;  // of the subtable
+    u32 format;  // 12 (all of Unicode), 4 (U+0000 to U+FFFF), or 0: none
+}
+
+CharMap find_charmap(u8[] data, u64 cmap) {
+    mut CharMap best = CharMap{ offset: 0, format: 0 };
+    u32 count = u16_at(data, cmap + 2);
+    for (u32 i in 0..count) {
+        u64 record = cmap + 4 + 8 * i as u64;
+        u32 platform = u16_at(data, record);
+        u32 encoding = u16_at(data, record + 2);
+        u64 offset = cmap + u32_at(data, record + 4) as u64;
+        u32 format = u16_at(data, offset);
+        bool unicode = platform == 0 || platform == 3 && (encoding == 1 || encoding == 10);
+        if (unicode && format == 12) {
+            return CharMap{ offset: offset, format: 12 };
+        }
+        if (unicode && format == 4 && best.format == 0) {
+            best = CharMap{ offset: offset, format: 4 };
+        }
+    }
+    return best;
+}
+
+// Format 4: segments of consecutive characters, with a delta or a table of glyphs.
+u32 glyph_format4(u8[] data, u64 table, u32 c) {
+    if (c > 0xFFFF) {
+        return 0;
+    }
+    u64 segments = (u16_at(data, table + 6) / 2) as u64;
+    u64 ends = table + 14;
+    u64 starts = ends + 2 * segments + 2;
+    u64 deltas = starts + 2 * segments;
+    u64 ranges = deltas + 2 * segments;
+    for (u64 i in 0..segments) {
+        if (u16_at(data, ends + 2 * i) >= c) {
+            u32 start = u16_at(data, starts + 2 * i);
+            if (start > c) {
+                return 0;
+            }
+            u32 delta = u16_at(data, deltas + 2 * i);
+            u32 range = u16_at(data, ranges + 2 * i);
+            if (range == 0) {
+                return c + delta & 0xFFFF;
+            }
+            u32 glyph = u16_at(data, ranges + 2 * i + range as u64 + 2 * (c - start) as u64);
+            return glyph == 0 ? 0 : glyph + delta & 0xFFFF;
+        }
+    }
+    return 0;
+}
+
+// Format 12: groups of consecutive characters and glyphs, sorted.
+u32 glyph_format12(u8[] data, u64 table, u32 c) {
+    mut u64 low = 0;
+    mut u64 high = u32_at(data, table + 12) as u64;
+    while (low < high) {
+        u64 middle = (low + high) / 2;
+        u64 group = table + 16 + 12 * middle;
+        u32 first = u32_at(data, group);
+        if (c < first) {
+            high = middle;
+        } else if (c > u32_at(data, group + 4)) {
+            low = middle + 1;
+        } else {
+            return wrapping_add(u32_at(data, group + 8), c - first);
+        }
+    }
+    return 0;
+}
+
+// ---- Drawing: lines and curves accumulated into a coverage map ----
+
+struct Point {
+    f32 x;
+    f32 y;
+}
+
+Point middle_of(Point a, Point b) {
+    return Point{ x: (a.x + b.x) / 2.0, y: (a.y + b.y) / 2.0 };
+}
+
+// x' = a x + c y + e, y' = b x + d y + f: from the units of the font to the pixels of an image.
+struct Transform {
+    mut f32 a;
+    mut f32 b;
+    mut f32 c;
+    mut f32 d;
+    mut f32 e;
+    mut f32 f;
+
+    Point apply(f32 x, f32 y) {
+        return Point{ x: a * x + c * y + e, y: b * x + d * y + f };
+    }
+
+    // This transform after `inner`.
+    Transform after(Transform inner) {
+        return Transform{ a: a * inner.a + c * inner.b, b: b * inner.a + d * inner.b, c: a * inner.c + c * inner.d, d: b * inner.c + d * inner.d, e: a * inner.e + c * inner.f + e, f: b * inner.e + d * inner.f + f };
+    }
+}
+
+i32 floor_of(f32 value) {
+    i32 truncated = value as i32;
+    return truncated as f32 > value ? truncated - 1 : truncated;
+}
+
+i32 ceil_of(f32 value) {
+    i32 truncated = value as i32;
+    return truncated as f32 < value ? truncated + 1 : truncated;
+}
+
+// The signed area of the outline under each pixel, accumulated along each row (the method
+// of font-rs): the coverage of a pixel is the sum of its row up to it.
+struct Raster {
+    i32 width;
+    i32 height;
+    i32 stride;  // width + 2: a line can touch the column just after the image
+    f32[] area;
+
+    void line(Point p0, Point p1) {
+        if (p0.y == p1.y) {
+            return;
+        }
+        f32 direction = p0.y < p1.y ? 1.0 : -1.0;
+        Point top = p0.y < p1.y ? p0 : p1;
+        Point bottom = p0.y < p1.y ? p1 : p0;
+        f32 slope = (bottom.x - top.x) / (bottom.y - top.y);
+        f32 y_start = max(top.y, 0.0);
+        f32 y_end = min(bottom.y, height as f32);
+        mut f32 x = top.x + (y_start - top.y) * slope;
+        for (mut i32 row = floor_of(y_start); row as f32 < y_end; row += 1) {
+            f32 dy = min((row + 1) as f32, y_end) - max(row as f32, y_start);
+            f32 x_next = x + slope * dy;
+            f32 d = dy * direction;
+            f32 x0 = min(max(min(x, x_next), 0.0), width as f32);
+            f32 x1 = min(max(max(x, x_next), 0.0), width as f32);
+            cover(row, x0, x1, d);
+            x = x_next;
+        }
+    }
+
+    // The part of row `row` under a piece of line from x0 to x1 (x0 <= x1), `d` high.
+    void cover(i32 row, f32 x0, f32 x1, f32 d) {
+        i32 start = row * stride;
+        i32 x0_floor = floor_of(x0);
+        i32 x1_ceil = ceil_of(x1);
+        if (x1_ceil <= x0_floor + 1) {
+            f32 middle = (x0 + x1) / 2.0 - x0_floor as f32;
+            add(start + x0_floor, d - d * middle);
+            add(start + x0_floor + 1, d * middle);
+            return;
+        }
+        f32 s = 1.0 / (x1 - x0);
+        f32 x0_part = x0 - x0_floor as f32;
+        f32 a0 = 0.5 * s * (1.0 - x0_part) * (1.0 - x0_part);
+        f32 x1_part = x1 - x1_ceil as f32 + 1.0;
+        f32 am = 0.5 * s * x1_part * x1_part;
+        add(start + x0_floor, d * a0);
+        if (x1_ceil == x0_floor + 2) {
+            add(start + x0_floor + 1, d * (1.0 - a0 - am));
+        } else {
+            f32 a1 = s * (1.5 - x0_part);
+            add(start + x0_floor + 1, d * (a1 - a0));
+            for (mut i32 column = x0_floor + 2; column < x1_ceil - 1; column += 1) {
+                add(start + column, d * s);
+            }
+            f32 a2 = a1 + (x1_ceil - x0_floor - 3) as f32 * s;
+            add(start + x1_ceil - 1, d * (1.0 - a2 - am));
+        }
+        add(start + x1_ceil, d * am);
+    }
+
+    void add(i32 index, f32 amount) {
+        if (index >= 0 && index as usize < area.len) {
+            area[index as usize] += amount;
+        }
+    }
+
+    // A quadratic curve, as lines short enough to stay within a tenth of a pixel of it.
+    void curve(Point p0, Point control, Point p1) {
+        f32 bend = abs(p0.x - 2.0 * control.x + p1.x) + abs(p0.y - 2.0 * control.y + p1.y);
+        mut i32 pieces = 1;
+        while (pieces < 32 && (pieces * pieces) as f32 * 0.8 < bend) {
+            pieces += 1;
+        }
+        mut Point from = p0;
+        for (mut i32 i = 1; i <= pieces; i += 1) {
+            f32 t = i as f32 / pieces as f32;
+            f32 u = 1.0 - t;
+            Point to = Point{ x: u * u * p0.x + 2.0 * u * t * control.x + t * t * p1.x, y: u * u * p0.y + 2.0 * u * t * control.y + t * t * p1.y };
+            line(from, to);
+            from = to;
+        }
+    }
+
+    // The coverage of each pixel, 0 to 255.
+    void fill(u8[] out) {
+        for (mut i32 y = 0; y < height; y += 1) {
+            mut f32 sum = 0.0;
+            for (mut i32 x = 0; x < width; x += 1) {
+                sum += area[(y * stride + x) as usize];
+                f32 coverage = min(abs(sum), 1.0);
+                out[(y * width + x) as usize] = (coverage * 255.0 + 0.5) as u8;
+            }
+        }
+    }
+}
+
+// Follows a contour: points on the curve are joined by lines, and a point off the curve is
+// the control of a quadratic curve; between two of them, a point on the curve is implied.
+struct Pen {
+    mut Point current;
+    mut Point control;
+    mut bool has_control = false;
+
+    void to(Raster* r, Point p, bool on_curve) {
+        if (on_curve) {
+            if (has_control) {
+                r.curve(current, control, p);
+            } else {
+                r.line(current, p);
+            }
+            current = p;
+            has_control = false;
+        } else if (has_control) {
+            Point middle = middle_of(control, p);
+            r.curve(current, control, middle);
+            current = middle;
+            control = p;
+        } else {
+            control = p;
+            has_control = true;
+        }
+    }
+}
+
+// ---- Fonts ----
+
+// The image of a glyph at a size.
+pub struct GlyphImage {
+    pub i32 left;  // from the pen to the left side of the image, in pixels
+    pub i32 top;  // from the baseline up to the top of the image
+    pub i32 width;
+    pub i32 height;
+    pub u8[] coverage;  // width * height, row by row, 0 to 255
+}
+
+struct Slot {
+    mut bool used;
+    mut u32 glyph;
+    mut u32 size;  // in quarters of a pixel
+    mut GlyphImage image;
+}
+
+// Where the tables of a font are, once checked.
+struct Tables {
+    u64 charmap;
+    u32 charmap_format;
+    u64 glyf;
+    u64 loca;
+    u64 hmtx;
+    bool long_loca;
+    u32 metrics;  // advances in `hmtx`
+    u32 glyphs;
+    f32 units;  // per em
+    f32 ascent;
+    f32 descent;  // negative: under the baseline
+    f32 gap;
+}
+
+// A font, read from a .ttf file. `close()` frees the images of its glyphs.
+pub class Font {
+    u8[] data;
+    Tables t;
+    mut Arena images;  // the images of the glyphs drawn
+    mut Arena scratch;  // what drawing one glyph needs, emptied after it
+    mut Slot[256] slots;
+    mut u32 slots_used;
+
+    void init(u8[] data, Tables tables) {
+        self.data = data;
+        t = tables;
+        images = Arena.new(256 * KB);
+        scratch = Arena.new(64 * KB);
+        GlyphImage nothing = GlyphImage{ left: 0, top: 0, width: 0, height: 0, coverage: images.alloc_slice(u8, 0) };
+        slots = [Slot{ used: false, glyph: 0, size: 0, image: nothing }; 256];
+        slots_used = 0;
+    }
+
+    pub void close() {
+        images.free();
+        scratch.free();
+    }
+
+    // From the top of a line to its baseline, for a font of `size` pixels per em.
+    pub f32 ascent(f32 size) {
+        return t.ascent * size / t.units;
+    }
+
+    // From one line to the next.
+    pub f32 line_height(f32 size) {
+        return (t.ascent - t.descent + t.gap) * size / t.units;
+    }
+
+    // The glyph of `c`, or 0 (the glyph of missing characters).
+    pub u32 glyph_of(char c) {
+        u32 code = c as u32;
+        if (t.charmap_format == 12) {
+            return glyph_format12(data, t.charmap, code);
+        }
+        return glyph_format4(data, t.charmap, code);
+    }
+
+    // How far the pen moves after `glyph`.
+    pub f32 advance(u32 glyph, f32 size) {
+        u32 index = min(glyph, t.metrics - 1);
+        return u16_at(data, t.hmtx + 4 * index as u64) as f32 * size / t.units;
+    }
+
+    // The width of the longest line of `text`.
+    pub f32 measure(str text, f32 size) {
+        mut f32 widest = 0.0;
+        mut f32 line = 0.0;
+        for (char c in text.chars()) {
+            if (c == '\n') {
+                line = 0.0;
+            } else {
+                line += advance(glyph_of(c), size);
+                widest = max(widest, line);
+            }
+        }
+        return widest;
+    }
+
+    // The image of `glyph` at `size` pixels per em, drawn the first time. It stays valid
+    // until the next call: the images are forgotten when there are too many.
+    pub GlyphImage* image(u32 glyph, f32 size) {
+        u32 key = (min(max(size, 1.0), 1024.0) * 4.0) as u32;
+        mut u32 slot = (glyph % 65536 * 31 + key) % 256;
+        for (mut i32 tries = 0; tries < 256 && slots[slot].used; tries += 1) {
+            if (slots[slot].glyph == glyph && slots[slot].size == key) {
+                return &slots[slot].image;
+            }
+            slot = (slot + 1) % 256;
+        }
+        if (slots_used >= 192) {
+            forget();
+            slot = (glyph % 65536 * 31 + key) % 256;
+        }
+        GlyphImage drawn = draw(glyph, key as f32 / 4.0);
+        slots[slot] = Slot{ used: true, glyph: glyph, size: key, image: drawn };
+        slots_used += 1;
+        return &slots[slot].image;
+    }
+
+    // Forgets every image, to draw them again.
+    void forget() {
+        images.free();
+        images = Arena.new(256 * KB);
+        for (mut usize i = 0; i < 256; i += 1) {
+            slots[i].used = false;
+        }
+        slots_used = 0;
+    }
+
+    GlyphImage draw(u32 glyph, f32 size) {
+        u64 start = glyph_start(glyph);
+        u64 end = glyph_start(glyph + 1);
+        if (glyph >= t.glyphs || end <= start) {
+            return GlyphImage{ left: 0, top: 0, width: 0, height: 0, coverage: images.alloc_slice(u8, 0) };
+        }
+        f32 s = size / t.units;
+        i32 left = floor_of(i16_at(data, start + 2) as f32 * s);
+        i32 bottom = floor_of(i16_at(data, start + 4) as f32 * s);
+        i32 right = ceil_of(i16_at(data, start + 6) as f32 * s);
+        i32 top = ceil_of(i16_at(data, start + 8) as f32 * s);
+        i32 width = min(max(right - left + 1, 1), 2048);
+        i32 height = min(max(top - bottom + 1, 1), 2048);
+        mut Raster r = Raster{ width: width, height: height, stride: width + 2, area: scratch.alloc_slice(f32, ((width + 2) * height) as usize) };
+        // from the units of the font, y upwards, to the pixels of the image, y downwards
+        Transform place = Transform{ a: s, b: 0.0, c: 0.0, d: -s, e: -(left as f32), f: top as f32 };
+        outline(&r, glyph, place, 0);
+        u8[] coverage = images.alloc_slice(u8, (width * height) as usize);
+        r.fill(coverage);
+        scratch.free();
+        scratch = Arena.new(64 * KB);
+        return GlyphImage{ left: left, top: top, width: width, height: height, coverage: coverage };
+    }
+
+    // Where the outline of `glyph` starts in the file.
+    u64 glyph_start(u32 glyph) {
+        if (glyph > t.glyphs) {
+            return t.glyf;
+        }
+        if (t.long_loca) {
+            return t.glyf + u32_at(data, t.loca + 4 * glyph as u64) as u64;
+        }
+        return t.glyf + 2 * u16_at(data, t.loca + 2 * glyph as u64) as u64;
+    }
+
+    void outline(Raster* r, u32 glyph, Transform m, i32 depth) {
+        u64 start = glyph_start(glyph);
+        if (glyph >= t.glyphs || glyph_start(glyph + 1) <= start) {
+            return;  // no outline: a space
+        }
+        i32 contours = i16_at(data, start);
+        if (contours >= 0) {
+            simple(r, start, contours as u32, m);
+        } else if (depth < 8) {
+            composite(r, start, m, depth);
+        }
+    }
+
+    // A glyph made of its own contours.
+    void simple(Raster* r, u64 start, u32 contours, Transform m) {
+        if (contours == 0) {
+            return;
+        }
+        u64 ends = start + 10;
+        u32 points = u16_at(data, ends + 2 * (contours - 1) as u64) + 1;
+        u64 instructions = ends + 2 * contours as u64;
+        mut u64 at = instructions + 2 + u16_at(data, instructions) as u64;
+
+        // the flags of the points: on the curve or not, and how their coordinates are stored
+        u8[] flags = scratch.alloc_slice(u8, points as usize);
+        mut u32 count = 0;
+        while (count < points) {
+            u32 flag = byte_at(data, at);
+            at += 1;
+            flags[count as usize] = flag as u8;
+            count += 1;
+            if (flag & 8 != 0) {  // repeated
+                u32 times = byte_at(data, at);
+                at += 1;
+                for (u32 k in 0..times) {
+                    if (count < points) {
+                        flags[count as usize] = flag as u8;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        // the coordinates, each relative to the previous point
+        f32[] xs = scratch.alloc_slice(f32, points as usize);
+        f32[] ys = scratch.alloc_slice(f32, points as usize);
+        mut i32 x = 0;
+        for (u32 p in 0..points) {
+            u32 flag = flags[p as usize] as u32;
+            if (flag & 2 != 0) {  // one byte, its sign given by the flag
+                i32 dx = byte_at(data, at) as i32;
+                at += 1;
+                x += flag & 16 != 0 ? dx : -dx;
+            } else if (flag & 16 == 0) {  // two bytes; else the same as the previous point
+                x += i16_at(data, at);
+                at += 2;
+            }
+            xs[p as usize] = x as f32;
+        }
+        mut i32 y = 0;
+        for (u32 p in 0..points) {
+            u32 flag = flags[p as usize] as u32;
+            if (flag & 4 != 0) {
+                i32 dy = byte_at(data, at) as i32;
+                at += 1;
+                y += flag & 32 != 0 ? dy : -dy;
+            } else if (flag & 32 == 0) {
+                y += i16_at(data, at);
+                at += 2;
+            }
+            ys[p as usize] = y as f32;
+        }
+
+        mut u32 first = 0;
+        for (u32 c in 0..contours) {
+            u32 last = u16_at(data, ends + 2 * c as u64);
+            if (last < first || last >= points) {
+                return;  // damaged
+            }
+            contour(r, xs, ys, flags, first, last, m);
+            first = last + 1;
+        }
+    }
+
+    // One closed contour, from point `first` to point `last`.
+    void contour(Raster* r, f32[] xs, f32[] ys, u8[] flags, u32 first, u32 last, Transform m) {
+        u32 count = last - first + 1;
+        mut u32 on = count;  // the first point on the curve, if any
+        for (u32 k in 0..count) {
+            if (on == count && flags[(first + k) as usize] & 1 != 0) {
+                on = k;
+            }
+        }
+        Point begin = on < count ? m.apply(xs[(first + on) as usize], ys[(first + on) as usize]) : middle_of(m.apply(xs[first as usize], ys[first as usize]), m.apply(xs[last as usize], ys[last as usize]));
+        mut Pen pen = Pen{ current: begin, control: begin };
+        u32 skip = on < count ? on + 1 : 0;
+        for (u32 k in 0..count) {
+            u32 index = first + (skip + k) % count;
+            if (on < count && k == count - 1) {
+                break;  // the last point is the start, closed below
+            }
+            Point p = m.apply(xs[index as usize], ys[index as usize]);
+            pen.to(r, p, flags[index as usize] & 1 != 0);
+        }
+        pen.to(r, begin, true);
+    }
+
+    // A glyph made of other glyphs (an accented letter), each moved and maybe scaled.
+    void composite(Raster* r, u64 start, Transform m, i32 depth) {
+        mut u64 at = start + 10;
+        mut bool more = true;
+        while (more) {
+            u32 flags = u16_at(data, at);
+            u32 part = u16_at(data, at + 2);
+            at += 4;
+            mut Transform own = Transform{ a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            if (flags & 1 != 0) {  // offsets of two bytes
+                if (flags & 2 != 0) {
+                    own.e = i16_at(data, at) as f32;
+                    own.f = i16_at(data, at + 2) as f32;
+                }
+                at += 4;
+            } else {
+                if (flags & 2 != 0) {
+                    own.e = byte_at(data, at) as u8 as i8 as f32;
+                    own.f = byte_at(data, at + 1) as u8 as i8 as f32;
+                }
+                at += 2;
+            }
+            if (flags & 8 != 0) {  // one scale
+                own.a = f2dot14_at(data, at);
+                own.d = own.a;
+                at += 2;
+            } else if (flags & 0x40 != 0) {  // a scale for x and one for y
+                own.a = f2dot14_at(data, at);
+                own.d = f2dot14_at(data, at + 2);
+                at += 4;
+            } else if (flags & 0x80 != 0) {  // a 2 by 2 matrix
+                own.a = f2dot14_at(data, at);
+                own.b = f2dot14_at(data, at + 2);
+                own.c = f2dot14_at(data, at + 4);
+                own.d = f2dot14_at(data, at + 6);
+                at += 8;
+            }
+            outline(r, part, m.after(own), depth + 1);
+            more = flags & 0x20 != 0;
+        }
+    }
+}
+
+// A font from the bytes of a .ttf file, which must live as long as it.
+pub Font*!FontError parse(Arena* arena, u8[] data) {
+    u32 version = u32_at(data, 0);
+    if (data.len < 12 || version != 0x00010000 && version != 0x74727565) {  // 1.0, or "true"
+        return err(NotTrueType);
+    }
+    u64 head = find_table(data, "head");
+    u64 hhea = find_table(data, "hhea");
+    u64 maxp = find_table(data, "maxp");
+    u64 hmtx = find_table(data, "hmtx");
+    u64 loca = find_table(data, "loca");
+    u64 glyf = find_table(data, "glyf");
+    u64 cmap = find_table(data, "cmap");
+    if (head == 0 || hhea == 0 || maxp == 0 || hmtx == 0 || loca == 0 || glyf == 0 || cmap == 0) {
+        return err(NotTrueType);  // a .otf font with CFF outlines has no `glyf`
+    }
+    u32 units = u16_at(data, head + 18);
+    u32 metrics = u16_at(data, hhea + 34);
+    CharMap charmap = find_charmap(data, cmap);
+    if (units < 16 || units > 16384 || metrics == 0 || charmap.format == 0) {
+        return err(NotTrueType);
+    }
+    Tables tables = Tables{ charmap: charmap.offset, charmap_format: charmap.format, glyf: glyf, loca: loca, hmtx: hmtx, long_loca: i16_at(data, head + 50) == 1, metrics: metrics, glyphs: u16_at(data, maxp + 4), units: units as f32, ascent: i16_at(data, hhea + 4) as f32, descent: i16_at(data, hhea + 6) as f32, gap: i16_at(data, hhea + 8) as f32 };
+    return ok(arena.new(Font, data, tables));
+}
+
+// A font from a .ttf file, read into `arena`.
+pub Font*!FontError load(Arena* arena, str path) uses io {
+    u8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(Unreadable);
+        },
+    };
+    return parse(arena, data);
+}
+
+// The tests read the font of the package: run them from the root of the repository.
+str noto() {
+    return "packages/render/fonts/NotoSans-Regular.ttf";
+}
+
+test "a font is read" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Font* face = match (load(&arena, noto())) {
+        ok(f) => f,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer face.close();
+    assert(face.t.units == 1000.0 && face.t.glyphs > 1000);
+    assert(face.glyph_of('A') != 0 && face.glyph_of('\u{e9}') != 0 && face.glyph_of('\u{20ac}') != 0);
+    assert(face.glyph_of('\u{4e2d}') == 0);  // no Chinese in Noto Sans: the missing glyph
+    // proportional: `i` is narrower than `W`
+    assert(face.advance(face.glyph_of('i'), 20.0) < face.advance(face.glyph_of('W'), 20.0));
+    assert(face.measure("", 20.0) == 0.0);
+    assert(face.measure("ab\nabc", 20.0) == face.measure("abc", 20.0));
+    assert(face.line_height(20.0) > 20.0 && face.ascent(20.0) > 10.0);
+}
+
+test "glyphs are drawn, accented letters included" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Font* face = match (load(&arena, noto())) {
+        ok(f) => f,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer face.close();
+    GlyphImage* a = face.image(face.glyph_of('I'), 40.0);
+    assert(a.height > 20 && a.height < 40 && a.top > 20);
+    // the stem of `I` is solid in its middle
+    assert(a.coverage[(a.height / 2 * a.width + a.width / 2) as usize] == 255);
+    // `O`: a solid ring around an empty middle
+    GlyphImage* o = face.image(face.glyph_of('O'), 40.0);
+    i32 middle = o.height / 2 * o.width;
+    assert(o.coverage[(middle + o.width / 2) as usize] == 0);
+    mut u8 ring = 0;
+    for (mut i32 x = 0; x < o.width / 3; x += 1) {
+        ring = max(ring, o.coverage[(middle + x) as usize]);
+    }
+    assert(ring == 255);
+    // `é` is `e` and an accent above it: higher than `e`
+    i32 e_top = face.image(face.glyph_of('e'), 40.0).top;
+    assert(face.image(face.glyph_of('\u{e9}'), 40.0).top > e_top + 5);
+    // a space has no image, but moves the pen
+    GlyphImage* space = face.image(face.glyph_of(' '), 40.0);
+    assert(space.width == 0 && face.advance(face.glyph_of(' '), 40.0) > 5.0);
+    // the same glyph at the same size comes from the cache
+    assert(face.image(face.glyph_of('I'), 40.0).width == a.width);
+    for (mut i32 i = 0; i < 300; i += 1) {  // more images than the cache keeps
+        face.image(face.glyph_of('A') + (i % 100) as u32, 10.0 + (i / 100) as f32);
+    }
+    assert(face.slots_used <= 192);
+}
+
+test "what is not a TrueType font is refused" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    bool missing = match (load(&arena, "no/such/font.ttf")) {
+        ok(f) => false,
+        err(e) => true,
+    };
+    assert(missing);
+    mut u8[64] junk = [0; 64];
+    junk[1] = 1;  // the version of TrueType, but no tables
+    bool refused = match (parse(&arena, junk[0..64])) {
+        ok(f) => false,
+        err(e) => true,
+    };
+    assert(refused);
+}

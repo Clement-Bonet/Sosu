@@ -1,0 +1,7 @@
+# Errors found by the type checker in an interface file.
+[package]
+name = "bad_ui"
+version = "0.1.0"
+
+[dependencies]
+ui = { path = "../../../packages/ui" }

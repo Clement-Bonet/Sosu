@@ -1,0 +1,12 @@
+// planned.ui.sosu: parts of spec §10.2 that v0 does not translate yet (styles, alignment).
+// Only lexed by the tests.
+import app.tasks;
+
+style Muted { color: Gray }
+
+component TaskRow(Task* t) {
+    Row(gap: 8, align: End) {
+        Checkbox(bind: t.done)
+        Text(t.title, style: t.done ? Muted : Normal)
+    }
+}

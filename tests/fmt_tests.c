@@ -44,6 +44,10 @@ static void test_canonical(void) {
                   "void f() {\n    for (mut i32 i = 0; i < 3; i += 1) { }\n    for (;;) {\n        break;\n    }\n}\n");
     expect_format("void f() { auto a = [1,2,3]; auto b = [0;8]; Point p = Point{x:1.0,y:2.0}; }",
                   "void f() {\n    auto a = [1, 2, 3];\n    auto b = [0; 8];\n    Point p = Point{ x: 1.0, y: 2.0 };\n}\n");
+    expect_format("void f() { auto t = [1,\n 2, // two\n\n 3]; }",
+                  "void f() {\n    auto t = [\n        1,\n        2,  // two\n\n        3,\n    ];\n}\n");
+    expect_format("void f() { auto t = [\n1, 2]; auto u = [[1, 2], [3, 4]]; }",
+                  "void f() {\n    auto t = [\n        1,\n        2,\n    ];\n    auto u = [[1, 2], [3, 4]];\n}\n");
     expect_format("class B : A, I { override void f() uses io { } }",
                   "class B : A, I {\n    override void f() uses io { }\n}\n");
 }
@@ -106,12 +110,16 @@ static size_t comment_count(const char *text) {
 }
 
 static const char *const files[] = {
-    "tests/programs/basics/src/main.sosu", "tests/programs/classes/src/main.sosu",
+    "tests/programs/basics/src/main.sosu", "tests/programs/basics/src/defaults.sosu",
+    "tests/programs/classes/src/main.sosu", "packages/ui/src/widgets.sosu", "packages/ui/src/lib.sosu",
+    "examples/form/src/main.sosu", "examples/form/src/state.sosu", "tests/programs/screens/src/main.sosu",
+    "tests/programs/screens/src/state.sosu", "tests/packages/bad_ui/src/main.sosu",
     "tests/programs/files/src/main.sosu", "tests/programs/clock_random/src/main.sosu",
     "tests/programs/arrays/src/main.sosu", "tests/programs/copies/src/main.sosu",
     "tests/programs/linking/src/main.sosu", "tests/programs/testing/src/lib.sosu",
     "packages/platform/src/app.sosu", "packages/platform/src/sdl.sosu", "packages/render/src/canvas.sosu",
-    "packages/render/src/lib.sosu", "examples/window/src/main.sosu",
+    "packages/render/src/font.sosu", "packages/render/src/truetype.sosu", "packages/render/src/lib.sosu",
+    "examples/window/src/main.sosu",
     "tests/window/src/main.sosu", "lib/std/src/io.sosu", "lib/std/src/time.sosu", "lib/std/src/random.sosu",
     "lib/core/src/prelude.sosu", "tests/samples/hello.sosu", "tests/samples/classes.sosu",
     "tests/samples/reliability.sosu", "tests/samples/events.sosu",

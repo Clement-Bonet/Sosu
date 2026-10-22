@@ -1,0 +1,548 @@
+// ui.widgets: widgets in immediate mode (spec §10). Each frame, the program describes its
+// interface from its own state, by calls: `if (f.button("OK")) { ... }`. Nothing is
+// registered and nothing calls the program back: the description is simply run again.
+//
+// `Ui` keeps what lasts between frames: the input received since the last one, the widget
+// pressed and the text field that has the focus. `Frame` places the widgets of one frame,
+// one under the other, or side by side between `row()` and `end_row()`.
+import render.canvas;
+import render.truetype;
+
+// Text typed or edited: at most 256 bytes of UTF-8.
+pub struct TextBuffer {
+    mut u8[256] bytes = [0; 256];
+    mut usize len = 0;
+
+    pub str text() {
+        return match (str.from_bytes(bytes[0..len])) {
+            ok(valid) => valid,
+            err(e) => "",
+        };
+    }
+
+    pub void set(str text) {
+        len = 0;
+        append(text);
+    }
+
+    // Adds `text` at the end, if it fits whole.
+    pub void append(str text) {
+        if (len + text.len > 256) {
+            return;
+        }
+        for (u8 b in text.bytes) {
+            bytes[len] = b;
+            len += 1;
+        }
+    }
+
+    // Removes the last character (all its bytes).
+    pub void erase_last() {
+        if (len == 0) {
+            return;
+        }
+        len -= 1;
+        while (len > 0 && bytes[len] & 0xC0 == 0x80) {  // a continuation byte
+            len -= 1;
+        }
+    }
+
+    // The last `count` characters at most.
+    pub str tail(usize count) {
+        mut usize start = len;
+        mut usize found = 0;
+        while (start > 0 && found < count) {
+            start -= 1;
+            if (bytes[start] & 0xC0 != 0x80) {
+                found += 1;
+            }
+        }
+        return match (str.from_bytes(bytes[start..len])) {
+            ok(valid) => valid,
+            err(e) => "",
+        };
+    }
+
+    // The number of characters.
+    pub usize count() {
+        mut usize found = 0;
+        for (usize i in 0..len) {
+            if (bytes[i] & 0xC0 != 0x80) {
+                found += 1;
+            }
+        }
+        return found;
+    }
+}
+
+// The state of an interface between frames.
+pub struct Ui {
+    // The input since the last frame.
+    mut f32 mouse_x = 0.0;
+    mut f32 mouse_y = 0.0;
+    mut bool down = false;  // the left button is held
+    mut bool pressed = false;  // it went down
+    mut bool released = false;  // it went up
+    mut TextBuffer typed = TextBuffer{ };
+    mut i32 erased = 0;  // Backspace presses
+    mut bool entered = false;  // Enter was pressed
+
+    // Between frames: the widget pressed and not yet released, the text field that has
+    // the keyboard (-1: none). Widgets are numbered in the order of the calls.
+    mut i32 active = -1;
+    mut i32 focus = -1;
+
+    // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
+    // em for each step of scale: 18 for labels, 27 for titles.
+    pub mut truetype.Font*? font = none;
+
+    // The input, as `platform.app` gives it.
+    pub void mouse_move(f32 x, f32 y) {
+        mouse_x = x;
+        mouse_y = y;
+    }
+
+    // The left button, pressed or released.
+    pub void mouse_button(bool is_down) {
+        if (is_down) {
+            pressed = true;
+        } else {
+            released = true;
+        }
+        down = is_down;
+    }
+
+    pub void type_text(str text) {
+        typed.append(text);
+    }
+
+    // A key, with the key codes of SDL: Backspace (8) and Enter (13) edit the text fields.
+    pub void key(u32 code, bool is_down) {
+        if (!is_down) {
+            return;
+        }
+        if (code == 8) {
+            erased += 1;
+        } else if (code == 13) {
+            entered = true;
+        }
+    }
+}
+
+// The colors of the widgets.
+canvas.Color ink() {
+    return canvas.Color{ r: 205, g: 214, b: 244 };
+}
+
+canvas.Color face(bool hot, bool held) {
+    if (held) {
+        return canvas.Color{ r: 49, g: 50, b: 68 };
+    }
+    return hot ? canvas.Color{ r: 88, g: 91, b: 112 } : canvas.Color{ r: 69, g: 71, b: 90 };
+}
+
+canvas.Color accent() {
+    return canvas.Color{ r: 137, g: 180, b: 250 };
+}
+
+canvas.Color well() {
+    return canvas.Color{ r: 24, g: 24, b: 37 };
+}
+
+// What a window of a `.ui.sosu` file says about itself (spec §10.2).
+pub struct Window {
+    pub str title = "Sosu";
+    pub i32 width = 640;
+    pub i32 height = 480;
+}
+
+// A column or a row of widgets, being placed.
+struct Layout {
+    mut bool horizontal = false;
+    mut f32 x = 0.0;  // where the next widget goes
+    mut f32 y = 0.0;
+    mut f32 left = 0.0;  // where its widgets start, inside its padding
+    mut f32 top = 0.0;
+    mut f32 right = 0.0;  // how far its widgets go
+    mut f32 bottom = 0.0;
+    mut f32 gap = 8.0;
+    mut f32 padding = 0.0;
+}
+
+// The widgets of one frame, drawn on `surface`.
+pub struct Frame {
+    Ui* ui;
+    canvas.Canvas* surface;
+    // The layouts open, the frame itself first: a column, or a row inside, and so on.
+    mut Layout[16] layouts = [Layout{ }; 16];
+    mut usize depth = 0;
+    mut i32 next_id = 0;
+    mut bool focus_taken = false;  // a text field took the focus in this frame
+    f32 height = 32.0;  // of a line of widgets
+
+    // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
+    // until `end()`; the column then takes its place in the layout that holds it.
+    pub void column(f32 gap, f32 padding) {
+        open(false, gap, padding);
+    }
+
+    // The same, side by side.
+    pub void row_with(f32 gap, f32 padding) {
+        open(true, gap, padding);
+    }
+
+    pub void end() {
+        if (depth == 0) {
+            return;
+        }
+        Layout done = layouts[depth];
+        depth -= 1;
+        place(done.right - done.left + 2.0 * done.padding, done.bottom - done.top + 2.0 * done.padding);
+    }
+
+    // The widgets that follow go side by side, until `end_row()`.
+    pub void row() {
+        open(true, 8.0, 0.0);
+    }
+
+    pub void end_row() {
+        end();
+    }
+
+    // Empty space after the last widget.
+    pub void space(f32 size) {
+        if (layouts[depth].horizontal) {
+            layouts[depth].x += size;
+        } else {
+            layouts[depth].y += size;
+        }
+    }
+
+    // Text, at the size of the widgets (font at scale 2).
+    pub void label(str text) {
+        canvas.Rect size = measure(text, 2);
+        canvas.Rect r = place(size.w, max(size.h, height));
+        write(r.x, r.y, height, text, ink(), 2);
+    }
+
+    // Bigger text (font at scale 3).
+    pub void title(str text) {
+        canvas.Rect size = measure(text, 3);
+        canvas.Rect r = place(size.w, size.h + 8.0);
+        write(r.x, r.y, size.h, text, ink(), 3);
+    }
+
+    // Returns true when it is clicked: pressed, then released over it.
+    pub bool button(str text) {
+        return button_enabled(text, true);
+    }
+
+    // A button that can be disabled: dimmed, and never clicked.
+    pub bool button_enabled(str text, bool enabled) {
+        i32 id = take_id();
+        canvas.Rect size = measure(text, 2);
+        canvas.Rect r = place(size.w + 32.0, height);
+        if (!enabled) {
+            surface.fill(r, well());
+            write(r.x + 16.0, r.y, height, text, face(false, false), 2);
+            return false;
+        }
+        bool clicked = click(id, r);
+        bool hot = over(r);
+        surface.fill(r, face(hot, ui.active == id && hot));
+        write(r.x + 16.0, r.y, height, text, ink(), 2);
+        return clicked;
+    }
+
+    // A box that `value` checks or not; returns true when it changes it.
+    pub bool checkbox(str text, bool* value) {
+        i32 id = take_id();
+        canvas.Rect size = measure(text, 2);
+        canvas.Rect r = place(size.w + 32.0, height);
+        bool clicked = click(id, r);
+        if (clicked) {
+            *value = !(*value);
+        }
+        canvas.Rect box = canvas.Rect{ x: r.x + 2.0, y: r.y + 6.0, w: 20.0, h: 20.0 };
+        surface.fill(box, face(over(r), ui.active == id && over(r)));
+        if (*value) {
+            surface.fill(canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 }, accent());
+        }
+        write(r.x + 32.0, r.y, height, text, ink(), 2);
+        return clicked;
+    }
+
+    // The same box, without a label.
+    pub bool checkbox_alone(bool* value) {
+        return checkbox("", value);
+    }
+
+    // A text field `width` pixels wide. A click gives it the keyboard; returns true when
+    // Enter is pressed in it.
+    pub bool text_field(TextBuffer* text, f32 width) {
+        i32 id = take_id();
+        canvas.Rect r = place(width, height);
+        if (ui.pressed && over(r)) {
+            ui.focus = id;
+            focus_taken = true;
+        }
+        bool focused = ui.focus == id;
+        mut bool entered = false;
+        if (focused) {
+            text.append(ui.typed.text());
+            for (mut i32 i = 0; i < ui.erased; i += 1) {
+                text.erase_last();
+            }
+            entered = ui.entered;
+        }
+        surface.fill(r, well());
+        surface.stroke(r, focused ? accent() : face(over(r), false), 2.0);
+        // what fits, ending with the last characters typed
+        mut usize count = text.count();
+        while (count > 0 && measure(text.tail(count), 2).w > width - 20.0) {
+            count -= 1;
+        }
+        str shown = text.tail(count);
+        write(r.x + 8.0, r.y, height, shown, ink(), 2);
+        if (focused) {
+            f32 end = r.x + 8.0 + measure(shown, 2).w;
+            surface.fill(canvas.Rect{ x: end + 1.0, y: r.y + 6.0, w: 2.0, h: 20.0 }, accent());
+        }
+        return entered;
+    }
+
+    // Ends the frame: the input it used is consumed.
+    pub void finish() {
+        if (ui.released) {
+            ui.active = -1;
+        }
+        if (ui.pressed && !focus_taken) {
+            ui.focus = -1;  // a click elsewhere takes the keyboard away
+        }
+        ui.pressed = false;
+        ui.released = false;
+        ui.typed.len = 0;
+        ui.erased = 0;
+        ui.entered = false;
+    }
+
+    // The size of `text` at `scale`, in the font of `ui`, or else the built-in one.
+    canvas.Rect measure(str text, i32 scale) {
+        return match (ui.font) {
+            some(f) => canvas.Rect{ x: 0.0, y: 0.0, w: f.measure(text, 9.0 * scale as f32), h: f.line_height(9.0 * scale as f32) },
+            none => canvas.text_size(text, scale),
+        };
+    }
+
+    // `text` at `scale`, from x, in the middle of a box `box` high from y.
+    void write(f32 x, f32 y, f32 box, str text, canvas.Color color, i32 scale) {
+        f32 top = y + (box - measure(text, scale).h) / 2.0;
+        match (ui.font) {
+            some(f) => {
+                surface.text_with(f, 9.0 * scale as f32, x, top, text, color);
+            },
+            none => {
+                surface.text(x, top, text, color, scale);
+            },
+        }
+    }
+
+    i32 take_id() {
+        i32 id = next_id;
+        next_id += 1;
+        return id;
+    }
+
+    void open(bool horizontal, f32 gap, f32 padding) {
+        if (depth == 15) {
+            return;  // too deep: the widgets stay in the current layout
+        }
+        f32 x = layouts[depth].x + padding;
+        f32 y = layouts[depth].y + padding;
+        depth += 1;
+        layouts[depth] = Layout{ horizontal: horizontal, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, padding: padding };
+    }
+
+    // The place of the next widget, of size `w` by `h`, in the current layout.
+    canvas.Rect place(f32 w, f32 h) {
+        Layout l = layouts[depth];
+        canvas.Rect r = canvas.Rect{ x: l.x, y: l.y, w: w, h: h };
+        layouts[depth].right = max(l.right, l.x + w);
+        layouts[depth].bottom = max(l.bottom, l.y + h);
+        if (l.horizontal) {
+            layouts[depth].x += w + l.gap;
+        } else {
+            layouts[depth].y += h + l.gap;
+        }
+        return r;
+    }
+
+    bool over(canvas.Rect r) {
+        return ui.mouse_x >= r.x && ui.mouse_x < r.x + r.w && ui.mouse_y >= r.y && ui.mouse_y < r.y + r.h;
+    }
+
+    // Pressed then released over `r`, the press and the release maybe in the same frame.
+    bool click(i32 id, canvas.Rect r) {
+        if (ui.pressed && over(r)) {
+            ui.active = id;
+        }
+        return ui.released && ui.active == id && over(r);
+    }
+}
+
+// The widgets of a frame, from (x, y) downwards. End it with `finish()`.
+pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
+    mut Frame f = Frame{ ui: ui, surface: surface };
+    f.layouts[0] = Layout{ x: x, y: y, left: x, top: y, right: x, bottom: y };
+    return f;
+}
+
+test "text buffer" {
+    mut TextBuffer t = TextBuffer{ };
+    t.set("h\u{e9}llo");
+    assert(t.len == 6 && t.count() == 5);
+    t.erase_last();
+    t.erase_last();
+    t.erase_last();
+    assert(t.text().len == 3 && t.count() == 2);  // "hé": é takes 2 bytes
+    t.erase_last();
+    assert(t.text().len == 1);
+    t.set("abcdef");
+    assert(t.tail(2).len == 2 && t.tail(10).len == 6);
+}
+
+test "a button is clicked by a press and a release over it" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 200, 100);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(20.0, 20.0);
+    ui.mouse_button(true);
+    mut Frame f = begin(&ui, &surface, 10.0, 10.0);
+    assert(!f.button("OK"));
+    f.finish();
+    assert(ui.active == 0);
+    ui.mouse_button(false);
+    f = begin(&ui, &surface, 10.0, 10.0);
+    assert(f.button("OK"));
+    f.finish();
+    assert(ui.active == -1);
+    assert(surface.at(12, 12) != 0);  // drawn
+
+    // pressed elsewhere, released over it: not a click
+    ui.mouse_move(150.0, 90.0);
+    ui.mouse_button(true);
+    f = begin(&ui, &surface, 10.0, 10.0);
+    assert(!f.button("OK"));
+    f.finish();
+    ui.mouse_move(20.0, 20.0);
+    ui.mouse_button(false);
+    f = begin(&ui, &surface, 10.0, 10.0);
+    assert(!f.button("OK"));
+    f.finish();
+}
+
+test "a text field takes the keyboard when clicked" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    mut TextBuffer name = TextBuffer{ };
+    mut bool done = false;
+
+    ui.type_text("lost");  // no field has the focus yet
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.text_field(&name, 200.0);
+    f.finish();
+    assert(name.len == 0);
+
+    ui.mouse_move(10.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    ui.type_text("Ada");
+    ui.key(8, true);
+    ui.key(13, true);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    assert(f.text_field(&name, 200.0));  // Enter
+    f.finish();
+    assert(name.len == 2 && ui.focus == 0);
+
+    // a click elsewhere takes the focus away; the checkbox is the second widget
+    ui.mouse_move(20.0, 50.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.text_field(&name, 200.0);
+    assert(f.checkbox("Done", &done) && done);
+    f.finish();
+    assert(ui.focus == -1);
+}
+
+test "layouts nest" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 10.0, 10.0);
+    f.row_with(4.0, 0.0);
+    f.column(2.0, 0.0);
+    canvas.Rect a = f.place(16.0, 32.0);
+    canvas.Rect b = f.place(20.0, 32.0);
+    f.end();  // the column: 20 wide, 66 high
+    canvas.Rect c = f.place(10.0, 10.0);
+    f.end();
+    canvas.Rect d = f.place(10.0, 10.0);
+    assert(a.x == 10.0 && a.y == 10.0 && b.x == 10.0 && b.y == 44.0);
+    assert(c.x == 34.0 && c.y == 10.0);
+    assert(d.x == 10.0 && d.y == 84.0);
+
+    f.column(0.0, 5.0);  // padding on every side
+    canvas.Rect e = f.place(10.0, 10.0);
+    f.end();
+    canvas.Rect g = f.place(10.0, 10.0);
+    assert(e.x == 15.0 && e.y == 107.0 && g.y == 130.0);  // the column, 20 high, starts at 102
+    f.end();  // nothing open: ignored
+    f.finish();
+}
+
+test "a disabled button is never clicked" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 200, 100);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(20.0, 20.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    mut Frame f = begin(&ui, &surface, 10.0, 10.0);
+    assert(!f.button_enabled("OK", false));
+    f.finish();
+}
+
+test "the widgets use the font of ui" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    truetype.Font* noto = match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(f) => f,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer noto.close();
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    canvas.Rect bitmap = f.measure("iiii", 2);  // 8 by 8: every character as wide
+    ui.font = some(noto);
+    canvas.Rect proportional = f.measure("iiii", 2);
+    assert(proportional.w < bitmap.w / 2.0);
+    f.label("Hello");
+    mut u32 drawn = 0;
+    for (mut i32 y = 0; y < 32; y += 1) {
+        for (mut i32 x = 0; x < 60; x += 1) {
+            drawn += surface.at(x, y) != 0 ? 1 : 0;
+        }
+    }
+    assert(drawn > 50);
+    f.finish();
+}

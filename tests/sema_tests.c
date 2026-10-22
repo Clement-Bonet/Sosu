@@ -348,6 +348,15 @@ static void test_body_errors(void) {
     expect_codes("void g(Arena* a) { }\nvoid f() { mut Arena a = Arena.new(1 * KB); g(&a); g(&a); a.free(); }", "");
     expect_codes("struct P { f32 x; }\nvoid f() { P a = P{ x: 1.0 }; P b = a; P c = a; }", "");   /* copied */
 
+    /* views x[a..b] */
+    expect_codes("void f() { mut i32[3] a = [1, 2, 3]; i32[] v = a[0..2]; i32[] w = v[1..2]; }", "");
+    expect_codes("void f(i32[3]* p, u8[] s) { i32[] v = p[1..3]; u8[] t = s[0..s.len]; }", "");
+    expect_codes("void f() { i32[3] a = [1, 2, 3]; i32[] v = a[0..2]; }", "E0335");  /* `a` is not mut */
+    expect_codes("void f(i32[] s) { s[0..1] = s; }", "E0335");
+    expect_codes("void f(str s) { u8[] b = s[0..1]; }", "E0334");
+    expect_codes("void f(i32[] s, i32 n) { i32[] v = s[0..n]; }", "E0331");
+    expect_codes("void f(i32[] s) { i32[] v = s[0..=1]; }", "E0352");
+
     /* x.copy(): new arenas, and the original is not moved */
     expect_codes("struct H { Arena a; i32 n; }\nvoid f(H h) { H c = h.copy(); H d = h; }", "");
     expect_codes("struct H { Arena a; }\nvoid f(H* h) { H c = h.copy(); }", "");
@@ -374,6 +383,8 @@ static void test_packages(void) {
     expect_package("tests/packages/app", "");
     expect_package("tests/packages/geometry", "");
     expect_package("tests/packages/visibility", "E0302 E0305 E0303 E0304");
+    expect_package("tests/packages/bad_ui", "E0331 E0338");  /* in screen.ui.sosu */
+    expect_package("tests/programs/screens", "");
 }
 
 int main(void) {

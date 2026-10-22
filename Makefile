@@ -30,7 +30,10 @@ test: all
 	./build/sosuc check examples/window
 	./build/sosuc check tests/window
 	./build/sosuc test packages/render
+	./build/sosuc test packages/ui
+	./build/sosuc check examples/form
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
+	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@echo "samples: ok"
 

@@ -1,0 +1,5 @@
+window: Greeter 400x320
+greeted: 0
+Hello, Ada (1)
+HELLO, Ada (2), shout: true
+after Clear: name 0, message 0

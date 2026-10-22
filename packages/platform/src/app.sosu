@@ -24,6 +24,7 @@ pub enum Event {
     MouseMove(f32 x, f32 y),
     Click(f32 x, f32 y, Button button),  // a button pressed
     Release(f32 x, f32 y, Button button),  // a button released
+    TextInput(str text),  // typed text (UTF-8), valid until the end of the frame
 }
 
 // What a program implements: its state lives in the class that implements it.
@@ -37,7 +38,8 @@ Button button_of(u8 index) {
     return index == 1 ? Left : index == 2 ? Middle : index == 3 ? Right : Other;
 }
 
-Event? translate(sdl.Event* event) {
+// The event the program receives, if it is one `platform` handles. Text goes to `frame`.
+Event? translate(sdl.Event* event, Arena* frame) {
     u32 kind = event.kind;
     if (kind == 0x100) {  // SDL_EVENT_QUIT
         return some(Quit);
@@ -56,6 +58,9 @@ Event? translate(sdl.Event* event) {
         sdl.MouseButton* press = sdl.as_button(event);
         Button button = button_of(press.button);
         return some(kind == 0x401 ? Click(press.x, press.y, button) : Release(press.x, press.y, button));
+    }
+    if (kind == 0x303) {  // SDL_EVENT_TEXT_INPUT
+        return some(TextInput(sdl.text_of(frame, event)));
     }
     return none;
 }
@@ -81,6 +86,7 @@ pub i32 run(Config config, Handler* handler) uses io {
         },
     };
     defer sdl.destroy_window(window);
+    sdl.start_text_input(window);
     sdl.Renderer* renderer = match (sdl.create_renderer(window)) {
         some(created) => created,
         none => {
@@ -102,10 +108,15 @@ pub i32 run(Config config, Handler* handler) uses io {
     defer sdl.destroy_texture(texture);
 
     sdl.Event* event = arena.alloc(sdl.Event);
+    // What lives for one frame (the text of the events), emptied before each frame.
+    mut Arena frame = Arena.new(4 * KB);
+    defer frame.free();
     mut bool running = true;
     while (running) {
+        frame.free();
+        frame = Arena.new(4 * KB);
         while (sdl.poll(event)) {
-            match (translate(event)) {
+            match (translate(event, &frame)) {
                 some(e) => {
                     match (e) {
                         Resized(width, height) => {
