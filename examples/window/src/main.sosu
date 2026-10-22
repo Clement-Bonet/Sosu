@@ -1,5 +1,6 @@
-// A window with an orange rectangle (spec §10.4, milestone 1): the arrows move it, a click
-// puts it under the mouse, a line follows the mouse. Closes with the window button or Escape.
+// A window with an orange rectangle and some text (spec §10.4, milestone 1): the arrows move
+// the rectangle, a click puts it under the mouse, a line follows the mouse. Closes with the
+// window button or Escape.
 // On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/window`.
 import std.io;
 import platform.app;
@@ -51,6 +52,12 @@ class Demo : app.Handler {
         surface.fill(box, canvas.Color{ r: 255, g: 140, b: 0 });
         surface.stroke(box, canvas.Color{ r: 255, g: 255, b: 255, a: 160 }, 4.0);
         surface.line((x + 180.0) as i32, (y + 110.0) as i32, mouse_x as i32, mouse_y as i32, canvas.Color{ r: 137, g: 180, b: 250 });
+
+        str title = "Sosu";
+        canvas.Rect size = canvas.text_size(title, 4);
+        canvas.Color dark = canvas.Color{ r: 30, g: 30, b: 46 };
+        surface.text(x + (360.0 - size.w) / 2.0, y + (220.0 - size.h) / 2.0, title, dark, 4);
+        surface.text(16.0, 16.0, "Arrows: move\nClick: place\nEscape: quit", canvas.Color{ r: 205, g: 214, b: 244 }, 2);
     }
 }
 

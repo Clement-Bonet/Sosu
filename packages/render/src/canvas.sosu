@@ -1,5 +1,6 @@
-// render.canvas: a buffer of pixels and what draws in it: rectangles, lines, blending.
+// render.canvas: a buffer of pixels and what draws in it: rectangles, lines, text, blending.
 // Coordinates are in pixels, from the top left corner; what falls outside is clipped.
+import render.font;
 
 pub struct Color {
     pub u8 r;
@@ -76,12 +77,48 @@ pub struct Canvas {
         }
     }
 
+    // `text` in the built-in font, its top left corner at (x, y); each pixel of the font is a
+    // square of `scale` pixels. `\n` starts a new line, `font.line_height()` lower.
+    pub void text(f32 x, f32 y, str text, Color color, i32 scale) {
+        i32 s = max(scale, 1);
+        i32 step = font.size() * s;
+        i32 left = x as i32;
+        mut i32 pen_x = left;
+        mut i32 pen_y = y as i32;
+        for (char c in text.chars()) {
+            if (c == '\n') {
+                pen_x = left;
+                pen_y += font.line_height() * s;
+                continue;
+            }
+            u64 glyph = font.glyph(c);
+            for (mut i32 row = 0; row < 8; row += 1) {
+                u64 bits = glyph >> (row * 8) as u64 & 0xFF;
+                for (mut i32 col = 0; col < 8; col += 1) {
+                    if (bits >> col as u64 & 1 == 1) {
+                        dot(pen_x + col * s, pen_y + row * s, s, color);
+                    }
+                }
+            }
+            pen_x += step;
+        }
+    }
+
     // The pixel at (x, y), or 0 outside the canvas.
     pub u32 at(i32 x, i32 y) {
         if (x < 0 || y < 0 || x >= width || y >= height) {
             return 0;
         }
         return pixels[(y * width + x) as usize];
+    }
+
+    // A square of `size` pixels.
+    void dot(i32 x, i32 y, i32 size, Color color) {
+        for (mut i32 dy = 0; dy < size; dy += 1) {
+            for (mut i32 dx = 0; dx < size; dx += 1) {
+                blend(x + dx, y + dy, color);
+            }
+        }
     }
 
     void blend(i32 x, i32 y, Color color) {
@@ -100,6 +137,24 @@ pub struct Canvas {
         u32 b = mix(color.b as u32, below & 0xFF, a);
         pixels[i] = 0xFF000000 | r << 16 | g << 8 | b;
     }
+}
+
+// The size of `text` drawn by `Canvas.text`: its longest line, and its number of lines.
+pub Rect text_size(str text, i32 scale) {
+    i32 step = font.size() * max(scale, 1);
+    mut i32 widest = 0;
+    mut i32 column = 0;
+    mut i32 lines = 1;
+    for (char c in text.chars()) {
+        if (c == '\n') {
+            lines += 1;
+            column = 0;
+        } else {
+            column += 1;
+            widest = max(widest, column);
+        }
+    }
+    return Rect{ x: 0.0, y: 0.0, w: (widest * step) as f32, h: (font.size() + (lines - 1) * font.line_height()) as f32 * max(scale, 1) as f32 };
 }
 
 // A canvas of `width * height` pixels in `arena`, transparent black.
@@ -177,4 +232,35 @@ test "lines and strokes" {
     c.stroke(Rect{ x: 0.0, y: 0.0, w: 5.0, h: 5.0 }, white, 1.0);
     assert(c.at(0, 2) == 0xFFFFFFFF && c.at(4, 2) == 0xFFFFFFFF && c.at(2, 4) == 0xFFFFFFFF);
     assert(c.at(2, 2) == 0);
+}
+
+test "text" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    Canvas c = create(&arena, 40, 20);
+    Color white = Color{ r: 255, g: 255, b: 255 };
+    c.text(0.0, 0.0, "A\nA", white, 1);
+    // `A`: rows 0x0C, 0x1E, 0x33...: the top row has pixels 2 and 3
+    assert(c.at(2, 0) == 0xFFFFFFFF && c.at(3, 0) == 0xFFFFFFFF);
+    assert(c.at(1, 0) == 0 && c.at(4, 0) == 0);
+    assert(c.at(0, 2) == 0xFFFFFFFF && c.at(5, 2) == 0xFFFFFFFF && c.at(2, 2) == 0);
+    assert(c.at(2, 10) == 0xFFFFFFFF && c.at(2, 8) == 0);  // second line, 2 rows lower
+    assert(c.at(0, 7) == 0);  // the last row of `A` is empty
+
+    c.clear(Color{ r: 0, g: 0, b: 0, a: 0 });
+    c.text(10.0, 0.0, "A", white, 2);
+    assert(c.at(14, 0) == 0xFFFFFFFF && c.at(17, 1) == 0xFFFFFFFF);
+    assert(c.at(13, 0) == 0 && c.at(18, 0) == 0);
+
+    c.clear(Color{ r: 0, g: 0, b: 0, a: 0 });
+    c.text(0.0, 0.0, "\u{e9}", white, 1);  // not ASCII: a box
+    assert(c.at(1, 1) == 0xFFFFFFFF && c.at(6, 1) == 0xFFFFFFFF && c.at(3, 3) == 0);
+    c.text(35.0, 15.0, "clipped", white, 3);
+}
+
+test "text size" {
+    Rect size = text_size("ab\nabc", 2);
+    assert(size.w == 48.0 && size.h == 36.0);
+    Rect empty = text_size("", 1);
+    assert(empty.w == 0.0 && empty.h == 8.0);
 }

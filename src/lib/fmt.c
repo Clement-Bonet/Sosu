@@ -286,6 +286,25 @@ static void fmt_match(Fmt *f, const Expr *e) {
     put(f, "}");
 }
 
+/* An array literal written over several lines: one element per line (tables of data). */
+static void fmt_array_lines(Fmt *f, const Expr *e) {
+    put(f, "[");
+    end_line(f);
+    f->indent++;
+    f->block_start = true;
+    for (size_t i = 0; i < e->as.array.count; i++) {
+        begin_item(f, e->as.array.items[i]->offset);
+        start_line(f);
+        fmt_expr(f, e->as.array.items[i]);
+        put(f, ",");
+        end_line(f);
+    }
+    flush_comments(f, e->offset + e->length - 1);
+    f->indent--;
+    start_line(f);
+    put(f, "]");
+}
+
 static void fmt_expr(Fmt *f, const Expr *e) {
     switch (e->kind) {
     case EXPR_ERROR:
@@ -379,6 +398,11 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         fmt_match(f, e);
         break;
     case EXPR_ARRAY:
+        if (!e->as.array.repeat && e->as.array.count &&
+            line_number(f, e->offset) != line_number(f, e->offset + e->length - 1)) {
+            fmt_array_lines(f, e);
+            break;
+        }
         put(f, "[");
         if (e->as.array.repeat) {
             char count[32];
