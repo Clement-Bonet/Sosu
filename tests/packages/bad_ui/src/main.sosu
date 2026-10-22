@@ -1,0 +1,6 @@
+// An application whose interface file has errors.
+import bad_ui.screen;
+
+i32 main() {
+    return 0;
+}

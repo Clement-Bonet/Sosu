@@ -609,7 +609,7 @@ A window has its own arena; a per-frame arena is reset at every frame for the wi
 
 ### 10.2 `.ui.sosu` interface files
 
-Windows and components are described in `.ui.sosu` files, separate from the logic. The format is inspired by XAML, but lighter: braces, no tags, no namespaces. Sketch: the exact grammar will be settled with the `ui` package.
+Windows and components are described in `.ui.sosu` files, separate from the logic. The format is inspired by XAML, but lighter: braces, no tags, no namespaces. The examples below show the whole design; what v0 translates is listed under *Translation in v0*, after the rules.
 
 ```sosu
 // login.ui.sosu
@@ -685,10 +685,40 @@ XAML equivalents:
 
 Compilation:
 
-- `sosuc` translates each `.ui.sosu` into ordinary Sosu functions that build the tree in the frame arena. `#line` directives point errors back to the interface file.
+- `sosuc` translates each `.ui.sosu` into ordinary Sosu functions, which describe the interface with the widgets of the `ui` package at each frame (immediate mode, §10.4). The translation builds the syntax tree directly, with the positions of the interface file: the type checker's errors point to it, without `#line`.
 - No reflection and no run-time parsing: an unknown property is a compile error, with a suggestion.
-- This translator is part of the tooling of the `ui` package, not of the compiler core.
+- The translator lives next to the parser, whose expressions it reuses, and only knows the interface of `ui.widgets`; the type checker and the code generator see ordinary functions.
 - Hot reload (changing the interface without recompiling): possible later, by interpreting the file during development.
+
+Translation in v0:
+
+- `import app.screen;` loads `src/screen.sosu`, or else `src/screen.ui.sosu`. The package must depend on `ui`; `import ui.widgets;` is implied.
+- `window Name(params) [uses ...] { properties, then nodes }` becomes `pub void Name(widgets.Frame* ui_frame, params)`. Its properties `title`, `width` and `height` become `pub widgets.Window NameConfig()`, which the program passes to `platform` (`app.Config`). `component Name(params) { nodes }` becomes the same function, without properties. A node `Name(values)`, or `module.Name(values)`, calls a component, its values in order.
+- Nodes, and what they become (`f` stands for `ui_frame`); a number of pixels can be written `8` for `8.0`:
+
+| Node | Becomes |
+|---|---|
+| `Column(gap: g, padding: p) { ... }`, `Row(...)` | `f.column(g, p)` (or `f.row_with(g, p)`), the nodes, `f.end()`; `gap` is 8 and `padding` 0 by default |
+| `Text(s)`, `Title(s)`, `Space(n)` | `f.label(s)`, `f.title(s)`, `f.space(n)` |
+| `Button(s, on_click: h, enabled: c)` | `if (f.button_enabled(s, c)) { h(); }`; `h` is a function or a method (`state.save`), or a call (`state.save(1)`) |
+| `TextField(bind: x, width: w, on_enter: h)` | `if (f.text_field(&x, w)) { h(); }`; `bind:` is required, `width` is 200 by default |
+| `Checkbox(s, bind: x, on_change: h)` | `if (f.checkbox(s, &x)) { h(); }`; without `s`, `f.checkbox_alone(&x)` |
+
+- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples.
+- Not yet: `style` and `theme` blocks, `style:`, `align:`, grids (`row:`, `col:`, `span:`), `List`, `bind:` on other widgets than `TextField` and `Checkbox` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+
+Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
+
+```ebnf
+ui_file      = { import | view } ;
+view         = ( "window" | "component" ) IDENT params [ effects ] "{" { property } { item } "}" ;
+property     = IDENT ":" expr ;                                (* window only: title, width, height *)
+item         = node | "if" "(" expr ")" children [ "else" ( item | children ) ]
+             | "for" "(" [ "mut" ] ( type | "auto" ) IDENT "in" expr ")" children ;
+node         = path "(" [ argument { "," argument } ] ")" [ children ] ;
+argument     = IDENT ":" expr | expr ;
+children     = "{" { item } "}" ;
+```
 
 ### 10.3 Mobile specifics
 
@@ -703,10 +733,10 @@ Compilation:
    - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `line`, `text` and `at`, all clipped to the canvas. `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen.
    - Text: `render.font` is a built-in 8 by 8 font for printable ASCII (font8x8, public domain); other characters are drawn as a box. `surface.text(x, y, text, color, scale)` draws each pixel of the font as a `scale` by `scale` square, `\n` starts a new line (`font.line_height()`: 10 pixels of the font), and `canvas.text_size(text, scale)` gives the size of the text. Proportional TrueType fonts (§10) can come later behind the same call.
 2. The same program on the Android emulator, then on the iOS simulator.
-3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target.
-   - First part, without the `.ui.sosu` file: the `ui` package and `examples/form`. Without lambdas (v1), a widget cannot call the program back: `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame under each other, or side by side between `row()` and `end_row()`.
-   - Widgets: `label`, `title`, `button` (true when clicked), `checkbox(text, bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8.
-   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` will generate these calls.
+3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target. Done on the desktop: `examples/form` describes its window in `screen.ui.sosu` (§10.2), and `tests/programs/screens` drives such a window with simulated input, without a screen.
+   - The `ui` package: without lambdas (v1), a widget cannot call the program back, so `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame in nested columns and rows (`column(gap, padding)`, `row_with(gap, padding)`, `end()`; `row()` and `end_row()` for a row with the default gap).
+   - Widgets: `label`, `title`, `button` and `button_enabled` (true when clicked), `checkbox(text, bool*)` and `checkbox_alone(bool*)`, `text_field(TextBuffer*, width)` (a click gives it the keyboard; true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8. `widgets.Window` holds what a window of a `.ui.sosu` file says about itself.
+   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `type_text`, `key`), so its tests run without SDL. The translator of `.ui.sosu` generates the calls to the widgets.
 
 ## 11. Targets and compilation
 

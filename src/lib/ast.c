@@ -106,6 +106,12 @@ static void print_expr(Printer *pr, const Expr *expr, int indent) {
     case EXPR_ERROR: fputs("<error>", out); break;
     case EXPR_INT:
     case EXPR_FLOAT:
+        if (expr->length == 0) { /* a number added by the translation of a .ui.sosu file */
+            fprintf(out, expr->kind == EXPR_FLOAT ? "%llu.0" : "%llu", (unsigned long long)expr->as.int_value);
+            break;
+        }
+        print_source(pr, expr->offset, expr->length);
+        break;
     case EXPR_STRING:
     case EXPR_CHAR: print_source(pr, expr->offset, expr->length); break;
     case EXPR_BOOL: fputs(expr->as.bool_value ? "true" : "false", out); break;

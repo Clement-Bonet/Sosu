@@ -383,6 +383,8 @@ static void test_packages(void) {
     expect_package("tests/packages/app", "");
     expect_package("tests/packages/geometry", "");
     expect_package("tests/packages/visibility", "E0302 E0305 E0303 E0304");
+    expect_package("tests/packages/bad_ui", "E0331 E0338");  /* in screen.ui.sosu */
+    expect_package("tests/programs/screens", "");
 }
 
 int main(void) {

@@ -1,0 +1,5 @@
+// Errors that only the type checker finds: they point here.
+window Broken(i32 count) {
+    Text(count)
+    Button("OK", on_click: count)
+}

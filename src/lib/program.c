@@ -170,13 +170,22 @@ static Unit *find_unit(const Program *program, const char *path) {
     return NULL;
 }
 
+bool program_is_ui_file(const char *path) {
+    size_t length = strlen(path);
+    return length >= 8 && strcmp(path + length - 8, ".ui.sosu") == 0;
+}
+
 /* Lexes and parses a unit whose file is loaded, and adds it to the program. */
 static void finish_unit(Program *program, Unit *unit, Package *package, char *module) {
     unit->index = program->units.count;
     unit->module = module;
     unit->package = package;
     lex_file(&unit->file, &unit->tokens, &program->diags);
-    unit->ast = parse_module(&unit->file, &unit->tokens, &program->arena, &program->diags);
+    if (program_is_ui_file(unit->file.path)) {
+        unit->ast = parse_ui_module(&unit->file, &unit->tokens, &program->arena, &program->diags);
+    } else {
+        unit->ast = parse_module(&unit->file, &unit->tokens, &program->arena, &program->diags);
+    }
     SOSU_VEC_PUSH(&program->units, unit);
 }
 
@@ -258,24 +267,26 @@ static void resolve_imports(Program *program, Unit *unit) {
                                    "`import %s;` does not name a module", name);
             diag_help(d, "import a module of the package: `import %s.<module>;`", name);
         } else if (target) {
+            /* `src/a/b.sosu`, or else an interface file `src/a/b.ui.sosu` (spec §10.2) */
             char *module = join_names(path, 0, "", '.', "");
             char *relative = join_names(path, 1, "src/", '/', ".sosu");
+            char *ui_relative = join_names(path, 1, "src/", '/', ".ui.sosu");
             char *file = normalized_join(target->root, relative);
+            char *ui_file = normalized_join(target->root, ui_relative);
             Unit *found = find_unit(program, file);
+            if (!found) found = find_unit(program, ui_file);
+            if (!found) found = load_unit(program, target, sosu_strdup(module), file);
+            if (!found) found = load_unit(program, target, sosu_strdup(module), ui_file);
             if (!found) {
-                char *display = sosu_strdup(module);
-                found = load_unit(program, target, module, file);
-                if (!found) {
-                    Diagnostic *d = report(program, "E0411", &unit->file, offset, length, "module `%s` not found", display);
-                    diag_help(d, "expected the file `%s`", file);
-                }
-                free(display);
-            } else {
-                free(module);
+                Diagnostic *d = report(program, "E0411", &unit->file, offset, length, "module `%s` not found", module);
+                diag_help(d, "expected the file `%s` (or `%s`)", file, ui_file);
             }
             link.unit = found;
+            free(module);
             free(relative);
+            free(ui_relative);
             free(file);
+            free(ui_file);
         }
         free(name);
         SOSU_VEC_PUSH(&links, link);

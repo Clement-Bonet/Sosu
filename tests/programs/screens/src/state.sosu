@@ -1,0 +1,27 @@
+// The state of the screen, changed by its widgets.
+import ui.widgets;
+
+pub class Form {
+    pub mut widgets.TextBuffer name;
+    pub mut widgets.TextBuffer message;
+    pub mut bool shout;
+    pub mut i32 greeted;
+
+    void init() {
+        name = widgets.TextBuffer{ };
+        message = widgets.TextBuffer{ };
+        shout = false;
+        greeted = 0;
+    }
+
+    pub void greet() {
+        greeted += 1;
+        message.set(shout ? "HELLO, " : "Hello, ");
+        message.append(name.text());
+    }
+
+    pub void clear() {
+        name.set("");
+        message.set("");
+    }
+}
