@@ -1,23 +1,64 @@
-// A window with a colored rectangle; closes with the window button or Escape.
+// A window with an orange rectangle (spec §10.4, milestone 1): the arrows move it, a click
+// puts it under the mouse, a line follows the mouse. Closes with the window button or Escape.
 // On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/window`.
 import std.io;
 import platform.app;
+import render.canvas;
 
-bool on_event(app.Event e) uses io {
-    return match (e) {
-        Quit => false,
-        Key(code, down) => code != 27,  // Escape
-        Resized(width, height) => true,
-    };
-}
+class Demo : app.Handler {
+    mut f32 x;
+    mut f32 y;
+    mut f32 mouse_x;
+    mut f32 mouse_y;
 
-void on_frame(app.Canvas* canvas) uses io {
-    canvas.clear(app.Color{ r: 30, g: 30, b: 46 });
-    canvas.fill(app.Rect{ x: 220.0, y: 140.0, w: 360.0, h: 220.0 }, app.Color{ r: 255, g: 140, b: 0 });
+    void init() {
+        x = 220.0;
+        y = 140.0;
+        mouse_x = 0.0;
+        mouse_y = 0.0;
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Key(code, down) => {
+                if (code == 27) {
+                    return false;
+                }
+                if (down) {
+                    x += code == 0x4000004F ? 10.0 : code == 0x40000050 ? -10.0 : 0.0;
+                    y += code == 0x40000051 ? 10.0 : code == 0x40000052 ? -10.0 : 0.0;
+                }
+            },
+            MouseMove(mx, my) => {
+                mouse_x = mx;
+                mouse_y = my;
+            },
+            Click(cx, cy, button) => {
+                x = cx - 180.0;
+                y = cy - 110.0;
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        canvas.Rect box = canvas.Rect{ x: x, y: y, w: 360.0, h: 220.0 };
+        surface.fill(box, canvas.Color{ r: 255, g: 140, b: 0 });
+        surface.stroke(box, canvas.Color{ r: 255, g: 255, b: 255, a: 160 }, 4.0);
+        surface.line((x + 180.0) as i32, (y + 110.0) as i32, mouse_x as i32, mouse_y as i32, canvas.Color{ r: 137, g: 180, b: 250 });
+    }
 }
 
 i32 main() uses io {
-    i32 status = app.run(app.Config{ title: "Sosu", width: 800, height: 600 }, on_event, on_frame);
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    Demo* demo = arena.new(Demo);
+    i32 status = app.run(app.Config{ title: "Sosu", width: 800, height: 600 }, demo as app.Handler*);
     io.print("window closed ({})", status);
     return status;
 }

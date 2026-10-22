@@ -1,0 +1,4 @@
+# Drawing into a buffer of pixels (spec §10), in Sosu: the same pixels on every target.
+[package]
+name = "render"
+version = "0.1.0"

@@ -60,8 +60,10 @@ static void check_codes(const char *what, const DiagList *diags, const char *exp
         if (i) strcat(codes, " ");
         strcat(codes, diags->items[i].code);
     }
-    CHECK(strcmp(codes, expected) == 0, "%s: got [%s], expected [%s]%s%s", what, codes, expected,
-          diags->count ? "; first: " : "", diags->count ? diags->items[0].message : "");
+    const Diagnostic *first = diags->count ? &diags->items[0] : NULL;
+    CHECK(strcmp(codes, expected) == 0, "%s: got [%s], expected [%s]%s%s%s%s", what, codes, expected,
+          first ? "; first: " : "", first ? first->message : "", first && first->help ? " / " : "",
+          first && first->help ? first->help : "");
 }
 
 static void expect_manifest_errors(const char *text, const char *expected) {

@@ -162,6 +162,20 @@ static char *checkout_dir(const char *deps_dir, const char *name, const char *co
     return dir;
 }
 
+/* Moves the clone to its folder. On Windows, a file just written may stay open a moment
+   (antivirus, indexing), which makes the move fail: it is tried again. */
+static bool move_dir(const char *from, const char *to) {
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (rename(from, to) == 0) return true;
+#ifdef _WIN32
+        shell_run("ping -n 2 127.0.0.1 >nul"); /* about one second */
+#else
+        break;
+#endif
+    }
+    return false;
+}
+
 static bool holds_package(const char *dir) {
     char *manifest = path_join(dir, "sosu.toml");
     bool found = shell_file_exists(manifest);
@@ -206,7 +220,7 @@ char *git_fetch(const char *deps_dir, const char *name, const char *url, const c
                 shell_remove_dir(work);
             } else {
                 shell_remove_dir(dir);
-                if (rename(work, dir) != 0) {
+                if (!move_dir(work, dir)) {
                     *error = sosu_format("cannot move the clone to `%s`", dir);
                     free(dir);
                     dir = NULL;

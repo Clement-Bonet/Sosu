@@ -24,11 +24,13 @@ jobs:
       - name: Build and test
         run: make test
       - name: Install SDL3
+        timeout-minutes: 5  # a stalled apt mirror fails the job instead of hanging it
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libsdl3-dev
       # The dummy video driver needs no screen: the window opens, draws a frame and closes itself.
       - name: Window test (platform)
+        timeout-minutes: 3
         env:
           SDL_VIDEO_DRIVER: dummy
         run: ./build/sosuc run tests/window
@@ -42,9 +44,11 @@ jobs:
         shell: cmd
         run: build.bat test
       - name: Download SDL3
+        timeout-minutes: 5
         shell: pwsh
         run: ./packages/platform/fetch-sdl3.ps1
       - name: Window test (platform)
+        timeout-minutes: 3
         shell: cmd
         env:
           SDL_VIDEO_DRIVER: dummy
