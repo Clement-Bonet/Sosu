@@ -19,15 +19,21 @@ struct Point {
     mut f32 x;
     f32 y;
 
-    f32 length_squared() { return x * x + y * y; }
+    f32 length_squared() {
+        return x * x + y * y;
+    }
 }
 
 enum ParseError { Empty, NotADigit }
 
 i32!ParseError digit(str s) {
-    if (s.len == 0) { return err(Empty); }
+    if (s.len == 0) {
+        return err(Empty);
+    }
     u8 c = s.bytes[0];
-    if (c < 48 || c > 57) { return err(NotADigit); }
+    if (c < 48 || c > 57) {
+        return err(NotADigit);
+    }
     return ok((c - 48) as i32);
 }
 
@@ -40,8 +46,12 @@ i32 clamp(i32 x, i32 lo, i32 hi)
     requires lo <= hi
     ensures result >= lo && result <= hi
 {
-    if (x < lo) { return lo; }
-    if (x > hi) { return hi; }
+    if (x < lo) {
+        return lo;
+    }
+    if (x > hi) {
+        return hi;
+    }
     return x;
 }
 
@@ -54,7 +64,9 @@ void count_down(i32 n) uses io {
 
 i32? find(u8[] bytes, u8 target) {
     for (mut usize i = 0; i < bytes.len; i += 1) {
-        if (bytes[i] == target) { return some(i as i32); }
+        if (bytes[i] == target) {
+            return some(i as i32);
+        }
     }
     return none;
 }
@@ -73,7 +85,9 @@ void show(i32!ParseError r) uses io {
 i32 first_even() {
     mut i32 n = 1;
     while (true) {
-        if (n % 2 == 0) { break; }
+        if (n % 2 == 0) {
+            break;
+        }
         n += 1;
     }
     return n;
@@ -103,8 +117,12 @@ i32 main() uses io {
     mut i32 k = 0;
     while (true) {
         k += 1;
-        if (k > 10) { break; }
-        if (k % 2 == 0) { continue; }
+        if (k > 10) {
+            break;
+        }
+        if (k % 2 == 0) {
+            continue;
+        }
         total += k;
     }
     io.print("odd sum = {}", total);

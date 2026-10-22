@@ -1,0 +1,38 @@
+// std.time: the clock and waiting (spec §8), with the effect `time` (spec §7.4).
+// Written in Sosu; the runtime gives the clocks, which differ by system.
+
+extern "C" {
+    u64 sosu_monotonic_ns() uses time;
+    i64 sosu_unix_seconds() uses time;
+    void sosu_sleep_ms(u32 ms) uses time;
+}
+
+// Nanoseconds from an unspecified start. This clock never goes backwards: measure durations
+// with it.
+pub u64 monotonic_ns() uses time {
+    mut u64 now = 0;
+    unsafe {
+        now = sosu_monotonic_ns();
+    }
+    return now;
+}
+
+pub u64 monotonic_ms() uses time {
+    return monotonic_ns() / 1000000;
+}
+
+// Seconds since 1970-01-01 UTC: the wall clock, which the system can change.
+pub i64 unix_seconds() uses time {
+    mut i64 now = 0;
+    unsafe {
+        now = sosu_unix_seconds();
+    }
+    return now;
+}
+
+// Waits at least `ms` milliseconds.
+pub void sleep_ms(u32 ms) uses time {
+    unsafe {
+        sosu_sleep_ms(ms);
+    }
+}

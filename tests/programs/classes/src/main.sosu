@@ -42,8 +42,12 @@ class Button : Widget, Shape {
         base.on_click();
     }
 
-    override f32 area() { return 2.0 * 3.0; }
-    override str name() { return label; }
+    override f32 area() {
+        return 2.0 * 3.0;
+    }
+    override str name() {
+        return label;
+    }
 }
 
 class IconButton : Button {
@@ -51,7 +55,9 @@ class IconButton : Button {
         base.init("icon");
     }
 
-    override f32 area() { return 1.0; }
+    override f32 area() {
+        return 1.0;
+    }
 }
 
 void describe(Shape* s) uses io {

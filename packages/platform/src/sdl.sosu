@@ -6,13 +6,13 @@ pub struct Renderer { }
 
 // SDL_Event: 128 bytes, read through the fields of the events `platform` handles.
 pub struct Event {
-    pub u32 kind;      // SDL_EventType
+    pub u32 kind;  // SDL_EventType
     u32 reserved;
     u64 timestamp;
     u32 window;
-    pub u32 word5;     // window events: data1; keyboard events: keyboard id
-    pub u32 word6;     // window events: data2; keyboard events: scancode
-    pub u32 word7;     // keyboard events: key code
+    pub u32 word5;  // window events: data1; keyboard events: keyboard id
+    pub u32 word6;  // window events: data2; keyboard events: scancode
+    pub u32 word7;  // keyboard events: key code
     u8[96] rest;
 }
 
@@ -46,7 +46,7 @@ extern "C" {
 pub bool init_video() uses io {
     mut bool ok = false;
     unsafe {
-        ok = SDL_Init(0x20);   // SDL_INIT_VIDEO
+        ok = SDL_Init(0x20);  // SDL_INIT_VIDEO
     }
     return ok;
 }
@@ -65,8 +65,8 @@ pub Window*? create_window(Arena* arena, str title, i32 width, i32 height) uses 
         text.bytes[i] = title.bytes[i];
     }
     unsafe {
-        Window* window = SDL_CreateWindow(&text.bytes as u8*, width, height, 0x20);   // SDL_WINDOW_RESIZABLE
-        if ((window as u64) == 0) {
+        Window* window = SDL_CreateWindow(&text.bytes as u8*, width, height, 0x20);  // SDL_WINDOW_RESIZABLE
+        if (window as u64 == 0) {
             return none;
         }
         return some(window);
@@ -82,7 +82,7 @@ pub void destroy_window(Window* window) uses io {
 pub Renderer*? create_renderer(Window* window) uses io {
     unsafe {
         Renderer* renderer = SDL_CreateRenderer(window, 0 as u8*);
-        if ((renderer as u64) == 0) {
+        if (renderer as u64 == 0) {
             return none;
         }
         return some(renderer);
@@ -116,7 +116,7 @@ pub void clear(Renderer* renderer) uses io {
 }
 
 pub void fill_rect(Renderer* renderer, f32 x, f32 y, f32 w, f32 h) uses io {
-    FRect rect = FRect{ x: x, y: y, w: w, h: h };
+    mut FRect rect = FRect{ x: x, y: y, w: w, h: h };
     unsafe {
         SDL_RenderFillRect(renderer, &rect);
     }

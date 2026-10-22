@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "codegen.h"
+#include "fmt.h"
 #include "path.h"
 #include "sema.h"
 
@@ -22,7 +23,7 @@ static void usage(FILE *out) {
           "  build   compile a package into build/<name> (through C)\n"
           "  run     compile and run a package\n"
           "  test    compile and run the test blocks of a package\n"
-          "  fmt     format source files (not implemented yet)\n"
+          "  fmt     format files or packages in place (--check: only report)\n"
           "\n"
           "options:\n"
           "  --format=text|json   diagnostics format (default: text)\n"
@@ -438,6 +439,70 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
     return status;
 }
 
+/* ---- fmt ---- */
+
+/* Formats one file. Returns 0 if it was already formatted (or has been rewritten),
+   1 if it has errors or, with --check, would change. */
+static int format_file(const char *path, bool check) {
+    SourceFile file;
+    if (!load(&file, path)) return 1;
+    DiagList diags = {0};
+    char *formatted = format_source(&file, &diags);
+    int status = 0;
+    if (!formatted) {
+        diag_print_text(&diags, stderr);
+        fprintf(stderr, "sosuc: `%s` is not formatted: fix its errors first\n", path);
+        status = 1;
+    } else if (strcmp(formatted, file.text) != 0) {
+        if (check) {
+            printf("would reformat %s\n", path);
+            status = 1;
+        } else if (write_file(path, formatted)) {
+            printf("formatted %s\n", path);
+        } else {
+            fprintf(stderr, "sosuc: cannot write `%s`\n", path);
+            status = 1;
+        }
+    }
+    free(formatted);
+    diag_free(&diags);
+    source_free(&file);
+    return status;
+}
+
+/* `sosuc fmt [--check] path...`: files, or package folders (the modules of the package,
+   not of its dependencies). */
+static int command_fmt(const char **paths, int count, bool check, const char *argv0) {
+    int status = 0;
+    char *lib = library_dir(argv0);
+    for (int i = 0; i < count; i++) {
+        const char *path = paths[i];
+        if (has_suffix(path, ".ui.sosu")) {
+            fprintf(stderr, "sosuc: `%s`: `.ui.sosu` files are formatted by the `ui` package (not available yet)\n", path);
+            continue;
+        }
+        if (has_suffix(path, ".sosu")) {
+            status |= format_file(path, check);
+            continue;
+        }
+        Program program;
+        program_load(&program, path, lib);
+        if (program.fatal) {
+            fprintf(stderr, "sosuc: %s\n", program.fatal);
+            status = 1;
+        } else {
+            const Package *root = program.packages.items[0];
+            for (size_t j = 0; j < program.units.count; j++) {
+                const Unit *unit = program.units.items[j];
+                if (unit->package == root) status |= format_file(unit->file.path, check);
+            }
+        }
+        program_free(&program);
+    }
+    free(lib);
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(stderr);
@@ -458,8 +523,16 @@ int main(int argc, char **argv) {
     BuildOptions options = { false, { true, true, true } };
     int checks = -1;    /* --checks: -1 when not given */
     int contracts = -1; /* --contracts */
+    bool is_fmt = strcmp(command, "fmt") == 0;
+    bool fmt_check = false;
+    const char **paths = sosu_alloc((size_t)argc * sizeof *paths); /* fmt takes several */
+    int path_count = 0;
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--format=text") == 0) {
+        if (is_fmt && strcmp(argv[i], "--check") == 0) {
+            fmt_check = true;
+        } else if (is_fmt && argv[i][0] != '-') {
+            paths[path_count++] = argv[i];
+        } else if (strcmp(argv[i], "--format=text") == 0) {
             format = FORMAT_TEXT;
         } else if (strcmp(argv[i], "--format=json") == 0) {
             format = FORMAT_JSON;
@@ -496,10 +569,13 @@ int main(int argc, char **argv) {
     if (strcmp(command, "build") == 0) return command_build(path ? path : ".", argv[0], format, MODE_BUILD, &options);
     if (strcmp(command, "run") == 0) return command_build(path ? path : ".", argv[0], format, MODE_RUN, &options);
     if (strcmp(command, "test") == 0) return command_build(path ? path : ".", argv[0], format, MODE_TEST, &options);
-    if (strcmp(command, "fmt") == 0) {
-        fprintf(stderr, "sosuc: `%s` is not implemented yet\n", command);
-        return 2;
+    if (is_fmt) {
+        if (path_count == 0) paths[path_count++] = ".";
+        int status = command_fmt(paths, path_count, fmt_check, argv[0]);
+        free(paths);
+        return status;
     }
+    free(paths);
     fprintf(stderr, "sosuc: unknown command `%s`\n", command);
     usage(stderr);
     return 2;

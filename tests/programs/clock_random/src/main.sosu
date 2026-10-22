@@ -1,0 +1,37 @@
+// std.time and std.random (spec §8): run with `sosuc run`. The seeded generator gives fixed
+// numbers; the clock and the system seed are only checked for plausible values.
+import std.io;
+import std.random;
+import std.time;
+
+i32 main() uses io, time, random {
+    mut random.Rng rng = random.seeded(0);
+    io.print("{}", rng.next());  // SplitMix64 from 0: 16294208416658607535
+    io.print("{}", rng.next());  // then 7960286522194355700
+
+    mut i32 outside = 0;
+    for (i32 i in 0..1000) {
+        if (rng.below(6) >= 6) {
+            outside += 1;
+        }
+        i64 die = rng.between(-3, 3);
+        if (die < -3 || die > 3) {
+            outside += 1;
+        }
+        f64 u = rng.unit();
+        if (u < 0.0 || u >= 1.0) {
+            outside += 1;
+        }
+    }
+    io.print("values outside their range: {}", outside);
+    io.print("wrapping: {} {}", wrapping_add(250 as u8, 10 as u8), wrapping_mul(-128 as i8, -1 as i8));
+
+    mut random.Rng system = random.from_system();
+    io.print("system seed: {}", system.below(10) < 10);
+
+    u64 start = time.monotonic_ns();
+    time.sleep_ms(20);
+    io.print("slept at least 20 ms: {}", time.monotonic_ns() - start >= 20000000);
+    io.print("after 2023: {}", time.unix_seconds() > 1700000000);
+    return 0;
+}

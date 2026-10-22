@@ -285,7 +285,9 @@ static void test_body_errors(void) {
     expect_codes("void f(i32 x) { x == 1; }", "E0348");
     expect_codes("enum E { A }\ni32!E g() { return ok(1); }\nvoid f() { g(); }", "E0348");
     expect_codes("void f() { auto s = self; }", "E0349");
-    expect_codes("void f() { auto r = result; }", "E0349");
+    expect_codes("void f() { auto r = result; }", "E0330");          /* contextual: only in `ensures` */
+    expect_codes("i32 f() { i32 result = 3; return result; }", "");
+    expect_codes("void f() ensures result > 0 { }", "E0349");
     expect_codes("struct P { f32 x; f32 y; }\nvoid f() { P p = P{ x: 1.0 }; }", "E0350");
     expect_codes("struct P { f32 x; }\nvoid f() { P p = P{ x: 1.0, z: 2.0 }; }", "E0350");
     expect_codes("struct P { f32 x; f32 y = 0.0; }\nvoid f() { P p = P{ x: 1.0 }; }", "");
@@ -325,6 +327,34 @@ static void test_body_errors(void) {
     expect_codes("void f() { auto t = str.from_bytes(\"abc\"); }", "E0331");
     expect_codes("void f(Arena* a) { auto s = a.alloc_slice(u8); }", "E0336");
     expect_codes("enum Utf8Error { Mine }\nUtf8Error f() { return Mine; }", "");
+
+    /* array literals */
+    expect_codes("void f() { i32[3] a = [1, 2, 3]; u8[64] b = [0; 64]; auto c = [1.5, 2.5]; f64 x = c[1]; }", "");
+    expect_codes("void f() { auto grid = [[1, 2], [3, 4]]; i32 x = grid[1][0]; }", "");
+    expect_codes("void f() { i32[3] a = [1, 2]; }", "E0355");
+    expect_codes("void f() { auto a = []; }", "E0308");
+    expect_codes("void f() { auto a = [1, 2.0]; }", "E0331");
+
+    /* `&x` needs `mut x` */
+    expect_codes("void f() { i32 x = 1; i32* p = &x; }", "E0335");
+    expect_codes("void f() { mut i32 x = 1; i32* p = &x; }", "");
+    expect_codes("struct P { f32 x; }\nvoid f(P* p) { f32* q = &p.x; }", "E0335");
+
+    /* moves of values owning a resource */
+    expect_codes("void f() { Arena a = Arena.new(1 * KB); Arena b = a; a.free(); }", "E0356");
+    expect_codes("void f() { mut Arena a = Arena.new(1 * KB); Arena b = a; a = Arena.new(1 * KB); a.free(); b.free(); }", "");
+    expect_codes("void g(Arena a) { }\nvoid f() { Arena a = Arena.new(1 * KB); while (true) { g(a); } }", "E0356");
+    expect_codes("struct H { Arena a; }\nvoid f(H* h) { Arena x = h.a; }", "E0356");
+    expect_codes("void g(Arena* a) { }\nvoid f() { mut Arena a = Arena.new(1 * KB); g(&a); g(&a); a.free(); }", "");
+    expect_codes("struct P { f32 x; }\nvoid f() { P a = P{ x: 1.0 }; P b = a; P c = a; }", "");   /* copied */
+
+    /* wrapping operations (spec §5.1), std.time and std.random effects */
+    expect_codes("u64 f(u64 a) { return wrapping_mul(wrapping_add(a, 1), 3); }", "");
+    expect_codes("f64 f(f64 a) { return wrapping_add(a, 1.0); }", "E0334");
+    expect_codes("void f(u8 a, u16 b) { auto c = wrapping_sub(a, b); }", "E0334");
+    expect_codes("import std.time;\nvoid f() { time.sleep_ms(10); }", "E0340");
+    expect_codes("import std.random;\nu64 f() { random.Rng r = random.seeded(1); return r.next(); }", "");
+    expect_codes("import std.random;\nvoid f() { random.Rng r = random.from_system(); }", "E0340");
 }
 
 static void test_packages(void) {

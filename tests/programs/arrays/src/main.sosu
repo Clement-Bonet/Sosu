@@ -1,0 +1,32 @@
+// Array literals, moves and `result` as a name (spec §5.3, §6): run with `sosuc run`.
+import std.io;
+
+i32 sum(i32[4] values) {
+    mut i32 total = 0;
+    for (i32 v in values) {
+        total += v;
+    }
+    return total;
+}
+
+i32 main() uses io {
+    i32[4] a = [1, 2, 3, 4];
+    io.print("sum = {}", sum(a));
+
+    mut u8[8] zeros = [0; 8];
+    zeros[3] = 7;
+    io.print("{} {} {}", zeros[0], zeros[3], zeros.len);
+
+    auto grid = [[1, 2], [3, 4]];
+    io.print("grid = {}", grid[1][0]);
+
+    Arena first = Arena.new(1 * KB);
+    Arena owner = first;  // `first` is moved: only `owner` can use and free the arena
+    defer owner.free();
+    i32* n = owner.alloc(i32);
+    io.print("moved arena works: {}", *n == 0);
+
+    i32 result = 42;  // `result` is a name like any other outside `ensures`
+    io.print("result = {}", result);
+    return 0;
+}

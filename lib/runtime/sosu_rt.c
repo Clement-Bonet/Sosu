@@ -1,3 +1,7 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L /* clock_gettime, nanosleep */
+#endif
+
 #include "sosu_rt.h"
 
 #include <errno.h>
@@ -5,8 +9,58 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 static jmp_buf *current_test;
+
+/* ---- For std.time and std.random ----
+   Declared by std itself with `extern "C"`: the clock and sleeping differ by system. */
+
+uint64_t sosu_monotonic_ns(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    uint64_t seconds = (uint64_t)(counter.QuadPart / frequency.QuadPart);
+    uint64_t rest = (uint64_t)(counter.QuadPart % frequency.QuadPart);
+    return seconds * 1000000000u + rest * 1000000000u / (uint64_t)frequency.QuadPart;
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+#endif
+}
+
+void sosu_sleep_ms(uint32_t ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec wait = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&wait, &wait) != 0 && errno == EINTR) {
+    }
+#endif
+}
+
+int64_t sosu_unix_seconds(void) {
+    return (int64_t)time(NULL);
+}
+
+/* A seed that differs from one run to the next: the clocks, and addresses that the
+   system places at random. Not for cryptography. */
+uint64_t sosu_random_seed(void) {
+    static uint64_t calls;
+    int local = 0;
+    uint64_t seed = sosu_monotonic_ns() ^ ((uint64_t)time(NULL) << 32);
+    seed ^= (uint64_t)(uintptr_t)&local ^ ((uint64_t)(uintptr_t)&calls << 16);
+    seed ^= ++calls * 0x9E3779B97F4A7C15u;
+    return seed;
+}
 
 void sosu_fail(const char *loc, const char *message) {
     fflush(stdout);

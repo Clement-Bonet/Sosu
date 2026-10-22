@@ -10,10 +10,18 @@ enum Event {
 
 void on_event(App* app, Event e) uses io {
     match (e) {
-        Quit => { app.running = false; },
-        Resized(w, h) => { app.ui.resize(w, h); },
-        Suspend => { app.save(); },
-        _ => { app.ui.handle(e); },
+        Quit => {
+            app.running = false;
+        },
+        Resized(w, h) => {
+            app.ui.resize(w, h);
+        },
+        Suspend => {
+            app.save();
+        },
+        _ => {
+            app.ui.handle(e);
+        },
     }
 }
 

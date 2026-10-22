@@ -31,7 +31,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 - Comments: `// line` and `/* block */`. Block comments do not nest.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - v0 keywords (English):
-  `struct class interface enum import extern pub return if else while for in break continue defer mut auto true false as match try requires ensures test uses result unsafe virtual override self base`
+  `struct class interface enum import extern pub return if else while for in break continue defer mut auto true false as match try requires ensures test uses unsafe virtual override self base`
 - Reserved for later: `comptime`.
 - Contextual words of `.ui.sosu` files (not reserved elsewhere): `window`, `component`, `style`, `theme`.
 - Predefined constructors (not reserved): `some`, `none`, `ok`, `err`.
@@ -210,12 +210,15 @@ Button* back = w as? Button*; // `as?` returns Button*?
 ### 5.3 Names, values and typing rules
 
 - **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
-- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`. They are part of the compiler, since they work for several types and Sosu v0 has no generics.
+- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet). They are part of the compiler, since they work for several types and Sosu v0 has no generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
 - **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
 - **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned.
+- **Taking an address** `&x` follows the same rules, since the pointer allows writing: `x` must be `mut` (and a field must be `mut`). Pointers that only allow reading may come later.
+- **Array literals**: `[1, 2, 3]` (trailing comma allowed) and `[value; count]` (count: an integer literal). The element type comes from the expected array type, or else from the first element; the number of elements must match the type (`i32[3] a = [1, 2];` is an error).
+- **`result`** is not a keyword: in `ensures` it names the returned value; everywhere else it is an ordinary name.
 - **Enum values** are written `Shape.Circle(1.0)` or `Shape.Empty`; the name of the enum may be left out when the expected type is known (`Shape s = Circle(1.0);`), as in `match` patterns.
 - **Statements**: an expression statement must be a call or a `match`; `x == 1;` is an error. The value of a call returning `T!E` must be used (with `try`, `match`, or a variable).
 - **Functions** that return a value must end every path with `return`.
@@ -242,9 +245,13 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
 - The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
 - `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only.
-- Until moves exist (below), copying an `Arena` value shares its blocks: free it once, through one name.
+- An `Arena` owns its blocks: it is moved, not copied (below).
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
+  - In v0, the types owning a resource are `Arena` and the values containing one (struct fields, array elements, option and result values, enum variant fields). They have no `.copy()`.
+  - Using such a variable as a value (initializing a variable, assigning, passing it by value, returning it, putting it in a literal) moves it: the variable can no longer be used afterwards, until it is assigned again. Calling its methods, taking its address and reading its fields do not move it.
+  - The check follows the order of the source: after a move in a branch, the variable is no longer usable after the `if`. A variable declared outside a loop cannot be moved inside it.
+  - A value cannot be moved out of a field, an element or a pointer: pass a pointer instead.
 - Plain `struct`s (without a resource) are copied by value.
 - No hidden allocation: no global allocator; every function that allocates explicitly receives an `Arena*`.
 - No borrow checker in v0: safety relies on arenas and `defer`.
@@ -357,7 +364,15 @@ error[E0312]: non-exhaustive match
 
 ### 7.6 Canonical formatter and minimal core
 
-- `sosuc fmt`: a single style, no configuration option.
+- `sosuc fmt`: a single style, no configuration option. It prints the file from its syntax tree, so a file must parse to be formatted, and puts every comment back where it was. The style:
+  - 4 spaces of indentation; `{` at the end of the line, `}` on its own line; a non-empty block always spans several lines, an empty one is `{ }`;
+  - one statement per line; spaces around binary operators and after commas, none inside parentheses or brackets; struct literals on one line: `Point{ x: 1.0, y: 2.0 }`;
+  - parentheses only where the precedence needs them (`(a + b) * c`, `-(x as f32)`, `(p as u8*) + 1`);
+  - at most one blank line, where the source has one; none after `{`;
+  - a comment on its own line stays on its own line; a comment after code stays at the end of the line, after two spaces;
+  - a function with contracts puts each `requires` / `ensures` on its own line and `{` alone below them;
+  - an enum written on one line stays on one line; otherwise one variant per line, each followed by a comma;
+  - long lines are not broken in v0.
 - No function or operator overloading, no macros, no preprocessor, no exceptions, no implicit conversion.
 
 ### 7.7 `unsafe` and debug checks
@@ -394,6 +409,8 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 `core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` two small functions where C differs between systems (`errno`, file sizes). Available so far:
 
 - `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
+- `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`.
+- `std.random`: `random.Rng`, a generator holding its state (SplitMix64; not for cryptography): `next()` (64 bits), `below(bound)`, `between(low, high)`, `unit()` (a float in [0, 1)). `random.seeded(seed)` gives the same numbers for the same seed, without effect; `random.from_system()` seeds it differently on each run, with the effect `random`.
 - `core.prelude`: `Utf8Error` (§5.3).
 
 ### 8.1 Packages and manifest
@@ -652,7 +669,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
-- `sosuc fmt`: not implemented yet.
+- `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
 - `sosuc package` and `sosuc bindgen`: v1.
 
 ## 12. Grammar (v0, EBNF)
@@ -707,8 +724,9 @@ prefix       = ( "-" | "!" | "~" | "&" | "*" | "try" ) prefix | postfix ;
 postfix      = primary { call | "[" expr "]" | "." IDENT | struct_lit } ;
 call         = "(" [ expr { "," expr } [ "," ] ] ")" ;
 struct_lit   = "{" [ IDENT ":" expr { "," IDENT ":" expr } [ "," ] ] "}" ;  (* after a path *)
-primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base" | "result"
-             | IDENT | "(" expr ")" | match ;
+primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base"
+             | IDENT | "(" expr ")" | match | array ;
+array        = "[" [ expr ( ";" INT | { "," expr } [ "," ] ) ] "]" ;   (* [1, 2, 3] or [0; 64] *)
 match        = "match" "(" expr ")" "{" [ arm { "," arm } [ "," ] ] "}" ;
 arm          = pattern "=>" ( block | expr ) ;
 pattern      = "_" | path [ "(" [ IDENT { "," IDENT } ] ")" ] ;
@@ -768,6 +786,8 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Imported names are qualified by the module name: `vector.Vec2`, `io.print(...)` (§8.1).
 - C libraries are declared in `sosu.toml` only ([link] sections, §9.1), not in the source code.
 - Lexical details settled by the implementation: §3.1 (literals), §5.1 (`as`, ranges, struct literals, function types), §12 (grammar).
+- Array literals `[a, b]` and `[value; n]`; `&x` requires `mut x`; `result` is contextual (only in `ensures`) (§5.3).
+- Moves: `Arena` and the values containing one are moved, checked in the order of the source (§6).
 
 ### 14.2 Open questions
 
@@ -775,5 +795,4 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 - Abstract classes: unnecessary, interfaces are enough? (proposed: yes)
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
-- `result` and `test` are keywords, so they cannot name a variable or a function. (proposed: keep them reserved)
 - Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)

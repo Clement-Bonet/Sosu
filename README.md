@@ -16,8 +16,8 @@ English is the working language of the project: code, comments, compiler message
 | 3. Semantic analysis | done for the language of §5 to §7 |
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows) |
-| 6. Arenas, defer, move, unsafe, checks | done, except moves (`.copy()`) |
-| 7. Tooling | `run`, `test`, JSON diagnostics, contracts and `--release` done; `fmt` to do |
+| 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it; no `.copy()` yet) |
+| 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -48,6 +48,7 @@ sosuc run tests/programs/classes --release   # optimized: no overflow checks nor
 sosuc test tests/programs/testing   # runs its `test` blocks
 sosuc build tests/programs/basics   # writes build/basics.c and build/basics(.exe)
 sosuc check tests/packages/app      # checks without compiling
+sosuc fmt packages/platform         # formats in place (spec §7.6); --check only reports
 sosuc lex tests/samples/hello.sosu  # tokens of a file (debugging)
 sosuc parse tests/samples/hello.sosu --format=json   # syntax tree; JSON diagnostics on stderr
 ```
@@ -67,6 +68,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   utf8        UTF-8 decoding
   source      source files, line / column positions
   diag        diagnostics (text and JSON, spec §7.5)
+  fmt         the canonical formatter (spec §7.6)
   token       token kinds
   lexer       lexical analysis
   arena       arena allocator for compiler data
@@ -80,7 +82,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   sema_body   semantic analysis of function bodies
   codegen     C code generation
 src/sosuc/    command-line driver
-lib/          the `core` and `std` packages, written in Sosu (std.io: files), and the C runtime (lib/runtime)
+lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end
 docs/         specification and error codes
 ```

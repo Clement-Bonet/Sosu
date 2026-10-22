@@ -6,7 +6,7 @@ import platform.app;
 bool on_event(app.Event e) uses io {
     return match (e) {
         Quit => false,
-        Key(code, down) => code != 27,   // Escape
+        Key(code, down) => code != 27,  // Escape
         Resized(width, height) => true,
     };
 }

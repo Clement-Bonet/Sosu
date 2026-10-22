@@ -3,7 +3,8 @@
 
 #include "common.h"
 
-/* Keywords (spec §3). `comptime` is reserved: the lexer reports it. */
+/* Keywords (spec §3). `comptime` is reserved: the lexer reports it. `result` is not a
+   keyword: it names the returned value only in `ensures` (see sema_body.c). */
 #define SOSU_KEYWORDS(X)                                                          \
     X(KW_STRUCT, "struct") X(KW_CLASS, "class") X(KW_INTERFACE, "interface")       \
     X(KW_ENUM, "enum") X(KW_IMPORT, "import") X(KW_EXTERN, "extern")               \
@@ -13,7 +14,7 @@
     X(KW_AUTO, "auto") X(KW_TRUE, "true") X(KW_FALSE, "false") X(KW_AS, "as")      \
     X(KW_MATCH, "match") X(KW_TRY, "try") X(KW_REQUIRES, "requires")              \
     X(KW_ENSURES, "ensures") X(KW_TEST, "test") X(KW_USES, "uses")                 \
-    X(KW_RESULT, "result") X(KW_UNSAFE, "unsafe") X(KW_VIRTUAL, "virtual")         \
+    X(KW_UNSAFE, "unsafe") X(KW_VIRTUAL, "virtual")                                \
     X(KW_OVERRIDE, "override") X(KW_SELF, "self") X(KW_BASE, "base")               \
     X(KW_COMPTIME, "comptime")
 
