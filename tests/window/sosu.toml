@@ -1,0 +1,8 @@
+# Opens a window, draws one frame and closes itself: checks `platform` without a user.
+# The CI runs it with SDL_VIDEO_DRIVER=dummy, which needs no screen.
+[package]
+name = "window_test"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
