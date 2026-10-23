@@ -154,6 +154,14 @@ u32 key_left() {
     return 0x40000050;
 }
 
+u32 key_up() {
+    return 0x40000052;
+}
+
+u32 key_down() {
+    return 0x40000051;
+}
+
 u32 key_home() {
     return 0x4000004A;
 }
@@ -195,6 +203,10 @@ pub struct Ui {
     // What Ctrl+C or Ctrl+X copied, for the program to put on the clipboard.
     mut TextBuffer copied = TextBuffer{ };
     mut bool has_copied = false;
+    // The mouse wheel since the last frame, in steps (positive: away from the user), and
+    // what each list keeps between frames.
+    mut f32 wheel = 0.0;
+    mut ListState[8] lists = [ListState{ }; 8];
 
     // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
     // em for each step of scale: 18 for labels, 27 for titles.
@@ -214,6 +226,11 @@ pub struct Ui {
             released = true;
         }
         down = is_down;
+    }
+
+    // The mouse wheel turned by `steps` (`platform.app.Wheel`): it scrolls the list under the mouse.
+    pub void scroll_wheel(f32 steps) {
+        wheel += steps;
     }
 
     // Typed text, or the text of the clipboard for a paste (Ctrl+V).
@@ -364,6 +381,21 @@ struct Layout {
     mut f32 bottom = 0.0;
     mut f32 gap = 8.0;
     mut f32 padding = 0.0;
+    // In a list: the slot of `Ui.lists` (-1: not a list), its rectangle, the next item, and
+    // the item chosen, if the list has a choice.
+    mut i32 list = -1;
+    mut canvas.Rect frame = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    mut i32 item = 0;
+    mut i32*? selected = none;
+}
+
+// What a list keeps between frames.
+struct ListState {
+    mut i32 id = -1;  // the widget number of its list, -1: a free slot
+    mut f32 scroll = 0.0;  // how far its items are scrolled up
+    mut f32 content = 0.0;  // how high its items were at the last frame
+    mut i32 items = 0;  // how many
+    mut bool reveal = false;  // scroll to the item chosen, after a key moved the choice
 }
 
 // The widgets of one frame, drawn on `surface`.
@@ -472,6 +504,23 @@ pub struct Frame {
     // The same box, without a label.
     pub bool checkbox_alone(bool* value) {
         return checkbox("", value);
+    }
+
+    // A round button of a group, of which one is chosen: drawn chosen when `chosen`; returns
+    // true when it is clicked (the program then chooses it, see `Radio` in .ui.sosu files).
+    pub bool radio(str text, bool chosen) {
+        i32 id = take_id();
+        canvas.Rect size = measure(text, 2);
+        canvas.Rect r = place(size.w + 32.0, height);
+        bool clicked = click(id, r);
+        f32 cx = r.x + 12.0;
+        f32 cy = r.y + height / 2.0;
+        surface.fill_circle(cx, cy, 10.0, face(over(r), ui.active == id && over(r)));
+        if (chosen) {
+            surface.fill_circle(cx, cy, 5.0, accent());
+        }
+        write(r.x + 32.0, r.y, height, text, ink(), 2);
+        return clicked;
     }
 
     // A text field `width` pixels wide. A click gives it the keyboard and places the cursor,
@@ -650,6 +699,7 @@ pub struct Frame {
         ui.released = false;
         ui.typed.len = 0;
         ui.edit_count = 0;
+        ui.wheel = 0.0;
     }
 
     // The size of `text` at `scale`, in the font of `ui`, or else the built-in one.
@@ -700,7 +750,116 @@ pub struct Frame {
         } else {
             layouts[depth].y += h + l.gap;
         }
+        if (l.list >= 0) {
+            item_placed(l, r);
+        }
         return r;
+    }
+
+    // A widget placed in a list is one of its items: it can be chosen, and is highlighted.
+    void item_placed(Layout l, canvas.Rect r) {
+        i32 index = l.item;
+        layouts[depth].item += 1;
+        canvas.Rect row = canvas.Rect{ x: l.frame.x, y: r.y, w: l.frame.w, h: r.h };
+        bool inside = over(row) && over(l.frame);
+        match (l.selected) {
+            some(chosen) => {
+                if (ui.pressed && inside) {
+                    *chosen = index;
+                }
+                ListState* state = &ui.lists[l.list as usize];
+                if (*chosen == index) {
+                    surface.fill(row, canvas.Color{ r: 137, g: 180, b: 250, a: 70 });
+                    if (state.reveal) {  // the item chosen with a key comes into view
+                        f32 top = r.y - l.frame.y + state.scroll;
+                        state.scroll = min(state.scroll, top);
+                        state.scroll = max(state.scroll, top + r.h - l.frame.h);
+                        state.reveal = false;
+                    }
+                } else if (inside) {
+                    surface.fill(row, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
+                }
+            },
+            none => { },
+        }
+    }
+
+    // A list `width` by `height`: the widgets that follow, until `end_list()`, are its items,
+    // one under the other, scrolled by the mouse wheel when they are higher than it. With
+    // `selected`, a click chooses an item and gives the list the keyboard, Up and Down move
+    // the choice, and the item chosen is highlighted.
+    pub void list(f32 width, f32 height, i32*? selected) {
+        i32 id = take_id();
+        canvas.Rect r = place(width, height);
+        usize slot = list_slot(id);
+        ListState* state = &ui.lists[slot];
+        if (ui.wheel != 0.0 && over(r)) {
+            state.scroll -= ui.wheel * 40.0;
+            ui.wheel = 0.0;
+        }
+        if (ui.pressed && over(r)) {
+            ui.focus = id;
+            focus_taken = true;
+        }
+        match (selected) {
+            some(chosen) => {
+                if (ui.focus == id) {
+                    for (usize i in 0..ui.edit_count) {
+                        u32 key = ui.edits[i].key;
+                        if (key == key_up() || key == key_down()) {
+                            *chosen = key == key_up() ? max(*chosen - 1, 0) : min(*chosen + 1, max(state.items - 1, 0));
+                            state.reveal = true;
+                        }
+                    }
+                }
+            },
+            none => { },
+        }
+        state.scroll = max(min(state.scroll, state.content - height), 0.0);
+        surface.fill(r, well());
+        surface.stroke(r, ui.focus == id ? accent() : face(false, false), 2.0);
+        surface.push_clip(canvas.Rect{ x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: r.h - 4.0 });
+        if (depth == 15) {
+            return;
+        }
+        f32 top = r.y - state.scroll;
+        depth += 1;
+        layouts[depth] = Layout{ x: r.x + 8.0, y: top, left: r.x + 8.0, top: top, right: r.x + 8.0, bottom: top, gap: 0.0, list: slot as i32, frame: r, selected: selected };
+    }
+
+    pub void end_list() {
+        Layout done = layouts[depth];
+        if (done.list < 0) {
+            return;  // not in a list
+        }
+        depth -= 1;
+        ListState* state = &ui.lists[done.list as usize];
+        state.content = done.bottom - done.top;
+        state.items = done.item;
+        surface.pop_clip();
+        canvas.Rect r = done.frame;
+        if (state.content > r.h) {  // a bar shows how far the list is scrolled
+            f32 bar = max(r.h * r.h / state.content, 16.0);
+            f32 y = r.y + (r.h - bar) * state.scroll / (state.content - r.h);
+            surface.fill(canvas.Rect{ x: r.x + r.w - 6.0, y: y, w: 4.0, h: bar }, face(true, false));
+        }
+    }
+
+    // The slot of `Ui.lists` of the list `id`: its own, or a free one.
+    usize list_slot(i32 id) {
+        for (usize i in 0..8) {
+            if (ui.lists[i].id == id) {
+                return i;
+            }
+        }
+        for (usize i in 0..8) {
+            if (ui.lists[i].id == -1) {
+                ui.lists[i].id = id;
+                return i;
+            }
+        }
+        ui.lists[0] = ListState{ id: id };  // more than 8 lists: one forgets its scrolling
+        return 0;
     }
 
     bool over(canvas.Rect r) {
@@ -985,4 +1144,57 @@ test "formats" {
     ui.type_text("ab12");
     field_frame(&ui, &surface, &code, Format{ mask: "AA-99" });
     assert(code.len == 5 && code.bytes[2] == 45);  // "ab-12"
+}
+
+// A list 200 by 100 at (0, 0), of 20 labels 32 high: 640 of content.
+void list_frame(Ui* ui, canvas.Canvas* surface, i32* chosen) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.list(200.0, 100.0, some(chosen));
+    for (i32 i in 0..20) {
+        f.label("item");
+    }
+    f.end_list();
+    f.finish();
+}
+
+test "lists scroll and choose" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = -1;
+    list_frame(&ui, &surface, &chosen);
+    assert(ui.lists[0].content == 640.0 && ui.lists[0].items == 20);
+
+    ui.mouse_move(50.0, 40.0);  // the second item (32 to 64)
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    list_frame(&ui, &surface, &chosen);
+    assert(chosen == 1 && ui.focus == 0);
+
+    ui.scroll_wheel(-2.0);  // towards the user: down, 80 pixels
+    list_frame(&ui, &surface, &chosen);
+    assert(ui.lists[0].scroll == 80.0);
+    ui.scroll_wheel(-100.0);  // no further than the end
+    list_frame(&ui, &surface, &chosen);
+    list_frame(&ui, &surface, &chosen);
+    assert(ui.lists[0].scroll == 540.0);
+    ui.mouse_move(250.0, 40.0);  // outside: the wheel does nothing
+    ui.scroll_wheel(5.0);
+    list_frame(&ui, &surface, &chosen);
+    assert(ui.lists[0].scroll == 540.0);
+
+    // Up and Down move the choice; the item chosen comes into view
+    ui.key(key_down(), true, false, false);
+    ui.key(key_up(), true, false, false);
+    ui.key(key_up(), true, false, false);
+    list_frame(&ui, &surface, &chosen);
+    list_frame(&ui, &surface, &chosen);
+    assert(chosen == 0 && ui.lists[0].scroll == 0.0);
+    for (i32 i in 0..30) {
+        ui.key(key_down(), true, false, false);
+    }
+    list_frame(&ui, &surface, &chosen);
+    list_frame(&ui, &surface, &chosen);
+    assert(chosen == 19 && ui.lists[0].scroll == 540.0);
 }

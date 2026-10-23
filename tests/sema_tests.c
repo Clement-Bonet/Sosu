@@ -261,6 +261,14 @@ static void test_body_errors(void) {
     expect_codes("void f() { auto r = ok(1); }", "E0342");
     expect_codes("enum E { A, B }\nvoid g() { }\nvoid f(E e) { match (e) { A => g(), C => g(), _ => g() } }", "E0343");
     expect_codes("void g() { }\nvoid f(i32 x) { match (x) { _ => g() } }", "E0343");
+
+    /* a variant without its type, where an enum is expected (spec §10.2); `==` on enums without data */
+    expect_codes("enum Size { Small, Large }\nstruct S { mut Size size; }\n"
+                 "Size f(S* s, Size other) { s.size = Large; Size t = Small; bool same = other == Small; return Small; }",
+                 "");
+    expect_codes("enum Size { Small, Large }\nvoid f() { auto x = Small; }", "E0330");  /* nothing expected */
+    expect_codes("enum Size { Small, Large }\nvoid f() { Size x = Medium; }", "E0330");
+    expect_codes("enum Shape { Circle(f32 r), Dot }\nvoid f() { Shape s = Circle; }", "E0336");
     expect_codes("enum E { A }\nvoid g() { }\nvoid f(E e) { match (e) { A => g(), _ => g() } }", "E0343");
     expect_codes("enum E { A(i32 x) }\nvoid g() { }\nvoid f(E e) { match (e) { A => g() } }", "E0343");
     expect_codes("enum E { A, B }\ni32 f(E e) { return match (e) { A => 1, B => { } }; }", "E0343");

@@ -181,6 +181,24 @@ pub MouseButton* as_button(Event* event) {
     }
 }
 
+// SDL_MouseWheelEvent.
+pub struct MouseWheel {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    u32 which;
+    pub f32 x;  // steps to the right
+    pub f32 y;  // steps away from the user
+    pub u32 direction;  // 1: flipped (natural scrolling), the steps are the other way
+}
+
+pub MouseWheel* as_wheel(Event* event) {
+    unsafe {
+        return event as MouseWheel*;
+    }
+}
+
 // A texture of `width * height` pixels 0xAARRGGBB that the program updates, or none.
 pub Texture*? create_texture(Renderer* renderer, i32 width, i32 height) uses io {
     unsafe {

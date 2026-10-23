@@ -50,5 +50,16 @@ i32 main() uses io {
     click(&ui, 40.0, 190.0);  // Clear
     frame(&ui, &surface, form);
     io.print("after Clear: name {}, message {}", form.name.count(), form.message.count());
+
+    // Below: "Nobody greeted yet" 216-248, the age field 256-288, the radios 296-328
+    // (S: x 16-64, L: x 72-120).
+    click(&ui, 90.0, 310.0);  // L
+    frame(&ui, &surface, form);
+    click(&ui, 90.0, 310.0);  // L again: already chosen, nothing changes
+    frame(&ui, &surface, form);
+    io.print("size large: {}, changes: {}", form.size == state.Size.Large, form.changes);
+    click(&ui, 30.0, 310.0);  // S
+    frame(&ui, &surface, form);
+    io.print("size small: {}, changes: {}", form.size == state.Size.Small, form.changes);
     return 0;
 }

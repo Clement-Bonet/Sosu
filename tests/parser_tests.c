@@ -333,6 +333,24 @@ static void test_ui_files(void) {
               "    (call (. ui_frame text_field_with) (& (. t date)) 200.0 "
               "(lit widgets.Format (accept (. (. widgets Accept) Digits)) (max 10) (mask \"99/99/9999\")))))\n"
               "(import ui.widgets)\n");
+    expect_ui("component C(T* t) {\n    Radio(\"S\", bind: t.size, value: Small)\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (if (&& (call (. ui_frame radio) \"S\" (== (. t size) Small)) (!= (. t size) Small))\n"
+              "      (block\n"
+              "        (= (. t size) Small)))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Radio(\"S\", bind: x)\n}\n", "E0215", 2, 5);  /* no value */
+    expect_ui("component C(T* t) {\n    List(height: 120, selected: t.index) {\n        Text(\"a\")\n    }\n"
+              "    List { }\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame list) 300.0 120 (call some (& (. t index))))\n"
+              "    (call (. ui_frame label) \"a\")\n"
+              "    (call (. ui_frame end_list))\n"
+              "    (call (. ui_frame list) 300.0 200.0 none)\n"
+              "    (call (. ui_frame end_list))))\n"
+              "(import ui.widgets)\n");
 
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
     expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);

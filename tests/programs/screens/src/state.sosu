@@ -1,12 +1,19 @@
 // The state of the screen, changed by its widgets.
 import ui.widgets;
 
+pub enum Size {
+    Small,
+    Large,
+}
+
 pub class Form {
     pub mut widgets.TextBuffer name;
     pub mut widgets.TextBuffer message;
     pub mut bool shout;
     pub mut i32 greeted;
     pub mut widgets.TextBuffer age;
+    pub mut Size size;
+    pub mut i32 changes;
 
     void init() {
         name = widgets.TextBuffer{ };
@@ -14,12 +21,18 @@ pub class Form {
         shout = false;
         greeted = 0;
         age = widgets.TextBuffer{ };
+        size = Small;
+        changes = 0;
     }
 
     pub void greet() {
         greeted += 1;
         message.set(shout ? "HELLO, " : "Hello, ");
         message.append(name.text());
+    }
+
+    pub void changed() {
+        changes += 1;
     }
 
     pub void clear() {
