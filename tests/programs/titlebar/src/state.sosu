@@ -1,0 +1,36 @@
+// The state of the editor, changed by the widgets of its title bar.
+import ui.widgets;
+
+pub enum Mode {
+    Debug,
+    Release,
+}
+
+pub class Editor {
+    pub mut widgets.TextBuffer search;
+    pub mut widgets.TextBuffer output;
+    pub mut Mode mode;
+    pub mut i32 builds;
+
+    void init() {
+        search = widgets.TextBuffer{ };
+        output = widgets.TextBuffer{ };
+        mode = Debug;
+        builds = 0;
+    }
+
+    pub void find() {
+        output.set("found ");
+        output.append(search.text());
+    }
+
+    pub void rebuild() {
+        builds += 1;
+    }
+
+    pub void run() {
+        output.set("run ");
+        output.append(search.text());
+        output.append(mode == Debug ? " in Debug" : " in Release");
+    }
+}

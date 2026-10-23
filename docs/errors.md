@@ -42,7 +42,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0212 | modifier not allowed here | `virtual` in a `struct`, `pub import` |
 | E0213 | only classes can have a parent class or interfaces | `struct S : Base` |
 | E0214 | expected a node in a `.ui.sosu` file | `42` among the nodes of a window |
-| E0215 | invalid node or property in a `.ui.sosu` file | `Button("OK", on_tap: f)`, `TextField()` without `bind:`, `Text("a") { }`, a property after the nodes |
+| E0215 | invalid node or property in a `.ui.sosu` file | `Button("OK", on_tap: f)`, `TextField()` without `bind:`, `Text("a") { }`, a property after the nodes, a `TitleBar` that is not the first node of a window, an `Option` outside a `Dropdown` |
 | E0216 | not supported yet in a `.ui.sosu` file | `style` blocks, `align:`, `row:` / `col:` / `span:` |
 
 ## Semantic analysis

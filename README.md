@@ -126,7 +126,9 @@ Three packages, written in Sosu:
   from its state (`if (f.button("Greet")) { ... }`).
 
 `examples/window` moves a rectangle with the arrows and the mouse; `examples/form` is a small form
-with a text field, a checkbox and buttons. On Windows:
+with a text field, a checkbox and buttons; `examples/editor` draws its own title bar, with a
+search field, a dropdown and a button in it, which still moves, maximizes and closes the window.
+On Windows:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File packages\platform\fetch-sdl3.ps1   :: once: SDL3 3.4.18, checked by SHA-256
@@ -141,6 +143,7 @@ The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On 
 sudo apt install libsdl3-dev    # Ubuntu 25.04 or later, Debian 13 or later
 ./build/sosuc run examples/window
 ./build/sosuc run examples/form
+./build/sosuc run examples/editor
 ```
 
 The tests of `render` and `ui` need no screen (`sosuc test packages/render`, `sosuc test

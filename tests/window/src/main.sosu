@@ -1,20 +1,35 @@
 // Draws one frame, checks a pixel of it, then asks to close: `run` must return 0 after `Quit`.
+// The window asks for a title bar of its own: `run` must say, before the first frame, whether
+// the system left it to the program (the dummy video driver of the CI may refuse it).
 import std.io;
 import platform.app;
 import render.canvas;
 
-class Once : app.Handler {
+class Once : app.Handler, app.TitleBar {
     mut i32 frames;
     mut bool drawn;
+    mut i32 told;  // CustomTitleBar events received before the first frame
 
     void init() {
         frames = 0;
         drawn = false;
+        told = 0;
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return y < 30.0;
     }
 
     override bool on_event(app.Event e) uses io {
         return match (e) {
             Quit => false,
+            CustomTitleBar(active) => {
+                io.print("custom title bar: {}", active);
+                if (frames == 0) {
+                    told += 1;
+                }
+                return true;
+            },
             _ => true,
         };
     }
@@ -32,7 +47,8 @@ i32 main() uses io {
     mut Arena arena = Arena.new(1 * KB);
     defer arena.free();
     Once* once = arena.new(Once);
-    i32 status = app.run(app.Config{ title: "Sosu test", width: 320, height: 240 }, once as app.Handler*);
+    app.Config config = app.Config{ title: "Sosu test", width: 320, height: 240, title_bar: some(once as app.TitleBar*) };
+    i32 status = app.run(config, once as app.Handler*);
     io.print("window closed ({}), frames: {}, drawn: {}", status, once.frames, once.drawn);
-    return once.drawn && once.frames == 1 ? status : 1;
+    return once.drawn && once.frames == 1 && once.told == 1 ? status : 1;
 }
