@@ -380,7 +380,10 @@ static Type *variant_value(Body *b, Expr *e, const TypeInfo *info, size_t index)
 /* Records in `e` what it refers to, for code generation. */
 static void record(Expr *e, Ref ref) {
     switch (ref.kind) {
-    case REF_LOCAL: e->resolution = RESOLVED_LOCAL; break;
+    case REF_LOCAL:
+        e->resolution = RESOLVED_LOCAL;
+        e->target_index = ref.local->name.offset; /* where it is declared, for the language server */
+        break;
     case REF_FIELD: e->resolution = RESOLVED_SELF_FIELD; e->target = ref.field; break;
     case REF_METHOD: e->resolution = RESOLVED_SELF_METHOD; e->target = ref.method; break;
     case REF_FN: e->resolution = RESOLVED_FN; e->target = ref.fn; break;

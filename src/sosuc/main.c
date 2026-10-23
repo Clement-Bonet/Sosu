@@ -3,8 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include "codegen.h"
 #include "fmt.h"
+#include "lsp.h"
 #include "path.h"
 #include "sema.h"
 #include "shell.h"
@@ -25,6 +31,7 @@ static void usage(FILE *out) {
           "  run     compile and run a package\n"
           "  test    compile and run the test blocks of a package\n"
           "  fmt     format files or packages in place (--check: only report)\n"
+          "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
           "\n"
           "options:\n"
           "  --format=text|json   diagnostics format (default: text)\n"
@@ -476,6 +483,53 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
     return status;
 }
 
+/* The language server: messages on stdin and stdout, each behind a `Content-Length`
+   header (the Language Server Protocol). Diagnostics never go to stdout here. */
+static int command_lsp(const char *argv0) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY); /* no \r\n translation: the lengths are in bytes */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    char *lib = library_dir(argv0);
+    LspServer *server = lsp_new(lib);
+    free(lib);
+    bool running = true;
+    while (running) {
+        size_t length = 0;
+        bool has_length = false;
+        char line[1024];
+        for (;;) {
+            if (!fgets(line, sizeof line, stdin)) {
+                running = false;
+                break;
+            }
+            if (line[0] == '\r' || line[0] == '\n') break;
+            if (strncmp(line, "Content-Length:", 15) == 0) {
+                length = (size_t)strtoul(line + 15, NULL, 10);
+                has_length = true;
+            }
+        }
+        if (!running || !has_length) continue;
+        char *body = sosu_alloc(length + 1);
+        if (fread(body, 1, length, stdin) != length) {
+            free(body);
+            break;
+        }
+        body[length] = '\0';
+        LspMessages out = {0};
+        running = lsp_handle(server, body, length, &out);
+        for (size_t i = 0; i < out.count; i++) {
+            fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(out.items[i]), out.items[i]);
+        }
+        fflush(stdout);
+        lsp_messages_free(&out);
+        free(body);
+    }
+    int status = lsp_exit_code(server);
+    lsp_free(server);
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(stderr);
@@ -531,6 +585,10 @@ int main(int argc, char **argv) {
     options.checks.contracts = contracts >= 0 ? contracts == 1 : !options.release;
     options.checks.bounds_checks = checks != 0;
 
+    if (strcmp(command, "lsp") == 0) {
+        free(paths);
+        return command_lsp(argv[0]);
+    }
     if (strcmp(command, "check") == 0) return command_check(path ? path : ".", argv[0], format);
     if (strcmp(command, "lex") == 0 || strcmp(command, "parse") == 0) {
         if (!path) {

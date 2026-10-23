@@ -22,6 +22,8 @@ cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\parser_tests.exe sr
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\package_tests.exe src\lib\*.c tests\package_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\sema_tests.exe src\lib\*.c tests\sema_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\fmt_tests.exe src\lib\*.c tests\fmt_tests.c || exit /b 1
+cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\json_tests.exe src\lib\*.c tests\json_tests.c || exit /b 1
+cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\lsp_tests.exe src\lib\*.c tests\lsp_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\program_tests.exe tests\program_tests.c || exit /b 1
 
 if /i not "%1"=="test" exit /b 0
@@ -31,6 +33,8 @@ build\parser_tests.exe || exit /b 1
 build\package_tests.exe || exit /b 1
 build\sema_tests.exe || exit /b 1
 build\fmt_tests.exe || exit /b 1
+build\json_tests.exe || exit /b 1
+build\lsp_tests.exe || exit /b 1
 build\program_tests.exe build\sosuc.exe || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 build\sosuc.exe check packages\platform || exit /b 1

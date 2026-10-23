@@ -17,7 +17,7 @@ English is the working language of the project: code, comments, compiler message
 | 4. C code generation | done: classes with virtual tables, interfaces, `as?` |
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
-| 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release` |
+| 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release`, a language server (`sosuc lsp`) |
 | 8. `platform` / `render` / `ui` | done on the desktop: window, keyboard, mouse and text events, drawing in a canvas of pixels, text (TrueType fonts read and drawn in Sosu, and a built-in 8 by 8 font), widgets in immediate mode (`ui`), `.ui.sosu` interface files (no styles yet) |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
@@ -51,6 +51,7 @@ sosuc test tests/programs/testing   # runs its `test` blocks
 sosuc build tests/programs/basics   # writes build/basics.c and build/basics(.exe)
 sosuc check tests/packages/app      # checks without compiling
 sosuc fmt packages/platform         # formats in place (spec §7.6); --check only reports
+sosuc lsp                           # the language server of editors (spec §11.4), on stdin and stdout
 sosuc lex tests/samples/hello.sosu  # tokens of a file (debugging)
 sosuc parse tests/samples/hello.sosu --format=json   # syntax tree; JSON diagnostics on stderr
 ```
@@ -85,6 +86,8 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   sema        semantic analysis of declarations
   sema_body   semantic analysis of function bodies
   codegen     C code generation
+  json        JSON reader and writer (for the language server)
+  lsp         the language server: diagnostics while typing, hover, definition, completion
 src/sosuc/    command-line driver
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 packages/     platform (window and events, on SDL3), render (pixels, shapes, text), ui (widgets)
