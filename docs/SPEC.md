@@ -811,13 +811,14 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 ### 11.4 Compiler as a library, and commands
 
-The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including a future language server (LSP) for completion in editors.
+The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including the language server.
 
 - `sosuc build [--target <os>-<arch>]`: compiles (cross-compiling depending on the available tooling). The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target` is not implemented yet.
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
 - `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
+- `sosuc lsp`: the language server of editors (Language Server Protocol, JSON-RPC on stdin and stdout, behind `Content-Length` headers). While typing, it checks the package of the open file as `sosuc check` does, with the text of the open files in place of their files on disk, and publishes the diagnostics. It shows the type of what is under the mouse (the signature of a function or method, the type of a variable or field), goes to the definition of a name (variable, parameter, function, method, field, variant, type, module), and completes the members after `.` (fields and methods of a value, public names of a module, variants of an enum) and otherwise the names in scope (variables, functions, types, imported modules, keywords). Positions are in UTF-16 code units, as the protocol has them. Hover, definition and member completion need a package that loads without errors (semantic analysis only runs then); a file outside any package, or that no import reaches, is only parsed. Renaming and the references of a name come later.
 - `sosuc build --lib[=shared]` (planned, §9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages and for mobile.
 - `sosuc package` and `sosuc bindgen`: v1.
 
@@ -910,7 +911,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 10. Generics (monomorphized), `Vec` / `HashMap` containers
 11. `sosuc bindgen`, `sosuc package`, cross-compilation
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
-13. Research: `comptime`, effect polymorphism, regions, concurrency, language server (LSP)
+13. Research: `comptime`, effect polymorphism, regions, concurrency
 14. Self-hosting
 
 ## 14. Decisions and open questions
