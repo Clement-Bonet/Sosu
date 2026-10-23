@@ -1,21 +1,47 @@
 // The state of the form, and what its buttons do. Its interface is in screen.ui.sosu.
 import ui.widgets;
 
+pub enum Language {
+    English,
+    French,
+}
+
 pub class Form {
     pub mut widgets.TextBuffer name;
     pub mut widgets.TextBuffer message;
     pub mut bool shout;
+    pub mut widgets.TextBuffer birthday;
+    pub mut Language language;
+    // The names greeted, the last 8, and the one chosen in the list (-1: none).
+    pub mut widgets.TextBuffer[8] greeted;
+    pub mut i32 count;
+    pub mut i32 chosen;
 
     void init() {
         name = widgets.TextBuffer{ };
         message = widgets.TextBuffer{ };
         shout = false;
+        birthday = widgets.TextBuffer{ };
+        language = English;
+        greeted = [widgets.TextBuffer{ }; 8];
+        count = 0;
+        chosen = -1;
     }
 
     pub void greet() {
-        message.set(shout ? "HELLO, " : "Hello, ");
+        str hello = language == English ? "Hello, " : "Bonjour, ";
+        message.set(shout ? "HEY! " : "");
+        message.append(hello);
         message.append(name.text());
         message.append(shout ? "!!!" : ".");
+        if (count == 8) {  // the oldest goes
+            for (usize i in 0..7) {
+                greeted[i] = greeted[i + 1];
+            }
+            count = 7;
+        }
+        greeted[count as usize].set(name.text());
+        count += 1;
     }
 
     pub void clear() {

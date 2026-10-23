@@ -1355,19 +1355,21 @@ typedef struct {
     const char *name;
     size_t values;        /* values in order, before the properties */
     bool optional;        /* the value can be left out (a checkbox without a label) */
-    const char *props[4]; /* NULL-terminated */
+    const char *props[8]; /* NULL-terminated */
     bool children;        /* `{ ... }` after the arguments */
 } UiNodeKind;
 
 static const UiNodeKind ui_nodes[] = {
     { "Column", 0, false, { "gap", "padding", NULL }, true },
     { "Row", 0, false, { "gap", "padding", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", NULL }, true },
     { "Text", 1, false, { NULL }, false },
     { "Title", 1, false, { NULL }, false },
     { "Space", 1, false, { NULL }, false },
     { "Button", 1, false, { "on_click", "enabled", NULL }, false },
-    { "TextField", 0, false, { "bind", "width", "on_enter", NULL }, false },
+    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
+    { "Radio", 1, false, { "bind", "value", "on_change", NULL }, false },
 };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1543,12 +1545,52 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         else diag_help(d, "it has no properties");
         return false;
     }
-    if ((strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "Checkbox") == 0) && !ui_prop(args, "bind")) {
+    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
+                 strcmp(kind->name, "Radio") == 0;
+    if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
         diag_help(d, "bind it to a `mut` field: `%s(bind: state.value)`", kind->name);
         return false;
     }
+    if (strcmp(kind->name, "Radio") == 0 && !ui_prop(args, "value")) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Radio` needs `value:`");
+        diag_help(d, "give the value it chooses: `Radio(\"Small\", bind: state.size, value: Small)`");
+        return false;
+    }
     return true;
+}
+
+/* `widgets.Format{ accept: widgets.Accept.Digits, max: 10, mask: "..." }` from the properties of a
+   TextField, or NULL when it has none of them. `accept: Digits` names a variant of
+   `widgets.Accept`: it is qualified here, since the type is known. */
+static Expr *ui_format(Parser *p, const UiArgs *args, size_t offset, size_t length) {
+    static const char *const names[] = { "accept", "max", "mask" };
+    VEC(FieldInit) fields = {0};
+    for (size_t i = 0; i < 3; i++) {
+        Expr *value = ui_prop(args, names[i]);
+        if (!value) continue;
+        if (i == 0 && value->kind == EXPR_NAME) {
+            Expr *module = ui_expr(p, EXPR_NAME, value->offset, value->length);
+            module->as.name = ui_name("widgets", value->offset);
+            Expr *type = ui_expr(p, EXPR_FIELD, value->offset, value->length);
+            type->as.field.object = module;
+            type->as.field.name = ui_name("Accept", value->offset);
+            Expr *variant = ui_expr(p, EXPR_FIELD, value->offset, value->length);
+            variant->as.field.object = type;
+            variant->as.field.name = value->as.name;
+            value = variant;
+        }
+        FieldInit field;
+        field.name = ui_name(names[i], value->offset);
+        field.value = value;
+        SOSU_VEC_PUSH(&fields, field);
+    }
+    if (!fields.count) return NULL;
+    Expr *literal = ui_expr(p, EXPR_STRUCT_LIT, offset, length);
+    literal->as.struct_lit.type = ui_type(p, offset, "widgets", "Format");
+    literal->as.struct_lit.field_count = fields.count;
+    literal->as.struct_lit.fields = FINISH(p, fields);
+    return literal;
 }
 
 /* A component used as a node: `TaskRow(t)` calls `TaskRow(ui_frame, t)`. */
@@ -1559,7 +1601,7 @@ static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_
         diag_help(d, "remove `%.*s:`, and give the values in the order of its parameters", (int)prop.length, prop.text);
     }
     if (check(p, TOK_LBRACE)) {
-        error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column` and `Row` contain other nodes");
+        error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column`, `Row` and `List` contain other nodes");
         skip_balanced_braces(p);
     }
     Expr *callee = ui_expr(p, EXPR_NAME, path.items[0].offset, path.items[0].length);
@@ -1588,7 +1630,11 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
     Path path = parse_path(p);
     Name node = path.items[path.count - 1];
     UiArgs args;
-    ui_parse_args(p, &args);
+    if (check(p, TOK_LPAREN)) {
+        ui_parse_args(p, &args);
+    } else {
+        memset(&args, 0, sizeof args);  /* `List { ... }`: no arguments, no parentheses */
+    }
     size_t length = span_from(p, start);
 
     const UiNodeKind *kind = NULL;
@@ -1603,7 +1649,7 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
             if (kind->children) {
                 report_expected(p, "E0215", "`{` and the nodes it contains", false);
             } else {
-                error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column` and `Row` contain other nodes");
+                error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column`, `Row` and `List` contain other nodes");
                 skip_balanced_braces(p);
             }
             valid = false;
@@ -1611,6 +1657,26 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
         Expr *value = args.values.count ? args.values.items[0] : NULL;
         if (!valid) {
             if (kind->children && check(p, TOK_LBRACE)) ui_parse_children(p, out);
+        } else if (name_text_is(node, "List")) {
+            /* f.list(width, height, some(&selected) or none), the items, f.end_list() */
+            Expr *selected = ui_prop(&args, "selected");
+            Expr *choice;
+            if (selected) {
+                choice = ui_expr(p, EXPR_CALL, selected->offset, selected->length);
+                choice->as.call.callee = ui_expr(p, EXPR_NAME, selected->offset, selected->length);
+                choice->as.call.callee->as.name = ui_name("some", selected->offset);
+                choice->as.call.arg_count = 1;
+                choice->as.call.args = arena_alloc(p->arena, sizeof(Expr *));
+                choice->as.call.args[0] = ui_address(p, selected);
+            } else {
+                choice = ui_expr(p, EXPR_NAME, start, length);
+                choice->as.name = ui_name("none", start);
+            }
+            Expr *list_args[3] = { ui_float(p, ui_prop(&args, "width"), start, 300),
+                                   ui_float(p, ui_prop(&args, "height"), start, 200), choice };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
+            ui_parse_children(p, out);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
         } else if (kind->children) {
             Expr *layout[2] = { ui_float(p, ui_prop(&args, "gap"), start, 8), ui_float(p, ui_prop(&args, "padding"), start, 0) };
             const char *open = name_text_is(node, "Row") ? "row_with" : "column";
@@ -1629,8 +1695,10 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
         } else if (name_text_is(node, "TextField")) {
-            Expr *call_args[2] = { ui_address(p, ui_prop(&args, "bind")), ui_float(p, ui_prop(&args, "width"), start, 200) };
-            Expr *field = ui_frame_call(p, start, length, "text_field", call_args, 2);
+            Expr *call_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_float(p, ui_prop(&args, "width"), start, 200),
+                                   ui_format(p, &args, start, length) };
+            Expr *field = ui_frame_call(p, start, length, call_args[2] ? "text_field_with" : "text_field", call_args,
+                                        call_args[2] ? 3 : 2);
             SOSU_VEC_PUSH(out, ui_when(p, field, ui_prop(&args, "on_enter")));
         } else if (name_text_is(node, "Checkbox")) {
             Expr *bound = ui_address(p, ui_prop(&args, "bind"));
@@ -1638,6 +1706,45 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
             Expr *box = value ? ui_frame_call(p, start, length, "checkbox", call_args, 2)
                               : ui_frame_call(p, start, length, "checkbox_alone", &bound, 1);
             SOSU_VEC_PUSH(out, ui_when(p, box, ui_prop(&args, "on_change")));
+        } else if (name_text_is(node, "Radio")) {
+            /* if (f.radio(label, x == v) && x != v) { x = v; handler(); }: clicking the radio
+               already chosen changes nothing */
+            Expr *bound = ui_prop(&args, "bind");
+            Expr *chosen = ui_prop(&args, "value");
+            Expr *same = ui_expr(p, EXPR_BINARY, chosen->offset, chosen->length);
+            same->as.binary.op = TOK_EQ_EQ;
+            same->as.binary.left = bound;
+            same->as.binary.right = chosen;
+            Expr *other = ui_expr(p, EXPR_BINARY, chosen->offset, chosen->length);
+            other->as.binary.op = TOK_BANG_EQ;
+            other->as.binary.left = bound;
+            other->as.binary.right = chosen;
+            Expr *call_args[2] = { value, same };
+            Expr *clicked = ui_frame_call(p, start, length, "radio", call_args, 2);
+            Expr *radio = ui_expr(p, EXPR_BINARY, start, length);
+            radio->as.binary.op = TOK_AMP_AMP;
+            radio->as.binary.left = clicked;
+            radio->as.binary.right = other;
+            Stmt *choose = new_stmt(p, STMT_ASSIGN, chosen->offset);
+            choose->length = chosen->length;
+            choose->as.assign.op = TOK_EQ;
+            choose->as.assign.target = bound;
+            choose->as.assign.value = chosen;
+            Stmt *when = ui_when(p, radio, ui_prop(&args, "on_change"));
+            if (when->kind == STMT_IF) {  /* the handler is called after the choice */
+                StmtVec items = {0};
+                SOSU_VEC_PUSH(&items, choose);
+                SOSU_VEC_PUSH(&items, when->as.if_.then_block->as.block.items[0]);
+                when->as.if_.then_block = ui_block(p, &items, chosen->offset, chosen->length);
+            } else {
+                StmtVec items = {0};
+                SOSU_VEC_PUSH(&items, choose);
+                when = new_stmt(p, STMT_IF, radio->offset);
+                when->length = radio->length;
+                when->as.if_.cond = radio;
+                when->as.if_.then_block = ui_block(p, &items, chosen->offset, chosen->length);
+            }
+            SOSU_VEC_PUSH(out, when);
         }
     }
     free(args.values.items);
