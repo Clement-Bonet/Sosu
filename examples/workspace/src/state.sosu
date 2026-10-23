@@ -1,0 +1,256 @@
+// The state of the workspace: a few files, the one chosen, its details being edited, and what
+// the buttons of the title bar did. Its interface is in screen.ui.sosu.
+import ui.widgets;
+
+pub enum Kind {
+    Source,
+    Binary,
+    Image,
+}
+
+pub enum Encoding {
+    Utf8,
+    Latin1,
+    Utf16,
+}
+
+pub enum Mode {
+    Debug,
+    Release,
+}
+
+pub enum Target {
+    Windows,
+    Linux,
+    MacOs,
+}
+
+// A file of the workspace, as its details show it.
+pub struct File {
+    pub mut widgets.TextBuffer name = widgets.TextBuffer{ };
+    pub mut widgets.TextBuffer size = widgets.TextBuffer{ };  // in KB
+    pub mut widgets.TextBuffer date = widgets.TextBuffer{ };  // dd/mm/yyyy
+    pub mut widgets.TextBuffer price = widgets.TextBuffer{ };  // a licence, for the decimal field
+    pub mut Kind kind = Source;
+    pub mut Encoding encoding = Utf8;
+    pub mut bool read_only = false;
+    pub mut bool hidden = false;
+}
+
+// Whether two text buffers hold the same text.
+bool same(widgets.TextBuffer a, widgets.TextBuffer b) {
+    str x = a.text();
+    str y = b.text();
+    if (x.len != y.len) {
+        return false;
+    }
+    for (usize i in 0..x.len) {
+        if (x.bytes[i] != y.bytes[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool same_file(File a, File b) {
+    return same(a.name, b.name) && same(a.size, b.size) && same(a.date, b.date) && same(a.price, b.price) && a.kind == b.kind && a.encoding == b.encoding && a.read_only == b.read_only && a.hidden == b.hidden;
+}
+
+File file(str name, str size, str date, Kind kind) {
+    mut File f = File{ };
+    f.name.set(name);
+    f.size.set(size);
+    f.date.set(date);
+    f.kind = kind;
+    return f;
+}
+
+pub class Workspace {
+    // The files, 16 at most, and the one chosen in the list (-1: none).
+    pub mut File[16] files;
+    pub mut i32 count;
+    pub mut i32 chosen;
+    // The details of the file chosen, edited until Save or Revert; `loaded` is the file they
+    // were read from.
+    pub mut File details;
+    pub mut i32 loaded;
+    // The title bar.
+    pub mut widgets.TextBuffer search;
+    pub mut Mode mode;
+    pub mut Target target;
+    // What happened, the last 12 lines, and the status line.
+    pub mut widgets.TextBuffer[12] output;
+    pub mut i32 lines;
+    pub mut widgets.TextBuffer status;
+    mut i32 created;
+
+    void init() {
+        files = [File{ }; 16];
+        files[0] = file("main.sosu", "4", "21/10/2026", Source);
+        files[1] = file("screen.ui.sosu", "2", "22/10/2026", Source);
+        files[2] = file("state.sosu", "6", "22/10/2026", Source);
+        files[3] = file("logo.png", "38", "02/09/2026", Image);
+        files[4] = file("sosuc.exe", "912", "23/10/2026", Binary);
+        count = 5;
+        chosen = 0;
+        details = files[0];
+        loaded = 0;
+        search = widgets.TextBuffer{ };
+        mode = Debug;
+        target = Windows;
+        output = [widgets.TextBuffer{ }; 12];
+        lines = 0;
+        status = widgets.TextBuffer{ };
+        status.set("Ready");
+        created = 0;
+    }
+
+    // Called before each frame: the details follow the file chosen in the list.
+    pub void follow_choice() {
+        if (chosen == loaded) {
+            return;
+        }
+        loaded = chosen;
+        if (chosen >= 0 && chosen < count) {
+            details = files[chosen as usize];
+        }
+    }
+
+    pub bool has_choice() {
+        return chosen >= 0 && chosen < count;
+    }
+
+    // The details differ from the file: Save and Revert have something to do.
+    pub bool changed() {
+        return has_choice() && !same_file(details, files[chosen as usize]);
+    }
+
+    pub str chosen_name() {
+        return has_choice() ? files[chosen as usize].name.text() : "No file";
+    }
+
+    pub void save() {
+        if (!has_choice()) {
+            return;
+        }
+        files[chosen as usize] = details;
+        log("Saved ", details.name.text());
+    }
+
+    pub void revert() {
+        if (has_choice()) {
+            details = files[chosen as usize];
+            status.set("Reverted");
+        }
+    }
+
+    pub void new_file() {
+        if (count == 16) {
+            status.set("The workspace is full (16 files)");
+            return;
+        }
+        created += 1;
+        mut widgets.TextBuffer name = widgets.TextBuffer{ };
+        name.set("untitled-");
+        append_number(&name, created);
+        name.append(".sosu");
+        files[count as usize] = file(name.text(), "0", "23/10/2026", Source);
+        chosen = count;
+        count += 1;
+        log("Created ", name.text());
+    }
+
+    pub void remove() {
+        if (!has_choice()) {
+            return;
+        }
+        log("Removed ", files[chosen as usize].name.text());
+        for (mut i32 i = chosen; i + 1 < count; i += 1) {
+            files[i as usize] = files[(i + 1) as usize];
+        }
+        count -= 1;
+        chosen = min(chosen, count - 1);
+        loaded = -2;  // the details follow the new choice
+    }
+
+    // Enter in the search field: chooses the first file whose name contains the text.
+    pub void find() {
+        str wanted = search.text();
+        for (i32 i in 0..count) {
+            if (contains(files[i as usize].name.text(), wanted)) {
+                chosen = i;
+                log("Found ", files[i as usize].name.text());
+                return;
+            }
+        }
+        log("Nothing matches ", wanted);
+    }
+
+    pub void build() {
+        log(mode == Debug ? "Build, debug, for " : "Build, release, for ", target_name());
+    }
+
+    pub void run() {
+        log(mode == Debug ? "Run, debug, on " : "Run, release, on ", target_name());
+    }
+
+    pub void mode_changed() {
+        status.set(mode == Debug ? "Mode: debug, with checks" : "Mode: release, optimized");
+    }
+
+    pub void target_changed() {
+        status.set("Target: ");
+        status.append(target_name());
+    }
+
+    str target_name() {
+        return match (target) {
+            Windows => "Windows",
+            Linux => "Linux",
+            MacOs => "macOS",
+        };
+    }
+
+    // A line of output, the oldest one forgotten when there are 12; it is also the status.
+    void log(str what, str subject) {
+        if (lines == 12) {
+            for (usize i in 0..11) {
+                output[i] = output[i + 1];
+            }
+            lines = 11;
+        }
+        output[lines as usize].set(what);
+        output[lines as usize].append(subject);
+        status = output[lines as usize];
+        lines += 1;
+    }
+}
+
+// Appends the decimal digits of `n` (0 or more) to `text`.
+void append_number(widgets.TextBuffer* text, i32 n) {
+    if (n >= 10) {
+        append_number(text, n / 10);
+    }
+    str[10] digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    text.append(digits[(n % 10) as usize]);
+}
+
+// Whether `text` contains `part` (bytes; "" is in every text).
+bool contains(str text, str part) {
+    if (part.len > text.len) {
+        return false;
+    }
+    for (usize start in 0..text.len - part.len + 1) {
+        mut bool found = true;
+        for (usize i in 0..part.len) {
+            if (text.bytes[start + i] != part.bytes[i]) {
+                found = false;
+                break;
+            }
+        }
+        if (found) {
+            return true;
+        }
+    }
+    return false;
+}

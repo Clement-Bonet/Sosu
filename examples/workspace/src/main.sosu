@@ -1,0 +1,143 @@
+// A workspace in the manner of VS Code (spec §10.5): the program draws the title bar and puts
+// its actions in it, while the bar still moves, maximizes and closes the window. Its interface
+// is in screen.ui.sosu, its state in state.sosu.
+//
+// With the environment variable SOSU_SYSTEM_TITLE_BAR set (to anything), the window keeps the
+// title bar of the system, as on a platform that has no custom decorations: the bar of the
+// program is then a tool bar under it, and the program does not change.
+//
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/workspace`
+// from the root of the repository, where the font is found.
+import std.io;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import ui.widgets;
+import workspace.screen;
+import workspace.state;
+
+extern "C" {
+    u8* getenv(u8* name);
+}
+
+// Whether the environment variable `name` is set.
+bool has_env(Arena* arena, str name) {
+    u8* c_name = name.to_cstr(arena);
+    unsafe {
+        return getenv(c_name) as u64 != 0;
+    }
+}
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    state.Workspace* w;
+
+    void init(state.Workspace* w) {
+        ui = widgets.Ui{ };
+        self.w = w;
+    }
+
+    // Asked by the system between two frames: the empty space and the labels of the title
+    // bar move the window.
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;  // else the bar of the program is a tool bar
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Key(code, down, mods) => {
+                bool ctrl = mods.ctrl || mods.command;  // Cmd on macOS
+                if (down && ctrl && code == 118) {  // Ctrl+V: the clipboard, typed
+                    mut Arena paste = Arena.new(4 * KB);
+                    defer paste.free();
+                    ui.type_text(app.clipboard(&paste));
+                } else if (down && ctrl && code == 115) {  // Ctrl+S
+                    w.save();
+                } else {
+                    ui.key(code, down, mods.shift, ctrl);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        w.follow_choice();
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Workspace(&f, w);
+        f.finish();
+        // the window buttons of the title bar act through `platform`
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        match (ui.take_copied()) {
+            some(text) => {
+                mut Arena copy = Arena.new(4 * KB);
+                defer copy.free();
+                app.set_clipboard(&copy, text);
+            },
+            none => { },
+        }
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    state.Workspace* w = arena.new(state.Workspace);
+    App* handler = arena.new(App, w);
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(noto) => {
+            handler.ui.font = some(noto);
+        },
+        err(e) => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    widgets.Window window = screen.WorkspaceConfig();
+    bool custom = window.custom_title_bar && !has_env(&arena, "SOSU_SYSTEM_TITLE_BAR");
+    app.TitleBar*? bar = custom ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler*);
+}
