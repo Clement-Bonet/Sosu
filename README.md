@@ -91,7 +91,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
 src/sosuc/    command-line driver
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 packages/     platform (window and events, on SDL3), render (pixels, shapes, text), ui (widgets)
-examples/     window (shapes, keyboard and mouse), form (widgets)
+examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification and error codes
@@ -127,7 +127,10 @@ Three packages, written in Sosu:
 
 `examples/window` moves a rectangle with the arrows and the mouse; `examples/form` is a small form
 with a text field, a checkbox and buttons; `examples/editor` draws its own title bar, with a
-search field, a dropdown and a button in it, which still moves, maximizes and closes the window.
+search field, a dropdown and a button in it, which still moves, maximizes and closes the window; `examples/workspace` goes further, in the
+manner of VS Code: actions, a search field and two dropdowns in the title bar, over a list of
+files, the details of the file chosen (every widget of `ui`) and an output pane. With
+`SOSU_SYSTEM_TITLE_BAR` set, it keeps the title bar of the system, and its own becomes a tool bar.
 On Windows:
 
 ```bat
@@ -144,6 +147,7 @@ sudo apt install libsdl3-dev    # Ubuntu 25.04 or later, Debian 13 or later
 ./build/sosuc run examples/window
 ./build/sosuc run examples/form
 ./build/sosuc run examples/editor
+./build/sosuc run examples/workspace
 ```
 
 The tests of `render` and `ui` need no screen (`sosuc test packages/render`, `sosuc test
