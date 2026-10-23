@@ -4,22 +4,30 @@ import form.state;
 
 window Greeter(state.Form* form) {
     title: "Sosu form"
-    width: 400
-    height: 460
+    width: 420
+    height: 640
 
     Column(gap: 8, padding: 32) {
         Title("Hello")
         Text("Your name:")
-        TextField(bind: form.name, width: 336, on_enter: form.greet)
+        TextField(bind: form.name, width: 356, on_enter: form.greet)
         Text("Birthday:")
         TextField(bind: form.birthday, width: 160, mask: "99/99/9999")
+        Row(gap: 16) {
+            Radio("English", bind: form.language, value: English)
+            Radio("French", bind: form.language, value: French)
+        }
         Checkbox("Shout", bind: form.shout)
-        Space(8)
         Row(gap: 8) {
             Button("Clear", on_click: form.clear)
             Button("Greet", on_click: form.greet, enabled: form.name.count() > 0)
         }
-        Space(8)
         Text(form.message.text())
+        Text("Greeted:")
+        List(width: 356, height: 100, selected: form.chosen) {
+            for (i32 i in 0..form.count) {
+                Text(form.greeted[i].text())
+            }
+        }
     }
 }

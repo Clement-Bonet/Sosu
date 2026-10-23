@@ -35,6 +35,7 @@ pub enum Event {
     Click(f32 x, f32 y, Button button),  // a button pressed
     Release(f32 x, f32 y, Button button),  // a button released
     TextInput(str text),  // typed text (UTF-8), valid until the end of the frame
+    Wheel(f32 x, f32 y),  // the mouse wheel, in steps: y > 0 away from the user (up)
 }
 
 // What a program implements: its state lives in the class that implements it.
@@ -71,6 +72,11 @@ Event? translate(sdl.Event* event, Arena* frame) {
         sdl.MouseButton* press = sdl.as_button(event);
         Button button = button_of(press.button);
         return some(kind == 0x401 ? Click(press.x, press.y, button) : Release(press.x, press.y, button));
+    }
+    if (kind == 0x403) {  // SDL_EVENT_MOUSE_WHEEL
+        sdl.MouseWheel* wheel = sdl.as_wheel(event);
+        f32 sign = wheel.direction == 1 ? -1.0 : 1.0;
+        return some(Wheel(wheel.x * sign, wheel.y * sign));
     }
     if (kind == 0x303) {  // SDL_EVENT_TEXT_INPUT
         return some(TextInput(sdl.text_of(frame, event)));

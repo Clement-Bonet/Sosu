@@ -73,6 +73,31 @@ pub struct Canvas {
         }
     }
 
+    // A disc of `radius` pixels around (cx, cy), its edge antialiased: each pixel is covered
+    // by the part of its 4 by 4 samples inside the circle.
+    pub void fill_circle(f32 cx, f32 cy, f32 radius, Color color) {
+        i32 x0 = max(clamp(cx - radius, width), clip.x0);
+        i32 y0 = max(clamp(cy - radius, height), clip.y0);
+        i32 x1 = min(clamp(cx + radius + 1.0, width), clip.x1);
+        i32 y1 = min(clamp(cy + radius + 1.0, height), clip.y1);
+        f32 limit = radius * radius;
+        for (mut i32 y = y0; y < y1; y += 1) {
+            for (mut i32 x = x0; x < x1; x += 1) {
+                mut u32 inside = 0;
+                for (mut i32 sy = 0; sy < 4; sy += 1) {
+                    for (mut i32 sx = 0; sx < 4; sx += 1) {
+                        f32 dx = x as f32 + (sx as f32 + 0.5) / 4.0 - cx;
+                        f32 dy = y as f32 + (sy as f32 + 0.5) / 4.0 - cy;
+                        inside += dx * dx + dy * dy <= limit ? 1 : 0;
+                    }
+                }
+                if (inside > 0) {
+                    blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
+                }
+            }
+        }
+    }
+
     // The border of a rectangle, `thickness` pixels wide, inside the rectangle.
     pub void stroke(Rect rect, Color color, f32 thickness) {
         f32 t = min(thickness, min(rect.w, rect.h) / 2.0);
@@ -344,4 +369,15 @@ test "clipping" {
     c.pop_clip();  // nothing pushed: ignored
     c.fill(Rect{ x: 8.0, y: 8.0, w: 1.0, h: 1.0 }, red);
     assert(c.at(8, 8) == 0xFFFF0000);
+}
+
+test "discs" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut Canvas c = create(&arena, 20, 20);
+    c.fill_circle(10.0, 10.0, 5.0, Color{ r: 255, g: 255, b: 255 });
+    assert(c.at(10, 10) == 0xFFFFFFFF && c.at(7, 10) == 0xFFFFFFFF);  // inside
+    assert(c.at(2, 2) == 0 && c.at(16, 10) == 0);  // outside
+    u32 edge = c.at(13, 13) & 0xFF;  // across the circle: partly covered
+    assert(edge > 0 && edge < 255);
 }

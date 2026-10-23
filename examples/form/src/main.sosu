@@ -52,6 +52,9 @@ class App : app.Handler {
             TextInput(text) => {
                 ui.type_text(text);
             },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
             _ => { },
         }
         return true;
