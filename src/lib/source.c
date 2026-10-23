@@ -28,7 +28,24 @@ static void init(SourceFile *file, const char *path, char *text, size_t length) 
     file->line_count = lines.count;
 }
 
+static SourceOverlay overlay;
+static void *overlay_data;
+
+void source_set_overlay(SourceOverlay function, void *data) {
+    overlay = function;
+    overlay_data = data;
+}
+
 bool source_load(SourceFile *file, const char *path) {
+    size_t open_length = 0;
+    const char *open = overlay ? overlay(path, &open_length, overlay_data) : NULL;
+    if (open) {
+        char *copy = sosu_alloc(open_length + 1);
+        memcpy(copy, open, open_length);
+        init(file, path, copy, open_length);
+        return true;
+    }
+
     FILE *f = fopen(path, "rb");
     if (!f) return false;
 

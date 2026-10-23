@@ -11,7 +11,13 @@ typedef struct {
     size_t line_count;
 } SourceFile;
 
-/* Reads a file. Returns false on I/O error (errno is set). */
+/* Text that replaces the contents of a file on disk, or NULL to read the file: the documents open
+   in an editor, for the language server. */
+typedef const char *(*SourceOverlay)(const char *path, size_t *length, void *data);
+/* Sets the overlay that source_load asks first; NULL removes it. */
+void source_set_overlay(SourceOverlay overlay, void *data);
+
+/* Reads a file, or takes its text from the overlay. Returns false on I/O error (errno is set). */
 bool source_load(SourceFile *file, const char *path);
 /* Builds a source file from text in memory (used by tests and tools). */
 void source_from_string(SourceFile *file, const char *path, const char *text);
