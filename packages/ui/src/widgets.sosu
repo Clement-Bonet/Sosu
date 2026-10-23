@@ -208,6 +208,23 @@ pub struct Ui {
     mut f32 wheel = 0.0;
     mut ListState[8] lists = [ListState{ }; 8];
 
+    // The dropdown open (-1: none), and the rectangle of its list at the last frame: the
+    // layer above, which takes the mouse before the widgets under it.
+    mut i32 open = -1;
+    mut canvas.Rect layer = nowhere();
+
+    // The title bar of the last frame (spec §10.5): its rectangle, those of the interactive
+    // widgets in it and of its window buttons, and the request of a window button.
+    mut canvas.Rect bar = nowhere();
+    mut canvas.Rect[16] bar_widgets = [nowhere(); 16];
+    mut usize bar_widget_count = 0;
+    mut canvas.Rect bar_buttons = nowhere();
+    mut WindowRequest? request = none;
+    // Set by the program: whether the system left the title bar to it (`platform.app` says
+    // so with `CustomTitleBar`), else a `title_bar` is a tool bar; whether it is maximized.
+    pub mut bool custom_title_bar = false;
+    pub mut bool maximized = false;
+
     // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
     // em for each step of scale: 18 for labels, 27 for titles.
     pub mut truetype.Font*? font = none;
@@ -260,6 +277,42 @@ pub struct Ui {
         has_copied = false;
         return some(copied.text());
     }
+
+    // What a window button of the title bar asked since the last call, for `platform.app`.
+    pub WindowRequest? take_window_request() {
+        WindowRequest? asked = request;
+        request = none;
+        return asked;
+    }
+
+    // Whether the mouse at (x, y) moves the window: on the title bar of the last frame, and on
+    // none of its interactive widgets, its window buttons or an open dropdown. Labels drag.
+    pub bool is_drag_area(f32 x, f32 y) {
+        if (!custom_title_bar || !contains(bar, x, y) || contains(bar_buttons, x, y) || contains(layer, x, y)) {
+            return false;
+        }
+        for (usize i in 0..bar_widget_count) {
+            if (contains(bar_widgets[i], x, y)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// What a window button asks of the window.
+pub enum WindowRequest {
+    Minimize,
+    ToggleMaximize,  // maximize, or restore when it is maximized
+    Close,
+}
+
+canvas.Rect nowhere() {
+    return canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+}
+
+bool contains(canvas.Rect r, f32 x, f32 y) {
+    return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
 
 // ---- Formats of text fields ----
@@ -368,6 +421,7 @@ pub struct Window {
     pub str title = "Sosu";
     pub i32 width = 640;
     pub i32 height = 480;
+    pub bool custom_title_bar = false;  // it draws its own title bar (`TitleBar`, spec §10.5)
 }
 
 // A column or a row of widgets, being placed.
@@ -408,6 +462,22 @@ pub struct Frame {
     mut i32 next_id = 0;
     mut bool focus_taken = false;  // a text field took the focus in this frame
     f32 height = 32.0;  // of a line of widgets
+    // The title bar being placed: the depth of its row (0: none), its rectangle, and the
+    // interactive widgets in it.
+    mut usize bar_depth = 0;
+    mut canvas.Rect bar = nowhere();
+    mut canvas.Rect[16] bar_widgets = [nowhere(); 16];
+    mut usize bar_widget_count = 0;
+    // The dropdown being described (-1: none) and its box; the list of the open one, drawn by
+    // `finish()` above the rest: its owner, its rectangle, its options and the one chosen.
+    mut i32 dropdown_id = -1;
+    mut canvas.Rect box = nowhere();
+    mut i32 layer_owner = -1;
+    mut canvas.Rect layer = nowhere();
+    mut str[16] options = [""; 16];
+    mut usize option_count = 0;
+    mut i32 option_chosen = -1;
+    mut bool dropdown_pressed = false;  // a press went to a dropdown or to one of its options
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -471,6 +541,7 @@ pub struct Frame {
         i32 id = take_id();
         canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w + 32.0, height);
+        interactive(r);
         if (!enabled) {
             surface.fill(r, well());
             write(r.x + 16.0, r.y, height, text, face(false, false), 2);
@@ -488,6 +559,7 @@ pub struct Frame {
         i32 id = take_id();
         canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w + 32.0, height);
+        interactive(r);
         bool clicked = click(id, r);
         if (clicked) {
             *value = !(*value);
@@ -512,6 +584,7 @@ pub struct Frame {
         i32 id = take_id();
         canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w + 32.0, height);
+        interactive(r);
         bool clicked = click(id, r);
         f32 cx = r.x + 12.0;
         f32 cy = r.y + height / 2.0;
@@ -533,6 +606,7 @@ pub struct Frame {
     pub bool text_field_with(TextBuffer* text, f32 width, Format format) {
         i32 id = take_id();
         canvas.Rect r = place(width, height);
+        interactive(r);
         canvas.Rect inner = canvas.Rect{ x: r.x + 8.0, y: r.y, w: max(width - 16.0, 0.0), h: height };
         if (ui.pressed && over(r)) {
             if (ui.focus != id) {
@@ -687,8 +761,182 @@ pub struct Frame {
         ui.anchor = ui.cursor;
     }
 
-    // Ends the frame: the input it used is consumed.
+    // A title bar across the surface, from the left of the current layout: the widgets that
+    // follow, until `end_title_bar()`, go side by side in it, `gap` apart, `padding` from its
+    // left end. Its empty space and its labels drag the window (`Ui.is_drag_area`).
+    pub void title_bar(f32 bar_height, f32 gap, f32 padding) {
+        Layout l = layouts[depth];
+        bar = canvas.Rect{ x: l.x, y: l.y, w: max(surface.width as f32 - l.x, 0.0), h: bar_height };
+        bar_widget_count = 0;
+        surface.fill(bar, canvas.Color{ r: 17, g: 17, b: 27 });
+        if (depth == 15) {
+            return;  // too deep: the widgets stay in the current layout
+        }
+        f32 x = bar.x + padding;
+        f32 y = bar.y + max((bar_height - height) / 2.0, 0.0);
+        depth += 1;
+        layouts[depth] = Layout{ horizontal: true, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap };
+        bar_depth = depth;
+    }
+
+    // Ends the title bar: draws its window buttons, if the system left the bar to the program,
+    // and remembers what is in it for `Ui.is_drag_area`. The frame goes on under it.
+    pub void end_title_bar() {
+        if (bar_depth == 0) {
+            return;  // not in a title bar
+        }
+        depth = bar_depth - 1;
+        bar_depth = 0;
+        ui.bar = bar;
+        ui.bar_widgets = bar_widgets;
+        ui.bar_widget_count = bar_widget_count;
+        ui.bar_buttons = nowhere();
+        if (ui.custom_title_bar) {
+            window_buttons();
+        }
+        place(bar.w, bar.h);
+    }
+
+    // Minimize, maximize (or restore) and close, at the right end of the title bar.
+    void window_buttons() {
+        f32 w = 46.0;
+        ui.bar_buttons = canvas.Rect{ x: bar.x + bar.w - 3.0 * w, y: bar.y, w: 3.0 * w, h: bar.h };
+        for (i32 i in 0..3) {
+            i32 id = take_id();
+            canvas.Rect r = canvas.Rect{ x: ui.bar_buttons.x + i as f32 * w, y: bar.y, w: w, h: bar.h };
+            bool clicked = click(id, r);
+            if (over(r)) {
+                bool held = ui.active == id;
+                surface.fill(r, i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 } : face(!held, held));
+            }
+            i32 cx = (r.x + w / 2.0) as i32;
+            i32 cy = (r.y + bar.h / 2.0) as i32;
+            if (i == 0) {
+                surface.line(cx - 5, cy, cx + 5, cy, ink());
+            } else if (i == 1 && ui.maximized) {  // restore: two squares
+                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 3) as f32, w: 8.0, h: 8.0 }, ink(), 1.0);
+                surface.line(cx - 3, cy - 5, cx + 5, cy - 5, ink());
+                surface.line(cx + 5, cy - 5, cx + 5, cy + 3, ink());
+            } else if (i == 1) {
+                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 5) as f32, w: 10.0, h: 10.0 }, ink(), 1.0);
+            } else {
+                surface.line(cx - 5, cy - 5, cx + 5, cy + 5, ink());
+                surface.line(cx - 5, cy + 5, cx + 5, cy - 5, ink());
+            }
+            if (clicked) {
+                if (i == 0) {
+                    ui.request = some(WindowRequest.Minimize);
+                } else if (i == 1) {
+                    ui.request = some(WindowRequest.ToggleMaximize);
+                } else {
+                    ui.request = some(WindowRequest.Close);
+                }
+            }
+        }
+    }
+
+    // A widget the mouse acts on: in a title bar, it does not drag the window.
+    void interactive(canvas.Rect r) {
+        if (bar_depth > 0 && bar_widget_count < 16) {
+            bar_widgets[bar_widget_count] = r;
+            bar_widget_count += 1;
+        }
+    }
+
+    // A dropdown `width` wide: its options follow, until `end_dropdown()`. Its box shows the
+    // option chosen; a click on it opens the list of its options under it, above the rest of
+    // the frame, where a click chooses one. A click elsewhere, or Escape, closes it.
+    pub void dropdown(f32 width) {
+        i32 id = take_id();
+        canvas.Rect r = place(width, height);
+        interactive(r);
+        if (ui.pressed && over(r)) {
+            ui.open = ui.open == id ? -1 : id;
+            dropdown_pressed = true;
+        }
+        if (ui.open == id) {
+            for (usize i in 0..ui.edit_count) {
+                if (ui.edits[i].key == 27) {  // Escape
+                    ui.open = -1;
+                }
+            }
+        }
+        dropdown_id = id;
+        box = r;
+        if (ui.open == id) {
+            layer_owner = id;
+            layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
+            option_count = 0;
+            option_chosen = -1;
+        }
+        surface.fill(r, well());
+        surface.stroke(r, ui.open == id ? accent() : face(over(r), false), 2.0);
+        i32 cx = (r.x + r.w - 16.0) as i32;  // a chevron, pointing down
+        i32 cy = (r.y + height / 2.0) as i32;
+        surface.line(cx - 5, cy - 2, cx, cy + 3, ink());
+        surface.line(cx, cy + 3, cx + 5, cy - 2, ink());
+    }
+
+    // An option of the dropdown being described, drawn in its box when `chosen`; returns
+    // true when it is clicked in the open list (the program then chooses it, see `Option` in
+    // .ui.sosu files).
+    pub bool option(str text, bool chosen) {
+        if (dropdown_id < 0) {
+            return false;  // not in a dropdown
+        }
+        if (chosen) {
+            surface.push_clip(canvas.Rect{ x: box.x + 2.0, y: box.y + 2.0, w: max(box.w - 32.0, 0.0), h: box.h - 4.0 });
+            write(box.x + 8.0, box.y, height, text, ink(), 2);
+            surface.pop_clip();
+        }
+        if (layer_owner != dropdown_id || option_count >= 16) {
+            return false;
+        }
+        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h, w: layer.w, h: height };
+        options[option_count] = text;
+        if (chosen) {
+            option_chosen = option_count as i32;
+        }
+        option_count += 1;
+        layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: layer.h + height };
+        if (ui.open == dropdown_id && ui.pressed && contains(r, ui.mouse_x, ui.mouse_y)) {
+            ui.open = -1;
+            dropdown_pressed = true;
+            return true;
+        }
+        return false;
+    }
+
+    pub void end_dropdown() {
+        dropdown_id = -1;
+    }
+
+    // The open list of a dropdown, over everything else.
+    void draw_layer() {
+        surface.fill(layer, face(false, false));
+        for (usize i in 0..option_count) {
+            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height, w: layer.w, h: height };
+            if (i as i32 == option_chosen) {
+                surface.fill(r, canvas.Color{ r: 137, g: 180, b: 250, a: 70 });
+            } else if (contains(r, ui.mouse_x, ui.mouse_y)) {
+                surface.fill(r, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
+            }
+            write(r.x + 8.0, r.y, height, options[i], ink(), 2);
+        }
+        surface.stroke(layer, accent(), 2.0);
+    }
+
+    // Ends the frame: draws the layer above, and the input it used is consumed.
     pub void finish() {
+        if (ui.pressed && !dropdown_pressed || ui.open != layer_owner) {
+            ui.open = -1;  // a click elsewhere closes the dropdown, as does its disappearance
+        }
+        if (ui.open >= 0) {
+            draw_layer();
+            ui.layer = layer;
+        } else {
+            ui.layer = nowhere();
+        }
         if (ui.released) {
             ui.active = -1;
         }
@@ -791,6 +1039,7 @@ pub struct Frame {
     pub void list(f32 width, f32 height, i32*? selected) {
         i32 id = take_id();
         canvas.Rect r = place(width, height);
+        interactive(r);
         usize slot = list_slot(id);
         ListState* state = &ui.lists[slot];
         if (ui.wheel != 0.0 && over(r)) {
@@ -862,8 +1111,9 @@ pub struct Frame {
         return 0;
     }
 
+    // The mouse is over `r`, and not over the open list of a dropdown, which is above it.
     bool over(canvas.Rect r) {
-        return ui.mouse_x >= r.x && ui.mouse_x < r.x + r.w && ui.mouse_y >= r.y && ui.mouse_y < r.y + r.h;
+        return contains(r, ui.mouse_x, ui.mouse_y) && !contains(ui.layer, ui.mouse_x, ui.mouse_y);
     }
 
     // Pressed then released over `r`, the press and the release maybe in the same frame.
@@ -1197,4 +1447,122 @@ test "lists scroll and choose" {
     list_frame(&ui, &surface, &chosen);
     list_frame(&ui, &surface, &chosen);
     assert(chosen == 19 && ui.lists[0].scroll == 540.0);
+}
+
+// A title bar 40 high holding a label and a button, then a label under it. Returns whether
+// the button was clicked.
+bool bar_frame(Ui* ui, canvas.Canvas* surface) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.title_bar(40.0, 8.0, 4.0);
+    f.label("App");  // built-in font: 48 wide, from x 4
+    bool run = f.button("Run");  // x 60 to 140
+    f.end_title_bar();
+    f.label("under");
+    f.finish();
+    return run;
+}
+
+void click_at(Ui* ui, f32 x, f32 y) {
+    ui.mouse_move(x, y);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+}
+
+test "a title bar drags the window, except on its widgets and buttons" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    bar_frame(&ui, &surface);
+    assert(!ui.is_drag_area(200.0, 20.0));  // the system kept its title bar: a tool bar
+    assert(ui.bar_buttons.w == 0.0);
+
+    ui.custom_title_bar = true;
+    bar_frame(&ui, &surface);
+    assert(ui.is_drag_area(200.0, 20.0));  // empty space
+    assert(ui.is_drag_area(10.0, 20.0));  // the label
+    assert(!ui.is_drag_area(100.0, 20.0));  // the button
+    assert(!ui.is_drag_area(300.0, 20.0));  // the window buttons: x 262 to 400
+    assert(!ui.is_drag_area(200.0, 60.0));  // under the bar
+    assert(surface.at(1, 1) != 0);  // drawn
+
+    click_at(&ui, 100.0, 20.0);
+    assert(bar_frame(&ui, &surface));
+    match (ui.take_window_request()) {
+        some(r) => assert(false),
+        none => { },
+    }
+    // the window buttons: minimize, maximize, close, 46 wide each
+    for (i32 i in 0..3) {
+        click_at(&ui, 262.0 + 46.0 * i as f32 + 20.0, 20.0);
+        bar_frame(&ui, &surface);
+        mut i32 asked = -1;
+        match (ui.take_window_request()) {
+            some(r) => {
+                asked = match (r) {
+                    Minimize => 0,
+                    ToggleMaximize => 1,
+                    Close => 2,
+                };
+            },
+            none => { },
+        }
+        assert(asked == i);
+    }
+    match (ui.take_window_request()) {  // given once
+        some(r) => assert(false),
+        none => { },
+    }
+}
+
+// A dropdown of three options at the top, and a button under it (y 40 to 72), which its open
+// list (y 32 to 128) covers. Returns whether the button was clicked.
+bool dropdown_frame(Ui* ui, canvas.Canvas* surface, i32* choice) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.dropdown(160.0);
+    for (i32 i in 0..3) {
+        str text = i == 0 ? "Debug" : i == 1 ? "Release" : "Profile";
+        if (f.option(text, *choice == i) && *choice != i) {
+            *choice = i;
+        }
+    }
+    f.end_dropdown();
+    bool under = f.button("Under");
+    f.finish();
+    return under;
+}
+
+test "a dropdown opens above the rest, chooses and closes" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut i32 choice = 1;
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open == -1 && ui.layer.h == 0.0);
+
+    click_at(&ui, 20.0, 10.0);  // the box opens the list
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open == 0 && ui.layer.y == 32.0 && ui.layer.h == 96.0);
+
+    // the first option, over the button: the option takes the click, and the list closes
+    click_at(&ui, 20.0, 50.0);
+    assert(!dropdown_frame(&ui, &surface, &choice));
+    assert(choice == 0 && ui.open == -1);
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.layer.h == 0.0);
+    click_at(&ui, 20.0, 50.0);  // closed: the button gets the click
+    assert(dropdown_frame(&ui, &surface, &choice));
+
+    click_at(&ui, 20.0, 10.0);  // a click elsewhere closes it without choosing
+    dropdown_frame(&ui, &surface, &choice);
+    click_at(&ui, 300.0, 150.0);
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open == -1 && choice == 0);
+
+    click_at(&ui, 20.0, 10.0);  // and Escape
+    dropdown_frame(&ui, &surface, &choice);
+    ui.key(27, true, false, false);
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open == -1 && choice == 0);
 }

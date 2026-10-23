@@ -72,6 +72,12 @@ pub struct Keyboard {
 
 pub struct Texture { }
 
+// SDL_Point: a point of a window, for its hit test.
+pub struct Point {
+    pub i32 x;
+    pub i32 y;
+}
+
 pub struct FRect {
     f32 x;
     f32 y;
@@ -106,6 +112,17 @@ extern "C" {
     u8* SDL_GetClipboardText() uses io;  // to free with SDL_free; "" when empty
     bool SDL_SetClipboardText(u8* text) uses io;
     void SDL_free(u8* memory) uses io;
+    // SDL_HitTest: what is at a point of the window (an SDL_HitTestResult), asked by the system.
+    bool SDL_SetWindowHitTest(Window* window, fn(Window*, Point*, u8*) -> i32 uses io callback, u8* data) uses io;
+    bool SDL_SetWindowBordered(Window* window, bool bordered) uses io;
+    bool SDL_MinimizeWindow(Window* window) uses io;
+    bool SDL_MaximizeWindow(Window* window) uses io;
+    bool SDL_RestoreWindow(Window* window) uses io;
+    u64 SDL_GetWindowFlags(Window* window) uses io;
+    bool SDL_GetWindowSize(Window* window, i32* w, i32* h) uses io;
+    // SDL_EventFilter: called as each event arrives, before the queue.
+    bool SDL_AddEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
+    void SDL_RemoveEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
 }
 
 // A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
@@ -242,20 +259,89 @@ pub void quit() uses io {
     }
 }
 
-// A resizable window, or none if SDL cannot create it.
-pub Window*? create_window(Arena* arena, str title, i32 width, i32 height) uses io {
+// A resizable window, or none if SDL cannot create it. Without `decorated`, the system draws
+// no title bar and no border: the program draws its own.
+pub Window*? create_window(Arena* arena, str title, i32 width, i32 height, bool decorated) uses io {
     CString* text = arena.alloc(CString);
     usize length = min(title.len, 255);
     for (mut usize i = 0; i < length; i += 1) {
         text.bytes[i] = title.bytes[i];
     }
     unsafe {
-        Window* window = SDL_CreateWindow(&text.bytes as u8*, width, height, 0x20);  // SDL_WINDOW_RESIZABLE
+        // SDL_WINDOW_RESIZABLE, and SDL_WINDOW_BORDERLESS
+        Window* window = SDL_CreateWindow(&text.bytes as u8*, width, height, decorated ? 0x20 : 0x30);
         if (window as u64 == 0) {
             return none;
         }
         return some(window);
     }
+}
+
+// Asks the system to call `callback` with `data` for each point of the window where the mouse
+// acts (to drag it, to resize it). False when the system cannot.
+pub bool set_hit_test(Window* window, fn(Window*, Point*, u8*) -> i32 uses io callback, u8* data) uses io {
+    mut bool ok = false;
+    unsafe {
+        ok = SDL_SetWindowHitTest(window, callback, data);
+    }
+    return ok;
+}
+
+// Asks SDL to call `watch` with `data` on each event as it arrives, even while the system
+// holds the loop of the program (a window resized on Windows).
+pub void add_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
+    unsafe {
+        SDL_AddEventWatch(watch, data);
+    }
+}
+
+pub void remove_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
+    unsafe {
+        SDL_RemoveEventWatch(watch, data);
+    }
+}
+
+// Gives the window its title bar and borders back, or takes them away.
+pub void set_decorated(Window* window, bool decorated) uses io {
+    unsafe {
+        SDL_SetWindowBordered(window, decorated);
+    }
+}
+
+pub void minimize(Window* window) uses io {
+    unsafe {
+        SDL_MinimizeWindow(window);
+    }
+}
+
+// Maximizes the window, or restores it when it is maximized.
+pub void toggle_maximize(Window* window) uses io {
+    bool maximized = is_maximized(window);
+    unsafe {
+        if (maximized) {
+            SDL_RestoreWindow(window);
+        } else {
+            SDL_MaximizeWindow(window);
+        }
+    }
+}
+
+pub bool is_maximized(Window* window) uses io {
+    mut u64 flags = 0;
+    unsafe {
+        flags = SDL_GetWindowFlags(window);
+    }
+    return flags & 0x80 != 0;  // SDL_WINDOW_MAXIMIZED
+}
+
+// The size of the window, in the coordinates of its events.
+pub Point window_size(Window* window) uses io {
+    mut i32 w = 0;
+    mut i32 h = 0;
+    unsafe {
+        SDL_GetWindowSize(window, &w, &h);
+    }
+    return Point{ x: w, y: h };
 }
 
 pub void destroy_window(Window* window) uses io {
@@ -291,6 +377,15 @@ pub bool poll(Event* event) uses io {
 // Queues an SDL_EVENT_QUIT, as if the user had closed the window.
 pub void push_quit() uses io {
     mut Event event = Event{ kind: 0x100, reserved: 0, timestamp: 0, window: 0, word5: 0, word6: 0, word7: 0, rest: [0; 96] };
+    unsafe {
+        SDL_PushEvent(&event);
+    }
+}
+
+// Queues an SDL_EVENT_USER with `code`: a request of the program that `run` carries out on
+// its window (SDL_UserEvent keeps its code where `word5` is).
+pub void push_request(u32 code) uses io {
+    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: code, word6: 0, word7: 0, rest: [0; 96] };
     unsafe {
         SDL_PushEvent(&event);
     }

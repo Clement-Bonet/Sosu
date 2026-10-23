@@ -1,0 +1,21 @@
+// A title bar holding a text field, a dropdown and a button, as the bar of VS Code does.
+import titlebar.state;
+
+window Editor(state.Editor* editor) {
+    title: "Editor"
+    width: 600
+    height: 400
+
+    TitleBar(height: 40) {
+        Text("Sosu")
+        TextField(bind: editor.search, width: 160, on_enter: editor.find)
+        Dropdown(bind: editor.mode, width: 120, on_change: editor.rebuild) {
+            Option("Debug", value: Debug)
+            Option("Release", value: Release)
+        }
+        Button("Run", on_click: editor.run)
+    }
+    Column(gap: 8, padding: 16) {
+        Text(editor.output.text())
+    }
+}

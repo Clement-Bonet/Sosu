@@ -1,0 +1,124 @@
+// A window whose title bar is drawn by the program (spec §10.5): a search field, a dropdown
+// and a button in it, while dragging the bar moves the window, a double-click maximizes it
+// (on Windows), and its buttons minimize, maximize and close it. Its interface is in
+// screen.ui.sosu, its state in state.sosu.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/editor`
+// from the root of the repository, where the font is found.
+import std.io;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import ui.widgets;
+import editor.screen;
+import editor.state;
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    state.Editor* editor;
+
+    void init(state.Editor* editor) {
+        ui = widgets.Ui{ };
+        self.editor = editor;
+    }
+
+    // Asked by the system between two frames: the empty space and the labels of the title
+    // bar move the window.
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;  // else the bar of the program is a tool bar
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Key(code, down, mods) => {
+                bool ctrl = mods.ctrl || mods.command;  // Cmd on macOS
+                if (down && ctrl && code == 118) {  // Ctrl+V: the clipboard, typed
+                    mut Arena paste = Arena.new(4 * KB);
+                    defer paste.free();
+                    ui.type_text(app.clipboard(&paste));
+                } else {
+                    ui.key(code, down, mods.shift, ctrl);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Editor(&f, editor);
+        f.finish();
+        // the window buttons of the title bar act through `platform`
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        match (ui.take_copied()) {
+            some(text) => {
+                mut Arena copy = Arena.new(4 * KB);
+                defer copy.free();
+                app.set_clipboard(&copy, text);
+            },
+            none => { },
+        }
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    state.Editor* editor = arena.new(state.Editor);
+    App* handler = arena.new(App, editor);
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(noto) => {
+            handler.ui.font = some(noto);
+        },
+        err(e) => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    widgets.Window window = screen.EditorConfig();
+    // the window draws its own title bar: `handler` says where it drags the window
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler*);
+}

@@ -1,0 +1,8 @@
+# A window that draws its own title bar (spec §10.5), driven without a window.
+[package]
+name = "titlebar"
+version = "0.1.0"
+
+[dependencies]
+render = { path = "../../../packages/render" }
+ui = { path = "../../../packages/ui" }

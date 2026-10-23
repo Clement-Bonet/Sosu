@@ -1,0 +1,82 @@
+// Drives the window of screen.ui.sosu, whose title bar is drawn by the program, with simulated
+// input, frame after frame, as `platform` would.
+import std.io;
+import render.canvas;
+import ui.widgets;
+import titlebar.screen;
+import titlebar.state;
+
+void frame(widgets.Ui* ui, canvas.Canvas* surface, state.Editor* editor) {
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    screen.Editor(&f, editor);
+    f.finish();
+}
+
+void click(widgets.Ui* ui, f32 x, f32 y) {
+    ui.mouse_move(x, y);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+}
+
+str request(widgets.Ui* ui) {
+    return match (ui.take_window_request()) {
+        some(r) => match (r) {
+            Minimize => "minimize",
+            ToggleMaximize => "maximize",
+            Close => "close",
+        },
+        none => "none",
+    };
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(2 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 600, 400);
+    mut widgets.Ui ui = widgets.Ui{ };
+    state.Editor* editor = arena.new(state.Editor);
+
+    widgets.Window window = screen.EditorConfig();
+    io.print("window: {} {}x{}, custom title bar: {}", window.title, window.width, window.height, window.custom_title_bar);
+    ui.custom_title_bar = true;  // what `platform.app` says with `CustomTitleBar(true)`
+    frame(&ui, &surface, editor);
+
+    // The bar, 40 high, its widgets 32 high from y 4: the label x 4-68, the field 76-236, the
+    // dropdown 244-364, Run 372-452, then the window buttons 462-600.
+    io.print("drag: label {}, field {}, dropdown {}, button {}, empty {}, window buttons {}, under {}", ui.is_drag_area(30.0, 20.0), ui.is_drag_area(100.0, 20.0), ui.is_drag_area(300.0, 20.0), ui.is_drag_area(400.0, 20.0), ui.is_drag_area(457.0, 20.0), ui.is_drag_area(500.0, 20.0), ui.is_drag_area(300.0, 100.0));
+
+    click(&ui, 100.0, 20.0);  // the field takes the keyboard
+    ui.type_text("main");
+    frame(&ui, &surface, editor);
+    ui.key(13, true, false, false);  // Enter: on_enter
+    frame(&ui, &surface, editor);
+    io.print("{}", editor.output.text());
+
+    click(&ui, 300.0, 20.0);  // the dropdown opens: Debug y 36-68, Release 68-100
+    frame(&ui, &surface, editor);
+    io.print("open list: drag {}", ui.is_drag_area(300.0, 20.0));
+    click(&ui, 300.0, 80.0);  // Release
+    frame(&ui, &surface, editor);
+    io.print("mode release: {}, builds: {}", editor.mode == state.Mode.Release, editor.builds);
+
+    click(&ui, 400.0, 20.0);  // Run
+    frame(&ui, &surface, editor);
+    io.print("{}", editor.output.text());
+
+    click(&ui, 485.0, 20.0);  // minimize
+    frame(&ui, &surface, editor);
+    io.print("request: {}", request(&ui));
+    click(&ui, 577.0, 20.0);  // close
+    frame(&ui, &surface, editor);
+    io.print("request: {}, then {}", request(&ui), request(&ui));
+
+    // The system kept its title bar: no window buttons, no drag area
+    ui.custom_title_bar = false;
+    frame(&ui, &surface, editor);
+    io.print("tool bar: drag {}, window buttons {}", ui.is_drag_area(457.0, 20.0), ui.is_drag_area(577.0, 20.0));
+    click(&ui, 577.0, 20.0);
+    frame(&ui, &surface, editor);
+    io.print("request: {}", request(&ui));
+    return 0;
+}

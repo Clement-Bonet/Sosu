@@ -706,9 +706,10 @@ Translation in v0:
 | `Checkbox(s, bind: x, on_change: h)` | `if (f.checkbox(s, &x)) { h(); }`; without `s`, `f.checkbox_alone(&x)` |
 | `Radio(s, bind: x, value: v, on_change: h)` | `if (f.radio(s, x == v) && x != v) { x = v; h(); }`: one radio per value of an `enum` without data, `v` written without its type (`Small`); choosing the radio already chosen changes nothing |
 | `List(width: w, height: h, selected: i) { ... }` | `f.list(w, h, some(&i))` (or `none`), the nodes, `f.end_list()`: each node in the list is an item; `i` (an `i32`, -1 for none) is the item chosen; `width` is 300 and `height` 200 by default |
+| `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. A node without arguments may leave out its parentheses: `List { ... }`.
-- Not yet: `style` and `theme` blocks, `style:`, `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox` and `Radio` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+- Not yet: `style` and `theme` blocks, `style:`, `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
 
@@ -732,7 +733,7 @@ children     = "{" { item } "}" ;
 
 ### 10.4 Milestones
 
-1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). The events are `Quit`, `Resized`, `Key(code, down, mods)` (`app.Mods`: `shift`, `ctrl`, `alt`, `command`; a key held repeats its `down`), `MouseMove`, `Click`, `Release`, `Wheel(x, y)` (steps; `y > 0` away from the user, natural scrolling already applied) and `TextInput` (its `str` lives until the end of the frame); `app.request_quit()` closes the window as the window button does, `app.clipboard(arena)` and `app.set_clipboard(arena, text)` read and write the clipboard.
+1. Desktop: open a window, show a colored rectangle, close cleanly on `Quit`. Done on Windows and Linux with `packages/platform` and `examples/window`; `tests/window` checks it in the CI. Without generics to carry the application state, its v0 interface differs from the sketch of §10.1: the program implements the interface `app.Handler` with a class, whose fields hold the state, and calls `app.run(config, handler)`. `on_event(Event e)` returns `false` to close the window; `on_frame(canvas.Canvas* surface)` draws on a buffer of pixels the size of the window (package `render`, below). While the window is resized, Windows holds the loop of `run` until the mouse is released: `on_frame` is then called from an SDL event watch, on each `SDL_EVENT_WINDOW_EXPOSED` of the live resize, so that the window never shows a black area. The events are `Quit`, `Resized`, `Key(code, down, mods)` (`app.Mods`: `shift`, `ctrl`, `alt`, `command`; a key held repeats its `down`), `MouseMove`, `Click`, `Release`, `Wheel(x, y)` (steps; `y > 0` away from the user, natural scrolling already applied) and `TextInput` (its `str` lives until the end of the frame); `app.request_quit()` closes the window as the window button does, `app.minimize()` and `app.toggle_maximize()` act on it as its other buttons do (§10.5, with the events `CustomTitleBar` and `Maximized`), `app.clipboard(arena)` and `app.set_clipboard(arena, text)` read and write the clipboard.
    - `render.canvas` draws in Sosu into a `Canvas` (pixels 0xAARRGGBB): `clear`, `fill` (blended when the color is not opaque), `stroke`, `fill_circle` (a disc, its edge antialiased), `line`, `text` and `at`, all clipped to the canvas, and to the rectangles of `push_clip(rect)` until `pop_clip()` (16 levels; `clear` ignores them). `platform` shows it with one SDL texture per frame. Its tests (`sosuc test packages/render`) need no screen.
    - Text: `render.font` is a built-in 8 by 8 font for printable ASCII (font8x8, public domain); other characters are drawn as a box. `surface.text(x, y, text, color, scale)` draws each pixel of the font as a `scale` by `scale` square, `\n` starts a new line (`font.line_height()`: 10 pixels of the font), and `canvas.text_size(text, scale)` gives the size of the text. It needs no file, and stays the font of last resort.
    - TrueType fonts: `render.truetype` reads `.ttf` files and draws their glyphs in Sosu, antialiased, at any size. `truetype.load(arena, path)` gives a `Font*` (or `Unreadable`, `NotTrueType`); `surface.text_with(font, size, x, y, text, color)` draws text whose first line has its top at y, `size` being in pixels per em; `font.measure(text, size)`, `font.line_height(size)` and `font.ascent(size)` measure it. All of Unicode that the font covers is drawn (accented letters are composite glyphs); a character it does not have gets its missing glyph.
@@ -742,7 +743,7 @@ children     = "{" { item } "}" ;
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target. Done on the desktop: `examples/form` describes its window in `screen.ui.sosu` (§10.2), and `tests/programs/screens` drives such a window with simulated input, without a screen.
    - The `ui` package: without lambdas (v1), a widget cannot call the program back, so `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame in nested columns and rows (`column(gap, padding)`, `row_with(gap, padding)`, `end()`; `row()` and `end_row()` for a row with the default gap).
-   - Widgets: `label`, `title`, `button` and `button_enabled` (true when clicked), `checkbox(text, bool*)` and `checkbox_alone(bool*)`, `radio(text, chosen)` (true when clicked), `list(width, height, i32*? selected)` ... `end_list()`, `text_field(TextBuffer*, width)` and `text_field_with(TextBuffer*, width, Format)` (true on Enter), `space`. `TextBuffer` holds up to 256 bytes of UTF-8. `widgets.Window` holds what a window of a `.ui.sosu` file says about itself.
+   - Widgets: `label`, `title`, `button` and `button_enabled` (true when clicked), `checkbox(text, bool*)` and `checkbox_alone(bool*)`, `radio(text, chosen)` (true when clicked), `list(width, height, i32*? selected)` ... `end_list()`, `text_field(TextBuffer*, width)` and `text_field_with(TextBuffer*, width, Format)` (true on Enter), `dropdown(width)`, `option(text, chosen)` (true when clicked) and `end_dropdown()`, `title_bar(height, gap, padding)` ... `end_title_bar()` (§10.5), `space`. `TextBuffer` holds up to 256 bytes of UTF-8. `widgets.Window` holds what a window of a `.ui.sosu` file says about itself.
    - Text fields: a click gives the keyboard and places the cursor, dragging selects. Left and Right (with Shift: selecting), Home, End, Backspace and Delete edit at the cursor; Ctrl+A selects all, Ctrl+C and Ctrl+X copy (`ui.take_copied()` gives the text, for `app.set_clipboard`), and a paste is typed text (`ui.type_text(app.clipboard(arena))`). The text is clipped to the field and scrolls to keep the cursor in view. The input of a frame is replayed in order (typing, then a key, then typing again).
    - Formats: `Format{ accept, max, mask }`. `accept` is `Any`, `Digits`, `Integer` (and `-` first) or `Decimal` (and `-` first, and one `.` or `,`); `max` limits the characters; a mask such as `99/99/9999` takes a digit for `9`, a letter for `A`, anything for `*`, and writes its other characters when the cursor reaches them. What does not fit is not typed.
    - Lists: the widgets placed directly in a list are its items, one under the other, clipped to it. The mouse wheel over it scrolls it (`ui.scroll_wheel(steps)`, 40 pixels a step), within its content; a bar on its right shows where. With `selected`, a click chooses an item and gives the list the keyboard, Up and Down move the choice, which comes into view, and the item chosen is highlighted. `Ui` keeps the scroll of 8 lists between frames.
@@ -763,19 +764,78 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `TextArea` (several lines) | planned | the same editing core, plus Up / Down, line wrapping and scrolling; `rows:` gives its height; text in a buffer that grows in an arena |
 | `Radio` | available | `Radio("Small", bind: size, value: Small)`: the translator generates the comparison and the assignment for the `enum` (`==` on enums without data), so the widget itself needs no generics |
 | `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. Not yet: dragging the bar, a selection of several items |
-| `Dropdown` | planned | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it |
+| `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. Not yet: choosing with the keyboard, scrolling a long list (16 options at most) |
+| `TitleBar` | available | a title bar drawn by the program, with widgets in it (§10.5) |
 
 Foundations, to build first, since most planned widgets rely on them:
 
 1. Clipping in `render`: a stack of clip rectangles on the `Canvas`, so that nothing overflows a field, a list or a text area. Done.
 2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat. Done (key repeat comes from the system); not yet: moving by word (Ctrl+Left), undo.
 3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`.
-4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame.
+4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame. Done for dropdowns.
 5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`).
 
-Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling (done), then `TextArea`, and `Dropdown` with the layer above. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus, images (`render` would then draw images).
+Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling (done), `Dropdown` with the layer above (done), then `TextArea`. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus, images (`render` would then draw images).
 
 Two limits of v0 apply to every text widget: without a TrueType font (`ui.font`), the built-in font only draws ASCII (other characters are kept, and drawn as boxes), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
+
+### 10.5 Title bars drawn by the program
+
+A window can draw its own title bar and put widgets in it (a search field, a dropdown, buttons), as VS Code does. The bar still behaves as a title bar: dragging its empty space moves the window, a double-click maximizes it, and it has the minimize, maximize and close buttons. The system draws nothing: the window has no decorations, and the system asks the program, point by point, what is under the mouse.
+
+In a `.ui.sosu` file, `TitleBar` is the first node of a window, at most once; its children are placed in a row, as in `Row`:
+
+```sosu
+window Editor(state.Editor* editor) {
+    title: "Sosu editor"
+    width: 900
+    height: 600
+
+    TitleBar(height: 40, gap: 8, padding: 4) {
+        Text("Sosu")
+        TextField(bind: editor.search, width: 240)
+        Dropdown(bind: editor.mode, width: 140, on_change: editor.rebuild) {
+            Option("Debug", value: Debug)
+            Option("Release", value: Release)
+        }
+        Button("Run", on_click: editor.run)
+    }
+    Column(gap: 8, padding: 16) {
+        Text(editor.output.text())
+    }
+}
+```
+
+| Node | Becomes |
+|---|---|
+| `TitleBar(height: h, gap: g, padding: p) { ... }` | `f.title_bar(h, g, p)`, the nodes, `f.end_title_bar()`; `height` is 40, `gap` 8 and `padding` 4 by default. `EditorConfig()` gets `custom_title_bar: true` |
+| `Dropdown(bind: x, width: w, on_change: h) { ... }` | `f.dropdown(w)`, its options, `f.end_dropdown()`; `width` is 160 by default |
+| `Option(s, value: v)`, only in a `Dropdown` | `if (f.option(s, x == v) && x != v) { x = v; h(); }`: as `Radio`, one option per value of an `enum` without data |
+
+- `TitleBar` elsewhere than first in a window (in a component, in a `Column`, after another node, twice) is an error. `Option` outside a `Dropdown`, or another node in a `Dropdown` (except `if` and `for` around options), is an error.
+
+`ui` (still without depending on `platform`):
+
+- `f.title_bar(height, gap, padding)` opens a row across the whole width of the surface, at the top of the frame, on a background of its own; `f.end_title_bar()` draws the three window buttons at its right end (46 pixels wide each, the close button red under the mouse), then the frame goes on under the bar.
+- What the bar holds is remembered in `Ui` for the next frame: its rectangle, those of the window buttons, and those of the interactive widgets placed in it (buttons, text fields, checkboxes, radios, dropdowns; 16 at most). Labels are not interactive: they drag the window, as the title of a system bar does.
+- `ui.is_drag_area(x, y)`: in the bar, and on none of these rectangles, nor on an open dropdown. The system asks between two frames, so the answer comes from the last frame drawn.
+- The window buttons do not act themselves: `ui.take_window_request()` gives `some(Minimize)`, `some(ToggleMaximize)` or `some(Close)` once after a click, as `take_copied()` gives the text copied, and the program passes it to `platform`. `ui.maximized` (set by the program) chooses the icon of the middle button: one square, or two when the window is maximized.
+- `ui.custom_title_bar` (set by the program, false by default) says whether the system left the bar to the program. When false, `TitleBar` is a tool bar: the same row of widgets at the top, without window buttons and without drag area, under the title bar of the system.
+- `Dropdown` brings the layer above (foundation 4 of §10.4): a click on the closed box opens the list of its options under it; drawn at `finish()`, over everything else, it takes the input before the widgets under it, from its rectangle at the last frame. A click on an option chooses it and closes the list, a click elsewhere or Escape closes it without choosing. The box shows the text of the option chosen.
+
+`platform`:
+
+- `app.Config` gains `title_bar: app.TitleBar*? = none`. `TitleBar` is an interface with one method, `bool is_drag_area(f32 x, f32 y)`, that the program implements beside `Handler` (`class App : app.Handler, app.TitleBar`), usually by asking its `Ui`.
+- With a `title_bar`, `run` creates the window without decorations (`SDL_WINDOW_BORDERLESS`, still resizable), and gives SDL a hit test (`SDL_SetWindowHitTest`): a function of `platform`, passed as a C callback, with the interface as its data. On each point, it answers a border (`SDL_HITTEST_RESIZE_*`, 6 pixels wide, none when the window is maximized), else the drag area (`SDL_HITTEST_DRAGGABLE`) when `is_drag_area` says so, else the normal area: the program's widgets get the click.
+- Events: `CustomTitleBar(bool active)`, once before the first frame, when the program asked for a title bar: `true` if the hit test was accepted; `Maximized(bool on)`, when the window is maximized or restored.
+- `app.minimize()` and `app.toggle_maximize()` act on the window as `app.request_quit()` does, through an event that `run` receives (`SDL_EVENT_USER`), since the program has no handle on the window.
+- Double-click and the rest: on Windows, the drag area is the caption of the system (`HTCAPTION`), which gives the double-click that maximizes, the snapping to the edges of the screen, and the window menu (Alt+Space). Elsewhere, SDL moves the window itself, and a double-click does nothing (a limit of v0).
+
+Fallback, when the system leaves its own decorations (`SDL_SetWindowHitTest` refused, a backend without hit test, a phone or a tablet, where a window has no title bar):
+
+- `run` gives the window its decorations back (`SDL_SetWindowBordered`), and sends `CustomTitleBar(false)`. The program does not change: its `TitleBar` becomes the tool bar described above, under the bar of the system. On a phone, it is the bar at the top of the screen, below the safe area (§10.3).
+
+Tests: the tests of `ui` check the drag area, the window buttons and their requests, and a dropdown opened, chosen and closed; `tests/programs/titlebar` drives, without a screen, a window whose title bar holds a text field, a dropdown and buttons; `tests/window` asks for a title bar, and checks that `CustomTitleBar` comes before the first frame (`false` with the dummy video driver of the CI, `true` on a Windows desktop). `examples/editor` shows it on the desktop: on Windows, dragging the bar moves the window and a double-click maximizes it. As everywhere with SDL, the click that brings a window to the front is not given to the program.
 
 ## 11. Targets and compilation
 
@@ -968,4 +1028,7 @@ Widgets of `ui` (§10.4):
 - `Radio` and `Dropdown` compare values of an `enum`: the translator generates a `match`, or the language gains `==` on `enum`s without data? (proposed: `==` on `enum`s without data, useful everywhere; the translator uses it)
 - Text that grows: a `TextBuffer` that owns an arena is moved, not copied (§6). Acceptable for a field of a state class? (proposed: yes; the state is a class, handled through a pointer, so nothing has to be copied)
 - The layer above answers clicks from its rectangle at the previous frame: one frame late when a dropdown opens. (proposed: accept it; it is the usual price of immediate mode)
+- Title bars (§10.5): the drag area is asked of the program point by point (`app.TitleBar`), or `ui` gives `platform` a list of rectangles at each frame? (proposed: asked point by point; nothing is copied at each frame, and `platform` does not need to know the types of `ui`)
+- Title bars: Windows 11 shows its snap layouts when the mouse rests on the maximize button, which needs `HTMAXBUTTON`, an answer that SDL's hit test does not have. (proposed: accept it in v0; a Win32 backend could add it)
+- Title bars: the double-click that maximizes, on macOS and Linux, where SDL moves the window itself. Detect it in `ui` and send `ToggleMaximize`? (proposed: later; SDL takes the clicks of the drag area before the program sees them)
 - Accessibility (screen readers) needs the tree of widgets, which immediate mode does not keep. (proposed: later; the frame could record its widgets as it draws them)
