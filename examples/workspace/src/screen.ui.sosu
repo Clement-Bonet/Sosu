@@ -1,0 +1,102 @@
+// A workspace in the manner of VS Code: a title bar drawn by the program, holding its actions,
+// a search field and two dropdowns, over three panes that use every widget of `ui`: the files
+// (a list), the details of the file chosen (fields with formats, radios, a dropdown,
+// checkboxes, buttons that are enabled or not) and the output (a list of lines).
+import workspace.state;
+
+window Workspace(state.Workspace* w) {
+    title: "Sosu workspace"
+    width: 1180
+    height: 720
+
+    TitleBar(height: 44, gap: 8, padding: 8) {
+        Text("Sosu")
+        Space(8)
+        Button("New", on_click: w.new_file)
+        Button("Save", on_click: w.save, enabled: w.changed())
+        Space(24)
+        TextField(bind: w.search, width: 260, on_enter: w.find)
+        Dropdown(bind: w.mode, width: 120, on_change: w.mode_changed) {
+            Option("Debug", value: Debug)
+            Option("Release", value: Release)
+        }
+        Dropdown(bind: w.target, width: 130, on_change: w.target_changed) {
+            Option("Windows", value: Windows)
+            Option("Linux", value: Linux)
+            Option("macOS", value: MacOs)
+        }
+        Button("Build", on_click: w.build)
+        Button("Run", on_click: w.run)
+    }
+    Row(gap: 24, padding: 16) {
+        Column(gap: 8) {
+            Text("Files")
+            List(width: 260, height: 520, selected: w.chosen) {
+                for (i32 i in 0..w.count) {
+                    Text(w.files[i].name.text())
+                }
+            }
+            Row(gap: 8) {
+                Button("Add", on_click: w.new_file)
+                Button("Remove", on_click: w.remove, enabled: w.has_choice())
+            }
+        }
+        Column(gap: 8) {
+            Text(w.chosen_name())
+            if (w.has_choice()) {
+                Details(w)
+            } else {
+                Text("Choose a file in the list.")
+            }
+        }
+        Column(gap: 8) {
+            Text("Output")
+            List(width: 380, height: 520) {
+                for (i32 i in 0..w.lines) {
+                    Text(w.output[i].text())
+                }
+            }
+            Text(w.status.text())
+        }
+    }
+}
+
+// The details of the file chosen, edited until Save or Revert.
+component Details(state.Workspace* w) {
+    TextField(bind: w.details.name, width: 400)
+    Row(gap: 16) {
+        Column(gap: 4) {
+            Text("Size (KB)")
+            TextField(bind: w.details.size, width: 120, accept: Integer, max: 7)
+        }
+        Column(gap: 4) {
+            Text("Modified")
+            TextField(bind: w.details.date, width: 140, mask: "99/99/9999")
+        }
+        Column(gap: 4) {
+            Text("Licence")
+            TextField(bind: w.details.price, width: 108, accept: Decimal, max: 8)
+        }
+    }
+    Text("Kind")
+    Row(gap: 16) {
+        Radio("Source", bind: w.details.kind, value: Source)
+        Radio("Binary", bind: w.details.kind, value: Binary)
+        Radio("Image", bind: w.details.kind, value: Image)
+    }
+    Text("Encoding")
+    Dropdown(bind: w.details.encoding, width: 160) {
+        Option("UTF-8", value: Utf8)
+        Option("Latin-1", value: Latin1)
+        Option("UTF-16", value: Utf16)
+    }
+    Row(gap: 16) {
+        Checkbox("Read only", bind: w.details.read_only)
+        Checkbox("Hidden", bind: w.details.hidden)
+    }
+    Space(8)
+    Row(gap: 8) {
+        Button("Save", on_click: w.save, enabled: w.changed())
+        Button("Revert", on_click: w.revert, enabled: w.changed())
+    }
+}
