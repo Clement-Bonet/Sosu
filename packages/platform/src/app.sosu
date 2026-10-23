@@ -166,6 +166,104 @@ i32 hit_test(sdl.Window* window, sdl.Point* point, u8* data) uses io {
     };
 }
 
+// What draws the window: its pixels and their texture, rebuilt when its size changes. The
+// loop of `run` draws with it, and so does `on_expose` while the system holds that loop.
+class Screen {
+    Handler* handler;
+    sdl.Renderer* renderer;
+    mut Arena pixels;
+    mut canvas.Canvas surface;
+    mut sdl.Texture*? texture;
+
+    void init(Handler* handler, sdl.Renderer* renderer) {
+        self.handler = handler;
+        self.renderer = renderer;
+        pixels = Arena.new(1 * KB);
+        surface = canvas.create(&pixels, 0, 0);
+        texture = none;
+    }
+
+    // The pixels and the texture at `width` by `height`, unless they already are. False if
+    // SDL cannot create the texture.
+    bool resize(i32 width, i32 height) uses io {
+        bool ready = match (texture) {
+            some(t) => true,
+            none => false,
+        };
+        if (ready && surface.width == width && surface.height == height) {
+            return true;
+        }
+        pixels.free();
+        pixels = Arena.new(1 * MB);
+        surface = canvas.create(&pixels, width, height);
+        release();
+        texture = sdl.create_texture(renderer, max(width, 1), max(height, 1));
+        return match (texture) {
+            some(t) => true,
+            none => false,
+        };
+    }
+
+    // A frame of the program, shown.
+    void draw() uses io {
+        handler.on_frame(&surface);
+        match (texture) {
+            some(t) => {
+                sdl.show_pixels(renderer, t, surface.pixels, surface.width);
+            },
+            none => { },
+        }
+        sdl.present(renderer);
+    }
+
+    void release() uses io {
+        match (texture) {
+            some(t) => {
+                sdl.destroy_texture(t);
+            },
+            none => { },
+        }
+        texture = none;
+    }
+}
+
+// What `on_expose` needs: given to SDL as its data.
+struct ExposeTarget {
+    mut Screen*? screen;
+    mut sdl.Window*? window;
+}
+
+// Called by SDL as each event arrives. While a window is resized, Windows holds the loop of
+// `run` until the mouse is released: SDL then asks for frames with SDL_EVENT_WINDOW_EXPOSED
+// (data1 is 1 during a live resize), drawn here at the new size, or the new part of the
+// window would stay black.
+bool on_expose(u8* data, sdl.Event* event) uses io {
+    if (event.kind != 0x204 || event.word5 != 1) {
+        return true;  // the event goes to the queue, as usual
+    }
+    mut Screen*? screen = none;
+    mut sdl.Window*? window = none;
+    unsafe {
+        screen = (data as ExposeTarget*).screen;
+        window = (data as ExposeTarget*).window;
+    }
+    match (screen) {
+        some(s) => {
+            match (window) {
+                some(w) => {
+                    sdl.Point size = sdl.window_size(w);
+                    if (s.resize(size.x, size.y)) {
+                        s.draw();
+                    }
+                },
+                none => { },
+            }
+        },
+        none => { },
+    }
+    return true;
+}
+
 // Opens the window and runs until `on_event` returns false. Returns the exit code.
 pub i32 run(Config config, Handler* handler) uses io {
     mut Arena arena = Arena.new(16 * KB);
@@ -211,16 +309,20 @@ pub i32 run(Config config, Handler* handler) uses io {
     defer sdl.destroy_renderer(renderer);
 
     // The pixels of the window: rebuilt, with their arena, when its size changes.
-    mut Arena pixels = Arena.new(1 * MB);
-    defer pixels.free();
-    mut canvas.Canvas surface = canvas.create(&pixels, config.width, config.height);
-    mut sdl.Texture* texture = match (sdl.create_texture(renderer, config.width, config.height)) {
-        some(created) => created,
-        none => {
-            return 1;
-        },
-    };
-    defer sdl.destroy_texture(texture);
+    Screen* screen = arena.new(Screen, handler, renderer);
+    defer screen.pixels.free();
+    defer screen.release();
+    if (!screen.resize(config.width, config.height)) {
+        return 1;
+    }
+    // Frames while the window is resized, when the system holds this loop.
+    ExposeTarget* expose = arena.alloc(ExposeTarget);
+    expose.screen = some(screen);
+    expose.window = some(window);
+    unsafe {
+        sdl.add_event_watch(on_expose, expose as u8*);
+    }
+    defer remove_watch(expose);
 
     sdl.Event* event = arena.alloc(sdl.Event);
     // What lives for one frame (the text of the events), emptied before each frame.
@@ -246,16 +348,9 @@ pub i32 run(Config config, Handler* handler) uses io {
                 some(e) => {
                     match (e) {
                         Resized(width, height) => {
-                            pixels.free();
-                            pixels = Arena.new(1 * MB);
-                            surface = canvas.create(&pixels, width, height);
-                            sdl.destroy_texture(texture);
-                            texture = match (sdl.create_texture(renderer, max(width, 1), max(height, 1))) {
-                                some(created) => created,
-                                none => {
-                                    return 1;
-                                },
-                            };
+                            if (!screen.resize(width, height)) {
+                                return 1;
+                            }
                         },
                         _ => { },
                     }
@@ -269,10 +364,14 @@ pub i32 run(Config config, Handler* handler) uses io {
         if (!running) {
             break;
         }
-        handler.on_frame(&surface);
-        sdl.show_pixels(renderer, texture, surface.pixels, surface.width);
-        sdl.present(renderer);
+        screen.draw();
         sdl.delay(16);
     }
     return 0;
+}
+
+void remove_watch(ExposeTarget* expose) uses io {
+    unsafe {
+        sdl.remove_event_watch(on_expose, expose as u8*);
+    }
 }

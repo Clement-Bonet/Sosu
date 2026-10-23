@@ -120,6 +120,9 @@ extern "C" {
     bool SDL_RestoreWindow(Window* window) uses io;
     u64 SDL_GetWindowFlags(Window* window) uses io;
     bool SDL_GetWindowSize(Window* window, i32* w, i32* h) uses io;
+    // SDL_EventFilter: called as each event arrives, before the queue.
+    bool SDL_AddEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
+    void SDL_RemoveEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
 }
 
 // A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
@@ -282,6 +285,20 @@ pub bool set_hit_test(Window* window, fn(Window*, Point*, u8*) -> i32 uses io ca
         ok = SDL_SetWindowHitTest(window, callback, data);
     }
     return ok;
+}
+
+// Asks SDL to call `watch` with `data` on each event as it arrives, even while the system
+// holds the loop of the program (a window resized on Windows).
+pub void add_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
+    unsafe {
+        SDL_AddEventWatch(watch, data);
+    }
+}
+
+pub void remove_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
+    unsafe {
+        SDL_RemoveEventWatch(watch, data);
+    }
 }
 
 // Gives the window its title bar and borders back, or takes them away.
