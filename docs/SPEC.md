@@ -777,6 +777,66 @@ Order: the editing core and formatted one-line fields, `Radio`, `List` with scro
 
 Two limits of v0 apply to every text widget: without a TrueType font (`ui.font`), the built-in font only draws ASCII (other characters are kept, and drawn as boxes), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
 
+### 10.5 Title bars drawn by the program
+
+Status: design, not implemented yet.
+
+A window can draw its own title bar and put widgets in it (a search field, a dropdown, buttons), as VS Code does. The bar still behaves as a title bar: dragging its empty space moves the window, a double-click maximizes it, and it has the minimize, maximize and close buttons. The system draws nothing: the window has no decorations, and the system asks the program, point by point, what is under the mouse.
+
+In a `.ui.sosu` file, `TitleBar` is the first node of a window, at most once; its children are placed in a row, as in `Row`:
+
+```sosu
+window Editor(state.Editor* editor) {
+    title: "Sosu editor"
+    width: 900
+    height: 600
+
+    TitleBar(height: 40, gap: 8, padding: 4) {
+        Text("Sosu")
+        TextField(bind: editor.search, width: 240)
+        Dropdown(bind: editor.mode, width: 140, on_change: editor.rebuild) {
+            Option("Debug", value: Debug)
+            Option("Release", value: Release)
+        }
+        Button("Run", on_click: editor.run)
+    }
+    Column(gap: 8, padding: 16) {
+        Text(editor.output.text())
+    }
+}
+```
+
+| Node | Becomes |
+|---|---|
+| `TitleBar(height: h, gap: g, padding: p) { ... }` | `f.title_bar(h, g, p)`, the nodes, `f.end_title_bar()`; `height` is 40, `gap` 8 and `padding` 4 by default. `EditorConfig()` gets `custom_title_bar: true` |
+| `Dropdown(bind: x, width: w, on_change: h) { ... }` | `f.dropdown(w)`, its options, `f.end_dropdown()`; `width` is 160 by default |
+| `Option(s, value: v)`, only in a `Dropdown` | `if (f.option(s, x == v) && x != v) { x = v; h(); }`: as `Radio`, one option per value of an `enum` without data |
+
+- `TitleBar` elsewhere than first in a window (in a component, in a `Column`, after another node, twice) is an error. `Option` outside a `Dropdown`, or another node in a `Dropdown` (except `if` and `for` around options), is an error.
+
+`ui` (still without depending on `platform`):
+
+- `f.title_bar(height, gap, padding)` opens a row across the whole width of the surface, at the top of the frame, on a background of its own; `f.end_title_bar()` draws the three window buttons at its right end (46 pixels wide each, the close button red under the mouse), then the frame goes on under the bar.
+- What the bar holds is remembered in `Ui` for the next frame: its rectangle, those of the window buttons, and those of the interactive widgets placed in it (buttons, text fields, checkboxes, radios, dropdowns; 16 at most). Labels are not interactive: they drag the window, as the title of a system bar does.
+- `ui.is_drag_area(x, y)`: in the bar, and on none of these rectangles, nor on an open dropdown. The system asks between two frames, so the answer comes from the last frame drawn.
+- The window buttons do not act themselves: `ui.take_window_request()` gives `some(Minimize)`, `some(ToggleMaximize)` or `some(Close)` once after a click, as `take_copied()` gives the text copied, and the program passes it to `platform`. `ui.maximized` (set by the program) chooses the icon of the middle button: one square, or two when the window is maximized.
+- `ui.custom_title_bar` (set by the program, false by default) says whether the system left the bar to the program. When false, `TitleBar` is a tool bar: the same row of widgets at the top, without window buttons and without drag area, under the title bar of the system.
+- `Dropdown` brings the layer above (foundation 4 of §10.4): a click on the closed box opens the list of its options under it; drawn at `finish()`, over everything else, it takes the input before the widgets under it, from its rectangle at the last frame. A click on an option chooses it and closes the list, a click elsewhere or Escape closes it without choosing. The box shows the text of the option chosen.
+
+`platform`:
+
+- `app.Config` gains `title_bar: app.TitleBar*? = none`. `TitleBar` is an interface with one method, `bool is_drag_area(f32 x, f32 y)`, that the program implements beside `Handler` (`class App : app.Handler, app.TitleBar`), usually by asking its `Ui`.
+- With a `title_bar`, `run` creates the window without decorations (`SDL_WINDOW_BORDERLESS`, still resizable), and gives SDL a hit test (`SDL_SetWindowHitTest`): a function of `platform`, passed as a C callback, with the interface as its data. On each point, it answers a border (`SDL_HITTEST_RESIZE_*`, 6 pixels wide, none when the window is maximized), else the drag area (`SDL_HITTEST_DRAGGABLE`) when `is_drag_area` says so, else the normal area: the program's widgets get the click.
+- Events: `CustomTitleBar(bool active)`, once before the first frame, when the program asked for a title bar: `true` if the hit test was accepted; `Maximized(bool on)`, when the window is maximized or restored.
+- `app.minimize()` and `app.toggle_maximize()` act on the window as `app.request_quit()` does, through an event that `run` receives (`SDL_EVENT_USER`), since the program has no handle on the window.
+- Double-click and the rest: on Windows, the drag area is the caption of the system (`HTCAPTION`), which gives the double-click that maximizes, the snapping to the edges of the screen, and the window menu (Alt+Space). Elsewhere, SDL moves the window itself, and a double-click does nothing (a limit of v0).
+
+Fallback, when the system leaves its own decorations (`SDL_SetWindowHitTest` refused, a backend without hit test, a phone or a tablet, where a window has no title bar):
+
+- `run` gives the window its decorations back (`SDL_SetWindowBordered`), and sends `CustomTitleBar(false)`. The program does not change: its `TitleBar` becomes the tool bar described above, under the bar of the system. On a phone, it is the bar at the top of the screen, below the safe area (§10.3).
+
+Tests, without a screen: the widgets of `ui` (drag area, window buttons and their requests, a dropdown opened, chosen, closed); a program of `tests/programs` that drives a window whose title bar holds a text field, a dropdown and buttons; `examples/editor` shows it on the desktop.
+
 ## 11. Targets and compilation
 
 ### 11.1 Targets
@@ -967,4 +1027,7 @@ Widgets of `ui` (§10.4):
 - `Radio` and `Dropdown` compare values of an `enum`: the translator generates a `match`, or the language gains `==` on `enum`s without data? (proposed: `==` on `enum`s without data, useful everywhere; the translator uses it)
 - Text that grows: a `TextBuffer` that owns an arena is moved, not copied (§6). Acceptable for a field of a state class? (proposed: yes; the state is a class, handled through a pointer, so nothing has to be copied)
 - The layer above answers clicks from its rectangle at the previous frame: one frame late when a dropdown opens. (proposed: accept it; it is the usual price of immediate mode)
+- Title bars (§10.5): the drag area is asked of the program point by point (`app.TitleBar`), or `ui` gives `platform` a list of rectangles at each frame? (proposed: asked point by point; nothing is copied at each frame, and `platform` does not need to know the types of `ui`)
+- Title bars: Windows 11 shows its snap layouts when the mouse rests on the maximize button, which needs `HTMAXBUTTON`, an answer that SDL's hit test does not have. (proposed: accept it in v0; a Win32 backend could add it)
+- Title bars: the double-click that maximizes, on macOS and Linux, where SDL moves the window itself. Detect it in `ui` and send `ToggleMaximize`? (proposed: later; SDL takes the clicks of the drag area before the program sees them)
 - Accessibility (screen readers) needs the tree of widgets, which immediate mode does not keep. (proposed: later; the frame could record its widgets as it draws them)
