@@ -173,3 +173,17 @@ tests everywhere.
 - Only libc is used: the compiler cannot list a folder, so it loads the modules reachable by
   `import` from the entry file. It calls the C compiler and `git` through the system shell, like a
   user would.
+
+## License
+
+Licensed under either of
+
+- the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), or
+- the MIT license ([LICENSE-MIT](LICENSE-MIT)),
+
+at your option. The font and the other works that the repository contains or uses keep their own
+licenses: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without
+any additional terms or conditions.
