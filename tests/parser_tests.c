@@ -351,6 +351,36 @@ static void test_ui_files(void) {
               "    (call (. ui_frame list) 300.0 200.0 none)\n"
               "    (call (. ui_frame end_list))))\n"
               "(import ui.widgets)\n");
+    expect_ui("window W(T* t) {\n    TitleBar(height: 36) {\n        Text(\"App\")\n"
+              "        Dropdown(bind: t.mode, on_change: t.rebuild) {\n            Option(\"D\", value: Debug)\n"
+              "            Option(\"R\", value: Release)\n        }\n    }\n    Text(\"under\")\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame title_bar) 36 8.0 4.0)\n"
+              "    (call (. ui_frame label) \"App\")\n"
+              "    (call (. ui_frame dropdown) 160.0)\n"
+              "    (if (&& (call (. ui_frame option) \"D\" (== (. t mode) Debug)) (!= (. t mode) Debug))\n"
+              "      (block\n"
+              "        (= (. t mode) Debug)\n"
+              "        (call (. t rebuild))))\n"
+              "    (if (&& (call (. ui_frame option) \"R\" (== (. t mode) Release)) (!= (. t mode) Release))\n"
+              "      (block\n"
+              "        (= (. t mode) Release)\n"
+              "        (call (. t rebuild))))\n"
+              "    (call (. ui_frame end_dropdown))\n"
+              "    (call (. ui_frame end_title_bar))\n"
+              "    (call (. ui_frame label) \"under\")))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window (custom_title_bar true)))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Text(\"a\")\n    TitleBar { }\n}\n", "E0215", 3, 5);  /* not first */
+    expect_ui_error("component C() {\n    TitleBar { }\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Column { TitleBar { } }\n}\n", "E0215", 2, 14);
+    expect_ui_error("window W() {\n    Option(\"a\", value: A)\n}\n", "E0215", 2, 5);  /* not in a Dropdown */
+    expect_ui_error("window W(T* t) {\n    Dropdown(bind: t.m) { Text(\"a\") }\n}\n", "E0215", 2, 27);
+    expect_ui_error("window W(T* t) {\n    Dropdown(bind: t.m) { Option(\"a\") }\n}\n", "E0215", 2, 27);
+    expect_ui_error("window W() {\n    Dropdown { }\n}\n", "E0215", 2, 5);  /* no bind */
 
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
     expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);

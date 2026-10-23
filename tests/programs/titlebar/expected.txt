@@ -1,0 +1,10 @@
+window: Editor 600x400, custom title bar: true
+drag: label true, field false, dropdown false, button false, empty true, window buttons false, under false
+found main
+open list: drag false
+mode release: true, builds: 1
+run main in Release
+request: minimize
+request: close, then none
+tool bar: drag false, window buttons false
+request: none

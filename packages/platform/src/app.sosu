@@ -8,6 +8,15 @@ pub struct Config {
     pub str title;
     pub i32 width;
     pub i32 height;
+    // With a title bar, the system draws none: the program draws its own, and says where
+    // dragging moves the window (spec §10.5).
+    pub TitleBar*? title_bar = none;
+}
+
+// A title bar drawn by the program: the system asks it, point by point, between two frames,
+// whether the mouse there moves the window.
+pub interface TitleBar {
+    bool is_drag_area(f32 x, f32 y);
 }
 
 pub enum Button {
@@ -36,6 +45,10 @@ pub enum Event {
     Release(f32 x, f32 y, Button button),  // a button released
     TextInput(str text),  // typed text (UTF-8), valid until the end of the frame
     Wheel(f32 x, f32 y),  // the mouse wheel, in steps: y > 0 away from the user (up)
+    // Once before the first frame, when `Config` has a title bar: true if the system left it
+    // to the program, false if it kept its own (the program's bar is then a tool bar).
+    CustomTitleBar(bool active),
+    Maximized(bool on),  // the window was maximized, or restored
 }
 
 // What a program implements: its state lives in the class that implements it.
@@ -57,6 +70,9 @@ Event? translate(sdl.Event* event, Arena* frame) {
     }
     if (kind == 0x206) {  // SDL_EVENT_WINDOW_RESIZED
         return some(Resized(event.word5 as i32, event.word6 as i32));
+    }
+    if (kind == 0x20A || kind == 0x20B) {  // SDL_EVENT_WINDOW_MAXIMIZED, SDL_EVENT_WINDOW_RESTORED
+        return some(Maximized(kind == 0x20A));
     }
     if (kind == 0x300 || kind == 0x301) {  // SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP
         sdl.Keyboard* key = sdl.as_keyboard(event);
@@ -99,22 +115,92 @@ pub void request_quit() uses io {
     sdl.push_quit();
 }
 
+// Minimizes the window (the button of a title bar drawn by the program).
+pub void minimize() uses io {
+    sdl.push_request(1);
+}
+
+// Maximizes the window, or restores it when it is maximized.
+pub void toggle_maximize() uses io {
+    sdl.push_request(2);
+}
+
+// What the hit test of a window without decorations needs: given to SDL as its data.
+struct HitTarget {
+    mut TitleBar*? bar;
+}
+
+// The hit test of a window whose title bar the program draws: a border resizes it (6 pixels,
+// none when it is maximized), the drag area of the program moves it, the rest is the program's.
+i32 hit_test(sdl.Window* window, sdl.Point* point, u8* data) uses io {
+    mut TitleBar*? bar = none;
+    unsafe {
+        bar = (data as HitTarget*).bar;
+    }
+    i32 x = point.x;
+    i32 y = point.y;
+    if (!sdl.is_maximized(window)) {
+        sdl.Point size = sdl.window_size(window);
+        i32 edge = 6;
+        bool left = x < edge;
+        bool right = x >= size.x - edge;
+        bool top = y < edge;
+        bool bottom = y >= size.y - edge;
+        // SDL_HITTEST_RESIZE_TOPLEFT (2) to SDL_HITTEST_RESIZE_LEFT (9), clockwise
+        if (top) {
+            return left ? 2 : right ? 4 : 3;
+        }
+        if (bottom) {
+            return left ? 8 : right ? 6 : 7;
+        }
+        if (left) {
+            return 9;
+        }
+        if (right) {
+            return 5;
+        }
+    }
+    return match (bar) {
+        some(b) => b.is_drag_area(x as f32, y as f32) ? 1 : 0,  // SDL_HITTEST_DRAGGABLE, NORMAL
+        none => 0,
+    };
+}
+
 // Opens the window and runs until `on_event` returns false. Returns the exit code.
 pub i32 run(Config config, Handler* handler) uses io {
     mut Arena arena = Arena.new(16 * KB);
     defer arena.free();
+    bool wants_bar = match (config.title_bar) {
+        some(bar) => true,
+        none => false,
+    };
     if (!sdl.init_video()) {
         return 1;
     }
     defer sdl.quit();
 
-    sdl.Window* window = match (sdl.create_window(&arena, config.title, config.width, config.height)) {
+    sdl.Window* window = match (sdl.create_window(&arena, config.title, config.width, config.height, !wants_bar)) {
         some(created) => created,
         none => {
             return 1;
         },
     };
     defer sdl.destroy_window(window);
+    // A title bar drawn by the program, if the system accepts the hit test; else its own.
+    mut bool custom = false;
+    match (config.title_bar) {
+        some(bar) => {
+            HitTarget* target = arena.alloc(HitTarget);
+            target.bar = some(bar);
+            unsafe {
+                custom = sdl.set_hit_test(window, hit_test, target as u8*);
+            }
+            if (!custom) {
+                sdl.set_decorated(window, true);
+            }
+        },
+        none => { },
+    }
     sdl.start_text_input(window);
     sdl.Renderer* renderer = match (sdl.create_renderer(window)) {
         some(created) => created,
@@ -141,10 +227,21 @@ pub i32 run(Config config, Handler* handler) uses io {
     mut Arena frame = Arena.new(4 * KB);
     defer frame.free();
     mut bool running = true;
+    if (wants_bar) {
+        running = handler.on_event(CustomTitleBar(custom));
+    }
     while (running) {
         frame.free();
         frame = Arena.new(4 * KB);
         while (sdl.poll(event)) {
+            if (event.kind == 0x8000) {  // SDL_EVENT_USER: a request of `minimize` or `toggle_maximize`
+                if (event.word5 == 1) {
+                    sdl.minimize(window);
+                } else if (event.word5 == 2) {
+                    sdl.toggle_maximize(window);
+                }
+                continue;
+            }
             match (translate(event, &frame)) {
                 some(e) => {
                     match (e) {

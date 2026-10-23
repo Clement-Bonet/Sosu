@@ -18,6 +18,13 @@ typedef struct {
     DiagList *diags;
     bool panic;
     bool no_struct_literal; /* `Name {` starts a body, not a literal (contracts) */
+    /* .ui.sosu files: the `bind:` and `on_change:` of the `Dropdown` whose options are being
+       read (`ui_dropdown` NULL: not in one); whether the next item is the first node of a
+       window, the place of a `TitleBar`, and whether the window has one. */
+    Expr *ui_dropdown;
+    Expr *ui_dropdown_change;
+    bool ui_window_top;
+    bool ui_title_bar;
 } Parser;
 
 #define VEC(T) struct { T *items; size_t count; size_t cap; }
@@ -1370,7 +1377,12 @@ static const UiNodeKind ui_nodes[] = {
     { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
     { "Radio", 1, false, { "bind", "value", "on_change", NULL }, false },
+    { "TitleBar", 0, false, { "height", "gap", "padding", NULL }, true },
+    { "Dropdown", 0, false, { "bind", "width", "on_change", NULL }, true },
+    { "Option", 1, false, { "value", NULL }, false },
 };
+
+#define UI_CONTAINERS "only `Column`, `Row`, `List`, `TitleBar` and `Dropdown` contain other nodes"
 
 static void ui_parse_children(Parser *p, StmtVec *out);
 
@@ -1546,7 +1558,7 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         return false;
     }
     bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
-                 strcmp(kind->name, "Radio") == 0;
+                 strcmp(kind->name, "Radio") == 0 || strcmp(kind->name, "Dropdown") == 0;
     if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
         diag_help(d, "bind it to a `mut` field: `%s(bind: state.value)`", kind->name);
@@ -1557,7 +1569,72 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         diag_help(d, "give the value it chooses: `Radio(\"Small\", bind: state.size, value: Small)`");
         return false;
     }
+    if (strcmp(kind->name, "Option") == 0 && !ui_prop(args, "value")) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Option` needs `value:`");
+        diag_help(d, "give the value it chooses: `Option(\"Debug\", value: Debug)`");
+        return false;
+    }
     return true;
+}
+
+/* Where a node may go: a `TitleBar` first in a window, an `Option` in a `Dropdown`, and only
+   options there. Reports the error otherwise. */
+static bool ui_check_place(Parser *p, const UiNodeKind *kind, Name node, bool window_top) {
+    bool title_bar = kind && strcmp(kind->name, "TitleBar") == 0;
+    bool option = kind && strcmp(kind->name, "Option") == 0;
+    if (p->ui_dropdown && !option) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Dropdown` contains only `Option` nodes");
+        diag_help(d, "one option per value: `Option(\"Debug\", value: Debug)`");
+        return false;
+    }
+    if (option && !p->ui_dropdown) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "an `Option` goes in a `Dropdown`");
+        diag_help(d, "`Dropdown(bind: state.mode) { Option(\"Debug\", value: Debug) }`");
+        return false;
+    }
+    if (title_bar && (!window_top || p->ui_title_bar)) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `TitleBar` is the first node of a window");
+        diag_help(d, "a window has one title bar, at its top: move it before the other nodes");
+        return false;
+    }
+    return true;
+}
+
+/* `if (f.method(label, x == v) && x != v) { x = v; handler(); }`, for `Radio` and `Option`:
+   clicking the value already chosen changes nothing. */
+static Stmt *ui_choice(Parser *p, const char *method, Expr *label, Expr *bound, Expr *chosen, Expr *handler,
+                       size_t start, size_t length) {
+    Expr *same = ui_expr(p, EXPR_BINARY, chosen->offset, chosen->length);
+    same->as.binary.op = TOK_EQ_EQ;
+    same->as.binary.left = bound;
+    same->as.binary.right = chosen;
+    Expr *other = ui_expr(p, EXPR_BINARY, chosen->offset, chosen->length);
+    other->as.binary.op = TOK_BANG_EQ;
+    other->as.binary.left = bound;
+    other->as.binary.right = chosen;
+    Expr *call_args[2] = { label, same };
+    Expr *clicked = ui_frame_call(p, start, length, method, call_args, 2);
+    Expr *choice = ui_expr(p, EXPR_BINARY, start, length);
+    choice->as.binary.op = TOK_AMP_AMP;
+    choice->as.binary.left = clicked;
+    choice->as.binary.right = other;
+    Stmt *choose = new_stmt(p, STMT_ASSIGN, chosen->offset);
+    choose->length = chosen->length;
+    choose->as.assign.op = TOK_EQ;
+    choose->as.assign.target = bound;
+    choose->as.assign.value = chosen;
+    Stmt *when = ui_when(p, choice, handler);
+    StmtVec items = {0};
+    SOSU_VEC_PUSH(&items, choose);
+    if (when->kind == STMT_IF) {  /* the handler is called after the choice */
+        SOSU_VEC_PUSH(&items, when->as.if_.then_block->as.block.items[0]);
+    } else {
+        when = new_stmt(p, STMT_IF, choice->offset);
+        when->length = choice->length;
+        when->as.if_.cond = choice;
+    }
+    when->as.if_.then_block = ui_block(p, &items, chosen->offset, chosen->length);
+    return when;
 }
 
 /* `widgets.Format{ accept: widgets.Accept.Digits, max: 10, mask: "..." }` from the properties of a
@@ -1601,7 +1678,7 @@ static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_
         diag_help(d, "remove `%.*s:`, and give the values in the order of its parameters", (int)prop.length, prop.text);
     }
     if (check(p, TOK_LBRACE)) {
-        error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column`, `Row` and `List` contain other nodes");
+        error_at(p, "E0215", cur(p)->offset, cur(p)->length, UI_CONTAINERS);
         skip_balanced_braces(p);
     }
     Expr *callee = ui_expr(p, EXPR_NAME, path.items[0].offset, path.items[0].length);
@@ -1625,7 +1702,7 @@ static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_
 }
 
 /* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
-static void ui_parse_node(Parser *p, StmtVec *out) {
+static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     size_t start = cur(p)->offset;
     Path path = parse_path(p);
     Name node = path.items[path.count - 1];
@@ -1641,6 +1718,12 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
     for (size_t i = 0; path.count == 1 && i < sizeof ui_nodes / sizeof *ui_nodes; i++) {
         if (name_text_is(node, ui_nodes[i].name)) kind = &ui_nodes[i];
     }
+    if (!ui_check_place(p, kind, node, window_top)) {
+        if (check(p, TOK_LBRACE)) skip_balanced_braces(p);
+        free(args.values.items);
+        free(args.props.items);
+        return;
+    }
     if (!kind) {
         ui_component(p, out, path, &args, start, length);
     } else {
@@ -1649,7 +1732,7 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
             if (kind->children) {
                 report_expected(p, "E0215", "`{` and the nodes it contains", false);
             } else {
-                error_at(p, "E0215", cur(p)->offset, cur(p)->length, "only `Column`, `Row` and `List` contain other nodes");
+                error_at(p, "E0215", cur(p)->offset, cur(p)->length, UI_CONTAINERS);
                 skip_balanced_braces(p);
             }
             valid = false;
@@ -1677,7 +1760,7 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
-        } else if (kind->children) {
+        } else if (name_text_is(node, "Column") || name_text_is(node, "Row")) {
             Expr *layout[2] = { ui_float(p, ui_prop(&args, "gap"), start, 8), ui_float(p, ui_prop(&args, "padding"), start, 0) };
             const char *open = name_text_is(node, "Row") ? "row_with" : "column";
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, layout, 2)));
@@ -1707,44 +1790,29 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
                               : ui_frame_call(p, start, length, "checkbox_alone", &bound, 1);
             SOSU_VEC_PUSH(out, ui_when(p, box, ui_prop(&args, "on_change")));
         } else if (name_text_is(node, "Radio")) {
-            /* if (f.radio(label, x == v) && x != v) { x = v; handler(); }: clicking the radio
-               already chosen changes nothing */
-            Expr *bound = ui_prop(&args, "bind");
-            Expr *chosen = ui_prop(&args, "value");
-            Expr *same = ui_expr(p, EXPR_BINARY, chosen->offset, chosen->length);
-            same->as.binary.op = TOK_EQ_EQ;
-            same->as.binary.left = bound;
-            same->as.binary.right = chosen;
-            Expr *other = ui_expr(p, EXPR_BINARY, chosen->offset, chosen->length);
-            other->as.binary.op = TOK_BANG_EQ;
-            other->as.binary.left = bound;
-            other->as.binary.right = chosen;
-            Expr *call_args[2] = { value, same };
-            Expr *clicked = ui_frame_call(p, start, length, "radio", call_args, 2);
-            Expr *radio = ui_expr(p, EXPR_BINARY, start, length);
-            radio->as.binary.op = TOK_AMP_AMP;
-            radio->as.binary.left = clicked;
-            radio->as.binary.right = other;
-            Stmt *choose = new_stmt(p, STMT_ASSIGN, chosen->offset);
-            choose->length = chosen->length;
-            choose->as.assign.op = TOK_EQ;
-            choose->as.assign.target = bound;
-            choose->as.assign.value = chosen;
-            Stmt *when = ui_when(p, radio, ui_prop(&args, "on_change"));
-            if (when->kind == STMT_IF) {  /* the handler is called after the choice */
-                StmtVec items = {0};
-                SOSU_VEC_PUSH(&items, choose);
-                SOSU_VEC_PUSH(&items, when->as.if_.then_block->as.block.items[0]);
-                when->as.if_.then_block = ui_block(p, &items, chosen->offset, chosen->length);
-            } else {
-                StmtVec items = {0};
-                SOSU_VEC_PUSH(&items, choose);
-                when = new_stmt(p, STMT_IF, radio->offset);
-                when->length = radio->length;
-                when->as.if_.cond = radio;
-                when->as.if_.then_block = ui_block(p, &items, chosen->offset, chosen->length);
-            }
-            SOSU_VEC_PUSH(out, when);
+            SOSU_VEC_PUSH(out, ui_choice(p, "radio", value, ui_prop(&args, "bind"), ui_prop(&args, "value"),
+                                         ui_prop(&args, "on_change"), start, length));
+        } else if (name_text_is(node, "Option")) {
+            SOSU_VEC_PUSH(out, ui_choice(p, "option", value, p->ui_dropdown, ui_prop(&args, "value"),
+                                         p->ui_dropdown_change, start, length));
+        } else if (name_text_is(node, "TitleBar")) {
+            /* f.title_bar(height, gap, padding), the nodes, f.end_title_bar() */
+            Expr *bar[3] = { ui_float(p, ui_prop(&args, "height"), start, 40), ui_float(p, ui_prop(&args, "gap"), start, 8),
+                             ui_float(p, ui_prop(&args, "padding"), start, 4) };
+            p->ui_title_bar = true;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "title_bar", bar, 3)));
+            ui_parse_children(p, out);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_title_bar", NULL, 0)));
+        } else if (name_text_is(node, "Dropdown")) {
+            /* f.dropdown(width), the options, f.end_dropdown() */
+            Expr *width = ui_float(p, ui_prop(&args, "width"), start, 160);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "dropdown", &width, 1)));
+            p->ui_dropdown = ui_prop(&args, "bind");
+            p->ui_dropdown_change = ui_prop(&args, "on_change");
+            ui_parse_children(p, out);
+            p->ui_dropdown = NULL;
+            p->ui_dropdown_change = NULL;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_dropdown", NULL, 0)));
         }
     }
     free(args.values.items);
@@ -1753,6 +1821,8 @@ static void ui_parse_node(Parser *p, StmtVec *out) {
 
 /* A node, an `if` or a `for` in a window, a component, a `Column` or a `Row`. */
 static void ui_parse_item(Parser *p, StmtVec *out) {
+    bool window_top = p->ui_window_top;
+    p->ui_window_top = false;
     if (check(p, TOK_KW_IF)) {
         Stmt *stmt = new_stmt(p, STMT_IF, advance(p)->offset);
         stmt->as.if_.cond = parse_condition(p);
@@ -1785,7 +1855,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
         return;
     }
     if (check(p, TOK_IDENT)) {
-        ui_parse_node(p, out);
+        ui_parse_node(p, out, window_top);
         return;
     }
     const Token *token = cur(p);
@@ -1903,6 +1973,8 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
 
     VEC(FieldInit) settings = {0};
     StmtVec items = {0};
+    size_t nodes = 0;
+    p->ui_title_bar = false;
     size_t body_start = cur(p)->offset;
     if (expect(p, TOK_LBRACE)) {
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -1912,7 +1984,9 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
                 FieldInit setting;
                 if (ui_window_property(p, is_window, items.count > 0, &setting)) SOSU_VEC_PUSH(&settings, setting);
             } else {
+                p->ui_window_top = is_window && nodes == 0;
                 ui_parse_item(p, &items);
+                nodes++;
             }
             if (p->panic) ui_sync(p, line);
             if (p->pos == before) advance(p);
@@ -1922,6 +1996,13 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
     fn->body = ui_block(p, &items, body_start, span_from(p, body_start));
     fn->length = span_from(p, fn->offset);
     decl->length = fn->length;
+    if (is_window && p->ui_title_bar) {  /* `custom_title_bar: true`, for `platform` */
+        FieldInit setting;
+        setting.name = ui_name("custom_title_bar", fn->name.offset);
+        setting.value = ui_expr(p, EXPR_BOOL, fn->name.offset, fn->name.length);
+        setting.value->as.bool_value = true;
+        SOSU_VEC_PUSH(&settings, setting);
+    }
 
     VEC(Decl *) out = { *decls, *count, *cap };
     SOSU_VEC_PUSH(&out, decl);
