@@ -1,6 +1,7 @@
 // render.canvas: a buffer of pixels and what draws in it: rectangles, lines, text, blending.
 // Coordinates are in pixels, from the top left corner; what falls outside is clipped.
 import render.font;
+import render.image;
 import render.truetype;
 
 pub struct Color {
@@ -189,6 +190,48 @@ pub struct Canvas {
     }
 
     // The pixel at (x, y), or 0 outside the canvas.
+    // `img` scaled into `rect`, blended with what is below. Each pixel of the canvas takes the
+    // average of the pixels of the image it covers, weighted by their alpha, or the nearest one
+    // when the image is enlarged.
+    pub void draw_image(image.Image img, Rect rect) {
+        if (img.width <= 0 || img.height <= 0 || rect.w <= 0.0 || rect.h <= 0.0) {
+            return;
+        }
+        i32 x0 = max(clamp(rect.x, width), clip.x0);
+        i32 y0 = max(clamp(rect.y, height), clip.y0);
+        i32 x1 = min(clamp(rect.x + rect.w, width), clip.x1);
+        i32 y1 = min(clamp(rect.y + rect.h, height), clip.y1);
+        f32 sx = img.width as f32 / rect.w;
+        f32 sy = img.height as f32 / rect.h;
+        for (mut i32 y = y0; y < y1; y += 1) {
+            i32 top = min(max(((y as f32 - rect.y) * sy) as i32, 0), img.height - 1);
+            i32 bottom = min(max(((y as f32 + 1.0 - rect.y) * sy) as i32, top + 1), img.height);
+            for (mut i32 x = x0; x < x1; x += 1) {
+                i32 left = min(max(((x as f32 - rect.x) * sx) as i32, 0), img.width - 1);
+                i32 right = min(max(((x as f32 + 1.0 - rect.x) * sx) as i32, left + 1), img.width);
+                mut u64 n = 0;
+                mut u64 a = 0;
+                mut u64 r = 0;
+                mut u64 g = 0;
+                mut u64 b = 0;
+                for (i32 iy in top..bottom) {
+                    for (i32 ix in left..right) {
+                        u32 p = img.at(ix, iy);
+                        u64 alpha = (p >> 24) as u64;
+                        n += 1;
+                        a += alpha;
+                        r += (p >> 16 & 0xFF) as u64 * alpha;
+                        g += (p >> 8 & 0xFF) as u64 * alpha;
+                        b += (p & 0xFF) as u64 * alpha;
+                    }
+                }
+                if (a > 0) {
+                    blend(x, y, Color{ r: (r / a) as u8, g: (g / a) as u8, b: (b / a) as u8, a: (a / n) as u8 });
+                }
+            }
+        }
+    }
+
     pub u32 at(i32 x, i32 y) {
         if (x < 0 || y < 0 || x >= width || y >= height) {
             return 0;
@@ -380,4 +423,29 @@ test "discs" {
     assert(c.at(2, 2) == 0 && c.at(16, 10) == 0);  // outside
     u32 edge = c.at(13, 13) & 0xFF;  // across the circle: partly covered
     assert(edge > 0 && edge < 255);
+}
+
+test "images are drawn scaled, with their alpha" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut Canvas c = create(&arena, 20, 20);
+    c.clear(Color{ r: 0, g: 0, b: 0 });
+    // 4 by 4: the left half opaque red, the right half transparent
+    mut u32[] pixels = arena.alloc_slice(u32, 16);
+    for (usize i in 0..16) {
+        pixels[i] = i % 4 < 2 ? 0xFFFF0000 : 0x00FFFFFF;
+    }
+    image.Image img = image.Image{ width: 4, height: 4, pixels: pixels };
+    c.draw_image(img, Rect{ x: 2.0, y: 2.0, w: 8.0, h: 8.0 });  // enlarged twice
+    assert(c.at(2, 2) == 0xFFFF0000 && c.at(5, 9) == 0xFFFF0000);
+    assert(c.at(6, 2) == 0xFF000000 && c.at(10, 2) == 0xFF000000);  // transparent, then outside
+    c.draw_image(img, Rect{ x: 12.0, y: 12.0, w: 2.0, h: 2.0 });  // reduced: 2 by 2 per pixel
+    assert(c.at(12, 12) == 0xFFFF0000 && c.at(13, 12) == 0xFF000000);
+    c.draw_image(img, Rect{ x: 16.0, y: 16.0, w: 1.0, h: 1.0 });  // red, half covered
+    u32 half = c.at(16, 16);
+    assert(half >> 16 & 0xFF > 120 && half >> 16 & 0xFF < 135 && half & 0xFFFF == 0);
+    c.push_clip(Rect{ x: 0.0, y: 0.0, w: 3.0, h: 20.0 });
+    c.clear(Color{ r: 0, g: 0, b: 0 });
+    c.draw_image(img, Rect{ x: 2.0, y: 2.0, w: 8.0, h: 8.0 });
+    assert(c.at(2, 2) == 0xFFFF0000 && c.at(3, 2) == 0xFF000000);  // clipped
 }

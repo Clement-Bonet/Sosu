@@ -1,5 +1,6 @@
 // The state of the workspace: a few files, the one chosen, its details being edited, and what
 // the buttons of the title bar did. Its interface is in screen.ui.sosu.
+import render.image;
 import ui.widgets;
 
 pub enum Kind {
@@ -74,6 +75,8 @@ pub class Workspace {
     // were read from.
     pub mut File details;
     pub mut i32 loaded;
+    // The icon of the window, shown in its title bar too (empty if it was not found).
+    pub image.Image icon;
     // The title bar.
     pub mut widgets.TextBuffer search;
     pub mut Mode mode;
@@ -84,7 +87,8 @@ pub class Workspace {
     pub mut widgets.TextBuffer status;
     mut i32 created;
 
-    void init() {
+    void init(image.Image icon) {
+        self.icon = icon;
         files = [File{ }; 16];
         files[0] = file("main.sosu", "4", "21/10/2026", Source);
         files[1] = file("screen.ui.sosu", "2", "22/10/2026", Source);

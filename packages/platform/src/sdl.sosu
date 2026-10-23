@@ -71,6 +71,7 @@ pub struct Keyboard {
 }
 
 pub struct Texture { }
+pub struct Surface { }
 
 // SDL_Point: a point of a window, for its hit test.
 pub struct Point {
@@ -120,6 +121,9 @@ extern "C" {
     bool SDL_RestoreWindow(Window* window) uses io;
     u64 SDL_GetWindowFlags(Window* window) uses io;
     bool SDL_GetWindowSize(Window* window, i32* w, i32* h) uses io;
+    Surface* SDL_CreateSurfaceFrom(i32 w, i32 h, u32 format, u8* pixels, i32 pitch) uses io;
+    void SDL_DestroySurface(Surface* surface) uses io;
+    bool SDL_SetWindowIcon(Window* window, Surface* icon) uses io;
     // SDL_EventFilter: called as each event arrives, before the queue.
     bool SDL_AddEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
     void SDL_RemoveEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
@@ -298,6 +302,22 @@ pub void add_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses i
 pub void remove_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
     unsafe {
         SDL_RemoveEventWatch(watch, data);
+    }
+}
+
+// Sets the icon of the window (the task bar, Alt+Tab, the title bar of the system) from
+// `width * height` pixels 0xAARRGGBB. SDL copies them.
+pub void set_icon(Window* window, u32[] pixels, i32 width, i32 height) uses io {
+    if (pixels.len == 0) {
+        return;
+    }
+    unsafe {
+        // SDL_PIXELFORMAT_ARGB8888
+        Surface* surface = SDL_CreateSurfaceFrom(width, height, 0x16362004, &pixels[0] as u8*, width * 4);
+        if (surface as u64 != 0) {
+            SDL_SetWindowIcon(window, surface);
+            SDL_DestroySurface(surface);
+        }
     }
 }
 
