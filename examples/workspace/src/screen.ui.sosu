@@ -8,8 +8,10 @@ window Workspace(state.Workspace* w) {
     title: "Sosu workspace"
     width: 1180
     height: 720
+    icon: "examples/workspace/assets/sosu.png"
 
     TitleBar(height: 44, gap: 8, padding: 8) {
+        Image(w.icon, size: 22)
         Text("Sosu")
         Space(8)
         Button("New", on_click: w.new_file)

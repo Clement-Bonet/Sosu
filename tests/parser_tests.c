@@ -382,6 +382,17 @@ static void test_ui_files(void) {
     expect_ui_error("window W(T* t) {\n    Dropdown(bind: t.m) { Option(\"a\") }\n}\n", "E0215", 2, 27);
     expect_ui_error("window W() {\n    Dropdown { }\n}\n", "E0215", 2, 5);  /* no bind */
 
+    expect_ui("window W(T* t) {\n    icon: \"app.png\"\n    Image(t.logo, size: 20)\n    Image(t.logo)\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame image) (. t logo) 20)\n"
+              "    (call (. ui_frame image) (. t logo) 0.0)))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window (icon \"app.png\")))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W(T* t) {\n    Image()\n}\n", "E0215", 2, 5);
+
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
     expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);
     expect_ui_error("window W() {\n    Text(\"a\", \"b\")\n}\n", "E0215", 2, 5);

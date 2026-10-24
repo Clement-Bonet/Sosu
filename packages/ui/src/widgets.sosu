@@ -6,6 +6,7 @@
 // pressed and the text field that has the focus. `Frame` places the widgets of one frame,
 // one under the other, or side by side between `row()` and `end_row()`.
 import render.canvas;
+import render.image;
 import render.truetype;
 
 // Text typed or edited: at most 256 bytes of UTF-8.
@@ -422,6 +423,7 @@ pub struct Window {
     pub i32 width = 640;
     pub i32 height = 480;
     pub bool custom_title_bar = false;  // it draws its own title bar (`TitleBar`, spec §10.5)
+    pub str icon = "";  // the path of its icon, a PNG file: "" for none
 }
 
 // A column or a row of widgets, being placed.
@@ -522,6 +524,19 @@ pub struct Frame {
         canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w, max(size.h, height));
         write(r.x, r.y, height, text, ink(), 2);
+    }
+
+    // An image `size` pixels high (0: its own height), as wide as its proportions say; in a
+    // row higher than it, it is centered vertically.
+    pub void image(image.Image img, f32 size) {
+        if (img.width <= 0 || img.height <= 0) {
+            return;
+        }
+        f32 h = size > 0.0 ? size : img.height as f32;
+        f32 w = h * img.width as f32 / img.height as f32;
+        f32 box = layouts[depth].horizontal ? max(h, height) : h;
+        canvas.Rect r = place(w, box);
+        surface.draw_image(img, canvas.Rect{ x: r.x, y: r.y + (box - h) / 2.0, w: w, h: h });
     }
 
     // Bigger text (font at scale 3).
@@ -1565,4 +1580,25 @@ test "a dropdown opens above the rest, chooses and closes" {
     ui.key(27, true, false, false);
     dropdown_frame(&ui, &surface, &choice);
     assert(ui.open == -1 && choice == 0);
+}
+
+test "an image is placed as a widget, centered in a row" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 200, 100);
+    mut Ui ui = Ui{ };
+    mut u32[] pixels = arena.alloc_slice(u32, 8);
+    for (usize i in 0..8) {
+        pixels[i] = 0xFFFF0000;
+    }
+    image.Image img = image.Image{ width: 4, height: 2, pixels: pixels };  // twice as wide as high
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.image(img, 0.0);  // its own size: 4 by 2, at (0, 0)
+    f.row();
+    f.image(img, 10.0);  // 20 by 10, centered in a row 32 high, at y 10 + 11
+    f.label("x");
+    f.end_row();
+    f.finish();
+    assert(surface.at(3, 1) == 0xFFFF0000 && surface.at(4, 1) == 0);
+    assert(surface.at(19, 21) == 0xFFFF0000 && surface.at(19, 20) == 0 && surface.at(19, 31) == 0);
 }

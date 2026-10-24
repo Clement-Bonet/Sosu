@@ -3,6 +3,7 @@
 // `render.canvas.Canvas` the size of the window.
 import platform.sdl;
 import render.canvas;
+import render.image;
 
 pub struct Config {
     pub str title;
@@ -11,6 +12,8 @@ pub struct Config {
     // With a title bar, the system draws none: the program draws its own, and says where
     // dragging moves the window (spec §10.5).
     pub TitleBar*? title_bar = none;
+    // The icon of the window, for the system: its task bar, Alt+Tab, its title bar.
+    pub image.Image? icon = none;
 }
 
 // A title bar drawn by the program: the system asks it, point by point, between two frames,
@@ -284,6 +287,12 @@ pub i32 run(Config config, Handler* handler) uses io {
         },
     };
     defer sdl.destroy_window(window);
+    match (config.icon) {
+        some(icon) => {
+            sdl.set_icon(window, icon.pixels, icon.width, icon.height);
+        },
+        none => { },
+    }
     // A title bar drawn by the program, if the system accepts the hit test; else its own.
     mut bool custom = false;
     match (config.title_bar) {

@@ -1380,6 +1380,7 @@ static const UiNodeKind ui_nodes[] = {
     { "TitleBar", 0, false, { "height", "gap", "padding", NULL }, true },
     { "Dropdown", 0, false, { "bind", "width", "on_change", NULL }, true },
     { "Option", 1, false, { "value", NULL }, false },
+    { "Image", 1, false, { "size", NULL }, false },
 };
 
 #define UI_CONTAINERS "only `Column`, `Row`, `List`, `TitleBar` and `Dropdown` contain other nodes"
@@ -1769,6 +1770,9 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         } else if (name_text_is(node, "Text") || name_text_is(node, "Title")) {
             const char *method = name_text_is(node, "Text") ? "label" : "title";
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, method, &value, 1)));
+        } else if (name_text_is(node, "Image")) {
+            Expr *image_args[2] = { value, ui_float(p, ui_prop(&args, "size"), start, 0) };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "image", image_args, 2)));
         } else if (name_text_is(node, "Space")) {
             Expr *size = ui_float(p, value, start, 0);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "space", &size, 1)));
@@ -1901,13 +1905,14 @@ static bool ui_window_property(Parser *p, bool is_window, bool after_nodes, Fiel
     Name name = setting->name;
     if (!is_window) {
         Diagnostic *d = error_at(p, "E0215", name.offset, name.length, "a component has no properties");
-        diag_help(d, "only a `window` has properties: title, width, height");
+        diag_help(d, "only a `window` has properties: title, width, height, icon");
         return false;
     }
-    if (!name_text_is(name, "title") && !name_text_is(name, "width") && !name_text_is(name, "height")) {
+    if (!name_text_is(name, "title") && !name_text_is(name, "width") && !name_text_is(name, "height") &&
+        !name_text_is(name, "icon")) {
         Diagnostic *d = error_at(p, "E0215", name.offset, name.length, "a window has no property `%.*s`",
                                  (int)name.length, name.text);
-        diag_help(d, "its properties are: title, width, height");
+        diag_help(d, "its properties are: title, width, height, icon");
         return false;
     }
     if (after_nodes) {
