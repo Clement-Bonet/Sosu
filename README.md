@@ -1,6 +1,6 @@
 # Sosu
 
-<img src="docs/sosu.svg" alt="The Sosu logo: two mountains" width="160">
+includeHTML("docs/sosu-presentation.html")
 
 A native, low-level, statically typed language, and its compiler `sosuc` (C99, libc only).
 The specification is in [docs/SPEC.md](docs/SPEC.md).
