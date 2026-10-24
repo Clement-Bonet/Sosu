@@ -61,8 +61,6 @@ class App : app.Handler, app.TitleBar {
                     mut Arena paste = Arena.new(4 * KB);
                     defer paste.free();
                     ui.type_text(app.clipboard(&paste));
-                } else if (down && ctrl && code == 115) {  // Ctrl+S
-                    w.save();
                 } else {
                     ui.key(code, down, mods.shift, ctrl);
                 }
@@ -72,11 +70,27 @@ class App : app.Handler, app.TitleBar {
             },
             Click(x, y, button) => {
                 ui.mouse_move(x, y);
-                ui.mouse_button(true);
+                match (button) {
+                    Left => {
+                        ui.mouse_button(true);
+                    },
+                    Right => {
+                        ui.right_button(true);  // context menus
+                    },
+                    _ => { },
+                }
             },
             Release(x, y, button) => {
                 ui.mouse_move(x, y);
-                ui.mouse_button(false);
+                match (button) {
+                    Left => {
+                        ui.mouse_button(false);
+                    },
+                    Right => {
+                        ui.right_button(false);
+                    },
+                    _ => { },
+                }
             },
             TextInput(text) => {
                 ui.type_text(text);
@@ -95,6 +109,9 @@ class App : app.Handler, app.TitleBar {
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Workspace(&f, w);
         f.finish();
+        if (w.quitting) {
+            app.request_quit();
+        }
         // the window buttons of the title bar act through `platform`
         match (ui.take_window_request()) {
             some(request) => {

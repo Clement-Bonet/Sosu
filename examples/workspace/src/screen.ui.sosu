@@ -1,5 +1,5 @@
-// A workspace in the manner of VS Code: a title bar drawn by the program, holding its actions,
-// a search field and two dropdowns, over three panes that use every widget of `ui`: the files
+// A workspace in the manner of VS Code: a title bar drawn by the program, holding its icon, its
+// menus, a search field, two dropdowns and buttons, over three panes that use every widget of `ui`: the files
 // (a list), the details of the file chosen (fields with formats, radios, a dropdown,
 // checkboxes, buttons that are enabled or not) and the output (a list of lines).
 import workspace.state;
@@ -12,11 +12,40 @@ window Workspace(state.Workspace* w) {
 
     TitleBar(height: 44, gap: 8, padding: 8) {
         Image(w.icon, size: 22)
-        Text("Sosu")
-        Space(8)
-        Button("New", on_click: w.new_file)
-        Button("Save", on_click: w.save, enabled: w.changed())
-        Space(24)
+        MenuBar {
+            Menu("File") {
+                MenuItem("New file", on_click: w.new_file, shortcut: "Ctrl+N")
+                MenuItem("Save", on_click: w.save, shortcut: "Ctrl+S", enabled: w.changed())
+                MenuItem("Revert", on_click: w.revert, enabled: w.changed())
+                Separator
+                Menu("Open recent") {
+                    for (i32 i in 0..w.count) {
+                        MenuItem(w.files[i].name.text(), on_click: w.choose(i))
+                    }
+                }
+                Separator
+                MenuItem("Quit", on_click: w.quit, shortcut: "Ctrl+Q")
+            }
+            Menu("Edit") {
+                MenuItem("Duplicate", on_click: w.duplicate, shortcut: "Ctrl+D", enabled: w.has_choice())
+                MenuItem("Remove", on_click: w.remove, shortcut: "Delete", enabled: w.has_choice())
+                Separator
+                MenuItem("Clear the output", on_click: w.clear_output)
+            }
+            Menu("Build") {
+                MenuItem("Build", on_click: w.build, shortcut: "Ctrl+B")
+                MenuItem("Run", on_click: w.run, shortcut: "F5")
+                Separator
+                Menu("Mode") {
+                    MenuItem("Debug", on_click: w.set_mode(state.Mode.Debug))
+                    MenuItem("Release", on_click: w.set_mode(state.Mode.Release))
+                }
+            }
+            Menu("Help") {
+                MenuItem("About Sosu", on_click: w.about, shortcut: "F1")
+            }
+        }
+        Space(16)
         TextField(bind: w.search, width: 260, on_enter: w.find)
         Dropdown(bind: w.mode, width: 120, on_change: w.mode_changed) {
             Option("Debug", value: Debug)
@@ -37,6 +66,12 @@ window Workspace(state.Workspace* w) {
                 for (i32 i in 0..w.count) {
                     Text(w.files[i].name.text())
                 }
+            }
+            ContextMenu {
+                MenuItem("New file", on_click: w.new_file, shortcut: "Ctrl+N")
+                MenuItem("Duplicate", on_click: w.duplicate, shortcut: "Ctrl+D", enabled: w.has_choice())
+                Separator
+                MenuItem("Remove", on_click: w.remove, shortcut: "Delete", enabled: w.has_choice())
             }
             Row(gap: 8) {
                 Button("Add", on_click: w.new_file)

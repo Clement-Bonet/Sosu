@@ -25,6 +25,9 @@ typedef struct {
     Expr *ui_dropdown_change;
     bool ui_window_top;
     bool ui_title_bar;
+    /* in the items of a `Menu` or a `ContextMenu`; in a `MenuBar` */
+    bool ui_in_menu;
+    bool ui_in_menu_bar;
 } Parser;
 
 #define VEC(T) struct { T *items; size_t count; size_t cap; }
@@ -1381,9 +1384,16 @@ static const UiNodeKind ui_nodes[] = {
     { "Dropdown", 0, false, { "bind", "width", "on_change", NULL }, true },
     { "Option", 1, false, { "value", NULL }, false },
     { "Image", 1, false, { "size", NULL }, false },
+    { "MenuBar", 0, false, { NULL }, true },
+    { "Menu", 1, false, { NULL }, true },
+    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", NULL }, false },
+    { "Separator", 0, false, { NULL }, false },
+    { "ContextMenu", 0, false, { NULL }, true },
 };
 
-#define UI_CONTAINERS "only `Column`, `Row`, `List`, `TitleBar` and `Dropdown` contain other nodes"
+#define UI_CONTAINERS                                                                                         \
+    "only `Column`, `Row`, `List`, `TitleBar`, `Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other " \
+    "nodes"
 
 static void ui_parse_children(Parser *p, StmtVec *out);
 
@@ -1593,6 +1603,25 @@ static bool ui_check_place(Parser *p, const UiNodeKind *kind, Name node, bool wi
         diag_help(d, "`Dropdown(bind: state.mode) { Option(\"Debug\", value: Debug) }`");
         return false;
     }
+    bool menu = kind && strcmp(kind->name, "Menu") == 0;
+    bool entry = kind && (strcmp(kind->name, "MenuItem") == 0 || strcmp(kind->name, "Separator") == 0);
+    if (p->ui_in_menu && !menu && !entry) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length,
+                                 "a menu contains only `MenuItem`, `Separator` and `Menu` nodes");
+        diag_help(d, "`Menu(\"File\") { MenuItem(\"Save\", on_click: state.save, shortcut: \"Ctrl+S\") }`");
+        return false;
+    }
+    if (entry && !p->ui_in_menu) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `%s` goes in a `Menu` or a `ContextMenu`",
+                                 kind->name);
+        diag_help(d, "`Menu(\"File\") { MenuItem(\"Save\", on_click: state.save) }`");
+        return false;
+    }
+    if (p->ui_in_menu_bar && !menu) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `MenuBar` contains only `Menu` nodes");
+        diag_help(d, "`MenuBar { Menu(\"File\") { ... } Menu(\"Edit\") { ... } }`");
+        return false;
+    }
     if (title_bar && (!window_top || p->ui_title_bar)) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `TitleBar` is the first node of a window");
         diag_help(d, "a window has one title bar, at its top: move it before the other nodes");
@@ -1770,6 +1799,41 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         } else if (name_text_is(node, "Text") || name_text_is(node, "Title")) {
             const char *method = name_text_is(node, "Text") ? "label" : "title";
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, method, &value, 1)));
+        } else if (name_text_is(node, "MenuBar") || name_text_is(node, "Menu") || name_text_is(node, "ContextMenu")) {
+            /* f.menu_bar(), f.menu(title) or f.context_menu(), the nodes, then the matching end */
+            bool bar = name_text_is(node, "MenuBar");
+            bool context = name_text_is(node, "ContextMenu");
+            const char *open = bar ? "menu_bar" : context ? "context_menu" : "menu";
+            const char *close = bar ? "end_menu_bar" : context ? "end_context_menu" : "end_menu";
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, &value, bar || context ? 0 : 1)));
+            bool in_menu = p->ui_in_menu;
+            bool in_bar = p->ui_in_menu_bar;
+            p->ui_in_menu = !bar;
+            p->ui_in_menu_bar = bar;
+            ui_parse_children(p, out);
+            p->ui_in_menu = in_menu;
+            p->ui_in_menu_bar = in_bar;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, close, NULL, 0)));
+        } else if (name_text_is(node, "MenuItem")) {
+            /* f.menu_item(s), f.menu_item_enabled(s, c) or f.menu_item_with(s, key, c) */
+            Expr *key = ui_prop(&args, "shortcut");
+            Expr *enabled = ui_prop(&args, "enabled");
+            Expr *item;
+            if (key) {
+                if (!enabled) {
+                    enabled = ui_expr(p, EXPR_BOOL, start, length);
+                    enabled->as.bool_value = true;
+                }
+                Expr *call_args[3] = { value, key, enabled };
+                item = ui_frame_call(p, start, length, "menu_item_with", call_args, 3);
+            } else {
+                Expr *call_args[2] = { value, enabled };
+                item = ui_frame_call(p, start, length, enabled ? "menu_item_enabled" : "menu_item", call_args,
+                                     enabled ? 2 : 1);
+            }
+            SOSU_VEC_PUSH(out, ui_when(p, item, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "Separator")) {
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "separator", NULL, 0)));
         } else if (name_text_is(node, "Image")) {
             Expr *image_args[2] = { value, ui_float(p, ui_prop(&args, "size"), start, 0) };
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "image", image_args, 2)));

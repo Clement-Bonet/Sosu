@@ -128,8 +128,8 @@ Three packages, written in Sosu:
 `examples/window` moves a rectangle with the arrows and the mouse; `examples/form` is a small form
 with a text field, a checkbox and buttons; `examples/editor` draws its own title bar, with a
 search field, a dropdown and a button in it, which still moves, maximizes and closes the window; `examples/workspace` goes further, in the
-manner of VS Code: actions, a search field and two dropdowns in the title bar, over a list of
-files, the details of the file chosen (every widget of `ui`) and an output pane. With
+manner of VS Code: its icon, menus, a search field and two dropdowns in the title bar, over a list of
+files (with a context menu), the details of the file chosen (every widget of `ui`) and an output pane. With
 `SOSU_SYSTEM_TITLE_BAR` set, it keeps the title bar of the system, and its own becomes a tool bar.
 On Windows:
 
