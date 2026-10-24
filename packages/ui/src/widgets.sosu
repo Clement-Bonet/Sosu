@@ -6,6 +6,7 @@
 // pressed and the text field that has the focus. `Frame` places the widgets of one frame,
 // one under the other, or side by side between `row()` and `end_row()`.
 import render.canvas;
+import render.image;
 import render.truetype;
 
 // Text typed or edited: at most 256 bytes of UTF-8.
@@ -213,6 +214,21 @@ pub struct Ui {
     mut i32 open = -1;
     mut canvas.Rect layer = nowhere();
 
+    // The menus open: at each level, its widget number (-1: none), the first a menu opened by
+    // its title (`menu_in_bar`) or a context menu, the others its submenus; where the context
+    // menu opened; the size of each menu open at the last frame, and its rectangle, above the
+    // rest as the list of a dropdown is.
+    mut i32[4] menus = [-1; 4];
+    mut bool menu_in_bar = false;
+    mut f32 context_x = 0.0;
+    mut f32 context_y = 0.0;
+    mut f32[4] menu_w = [0.0; 4];
+    mut f32[4] menu_h = [0.0; 4];
+    mut canvas.Rect[4] popups = [nowhere(); 4];
+    mut usize popup_count = 0;
+    mut bool right_pressed = false;  // the right button went down: context menus
+    mut bool editing = false;  // a text field had the keyboard at the last frame
+
     // The title bar of the last frame (spec §10.5): its rectangle, those of the interactive
     // widgets in it and of its window buttons, and the request of a window button.
     mut canvas.Rect bar = nowhere();
@@ -243,6 +259,33 @@ pub struct Ui {
             released = true;
         }
         down = is_down;
+    }
+
+    // The right button, pressed or released: a press opens the context menu under the mouse.
+    pub void right_button(bool is_down) {
+        if (is_down) {
+            right_pressed = true;
+        }
+    }
+
+    // Closes the menus open from `level` on.
+    void close_menus(usize level) {
+        for (usize i in level..4) {
+            menus[i] = -1;
+        }
+    }
+
+    // Whether (x, y) is on the layer above: the list of a dropdown or a menu, open.
+    bool on_layer(f32 x, f32 y) {
+        if (contains(layer, x, y)) {
+            return true;
+        }
+        for (usize i in 0..popup_count) {
+            if (contains(popups[i], x, y)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // The mouse wheel turned by `steps` (`platform.app.Wheel`): it scrolls the list under the mouse.
@@ -286,9 +329,9 @@ pub struct Ui {
     }
 
     // Whether the mouse at (x, y) moves the window: on the title bar of the last frame, and on
-    // none of its interactive widgets, its window buttons or an open dropdown. Labels drag.
+    // none of its interactive widgets, its window buttons, an open dropdown or menu. Labels drag.
     pub bool is_drag_area(f32 x, f32 y) {
-        if (!custom_title_bar || !contains(bar, x, y) || contains(bar_buttons, x, y) || contains(layer, x, y)) {
+        if (!custom_title_bar || !contains(bar, x, y) || contains(bar_buttons, x, y) || on_layer(x, y)) {
             return false;
         }
         for (usize i in 0..bar_widget_count) {
@@ -422,6 +465,103 @@ pub struct Window {
     pub i32 width = 640;
     pub i32 height = 480;
     pub bool custom_title_bar = false;  // it draws its own title bar (`TitleBar`, spec §10.5)
+    pub str icon = "";  // the path of its icon, a PNG file: "" for none
+}
+
+// A menu being described, open or not: its place, and its entries, drawn by `finish()` when
+// it is open.
+struct Popup {
+    mut i32 id = -1;
+    mut bool open = false;
+    mut usize level = 0;
+    mut f32 x = 0.0;
+    mut f32 y = 0.0;
+    mut f32 w = 0.0;  // the width it had at the last frame
+    mut f32 h = 0.0;  // of its entries so far
+    mut f32 widest = 0.0;  // of an entry, for its width at the next frame
+    mut usize count = 0;
+    mut str[24] labels = [""; 24];
+    mut str[24] keys = [""; 24];  // the shortcuts
+    mut u8[24] kinds = [0; 24];  // 0: an item, 1: a separator, 2: a submenu
+    mut bool[24] enabled = [true; 24];
+    mut i32[24] submenus = [-1; 24];  // the widget number of a submenu
+}
+
+// The key code of a shortcut such as "Ctrl+S", "Ctrl+Shift+Z", "F5" or "Delete", and its
+// modifiers; the code 0 when it is not understood.
+struct Shortcut {
+    mut u32 code = 0;
+    mut bool ctrl = false;
+    mut bool shift = false;
+}
+
+bool same_text(str a, str b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (usize i in 0..a.len) {
+        u8 x = a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
+        u8 y = b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
+        if (x != y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The key of a shortcut: a character (a letter, without case), F1 to F12, or a named key.
+u32 key_named(str name) {
+    if (name.len == 1) {
+        u8 c = name.bytes[0];
+        return (c >= 65 && c <= 90 ? c + 32 : c) as u32;
+    }
+    if (name.len >= 2 && name.len <= 3 && (name.bytes[0] == 70 || name.bytes[0] == 102)) {  // F1 to F12
+        mut u32 n = 0;
+        for (usize i in 1..name.len) {
+            if (!is_digit(name.bytes[i])) {
+                return 0;
+            }
+            n = n * 10 + (name.bytes[i] - 48) as u32;
+        }
+        return n >= 1 && n <= 12 ? 0x4000003A + n - 1 : 0;
+    }
+    if (same_text(name, "delete") || same_text(name, "del")) {
+        return key_delete();
+    }
+    if (same_text(name, "enter")) {
+        return key_enter();
+    }
+    if (same_text(name, "backspace")) {
+        return key_backspace();
+    }
+    if (same_text(name, "tab")) {
+        return 9;
+    }
+    if (same_text(name, "space")) {
+        return 32;
+    }
+    return 0;
+}
+
+Shortcut parse_shortcut(str text) {
+    mut Shortcut s = Shortcut{ };
+    mut usize start = 0;
+    for (usize i in 0..text.len + 1) {
+        if (i < text.len && text.bytes[i] != 43) {  // +
+            continue;
+        }
+        str part = text_of(text.bytes[start..i]);
+        bool modifier = i < text.len;  // followed by +
+        if (modifier && (same_text(part, "ctrl") || same_text(part, "cmd"))) {
+            s.ctrl = true;
+        } else if (modifier && same_text(part, "shift")) {
+            s.shift = true;
+        } else {
+            s.code = key_named(part);
+        }
+        start = i + 1;
+    }
+    return s;
 }
 
 // A column or a row of widgets, being placed.
@@ -478,6 +618,18 @@ pub struct Frame {
     mut usize option_count = 0;
     mut i32 option_chosen = -1;
     mut bool dropdown_pressed = false;  // a press went to a dropdown or to one of its options
+    // The menus being described, one per level (`menu_level` of them), and those open, drawn by
+    // `finish()`; a press that went to a menu, a right press that opened a context menu.
+    mut Popup[4] menu_popups = [Popup{ }; 4];
+    mut usize menu_level = 0;
+    mut Popup[4] shown = [Popup{ }; 4];
+    mut usize shown_count = 0;
+    mut bool menu_pressed = false;
+    mut bool right_taken = false;
+    mut u64 keys_taken = 0;  // the edits a shortcut used: one item per key pressed
+    mut bool editing = false;  // a text field has the keyboard
+    // The rectangle of the last widget placed, or of the last list: what a context menu is for.
+    mut canvas.Rect last = nowhere();
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -522,6 +674,19 @@ pub struct Frame {
         canvas.Rect size = measure(text, 2);
         canvas.Rect r = place(size.w, max(size.h, height));
         write(r.x, r.y, height, text, ink(), 2);
+    }
+
+    // An image `size` pixels high (0: its own height), as wide as its proportions say; in a
+    // row higher than it, it is centered vertically.
+    pub void image(image.Image img, f32 size) {
+        if (img.width <= 0 || img.height <= 0) {
+            return;
+        }
+        f32 h = size > 0.0 ? size : img.height as f32;
+        f32 w = h * img.width as f32 / img.height as f32;
+        f32 box = layouts[depth].horizontal ? max(h, height) : h;
+        canvas.Rect r = place(w, box);
+        surface.draw_image(img, canvas.Rect{ x: r.x, y: r.y + (box - h) / 2.0, w: w, h: h });
     }
 
     // Bigger text (font at scale 3).
@@ -622,6 +787,7 @@ pub struct Frame {
         }
         bool focused = ui.focus == id;
         mut bool entered = false;
+        editing = editing || focused;
         if (focused) {
             // the text may have changed since the last frame (a Clear button)
             ui.cursor = min(ui.cursor, text.len);
@@ -911,6 +1077,260 @@ pub struct Frame {
         dropdown_id = -1;
     }
 
+    // ---- Menus ----
+
+    // A bar of menus: the `menu`s that follow, until `end_menu_bar()`, side by side.
+    pub void menu_bar() {
+        open(true, 0.0, 0.0);
+    }
+
+    pub void end_menu_bar() {
+        end();
+    }
+
+    // A menu: its items follow, until `end_menu()`, described at each frame whether it is
+    // open or not (their shortcuts work when it is closed). Outside of a menu, its title is
+    // placed (in a bar of menus, or alone, as a button), and a click on it opens the menu
+    // under it; when a menu opened by its title is open, the mouse over another title opens
+    // that one instead. In a menu, it is an entry that opens the submenu beside it, when the
+    // mouse is over it. Menus go 4 levels deep; deeper ones are ignored.
+    pub void menu(str title) {
+        i32 id = take_id();
+        if (menu_level >= 4) {
+            menu_level += 1;
+            return;
+        }
+        if (menu_level == 0) {
+            canvas.Rect r = place(measure(title, 2).w + 24.0, height);
+            interactive(r);
+            bool hot = over(r);
+            if (ui.pressed && hot) {
+                bool was_open = ui.menus[0] == id;
+                ui.close_menus(0);
+                if (!was_open) {
+                    ui.menus[0] = id;
+                    ui.menu_in_bar = true;
+                }
+                menu_pressed = true;
+            } else if (hot && ui.menus[0] >= 0 && ui.menus[0] != id && ui.menu_in_bar) {
+                ui.close_menus(0);  // from one menu of the bar to the next
+                ui.menus[0] = id;
+            }
+            bool open = ui.menus[0] == id;
+            if (open || hot) {
+                surface.fill(r, open ? face(false, true) : face(true, false));
+            }
+            write(r.x + 12.0, r.y, height, title, ink(), 2);
+            start_popup(id, open, r.x, r.y + r.h);
+            return;
+        }
+        // in a menu: the entry that opens it
+        canvas.Rect entry = add_entry(title, "", 2, true);
+        menu_popups[menu_level - 1].submenus[min(menu_popups[menu_level - 1].count, 24) - 1] = id;
+        bool parent_open = menu_popups[menu_level - 1].open;
+        if (parent_open && contains(entry, ui.mouse_x, ui.mouse_y)) {
+            if (ui.menus[menu_level] != id) {
+                ui.close_menus(menu_level);
+                ui.menus[menu_level] = id;
+            }
+            if (ui.pressed) {
+                menu_pressed = true;
+            }
+        }
+        start_popup(id, parent_open && ui.menus[menu_level] == id, entry.x + entry.w - 4.0, entry.y - 4.0);
+    }
+
+    pub void end_menu() {
+        if (menu_level == 0) {
+            return;
+        }
+        menu_level -= 1;
+        if (menu_level < 4 && menu_popups[menu_level].open && shown_count < 4) {
+            shown[shown_count] = menu_popups[menu_level];
+            shown_count += 1;
+        }
+    }
+
+    // A context menu for the widget placed just before it (a list: the whole list): its items
+    // follow, until `end_context_menu()`. A press of the right button on that widget opens it
+    // under the mouse; when context menus are nested (one for an item, one for its list), the
+    // first one described opens.
+    pub void context_menu() {
+        i32 id = take_id();
+        if (menu_level > 0) {
+            menu_level += 1;  // not in a menu: its items are ignored
+            return;
+        }
+        if (ui.right_pressed && !right_taken && over(last)) {
+            ui.close_menus(0);
+            ui.menus[0] = id;
+            ui.menu_in_bar = false;
+            ui.context_x = ui.mouse_x;
+            ui.context_y = ui.mouse_y;
+            right_taken = true;
+        }
+        start_popup(id, ui.menus[0] == id, ui.context_x, ui.context_y);
+    }
+
+    pub void end_context_menu() {
+        end_menu();
+    }
+
+    // An item of the menu being described: returns true when it is clicked.
+    pub bool menu_item(str text) {
+        return menu_item_with(text, "", true);
+    }
+
+    // The same, dimmed and never clicked unless `enabled`.
+    pub bool menu_item_enabled(str text, bool enabled) {
+        return menu_item_with(text, "", enabled);
+    }
+
+    // The same, with a shortcut ("Ctrl+S", "Ctrl+Shift+Z", "F5", "Delete"; "" for none), shown at
+    // its right, that works even with its menu closed. A shortcut without Ctrl does nothing
+    // while a text field has the keyboard, unless it is a function key.
+    pub bool menu_item_with(str text, str shortcut, bool enabled) {
+        if (menu_level == 0 || menu_level > 4) {
+            return false;
+        }
+        canvas.Rect r = add_entry(text, shortcut, 0, enabled);
+        if (!enabled) {
+            return false;
+        }
+        if (menu_popups[menu_level - 1].open && contains(r, ui.mouse_x, ui.mouse_y)) {
+            if (ui.released) {
+                ui.close_menus(0);
+                return true;
+            }
+            if (ui.pressed) {
+                menu_pressed = true;
+            }
+        }
+        if (shortcut.len == 0) {
+            return false;
+        }
+        Shortcut s = parse_shortcut(shortcut);
+        if (s.code == 0 || !s.ctrl && ui.editing && s.code < 0x4000003A) {
+            return false;
+        }
+        for (usize i in 0..ui.edit_count) {
+            Edit e = ui.edits[i];
+            u64 bit = 1 << i as u64;
+            if (e.key == s.code && e.ctrl == s.ctrl && e.shift == s.shift && keys_taken & bit == 0) {
+                keys_taken = keys_taken | bit;
+                ui.close_menus(0);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A line between the items of a menu.
+    pub void separator() {
+        if (menu_level > 0 && menu_level <= 4) {
+            add_entry("", "", 1, false);
+        }
+    }
+
+    // Opens the description of a menu, at (x, y) when it is open, kept on the surface.
+    void start_popup(i32 id, bool open, f32 x, f32 y) {
+        usize level = menu_level;
+        f32 w = max(ui.menu_w[level], 160.0);
+        f32 left = max(min(x, surface.width as f32 - w), 0.0);
+        f32 top = max(min(y, surface.height as f32 - ui.menu_h[level]), 0.0);
+        menu_popups[level] = Popup{ id: id, open: open, level: level, x: left, y: top, w: w };
+        menu_level += 1;
+    }
+
+    // An entry of the menu being described; its rectangle. The mouse over an item closes the
+    // submenus open beside.
+    canvas.Rect add_entry(str label, str key, u8 kind, bool enabled) {
+        Popup* p = &menu_popups[menu_level - 1];
+        f32 h = kind == 1 ? 9.0 : 28.0;
+        canvas.Rect r = canvas.Rect{ x: p.x, y: p.y + 4.0 + p.h, w: p.w, h: h };
+        if (p.count < 24) {
+            p.labels[p.count] = label;
+            p.keys[p.count] = key;
+            p.kinds[p.count] = kind;
+            p.enabled[p.count] = enabled;
+            p.count += 1;
+        }
+        p.h += h;
+        f32 key_w = key.len > 0 ? measure(key, 2).w + 32.0 : 0.0;
+        p.widest = max(p.widest, measure(label, 2).w + key_w + (kind == 2 ? 24.0 : 0.0));
+        if (p.open && kind != 2 && contains(r, ui.mouse_x, ui.mouse_y)) {
+            ui.close_menus(menu_level);
+        }
+        return r;
+    }
+
+    // An open menu, over everything else.
+    void draw_popup(Popup p) {
+        canvas.Rect frame = canvas.Rect{ x: p.x, y: p.y, w: p.w, h: p.h + 8.0 };
+        surface.fill(frame, canvas.Color{ r: 49, g: 50, b: 68 });
+        surface.stroke(frame, face(true, false), 1.0);
+        mut f32 y = p.y + 4.0;
+        for (usize i in 0..p.count) {
+            if (p.kinds[i] == 1) {
+                surface.fill(canvas.Rect{ x: p.x + 8.0, y: y + 4.0, w: p.w - 16.0, h: 1.0 }, face(true, false));
+                y += 9.0;
+                continue;
+            }
+            canvas.Rect r = canvas.Rect{ x: p.x + 4.0, y: y, w: p.w - 8.0, h: 28.0 };
+            bool open_beside = p.kinds[i] == 2 && p.level + 1 < 4 && ui.menus[p.level + 1] == p.submenus[i] && p.submenus[i] >= 0;
+            if (p.enabled[i] && (contains(r, ui.mouse_x, ui.mouse_y) || open_beside)) {
+                surface.fill(r, canvas.Color{ r: 137, g: 180, b: 250, a: 70 });
+            }
+            canvas.Color color = p.enabled[i] ? ink() : face(true, false);
+            write(p.x + 12.0, y, 28.0, p.labels[i], color, 2);
+            if (p.keys[i].len > 0) {
+                f32 kw = measure(p.keys[i], 2).w;
+                write(p.x + p.w - 12.0 - kw, y, 28.0, p.keys[i], face(true, false), 2);
+            }
+            if (p.kinds[i] == 2) {  // a chevron, pointing right
+                i32 cx = (p.x + p.w - 16.0) as i32;
+                i32 cy = (y + 14.0) as i32;
+                surface.line(cx - 2, cy - 5, cx + 3, cy, ink());
+                surface.line(cx + 3, cy, cx - 2, cy + 5, ink());
+            }
+            y += 28.0;
+        }
+    }
+
+    // Closes the menus a click elsewhere, a right press elsewhere or Escape closes, or whose
+    // menu was not described; draws those still open, and remembers them for the next frame.
+    void finish_menus() {
+        mut bool inside = false;
+        mut bool first_shown = false;
+        for (usize i in 0..shown_count) {
+            Popup p = shown[i];
+            inside = inside || contains(canvas.Rect{ x: p.x, y: p.y, w: p.w, h: p.h + 8.0 }, ui.mouse_x, ui.mouse_y);
+            first_shown = first_shown || p.level == 0;
+        }
+        mut bool escape = false;
+        for (usize i in 0..ui.edit_count) {
+            escape = escape || ui.edits[i].key == 27;
+        }
+        if (ui.pressed && !menu_pressed && !inside || ui.right_pressed && !right_taken || escape || !first_shown) {
+            ui.close_menus(0);
+        }
+        ui.popup_count = 0;
+        for (usize level in 0..4) {
+            for (usize i in 0..shown_count) {
+                Popup p = shown[i];
+                if (p.level == level && ui.menus[level] == p.id) {
+                    draw_popup(p);
+                    ui.popups[ui.popup_count] = canvas.Rect{ x: p.x, y: p.y, w: p.w, h: p.h + 8.0 };
+                    ui.popup_count += 1;
+                    ui.menu_w[level] = max(p.widest + 40.0, 160.0);
+                    ui.menu_h[level] = p.h + 8.0;
+                }
+            }
+        }
+        ui.right_pressed = false;
+        ui.editing = editing;
+    }
+
     // The open list of a dropdown, over everything else.
     void draw_layer() {
         surface.fill(layer, face(false, false));
@@ -937,6 +1357,7 @@ pub struct Frame {
         } else {
             ui.layer = nowhere();
         }
+        finish_menus();
         if (ui.released) {
             ui.active = -1;
         }
@@ -1001,6 +1422,7 @@ pub struct Frame {
         if (l.list >= 0) {
             item_placed(l, r);
         }
+        last = r;
         return r;
     }
 
@@ -1087,6 +1509,7 @@ pub struct Frame {
         state.items = done.item;
         surface.pop_clip();
         canvas.Rect r = done.frame;
+        last = r;
         if (state.content > r.h) {  // a bar shows how far the list is scrolled
             f32 bar = max(r.h * r.h / state.content, 16.0);
             f32 y = r.y + (r.h - bar) * state.scroll / (state.content - r.h);
@@ -1113,7 +1536,7 @@ pub struct Frame {
 
     // The mouse is over `r`, and not over the open list of a dropdown, which is above it.
     bool over(canvas.Rect r) {
-        return contains(r, ui.mouse_x, ui.mouse_y) && !contains(ui.layer, ui.mouse_x, ui.mouse_y);
+        return contains(r, ui.mouse_x, ui.mouse_y) && !ui.on_layer(ui.mouse_x, ui.mouse_y);
     }
 
     // Pressed then released over `r`, the press and the release maybe in the same frame.
@@ -1565,4 +1988,175 @@ test "a dropdown opens above the rest, chooses and closes" {
     ui.key(27, true, false, false);
     dropdown_frame(&ui, &surface, &choice);
     assert(ui.open == -1 && choice == 0);
+}
+
+test "an image is placed as a widget, centered in a row" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 200, 100);
+    mut Ui ui = Ui{ };
+    mut u32[] pixels = arena.alloc_slice(u32, 8);
+    for (usize i in 0..8) {
+        pixels[i] = 0xFFFF0000;
+    }
+    image.Image img = image.Image{ width: 4, height: 2, pixels: pixels };  // twice as wide as high
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.image(img, 0.0);  // its own size: 4 by 2, at (0, 0)
+    f.row();
+    f.image(img, 10.0);  // 20 by 10, centered in a row 32 high, at y 10 + 11
+    f.label("x");
+    f.end_row();
+    f.finish();
+    assert(surface.at(3, 1) == 0xFFFF0000 && surface.at(4, 1) == 0);
+    assert(surface.at(19, 21) == 0xFFFF0000 && surface.at(19, 20) == 0 && surface.at(19, 31) == 0);
+}
+
+// A bar with File (New, a separator, Recent > a.sosu, Quit disabled) and Edit (Undo), then a
+// button under it. Each bit of the result is something clicked: 1 New, 2 a.sosu, 4 Quit,
+// 8 Undo, 16 the button.
+i32 menu_frame(Ui* ui, canvas.Canvas* surface) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.menu_bar();
+    f.menu("File");  // the built-in font: x 0 to 88; its menu x 0 to 216 (New and Ctrl+N), y 32 to 133
+    if (f.menu_item_with("New", "Ctrl+N", true)) {  // y 36 to 64
+        clicked += 1;
+    }
+    f.separator();  // 64 to 73
+    f.menu("Recent");  // 73 to 101; its menu from x 212, y 69
+    if (f.menu_item("a.sosu")) {  // y 73 to 101
+        clicked += 2;
+    }
+    f.end_menu();
+    if (f.menu_item_with("Quit", "Ctrl+Q", false)) {  // 101 to 129
+        clicked += 4;
+    }
+    f.end_menu();
+    f.menu("Edit");  // x 88 to 176
+    if (f.menu_item_with("Undo", "Ctrl+Z", true)) {
+        clicked += 8;
+    }
+    f.end_menu();
+    f.end_menu_bar();
+    if (f.button("Under")) {  // y 40 to 72
+        clicked += 16;
+    }
+    f.finish();
+    return clicked;
+}
+
+test "menus of a bar: open, switch, submenus, items and shortcuts" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut Ui ui = Ui{ };
+    assert(menu_frame(&ui, &surface) == 0 && ui.menus[0] == -1);
+
+    click_at(&ui, 20.0, 10.0);  // File opens
+    assert(menu_frame(&ui, &surface) == 0 && ui.menus[0] == 0 && ui.popup_count == 1);
+    ui.mouse_move(120.0, 10.0);  // over Edit, File open: Edit opens instead
+    menu_frame(&ui, &surface);
+    assert(ui.menus[0] == 2);
+    click_at(&ui, 120.0, 10.0);  // a click on the title of the menu open closes it
+    menu_frame(&ui, &surface);
+    assert(ui.menus[0] == -1);
+
+    click_at(&ui, 20.0, 10.0);
+    menu_frame(&ui, &surface);
+    ui.mouse_move(20.0, 85.0);  // over Recent: its submenu opens
+    menu_frame(&ui, &surface);
+    assert(ui.menus[1] == 1 && ui.popup_count == 2);
+    ui.mouse_move(20.0, 50.0);  // over New: it closes
+    menu_frame(&ui, &surface);
+    assert(ui.menus[1] == -1 && ui.menus[0] == 0);
+    ui.mouse_move(20.0, 85.0);
+    menu_frame(&ui, &surface);
+    click_at(&ui, 300.0, 85.0);  // a.sosu, in the submenu: everything closes
+    assert(menu_frame(&ui, &surface) == 2 && ui.menus[0] == -1);
+
+    click_at(&ui, 20.0, 10.0);
+    menu_frame(&ui, &surface);
+    click_at(&ui, 20.0, 115.0);  // Quit, disabled: nothing, the menu stays open
+    assert(menu_frame(&ui, &surface) == 0 && ui.menus[0] == 0);
+    click_at(&ui, 20.0, 50.0);  // New, over the button: the menu takes the click
+    assert(menu_frame(&ui, &surface) == 1 && ui.menus[0] == -1);
+    click_at(&ui, 20.0, 50.0);  // closed: the button gets it
+    assert(menu_frame(&ui, &surface) == 16);
+
+    ui.key(110, true, false, true);  // Ctrl+N, the menu closed
+    assert(menu_frame(&ui, &surface) == 1);
+    ui.key(113, true, false, true);  // Ctrl+Q: Quit is disabled
+    ui.key(122, true, true, true);  // Ctrl+Shift+Z is not Ctrl+Z
+    assert(menu_frame(&ui, &surface) == 0);
+    ui.key(122, true, false, true);
+    assert(menu_frame(&ui, &surface) == 8);
+    ui.key(110, true, false, true);  // Ctrl+N once, Ctrl+Z twice: each press, once
+    ui.key(122, true, false, true);
+    ui.key(122, true, false, true);
+    assert(menu_frame(&ui, &surface) == 9);
+
+    click_at(&ui, 20.0, 10.0);  // Escape closes
+    menu_frame(&ui, &surface);
+    ui.key(27, true, false, false);
+    menu_frame(&ui, &surface);
+    assert(ui.menus[0] == -1 && ui.popup_count == 0);
+}
+
+// A list of two items, the first with its own context menu (Open), then the context menu of
+// the list (Rename, Delete), and a text field. 1 Open, 2 Rename, 4 Delete.
+i32 context_frame(Ui* ui, canvas.Canvas* surface, TextBuffer* text) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.list(200.0, 120.0, none);  // y 0 to 120, the items from y 0, 32 high
+    f.label("first");
+    f.context_menu();
+    if (f.menu_item("Open")) {
+        clicked += 1;
+    }
+    f.end_context_menu();
+    f.label("second");
+    f.end_list();
+    f.context_menu();
+    if (f.menu_item_with("Rename", "F2", true)) {
+        clicked += 2;
+    }
+    if (f.menu_item_with("Delete", "Delete", true)) {
+        clicked += 4;
+    }
+    f.end_context_menu();
+    f.text_field(text, 200.0);  // y 128 to 160
+    f.finish();
+    return clicked;
+}
+
+test "context menus open under the mouse, the innermost first" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut Ui ui = Ui{ };
+    mut TextBuffer text = TextBuffer{ };
+    ui.mouse_move(50.0, 90.0);  // in the list, under its items
+    ui.right_button(true);
+    ui.right_button(false);
+    context_frame(&ui, &surface, &text);
+    assert(ui.menus[0] == 2 && ui.context_x == 50.0 && ui.context_y == 90.0);
+    click_at(&ui, 60.0, 108.0);  // Rename: y 94 to 122
+    assert(context_frame(&ui, &surface, &text) == 2 && ui.menus[0] == -1);
+
+    ui.mouse_move(30.0, 10.0);  // on the first item: its own menu
+    ui.right_button(true);
+    context_frame(&ui, &surface, &text);
+    assert(ui.menus[0] == 1);  // the list is widget 0
+    ui.mouse_move(300.0, 250.0);  // a right press elsewhere closes it
+    ui.right_button(true);
+    context_frame(&ui, &surface, &text);
+    assert(ui.menus[0] == -1);
+
+    ui.key(key_delete(), true, false, false);  // the shortcut Delete
+    assert(context_frame(&ui, &surface, &text) == 4);
+    click_at(&ui, 20.0, 140.0);  // the text field takes the keyboard
+    context_frame(&ui, &surface, &text);
+    ui.key(key_delete(), true, false, false);  // now Delete edits the text
+    ui.key(0x4000003B, true, false, false);  // F2 still works
+    assert(context_frame(&ui, &surface, &text) == 2);
 }

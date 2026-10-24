@@ -11,6 +11,7 @@
 import std.io;
 import platform.app;
 import render.canvas;
+import render.image;
 import render.truetype;
 import ui.widgets;
 import workspace.screen;
@@ -60,8 +61,6 @@ class App : app.Handler, app.TitleBar {
                     mut Arena paste = Arena.new(4 * KB);
                     defer paste.free();
                     ui.type_text(app.clipboard(&paste));
-                } else if (down && ctrl && code == 115) {  // Ctrl+S
-                    w.save();
                 } else {
                     ui.key(code, down, mods.shift, ctrl);
                 }
@@ -71,11 +70,27 @@ class App : app.Handler, app.TitleBar {
             },
             Click(x, y, button) => {
                 ui.mouse_move(x, y);
-                ui.mouse_button(true);
+                match (button) {
+                    Left => {
+                        ui.mouse_button(true);
+                    },
+                    Right => {
+                        ui.right_button(true);  // context menus
+                    },
+                    _ => { },
+                }
             },
             Release(x, y, button) => {
                 ui.mouse_move(x, y);
-                ui.mouse_button(false);
+                match (button) {
+                    Left => {
+                        ui.mouse_button(false);
+                    },
+                    Right => {
+                        ui.right_button(false);
+                    },
+                    _ => { },
+                }
             },
             TextInput(text) => {
                 ui.type_text(text);
@@ -94,6 +109,9 @@ class App : app.Handler, app.TitleBar {
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Workspace(&f, w);
         f.finish();
+        if (w.quitting) {
+            app.request_quit();
+        }
         // the window buttons of the title bar act through `platform`
         match (ui.take_window_request()) {
             some(request) => {
@@ -125,7 +143,18 @@ class App : app.Handler, app.TitleBar {
 i32 main() uses io {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
-    state.Workspace* w = arena.new(state.Workspace);
+    widgets.Window window = screen.WorkspaceConfig();
+    // the icon of the window, a PNG file with transparency: for the system, and in the bar
+    mut image.Image icon = image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(u32, 0) };
+    match (image.load(&arena, window.icon)) {
+        ok(found) => {
+            icon = found;
+        },
+        err(e) => {
+            io.print("{} not found: the window has no icon", window.icon);
+        },
+    }
+    state.Workspace* w = arena.new(state.Workspace, icon);
     App* handler = arena.new(App, w);
     match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
         ok(noto) => {
@@ -135,9 +164,8 @@ i32 main() uses io {
             io.print("Noto Sans not found: the built-in font is used");
         },
     }
-    widgets.Window window = screen.WorkspaceConfig();
     bool custom = window.custom_title_bar && !has_env(&arena, "SOSU_SYSTEM_TITLE_BAR");
     app.TitleBar*? bar = custom ? some(handler as app.TitleBar*) : none;
-    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar, icon: icon.width > 0 ? some(icon) : none };
     return app.run(config, handler as app.Handler*);
 }

@@ -1,5 +1,6 @@
 // The state of the workspace: a few files, the one chosen, its details being edited, and what
 // the buttons of the title bar did. Its interface is in screen.ui.sosu.
+import render.image;
 import ui.widgets;
 
 pub enum Kind {
@@ -74,6 +75,8 @@ pub class Workspace {
     // were read from.
     pub mut File details;
     pub mut i32 loaded;
+    // The icon of the window, shown in its title bar too (empty if it was not found).
+    pub image.Image icon;
     // The title bar.
     pub mut widgets.TextBuffer search;
     pub mut Mode mode;
@@ -83,8 +86,11 @@ pub class Workspace {
     pub mut i32 lines;
     pub mut widgets.TextBuffer status;
     mut i32 created;
+    // Quit, from the menu: `main` closes the window.
+    pub mut bool quitting;
 
-    void init() {
+    void init(image.Image icon) {
+        self.icon = icon;
         files = [File{ }; 16];
         files[0] = file("main.sosu", "4", "21/10/2026", Source);
         files[1] = file("screen.ui.sosu", "2", "22/10/2026", Source);
@@ -103,6 +109,7 @@ pub class Workspace {
         status = widgets.TextBuffer{ };
         status.set("Ready");
         created = 0;
+        quitting = false;
     }
 
     // Called before each frame: the details follow the file chosen in the list.
@@ -142,6 +149,44 @@ pub class Workspace {
             details = files[chosen as usize];
             status.set("Reverted");
         }
+    }
+
+    // Chooses the file `i` (Open recent).
+    pub void choose(i32 i) {
+        if (i >= 0 && i < count) {
+            chosen = i;
+        }
+    }
+
+    pub void duplicate() {
+        if (!has_choice() || count == 16) {
+            return;
+        }
+        mut File copy = files[chosen as usize];
+        copy.name.set("copy of ");
+        copy.name.append(files[chosen as usize].name.text());
+        files[count as usize] = copy;
+        chosen = count;
+        count += 1;
+        log("Created ", copy.name.text());
+    }
+
+    pub void clear_output() {
+        lines = 0;
+        status.set("Ready");
+    }
+
+    pub void set_mode(Mode m) {
+        mode = m;
+        mode_changed();
+    }
+
+    pub void about() {
+        log("Sosu: ", "a language, its compiler and its widgets");
+    }
+
+    pub void quit() {
+        quitting = true;
     }
 
     pub void new_file() {

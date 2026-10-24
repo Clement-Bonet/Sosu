@@ -382,6 +382,51 @@ static void test_ui_files(void) {
     expect_ui_error("window W(T* t) {\n    Dropdown(bind: t.m) { Option(\"a\") }\n}\n", "E0215", 2, 27);
     expect_ui_error("window W() {\n    Dropdown { }\n}\n", "E0215", 2, 5);  /* no bind */
 
+    expect_ui("window W(T* t) {\n    icon: \"app.png\"\n    Image(t.logo, size: 20)\n    Image(t.logo)\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame image) (. t logo) 20)\n"
+              "    (call (. ui_frame image) (. t logo) 0.0)))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window (icon \"app.png\")))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W(T* t) {\n    Image()\n}\n", "E0215", 2, 5);
+    expect_ui("component C(T* t) {\n    MenuBar {\n        Menu(\"File\") {\n"
+              "            MenuItem(\"New\", on_click: t.new, shortcut: \"Ctrl+N\")\n            Separator\n"
+              "            Menu(\"Recent\") {\n                MenuItem(\"a\", enabled: t.ok)\n            }\n"
+              "            MenuItem(\"Quit\")\n        }\n    }\n"
+              "    List { }\n    ContextMenu {\n        MenuItem(\"Remove\", on_click: t.remove, shortcut: \"Delete\", "
+              "enabled: t.ok)\n    }\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame menu_bar))\n"
+              "    (call (. ui_frame menu) \"File\")\n"
+              "    (if (call (. ui_frame menu_item_with) \"New\" \"Ctrl+N\" true)\n"
+              "      (block\n"
+              "        (call (. t new))))\n"
+              "    (call (. ui_frame separator))\n"
+              "    (call (. ui_frame menu) \"Recent\")\n"
+              "    (call (. ui_frame menu_item_enabled) \"a\" (. t ok))\n"
+              "    (call (. ui_frame end_menu))\n"
+              "    (call (. ui_frame menu_item) \"Quit\")\n"
+              "    (call (. ui_frame end_menu))\n"
+              "    (call (. ui_frame end_menu_bar))\n"
+              "    (call (. ui_frame list) 300.0 200.0 none)\n"
+              "    (call (. ui_frame end_list))\n"
+              "    (call (. ui_frame context_menu))\n"
+              "    (if (call (. ui_frame menu_item_with) \"Remove\" \"Delete\" (. t ok))\n"
+              "      (block\n"
+              "        (call (. t remove))))\n"
+              "    (call (. ui_frame end_context_menu))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    MenuItem(\"a\")\n}\n", "E0215", 2, 5);  /* not in a menu */
+    expect_ui_error("window W() {\n    Separator\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Menu(\"a\") { Text(\"b\") }\n}\n", "E0215", 2, 17);
+    expect_ui_error("window W() {\n    MenuBar { Text(\"b\") }\n}\n", "E0215", 2, 15);
+    expect_ui_error("window W() {\n    Menu { }\n}\n", "E0215", 2, 5);  /* no title */
+    expect_ui_error("window W() {\n    ContextMenu { Column { } }\n}\n", "E0215", 2, 19);
+
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
     expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);
     expect_ui_error("window W() {\n    Text(\"a\", \"b\")\n}\n", "E0215", 2, 5);
