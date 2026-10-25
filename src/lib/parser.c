@@ -1418,7 +1418,7 @@ static const UiNodeKind ui_nodes[] = {
     { "Option", 1, false, { "value", "plural", "count", "context", NULL }, false },
     { "Image", 1, false, { "size", "style", NULL }, false },
     { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
-    { "Tabs", 0, false, { "bind", "focus", "style", NULL }, true },
+    { "Tabs", 0, false, { "bind", "placement", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
     { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
     { "Branch", 1, false, { "open", "plural", "count", "context", NULL }, true },
@@ -2373,7 +2373,11 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *chosen = ui_expr(p, EXPR_NAME, start, length);
             chosen->as.name = ui_name("none", start);
             if (bound) chosen = ui_some(p, ui_address(p, bound));
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tabs", &chosen, 1)));
+            Expr *placement = ui_prop(&args, "placement");
+            if (placement && placement->kind == EXPR_NAME) placement = ui_variant(p, placement, "Side", placement->as.name);
+            Expr *tabs_args[2] = { chosen, placement };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, placement ? "tabs_at" : "tabs", tabs_args,
+                                                        placement ? 2 : 1)));
             p->ui_in_tabs = true;
             ui_parse_children(p, out);
             p->ui_in_tabs = false;

@@ -584,6 +584,16 @@ static void test_ui_grids(void) {
               "(import ui.widgets)\n");
     expect_ui_error("window W() {\n    Tabs {\n        Text(\"a\")\n    }\n}\n", "E0215", 3, 9);
     expect_ui_error("window W() {\n    Tab(\"a\") { }\n}\n", "E0215", 2, 5);
+    expect_ui("window W() {\n    Tabs(placement: Bottom) { }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 17)\n"
+              "    (call (. ui_frame tabs_at) none (. (. widgets Side) Bottom))\n"
+              "    (call (. ui_frame end_tabs))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
     expect_ui("window W(S* s) {\n    Tree(selected: s.item, height: Fill) {\n        Branch(\"src\", open: s.open) {\n"
               "            Leaf(\"main\", on_click: s.main)\n        }\n        Leaf(\"README\")\n    }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
