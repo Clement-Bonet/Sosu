@@ -465,6 +465,16 @@ static void test_ui_files(void) {
               "    (call (. ui_frame end_scroll))))\n"
               "(import ui.widgets)\n");
     expect_ui_error("window W(T* t) {\n    for (i32 i in 0..3, id: i) { }\n}\n", "E0215", 2, 25);  /* not key: */
+    expect_ui("component C(T* t) {\n    TextField(bind: t.q, placeholder: \"Search\")\n"
+              "    Dropdown(bind: t.m, placeholder: \"Pick\") { }\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 24)\n"
+              "    (call (. ui_frame text_field_with) (& (. t q)) 200.0 (lit widgets.Format (placeholder \"Search\")))\n"
+              "    (call (. ui_frame at) 72)\n"
+              "    (call (. ui_frame dropdown_with) 160.0 \"Pick\")\n"
+              "    (call (. ui_frame end_dropdown))))\n"
+              "(import ui.widgets)\n");
     expect_ui_error("window W() {\n    Scroll(height: 100) { }\n}\n", "E0215", 2, 5);  /* no width */
 
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);

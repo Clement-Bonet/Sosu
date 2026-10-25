@@ -510,6 +510,8 @@ pub struct Format {
     // 9: a digit, A: a letter, *: any character; the other characters are written as they
     // are, when the cursor reaches them (`99/99/9999` for a date). Empty: no mask.
     pub str mask = "";
+    // A hint drawn, dimmed, while the text is empty (spec §10.7). Empty: none.
+    pub str placeholder = "";
 }
 
 str text_of(u8[] bytes) {
@@ -589,6 +591,11 @@ canvas.Color face(bool hot, bool held) {
 
 canvas.Color accent() {
     return canvas.Color{ r: 137, g: 180, b: 250 };
+}
+
+// The color of placeholders.
+canvas.Color hint() {
+    return canvas.Color{ r: 127, g: 132, b: 156 };
 }
 
 canvas.Color well() {
@@ -768,6 +775,7 @@ pub struct Frame {
     mut i32 option_current = -1;
     mut i32 option_enter = -1;
     mut i32 option_move = 0;
+    mut str dropdown_hint = "";  // its placeholder
     mut canvas.Rect layer = nowhere();
     mut str[16] options = [""; 16];
     mut usize option_count = 0;
@@ -988,6 +996,9 @@ pub struct Frame {
             canvas.Color selected = canvas.Color{ r: 137, g: 180, b: 250, a: 90 };
             surface.fill(canvas.Rect{ x: inner.x + a - shift, y: r.y + 6.0, w: b - a, h: 20.0 }, selected);
         }
+        if (text.len == 0 && format.placeholder.len > 0) {
+            write(inner.x, r.y, height, format.placeholder, hint(), 2);
+        }
         write(inner.x - shift, r.y, height, text.text(), ink(), 2);
         if (focused) {
             surface.fill(canvas.Rect{ x: inner.x + caret - shift, y: r.y + 6.0, w: 2.0, h: 20.0 }, accent());
@@ -1189,6 +1200,11 @@ pub struct Frame {
     // With the keyboard: Space, Enter or Alt+Down opens it; closed, Up and Down change the
     // choice; open, Up and Down move the highlight, Enter or Space chooses, Escape closes.
     pub void dropdown(f32 width) {
+        dropdown_with(width, "");
+    }
+
+    // The same, showing `placeholder`, dimmed, while no option is chosen.
+    pub void dropdown_with(f32 width, str placeholder) {
         u64 id = take_id();
         canvas.Rect r = place(width, height);
         interactive(r);
@@ -1224,6 +1240,7 @@ pub struct Frame {
         }
         dropdown_id = id;
         box = r;
+        dropdown_hint = placeholder;
         if (ui.open == id) {
             layer_owner = id;
             layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
@@ -1279,6 +1296,11 @@ pub struct Frame {
     }
 
     pub void end_dropdown() {
+        if (dropdown_id != 0 && option_current < 0 && dropdown_hint.len > 0) {
+            surface.push_clip(canvas.Rect{ x: box.x + 2.0, y: box.y + 2.0, w: max(box.w - 32.0, 0.0), h: box.h - 4.0 });
+            write(box.x + 8.0, box.y, height, dropdown_hint, hint(), 2);
+            surface.pop_clip();
+        }
         if (dropdown_id != 0 && option_index > 0) {
             if (ui.open == dropdown_id) {  // the highlight: on the option chosen at first
                 ui.highlight = ui.highlight < 0 ? max(option_current, 0) : min(ui.highlight, option_index - 1);
@@ -3077,4 +3099,53 @@ test "focus_here gives the keyboard the first time only" {
     f.text_field(&text, 200.0);
     f.finish();
     assert(ui.focus == 0);
+}
+
+test "placeholders: shown while the text is empty, never typed" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    mut TextBuffer text = TextBuffer{ };
+    Format search = Format{ placeholder: "Search" };
+    // the built-in font: "Search" from x 8, 16 pixels a character, in the color of hints
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.text_field_with(&text, 200.0, search);
+    f.finish();
+    mut bool dimmed = false;
+    for (i32 x in 8..24) {
+        for (i32 y in 8..24) {
+            dimmed = dimmed || surface.at(x, y) == canvas.pack(hint());
+        }
+    }
+    assert(dimmed && text.len == 0);
+    click_at(&ui, 20.0, 10.0);
+    ui.type_text("a");
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.text_field_with(&text, 200.0, search);
+    f.finish();
+    mut bool still = false;
+    for (i32 x in 8..120) {
+        for (i32 y in 8..24) {
+            still = still || surface.at(x, y) == canvas.pack(hint());
+        }
+    }
+    assert(!still && text.text().len == 1);
+
+    // a dropdown with no option chosen shows its placeholder
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    f = begin(&ui, &surface, 0.0, 50.0);
+    f.dropdown_with(160.0, "Pick");
+    f.option("One", false);
+    f.end_dropdown();
+    f.finish();
+    mut bool picked = false;
+    for (i32 x in 8..72) {
+        for (i32 y in 58..74) {
+            picked = picked || surface.at(x, y) == canvas.pack(hint());
+        }
+    }
+    assert(picked);
 }

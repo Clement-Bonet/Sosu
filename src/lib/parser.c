@@ -1365,7 +1365,7 @@ typedef struct {
     const char *name;
     size_t values;        /* values in order, before the properties */
     bool optional;        /* the value can be left out (a checkbox without a label) */
-    const char *props[8]; /* NULL-terminated */
+    const char *props[12]; /* NULL-terminated */
     bool children;        /* `{ ... }` after the arguments */
 } UiNodeKind;
 
@@ -1378,11 +1378,11 @@ static const UiNodeKind ui_nodes[] = {
     { "Title", 1, false, { NULL }, false },
     { "Space", 1, false, { NULL }, false },
     { "Button", 1, false, { "on_click", "enabled", "focus", NULL }, false },
-    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "focus", NULL }, false },
+    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
     { "Radio", 1, false, { "bind", "value", "on_change", NULL }, false },
     { "TitleBar", 0, false, { "height", "gap", "padding", NULL }, true },
-    { "Dropdown", 0, false, { "bind", "width", "on_change", "focus", NULL }, true },
+    { "Dropdown", 0, false, { "bind", "width", "on_change", "placeholder", "focus", NULL }, true },
     { "Option", 1, false, { "value", NULL }, false },
     { "Image", 1, false, { "size", NULL }, false },
     { "MenuBar", 0, false, { NULL }, true },
@@ -1693,9 +1693,9 @@ static Stmt *ui_choice(Parser *p, const char *method, Expr *label, Expr *bound, 
    TextField, or NULL when it has none of them. `accept: Digits` names a variant of
    `widgets.Accept`: it is qualified here, since the type is known. */
 static Expr *ui_format(Parser *p, const UiArgs *args, size_t offset, size_t length) {
-    static const char *const names[] = { "accept", "max", "mask" };
+    static const char *const names[] = { "accept", "max", "mask", "placeholder" };
     VEC(FieldInit) fields = {0};
-    for (size_t i = 0; i < 3; i++) {
+    for (size_t i = 0; i < 4; i++) {
         Expr *value = ui_prop(args, names[i]);
         if (!value) continue;
         if (i == 0 && value->kind == EXPR_NAME) {
@@ -1921,9 +1921,12 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_title_bar", NULL, 0)));
         } else if (name_text_is(node, "Dropdown")) {
-            /* f.dropdown(width), the options, f.end_dropdown() */
+            /* f.dropdown(width) or f.dropdown_with(width, placeholder), the options, f.end_dropdown() */
             Expr *width = ui_float(p, ui_prop(&args, "width"), start, 160);
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "dropdown", &width, 1)));
+            Expr *hint = ui_prop(&args, "placeholder");
+            Expr *drop_args[2] = { width, hint };
+            const char *open = hint ? "dropdown_with" : "dropdown";
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, drop_args, hint ? 2 : 1)));
             p->ui_dropdown = ui_prop(&args, "bind");
             p->ui_dropdown_change = ui_prop(&args, "on_change");
             ui_parse_children(p, out);
