@@ -8,6 +8,10 @@ on:
   pull_request:
     branches: [main, dev]
 
+# The jobs only read the repository: a workflow run by a pull request from a fork gets no more.
+permissions:
+  contents: read
+
 jobs:
   linux:
     name: Linux (${{ matrix.cc }})
