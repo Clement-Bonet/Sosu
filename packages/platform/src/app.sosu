@@ -47,6 +47,9 @@ pub enum Event {
     Click(f32 x, f32 y, Button button),  // a button pressed
     Release(f32 x, f32 y, Button button),  // a button released
     TextInput(str text),  // typed text (UTF-8), valid until the end of the frame
+    // The text an input method is composing (spec §10.9), not typed yet, and its cursor; an empty
+    // text ends the composition.
+    TextEditing(str text, i32 cursor),
     Wheel(f32 x, f32 y),  // the mouse wheel, in steps: y > 0 away from the user (up)
     // Once before the first frame, when `Config` has a title bar: true if the system left it
     // to the program, false if it kept its own (the program's bar is then a tool bar).
@@ -108,6 +111,9 @@ Event? translate(sdl.Event* event, Arena* frame) uses io {
     if (kind == 0x303) {  // SDL_EVENT_TEXT_INPUT
         return some(TextInput(sdl.text_of(frame, event)));
     }
+    if (kind == 0x302) {  // SDL_EVENT_TEXT_EDITING
+        return some(TextEditing(sdl.editing_text(frame, event), sdl.editing_cursor(event)));
+    }
     return none;
 }
 
@@ -147,6 +153,17 @@ pub str[] locales(Arena* arena) uses io {
 // Minimizes the window (the button of a title bar drawn by the program).
 pub void minimize() uses io {
     sdl.push_request(1);
+}
+
+// Where the text being typed is, in pixels of the window (spec §10.9): the window of the candidates
+// of an input method opens next to it (`ui.caret_area()` gives it).
+pub void set_text_input_area(f32 x, f32 y, f32 w, f32 h) uses io {
+    sdl.push_area(x as i32, y as i32, w as i32, h as i32);
+}
+
+// Shows or hides the keyboard of the system, on a touch screen (`ui.wants_text()` says when).
+pub void show_keyboard(bool on) uses io {
+    sdl.push_request(on ? 4 : 5);
 }
 
 // Maximizes the window, or restores it when it is maximized.
@@ -376,6 +393,10 @@ pub i32 run(Config config, Handler* handler) uses io {
                     sdl.minimize(window);
                 } else if (event.word5 == 2) {
                     sdl.toggle_maximize(window);
+                } else if (event.word5 == 3) {
+                    sdl.set_text_input_area(window, event.word6 as i32, event.word7 as i32, sdl.area_w(event), sdl.area_h(event));
+                } else if (event.word5 == 4 || event.word5 == 5) {
+                    sdl.text_input(window, event.word5 == 4);
                 }
                 continue;
             }

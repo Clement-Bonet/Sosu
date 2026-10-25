@@ -605,6 +605,11 @@ pub struct Ui {
     mut usize change_at = 0;
     mut u8[4096] history = [0; 4096];
     mut usize history_used = 0;
+    // What an input method is composing (spec §10.9), shown at the cursor of the field that has
+    // the keyboard; and where that cursor was at the last frame, for the window of candidates.
+    mut TextBuffer composing = TextBuffer{ };
+    mut canvas.Rect caret = nowhere();
+
     // The number field that has the keyboard, and its text being typed (spec §10.9).
     // The widget under the mouse for its tooltip, and since when (the time of `clock`).
     mut u64 tip_key = 0;
@@ -624,6 +629,24 @@ pub struct Ui {
     pub void clock(u64 ms) {
         now = ms;
         has_clock = true;
+    }
+
+    // The text an input method composes (`platform.app.TextEditing`): shown underlined at the cursor
+    // until it is typed; an empty text ends it.
+    pub void compose(str text, i32 cursor) {
+        composing.set(text);
+    }
+
+    // The rectangle of the cursor of the text field that has the keyboard, at the last frame: give it
+    // to `platform.app.set_text_input_area`.
+    pub canvas.Rect caret_area() {
+        return caret;
+    }
+
+    // Whether a text widget has the keyboard: the keyboard of the system is shown then, on a touch
+    // screen.
+    pub bool wants_text() {
+        return editing;
     }
 
     // The input, as `platform.app` gives it.
@@ -717,6 +740,7 @@ pub struct Ui {
 
     // Typed text, or the text of the clipboard for a paste (Ctrl+V).
     pub void type_text(str text) {
+        composing.len = 0;  // what was composed is typed
         usize from = typed.len;
         if (edit_count < 64 && typed.insert(from, text)) {
             edits[edit_count] = Edit{ from: from, to: typed.len };
@@ -2207,9 +2231,20 @@ pub struct Frame {
         if (text.len() == 0 && format.placeholder.len > 0) {
             write_px(inner.x, r.y, r.h, format.placeholder, l.hint, size);
         }
-        write_px(inner.x - shift, r.y, r.h, text.text(), l.color, size);
+        if (focused && ui.composing.len > 0) {  // the composition, underlined, at the cursor
+            str composed = ui.composing.text();
+            f32 composed_w = measure_px(composed, size).w;
+            f32 at = inner.x + caret - shift;
+            write_px(inner.x - shift, r.y, r.h, text.slice(0, ui.cursor), l.color, size);
+            write_px(at, r.y, r.h, composed, l.color, size);
+            surface.fill(canvas.Rect{ x: at, y: line_y + line - 1.0, w: composed_w, h: 1.0 }, l.color);
+            write_px(at + composed_w, r.y, r.h, text.slice(ui.cursor, text.len()), l.color, size);
+        } else {
+            write_px(inner.x - shift, r.y, r.h, text.text(), l.color, size);
+        }
         if (focused) {
             surface.fill(canvas.Rect{ x: inner.x + caret - shift, y: line_y, w: 2.0, h: line }, l.accent);
+            ui.caret = canvas.Rect{ x: inner.x + caret - shift, y: line_y, w: 2.0, h: line };
         }
         surface.pop_clip();
         return entered;
@@ -3056,6 +3091,7 @@ pub struct Frame {
                 if (focused && in_line(line, ui.cursor)) {
                     f32 cx = measure_px(t.slice(line.start, ui.cursor), size).w;
                     surface.fill(canvas.Rect{ x: inner.x + cx, y: y + 2.0, w: 2.0, h: line_h - 4.0 }, l.accent);
+                    ui.caret = canvas.Rect{ x: inner.x + cx, y: y + 2.0, w: 2.0, h: line_h - 4.0 };
                 }
             }
             index += 1;
@@ -7586,4 +7622,31 @@ test "mnemonics: Alt and a letter, the first widget with it; in an open menu, th
     ui.key(113, true, false, false);  // q, alone: Quit, chosen at the next frame
     letters_frame(&ui, &surface, &bold);
     assert(letters_frame(&ui, &surface, &bold) == 3);
+}
+
+test "input methods: the composition shown at the cursor, then typed; the area of the cursor" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 320, 60);
+    mut Ui ui = Ui{ };
+    mut LongText text = long_text();
+    defer text.free();
+    assert(!ui.wants_text());
+    ui.mouse_move(10.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_frame(&ui, &surface, &text);
+    assert(ui.wants_text());
+    ui.type_text("ab");
+    long_frame(&ui, &surface, &text);
+    // composing: shown, not typed; the cursor area is where the cursor is
+    ui.compose("\u{304b}", 1);
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "ab" && ui.composing.len > 0);
+    canvas.Rect at = ui.caret_area();
+    assert(at.x > 8.0 && at.h > 0.0);
+    // the input method types it: the composition ends
+    ui.type_text("\u{304b}");
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "ab\u{304b}" && ui.composing.len == 0);
 }

@@ -55,6 +55,26 @@ struct TextInput {
     u8* text;
 }
 
+// SDL_TextEditingEvent: the text being composed by an input method, and its cursor.
+struct TextEditing {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    u32 padding;
+    u8* text;
+    i32 start;
+    i32 length;
+}
+
+// SDL_Rect.
+struct IntRect {
+    i32 x;
+    i32 y;
+    i32 w;
+    i32 h;
+}
+
 // SDL_KeyboardEvent.
 pub struct Keyboard {
     u32 kind;
@@ -116,6 +136,8 @@ extern "C" {
     bool SDL_UpdateTexture(Texture* texture, FRect* rect, u8* pixels, i32 pitch) uses io;
     bool SDL_RenderTexture(Renderer* renderer, Texture* texture, FRect* source, FRect* target) uses io;
     bool SDL_StartTextInput(Window* window) uses io;
+    bool SDL_StopTextInput(Window* window) uses io;
+    bool SDL_SetTextInputArea(Window* window, IntRect* rect, i32 cursor) uses io;
     u8* SDL_GetClipboardText() uses io;  // to free with SDL_free; "" when empty
     bool SDL_SetClipboardText(u8* text) uses io;
     void SDL_free(u8* memory) uses io;
@@ -194,6 +216,60 @@ pub void start_text_input(Window* window) uses io {
 pub str text_of(Arena* arena, Event* event) {
     unsafe {
         return copy_cstring(arena, (event as TextInput*).text, 255);
+    }
+}
+
+// The text being composed (SDL_EVENT_TEXT_EDITING), and its cursor in characters.
+// The size of the area of a request of `push_area`.
+pub i32 area_w(Event* event) {
+    return event.rest[0] as i32 | event.rest[1] as i32 << 8;
+}
+
+pub i32 area_h(Event* event) {
+    return event.rest[2] as i32 | event.rest[3] as i32 << 8;
+}
+
+pub str editing_text(Arena* arena, Event* event) {
+    unsafe {
+        return copy_cstring(arena, (event as TextEditing*).text, 255);
+    }
+}
+
+pub i32 editing_cursor(Event* event) {
+    unsafe {
+        return (event as TextEditing*).start;
+    }
+}
+
+// Where the text being typed is: the system shows the candidates of an input method next to it.
+pub void set_text_input_area(Window* window, i32 x, i32 y, i32 w, i32 h) uses io {
+    mut IntRect r = IntRect{ x: x, y: y, w: w, h: h };
+    unsafe {
+        SDL_SetTextInputArea(window, &r, 0);
+    }
+}
+
+// Shows (`on`) or hides the keyboard of the system, on a touch screen.
+pub void text_input(Window* window, bool on) uses io {
+    unsafe {
+        if (on) {
+            SDL_StartTextInput(window);
+        } else {
+            SDL_StopTextInput(window);
+        }
+    }
+}
+
+// Queues a request with a rectangle: the area of the text being typed.
+pub void push_area(i32 x, i32 y, i32 w, i32 h) uses io {
+    mut u8[96] size = [0; 96];  // its width and height, in the first bytes after `word7`
+    size[0] = (w & 0xFF) as u8;
+    size[1] = (w >> 8 & 0xFF) as u8;
+    size[2] = (h & 0xFF) as u8;
+    size[3] = (h >> 8 & 0xFF) as u8;
+    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: 3, word6: x as u32, word7: y as u32, rest: size };
+    unsafe {
+        SDL_PushEvent(&event);
     }
 }
 
