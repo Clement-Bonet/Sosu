@@ -721,7 +721,7 @@ ui_file      = { import | view } ;
 view         = ( "window" | "component" ) IDENT params [ effects ] "{" { property } { item } "}" ;
 property     = IDENT ":" expr ;                                (* window only: title, width, height, icon *)
 item         = node | "if" "(" expr ")" children [ "else" ( item | children ) ]
-             | "for" "(" [ "mut" ] ( type | "auto" ) IDENT "in" expr ")" children ;
+             | "for" "(" [ "mut" ] ( type | "auto" ) IDENT "in" expr [ "," "key" ":" expr ] ")" children ;
 node         = path [ "(" [ argument { "," argument } ] ")" ] [ children ] ;
 argument     = IDENT ":" expr | expr ;
 children     = "{" { item } "}" ;
@@ -781,7 +781,7 @@ Foundations, to build first, since most planned widgets rely on them:
 2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat. Done (key repeat comes from the system); not yet: moving by word (Ctrl+Left), undo.
 3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`.
 4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame. Done for dropdowns and menus: `Ui` keeps the rectangles of the open list of a dropdown and of the open menus, and the widgets under them do not see the mouse.
-5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`).
+5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`). Designed in §10.6, with the identity of the widgets and the scrolling of any area.
 
 Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling (done), `Dropdown` with the layer above (done), then `TextArea`. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus.
 
@@ -844,6 +844,52 @@ Fallback, when the system leaves its own decorations (`SDL_SetWindowHitTest` ref
 - `run` gives the window its decorations back (`SDL_SetWindowBordered`), and sends `CustomTitleBar(false)`. The program does not change: its `TitleBar` becomes the tool bar described above, under the bar of the system. On a phone, it is the bar at the top of the screen, below the safe area (§10.3).
 
 Tests: the tests of `ui` check the drag area, the window buttons and their requests, and a dropdown opened, chosen and closed; `tests/programs/titlebar` drives, without a screen, a window whose title bar holds a text field, a dropdown and buttons; `tests/window` asks for a title bar, and checks that `CustomTitleBar` comes before the first frame (`false` with the dummy video driver of the CI, `true` on a Windows desktop). `examples/editor` shows it on the desktop: on Windows, dragging the bar moves the window and a double-click maximizes it. As everywhere with SDL, the click that brings a window to the front is not given to the program. `examples/workspace` is a fuller one, in the manner of VS Code: actions, a search field and two dropdowns in the bar, over panes that use every widget; with the environment variable `SOSU_SYSTEM_TITLE_BAR` set, it shows the fallback (the bar of the system, and the bar of the program as a tool bar).
+
+### 10.6 Foundations of the widgets: identity, keyboard, scrolling
+
+Status: design, not implemented yet. The first of the batches that complete `ui` (grid, frames, tabs, tree, table, text area...): what they all rely on.
+
+#### Identity of the widgets
+
+Today a widget is the number of its call in the frame. A widget that appears (`if`) or an item added to a list (`for`) shifts the numbers of those after it: the field that has the keyboard, the button held or the list scrolled becomes another one. The grid, the tabs and the tree make widgets appear and disappear all the time, so this comes first.
+
+- An identity is a 64-bit hash (FNV-1a) of a path: the scopes open around the widget, then the widget itself. `Ui` keeps identities (`active`, `focus`, the dropdown open, the menus open), never numbers; 0 is none.
+- `f.at(site)` gives the widget that follows its place, a `u32`; without it, the place is the number of the call in its scope, as today, so code written by hand keeps working.
+- `f.push_id(key)` ... `f.pop_id()` open a scope, `key` a `u64`.
+- The translator of `.ui.sosu` files writes them:
+  - each node gets `f.at(site)`, `site` being its offset in the file: a widget keeps its identity whatever appears before it;
+  - the body of a `for` is a scope per iteration, its key the index of the loop, or the value of `key:` when the loop gives one: `for (Task* t in state.tasks, key: t.id) { ... }`, so that an item keeps its focus when another is inserted before it;
+  - a component used as a node is a scope, its key the site of the node: two uses of `TaskRow` are distinct.
+- What lasts between frames per widget (the scroll of a list or of a `Scroll`, later the branches open in a tree, the tab chosen) is in a table of `Ui` keyed by identity (64 entries). An entry not seen during a frame is freed at its end: a list that disappears forgets its scroll, as a widget that no longer exists has no state.
+- Two widgets with the same identity in a frame (a loop with a `key:` that repeats): the second gets the number of its call instead, and a debug build reports it once (`io.print` is not available to `ui`: `ui.duplicates` counts them, and the tests check it is 0).
+
+#### Keyboard navigation
+
+- Tab and Shift+Tab move the keyboard to the next and previous widget that takes it, in the order of the frame: text fields, buttons, checkboxes, radios, dropdowns, lists, and the `Scroll` areas (below). The order of the frame is that of the description, so of the `.ui.sosu` file. A widget that is disabled is skipped; at the end, it goes round. Text fields do not type the Tab key.
+- The widget that has the keyboard shows it: the accent border that text fields and lists already have, on the others too (a ring 2 pixels wide).
+- What the keys do, to the widget that has the keyboard:
+  - a button: Space or Enter clicks it;
+  - a checkbox: Space checks or unchecks it; a radio: Space chooses it;
+  - a dropdown: Space, Enter or Alt+Down opens it; closed, Up and Down change the choice; open, Up and Down move the highlight, Enter chooses, Escape closes;
+  - a list: Up, Down, Home, End, Page Up, Page Down move the choice, which comes into view;
+  - a `Scroll` area: the arrows, Page Up, Page Down, Home and End scroll it.
+- Menus: Alt pressed and released alone, or F10, gives the keyboard to the first title of the bar. Left and Right go from title to title (from menu to menu when one is open), Down or Enter opens, Up and Down go from item to item, skipping separators and disabled items, Right opens a submenu and Left closes it, Enter chooses, Escape closes one level. The first context menu of the widget that has the keyboard opens with Shift+F10 or the Menu key, under that widget.
+- `ui.key` already receives every key; Alt alone needs its release too (`ui.key(code, false, ...)`, which `platform` already gives). Mnemonics (`&File`, Alt+F) are not part of this batch.
+- A widget can take the keyboard when the window opens: `TextField(bind: x, focus: true)` (`f.focus_here()` before the widget), applied once, the first time that identity is seen.
+
+#### Scrolling
+
+- `Scroll(width: w, height: h) { ... }` becomes `f.scroll(w, h)`, the nodes in a column, `f.end_scroll()`: an area `w` by `h` pixels, clipped, whose content scrolls when it is larger. `width` and `height` are required in this batch: the layout does not yet know how to fill what is left of the window (the `Split` panes and the grid will).
+- The wheel scrolls the innermost area under the mouse that can still scroll that way (at its end, it goes to the one around it); Shift and the wheel, or the horizontal wheel (`Wheel(x, y)`), scroll sideways.
+- A bar on the right (and at the bottom, when the content is wider) shows the position; its thumb can be dragged, and a click on the bar beside it moves by a page. This applies to `List` too, which becomes a `Scroll` with items: the dragging that lists lacked comes with it.
+- When Tab gives the keyboard to a widget inside a `Scroll`, the area scrolls it into view (as `List` already does for its item chosen).
+- What a `Scroll` keeps (its position, the size of its content at the last frame) is in the table of identities: there is no limit of 8 any more.
+
+#### Tests
+
+- `ui`: identities that survive an `if` and an insertion in a `for` with a `key:`; Tab and Shift+Tab around a frame with a disabled button; the keys of each widget; the menus with the keyboard; nested `Scroll` areas, the wheel at the end of the inner one, the dragged thumb, a focused widget brought into view.
+- The translator: `at`, `push_id` and `pop_id` around loops and components, `key:`, `focus:`, `Scroll`.
+- `tests/programs`: a screen with an `if` that inserts a field before the field being edited, which keeps the keyboard.
 
 ## 11. Targets and compilation
 
@@ -1029,7 +1075,9 @@ Libraries for other languages (§9.2):
 
 Widgets of `ui` (§10.4):
 
-- Identity of the widgets: they are numbered in the order of the calls, so a widget that appears (`if`) or a list that grows (`for`) shifts the numbers of those after it, and the focus or the pressed button can jump to another one. (proposed: the translator gives each node a number from its place in the `.ui.sosu` file, combined with the index of the loops around it; code written by hand passes its own)
+- Identity of the widgets: decided, see §10.6 (a hash of the place of the node in the file and of the keys of the loops around it).
+- The key of an item in a loop: an expression after the loop, `for (Task* t in state.tasks, key: t.id)`, or a node `Key(t.id) { ... }`? (proposed: `key:` in the loop; it says what the loop is over, and adds no node)
+- Alt alone for the menus: Windows and Linux do it, macOS does not (its menus are in the bar of the system, §14.2 above). (proposed: Alt and F10 everywhere in v0, the same on every system)
 - Formats of numbers and money: read from the locale of the system, or given explicitly? (proposed: explicit in v0, `decimal: ","`; the same program then shows the same thing everywhere, and tests do not depend on the machine)
 - Money: an integer of minor units (`i64` cents), or a decimal type of the language? (proposed: `i64` minor units in v0; a currency with 3 decimals gives `places: 3`)
 - `NumberField` without generics: one widget per type (`i64`, `f64`), or a text field and a conversion by the program? (proposed: one per type until generics, then a single generic one)
