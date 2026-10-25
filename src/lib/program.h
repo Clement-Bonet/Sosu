@@ -68,5 +68,7 @@ void program_free(Program *program);
 
 /* True for an interface file, `*.ui.sosu` (spec §10.2). */
 bool program_is_ui_file(const char *path);
+/* A catalog of translations, `messages.locale.fr-ch.sosu` (spec §10.7): gettext, not Sosu. */
+bool program_is_locale_file(const char *path);
 
 #endif

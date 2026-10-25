@@ -300,10 +300,10 @@ static void test_ui_files(void) {
               "        Button(\"OK\", on_click: s.ok, enabled: s.ready)\n    }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
               "  (block\n"
-              "    (call (. ui_frame column) 4 0.0)\n"
-              "    (call (. ui_frame label) \"a\")\n"
+              "    (call (. ui_frame column) 4 (- 1.0))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
               "    (call (. ui_frame at) 80)\n"
-              "    (if (call (. ui_frame button_enabled) \"OK\" (. s ready))\n"
+              "    (if (call (. ui_frame button_enabled) (call (. ui_frame tr) \"OK\") (. s ready))\n"
               "      (block\n"
               "        (call (. s ok))))\n"
               "    (call (. ui_frame end))))\n"
@@ -347,7 +347,7 @@ static void test_ui_files(void) {
               "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
               "  (block\n"
               "    (call (. ui_frame at) 24)\n"
-              "    (if (&& (call (. ui_frame radio) \"S\" (== (. t size) Small)) (!= (. t size) Small))\n"
+              "    (if (&& (call (. ui_frame radio) (call (. ui_frame tr) \"S\") (== (. t size) Small)) (!= (. t size) Small))\n"
               "      (block\n"
               "        (= (. t size) Small)))))\n"
               "(import ui.widgets)\n");
@@ -358,7 +358,7 @@ static void test_ui_files(void) {
               "  (block\n"
               "    (call (. ui_frame at) 24)\n"
               "    (call (. ui_frame list) 300.0 120 (call some (& (. t index))))\n"
-              "    (call (. ui_frame label) \"a\")\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
               "    (call (. ui_frame end_list))\n"
               "    (call (. ui_frame at) 91)\n"
               "    (call (. ui_frame list) 300.0 200.0 none)\n"
@@ -370,20 +370,20 @@ static void test_ui_files(void) {
               "(fn pub void W ((widgets.Frame* ui_frame) (T* t))\n"
               "  (block\n"
               "    (call (. ui_frame title_bar) 36 8.0 4.0)\n"
-              "    (call (. ui_frame label) \"App\")\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"App\"))\n"
               "    (call (. ui_frame at) 72)\n"
               "    (call (. ui_frame dropdown) 160.0)\n"
-              "    (if (&& (call (. ui_frame option) \"D\" (== (. t mode) Debug)) (!= (. t mode) Debug))\n"
+              "    (if (&& (call (. ui_frame option) (call (. ui_frame tr) \"D\") (== (. t mode) Debug)) (!= (. t mode) Debug))\n"
               "      (block\n"
               "        (= (. t mode) Debug)\n"
               "        (call (. t rebuild))))\n"
-              "    (if (&& (call (. ui_frame option) \"R\" (== (. t mode) Release)) (!= (. t mode) Release))\n"
+              "    (if (&& (call (. ui_frame option) (call (. ui_frame tr) \"R\") (== (. t mode) Release)) (!= (. t mode) Release))\n"
               "      (block\n"
               "        (= (. t mode) Release)\n"
               "        (call (. t rebuild))))\n"
               "    (call (. ui_frame end_dropdown))\n"
               "    (call (. ui_frame end_title_bar))\n"
-              "    (call (. ui_frame label) \"under\")))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"under\"))))\n"
               "(fn pub widgets.Window WConfig ()\n"
               "  (block\n"
               "    (return (lit widgets.Window (custom_title_bar true)))))\n"
@@ -416,16 +416,16 @@ static void test_ui_files(void) {
               "  (block\n"
               "    (call (. ui_frame menu_bar))\n"
               "    (call (. ui_frame at) 42)\n"
-              "    (call (. ui_frame menu) \"File\")\n"
-              "    (if (call (. ui_frame menu_item_with) \"New\" \"Ctrl+N\" true)\n"
+              "    (call (. ui_frame menu) (call (. ui_frame tr) \"File\"))\n"
+              "    (if (call (. ui_frame menu_item_with) (call (. ui_frame tr) \"New\") \"Ctrl+N\" true)\n"
               "      (block\n"
               "        (call (. t new))))\n"
               "    (call (. ui_frame separator))\n"
               "    (call (. ui_frame at) 156)\n"
-              "    (call (. ui_frame menu) \"Recent\")\n"
-              "    (call (. ui_frame menu_item_enabled) \"a\" (. t ok))\n"
+              "    (call (. ui_frame menu) (call (. ui_frame tr) \"Recent\"))\n"
+              "    (call (. ui_frame menu_item_enabled) (call (. ui_frame tr) \"a\") (. t ok))\n"
               "    (call (. ui_frame end_menu))\n"
-              "    (call (. ui_frame menu_item) \"Quit\")\n"
+              "    (call (. ui_frame menu_item) (call (. ui_frame tr) \"Quit\"))\n"
               "    (call (. ui_frame end_menu))\n"
               "    (call (. ui_frame end_menu_bar))\n"
               "    (call (. ui_frame at) 281)\n"
@@ -433,7 +433,7 @@ static void test_ui_files(void) {
               "    (call (. ui_frame end_list))\n"
               "    (call (. ui_frame at) 294)\n"
               "    (call (. ui_frame context_menu))\n"
-              "    (if (call (. ui_frame menu_item_with) \"Remove\" \"Delete\" (. t ok))\n"
+              "    (if (call (. ui_frame menu_item_with) (call (. ui_frame tr) \"Remove\") \"Delete\" (. t ok))\n"
               "      (block\n"
               "        (call (. t remove))))\n"
               "    (call (. ui_frame end_context_menu))))\n"
@@ -465,6 +465,33 @@ static void test_ui_files(void) {
               "    (call (. ui_frame end_scroll))))\n"
               "(import ui.widgets)\n");
     expect_ui_error("window W(T* t) {\n    for (i32 i in 0..3, id: i) { }\n}\n", "E0215", 2, 25);  /* not key: */
+    /* translations: literal texts, values in braces, plurals, contexts; data is not translated */
+    expect_ui("component C(T* u) {\n    Text(\"Hello, {name}\", name: u.name)\n"
+              "    Text(\"{count} file in {dir}\", plural: \"{count} files in {dir}\", count: u.n, dir: u.dir)\n"
+              "    Button(\"Open\", context: \"verb\")\n    Text(u.title)\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* u))\n"
+              "  (block\n"
+              "    (call (. ui_frame label) (call (. ui_frame with1) (call (. ui_frame tr) \"Hello, {name}\") {name} (. u name)))\n"
+              "    (call (. ui_frame label) (call (. ui_frame with2) (call (. ui_frame tr_plural) \"{count} file in {dir}\" "
+              "\"{count} files in {dir}\" (as (. u n) i64)) {count} (call (. ui_frame decimal) (as (. u n) i64)) {dir} (. u dir)))\n"
+              "    (call (. ui_frame at) 156)\n"
+              "    (call (. ui_frame button) (call (. ui_frame tr_in) \"verb\" \"Open\"))\n"
+              "    (call (. ui_frame label) (. u title))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("component C(T* u) {\n    Text(\"Hi, {name}\")\n}\n", "E0215", 2, 15);  /* no value */
+    expect_ui_error("component C(T* u) {\n    Text(\"Hi\", name: u.name)\n}\n", "E0215", 2, 16);  /* unused */
+    expect_ui_error("component C(T* u) {\n    Text(\"a\", plural: \"b\")\n}\n", "E0215", 2, 23);  /* no count */
+    expect_ui_error("component C(T* u) {\n    Text(\"a\", context: u.c)\n}\n", "E0215", 2, 24);
+    expect_ui("component C(T* t) {\n    TextField(bind: t.q, placeholder: \"Search\")\n"
+              "    Dropdown(bind: t.m, placeholder: \"Pick\") { }\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 24)\n"
+              "    (call (. ui_frame text_field_with) (& (. t q)) 200.0 (lit widgets.Format (placeholder (call (. ui_frame tr) \"Search\"))))\n"
+              "    (call (. ui_frame at) 72)\n"
+              "    (call (. ui_frame dropdown_with) 160.0 (call (. ui_frame tr) \"Pick\"))\n"
+              "    (call (. ui_frame end_dropdown))))\n"
+              "(import ui.widgets)\n");
     expect_ui_error("window W() {\n    Scroll(height: 100) { }\n}\n", "E0215", 2, 5);  /* no width */
 
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
@@ -476,12 +503,59 @@ static void test_ui_files(void) {
     expect_ui_error("window W() {\n    Row(align: End) { }\n}\n", "E0216", 2, 9);
     expect_ui_error("window W() {\n    Mine(size: 2)\n}\n", "E0215", 2, 10);
     expect_ui_error("window W() {\n    Text(\"a\") { }\n}\n", "E0215", 2, 15);
-    expect_ui_error("style Muted { color: Gray }\nwindow W() { }\n", "E0216", 1, 1);
     expect_ui_error("struct S { }\n", "E0203", 1, 1);
+}
+
+/* `theme` and `style` blocks, and `style:` on nodes (spec §10.7). */
+static void test_ui_themes(void) {
+    expect_ui("style Danger {\n    background: #F38BA8\n    radius: 6\n    hover { background: #EBA0AC, border_width: 2 }\n}\n",
+              "(fn pub widgets.Style Danger ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 243 139 168 255))) (radius (call some 6)))) (hover (lit widgets.Props (background (call some (call (. widgets rgb) 235 160 172 255))) (border_width (call some 2))))))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("theme Dark {\n    accent: #89B4FA\n    surface: #313244\n    Window { background: #1E1E2E }\n"
+              "    Button {\n        background: surface\n        focus { border: accent }\n    }\n}\n"
+              "theme Light : Dark {\n    surface: #CCD0DA\n    Window { background: #EFF1F5 }\n}\n",
+              "(fn pub widgets.Theme Dark ()\n"
+              "  (block\n"
+              "    (var auto accent (call (. widgets rgb) 137 180 250 255))\n"
+              "    (var auto surface (call (. widgets rgb) 49 50 68 255))\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent)))) (window (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 30 30 46 255))))))) (button (lit widgets.Style (normal (lit widgets.Props (background (call some surface)))) (focus (lit widgets.Props (border (call some accent))))))))))\n"
+              "(fn pub widgets.Theme Light ()\n"
+              "  (block\n"
+              "    (var auto accent (call (. widgets rgb) 137 180 250 255))\n"
+              "    (var auto surface (call (. widgets rgb) 204 208 218 255))\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent)))) (window (call (. widgets merge) (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 30 30 46 255)))))) (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 239 241 245 255)))))))) (button (lit widgets.Style (normal (lit widgets.Props (background (call some surface)))) (focus (lit widgets.Props (border (call some accent))))))))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Column(style: Card) {\n        Text(\"a\", style: s.late ? theme.Danger : Normal)\n"
+              "        Button(\"b\", style: [Card, s.mine])\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame style) (call Card))\n"
+              "    (call (. ui_frame column) (- 1.0) (- 1.0))\n"
+              "    (call (. ui_frame style) (?: (. s late) (call (. theme Danger)) (lit widgets.Style)))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
+              "    (call (. ui_frame style) (call Card))\n"
+              "    (call (. ui_frame style) (. s mine))\n"
+              "    (call (. ui_frame at) 108)\n"
+              "    (call (. ui_frame button) (call (. ui_frame tr) \"b\"))\n"
+              "    (call (. ui_frame end))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("style S { colour: #FFFFFF }\n", "E0215", 1, 11);
+    expect_ui_error("style S { active { color: #FFFFFF } }\n", "E0215", 1, 11);
+    expect_ui_error("style S { radius: 2, radius: 3 }\n", "E0215", 1, 22);
+    expect_ui_error("theme T { Label { color: #FFFFFF } }\n", "E0215", 1, 11);
+    expect_ui_error("theme T : Missing { }\n", "E0215", 1, 11);
+    expect_ui_error("theme T { a: 1\n    a: 2 }\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Text(\"a\", style: c ? [A, B] : A)\n}\n", "E0215", 2, 26);
 }
 
 int main(void) {
     test_ui_files();
+    test_ui_themes();
     test_precedence();
     test_casts();
     test_postfix();

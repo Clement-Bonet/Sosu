@@ -6,9 +6,16 @@
 // title bar of the system, as on a platform that has no custom decorations: the bar of the
 // program is then a tool bar under it, and the program does not change.
 //
+// Its texts are in English, translated by the catalogs of locales/ (spec §10.7): French, when
+// the user prefers it, or with the environment variable SOSU_LANG=fr (SOSU_LANG=en: English).
+//
+// It is dark or light as the system is, and follows it when it changes; SOSU_THEME=light or
+// SOSU_THEME=dark chooses (spec §10.7).
+//
 // On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/workspace`
 // from the root of the repository, where the font is found.
 import std.io;
+import i18n.catalog;
 import platform.app;
 import render.canvas;
 import render.image;
@@ -29,13 +36,63 @@ bool has_env(Arena* arena, str name) {
     }
 }
 
+// The value of the environment variable `name` (64 bytes at most), or "".
+str env(Arena* arena, str name) {
+    u8* c_name = name.to_cstr(arena);
+    mut u8[64] bytes = [0; 64];
+    mut usize length = 0;
+    unsafe {
+        u8* value = getenv(c_name);
+        if (value as u64 == 0) {
+            return "";
+        }
+        while (length < 64 && *(value + length) != 0) {
+            bytes[length] = *(value + length);
+            length += 1;
+        }
+    }
+    mut u8[] copy = arena.alloc_slice(u8, length);
+    for (usize i in 0..length) {
+        copy[i] = bytes[i];
+    }
+    return match (str.from_bytes(copy)) {
+        ok(text) => text,
+        err(e) => "",
+    };
+}
+
+// The catalog of the language the user prefers (SOSU_LANG first), or none for English.
+catalog.Catalog*? choose_language(Arena* arena) uses io {
+    mut str[2] available = ["en", "fr"];
+    str forced = env(arena, "SOSU_LANG");
+    mut str[1] wanted_one = [forced];
+    str[] wanted = forced.len > 0 ? wanted_one[0..1] : app.locales(arena);
+    usize chosen = match (catalog.best(available[0..2], wanted)) {
+        some(i) => i,
+        none => 0,
+    };
+    if (chosen == 0) {
+        return none;
+    }
+    return match (catalog.load(arena, "examples/workspace/locales/messages.locale.fr.sosu")) {
+        ok(c) => some(c),
+        err(e) => none,
+    };
+}
+
 class App : app.Handler, app.TitleBar {
     mut widgets.Ui ui;
     state.Workspace* w;
+    Arena* arena;  // of `main`: the catalogs of translations
+    mut bool dark;  // the theme of the system, unless SOSU_THEME chooses
+    mut bool forced;
 
-    void init(state.Workspace* w) {
+    void init(state.Workspace* w, Arena* arena) {
         ui = widgets.Ui{ };
         self.w = w;
+        self.arena = arena;
+        dark = true;
+        forced = false;
     }
 
     // Asked by the system between two frames: the empty space and the labels of the title
@@ -54,6 +111,14 @@ class App : app.Handler, app.TitleBar {
             },
             Maximized(on) => {
                 ui.maximized = on;
+            },
+            LocaleChanged => {
+                ui.catalog = choose_language(arena);  // the next frame is in that language
+            },
+            SystemThemeChanged(on) => {
+                if (!forced) {
+                    dark = on;  // the next frame is in that theme
+                }
             },
             Key(code, down, mods) => {
                 bool ctrl = mods.ctrl || mods.command;  // Cmd on macOS
@@ -106,7 +171,8 @@ class App : app.Handler, app.TitleBar {
 
     override void on_frame(canvas.Canvas* surface) uses io {
         w.follow_choice();
-        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        ui.theme = some(dark ? widgets.default_theme() : widgets.light_theme());
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });  // the light theme clears it with its own color
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Workspace(&f, w);
         f.finish();
@@ -156,7 +222,14 @@ i32 main() uses io {
         },
     }
     state.Workspace* w = arena.new(state.Workspace, icon);
-    App* handler = arena.new(App, w);
+    App* handler = arena.new(App, w, &arena);
+    handler.ui.catalog = choose_language(&arena);
+    str theme = env(&arena, "SOSU_THEME");
+    handler.forced = theme.len > 0;
+    handler.dark = handler.forced ? theme != "light" : match (app.system_theme()) {
+        Light => false,
+        _ => true,
+    };
     match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
         ok(noto) => {
             handler.ui.font = some(noto);
@@ -167,6 +240,10 @@ i32 main() uses io {
     }
     bool custom = window.custom_title_bar && !has_env(&arena, "SOSU_SYSTEM_TITLE_BAR");
     app.TitleBar*? bar = custom ? some(handler as app.TitleBar*) : none;
-    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar, icon: icon.width > 0 ? some(icon) : none };
+    str title = match (handler.ui.catalog) {
+        some(c) => c.text(window.title),
+        none => window.title,
+    };
+    app.Config config = app.Config{ title: title, width: window.width, height: window.height, title_bar: bar, icon: icon.width > 0 ? some(icon) : none };
     return app.run(config, handler as app.Handler*);
 }

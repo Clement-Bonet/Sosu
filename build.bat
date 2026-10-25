@@ -24,6 +24,7 @@ cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\sema_tests.exe src\
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\fmt_tests.exe src\lib\*.c tests\fmt_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\json_tests.exe src\lib\*.c tests\json_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\lsp_tests.exe src\lib\*.c tests\lsp_tests.c || exit /b 1
+cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\i18n_tests.exe src\lib\*.c tests\i18n_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\program_tests.exe tests\program_tests.c || exit /b 1
 
 if /i not "%1"=="test" exit /b 0
@@ -35,6 +36,7 @@ build\sema_tests.exe || exit /b 1
 build\fmt_tests.exe || exit /b 1
 build\json_tests.exe || exit /b 1
 build\lsp_tests.exe || exit /b 1
+build\i18n_tests.exe || exit /b 1
 build\program_tests.exe build\sosuc.exe || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 build\sosuc.exe check packages\platform || exit /b 1
@@ -42,9 +44,11 @@ build\sosuc.exe check examples\window || exit /b 1
 build\sosuc.exe check tests\window || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1
 build\sosuc.exe test packages\ui || exit /b 1
+build\sosuc.exe test packages\i18n || exit /b 1
 build\sosuc.exe check examples\form || exit /b 1
 build\sosuc.exe check examples\editor || exit /b 1
 build\sosuc.exe check examples\workspace || exit /b 1
+build\sosuc.exe check examples\themes || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

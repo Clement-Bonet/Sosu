@@ -1,0 +1,10 @@
+# Themes and styles of `ui` (spec §10.7): the theme of the system, dark, light or violet, and
+# styles that some widgets take over the theme.
+[package]
+name = "themes"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }

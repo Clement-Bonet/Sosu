@@ -1,0 +1,106 @@
+// The themes and styles of the example (spec §10.7). A theme gives every kind of widget its
+// colors and sizes; a style, as a class of CSS, changes those of the nodes that name it.
+
+theme Dark {
+    accent: #89B4FA               // names of the theme: colors and numbers used below
+    surface: #313244
+    color: #CDD6F4                // `color`, `font_size` and `accent` are for every widget too
+    field: #181825
+
+    Window { background: #1E1E2E }
+    Title { color: accent }
+    Button {
+        background: surface
+        radius: 6
+        padding: 16
+        hover { background: #45475A }
+        pressed { background: field }
+        disabled { color: #6C7086, background: field }
+    }
+    TextField {
+        background: field
+        border: surface
+        radius: 4
+        placeholder { color: #7F849C }
+        focus { border: accent }
+    }
+    Dropdown {
+        background: field
+        border: surface
+        radius: 4
+        focus { border: accent }
+        open { border: accent }
+    }
+    List {
+        background: field
+        border: surface
+        selection { background: #45475A }
+    }
+}
+
+// The same, light: the selectors of Dark, with its names changed.
+theme Light : Dark {
+    accent: #1E66F5
+    surface: #CCD0DA
+    color: #4C4F69
+    field: #FFFFFF
+
+    Window { background: #EFF1F5 }
+    Button {
+        hover { background: #BCC0CC }
+        pressed { background: #ACB0BE }
+        disabled { color: #9CA0B0, background: #E6E9EF }
+    }
+    List { selection { background: #DCE0E8 } }
+}
+
+// Light, in violet, with rounder buttons.
+theme Violet : Light {
+    accent: #8839EF
+    color: #362159
+    surface: #DCCBF7
+
+    Window { background: #EDE4FC }
+    Button { radius: 14 }
+}
+
+// A button that calls for the main action.
+style Primary {
+    background: #1E66F5
+    color: #FFFFFF
+    hover { background: #3D7BF7 }
+    pressed { background: #1550C8 }
+}
+
+// A button whose action cannot be undone.
+style Danger {
+    background: #D20F39
+    color: #FFFFFF
+    hover { background: #E64553 }
+    pressed { background: #AA0A2D }
+}
+
+// A framed column, for a group of widgets, on a dark or a light window.
+style CardDark {
+    background: #24273A
+    border: #45475A
+    border_width: 1
+    radius: 10
+    padding: 16
+    gap: 10
+}
+
+style CardLight {
+    background: #FFFFFF
+    border: #CCD0DA
+    border_width: 1
+    radius: 10
+    padding: 16
+    gap: 10
+}
+
+// A text of less importance.
+style Muted {
+    color: #7F849C
+    font_size: 15
+}

@@ -1,0 +1,84 @@
+// The state of the example: the theme chosen, the size of the texts, and what the widgets edit.
+// Its interface is in screen.ui.sosu.
+import ui.widgets;
+
+pub enum Choice {
+    System,  // that of the system, followed when it changes
+    Dark,
+    Light,
+    Violet,
+}
+
+pub enum Size {
+    Small,
+    Medium,
+    Large,
+}
+
+pub class Demo {
+    pub mut Choice choice;
+    pub mut bool system_dark;
+    pub mut Size size;
+    pub mut widgets.TextBuffer name;
+    pub mut bool notify;
+    pub mut bool compact;
+    pub mut i32 selected;
+    pub mut i32 deleted;
+    mut u8[12] digits;
+
+    void init(bool system_dark) {
+        choice = System;
+        self.system_dark = system_dark;
+        size = Medium;
+        name = widgets.TextBuffer{ };
+        notify = true;
+        compact = false;
+        selected = 0;
+        deleted = 0;
+        digits = [0; 12];
+    }
+
+    // Whether the theme chosen is dark.
+    pub bool dark() {
+        return match (choice) {
+            System => system_dark,
+            Dark => true,
+            _ => false,
+        };
+    }
+
+    // The size of the texts, in pixels per em.
+    pub f32 font_size() {
+        return match (size) {
+            Small => 15.0,
+            Medium => 18.0,
+            Large => 22.0,
+        };
+    }
+
+    pub void save() {
+        selected = 0;
+    }
+
+    pub void delete() {
+        deleted += 1;
+    }
+
+    // `deleted` in decimal digits.
+    pub str times() {
+        mut usize at = 12;
+        mut i32 n = deleted;
+        while (true) {
+            at -= 1;
+            digits[at] = (48 + n % 10) as u8;
+            n /= 10;
+            if (n == 0 || at == 0) {
+                break;
+            }
+        }
+        return match (str.from_bytes(digits[at..12])) {
+            ok(text) => text,
+            err(e) => "",
+        };
+    }
+}

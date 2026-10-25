@@ -99,6 +99,52 @@ pub struct Canvas {
         }
     }
 
+    // A rectangle with corners rounded by `radius` pixels, antialiased: a pixel near a corner is
+    // covered by the part of its 4 by 4 samples inside the shape. A radius of 0 is `fill`.
+    pub void fill_rounded(Rect rect, f32 radius, Color color) {
+        f32 r = max(min(radius, min(rect.w, rect.h) / 2.0), 0.0);
+        if (r < 0.5) {
+            fill(rect, color);
+            return;
+        }
+        rounded(rect, r, 0.0, color);
+    }
+
+    // The border of a rounded rectangle, `thickness` pixels wide, inside it.
+    pub void stroke_rounded(Rect rect, f32 radius, Color color, f32 thickness) {
+        f32 r = max(min(radius, min(rect.w, rect.h) / 2.0), 0.0);
+        if (r < 0.5) {
+            stroke(rect, color, thickness);
+            return;
+        }
+        rounded(rect, r, max(thickness, 0.0), color);
+    }
+
+    // The coverage of a rounded rectangle (`ring` > 0: only its border, that wide), blended.
+    void rounded(Rect rect, f32 r, f32 ring, Color color) {
+        i32 x0 = max(clamp(rect.x, width), clip.x0);
+        i32 y0 = max(clamp(rect.y, height), clip.y0);
+        i32 x1 = min(clamp(rect.x + rect.w, width), clip.x1);
+        i32 y1 = min(clamp(rect.y + rect.h, height), clip.y1);
+        for (mut i32 y = y0; y < y1; y += 1) {
+            for (mut i32 x = x0; x < x1; x += 1) {
+                mut u32 inside = 0;
+                for (mut i32 sy = 0; sy < 4; sy += 1) {
+                    for (mut i32 sx = 0; sx < 4; sx += 1) {
+                        f32 px = x as f32 + (sx as f32 + 0.5) / 4.0;
+                        f32 py = y as f32 + (sy as f32 + 0.5) / 4.0;
+                        bool outer = in_rounded(rect, r, px, py);
+                        bool inner = ring > 0.0 && in_rounded(Rect{ x: rect.x + ring, y: rect.y + ring, w: rect.w - 2.0 * ring, h: rect.h - 2.0 * ring }, max(r - ring, 0.0), px, py);
+                        inside += outer && !inner ? 1 : 0;
+                    }
+                }
+                if (inside > 0) {
+                    blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
+                }
+            }
+        }
+    }
+
     // The border of a rectangle, `thickness` pixels wide, inside the rectangle.
     pub void stroke(Rect rect, Color color, f32 thickness) {
         f32 t = min(thickness, min(rect.w, rect.h) / 2.0);
@@ -267,6 +313,18 @@ pub struct Canvas {
 }
 
 // The size of `text` drawn by `Canvas.text`: its longest line, and its number of lines.
+// Whether (x, y) is inside `rect` with its corners rounded by `r`.
+bool in_rounded(Rect rect, f32 r, f32 x, f32 y) {
+    if (rect.w <= 0.0 || rect.h <= 0.0 || x < rect.x || y < rect.y || x >= rect.x + rect.w || y >= rect.y + rect.h) {
+        return false;
+    }
+    f32 cx = x < rect.x + r ? rect.x + r : x > rect.x + rect.w - r ? rect.x + rect.w - r : x;
+    f32 cy = y < rect.y + r ? rect.y + r : y > rect.y + rect.h - r ? rect.y + rect.h - r : y;
+    f32 dx = x - cx;
+    f32 dy = y - cy;
+    return dx * dx + dy * dy <= r * r;
+}
+
 pub Rect text_size(str text, i32 scale) {
     i32 step = font.size() * max(scale, 1);
     mut i32 widest = 0;
@@ -448,4 +506,17 @@ test "images are drawn scaled, with their alpha" {
     c.clear(Color{ r: 0, g: 0, b: 0 });
     c.draw_image(img, Rect{ x: 2.0, y: 2.0, w: 8.0, h: 8.0 });
     assert(c.at(2, 2) == 0xFFFF0000 && c.at(3, 2) == 0xFF000000);  // clipped
+}
+
+test "rounded rectangles" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut Canvas c = create(&arena, 40, 40);
+    c.fill_rounded(Rect{ x: 0.0, y: 0.0, w: 40.0, h: 20.0 }, 8.0, Color{ r: 255, g: 255, b: 255 });
+    assert(c.at(0, 0) == 0 && c.at(20, 10) == 0xFFFFFFFF && c.at(20, 0) == 0xFFFFFFFF);  // the corner left out
+    assert(c.at(1, 1) >> 24 < 255 && c.at(4, 4) == 0xFFFFFFFF);
+    c.stroke_rounded(Rect{ x: 0.0, y: 20.0, w: 40.0, h: 20.0 }, 6.0, Color{ r: 255, g: 0, b: 0 }, 2.0);
+    assert(c.at(20, 20) == 0xFFFF0000 && c.at(20, 30) == 0 && c.at(0, 30) == 0xFFFF0000);
+    c.fill_rounded(Rect{ x: 30.0, y: 0.0, w: 10.0, h: 10.0 }, 0.0, Color{ r: 0, g: 0, b: 255 });  // radius 0: square
+    assert(c.at(39, 0) == 0xFF0000FF);
 }

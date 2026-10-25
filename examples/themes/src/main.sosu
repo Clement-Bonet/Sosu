@@ -1,0 +1,99 @@
+// Themes and styles of `ui` (spec §10.7), written in look.ui.sosu: the radio buttons choose the
+// theme, that of the system (followed when the user changes it), Dark, Light, which starts from
+// Dark, or Violet, which starts from Light. The size of the texts changes `all.font_size`, which
+// every widget inherits. Some nodes take a style over the theme, as a class of CSS: Primary and
+// Danger buttons, Card columns, Muted texts. The window is in screen.ui.sosu, its state in
+// state.sosu.
+//
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/themes` from
+// the root of the repository, where the font is found.
+import std.io;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import ui.widgets;
+import themes.look;
+import themes.screen;
+import themes.state;
+
+class App : app.Handler {
+    mut widgets.Ui ui;
+    state.Demo* s;
+
+    void init(state.Demo* s) {
+        ui = widgets.Ui{ };
+        self.s = s;
+    }
+
+    // The theme chosen, with the size of the texts chosen.
+    widgets.Theme theme() {
+        widgets.Theme chosen = match (s.choice) {
+            System => s.system_dark ? look.Dark() : look.Light(),
+            Dark => look.Dark(),
+            Light => look.Light(),
+            Violet => look.Violet(),
+        };
+        return widgets.over(chosen, widgets.Theme{ all: widgets.Props{ font_size: some(s.font_size()) } });
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            SystemThemeChanged(dark) => {
+                s.system_dark = dark;  // followed when `System` is chosen
+            },
+            Key(code, down, mods) => {
+                ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        ui.theme = some(theme());  // `Window { background }` of the theme clears the surface
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Themes(&f, s);
+        f.finish();
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    bool dark = match (app.system_theme()) {
+        Light => false,
+        _ => true,
+    };
+    state.Demo* s = arena.new(state.Demo, dark);
+    App* handler = arena.new(App, s);
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(noto) => {
+            handler.ui.font = some(noto);
+        },
+        err(e) => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    widgets.Window window = screen.ThemesConfig();
+    return app.run(app.Config{ title: window.title, width: window.width, height: window.height }, handler as app.Handler*);
+}

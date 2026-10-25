@@ -1,0 +1,36 @@
+# French, for the tests of i18n.catalog.
+msgid ""
+msgstr ""
+"Language: fr\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+msgid "Save"
+msgstr "Enregistrer"
+
+msgctxt "state"
+msgid "Open"
+msgstr "Ouvert"
+
+msgctxt "verb"
+msgid "Open"
+msgstr "Ouvrir"
+
+#: screen.ui.sosu:12
+msgid "{count} file"
+msgid_plural "{count} files"
+msgstr[0] "{count} fichier"
+msgstr[1] "{count} fichiers"
+
+msgid ""
+"A long "
+"text"
+msgstr ""
+"Un \"long\" "
+"texte\tici"
+
+#, fuzzy
+msgid "Quit"
+msgstr "Quitter"
+
+msgid "Help"
+msgstr ""

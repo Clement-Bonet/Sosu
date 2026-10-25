@@ -1,7 +1,7 @@
 #include "token.h"
 
 static const char *const names[TOK_COUNT] = {
-    "EOF", "ERROR", "IDENT", "INT", "FLOAT", "STRING", "CHAR",
+    "EOF", "ERROR", "IDENT", "INT", "FLOAT", "STRING", "CHAR", "COLOR",
 #define X(name, text) #name,
     SOSU_KEYWORDS(X)
     SOSU_PUNCTUATION(X)
@@ -10,7 +10,7 @@ static const char *const names[TOK_COUNT] = {
 
 static const char *const descriptions[TOK_COUNT] = {
     "end of file", "invalid token", "identifier", "integer literal",
-    "float literal", "string literal", "character literal",
+    "float literal", "string literal", "character literal", "color",
 #define X(name, text) "`" text "`",
     SOSU_KEYWORDS(X)
     SOSU_PUNCTUATION(X)
@@ -18,7 +18,7 @@ static const char *const descriptions[TOK_COUNT] = {
 };
 
 static const char *const spellings[TOK_COUNT] = {
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 #define X(name, text) text,
     SOSU_KEYWORDS(X)
     SOSU_PUNCTUATION(X)
