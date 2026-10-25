@@ -1,7 +1,8 @@
 // A workspace in the manner of VS Code: a title bar drawn by the program, holding its icon, its
 // menus, a search field, two dropdowns and buttons, over three panes that use every widget of `ui`: the files
-// (a list), the details of the file chosen (fields with formats, radios, a dropdown,
-// checkboxes, buttons that are enabled or not) and the output (a list of lines).
+// (a tree), the details of the file chosen in two tabs (fields with formats, radios, a dropdown,
+// a group of checkboxes, buttons that are enabled or not) and the output (a list of lines), in a
+// grid that follows the size of the window.
 import workspace.state;
 
 window Workspace(state.Workspace* w) {
@@ -59,12 +60,34 @@ window Workspace(state.Workspace* w) {
         Button("Build", on_click: w.build)
         Button("Run", on_click: w.run)
     }
-    Row(gap: 24, padding: 16) {
+    Grid(columns: [260, Fill, 380], rows: [Fill], gap: 24, padding: 16) {
         Column(gap: 8) {
             Text("{count} file", plural: "{count} files", count: w.count)
-            List(width: 260, height: 520, selected: w.chosen) {
-                for (i32 i in 0..w.count) {
-                    Text(w.files[i].name.text())
+            Row(gap: 8) {
+                Button("Add", on_click: w.new_file)
+                Button("Remove", on_click: w.remove, enabled: w.has_choice())
+            }
+            Tree(width: 260, height: Fill, selected: w.tree_item) {
+                Branch("Sources", open: w.open_sources) {
+                    for (i32 i in 0..w.count, key: i) {
+                        if (w.is(i, Source)) {
+                            Leaf(w.files[i].name.text(), on_click: w.choose(i))
+                        }
+                    }
+                }
+                Branch("Images", open: w.open_images) {
+                    for (i32 i in 0..w.count, key: i) {
+                        if (w.is(i, Image)) {
+                            Leaf(w.files[i].name.text(), on_click: w.choose(i))
+                        }
+                    }
+                }
+                Branch("Binaries", open: w.open_binaries) {
+                    for (i32 i in 0..w.count, key: i) {
+                        if (w.is(i, Binary)) {
+                            Leaf(w.files[i].name.text(), on_click: w.choose(i))
+                        }
+                    }
                 }
             }
             ContextMenu {
@@ -73,34 +96,46 @@ window Workspace(state.Workspace* w) {
                 Separator
                 MenuItem("Remove", on_click: w.remove, shortcut: "Delete", enabled: w.has_choice())
             }
-            Row(gap: 8) {
-                Button("Add", on_click: w.new_file)
-                Button("Remove", on_click: w.remove, enabled: w.has_choice())
-            }
         }
         Column(gap: 8) {
             Text(w.chosen_name())
             if (w.has_choice()) {
                 Details(w)
             } else {
-                Text("Choose a file in the list.")
+                Text("Choose a file in the tree.")
             }
         }
         Column(gap: 8) {
             Text("Output")
-            List(width: 380, height: 520) {
+            Text(w.status.text())
+            List(width: 380, height: Fill) {
                 for (i32 i in 0..w.lines) {
                     Text(w.output[i].text())
                 }
             }
-            Text(w.status.text())
         }
     }
 }
 
-// The details of the file chosen, edited until Save or Revert.
+// The details of the file chosen, edited until Save or Revert: in two tabs.
 component Details(state.Workspace* w) {
-    TextField(bind: w.details.name, width: 400, placeholder: "File name")
+    Tabs(bind: w.page) {
+        Tab("General") {
+            General(w)
+        }
+        Tab("Advanced") {
+            Advanced(w)
+        }
+    }
+    Row(gap: 8) {
+        Button("Save", on_click: w.save, enabled: w.changed())
+        Button("Revert", on_click: w.revert, enabled: w.changed())
+    }
+}
+
+// Its name, its size and dates, its kind.
+component General(state.Workspace* w) {
+    TextField(bind: w.details.name, width: Fill, placeholder: "File name")
     Row(gap: 16) {
         Column(gap: 4) {
             Text("Size (KB)")
@@ -121,19 +156,18 @@ component Details(state.Workspace* w) {
         Radio("Binary", bind: w.details.kind, value: Binary)
         Radio("Image", bind: w.details.kind, value: Image)
     }
+}
+
+// Its encoding and its options.
+component Advanced(state.Workspace* w) {
     Text("Encoding")
     Dropdown(bind: w.details.encoding, width: 160) {
         Option("UTF-8", value: Utf8)
         Option("Latin-1", value: Latin1)
         Option("UTF-16", value: Utf16)
     }
-    Row(gap: 16) {
+    Group("Options") {
         Checkbox("Read only", bind: w.details.read_only)
         Checkbox("Hidden", bind: w.details.hidden)
-    }
-    Space(8)
-    Row(gap: 8) {
-        Button("Save", on_click: w.save, enabled: w.changed())
-        Button("Revert", on_click: w.revert, enabled: w.changed())
     }
 }

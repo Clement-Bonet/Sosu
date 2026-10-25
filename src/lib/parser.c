@@ -28,6 +28,11 @@ typedef struct {
     /* in the items of a `Menu` or a `ContextMenu`; in a `MenuBar` */
     bool ui_in_menu;
     bool ui_in_menu_bar;
+    /* the items of a `Grid`, and the cells its nodes gave as literals, `row * 64 + col` (spec §10.8) */
+    bool ui_in_grid;
+    bool ui_in_tabs; /* the items of a `Tabs`: its `Tab` nodes only */
+    bool ui_in_tree; /* the items of a `Tree` or a `Branch`: `Branch` and `Leaf` nodes only */
+    struct { uint64_t *items; size_t count; size_t cap; } ui_cells;
 } Parser;
 
 #define VEC(T) struct { T *items; size_t count; size_t cap; }
@@ -1395,6 +1400,7 @@ typedef struct {
 } UiNodeKind;
 
 static const UiNodeKind ui_nodes[] = {
+    { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
     { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
     { "List", 0, false, { "width", "height", "selected", "focus", "style", NULL }, true },
@@ -1410,6 +1416,12 @@ static const UiNodeKind ui_nodes[] = {
     { "Dropdown", 0, false, { "bind", "width", "on_change", "placeholder", "focus", "style", NULL }, true },
     { "Option", 1, false, { "value", "plural", "count", "context", NULL }, false },
     { "Image", 1, false, { "size", "style", NULL }, false },
+    { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
+    { "Tabs", 0, false, { "bind", "focus", "style", NULL }, true },
+    { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
+    { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
+    { "Branch", 1, false, { "open", "plural", "count", "context", NULL }, true },
+    { "Leaf", 1, false, { "on_click", "plural", "count", "context", NULL }, false },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -1418,11 +1430,11 @@ static const UiNodeKind ui_nodes[] = {
 };
 
 #define UI_CONTAINERS                                                                                      \
-    "only `Column`, `Row`, `List`, `Scroll`, `TitleBar`, `Dropdown`, `MenuBar`, `Menu` and `ContextMenu` " \
-    "contain other nodes"
+    "only `Column`, `Row`, `Grid`, `Group`, `List`, `Scroll`, `Tabs`, `Tab`, `Tree`, `Branch`, `TitleBar`, " \
+    "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List",
+static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1558,12 +1570,6 @@ static void ui_parse_args(Parser *p, UiArgs *args) {
         } while (accept(p, TOK_COMMA));
     }
     expect_closing(p, TOK_RPAREN);
-}
-
-/* Properties of the spec (§10.2) that v0 does not implement yet. */
-static bool ui_planned_property(Name name) {
-    return name_text_is(name, "align") || name_text_is(name, "row") || name_text_is(name, "col") ||
-           name_text_is(name, "span");
 }
 
 /* The value of the property `name`, or NULL. */
@@ -1732,10 +1738,6 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
             ui_has_placeholder(p, ui_prop(args, "placeholder"), prop.text, prop.length)) {
             continue;  /* a value in braces: `Text("Hello, {name}", name: n)` */
         }
-        if (ui_planned_property(prop)) {
-            error_at(p, "E0216", prop.offset, prop.length, "`%.*s:` is not supported yet", (int)prop.length, prop.text);
-            return false;
-        }
         Diagnostic *d = error_at(p, "E0215", prop.offset, prop.length, "`%s` has no property `%.*s`", kind->name,
                                  (int)prop.length, prop.text);
         char list[128] = "";
@@ -1757,6 +1759,11 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
     if (strcmp(kind->name, "Radio") == 0 && !ui_prop(args, "value")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Radio` needs `value:`");
         diag_help(d, "give the value it chooses: `Radio(\"Small\", bind: state.size, value: Small)`");
+        return false;
+    }
+    if (strcmp(kind->name, "Grid") == 0 && !ui_prop(args, "columns")) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Grid` needs `columns:`");
+        diag_help(d, "give the size of each column: `Grid(columns: [Auto, Fill]) { ... }`");
         return false;
     }
     if (strcmp(kind->name, "Scroll") == 0 && (!ui_prop(args, "width") || !ui_prop(args, "height"))) {
@@ -1804,6 +1811,28 @@ static bool ui_check_place(Parser *p, const UiNodeKind *kind, Name node, bool wi
     if (p->ui_in_menu_bar && !menu) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `MenuBar` contains only `Menu` nodes");
         diag_help(d, "`MenuBar { Menu(\"File\") { ... } Menu(\"Edit\") { ... } }`");
+        return false;
+    }
+    bool item = kind && (strcmp(kind->name, "Branch") == 0 || strcmp(kind->name, "Leaf") == 0);
+    if (p->ui_in_tree && !item) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a tree contains only `Branch` and `Leaf` nodes");
+        diag_help(d, "`Tree(selected: state.item) { Branch(\"src\") { Leaf(\"main.sosu\") } }`");
+        return false;
+    }
+    if (item && !p->ui_in_tree) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `%s` goes in a `Tree` or a `Branch`", kind->name);
+        diag_help(d, "`Tree(selected: state.item) { Branch(\"src\") { Leaf(\"main.sosu\") } }`");
+        return false;
+    }
+    bool tab = kind && strcmp(kind->name, "Tab") == 0;
+    if (p->ui_in_tabs && !tab) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Tabs` contains only `Tab` nodes");
+        diag_help(d, "one tab per page: `Tabs(bind: state.page) { Tab(\"General\") { ... } }`");
+        return false;
+    }
+    if (tab && !p->ui_in_tabs) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Tab` goes in a `Tabs`");
+        diag_help(d, "`Tabs(bind: state.page) { Tab(\"General\") { ... } Tab(\"Files\") { ... } }`");
         return false;
     }
     if (title_bar && (!window_top || p->ui_title_bar)) {
@@ -1920,6 +1949,7 @@ static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_
 }
 
 static Expr *ui_call(Parser *p, Expr *callee, Expr *arg, size_t offset, size_t length);
+static Expr *ui_some(Parser *p, Expr *value);
 typedef VEC(FieldInit) UiFields;
 static Expr *ui_struct(Parser *p, const char *type, UiFields *fields, size_t offset, size_t length);
 
@@ -1968,6 +1998,140 @@ static Expr *ui_layout_size(Parser *p, Expr *value, size_t offset) {
     return minus;
 }
 
+/* ---- Grids (spec §10.8) ---- */
+
+/* `widgets.type.name`, placed at `at` */
+static Expr *ui_variant(Parser *p, const Expr *at, const char *type, Name name) {
+    Expr *module = ui_expr(p, EXPR_NAME, at->offset, at->length);
+    module->as.name = ui_name("widgets", at->offset);
+    Expr *of = ui_expr(p, EXPR_FIELD, at->offset, at->length);
+    of->as.field.object = module;
+    of->as.field.name = ui_name(type, at->offset);
+    Expr *variant = ui_expr(p, EXPR_FIELD, at->offset, at->length);
+    variant->as.field.object = of;
+    variant->as.field.name = name;
+    return variant;
+}
+
+static bool ui_is_name(const Expr *value, const char *name) {
+    return value && value->kind == EXPR_NAME && name_text_is(value->as.name, name);
+}
+
+/* `Fill(2)`, `Pixels(120)`: a call of `name` with one value */
+static bool ui_is_call_of(const Expr *value, const char *name) {
+    return value && value->kind == EXPR_CALL && value->as.call.arg_count == 1 && ui_is_name(value->as.call.callee, name);
+}
+
+/* A size of a column or a row: `120` is `widgets.Size.Pixels(120.0)`, `Auto` and `Fill` are
+   qualified, `Fill` alone weighs 1; another expression is a `widgets.Size` already. */
+static Expr *ui_size(Parser *p, Expr *value) {
+    if (value->kind == EXPR_INT || value->kind == EXPR_FLOAT) {
+        Name pixels = ui_name("Pixels", value->offset);
+        return ui_call(p, ui_variant(p, value, "Size", pixels), ui_float(p, value, value->offset, 0), value->offset,
+                       value->length);
+    }
+    if (ui_is_name(value, "Auto")) return ui_variant(p, value, "Size", value->as.name);
+    if (ui_is_name(value, "Fill")) {
+        return ui_call(p, ui_variant(p, value, "Size", value->as.name), ui_float(p, NULL, value->offset, 1),
+                       value->offset, value->length);
+    }
+    if (ui_is_call_of(value, "Fill") || ui_is_call_of(value, "Pixels")) {
+        Expr *callee = value->as.call.callee;
+        value->as.call.callee = ui_variant(p, callee, "Size", callee->as.name);
+        value->as.call.args[0] = ui_float(p, value->as.call.args[0], value->offset, 0);
+    }
+    return value;
+}
+
+/* A width or a height in pixels: `Fill` is what is left (`ui_frame.fill_width()`), `Auto` the
+   size of the widget, `fallback`. */
+static Expr *ui_extent(Parser *p, Expr *value, size_t offset, uint64_t fallback, bool horizontal) {
+    if (ui_is_name(value, "Fill") || ui_is_call_of(value, "Fill")) {
+        return ui_frame_call(p, value->offset, value->length, horizontal ? "fill_width" : "fill_height", NULL, 0);
+    }
+    if (ui_is_name(value, "Auto")) return ui_float(p, NULL, value->offset, fallback);
+    return ui_float(p, value, offset, fallback);
+}
+
+/* `-1` */
+static Expr *ui_minus_one(Parser *p, size_t offset) {
+    Expr *minus = ui_expr(p, EXPR_UNARY, offset, 0);
+    minus->as.unary.op = TOK_MINUS;
+    minus->as.unary.operand = ui_int(p, offset, 1);
+    return minus;
+}
+
+static bool ui_cell_property(Name name) {
+    return name_text_is(name, "row") || name_text_is(name, "col") || name_text_is(name, "span") ||
+           name_text_is(name, "row_span") || name_text_is(name, "align");
+}
+
+/* The cell of a node in a `Grid`: its properties `row:`, `col:`, `span:`, `row_span:` and
+   `align:` are taken out of `args`, and become `ui_frame.cell(row, col, span, row_span, align)`
+   before it; NULL when it gives none. Outside a grid they are an error (`*valid` false). */
+static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, bool *valid) {
+    Expr *row = NULL, *col = NULL, *span = NULL, *row_span = NULL, *align = NULL;
+    size_t kept = 0;
+    for (size_t i = 0; i < args->props.count; i++) {
+        UiProp prop = args->props.items[i];
+        if (!ui_cell_property(prop.name)) {
+            args->props.items[kept++] = prop;
+            continue;
+        }
+        if (!p->ui_in_grid) {
+            Diagnostic *d = error_at(p, "E0215", prop.name.offset, prop.name.length, "`%.*s:` places a node in a `Grid`",
+                                     (int)prop.name.length, prop.name.text);
+            diag_help(d, "put the node in a grid: `Grid(columns: [Auto, Fill]) { ... }`");
+            *valid = false;
+            return NULL;
+        }
+        Expr **slot = name_text_is(prop.name, "row") ? &row : name_text_is(prop.name, "col") ? &col
+                    : name_text_is(prop.name, "span") ? &span : name_text_is(prop.name, "row_span") ? &row_span : &align;
+        if (*slot) {
+            error_at(p, "E0215", prop.name.offset, prop.name.length, "`%.*s` is given twice", (int)prop.name.length,
+                     prop.name.text);
+            *valid = false;
+            return NULL;
+        }
+        *slot = prop.value;
+    }
+    args->props.count = kept;
+    if (!row && !col && !span && !row_span && !align) return NULL;
+    if (row && col && row->kind == EXPR_INT && col->kind == EXPR_INT) {
+        uint64_t key = row->as.int_value * 64 + col->as.int_value;
+        for (size_t i = 0; i < p->ui_cells.count; i++) {
+            if (p->ui_cells.items[i] == key) {
+                Diagnostic *d = error_at(p, "E0215", row->offset, col->offset + col->length - row->offset,
+                                         "the cell (%llu, %llu) is given twice", (unsigned long long)row->as.int_value,
+                                         (unsigned long long)col->as.int_value);
+                diag_help(d, "a cell holds one node: put several in a `Column` or a `Row` in it");
+                *valid = false;
+                return NULL;
+            }
+        }
+        SOSU_VEC_PUSH(&p->ui_cells, key);
+    }
+    if (align && align->kind == EXPR_NAME) align = ui_variant(p, align, "Align", align->as.name);
+    Expr *cell_args[5] = { row ? row : ui_minus_one(p, start), col ? col : ui_minus_one(p, start),
+                           span ? span : ui_int(p, start, 1), row_span ? row_span : ui_int(p, start, 1),
+                           align ? align : ui_variant(p, ui_expr(p, EXPR_NAME, start, length), "Align", ui_name("Start", start)) };
+    return ui_stmt(p, ui_frame_call(p, start, length, "cell", cell_args, 5));
+}
+
+/* `columns: [...]` or `rows: [...]`: `ui_frame.grid_column(size)` or `grid_row(size)` for each. */
+static void ui_grid_sizes(Parser *p, StmtVec *out, Expr *sizes, const char *method) {
+    if (!sizes) return;
+    if (sizes->kind != EXPR_ARRAY || sizes->as.array.repeat) {
+        Diagnostic *d = error_at(p, "E0215", sizes->offset, sizes->length, "the sizes of a grid are a list");
+        diag_help(d, "one size per column or row: `[120, Auto, Fill, Fill(2)]`");
+        return;
+    }
+    for (size_t i = 0; i < sizes->as.array.count; i++) {
+        Expr *size = ui_size(p, sizes->as.array.items[i]);
+        SOSU_VEC_PUSH(out, ui_frame_stmt(p, size->offset, size->length, method, size));
+    }
+}
+
 /* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
 static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     size_t start = cur(p)->offset;
@@ -1991,10 +2155,19 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         free(args.props.items);
         return;
     }
+    bool in_grid = p->ui_in_grid;
+    bool in_tabs = p->ui_in_tabs;
+    bool in_tree = p->ui_in_tree;
+    bool placed = true;
+    Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
+    if (cell) SOSU_VEC_PUSH(out, cell);
+    p->ui_in_grid = false;  /* the children of a node are not cells, unless it is a grid */
+    p->ui_in_tabs = false;
+    p->ui_in_tree = false;
     if (!kind) {
         ui_component(p, out, path, &args, start, length);
     } else {
-        bool valid = ui_check_args(p, kind, node, &args);
+        bool valid = placed && ui_check_args(p, kind, node, &args);
         if (kind->children != check(p, TOK_LBRACE)) {
             if (kind->children) {
                 report_expected(p, "E0215", "`{` and the nodes it contains", false);
@@ -2005,7 +2178,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
-        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem" };
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab", "Branch", "Leaf" };
         for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
             if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
         }
@@ -2045,14 +2218,15 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
                 choice = ui_expr(p, EXPR_NAME, start, length);
                 choice->as.name = ui_name("none", start);
             }
-            Expr *list_args[3] = { ui_float(p, ui_prop(&args, "width"), start, 300),
-                                   ui_float(p, ui_prop(&args, "height"), start, 200), choice };
+            Expr *list_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
         } else if (name_text_is(node, "Scroll")) {
             /* f.scroll(width, height), the nodes, f.end_scroll() */
-            Expr *size[2] = { ui_float(p, ui_prop(&args, "width"), start, 0), ui_float(p, ui_prop(&args, "height"), start, 0) };
+            Expr *size[2] = { ui_extent(p, ui_prop(&args, "width"), start, 0, true),
+                              ui_extent(p, ui_prop(&args, "height"), start, 0, false) };
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "scroll", size, 2)));
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_scroll", NULL, 0)));
@@ -2113,7 +2287,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
         } else if (name_text_is(node, "TextField")) {
-            Expr *call_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_float(p, ui_prop(&args, "width"), start, 200),
+            Expr *call_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 200, true),
                                    ui_format(p, &args, start, length) };
             Expr *field = ui_frame_call(p, start, length, call_args[2] ? "text_field_with" : "text_field", call_args,
                                         call_args[2] ? 3 : 2);
@@ -2140,7 +2314,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_title_bar", NULL, 0)));
         } else if (name_text_is(node, "Dropdown")) {
             /* f.dropdown(width) or f.dropdown_with(width, placeholder), the options, f.end_dropdown() */
-            Expr *width = ui_float(p, ui_prop(&args, "width"), start, 160);
+            Expr *width = ui_extent(p, ui_prop(&args, "width"), start, 160, true);
             Expr *hint = ui_translate(p, &args, ui_prop(&args, "placeholder"));
             Expr *drop_args[2] = { width, hint };
             const char *open = hint ? "dropdown_with" : "dropdown";
@@ -2151,8 +2325,134 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             p->ui_dropdown = NULL;
             p->ui_dropdown_change = NULL;
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_dropdown", NULL, 0)));
+        } else if (name_text_is(node, "Tree")) {
+            /* f.tree(width, height, some(&selected) or none), the branches and leaves, f.end_tree() */
+            Expr *selected = ui_prop(&args, "selected");
+            Expr *choice = ui_expr(p, EXPR_NAME, start, length);
+            choice->as.name = ui_name("none", start);
+            if (selected) choice = ui_some(p, ui_address(p, selected));
+            Expr *tree_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree", tree_args, 3)));
+            p->ui_in_tree = true;
+            ui_parse_children(p, out);
+            p->ui_in_tree = false;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_tree", NULL, 0)));
+        } else if (name_text_is(node, "Branch")) {
+            /* if (f.branch(text, some(&open) or none)) { the branches and leaves; f.end_branch(); } */
+            Expr *open = ui_prop(&args, "open");
+            Expr *state = ui_expr(p, EXPR_NAME, start, length);
+            state->as.name = ui_name("none", start);
+            if (open) state = ui_some(p, ui_address(p, open));
+            Expr *branch_args[2] = { value, state };
+            StmtVec inner = {0};
+            size_t body_start = cur(p)->offset;
+            p->ui_in_tree = true;
+            ui_parse_children(p, &inner);
+            p->ui_in_tree = false;
+            SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_branch", NULL, 0)));
+            Stmt *when = new_stmt(p, STMT_IF, start);
+            when->length = length;
+            when->as.if_.cond = ui_frame_call(p, start, length, "branch", branch_args, 2);
+            when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+            SOSU_VEC_PUSH(out, when);
+        } else if (name_text_is(node, "Leaf")) {
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "leaf", &value, 1), ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "Tabs")) {
+            /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
+            Expr *bound = ui_prop(&args, "bind");
+            Expr *chosen = ui_expr(p, EXPR_NAME, start, length);
+            chosen->as.name = ui_name("none", start);
+            if (bound) chosen = ui_some(p, ui_address(p, bound));
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tabs", &chosen, 1)));
+            p->ui_in_tabs = true;
+            ui_parse_children(p, out);
+            p->ui_in_tabs = false;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_tabs", NULL, 0)));
+        } else if (name_text_is(node, "Tab")) {
+            /* if (f.tab(title, closable, enabled)) { the nodes }, then if (f.tab_closed()) { on_close(); } */
+            Expr *on_close = ui_prop(&args, "on_close");
+            Expr *closable = ui_prop(&args, "closable");
+            Expr *enabled = ui_prop(&args, "enabled");
+            if (!closable) {
+                closable = ui_expr(p, EXPR_BOOL, start, length);
+                closable->as.bool_value = on_close != NULL;  /* a tab the program closes has a cross */
+            }
+            if (!enabled) {
+                enabled = ui_expr(p, EXPR_BOOL, start, length);
+                enabled->as.bool_value = true;
+            }
+            Expr *tab_args[3] = { value, closable, enabled };
+            StmtVec inner = {0};
+            size_t body_start = cur(p)->offset;
+            ui_parse_children(p, &inner);
+            Stmt *when = new_stmt(p, STMT_IF, start);
+            when->length = length;
+            when->as.if_.cond = ui_frame_call(p, start, length, "tab", tab_args, 3);
+            when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+            SOSU_VEC_PUSH(out, when);
+            if (on_close) SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "tab_closed", NULL, 0), on_close));
+        } else if (name_text_is(node, "Group")) {
+            /* f.group(title, gap, padding), or f.group_untitled(gap, padding), the nodes, f.end_group();
+               folding: if (f.group_folding(title, gap, padding, some(&open) or none)) { the nodes } */
+            Expr *gap = ui_layout_size(p, ui_prop(&args, "gap"), start);
+            Expr *padding = ui_layout_size(p, ui_prop(&args, "padding"), start);
+            Expr *collapsible = ui_prop(&args, "collapsible");
+            Expr *open = ui_prop(&args, "open");
+            if (collapsible && collapsible->kind != EXPR_BOOL) {
+                Diagnostic *d = error_at(p, "E0215", collapsible->offset, collapsible->length,
+                                         "`collapsible:` is `true` or `false`");
+                diag_help(d, "bind its state instead: `open: state.options_open`");
+                p->panic = false;
+            }
+            bool folding = open || (collapsible && collapsible->kind == EXPR_BOOL && collapsible->as.bool_value);
+            if (folding && !value) {
+                error_at(p, "E0215", node.offset, node.length, "a group that folds has a title");
+                p->panic = false;
+                folding = false;
+            }
+            if (folding) {
+                Expr *state = ui_expr(p, EXPR_NAME, start, length);
+                state->as.name = ui_name("none", start);
+                if (open) state = ui_some(p, ui_address(p, open));
+                Expr *group_args[4] = { value, gap, padding, state };
+                StmtVec inner = {0};
+                size_t body_start = cur(p)->offset;
+                ui_parse_children(p, &inner);
+                Stmt *when = new_stmt(p, STMT_IF, start);
+                when->length = length;
+                when->as.if_.cond = ui_frame_call(p, start, length, "group_folding", group_args, 4);
+                when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+                SOSU_VEC_PUSH(out, when);
+            } else {
+                Expr *group_args[3] = { value, gap, padding };
+                SOSU_VEC_PUSH(out, ui_stmt(p, value ? ui_frame_call(p, start, length, "group", group_args, 3)
+                                                   : ui_frame_call(p, start, length, "group_untitled", group_args + 1, 2)));
+                ui_parse_children(p, out);
+            }
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_group", NULL, 0)));
+        } else if (name_text_is(node, "Grid")) {
+            /* f.grid(gap, padding), f.grid_column(size)..., f.grid_row(size)..., the cells, f.end_grid() */
+            Expr *layout[2] = { ui_layout_size(p, ui_prop(&args, "gap"), start),
+                                ui_layout_size(p, ui_prop(&args, "padding"), start) };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "grid", layout, 2)));
+            ui_grid_sizes(p, out, ui_prop(&args, "columns"), "grid_column");
+            ui_grid_sizes(p, out, ui_prop(&args, "rows"), "grid_row");
+            p->panic = false;
+            VEC(uint64_t) cells = { p->ui_cells.items, p->ui_cells.count, p->ui_cells.cap };
+            memset(&p->ui_cells, 0, sizeof p->ui_cells);
+            p->ui_in_grid = true;
+            ui_parse_children(p, out);
+            free(p->ui_cells.items);
+            p->ui_cells.items = cells.items;
+            p->ui_cells.count = cells.count;
+            p->ui_cells.cap = cells.cap;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_grid", NULL, 0)));
         }
     }
+    p->ui_in_grid = in_grid;
+    p->ui_in_tabs = in_tabs;
+    p->ui_in_tree = in_tree;
     free(args.values.items);
     free(args.props.items);
 }
@@ -2386,7 +2686,7 @@ static const char *const ui_style_props[] = { "color", "background", "border", "
 /* The states and parts of a style: the fields of `widgets.Style` after `normal`. */
 static const char *const ui_style_states[] = { "hover", "pressed", "focus", "disabled", "checked",
                                                "open", "placeholder", "selection", "bar", NULL };
-#define UI_STYLE_STATES "hover, pressed, focus, disabled, checked, open, placeholder, selection, bar"
+#define UI_STYLE_STATES "hover, pressed, focus, disabled, checked, open, placeholder, selection, bar, title"
 #define UI_STYLE_PARTS 10 /* `normal` and the states */
 
 /* The selectors of a theme: a node, and its field in `widgets.Theme`. */
@@ -2395,10 +2695,12 @@ static const char *const ui_theme_selectors[][2] = {
     { "TextField", "text_field" }, { "Checkbox", "checkbox" }, { "Radio", "radio" }, { "Dropdown", "dropdown" },
     { "List", "list" }, { "Scroll", "scroll" }, { "Column", "column" }, { "Row", "row" },
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
+    { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
-    "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, Image"
+    "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
+    "Image, Grid, Group, Tabs, Tree"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };
@@ -2489,6 +2791,7 @@ static Expr *ui_parse_style_body(Parser *p, size_t offset, size_t length) {
                 for (size_t i = 0; ui_style_states[i]; i++) {
                     if (name_text_is(state, ui_style_states[i])) index = i + 1;
                 }
+                if (name_text_is(state, "title")) index = 7;  /* the title of a `Group`: the part `placeholder` */
                 if (!index || given[index]) {
                     if (!index) {
                         Diagnostic *d = error_at(p, "E0215", state.offset, state.length,

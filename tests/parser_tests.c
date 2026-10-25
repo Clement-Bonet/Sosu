@@ -500,13 +500,113 @@ static void test_ui_files(void) {
     expect_ui_error("window W() {\n    TextField(width: 9)\n}\n", "E0215", 2, 5);
     expect_ui_error("window W() {\n    Text(\"a\")\n    title: \"late\"\n}\n", "E0215", 3, 5);
     expect_ui_error("component C() {\n    width: 3\n}\n", "E0215", 2, 5);
-    expect_ui_error("window W() {\n    Row(align: End) { }\n}\n", "E0216", 2, 9);
+    expect_ui_error("window W() {\n    Row(align: End) { }\n}\n", "E0215", 2, 9);
     expect_ui_error("window W() {\n    Mine(size: 2)\n}\n", "E0215", 2, 10);
     expect_ui_error("window W() {\n    Text(\"a\") { }\n}\n", "E0215", 2, 15);
     expect_ui_error("struct S { }\n", "E0203", 1, 1);
 }
 
 /* `theme` and `style` blocks, and `style:` on nodes (spec §10.7). */
+/* `Grid`, its cells and sizes, and `Fill` widths (spec §10.8). */
+static void test_ui_grids(void) {
+    expect_ui("window W(S* s) {\n    Grid(columns: [120, Auto, Fill, Fill(2)], rows: [Auto, Fill]) {\n"
+              "        Text(\"a\")\n        Text(\"b\", row: 1, col: 2, span: 2, align: End)\n"
+              "        Scroll(width: Fill, height: Fill, row: 0, col: 1) { }\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame grid) (- 1.0) (- 1.0))\n"
+              "    (call (. ui_frame grid_column) (call (. (. widgets Size) Pixels) 120))\n"
+              "    (call (. ui_frame grid_column) (. (. widgets Size) Auto))\n"
+              "    (call (. ui_frame grid_column) (call (. (. widgets Size) Fill) 1.0))\n"
+              "    (call (. ui_frame grid_column) (call (. (. widgets Size) Fill) 2))\n"
+              "    (call (. ui_frame grid_row) (. (. widgets Size) Auto))\n"
+              "    (call (. ui_frame grid_row) (call (. (. widgets Size) Fill) 1.0))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
+              "    (call (. ui_frame cell) 1 2 2 1 (. (. widgets Align) End))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"b\"))\n"
+              "    (call (. ui_frame cell) 0 1 1 1 (. (. widgets Align) Start))\n"
+              "    (call (. ui_frame at) 166)\n"
+              "    (call (. ui_frame scroll) (call (. ui_frame fill_width)) (call (. ui_frame fill_height)))\n"
+              "    (call (. ui_frame end_scroll))\n"
+              "    (call (. ui_frame end_grid))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Group(\"Options\") {\n        Text(\"a\")\n    }\n"
+              "    Group(\"More\", open: s.more) {\n        Text(\"b\")\n    }\n    Group { }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame group) (call (. ui_frame tr) \"Options\") (- 1.0) (- 1.0))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
+              "    (call (. ui_frame end_group))\n"
+              "    (call (. ui_frame at) 68)\n"
+              "    (if (call (. ui_frame group_folding) (call (. ui_frame tr) \"More\") (- 1.0) (- 1.0) (call some (& (. s more))))\n"
+              "      (block\n"
+              "        (call (. ui_frame label) (call (. ui_frame tr) \"b\"))))\n"
+              "    (call (. ui_frame end_group))\n"
+              "    (call (. ui_frame at) 126)\n"
+              "    (call (. ui_frame group_untitled) (- 1.0) (- 1.0))\n"
+              "    (call (. ui_frame end_group))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Group(collapsible: true) { }\n}\n", "E0215", 2, 5);
+    expect_ui("window W(S* s) {\n    Tabs(bind: s.page) {\n        Tab(\"General\") {\n            Text(\"a\")\n        }\n"
+              "        Tab(\"Files\", on_close: s.close) { }\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame tabs) (call some (& (. s page))))\n"
+              "    (if (call (. ui_frame tab) (call (. ui_frame tr) \"General\") false true)\n"
+              "      (block\n"
+              "        (call (. ui_frame label) (call (. ui_frame tr) \"a\"))))\n"
+              "    (if (call (. ui_frame tab) (call (. ui_frame tr) \"Files\") true true)\n"
+              "      (block))\n"
+              "    (if (call (. ui_frame tab_closed))\n"
+              "      (block\n"
+              "        (call (. s close))))\n"
+              "    (call (. ui_frame end_tabs))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Tabs {\n        Text(\"a\")\n    }\n}\n", "E0215", 3, 9);
+    expect_ui_error("window W() {\n    Tab(\"a\") { }\n}\n", "E0215", 2, 5);
+    expect_ui("window W(S* s) {\n    Tree(selected: s.item, height: Fill) {\n        Branch(\"src\", open: s.open) {\n"
+              "            Leaf(\"main\", on_click: s.main)\n        }\n        Leaf(\"README\")\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame tree) 300.0 (call (. ui_frame fill_height)) (call some (& (. s item))))\n"
+              "    (call (. ui_frame at) 68)\n"
+              "    (if (call (. ui_frame branch) (call (. ui_frame tr) \"src\") (call some (& (. s open))))\n"
+              "      (block\n"
+              "        (call (. ui_frame at) 110)\n"
+              "        (if (call (. ui_frame leaf) (call (. ui_frame tr) \"main\"))\n"
+              "          (block\n"
+              "            (call (. s main))))\n"
+              "        (call (. ui_frame end_branch))))\n"
+              "    (call (. ui_frame at) 159)\n"
+              "    (call (. ui_frame leaf) (call (. ui_frame tr) \"README\"))\n"
+              "    (call (. ui_frame end_tree))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Tree {\n        Text(\"a\")\n    }\n}\n", "E0215", 3, 9);
+    expect_ui_error("window W() {\n    Leaf(\"a\")\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Text(\"a\", row: 1)\n}\n", "E0215", 2, 15);
+    expect_ui_error("window W() {\n    Grid { }\n}\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Grid(columns: Fill) { }\n}\n", "E0215", 2, 19);
+    expect_ui_error("window W() {\n    Grid(columns: [Fill]) {\n        Text(\"a\", row: 0, col: 0)\n"
+                    "        Text(\"b\", row: 0, col: 0)\n    }\n}\n", "E0215", 4, 24);
+    expect_ui_error("window W() {\n    Grid(columns: [Fill]) {\n        Column {\n            Text(\"a\", col: 0)\n"
+                    "        }\n    }\n}\n", "E0215", 4, 23);
+}
+
 static void test_ui_themes(void) {
     expect_ui("style Danger {\n    background: #F38BA8\n    radius: 6\n    hover { background: #EBA0AC, border_width: 2 }\n}\n",
               "(fn pub widgets.Style Danger ()\n"
@@ -556,6 +656,7 @@ static void test_ui_themes(void) {
 int main(void) {
     test_ui_files();
     test_ui_themes();
+    test_ui_grids();
     test_precedence();
     test_casts();
     test_postfix();
