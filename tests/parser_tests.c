@@ -753,6 +753,21 @@ static void test_ui_grids(void) {
               "  (block\n"
               "    (return (lit widgets.Window))))\n"
               "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    List(on_drop: s.move) {\n        Text(\"a\")\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame reorderable))\n"
+              "    (call (. ui_frame list) 300.0 200.0 none)\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
+              "    (call (. ui_frame end_list))\n"
+              "    (if (call (. ui_frame dropped))\n"
+              "      (block\n"
+              "        (call (. s move) (call (. ui_frame drop_from)) (call (. ui_frame drop_to)))))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
     expect_ui("window W() {\n    Tabs(placement: Bottom) { }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame))\n"
               "  (block\n"

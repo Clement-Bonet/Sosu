@@ -54,6 +54,7 @@ pub enum Event {
     // (what notches and system bars leave, as margins); the display scale; the life of the program
     // (it is not drawn while it is suspended).
     Touch(i64 finger, f32 x, f32 y, TouchPhase phase),
+    FileDropped(str path, f32 x, f32 y),  // a file dropped on the window from the system, one event per file
     SafeAreaChanged(f32 left, f32 top, f32 right, f32 bottom),
     ScaleChanged(f32 scale),
     Suspend,
@@ -157,6 +158,9 @@ Event? translate(sdl.Event* event, Arena* frame) uses io {
     }
     if (kind == 0x303) {  // SDL_EVENT_TEXT_INPUT
         return some(TextInput(sdl.text_of(frame, event)));
+    }
+    if (kind == 0x1000) {  // SDL_EVENT_DROP_FILE
+        return some(FileDropped(sdl.dropped_path(frame, event), sdl.drop_x(event), sdl.drop_y(event)));
     }
     if (kind == 0x302) {  // SDL_EVENT_TEXT_EDITING
         return some(TextEditing(sdl.editing_text(frame, event), sdl.editing_cursor(event)));

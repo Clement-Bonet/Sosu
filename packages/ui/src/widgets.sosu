@@ -643,6 +643,12 @@ pub struct Ui {
     mut canvas.Rect layer = nowhere();
     mut f32 drop_scroll = 0.0;  // how far the open list of a dropdown is scrolled (spec §10.10)
     mut bool drop_reveal = false;  // the keyboard moved its highlight: it comes into view
+    // An item dragged in a list that can be reordered (spec §10.10): the list, the item, where the press
+    // was, and whether it moved enough to be a drag.
+    mut u64 drag_list = 0;
+    mut i32 drag_from = -1;
+    mut f32 drag_start_y = 0.0;
+    mut bool item_dragged = false;
     mut i32 highlight = -1;
     mut u64 pick_dropdown = 0;
     mut i32 pick_option = -1;
@@ -689,6 +695,9 @@ pub struct Ui {
     pub mut catalog.Catalog*? catalog = none;
     // The colors and sizes of the widgets (spec §10.7); none: `default_theme()`.
     pub mut Theme? theme = none;
+    // The size of a pixel of `ui` in pixels of the screen (spec §10.10, `platform.app.ScaleChanged`):
+    // the sizes of the theme and the fonts are multiplied by it.
+    pub mut f32 scale = 1.0;
 
     // The time (spec §10.9), given by the program before each frame: milliseconds of a monotonic
     // clock. Without it, what needs time (double clicks, tooltips...) does not happen.
@@ -1969,6 +1978,7 @@ struct Layout {
     mut i32 item = 0;
     mut i32*? selected = none;
     mut Selection*? multi = none;  // a list of several choices (spec §10.10)
+    mut bool reorder = false;  // its items can be dragged to another place (spec §10.10)
     // What its widgets inherit (spec §10.7), and, when it is painted (a background, a border),
     // its identity, which keeps its size from the last frame, and its look.
     mut canvas.Color? color = none;
@@ -2173,6 +2183,13 @@ pub struct Frame {
     mut bool item_painted = false;
     mut bool item_not_chosen = false;
     mut Selection*? next_multi = none;  // `multiple`: for the next list or table
+    // `reorderable`: for the next list; where an item dragged would go, and what was dropped.
+    mut bool next_reorder = false;
+    mut i32 drag_target = -1;
+    mut f32 drag_line_y = 0.0;
+    mut bool drop_done = false;
+    mut i32 dropped_from = 0;
+    mut i32 dropped_to = 0;
     mut i32 shown_first = 0;  // a long list: the items in view, `shown_first` to `shown_last` excluded
     mut i32 shown_last = 0;
     mut u32 letters_taken = 0;  // the letters of Alt+letter that a widget took in this frame
@@ -3403,7 +3420,18 @@ pub struct Frame {
                     f32 xb = measure_px(t.slice(line.start, b), size).w + (high > line.end && !line.last ? 6.0 : 0.0);
                     surface.fill(canvas.Rect{ x: inner.x + xa, y: y, w: xb - xa, h: line_h }, l.selection);
                 }
-                write_px(inner.x, y, line_h, t.slice(line.start, line.end), l.color, size);
+                bool composing = focused && ui.composing.len > 0 && in_line(line, ui.cursor);
+                if (composing) {  // the composition of an input method, underlined, at the cursor
+                    str composed = ui.composing.text();
+                    f32 at = inner.x + measure_px(t.slice(line.start, ui.cursor), size).w;
+                    f32 composed_w = measure_px(composed, size).w;
+                    write_px(inner.x, y, line_h, t.slice(line.start, ui.cursor), l.color, size);
+                    write_px(at, y, line_h, composed, l.color, size);
+                    surface.fill(canvas.Rect{ x: at, y: y + line_h - 3.0, w: composed_w, h: 1.0 }, l.color);
+                    write_px(at + composed_w, y, line_h, t.slice(ui.cursor, line.end), l.color, size);
+                } else {
+                    write_px(inner.x, y, line_h, t.slice(line.start, line.end), l.color, size);
+                }
                 if (focused && in_line(line, ui.cursor)) {
                     f32 cx = measure_px(t.slice(line.start, ui.cursor), size).w;
                     surface.fill(canvas.Rect{ x: inner.x + cx, y: y + 2.0, w: 2.0, h: line_h - 4.0 }, l.accent);
@@ -4385,7 +4413,13 @@ pub struct Frame {
         bool own_color = states & state_disabled() != 0;
         canvas.Color inherited = color_or(l.color, color_or(all.color, d.color));
         f32 size = kind == Title ? d.font_size : f32_or(l.font_size, f32_or(all.font_size, d.font_size));
-        return Look{ color: color_or(p.color, own_color ? d.color : inherited), background: color_or(p.background, d.background), border: color_or(p.border, d.border), border_width: f32_or(p.border_width, d.border_width), radius: f32_or(p.radius, d.radius), padding: f32_or(p.padding, d.padding), gap: f32_or(p.gap, d.gap), height: f32_or(p.height, d.height), font_size: f32_or(p.font_size, size), accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))), hint: color_or(part(kind, 0).color, d.hint), selection: color_or(part(kind, 1).background, d.selection), bar: color_or(part(kind, 2).background, d.bar) };
+        Look unscaled = Look{ color: color_or(p.color, own_color ? d.color : inherited), background: color_or(p.background, d.background), border: color_or(p.border, d.border), border_width: f32_or(p.border_width, d.border_width), radius: f32_or(p.radius, d.radius), padding: f32_or(p.padding, d.padding), gap: f32_or(p.gap, d.gap), height: f32_or(p.height, d.height), font_size: f32_or(p.font_size, size), accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))), hint: color_or(part(kind, 0).color, d.hint), selection: color_or(part(kind, 1).background, d.selection), bar: color_or(part(kind, 2).background, d.bar) };
+        if (ui.scale == 1.0) {
+            return unscaled;
+        }
+        Look u = unscaled;
+        f32 k = ui.scale;  // a dense screen (spec §10.10): every size of the theme, larger
+        return Look{ color: u.color, background: u.background, border: u.border, border_width: u.border_width * k, radius: u.radius * k, padding: u.padding * k, gap: u.gap * k, height: u.height * k, font_size: u.font_size * k, accent: u.accent, hint: u.hint, selection: u.selection, bar: u.bar };
     }
 
     // The background and the border of `r`, as `l` says.
@@ -5427,6 +5461,19 @@ pub struct Frame {
         }
         canvas.Rect row = canvas.Rect{ x: l.frame.x, y: r.y, w: l.frame.w - l.bar_w, h: r.h };
         bool inside = over(row) && over(l.frame);
+        if (l.reorder) {  // an item pressed may be dragged; where it would go
+            if (ui.pressed && inside && !item_not_chosen) {
+                ui.drag_list = l.area_id;
+                ui.drag_from = index;
+                ui.drag_start_y = ui.mouse_y;
+                ui.item_dragged = false;
+            }
+            if (ui.item_dragged && ui.drag_list == l.area_id && ui.mouse_y >= row.y && ui.mouse_y < row.y + row.h) {
+                bool after = ui.mouse_y >= row.y + row.h / 2.0;
+                drag_target = after ? index + 1 : index;
+                drag_line_y = after ? row.y + row.h : row.y;
+            }
+        }
         match (l.multi) {  // several choices: Ctrl adds or removes, Shift extends from the anchor
             some(set) => {
                 if (ui.pressed && inside && !item_not_chosen) {
@@ -5570,6 +5617,27 @@ pub struct Frame {
         set.cursor = next;
         s.reveal = true;
         return true;
+    }
+
+    // The items of the next list can be dragged to another place (spec §10.10): after `end_list()`,
+    // `dropped()` says whether one was dropped, `drop_from()` where it was and `drop_to()` where it
+    // goes; the program moves it.
+    pub void reorderable() {
+        next_reorder = true;
+    }
+
+    pub bool dropped() {
+        bool done = drop_done;
+        drop_done = false;
+        return done;
+    }
+
+    pub i32 drop_from() {
+        return dropped_from;
+    }
+
+    pub i32 drop_to() {
+        return dropped_to;
     }
 
     // ---- Tables (spec §10.9) ----
@@ -6119,6 +6187,8 @@ pub struct Frame {
     void open_area(u64 id, Kind kind, canvas.Rect r, bool is_list, i32*? selected, i32 count) {
         Selection*? multi = next_multi;  // `multiple`: several items can be chosen
         next_multi = none;
+        bool reorder = next_reorder;
+        next_reorder = false;
         usize slot = ui.state_slot(id);
         WidgetState* s = &ui.states[slot];
         bool long_list = count >= 0;
@@ -6191,7 +6261,7 @@ pub struct Frame {
         f32 left = r.x + 8.0 - s.scroll_x;
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, multi: multi, look: area_look, room_w: max(view_w - 16.0, 0.0) };
+        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, multi: multi, reorder: reorder, look: area_look, room_w: max(view_w - 16.0, 0.0) };
         shown_first = 0;
         shown_last = 0;
         if (long_list) {  // the items in view: the first ones are skipped, where they would be
@@ -6233,6 +6303,27 @@ pub struct Frame {
         if (done.area < 0 || done.is_list != is_list) {
             return;  // not in such an area
         }
+        if (done.reorder && ui.drag_list == done.area_id) {  // an item dragged: its line, then its drop
+            if (ui.down && !ui.item_dragged && abs_f32(ui.mouse_y - ui.drag_start_y) > 6.0) {
+                ui.item_dragged = true;
+            }
+            if (ui.item_dragged && drag_target >= 0) {
+                surface.fill(canvas.Rect{ x: done.frame.x + 4.0, y: drag_line_y - 1.0, w: done.frame.w - done.bar_w - 8.0, h: 2.0 }, done.look.accent);
+            }
+            if (ui.released) {
+                if (ui.item_dragged && drag_target >= 0) {
+                    i32 to = drag_target > ui.drag_from ? drag_target - 1 : drag_target;
+                    if (to != ui.drag_from) {
+                        drop_done = true;
+                        dropped_from = ui.drag_from;
+                        dropped_to = to;
+                    }
+                }
+                ui.drag_list = 0;
+                ui.item_dragged = false;
+            }
+        }
+        drag_target = -1;
         depth -= 1;
         WidgetState* s = &ui.states[done.area as usize];
         f32 pad = is_list ? 0.0 : 8.0;
@@ -6324,7 +6415,7 @@ pub struct Frame {
 
 // The widgets of a frame, from (x, y) downwards. End it with `finish()`.
 pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
-    mut Frame f = Frame{ ui: ui, surface: surface };
+    mut Frame f = Frame{ ui: ui, surface: surface, height: 32.0 * ui.scale };
     // inside the safe area (spec §10.9): notches and system bars leave margins
     f32 left = x + ui.safe_left;
     f32 top = y + ui.safe_top;
@@ -8574,4 +8665,60 @@ test "a dropdown of 50 options: its list fits the window and scrolls; a letter g
     long_dropdown_frame(&ui, &surface, &chosen);
     long_dropdown_frame(&ui, &surface, &chosen);
     assert(chosen == 10);
+}
+
+test "the scale of a dense screen: the sizes of the theme and the fonts are larger" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.button("OK");
+    canvas.Rect one = f.last;
+    f.finish();
+    ui.scale = 2.0;
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.button("OK");
+    canvas.Rect two = f.last;
+    f.finish();
+    assert(two.h == 2.0 * one.h && two.w > 1.8 * one.w);
+}
+
+// A list of 5 items that can be reordered, for the test below: the move dropped, or -1.
+i32 reorder_frame(Ui* ui, canvas.Canvas* surface) {
+    mut i32 moved = -1;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.reorderable();
+    f.list(200.0, 200.0, none);
+    for (i32 i in 0..5) {
+        f.push_item();
+        f.label("item");
+        f.pop_id();
+    }
+    f.end_list();
+    if (f.dropped()) {
+        moved = f.drop_from() * 10 + f.drop_to();
+    }
+    f.finish();
+    return moved;
+}
+
+test "drag and drop: an item of a list dragged below another" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 220, 220);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(20.0, 10.0);  // the item 0, pressed
+    ui.mouse_button(true);
+    reorder_frame(&ui, &surface);
+    ui.mouse_move(20.0, 3.0 * 32.0 + 24.0);  // the lower half of the item 3
+    assert(reorder_frame(&ui, &surface) == -1);
+    reorder_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(reorder_frame(&ui, &surface) == 3);  // from 0 to 3: after the item 3, which moves up
+    // a press and a release without moving: no drop
+    ui.mouse_button(true);
+    reorder_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(reorder_frame(&ui, &surface) == -1);
 }

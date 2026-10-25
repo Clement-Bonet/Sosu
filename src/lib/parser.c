@@ -1409,7 +1409,7 @@ static const UiNodeKind ui_nodes[] = {
     { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
     { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", "selection", "count", "item", "focus", "style", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "selection", "count", "item", "on_drop", "focus", "style", NULL }, true },
     { "Table", 0, false, { "count", "item", "width", "height", "selected", "selection", "sort", "on_activate", "focus", "style", NULL }, true },
     { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
     { "Text", 1, false, { "plural", "count", "context", "style", NULL }, false },
@@ -2372,6 +2372,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             /* f.list(width, height, some(&selected) or none), the items, f.end_list() */
             Expr *several = ui_prop(&args, "selection");  /* several choices: f.multiple(&selection) first */
             if (several) SOSU_VEC_PUSH(out, ui_frame_stmt(p, several->offset, several->length, "multiple", ui_address(p, several)));
+            Expr *on_drop = ui_prop(&args, "on_drop");  /* items dragged: f.reorderable() first */
+            if (on_drop) SOSU_VEC_PUSH(out, ui_frame_stmt(p, on_drop->offset, on_drop->length, "reorderable", NULL));
             Expr *selected = ui_prop(&args, "selected");
             Expr *choice;
             if (selected) {
@@ -2399,6 +2401,15 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
                 ui_parse_children(p, out);
             }
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
+            if (on_drop) {  /* if (f.dropped()) { on_drop(f.drop_from(), f.drop_to()); } */
+                Expr *call = ui_expr(p, EXPR_CALL, on_drop->offset, on_drop->length);
+                call->as.call.callee = on_drop;
+                call->as.call.arg_count = 2;
+                call->as.call.args = arena_alloc(p->arena, 2 * sizeof(Expr *));
+                call->as.call.args[0] = ui_frame_call(p, on_drop->offset, on_drop->length, "drop_from", NULL, 0);
+                call->as.call.args[1] = ui_frame_call(p, on_drop->offset, on_drop->length, "drop_to", NULL, 0);
+                SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "dropped", NULL, 0), call));
+            }
         } else if (name_text_is(node, "Table")) {
             /* f.table(count, width, height, selected, sort), f.table_column(...) for each column,
                f.table_rows(), the rows in view (a cell per column), if (f.end_table()) { on_activate } */
