@@ -838,6 +838,23 @@ pub enum Accept {
     Decimal,  // digits, `-` first, and one separator, `.` or `,`
 }
 
+// The letter that `&` marks in `text` (spec §10.9), lower case: `"&Save"` gives `s`; `&&` is an `&`.
+// 0 when there is none.
+u8 mnemonic_of(str text) {
+    mut usize i = 0;
+    while (i + 1 < text.len) {
+        if (text.bytes[i] == 38) {
+            u8 c = text.bytes[i + 1];
+            if (c != 38) {
+                return c >= 65 && c <= 90 ? c + 32 : c;
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
 // A date of the calendar (spec §10.9), for a `DateField`.
 pub struct Date {
     pub mut i32 year = 2000;
@@ -1890,6 +1907,7 @@ pub struct Frame {
     mut TableBuild table_build = TableBuild{ };  // the table being described (one at a time)
     mut i32 shown_first = 0;  // a long list: the items in view, `shown_first` to `shown_last` excluded
     mut i32 shown_last = 0;
+    mut u32 letters_taken = 0;  // the letters of Alt+letter that a widget took in this frame
     mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
@@ -2031,21 +2049,21 @@ pub struct Frame {
         u64 id = take_id();
         take_styles();
         Look first = look(Button, enabled ? 0 : state_disabled());
-        canvas.Rect size = measure_px(text, first.font_size);
+        canvas.Rect size = measure_label(text, first.font_size);
         canvas.Rect r = place(size.w + 2.0 * first.padding, first.height);
         interactive(r);
         if (!enabled) {
             paint(r, first);
-            write_px(r.x + first.padding, r.y, r.h, text, first.color, first.font_size);
+            write_label(r.x + first.padding, r.y, r.h, text, first.color, first.font_size);
             return false;
         }
         focusable(id, r);
-        bool clicked = click(id, r) || activated(id, true);
+        bool clicked = click(id, r) || activated(id, true) || alt_letter(text);
         bool hot = over(r);
         u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0);
         Look l = look(Button, states);
         paint(r, l);
-        write_px(r.x + l.padding, r.y, r.h, text, l.color, l.font_size);
+        write_label(r.x + l.padding, r.y, r.h, text, l.color, l.font_size);
         if (ui.focus == id) {
             ring(r, l.accent);
         }
@@ -2058,11 +2076,11 @@ pub struct Frame {
         u64 id = take_id();
         take_styles();
         Look first = look(Checkbox, 0);
-        canvas.Rect size = measure_px(text, first.font_size);
+        canvas.Rect size = measure_label(text, first.font_size);
         canvas.Rect r = place(size.w + 32.0, first.height);
         interactive(r);
         focusable(id, r);
-        bool clicked = click(id, r) || activated(id, false);
+        bool clicked = click(id, r) || activated(id, false) || alt_letter(text);
         if (clicked) {
             *value = !(*value);
         }
@@ -2074,7 +2092,7 @@ pub struct Frame {
         if (*value) {
             surface.fill_rounded(canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 }, max(l.radius - 3.0, 0.0), l.accent);
         }
-        write_px(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
+        write_label(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
         if (ui.focus == id) {
             ring(r, l.accent);
         }
@@ -2092,11 +2110,11 @@ pub struct Frame {
         u64 id = take_id();
         take_styles();
         Look first = look(Radio, 0);
-        canvas.Rect size = measure_px(text, first.font_size);
+        canvas.Rect size = measure_label(text, first.font_size);
         canvas.Rect r = place(size.w + 32.0, first.height);
         interactive(r);
         focusable(id, r);
-        bool clicked = click(id, r) || activated(id, false);
+        bool clicked = click(id, r) || activated(id, false) || alt_letter(text);
         bool hot = over(r);
         u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (chosen ? state_checked() : 0);
         Look l = look(Radio, states);
@@ -2109,7 +2127,7 @@ pub struct Frame {
         if (chosen) {
             surface.fill_circle(cx, cy, 5.0, l.accent);
         }
-        write_px(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
+        write_label(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
         return clicked;
     }
 
@@ -2506,6 +2524,76 @@ pub struct Frame {
     // keyboard; 2 decimals unless `n` says otherwise.
     pub bool money_field(i64* value, f32 width, Number n) {
         return number_field(value, width, n);
+    }
+
+    // ---- Mnemonics (spec §10.9) ----
+
+    // `text` without its `&` (`&&` gives `&`); the byte where its letter is, in `at`.
+    str shown_text(str text, usize* at) {
+        *at = text.len;
+        mut bool marked = false;
+        for (u8 b in text.bytes) {
+            marked = marked || b == 38;
+        }
+        if (!marked) {
+            return text;
+        }
+        usize start = pool_used;
+        mut usize i = 0;
+        while (i < text.len && pool_used < 8192) {
+            u8 b = text.bytes[i];
+            if (b == 38 && i + 1 < text.len) {
+                i += 1;
+                if (text.bytes[i] != 38 && *at == text.len) {
+                    *at = pool_used - start;
+                }
+            }
+            pool[pool_used] = text.bytes[i];
+            pool_used += 1;
+            i += 1;
+        }
+        return text_of(pool[start..pool_used]);
+    }
+
+    // The size of `text` as it is drawn, without its `&`.
+    canvas.Rect measure_label(str text, f32 size) {
+        mut usize at = 0;
+        return measure_px(shown_text(text, &at), size);
+    }
+
+    // `text` drawn without its `&`, its letter underlined while Alt is held or the menus have the
+    // keyboard.
+    void write_label(f32 x, f32 y, f32 box, str text, canvas.Color color, f32 size) {
+        mut usize at = 0;
+        str shown = shown_text(text, &at);
+        write_px(x, y, box, shown, color, size);
+        if (at < shown.len && (ui.alt_down || ui.bar_keys)) {
+            f32 left = measure_px(text_of(shown.bytes[0..at]), size).w;
+            f32 right = measure_px(text_of(shown.bytes[0..next_char(shown, at)]), size).w;
+            f32 h = measure_px(shown, size).h;
+            surface.fill(canvas.Rect{ x: x + left, y: y + (box + h) / 2.0 - 2.0, w: max(right - left, 1.0), h: 1.0 }, color);
+        }
+    }
+
+    // Whether Alt and the letter of `text` were pressed: the first widget with that letter, in the
+    // order of the frame, takes it.
+    bool alt_letter(str text) {
+        u8 letter = mnemonic_of(text);
+        if (letter < 97 || letter > 122) {
+            return false;
+        }
+        u32 bit = 1 << (letter - 97) as u32;
+        if (letters_taken & bit != 0) {
+            return false;
+        }
+        for (usize i in 0..ui.edit_count) {
+            Edit e = ui.edits[i];
+            if (e.alt && !e.ctrl && e.key == letter as u32) {
+                letters_taken = letters_taken | bit;
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- Sliders, progress, tooltips (spec §10.9) ----
@@ -3344,7 +3432,7 @@ pub struct Frame {
         if (menu_level == 0) {
             take_styles();
             Look first = look(MenuBar, 0);
-            canvas.Rect r = place(measure_px(title, first.font_size).w + 2.0 * first.padding, first.height);
+            canvas.Rect r = place(measure_label(title, first.font_size).w + 2.0 * first.padding, first.height);
             interactive(r);
             bool hot = over(r);
             mut bool keyed = false;  // its title highlighted by the keyboard (F10, Alt)
@@ -3352,6 +3440,13 @@ pub struct Frame {
                 keyed = ui.bar_keys && ui.menus[0] == 0 && ui.bar_index == bar_title_count as i32;
                 bar_titles[bar_title_count] = id;
                 bar_title_count += 1;
+            }
+            if (ui.menus[0] == 0 && alt_letter(title)) {  // Alt and its letter: open, with the keyboard
+                ui.close_menus(0);
+                ui.menus[0] = id;
+                ui.menu_in_bar = true;
+                ui.menu_cursor[0] = -2;
+                ui.bar_keys = true;
             }
             if (ui.pressed && hot) {
                 ui.bar_keys = false;
@@ -3372,7 +3467,7 @@ pub struct Frame {
             if (keyed) {
                 ring(r, accent());
             }
-            write_px(r.x + tl.padding, r.y, r.h, title, tl.color, tl.font_size);
+            write_label(r.x + tl.padding, r.y, r.h, title, tl.color, tl.font_size);
             start_popup(id, open, r.x, r.y + r.h);
             return;
         }
@@ -3530,7 +3625,7 @@ pub struct Frame {
         }
         p.h += h;
         f32 key_w = key.len > 0 ? measure(key, 2).w + 32.0 : 0.0;
-        p.widest = max(p.widest, measure(label, 2).w + key_w + (kind == 2 ? 24.0 : 0.0));
+        p.widest = max(p.widest, measure_label(label, 18.0).w + key_w + (kind == 2 ? 24.0 : 0.0));
         if (p.open && kind != 2 && ui.moved && contains(r, ui.mouse_x, ui.mouse_y)) {
             ui.close_menus(menu_level);
         }
@@ -3556,7 +3651,7 @@ pub struct Frame {
                 surface.fill(r, m.selection);
             }
             canvas.Color color = p.enabled[i] ? m.color : face(true, false);
-            write_px(p.x + 12.0, y, 28.0, p.labels[i], color, m.font_size);
+            write_label(p.x + 12.0, y, 28.0, p.labels[i], color, m.font_size);
             if (p.keys[i].len > 0) {
                 f32 kw = measure(p.keys[i], 2).w;
                 write(p.x + p.w - 12.0 - kw, y, 28.0, p.keys[i], face(true, false), 2);
@@ -3680,6 +3775,20 @@ pub struct Frame {
             } else if ((e.key == key_enter() || e.key == key_space()) && cursor >= 0) {
                 ui.pick_menu = p.id;
                 ui.pick_entry = cursor;
+            } else if (!e.alt && e.key >= 97 && e.key <= 122) {  // the letter of an entry: it is chosen
+                for (usize j in 0..p.count) {
+                    if (p.enabled[j] && p.kinds[j] != 1 && mnemonic_of(p.labels[j]) as u32 == e.key) {
+                        if (p.kinds[j] == 2 && level + 1 < 4) {
+                            ui.close_menus(level + 1);
+                            ui.menus[level + 1] = p.submenus[j];
+                            ui.menu_cursor[level + 1] = -2;
+                        } else if (p.kinds[j] == 0) {
+                            ui.pick_menu = p.id;
+                            ui.pick_entry = j as i32;
+                        }
+                        break;
+                    }
+                }
             }
         }
     }
@@ -4470,7 +4579,7 @@ pub struct Frame {
         tab_builds[t].count += 1;
         u64 id = mix(b.id, 0x7AB00000 | index as u64);
         Look first = look(Tabs, 0);
-        canvas.Rect size = measure_px(title, first.font_size);
+        canvas.Rect size = measure_label(title, first.font_size);
         f32 cross = closable ? 22.0 : 0.0;
         f32 w = size.w + 2.0 * first.padding + cross;
         canvas.Rect r = canvas.Rect{ x: b.row.x + b.x - b.offset, y: b.row.y, w: w, h: b.row.h };
@@ -4485,6 +4594,8 @@ pub struct Frame {
                 closed = true;
             } else if (click(id, r) && over(b.row) && !chosen) {
                 ui.states[b.slot].pick = index;
+            } else if (!chosen && alt_letter(title)) {
+                ui.states[b.slot].pick = index;
             }
         }
         WidgetState* s = &ui.states[b.slot];
@@ -4496,7 +4607,7 @@ pub struct Frame {
         u32 states = (hot ? state_hover() : 0) | (chosen ? state_checked() : 0) | (enabled ? 0 : state_disabled());
         Look l = look(Tabs, states);
         paint(r, l);
-        write_px(r.x + l.padding, r.y, r.h, title, l.color, l.font_size);
+        write_label(r.x + l.padding, r.y, r.h, title, l.color, l.font_size);
         if (chosen) {  // the mark of the tab chosen, on the side of the content; the tab comes into view
             surface.fill(canvas.Rect{ x: r.x, y: b.bottom ? r.y : r.y + r.h - 3.0, w: r.w, h: 3.0 }, l.accent);
             if (b.reveal && r.x < b.row.x) {
@@ -7428,4 +7539,51 @@ test "a table: columns, alignment, sorting, a border dragged, a row chosen and a
     ui.mouse_button(true);
     ui.mouse_button(false);
     assert(table_frame(&ui, &surface, &row, &sort, &cells));
+}
+
+// Buttons, a checkbox and a menu with letters, for the test below: 1 Save, 2 Send (the second S),
+// 3 Quit; `bold` the checkbox.
+i32 letters_frame(Ui* ui, canvas.Canvas* surface, bool* bold) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.menu_bar();
+    f.menu("&File");
+    if (f.menu_item("&Quit")) {
+        clicked = 3;
+    }
+    f.end_menu();
+    f.end_menu_bar();
+    if (f.button("&Save")) {
+        clicked = 1;
+    }
+    if (f.button("&Send")) {
+        clicked = 2;
+    }
+    f.checkbox("&Bold && strong", bold);
+    f.finish();
+    return clicked;
+}
+
+test "mnemonics: Alt and a letter, the first widget with it; in an open menu, the letter alone" {
+    assert(mnemonic_of("&File") == 102 && mnemonic_of("Save &As") == 97 && mnemonic_of("A && B") == 0);
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut Ui ui = Ui{ };
+    mut bool bold = false;
+    ui.mouse_move(399.0, 299.0);
+    letters_frame(&ui, &surface, &bold);
+    ui.key(0x400000E2, true, false, false);  // Alt held
+    ui.key(115, true, false, false);  // S: Save, the first one
+    assert(letters_frame(&ui, &surface, &bold) == 1);
+    ui.key(98, true, false, false);  // B: the checkbox
+    letters_frame(&ui, &surface, &bold);
+    assert(bold);
+    ui.key(102, true, false, false);  // F: the menu File opens
+    ui.key(0x400000E2, false, false, false);
+    letters_frame(&ui, &surface, &bold);
+    assert(ui.menus[0] != 0);
+    ui.key(113, true, false, false);  // q, alone: Quit, chosen at the next frame
+    letters_frame(&ui, &surface, &bold);
+    assert(letters_frame(&ui, &surface, &bold) == 3);
 }

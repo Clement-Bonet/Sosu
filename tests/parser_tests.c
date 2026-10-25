@@ -768,6 +768,31 @@ static void test_ui_themes(void) {
     expect_ui_error("theme T { Label { color: #FFFFFF } }\n", "E0215", 1, 11);
     expect_ui_error("theme T : Missing { }\n", "E0215", 1, 11);
     expect_ui_error("theme T { a: 1\n    a: 2 }\n", "E0215", 2, 5);
+    expect_ui("style Size(f32 px) { font_size: px }\n"
+              "theme Brand(canvas.Color tint) { accent: tint }\n"
+              "theme Red : Brand(#D20F39) { }\n"
+              "window W() {\n    Text(\"a\", style: Size(22))\n}\n",
+              "(fn pub widgets.Style Size ((f32 px))\n"
+              "  (block\n"
+              "    (return (lit widgets.Style (normal (lit widgets.Props (font_size (call some px))))))))\n"
+              "(fn pub widgets.Theme Brand ((canvas.Color tint))\n"
+              "  (block\n"
+              "    (var auto accent tint)\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent))))))))\n"
+              "(fn pub widgets.Theme Red ()\n"
+              "  (block\n"
+              "    (var auto tint (call (. widgets rgb) 210 15 57 255))\n"
+              "    (var auto accent tint)\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent))))))))\n"
+              "(fn pub void W ((widgets.Frame* ui_frame))\n"
+              "  (block\n"
+              "    (call (. ui_frame style) (call Size 22))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("theme Brand(canvas.Color tint) { }\ntheme Red : Brand { }\n", "E0215", 2, 13);
     expect_ui_error("window W() {\n    Text(\"a\", style: c ? [A, B] : A)\n}\n", "E0215", 2, 26);
 }
 

@@ -1988,6 +1988,12 @@ static Expr *ui_style_of(Parser *p, Expr *value) {
         diag_help(d, "give the styles one by one: `style: [Card, c ? Danger : Normal]`");
         return value;
     }
+    if (value->kind == EXPR_CALL) {  /* `Size(22)`: a style with parameters, its numbers of pixels f32 */
+        for (size_t i = 0; i < value->as.call.arg_count; i++) {
+            value->as.call.args[i] = ui_float(p, value->as.call.args[i], value->offset, 0);
+        }
+        return value;
+    }
     const Expr *path = value;
     while (path->kind == EXPR_FIELD) path = path->as.field.object;
     if (path->kind != EXPR_NAME) return value;
@@ -3110,7 +3116,8 @@ static Expr *ui_parse_style_body(Parser *p, size_t offset, size_t length) {
 }
 
 /* `pub widgets.type name() { body }` */
-static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, StmtVec *body, size_t body_offset) {
+static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, StmtVec *body, size_t body_offset,
+                         Param *params, size_t param_count) {
     Decl *decl = arena_alloc(p->arena, sizeof *decl);
     decl->kind = DECL_FN;
     decl->is_pub = true;
@@ -3120,8 +3127,8 @@ static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, 
     fn->offset = offset;
     fn->name = name;
     fn->ret = ui_type(p, offset, "widgets", type);
-    fn->params = NULL;
-    fn->param_count = 0;
+    fn->params = params;
+    fn->param_count = param_count;
     fn->body = ui_block(p, body, body_offset, span_from(p, body_offset));
     fn->length = span_from(p, offset);
     decl->length = fn->length;
@@ -3140,11 +3147,14 @@ static Decl *ui_parse_style(Parser *p) {
     size_t offset = advance(p)->offset;
     Name name;
     expect_name(p, &name, "a style name");
+    Param *params = NULL;  /* `style Size(f32 px)`: a style with parameters */
+    size_t param_count = 0;
+    if (check(p, TOK_LPAREN)) parse_params(p, &params, &param_count, false);
     size_t body_offset = cur(p)->offset;
     Expr *style = ui_parse_style_body(p, name.offset, name.length);
     StmtVec body = {0};
     SOSU_VEC_PUSH(&body, ui_return(p, style));
-    return ui_function(p, offset, name, "Style", &body, body_offset);
+    return ui_function(p, offset, name, "Style", &body, body_offset, params, param_count);
 }
 
 /* A name of a theme, `accent: #89B4FA`; `own`: given by the body being read, not its parent. */
@@ -3168,6 +3178,9 @@ typedef struct {
     size_t body;
     size_t parent;
     bool valid;
+    Param *params;  /* `theme Brand(canvas.Color accent)`: its parameters */
+    size_t param_count;
+    ExprVec parent_args;  /* `: Brand(#D20F39)`: what it gives its parent */
 } UiTheme;
 
 typedef VEC(UiTheme) UiThemes;
@@ -3249,9 +3262,14 @@ static void ui_parse_theme_body(Parser *p, UiThemeBody *out) {
 
 /* What the theme `index` says, with its parents: their bodies are read again, so that the
    names a theme changes apply to the selectors it inherits (`theme Light : Dark`). */
-static void ui_inherit(Parser *p, const UiThemes *themes, size_t index, UiThemeBody *out) {
+static void ui_inherit(Parser *p, const UiThemes *themes, size_t index, const ExprVec *args, UiThemeBody *out) {
     const UiTheme *theme = &themes->items[index];
-    if (theme->parent != SIZE_MAX) ui_inherit(p, themes, theme->parent, out);
+    if (theme->parent != SIZE_MAX) ui_inherit(p, themes, theme->parent, &theme->parent_args, out);
+    /* its parameters: names of the theme, given by the theme that starts from it */
+    for (size_t i = 0; i < theme->param_count && i < args->count; i++) {
+        UiThemeName entry = { theme->params[i].name, ui_float(p, args->items[i], args->items[i]->offset, 0), false };
+        SOSU_VEC_PUSH(&out->names, entry);
+    }
     size_t pos = p->pos;
     p->pos = theme->body;
     ui_parse_theme_body(p, out);
@@ -3265,12 +3283,25 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
     size_t errors = p->diags->error_count;
     Name name;
     expect_name(p, &name, "a theme name");
+    Param *params = NULL;  /* `theme Brand(canvas.Color accent)` */
+    size_t param_count = 0;
+    if (check(p, TOK_LPAREN)) parse_params(p, &params, &param_count, false);
     UiThemeBody body;
     memset(&body, 0, sizeof body);
     size_t parent = SIZE_MAX;
+    ExprVec parent_args = {0};
     if (accept(p, TOK_COLON)) {
         Name base;
         if (expect_name(p, &base, "the theme it starts from")) {
+            if (accept(p, TOK_LPAREN)) {  /* `: Brand(#D20F39)` */
+                if (!check(p, TOK_RPAREN)) {
+                    do {
+                        Expr *arg = parse_expr(p);
+                        SOSU_VEC_PUSH(&parent_args, arg);
+                    } while (accept(p, TOK_COMMA));
+                }
+                expect_closing(p, TOK_RPAREN);
+            }
             for (size_t i = 0; i < themes->count; i++) {
                 if (names_equal(themes->items[i].name, base)) parent = i;
             }
@@ -3279,12 +3310,18 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
                                          (int)base.length, base.text);
                 diag_help(d, "a theme starts from a theme written above it, in the same file");
                 p->panic = false;
+            } else if (themes->items[parent].param_count != parent_args.count) {
+                Diagnostic *d = error_at(p, "E0215", base.offset, base.length, "`%.*s` takes %zu value%s, not %zu",
+                                         (int)base.length, base.text, themes->items[parent].param_count,
+                                         themes->items[parent].param_count == 1 ? "" : "s", parent_args.count);
+                diag_help(d, "give the values of its parameters: `theme Red : %.*s(#D20F39) { }`", (int)base.length, base.text);
+                p->panic = false;
             } else if (themes->items[parent].valid) {
-                ui_inherit(p, themes, parent, &body);
+                ui_inherit(p, themes, parent, &parent_args, &body);
             }
         }
     }
-    UiTheme theme = { name, p->pos, parent, false };
+    UiTheme theme = { name, p->pos, parent, false, params, param_count, parent_args };
     size_t body_offset = cur(p)->offset;
     ui_parse_theme_body(p, &body);
     theme.valid = p->diags->error_count == errors;
@@ -3321,7 +3358,7 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
         SOSU_VEC_PUSH(&fields, field);
     }
     SOSU_VEC_PUSH(&items, ui_return(p, ui_struct(p, "Theme", &fields, name.offset, name.length)));
-    return ui_function(p, offset, name, "Theme", &items, body_offset);
+    return ui_function(p, offset, name, "Theme", &items, body_offset, params, param_count);
 }
 
 static bool ui_imports_widgets(const Decl *decl) {
@@ -3374,6 +3411,7 @@ Module *parse_ui_module(const SourceFile *file, const TokenList *tokens, Arena *
         import->as.import.items = arena_copy(arena, names, sizeof names);
         SOSU_VEC_PUSH(&decls, import);
     }
+    for (size_t i = 0; i < themes.count; i++) free(themes.items[i].parent_args.items);
     free(themes.items);
     Module *module = arena_alloc(arena, sizeof *module);
     module->count = decls.count;
