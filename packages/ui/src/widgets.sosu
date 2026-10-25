@@ -2810,6 +2810,7 @@ pub struct Frame {
         if (depth > before) {
             layouts[depth].y += size.h / 2.0;  // under the title, which is on the border
             layouts[depth].top += size.h / 2.0;
+            layouts[depth].room_h = max(layouts[depth].room_h - size.h / 2.0, 0.0);
             layouts[depth].bottom = layouts[depth].top;
             layouts[depth].color = or_color(p.color, parent.color);
             layouts[depth].font_size = or_f32(p.font_size, parent.font_size);
@@ -2883,7 +2884,7 @@ pub struct Frame {
             current = s.pick;
             s.pick = -1;
         }
-        current = min(max(current, 0), max(s.items - 1, 0));
+        current = s.items > 0 ? min(max(current, 0), s.items - 1) : max(current, 0);  // the count is known from the second frame
         match (chosen) {
             some(index) => {
                 *index = current;
@@ -2924,6 +2925,7 @@ pub struct Frame {
         open(false, bar.gap, 0.0);
         layouts[depth].y += row_h + 8.0;  // the content, under the row
         layouts[depth].top += row_h + 8.0;
+        layouts[depth].room_h = max(layouts[depth].room_h - row_h - 8.0, 0.0);
         layouts[depth].bottom = layouts[depth].top;
         tab_builds[t] = TabsBuild{ id: id, slot: slot, bound: chosen, chosen: current, row: row, offset: s.scroll_x, marks: focus_marks, depth: depth };
     }
@@ -5006,4 +5008,19 @@ test "a tree: branches open and closed, indentation, the keys" {
     tree_frame(&ui, &surface, &chosen, &open, &x);
     ui.key(key_enter(), true, false, false);
     assert(chosen == 1 && tree_frame(&ui, &surface, &chosen, &open, &x) == 3);
+}
+
+test "tabs bound to a tab other than the first keep it from the first frame" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 2;
+    mut TextBuffer name = TextBuffer{ };
+    mut bool closed = false;
+    ui.mouse_move(399.0, 199.0);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 100 && chosen == 2);
+    chosen = 7;  // beyond the last tab: the last one
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(chosen == 2);
 }
