@@ -302,6 +302,7 @@ static void test_ui_files(void) {
               "  (block\n"
               "    (call (. ui_frame column) 4 0.0)\n"
               "    (call (. ui_frame label) \"a\")\n"
+              "    (call (. ui_frame at) 80)\n"
               "    (if (call (. ui_frame button_enabled) \"OK\" (. s ready))\n"
               "      (block\n"
               "        (call (. s ok))))\n"
@@ -318,24 +319,34 @@ static void test_ui_files(void) {
               "  (block\n"
               "    (if (. t on)\n"
               "      (block\n"
+              "        (call (. ui_frame at) 71)\n"
               "        (call (. ui_frame checkbox_alone) (& (. t on))))\n"
               "      (block\n"
+              "        (call (. ui_frame at) 113)\n"
               "        (if (call (. ui_frame text_field) (& (. t text)) 90.5)\n"
               "          (block\n"
               "            (call (. t go) 1)))))\n"
+              "    (call (. ui_frame push_id) 179)\n"
               "    (for-in i32 i (.. 0 (. t n))\n"
               "      (block\n"
+              "        (call (. ui_frame push_item))\n"
               "        (call (. ui_frame space) 4)\n"
-              "        (call (. other Row) ui_frame t i)))))\n");
+              "        (call (. ui_frame push_id) 228)\n"
+              "        (call (. other Row) ui_frame t i)\n"
+              "        (call (. ui_frame pop_id))\n"
+              "        (call (. ui_frame pop_id))))\n"
+              "    (call (. ui_frame pop_id))))\n");
     expect_ui("component C(T* t) {\n    TextField(bind: t.date, mask: \"99/99/9999\", accept: Digits, max: 10)\n}\n",
               "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
               "  (block\n"
+              "    (call (. ui_frame at) 24)\n"
               "    (call (. ui_frame text_field_with) (& (. t date)) 200.0 "
               "(lit widgets.Format (accept (. (. widgets Accept) Digits)) (max 10) (mask \"99/99/9999\")))))\n"
               "(import ui.widgets)\n");
     expect_ui("component C(T* t) {\n    Radio(\"S\", bind: t.size, value: Small)\n}\n",
               "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
               "  (block\n"
+              "    (call (. ui_frame at) 24)\n"
               "    (if (&& (call (. ui_frame radio) \"S\" (== (. t size) Small)) (!= (. t size) Small))\n"
               "      (block\n"
               "        (= (. t size) Small)))))\n"
@@ -345,9 +356,11 @@ static void test_ui_files(void) {
               "    List { }\n}\n",
               "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
               "  (block\n"
+              "    (call (. ui_frame at) 24)\n"
               "    (call (. ui_frame list) 300.0 120 (call some (& (. t index))))\n"
               "    (call (. ui_frame label) \"a\")\n"
               "    (call (. ui_frame end_list))\n"
+              "    (call (. ui_frame at) 91)\n"
               "    (call (. ui_frame list) 300.0 200.0 none)\n"
               "    (call (. ui_frame end_list))))\n"
               "(import ui.widgets)\n");
@@ -358,6 +371,7 @@ static void test_ui_files(void) {
               "  (block\n"
               "    (call (. ui_frame title_bar) 36 8.0 4.0)\n"
               "    (call (. ui_frame label) \"App\")\n"
+              "    (call (. ui_frame at) 72)\n"
               "    (call (. ui_frame dropdown) 160.0)\n"
               "    (if (&& (call (. ui_frame option) \"D\" (== (. t mode) Debug)) (!= (. t mode) Debug))\n"
               "      (block\n"
@@ -401,19 +415,23 @@ static void test_ui_files(void) {
               "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
               "  (block\n"
               "    (call (. ui_frame menu_bar))\n"
+              "    (call (. ui_frame at) 42)\n"
               "    (call (. ui_frame menu) \"File\")\n"
               "    (if (call (. ui_frame menu_item_with) \"New\" \"Ctrl+N\" true)\n"
               "      (block\n"
               "        (call (. t new))))\n"
               "    (call (. ui_frame separator))\n"
+              "    (call (. ui_frame at) 156)\n"
               "    (call (. ui_frame menu) \"Recent\")\n"
               "    (call (. ui_frame menu_item_enabled) \"a\" (. t ok))\n"
               "    (call (. ui_frame end_menu))\n"
               "    (call (. ui_frame menu_item) \"Quit\")\n"
               "    (call (. ui_frame end_menu))\n"
               "    (call (. ui_frame end_menu_bar))\n"
+              "    (call (. ui_frame at) 281)\n"
               "    (call (. ui_frame list) 300.0 200.0 none)\n"
               "    (call (. ui_frame end_list))\n"
+              "    (call (. ui_frame at) 294)\n"
               "    (call (. ui_frame context_menu))\n"
               "    (if (call (. ui_frame menu_item_with) \"Remove\" \"Delete\" (. t ok))\n"
               "      (block\n"
@@ -426,6 +444,28 @@ static void test_ui_files(void) {
     expect_ui_error("window W() {\n    MenuBar { Text(\"b\") }\n}\n", "E0215", 2, 15);
     expect_ui_error("window W() {\n    Menu { }\n}\n", "E0215", 2, 5);  /* no title */
     expect_ui_error("window W() {\n    ContextMenu { Column { } }\n}\n", "E0215", 2, 19);
+    /* identities: a loop with `key:`, `focus:`, a `Scroll` */
+    expect_ui("component C(T* t) {\n    for (Task* k in t.tasks, key: k.id) {\n        TextField(bind: k.name, focus: k.fresh)\n"
+              "    }\n    Scroll(width: 300, height: 100) { }\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame push_id) 24)\n"
+              "    (for-in Task* k (. t tasks)\n"
+              "      (block\n"
+              "        (call (. ui_frame push_id) (as (. k id) u64))\n"
+              "        (if (. k fresh)\n"
+              "          (block\n"
+              "            (call (. ui_frame focus_here))))\n"
+              "        (call (. ui_frame at) 70)\n"
+              "        (call (. ui_frame text_field) (& (. k name)) 200.0)\n"
+              "        (call (. ui_frame pop_id))))\n"
+              "    (call (. ui_frame pop_id))\n"
+              "    (call (. ui_frame at) 120)\n"
+              "    (call (. ui_frame scroll) 300 100)\n"
+              "    (call (. ui_frame end_scroll))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W(T* t) {\n    for (i32 i in 0..3, id: i) { }\n}\n", "E0215", 2, 25);  /* not key: */
+    expect_ui_error("window W() {\n    Scroll(height: 100) { }\n}\n", "E0215", 2, 5);  /* no width */
 
     expect_ui_error("window W() {\n    42\n}\n", "E0214", 2, 5);
     expect_ui_error("window W() {\n    Button(\"OK\", on_tap: f)\n}\n", "E0215", 2, 18);
