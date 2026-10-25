@@ -1409,8 +1409,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
     { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", "count", "item", "focus", "style", NULL }, true },
-    { "Table", 0, false, { "count", "item", "width", "height", "selected", "sort", "on_activate", "focus", "style", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "selection", "count", "item", "focus", "style", NULL }, true },
+    { "Table", 0, false, { "count", "item", "width", "height", "selected", "selection", "sort", "on_activate", "focus", "style", NULL }, true },
     { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
     { "Text", 1, false, { "plural", "count", "context", "style", NULL }, false },
     { "Title", 1, false, { "plural", "count", "context", "style", NULL }, false },
@@ -2370,6 +2370,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             if (kind->children && check(p, TOK_LBRACE)) ui_parse_children(p, out);
         } else if (name_text_is(node, "List")) {
             /* f.list(width, height, some(&selected) or none), the items, f.end_list() */
+            Expr *several = ui_prop(&args, "selection");  /* several choices: f.multiple(&selection) first */
+            if (several) SOSU_VEC_PUSH(out, ui_frame_stmt(p, several->offset, several->length, "multiple", ui_address(p, several)));
             Expr *selected = ui_prop(&args, "selected");
             Expr *choice;
             if (selected) {
@@ -2402,6 +2404,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
                f.table_rows(), the rows in view (a cell per column), if (f.end_table()) { on_activate } */
             Expr *selected = ui_prop(&args, "selected");
             Expr *sort = ui_prop(&args, "sort");
+            Expr *several = ui_prop(&args, "selection");
+            if (several) SOSU_VEC_PUSH(out, ui_frame_stmt(p, several->offset, several->length, "multiple", ui_address(p, several)));
             Expr *none_selected = ui_expr(p, EXPR_NAME, start, length);
             none_selected->as.name = ui_name("none", start);
             Expr *none_sort = ui_expr(p, EXPR_NAME, start, length);

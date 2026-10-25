@@ -235,6 +235,106 @@ pub struct LongText {
     }
 }
 
+// The items chosen in a list or a table that allows several (spec §10.10): a set of indices, in an
+// arena of its own (moved, never copied); `anchor` is where Shift extends from, `cursor` the item
+// of the keyboard. Make one with `selection()`, free it with `free()`.
+pub struct Selection {
+    mut Arena arena;
+    mut u64[] words;
+    pub mut i32 anchor = -1;
+    pub mut i32 cursor = 0;
+
+    pub bool contains(i32 index) {
+        if (index < 0) {
+            return false;
+        }
+        usize word = (index / 64) as usize;
+        return word < words.len && words[word] >> (index % 64) as u64 & 1 == 1;
+    }
+
+    pub void add(i32 index) {
+        if (index < 0) {
+            return;
+        }
+        usize word = (index / 64) as usize;
+        if (word >= words.len) {  // more words, twice as many each time
+            mut usize room = max(words.len * 2, 4);
+            while (room <= word) {
+                room *= 2;
+            }
+            mut u64[] grown = arena.alloc_slice(u64, room);
+            for (usize i in 0..words.len) {
+                grown[i] = words[i];
+            }
+            words = grown;
+        }
+        words[word] = words[word] | 1 << (index % 64) as u64;
+    }
+
+    pub void remove(i32 index) {
+        usize word = (index / 64) as usize;
+        if (index >= 0 && word < words.len) {
+            words[word] = words[word] & ~(1 << (index % 64) as u64);
+        }
+    }
+
+    pub void toggle(i32 index) {
+        if (contains(index)) {
+            remove(index);
+        } else {
+            add(index);
+        }
+    }
+
+    pub void clear() {
+        for (usize i in 0..words.len) {
+            words[i] = 0;
+        }
+    }
+
+    // The items from `from` to `to`, both included, in either order.
+    pub void add_range(i32 from, i32 to) {
+        for (i32 i in min(from, to)..max(from, to) + 1) {
+            add(i);
+        }
+    }
+
+    pub i32 count() {
+        mut i32 n = 0;
+        for (usize i in 0..words.len) {
+            mut u64 w = words[i];
+            while (w != 0) {
+                w = w & w - 1;
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    // The first item chosen from `from` on, or -1: `for` the items chosen, from 0.
+    pub i32 next(i32 from) {
+        mut i32 i = max(from, 0);
+        while ((i / 64) as usize < words.len) {
+            if (contains(i)) {
+                return i;
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    pub void free() {
+        arena.free();
+    }
+}
+
+// An empty `Selection`.
+pub Selection selection() {
+    mut Arena arena = Arena.new(1 * KB);
+    u64[] words = arena.alloc_slice(u64, 4);
+    return Selection{ arena: arena, words: words };
+}
+
 // An empty `LongText`.
 pub LongText long_text() {
     mut Arena arena = Arena.new(4 * KB);
@@ -530,6 +630,7 @@ pub struct Ui {
     mut f32 wheel = 0.0;
     mut f32 wheel_x = 0.0;
     mut bool shift_held = false;
+    mut bool ctrl_held = false;  // Ctrl (Cmd on macOS) held: a click adds to a selection
     mut f32 drag_offset = 0.0;
     // Alt held, and no other key since: released alone, it is F10 (the menus).
     mut bool alt_down = false;
@@ -855,6 +956,7 @@ pub struct Ui {
     // Alt pressed and released alone is F10 (the menus); its release is needed for that.
     pub void key(u32 code, bool is_down, bool shift, bool ctrl) {
         shift_held = shift;
+        ctrl_held = ctrl;
         if (code == 0x400000E2 || code == 0x400000E6) {  // left and right Alt
             if (is_down && !alt_down) {
                 alt_down = true;
@@ -1859,6 +1961,7 @@ struct Layout {
     mut f32 bar_h = 0.0;
     mut i32 item = 0;
     mut i32*? selected = none;
+    mut Selection*? multi = none;  // a list of several choices (spec §10.10)
     // What its widgets inherit (spec §10.7), and, when it is painted (a background, a border),
     // its identity, which keeps its size from the last frame, and its look.
     mut canvas.Color? color = none;
@@ -2062,6 +2165,7 @@ pub struct Frame {
     mut usize item_count = 0;
     mut bool item_painted = false;
     mut bool item_not_chosen = false;
+    mut Selection*? next_multi = none;  // `multiple`: for the next list or table
     mut i32 shown_first = 0;  // a long list: the items in view, `shown_first` to `shown_last` excluded
     mut i32 shown_last = 0;
     mut u32 letters_taken = 0;  // the letters of Alt+letter that a widget took in this frame
@@ -2787,10 +2891,13 @@ pub struct Frame {
         WidgetState kept = ui.states[slot];
         // where it is: its row in a list, else its size at the last frame
         canvas.Rect r = canvas.Rect{ x: in_list ? parent.frame.x : parent.x, y: parent.y, w: in_list ? parent.frame.w - parent.bar_w : kept.content_w, h: kept.content_h };
-        bool chosen = in_list && match (parent.selected) {
+        bool chosen = in_list && (match (parent.selected) {
             some(index) => *index == parent.item,
             none => false,
-        };
+        } || match (parent.multi) {
+            some(set) => set.contains(parent.item),
+            none => false,
+        });
         u32 states = (kept.content_h > 0.0 && over(r) && enabled ? state_hover() : 0) | (chosen ? state_checked() : 0) | (chosen && ui.focus == parent.area_id ? state_focus() : 0) | (enabled ? 0 : state_disabled());
         Look l = look(Item, states);
         Props p = explicit_props(Item, states);
@@ -5256,6 +5363,38 @@ pub struct Frame {
         }
         canvas.Rect row = canvas.Rect{ x: l.frame.x, y: r.y, w: l.frame.w - l.bar_w, h: r.h };
         bool inside = over(row) && over(l.frame);
+        match (l.multi) {  // several choices: Ctrl adds or removes, Shift extends from the anchor
+            some(set) => {
+                if (ui.pressed && inside && !item_not_chosen) {
+                    if (ui.ctrl_held) {
+                        set.toggle(index);
+                        set.anchor = index;
+                    } else if (ui.shift_held && set.anchor >= 0) {
+                        set.clear();
+                        set.add_range(set.anchor, index);
+                    } else {
+                        set.clear();
+                        set.add(index);
+                        set.anchor = index;
+                    }
+                    set.cursor = index;
+                }
+                if (set.contains(index) && !item_painted) {
+                    surface.fill(row, l.look.selection);
+                } else if (inside && !item_painted) {
+                    surface.fill(row, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
+                }
+                WidgetState* s = &ui.states[l.area as usize];
+                if (s.reveal && set.cursor == index) {
+                    f32 top = r.y - l.frame.y + s.scroll_y;
+                    s.scroll_y = min(s.scroll_y, top);
+                    s.scroll_y = max(s.scroll_y, top + r.h - l.frame.h);
+                    s.reveal = false;
+                }
+                return;
+            },
+            none => { },
+        }
         match (l.selected) {
             some(chosen) => {
                 if (ui.pressed && inside && !item_not_chosen) {
@@ -5314,6 +5453,59 @@ pub struct Frame {
         canvas.Rect r = place(width, height_of);
         interactive(r);
         open_area(id, List, r, true, selected, max(count, 0));
+    }
+
+    // The next list or table allows several choices, kept in `chosen` (spec §10.10): Ctrl and a click
+    // add or remove an item, Shift and a click extend from the anchor, Up and Down (with Shift:
+    // extending), Ctrl+A for all, Space to add or remove the item of the keyboard.
+    pub void multiple(Selection* chosen) {
+        next_multi = some(chosen);
+    }
+
+    // The keys of a list of several choices; true when `e` was one of them.
+    bool multi_keys(Selection*? multi, Edit e, WidgetState* s, f32 view_h) {
+        return match (multi) {
+            some(set) => multi_key(set, e, s, view_h),
+            none => false,
+        };
+    }
+
+    bool multi_key(Selection* set, Edit e, WidgetState* s, f32 view_h) {
+        i32 last_item = max(s.items - 1, 0);
+        i32 page = max((view_h / height) as i32 - 1, 1);
+        mut i32 next = set.cursor;
+        mut bool moved = true;
+        if (e.key == key_up() || e.key == key_down()) {
+            next += e.key == key_up() ? -1 : 1;
+        } else if (e.key == key_page_up() || e.key == key_page_down()) {
+            next += e.key == key_page_up() ? -page : page;
+        } else if (e.key == key_home() || e.key == key_end()) {
+            next = e.key == key_home() ? 0 : last_item;
+        } else if (e.ctrl && e.key == 97) {  // Ctrl+A: all
+            set.add_range(0, last_item);
+            return true;
+        } else if (e.key == key_space()) {
+            set.toggle(set.cursor);
+            set.anchor = set.cursor;
+            return true;
+        } else {
+            moved = false;
+        }
+        if (!moved) {
+            return false;
+        }
+        next = min(max(next, 0), last_item);
+        if (e.shift && set.anchor >= 0) {
+            set.clear();
+            set.add_range(set.anchor, next);
+        } else {
+            set.clear();
+            set.add(next);
+            set.anchor = next;
+        }
+        set.cursor = next;
+        s.reveal = true;
+        return true;
     }
 
     // ---- Tables (spec §10.9) ----
@@ -5819,6 +6011,8 @@ pub struct Frame {
     // as high as the first one, of which only those in view are described (`first_shown` to
     // `last_shown`).
     void open_area(u64 id, Kind kind, canvas.Rect r, bool is_list, i32*? selected, i32 count) {
+        Selection*? multi = next_multi;  // `multiple`: several items can be chosen
+        next_multi = none;
         usize slot = ui.state_slot(id);
         WidgetState* s = &ui.states[slot];
         bool long_list = count >= 0;
@@ -5839,6 +6033,9 @@ pub struct Frame {
         if (ui.focus == id) {
             for (usize i in 0..ui.edit_count) {
                 u32 key = ui.edits[i].key;
+                if (is_list && multi_keys(multi, ui.edits[i], s, view_h)) {
+                    continue;
+                }
                 if (is_list) {
                     match (selected) {
                         some(chosen) => {
@@ -5888,7 +6085,7 @@ pub struct Frame {
         f32 left = r.x + 8.0 - s.scroll_x;
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, look: area_look, room_w: max(view_w - 16.0, 0.0) };
+        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, multi: multi, look: area_look, room_w: max(view_w - 16.0, 0.0) };
         shown_first = 0;
         shown_last = 0;
         if (long_list) {  // the items in view: the first ones are skipped, where they would be
@@ -5897,6 +6094,17 @@ pub struct Frame {
                 some(chosen) => {
                     if (kept.reveal) {
                         f32 at = *chosen as f32 * item_h;
+                        kept.scroll_y = max(min(kept.scroll_y, at), at + item_h - view_h);
+                        kept.scroll_y = max(min(kept.scroll_y, kept.content_h - view_h), 0.0);
+                        kept.reveal = false;
+                    }
+                },
+                none => { },
+            }
+            match (multi) {  // the item of the keyboard, when several can be chosen
+                some(set) => {
+                    if (kept.reveal) {
+                        f32 at = set.cursor as f32 * item_h;
                         kept.scroll_y = max(min(kept.scroll_y, at), at + item_h - view_h);
                         kept.scroll_y = max(min(kept.scroll_y, kept.content_h - view_h), 0.0);
                         kept.reveal = false;
@@ -8103,4 +8311,57 @@ test "item templates: several widgets, one item; its button is not a choice; its
     chosen = 0;
     items_frame(&ui, &surface, &chosen, &color);
     assert(color.r == 255 && color.g == 0);
+}
+
+// A list of 10 items, several of which can be chosen, for the test below.
+void many_frame(Ui* ui, canvas.Canvas* surface, Selection* chosen) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.multiple(chosen);
+    f.list_of(10, 200.0, 400.0, none);
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        f.label("item");
+        f.pop_id();
+    }
+    f.end_list();
+    f.finish();
+}
+
+test "several choices: a click, Ctrl and a click, Shift and a click, the keys, Ctrl+A, Space" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 220, 420);
+    mut Ui ui = Ui{ };
+    mut Selection chosen = selection();
+    defer chosen.free();
+    ui.mouse_move(10.0, 32.0 + 10.0);  // the item 1
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 1 && chosen.contains(1));
+    ui.key(0x400000E0, true, false, true);  // Ctrl held; a click on the item 3 adds it
+    ui.mouse_move(10.0, 3.0 * 32.0 + 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 2 && chosen.contains(3));
+    ui.key(0x400000E0, false, false, false);
+    ui.key(0x400000E1, true, true, false);  // Shift held; a click on the item 5: from 3 to 5
+    ui.mouse_move(10.0, 5.0 * 32.0 + 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 3 && chosen.contains(4) && !chosen.contains(1));
+    ui.key(0x400000E1, false, false, false);
+    // the keys: Shift+Down extends, Ctrl+A chooses all, Space removes the item of the keyboard
+    ui.key(key_down(), true, true, false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.contains(6) && chosen.contains(3));
+    ui.key(97, true, false, true);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 10);
+    ui.key(key_space(), true, false, false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 9 && !chosen.contains(6));
+    assert(chosen.next(0) == 0 && chosen.next(6) == 7);
 }
