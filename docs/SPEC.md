@@ -715,7 +715,7 @@ Translation in v0:
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
-- `theme` and `style` blocks, and `style:` on a node: see §10.7. `Grid` and the places of its nodes (`row:`, `col:`, `span:`, `align:`), `Group`, `Tabs` and `Tree`: see §10.8. Not yet: `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+- `theme` and `style` blocks, and `style:` on a node: see §10.7. `Grid` and the places of its nodes (`row:`, `col:`, `span:`, `align:`), `Group`, `Tabs` and `Tree`: see §10.8. `bind:` goes on `TextField`, `TextArea`, `NumberField`, `MoneyField`, `Checkbox`, `Radio`, `Dropdown`, `Slider` and `DateField` (elsewhere: error E0215). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
 
@@ -780,9 +780,9 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `Table` | available | columns of sizes, sorting, borders dragged, rows chosen, only those in view (§10.9) |
 | `TextArea` (several lines) | available | bound to a `LongText`: lines, wrapping, Up and Down, undo, scrolling (§10.9) |
 | `Radio` | available | `Radio("Small", bind: size, value: Small)`: the translator generates the comparison and the assignment for the `enum` (`==` on enums without data), so the widget itself needs no generics |
-| `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. Not yet: a selection of several items |
+| `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. With `count:` and `item:`, a long list: only the items in view are described (§10.9). Not yet: a selection of several items |
 | `Scroll` | available | `Scroll(width: 300, height: 200) { ... }`: any content, scrolled by the wheel (the innermost area first), its bars and the keyboard (§10.6) |
-| `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. Not yet: choosing with the keyboard, scrolling a long list (16 options at most) |
+| `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. With the keyboard: Space, Enter or Alt+Down opens it, Up and Down choose (§10.6). Not yet: scrolling a long list (16 options at most) |
 | `MenuBar`, `Menu`, `MenuItem`, `Separator` | available | menus drawn by `ui`, in a title bar as in VS Code, or anywhere; submenus; shortcuts |
 | `ContextMenu` | available | the menu of the widget placed before it, opened by the right button |
 | `TitleBar` | available | a title bar drawn by the program, with widgets in it (§10.5) |
@@ -795,11 +795,11 @@ Foundations, to build first, since most planned widgets rely on them:
 
 1. Clipping in `render`: a stack of clip rectangles on the `Canvas`, so that nothing overflows a field, a list or a text area. Done.
 2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat. Done (key repeat comes from the system); not yet: moving by word (Ctrl+Left), undo.
-3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`.
+3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`. Done: `LongText` (§10.9).
 4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame. Done for dropdowns and menus: `Ui` keeps the rectangles of the open list of a dropdown and of the open menus, and the widgets under them do not see the mouse.
 5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`). Done, with the identity of the widgets and the scrolling of any area (§10.6).
 
-Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling (done), `Dropdown` with the layer above (done), then `TextArea`. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus.
+Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling, `Dropdown` with the layer above, then the foundations of §10.6, the themes of §10.7, the containers of §10.8, and the rest of §10.9 (text areas, numbers, dates, sliders, progress bars, tooltips, dialogs, tables, mnemonics): all done.
 
 Two limits of v0 apply to every text widget: without a TrueType font (`ui.font`), the built-in font only draws ASCII (other characters are kept, and drawn as boxes), and the composition of input methods (IME) is not shown: only the final text arrives, as `TextInput`.
 
