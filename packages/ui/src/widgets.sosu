@@ -5809,6 +5809,48 @@ pub struct Frame {
         return clicked;
     }
 
+    // A long tree (spec §10.10): `count` rows, a tree the program flattened into the rows it shows;
+    // only those in view are described, `first_shown()` to `last_shown()`, each after `tree_row`,
+    // then `end_tree()`.
+    pub void tree_of(i32 count, f32 width, f32 height_of, i32*? selected) {
+        list_of(count, width, height_of, selected);
+        if (layouts[depth].is_list) {
+            layouts[depth].tree = true;
+        }
+        tree_level = 0;
+    }
+
+    // A row of a long tree, `depth` deep, with a triangle when it is a branch (open or not): its
+    // widgets follow, until `end_tree_row()`. Returns true when the program should open or close
+    // it: a click on its triangle, Right on a closed branch or Left on an open one, Enter.
+    pub bool tree_row(i32 row_depth, bool is_branch, bool is_open) {
+        u64 id = take_id();
+        i32 index = layouts[depth].item;
+        Layout l = layouts[depth];
+        f32 indent = max(row_depth, 0) as f32 * 16.0;
+        canvas.Rect toggle = canvas.Rect{ x: l.x + indent, y: l.y, w: 20.0, h: height };
+        mut bool change = is_branch && click(id, toggle);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (is_branch && (key == key_right() && !is_open || key == key_left() && is_open || key == key_enter())) {
+                    change = true;
+                } else if (key == key_right() && is_open) {
+                    tree_choose(index + 1);  // its first child
+                }
+            }
+        }
+        usize level = tree_level;
+        tree_level = max(row_depth, 0) as usize;
+        tree_line_open(is_branch, is_open, id, index);
+        tree_level = level;
+        return change;
+    }
+
+    pub void end_tree_row() {
+        tree_line_close();
+    }
+
     // A branch whose line is made of widgets (spec §10.10, `template:`): they follow, until
     // `branch_close()`, which returns whether it is open (its children then follow, then
     // `end_branch()`). Its triangle and its keys are those of `branch`.
@@ -8364,4 +8406,58 @@ test "several choices: a click, Ctrl and a click, Shift and a click, the keys, C
     many_frame(&ui, &surface, &chosen);
     assert(chosen.count() == 9 && !chosen.contains(6));
     assert(chosen.next(0) == 0 && chosen.next(6) == 7);
+}
+
+// A long tree of 100 000 rows, every tenth a branch, the rows after an open branch one deeper,
+// for the test below: the rows described, and the row toggled (-1: none).
+i32 long_tree_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, i32* toggled) {
+    mut i32 described = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.tree_of(100000, 300.0, 200.0, some(chosen));
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        if (f.tree_row(i % 10 == 0 ? 0 : 1, i % 10 == 0, true)) {
+            *toggled = i;
+        }
+        f.label("row");
+        f.end_tree_row();
+        f.pop_id();
+        described += 1;
+    }
+    f.end_tree();
+    f.finish();
+    return described;
+}
+
+test "a long tree: only the rows in view, their depth, a triangle that asks to toggle" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 320, 220);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut i32 toggled = -1;
+    ui.mouse_move(319.0, 219.0);
+    assert(long_tree_frame(&ui, &surface, &chosen, &toggled) <= 9);
+    // a click on the triangle of the row 0 (a branch): the program is asked to close it
+    ui.mouse_move(8.0 + 8.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(toggled == 0);
+    // End: the last row, in view
+    ui.key(key_end(), true, false, false);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(chosen == 99999);
+    // Up nine times: the branch 99990, which comes into view; Left on it: it is closed
+    for (i32 k in 0..9) {
+        ui.key(key_up(), true, false, false);
+    }
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(chosen == 99990);
+    toggled = -1;
+    ui.key(key_left(), true, false, false);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(toggled == 99990);
 }

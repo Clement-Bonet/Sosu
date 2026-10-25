@@ -1433,7 +1433,7 @@ static const UiNodeKind ui_nodes[] = {
     { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
     { "Tabs", 0, false, { "bind", "placement", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
-    { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
+    { "Tree", 0, false, { "selected", "width", "height", "count", "item", "depth", "branch", "open", "on_toggle", "focus", "style", NULL }, true },
     { "Branch", 1, true, { "open", "icon", "template", "plural", "count", "context", NULL }, true },
     { "Leaf", 1, true, { "on_click", "icon", "template", "plural", "count", "context", NULL }, false },
     { "Item", 0, false, { "gap", "padding", "vertical", "enabled", "style", NULL }, true },
@@ -2612,10 +2612,33 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             if (selected) choice = ui_some(p, ui_address(p, selected));
             Expr *tree_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
                                    ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree", tree_args, 3)));
-            p->ui_in_tree = true;
-            ui_parse_children(p, out);
-            p->ui_in_tree = false;
+            Expr *count = ui_prop(&args, "count");
+            if (count) {  /* a long tree: f.tree_of(count, ...), each row in view after f.tree_row(depth, branch, open) */
+                Expr *long_args[4] = { count, tree_args[0], tree_args[1], choice };
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree_of", long_args, 4)));
+                Expr *depth = ui_prop(&args, "depth");
+                Expr *branch = ui_prop(&args, "branch");
+                Expr *open = ui_prop(&args, "open");
+                if (!branch) {
+                    branch = ui_expr(p, EXPR_BOOL, start, length);
+                    branch->as.bool_value = false;
+                }
+                if (!open) {
+                    open = ui_expr(p, EXPR_BOOL, start, length);
+                    open->as.bool_value = false;
+                }
+                Expr *row_args[3] = { depth ? depth : ui_int(p, start, 0), branch, open };
+                StmtVec row = {0};
+                SOSU_VEC_PUSH(&row, ui_when(p, ui_frame_call(p, start, length, "tree_row", row_args, 3), ui_prop(&args, "on_toggle")));
+                ui_parse_children(p, &row);  /* the widgets of a row */
+                SOSU_VEC_PUSH(&row, ui_stmt(p, ui_frame_call(p, start, length, "end_tree_row", NULL, 0)));
+                ui_shown_loop(p, out, ui_prop(&args, "item"), &row, start, length);
+            } else {
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree", tree_args, 3)));
+                p->ui_in_tree = true;
+                ui_parse_children(p, out);
+                p->ui_in_tree = false;
+            }
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_tree", NULL, 0)));
         } else if (name_text_is(node, "Branch")) {
             /* if (f.branch(text, some(&open) or none)) { the branches and leaves; f.end_branch(); } */

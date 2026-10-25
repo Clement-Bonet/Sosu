@@ -733,6 +733,26 @@ static void test_ui_grids(void) {
               "  (block\n"
               "    (return (lit widgets.Window))))\n"
               "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Tree(count: s.n, item: i, depth: s.depth(i), branch: s.folder(i), open: s.open(i), on_toggle: s.toggle(i)) {\n"
+              "        Text(s.name(i))\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame tree_of) (. s n) 300.0 200.0 none)\n"
+              "    (for-in i32 i (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
+              "      (block\n"
+              "        (call (. ui_frame push_id) (as i u64))\n"
+              "        (if (call (. ui_frame tree_row) (call (. s depth) i) (call (. s folder) i) (call (. s open) i))\n"
+              "          (block\n"
+              "            (call (. s toggle) i)))\n"
+              "        (call (. ui_frame label) (call (. s name) i))\n"
+              "        (call (. ui_frame end_tree_row))\n"
+              "        (call (. ui_frame pop_id))))\n"
+              "    (call (. ui_frame end_tree))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
     expect_ui("window W() {\n    Tabs(placement: Bottom) { }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame))\n"
               "  (block\n"
