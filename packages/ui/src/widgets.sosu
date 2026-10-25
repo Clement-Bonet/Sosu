@@ -1399,6 +1399,7 @@ pub struct Theme {
     pub Style dialog = Style{ };  // its window; the part `placeholder` is its title
     pub Style date = Style{ };  // the calendar of a date field; `checked`: the day chosen
     pub Style table = Style{ };  // its rows; the part `bar`: its header and its scroll bar
+    pub Style item = Style{ };  // an item of a list, a tree or a table: `hover`, `checked`, `focus`, `disabled`
 }
 
 // The kinds of widgets, the selectors of a theme.
@@ -1429,6 +1430,7 @@ enum Kind {
     Dialog,
     Calendar,
     Table,
+    Item,
 }
 
 // The states of a widget, which can be combined.
@@ -1482,7 +1484,7 @@ pub Style merge(Style weak, Style strong) {
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date), table: merge(weak.table, strong.table) };
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date), table: merge(weak.table, strong.table), item: merge(weak.item, strong.item) };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
@@ -1537,6 +1539,7 @@ Style style_of(Theme t, Kind kind) {
         Dialog => t.dialog,
         Calendar => t.date,
         Table => t.table,
+        Item => t.item,
     };
 }
 
@@ -1676,6 +1679,11 @@ Look default_look(Kind kind, u32 states) {
             border = face(true, false);
             border_width = 1.0;
             padding = 16.0;
+        },
+        Item => {  // the item chosen in the color of the selection, the item under the mouse lighter
+            bool chosen = states & state_checked() != 0;
+            background = chosen ? rgb(137, 180, 250, 90) : hot ? rgb(205, 214, 244, 18) : clear();
+            color = off ? face(false, false) : ink();
         },
         Table => {
             background = well();
@@ -1902,6 +1910,16 @@ pub struct Sort {
     pub mut bool descending = false;
 }
 
+// An `Item` being described (spec §10.10): its identity and entry of `Ui.states` (its size at the last
+// frame), whether a press went to a widget inside it, whether it can be chosen, whether it is in a list.
+struct ItemBuild {
+    mut u64 id = 0;
+    mut usize slot = 0;
+    mut u64 active_before = 0;
+    mut bool enabled = true;
+    mut bool in_list = false;
+}
+
 // The table being described: its rectangle, rows, columns (titles, sizes, alignments), their places
 // once laid out, the widths its cells measured in this frame, the next cell, and whether a row
 // was activated (Enter, a double click).
@@ -2038,6 +2056,12 @@ pub struct Frame {
     mut bool cal_monday = true;
     mut bool no_edit = false;
     mut TableBuild table_build = TableBuild{ };  // the table being described (one at a time)
+    // The items being described, the outermost first; while one is placed, its list neither paints it
+    // (it painted itself) nor, when a widget inside it took the press, chooses it.
+    mut ItemBuild[4] item_builds = [ItemBuild{ }; 4];
+    mut usize item_count = 0;
+    mut bool item_painted = false;
+    mut bool item_not_chosen = false;
     mut i32 shown_first = 0;  // a long list: the items in view, `shown_first` to `shown_last` excluded
     mut i32 shown_last = 0;
     mut u32 letters_taken = 0;  // the letters of Alt+letter that a widget took in this frame
@@ -2062,6 +2086,11 @@ pub struct Frame {
     mut usize tree_level = 0;
     mut i32[16] tree_parents = [-1; 16];
     mut bool tree_keys_used = false;  // the keys of this frame acted on an item already
+    // The line of widgets of a branch or a leaf being described (`branch_open`, `leaf_open`).
+    mut u64 tree_line_id = 0;
+    mut i32 tree_line_index = 0;
+    mut bool tree_line_branch_open = false;
+    mut u64 tree_line_active = 0;
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -2738,6 +2767,68 @@ pub struct Frame {
             }
         }
         return false;
+    }
+
+    // ---- Items (spec §10.10) ----
+
+    // An item made of the widgets that follow, until `end_item()`, laid out in a row (`horizontal`)
+    // or a column: one item of the list, tree or table that holds it. It is painted in its states
+    // (`hover`, `checked` when it is chosen, `focus` when chosen while its list has the keyboard,
+    // `disabled` when it cannot be chosen) by the selector `Item` of the theme and its styles, and
+    // its widgets inherit its color. A press on a widget inside it does not choose it. A negative
+    // `gap` or `padding`: that of the theme.
+    pub void item(bool horizontal, f32 gap, f32 padding, bool enabled) {
+        ensure_cell();
+        u64 id = take_id();
+        take_styles();
+        Layout parent = layouts[depth];
+        bool in_list = parent.area >= 0 && parent.is_list;
+        usize slot = ui.state_slot(id);
+        WidgetState kept = ui.states[slot];
+        // where it is: its row in a list, else its size at the last frame
+        canvas.Rect r = canvas.Rect{ x: in_list ? parent.frame.x : parent.x, y: parent.y, w: in_list ? parent.frame.w - parent.bar_w : kept.content_w, h: kept.content_h };
+        bool chosen = in_list && match (parent.selected) {
+            some(index) => *index == parent.item,
+            none => false,
+        };
+        u32 states = (kept.content_h > 0.0 && over(r) && enabled ? state_hover() : 0) | (chosen ? state_checked() : 0) | (chosen && ui.focus == parent.area_id ? state_focus() : 0) | (enabled ? 0 : state_disabled());
+        Look l = look(Item, states);
+        Props p = explicit_props(Item, states);
+        if (kept.content_h > 0.0) {
+            paint(r, l);
+        }
+        if (item_count == 4 || depth == 15) {
+            return;
+        }
+        item_builds[item_count] = ItemBuild{ id: id, slot: slot, active_before: ui.active, enabled: enabled, in_list: in_list };
+        item_count += 1;
+        open(horizontal, gap >= 0.0 ? gap : l.gap, padding >= 0.0 ? padding : l.padding);
+        layouts[depth].color = or_color(p.color, parent.color);
+        layouts[depth].font_size = or_f32(p.font_size, parent.font_size);
+        layouts[depth].accent = or_color(p.accent, parent.accent);
+    }
+
+    // The end of an item: it takes its place, and is chosen when it was pressed outside its widgets.
+    pub void end_item() {
+        if (item_count == 0) {
+            return;
+        }
+        item_count -= 1;
+        ItemBuild b = item_builds[item_count];
+        Layout done = layouts[depth];
+        depth -= 1;
+        f32 w = done.right - done.left + 2.0 * done.padding;
+        f32 h = done.bottom - done.top + 2.0 * done.padding;
+        bool inner = ui.pressed && ui.active != b.active_before && ui.active != 0;  // a button inside took it
+        item_painted = true;
+        item_not_chosen = inner || !b.enabled;
+        canvas.Rect r = place(w, h);
+        item_painted = false;
+        item_not_chosen = false;
+        usize slot = b.slot;  // a variable: see the bug noted in `menu`
+        WidgetState* s = &ui.states[slot];
+        s.content_w = r.w;
+        s.content_h = r.h;
     }
 
     // ---- Sliders, progress, tooltips (spec §10.9) ----
@@ -5167,19 +5258,21 @@ pub struct Frame {
         bool inside = over(row) && over(l.frame);
         match (l.selected) {
             some(chosen) => {
-                if (ui.pressed && inside) {
+                if (ui.pressed && inside && !item_not_chosen) {
                     *chosen = index;
                 }
                 WidgetState* s = &ui.states[l.area as usize];
                 if (*chosen == index) {
-                    surface.fill(row, l.look.selection);
+                    if (!item_painted) {
+                        surface.fill(row, l.look.selection);
+                    }
                     if (s.reveal) {  // the item chosen with a key comes into view
                         f32 top = r.y - l.frame.y + s.scroll_y;
                         s.scroll_y = min(s.scroll_y, top);
                         s.scroll_y = max(s.scroll_y, top + r.h - l.frame.h);
                         s.reveal = false;
                     }
-                } else if (inside) {
+                } else if (inside && !item_painted) {
                     surface.fill(row, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
                 }
             },
@@ -5522,6 +5615,126 @@ pub struct Frame {
             }
         }
         return clicked;
+    }
+
+    // A branch whose line is made of widgets (spec §10.10, `template:`): they follow, until
+    // `branch_close()`, which returns whether it is open (its children then follow, then
+    // `end_branch()`). Its triangle and its keys are those of `branch`.
+    pub void branch_open(bool*? open) {
+        u64 id = take_id();
+        usize slot = ui.state_slot(id);
+        WidgetState* s = &ui.states[slot];
+        mut bool is_open = match (open) {
+            some(flag) => *flag,
+            none => s.expanded,
+        };
+        i32 index = layouts[depth].item;
+        f32 indent = tree_level as f32 * 16.0;
+        Layout l = layouts[depth];
+        canvas.Rect toggle = canvas.Rect{ x: l.x + indent, y: l.y, w: 20.0, h: height };
+        mut bool change = click(id, toggle);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_right() || key == key_left() || key == key_enter()) {
+                    if (key == key_right() && is_open) {
+                        tree_choose(index + 1);
+                    } else if (key == key_left() && !is_open) {
+                        tree_to_parent();
+                    } else {
+                        change = true;
+                    }
+                }
+            }
+        }
+        if (change) {
+            is_open = !is_open;
+            s.expanded = is_open;
+            match (open) {
+                some(flag) => {
+                    *flag = is_open;
+                },
+                none => { },
+            }
+        }
+        tree_line_open(true, is_open, id, index);
+    }
+
+    pub bool branch_close() {
+        bool is_open = tree_line_close();
+        if (is_open && tree_level < 16) {
+            tree_parents[tree_level] = tree_line_index;
+            tree_level += 1;
+        }
+        return is_open;
+    }
+
+    // A leaf whose line is made of widgets: they follow, until `leaf_close()`, true when it is
+    // clicked (outside its widgets) or when Enter is pressed while it is chosen.
+    pub void leaf_open() {
+        u64 id = take_id();
+        tree_line_open(false, false, id, layouts[depth].item);
+    }
+
+    pub bool leaf_close() {
+        u64 id = tree_line_id;
+        i32 index = tree_line_index;
+        tree_line_close();
+        mut bool clicked = ui.released && ui.active == mix(id, 1) && over(last);
+        if (ui.pressed && over(last) && !item_not_chosen) {
+            ui.active = mix(id, 1);
+        }
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                if (ui.edits[i].key == key_enter()) {
+                    clicked = true;
+                } else if (ui.edits[i].key == key_left()) {
+                    tree_to_parent();
+                }
+            }
+        }
+        return clicked;
+    }
+
+    // The line of a branch or a leaf of widgets: its triangle, then a row for its widgets.
+    void tree_line_open(bool is_branch, bool is_open, u64 id, i32 index) {
+        take_styles();
+        Look l = look(Tree, 0);
+        Layout list = layouts[depth];
+        f32 indent = tree_level as f32 * 16.0;
+        if (is_branch) {
+            i32 cx = (list.x + indent + 8.0) as i32;
+            i32 cy = (list.y + height / 2.0) as i32;
+            if (is_open) {
+                surface.line(cx - 4, cy - 2, cx, cy + 2, l.color);
+                surface.line(cx, cy + 2, cx + 4, cy - 2, l.color);
+            } else {
+                surface.line(cx - 2, cy - 4, cx + 2, cy, l.color);
+                surface.line(cx + 2, cy, cx - 2, cy + 4, l.color);
+            }
+        }
+        tree_line_id = id;
+        tree_line_index = index;
+        tree_line_branch_open = is_open;
+        tree_line_active = ui.active;
+        if (depth == 15) {
+            return;
+        }
+        f32 x = list.x + indent + 22.0;
+        depth += 1;
+        layouts[depth] = Layout{ horizontal: true, x: x, y: list.y, left: x, top: list.y, right: x, bottom: list.y, gap: 8.0, color: list.color, font_size: list.font_size, accent: list.accent };
+    }
+
+    // Places the line in the tree, as one item; returns whether its branch is open.
+    bool tree_line_close() {
+        Layout done = layouts[depth];
+        depth -= 1;
+        Layout list = layouts[depth];
+        bool inner = ui.pressed && ui.active != tree_line_active && ui.active != 0;
+        item_not_chosen = inner;
+        place(done.right - list.x, max(done.bottom - done.top, height));
+        item_not_chosen = false;
+        return tree_line_branch_open;
     }
 
     // An item of the tree: its row, indented, a triangle for a branch, its icon and its text.
@@ -7836,4 +8049,58 @@ test "touch: a tap clicks, a long press opens the context menu, a drag scrolls w
     f.label("top");
     assert(f.last.x == 10.0 && f.last.y == 30.0);
     f.finish();
+}
+
+// A list of 3 items, each a label and a button, for the test below: the button clicked (its
+// index, -1: none), and the color of the label of the first item.
+i32 items_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, canvas.Color* first_color) {
+    mut i32 clicked = -1;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.list(300.0, 200.0, some(chosen));
+    for (i32 i in 0..3) {
+        f.push_item();
+        f.style(Style{ checked: Props{ color: some(rgb(255, 0, 0, 255)) } });  // chosen: red text
+        f.item(true, 8.0, 4.0, true);
+        if (i == 0) {
+            *first_color = f.look(Text, 0).color;
+        }
+        f.label("file");
+        if (f.button("Open")) {
+            clicked = i;
+        }
+        f.end_item();
+        f.pop_id();
+    }
+    f.end_list();
+    f.finish();
+    return clicked;
+}
+
+test "item templates: several widgets, one item; its button is not a choice; its states" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 320, 220);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = -1;
+    mut canvas.Color color = clear();
+    ui.mouse_move(319.0, 219.0);
+    items_frame(&ui, &surface, &chosen, &color);
+    items_frame(&ui, &surface, &chosen, &color);  // their sizes known
+    // a click on the label of the second item (each 32 + 8 high): chosen
+    ui.mouse_move(20.0, 40.0 + 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(items_frame(&ui, &surface, &chosen, &color) == -1 && chosen == 1);
+    // a click on the button of the third: clicked, not chosen
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f32 label_w = f.measure_px("file", 18.0).w;
+    f.finish();
+    ui.mouse_move(8.0 + 4.0 + label_w + 8.0 + 10.0, 80.0 + 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(items_frame(&ui, &surface, &chosen, &color) == 2 && chosen == 1);
+    // the first item chosen: its text takes the color of its style in the state `checked`
+    chosen = 0;
+    items_frame(&ui, &surface, &chosen, &color);
+    assert(color.r == 255 && color.g == 0);
 }

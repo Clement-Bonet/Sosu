@@ -1434,8 +1434,9 @@ static const UiNodeKind ui_nodes[] = {
     { "Tabs", 0, false, { "bind", "placement", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
     { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
-    { "Branch", 1, false, { "open", "icon", "plural", "count", "context", NULL }, true },
-    { "Leaf", 1, false, { "on_click", "icon", "plural", "count", "context", NULL }, false },
+    { "Branch", 1, true, { "open", "icon", "template", "plural", "count", "context", NULL }, true },
+    { "Leaf", 1, true, { "on_click", "icon", "template", "plural", "count", "context", NULL }, false },
+    { "Item", 0, false, { "gap", "padding", "vertical", "enabled", "style", NULL }, true },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -1448,7 +1449,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Table", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Item", "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Table", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -2165,6 +2166,28 @@ static void ui_grid_sizes(Parser *p, StmtVec *out, Expr *sizes, const char *meth
     }
 }
 
+/* `template: FileItem(f)` (spec §10.10): the component `FileItem` called with the frame, as a
+   node, in a scope of its own: `ui_frame.push_id(site); FileItem(ui_frame, f); ui_frame.pop_id();`. */
+static void ui_template(Parser *p, StmtVec *out, Expr *call) {
+    if (call->kind != EXPR_CALL) {
+        Diagnostic *d = error_at(p, "E0215", call->offset, call->length, "a template is a component and its values");
+        diag_help(d, "`template: FileItem(f)`, where `component FileItem(state.File* f) { Item { ... } }`");
+        p->panic = false;
+        return;
+    }
+    Expr *frame = ui_expr(p, EXPR_NAME, call->offset, call->length);
+    frame->as.name = ui_name("ui_frame", call->offset);
+    size_t count = call->as.call.arg_count + 1;
+    Expr **args = arena_alloc(p->arena, count * sizeof *args);
+    args[0] = frame;
+    for (size_t i = 1; i < count; i++) args[i] = call->as.call.args[i - 1];
+    call->as.call.args = args;
+    call->as.call.arg_count = count;
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, call->offset, call->length, "push_id", ui_int(p, call->offset, call->offset)));
+    SOSU_VEC_PUSH(out, ui_stmt(p, call));
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, call->offset, call->length, "pop_id", NULL));
+}
+
 /* The items in view of a long list or a table: `for (i32 item in ui_frame.first_shown()..
    ui_frame.last_shown()) { ui_frame.push_id(item as u64); the items; ui_frame.pop_id(); }`. */
 static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, size_t start, size_t length) {
@@ -2596,6 +2619,14 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *state = ui_expr(p, EXPR_NAME, start, length);
             state->as.name = ui_name("none", start);
             if (open) state = ui_some(p, ui_address(p, open));
+            Expr *template = ui_prop(&args, "template");
+            if (template) {  /* f.branch_open(open), its template, if (f.branch_close()) { children; f.end_branch(); } */
+                SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "branch_open", state));
+                ui_template(p, out, template);
+            } else if (!value) {
+                error_at(p, "E0215", node.offset, node.length, "a `Branch` has a text or a `template:`");
+                p->panic = false;
+            }
             Expr *icon = ui_prop(&args, "icon");
             Expr *branch_args[3] = { value, state, icon ? ui_some(p, icon) : NULL };
             StmtVec inner = {0};
@@ -2606,14 +2637,46 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_branch", NULL, 0)));
             Stmt *when = new_stmt(p, STMT_IF, start);
             when->length = length;
-            when->as.if_.cond = ui_frame_call(p, start, length, icon ? "branch_with" : "branch", branch_args, icon ? 3 : 2);
+            when->as.if_.cond = template ? ui_frame_call(p, start, length, "branch_close", NULL, 0)
+                                         : ui_frame_call(p, start, length, icon ? "branch_with" : "branch", branch_args, icon ? 3 : 2);
             when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
             SOSU_VEC_PUSH(out, when);
         } else if (name_text_is(node, "Leaf")) {
+            Expr *template = ui_prop(&args, "template");
             Expr *icon = ui_prop(&args, "icon");
             Expr *leaf_args[2] = { value, icon ? ui_some(p, icon) : NULL };
-            Expr *leaf = ui_frame_call(p, start, length, icon ? "leaf_with" : "leaf", leaf_args, icon ? 2 : 1);
-            SOSU_VEC_PUSH(out, ui_when(p, leaf, ui_prop(&args, "on_click")));
+            Expr *leaf = NULL;
+            if (template) {  /* f.leaf_open(), its template, if (f.leaf_close()) { on_click } */
+                SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "leaf_open", NULL));
+                ui_template(p, out, template);
+                leaf = ui_frame_call(p, start, length, "leaf_close", NULL, 0);
+            } else if (value) {
+                leaf = ui_frame_call(p, start, length, icon ? "leaf_with" : "leaf", leaf_args, icon ? 2 : 1);
+            } else {
+                error_at(p, "E0215", node.offset, node.length, "a `Leaf` has a text or a `template:`");
+                p->panic = false;
+            }
+            if (leaf) SOSU_VEC_PUSH(out, ui_when(p, leaf, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "Item")) {
+            /* f.item(horizontal, gap, padding, enabled), the widgets, f.end_item() */
+            Expr *vertical = ui_prop(&args, "vertical");
+            Expr *horizontal = ui_expr(p, EXPR_UNARY, start, length);
+            horizontal->as.unary.op = TOK_BANG;
+            horizontal->as.unary.operand = vertical;
+            if (!vertical) {
+                horizontal = ui_expr(p, EXPR_BOOL, start, length);
+                horizontal->as.bool_value = true;
+            }
+            Expr *enabled = ui_prop(&args, "enabled");
+            if (!enabled) {
+                enabled = ui_expr(p, EXPR_BOOL, start, length);
+                enabled->as.bool_value = true;
+            }
+            Expr *item_args[4] = { horizontal, ui_layout_size(p, ui_prop(&args, "gap"), start),
+                                   ui_layout_size(p, ui_prop(&args, "padding"), start), enabled };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "item", item_args, 4)));
+            ui_parse_children(p, out);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_item", NULL, 0)));
         } else if (name_text_is(node, "Tabs")) {
             /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
             Expr *bound = ui_prop(&args, "bind");
@@ -2971,12 +3034,12 @@ static const char *const ui_theme_selectors[][2] = {
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
     { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
     { "Slider", "slider" }, { "Progress", "progress" }, { "Tooltip", "tooltip" }, { "Dialog", "dialog" },
-    { "DateField", "date" }, { "Table", "table" },
+    { "DateField", "date" }, { "Table", "table" }, { "Item", "item" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
     "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
-    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip, Dialog, DateField, Table"
+    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip, Dialog, DateField, Table, Item"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };
