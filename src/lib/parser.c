@@ -30,6 +30,7 @@ typedef struct {
     bool ui_in_menu_bar;
     /* the items of a `Grid`, and the cells its nodes gave as literals, `row * 64 + col` (spec §10.8) */
     bool ui_in_grid;
+    bool ui_in_tabs; /* the items of a `Tabs`: its `Tab` nodes only */
     struct { uint64_t *items; size_t count; size_t cap; } ui_cells;
 } Parser;
 
@@ -1415,6 +1416,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Option", 1, false, { "value", "plural", "count", "context", NULL }, false },
     { "Image", 1, false, { "size", "style", NULL }, false },
     { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
+    { "Tabs", 0, false, { "bind", "focus", "style", NULL }, true },
+    { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -1427,7 +1430,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group",
+static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group", "Tabs",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1806,6 +1809,17 @@ static bool ui_check_place(Parser *p, const UiNodeKind *kind, Name node, bool wi
         diag_help(d, "`MenuBar { Menu(\"File\") { ... } Menu(\"Edit\") { ... } }`");
         return false;
     }
+    bool tab = kind && strcmp(kind->name, "Tab") == 0;
+    if (p->ui_in_tabs && !tab) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Tabs` contains only `Tab` nodes");
+        diag_help(d, "one tab per page: `Tabs(bind: state.page) { Tab(\"General\") { ... } }`");
+        return false;
+    }
+    if (tab && !p->ui_in_tabs) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Tab` goes in a `Tabs`");
+        diag_help(d, "`Tabs(bind: state.page) { Tab(\"General\") { ... } Tab(\"Files\") { ... } }`");
+        return false;
+    }
     if (title_bar && (!window_top || p->ui_title_bar)) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `TitleBar` is the first node of a window");
         diag_help(d, "a window has one title bar, at its top: move it before the other nodes");
@@ -2127,10 +2141,12 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         return;
     }
     bool in_grid = p->ui_in_grid;
+    bool in_tabs = p->ui_in_tabs;
     bool placed = true;
     Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
     if (cell) SOSU_VEC_PUSH(out, cell);
     p->ui_in_grid = false;  /* the children of a node are not cells, unless it is a grid */
+    p->ui_in_tabs = false;
     if (!kind) {
         ui_component(p, out, path, &args, start, length);
     } else {
@@ -2145,7 +2161,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
-        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group" };
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab" };
         for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
             if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
         }
@@ -2292,6 +2308,40 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             p->ui_dropdown = NULL;
             p->ui_dropdown_change = NULL;
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_dropdown", NULL, 0)));
+        } else if (name_text_is(node, "Tabs")) {
+            /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
+            Expr *bound = ui_prop(&args, "bind");
+            Expr *chosen = ui_expr(p, EXPR_NAME, start, length);
+            chosen->as.name = ui_name("none", start);
+            if (bound) chosen = ui_some(p, ui_address(p, bound));
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tabs", &chosen, 1)));
+            p->ui_in_tabs = true;
+            ui_parse_children(p, out);
+            p->ui_in_tabs = false;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_tabs", NULL, 0)));
+        } else if (name_text_is(node, "Tab")) {
+            /* if (f.tab(title, closable, enabled)) { the nodes }, then if (f.tab_closed()) { on_close(); } */
+            Expr *on_close = ui_prop(&args, "on_close");
+            Expr *closable = ui_prop(&args, "closable");
+            Expr *enabled = ui_prop(&args, "enabled");
+            if (!closable) {
+                closable = ui_expr(p, EXPR_BOOL, start, length);
+                closable->as.bool_value = on_close != NULL;  /* a tab the program closes has a cross */
+            }
+            if (!enabled) {
+                enabled = ui_expr(p, EXPR_BOOL, start, length);
+                enabled->as.bool_value = true;
+            }
+            Expr *tab_args[3] = { value, closable, enabled };
+            StmtVec inner = {0};
+            size_t body_start = cur(p)->offset;
+            ui_parse_children(p, &inner);
+            Stmt *when = new_stmt(p, STMT_IF, start);
+            when->length = length;
+            when->as.if_.cond = ui_frame_call(p, start, length, "tab", tab_args, 3);
+            when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+            SOSU_VEC_PUSH(out, when);
+            if (on_close) SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "tab_closed", NULL, 0), on_close));
         } else if (name_text_is(node, "Group")) {
             /* f.group(title, gap, padding), or f.group_untitled(gap, padding), the nodes, f.end_group();
                folding: if (f.group_folding(title, gap, padding, some(&open) or none)) { the nodes } */
@@ -2351,6 +2401,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         }
     }
     p->ui_in_grid = in_grid;
+    p->ui_in_tabs = in_tabs;
     free(args.values.items);
     free(args.props.items);
 }

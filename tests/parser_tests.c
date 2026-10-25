@@ -554,6 +554,27 @@ static void test_ui_grids(void) {
               "    (return (lit widgets.Window))))\n"
               "(import ui.widgets)\n");
     expect_ui_error("window W() {\n    Group(collapsible: true) { }\n}\n", "E0215", 2, 5);
+    expect_ui("window W(S* s) {\n    Tabs(bind: s.page) {\n        Tab(\"General\") {\n            Text(\"a\")\n        }\n"
+              "        Tab(\"Files\", on_close: s.close) { }\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame tabs) (call some (& (. s page))))\n"
+              "    (if (call (. ui_frame tab) (call (. ui_frame tr) \"General\") false true)\n"
+              "      (block\n"
+              "        (call (. ui_frame label) (call (. ui_frame tr) \"a\"))))\n"
+              "    (if (call (. ui_frame tab) (call (. ui_frame tr) \"Files\") true true)\n"
+              "      (block))\n"
+              "    (if (call (. ui_frame tab_closed))\n"
+              "      (block\n"
+              "        (call (. s close))))\n"
+              "    (call (. ui_frame end_tabs))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Tabs {\n        Text(\"a\")\n    }\n}\n", "E0215", 3, 9);
+    expect_ui_error("window W() {\n    Tab(\"a\") { }\n}\n", "E0215", 2, 5);
     expect_ui_error("window W() {\n    Text(\"a\", row: 1)\n}\n", "E0215", 2, 15);
     expect_ui_error("window W() {\n    Grid { }\n}\n", "E0215", 2, 5);
     expect_ui_error("window W() {\n    Grid(columns: Fill) { }\n}\n", "E0215", 2, 19);

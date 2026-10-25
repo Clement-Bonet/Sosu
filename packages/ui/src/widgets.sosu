@@ -230,6 +230,12 @@ struct WidgetState {
     mut f32 content_h = 0.0;
     mut i32 items = 0;  // a list: how many items
     mut bool closed = false;  // a group folded, a branch of a tree closed
+    // Tabs: the tab chosen when the program does not bind it, a tab to choose and a tab to close
+    // at the next frame (-1: none), how many tabs it had, and the width of its row of tabs.
+    mut i32 chosen = 0;
+    mut i32 pick = -1;
+    mut i32 closing = -1;
+    mut f32 extent = 0.0;
     mut bool reveal = false;  // a list: scroll to the item chosen, after a key moved the choice
 }
 
@@ -1122,6 +1128,23 @@ struct Layout {
     mut bool folded = false;
 }
 
+// A `Tabs` being described (spec §10.8): its identity and its entry of `Ui.states`, the tab
+// chosen, the tabs so far and where the next one goes in its row, the row and how far it is
+// scrolled, whether the last tab was closed, and the keyboard marks before its content.
+struct TabsBuild {
+    mut u64 id = 0;
+    mut usize slot = 0;
+    mut i32*? bound = none;
+    mut i32 chosen = 0;
+    mut i32 count = 0;
+    mut f32 x = 0.0;
+    mut canvas.Rect row = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    mut f32 offset = 0.0;
+    mut bool closed = false;
+    mut usize marks = 0;
+    mut usize depth = 0;  // that of the layout of its content
+}
+
 // A grid being described: its columns and rows, laid out at its first cell, the next free
 // cell, the cell of the next widget, and the sizes measured in this frame, for the next one.
 struct GridBuild {
@@ -1226,6 +1249,11 @@ pub struct Frame {
     // The grids being described, the outermost first (spec §10.8).
     mut GridBuild[4] grids = [GridBuild{ }; 4];
     mut usize grid_count = 0;
+    // The tabs being described, the outermost first, and how many times the widget that has the
+    // keyboard was placed so far (Ctrl+Tab: whether it is inside the content of a `Tabs`).
+    mut TabsBuild[4] tab_builds = [TabsBuild{ }; 4];
+    mut usize tabs_count = 0;
+    mut usize focus_marks = 0;
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -2240,7 +2268,7 @@ pub struct Frame {
         if (ui.pressed && !focus_taken) {
             ui.focus = 0;  // a click elsewhere takes the keyboard away
         }
-        tab();
+        tab_keys();
         mut bool focus_seen = ui.focus == 0;  // the widget that has the keyboard disappeared
         for (usize i in 0..order_count) {
             focus_seen = focus_seen || order[i] == ui.focus;
@@ -2600,6 +2628,9 @@ pub struct Frame {
             ui.focus = id;
             focus_taken = true;
         }
+        if (ui.focus == id) {
+            focus_marks += 1;
+        }
         if (ui.focus == id && ui.reveal) {
             ui.reveal = false;
             reveal(r);
@@ -2636,7 +2667,7 @@ pub struct Frame {
     }
 
     // Tab and Shift+Tab: the keyboard to the next or the previous widget of this frame.
-    void tab() {
+    void tab_keys() {
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
             if (e.key != key_tab() || e.ctrl || order_count == 0) {
@@ -2817,6 +2848,178 @@ pub struct Frame {
             surface.fill(canvas.Rect{ x: r.x + r.w - bw, y: top, w: bw, h: r.y + r.h - top }, l.border);
             surface.fill(canvas.Rect{ x: r.x, y: r.y + r.h - bw, w: r.w, h: bw }, l.border);
         }
+    }
+
+    // ---- Tabs (spec §10.8) ----
+
+    // A row of tabs, then the content of the tab chosen: `tab(...)` for each tab, true for the
+    // one chosen, whose widgets follow; then `end_tabs()`. `chosen` binds the index of the tab
+    // chosen; none: the tabs keep it. A click, the keys of the row (Left, Right, Home, End) and
+    // Ctrl+Tab choose at the next frame, so that one content only is described in a frame.
+    pub void tabs(i32*? chosen) {
+        ensure_cell();
+        u64 id = take_id();
+        take_styles();
+        Look l = look(Tabs, 0);
+        Layout parent = layouts[depth];
+        if (tabs_count == 4 || depth == 15) {
+            open(false, l.gap, 0.0);  // too deep: a column
+            return;
+        }
+        usize slot = ui.state_slot(id);
+        WidgetState* s = &ui.states[slot];
+        mut i32 current = match (chosen) {
+            some(index) => *index,
+            none => s.chosen,
+        };
+        if (s.pick >= 0) {
+            current = s.pick;
+            s.pick = -1;
+        }
+        current = min(max(current, 0), max(s.items - 1, 0));
+        match (chosen) {
+            some(index) => {
+                *index = current;
+            },
+            none => { },
+        }
+        s.chosen = current;
+        f32 row_h = l.height + 4.0;
+        f32 width = fill_width() > 0.0 ? fill_width() : max(s.extent, s.content_w);
+        canvas.Rect row = canvas.Rect{ x: parent.x, y: parent.y, w: width, h: row_h };
+        Look bar = look(Tabs, 0);
+        Props row_props = part(Tabs, 2);
+        match (row_props.background) {
+            some(c) => {
+                surface.fill(row, c);
+            },
+            none => { },
+        }
+        // the row scrolls with the wheel when its tabs are wider than it
+        if (over(row) && s.extent > row.w) {
+            s.scroll_x = max(min(s.scroll_x - (ui.wheel + ui.wheel_x) * 40.0, s.extent - row.w), 0.0);
+            ui.wheel = 0.0;
+            ui.wheel_x = 0.0;
+        }
+        focusable(id, row);
+        if (ui.focus == id) {
+            for (usize i in 0..ui.edit_count) {
+                Edit e = ui.edits[i];
+                if (e.key == key_left() || e.key == key_right()) {
+                    s.pick = min(max(current + (e.key == key_left() ? -1 : 1), 0), max(s.items - 1, 0));
+                } else if (e.key == key_home() || e.key == key_end()) {
+                    s.pick = e.key == key_home() ? 0 : max(s.items - 1, 0);
+                }
+            }
+        }
+        usize t = tabs_count;
+        tabs_count += 1;
+        open(false, bar.gap, 0.0);
+        layouts[depth].y += row_h + 8.0;  // the content, under the row
+        layouts[depth].top += row_h + 8.0;
+        layouts[depth].bottom = layouts[depth].top;
+        tab_builds[t] = TabsBuild{ id: id, slot: slot, bound: chosen, chosen: current, row: row, offset: s.scroll_x, marks: focus_marks, depth: depth };
+    }
+
+    // A tab of the `Tabs` being described: true when it is the one chosen, whose widgets follow.
+    // `closable` puts a cross on it (`tab_closed()` then says it was clicked); a tab not
+    // `enabled` is dimmed and cannot be chosen.
+    pub bool tab(str title, bool closable, bool enabled) {
+        if (tabs_count == 0) {
+            return false;
+        }
+        usize t = tabs_count - 1;
+        TabsBuild b = tab_builds[t];
+        i32 index = b.count;
+        tab_builds[t].count += 1;
+        u64 id = mix(b.id, 0x7AB00000 | index as u64);
+        Look first = look(Tabs, 0);
+        canvas.Rect size = measure_px(title, first.font_size);
+        f32 cross = closable ? 22.0 : 0.0;
+        f32 w = size.w + 2.0 * first.padding + cross;
+        canvas.Rect r = canvas.Rect{ x: b.row.x + b.x - b.offset, y: b.row.y, w: w, h: b.row.h };
+        tab_builds[t].x += w + 2.0;
+        bool chosen = index == b.chosen;
+        canvas.Rect close_box = canvas.Rect{ x: r.x + r.w - cross - 4.0, y: r.y + (r.h - 18.0) / 2.0, w: 18.0, h: 18.0 };
+        surface.push_clip(b.row);
+        bool hot = over(r) && over(b.row);
+        mut bool closed = false;
+        if (enabled) {
+            if (closable && click(mix(id, 1), close_box) && over(b.row)) {
+                closed = true;
+            } else if (click(id, r) && over(b.row) && !chosen) {
+                ui.states[b.slot].pick = index;
+            }
+        }
+        WidgetState* s = &ui.states[b.slot];
+        if (s.closing == index) {  // Ctrl+W at the last frame
+            s.closing = -1;
+            closed = closable;
+        }
+        tab_builds[t].closed = closed;
+        u32 states = (hot ? state_hover() : 0) | (chosen ? state_checked() : 0) | (enabled ? 0 : state_disabled());
+        Look l = look(Tabs, states);
+        paint(r, l);
+        write_px(r.x + l.padding, r.y, r.h, title, l.color, l.font_size);
+        if (chosen) {  // the mark of the tab chosen
+            surface.fill(canvas.Rect{ x: r.x, y: r.y + r.h - 3.0, w: r.w, h: 3.0 }, l.accent);
+            if (ui.focus == b.id) {
+                ring(r, l.accent);
+            }
+        }
+        if (closable) {
+            canvas.Color mark = over(close_box) ? l.accent : l.color;
+            i32 cx = (close_box.x + 9.0) as i32;
+            i32 cy = (close_box.y + 9.0) as i32;
+            surface.line(cx - 4, cy - 4, cx + 4, cy + 4, mark);
+            surface.line(cx - 4, cy + 4, cx + 4, cy - 4, mark);
+        }
+        surface.pop_clip();
+        if (enabled) {
+            interactive(r);
+        }
+        return chosen;
+    }
+
+    // Whether the cross of the last tab was clicked (or Ctrl+W pressed on it): the program
+    // then removes it.
+    pub bool tab_closed() {
+        if (tabs_count == 0) {
+            return false;
+        }
+        bool closed = tab_builds[tabs_count - 1].closed;
+        tab_builds[tabs_count - 1].closed = false;
+        return closed;
+    }
+
+    // The end of the tabs: the line under the row, the keys of the tabs, and their place.
+    pub void end_tabs() {
+        if (tabs_count == 0 || tab_builds[tabs_count - 1].depth != depth) {
+            end();
+            return;
+        }
+        tabs_count -= 1;
+        TabsBuild b = tab_builds[tabs_count];
+        Layout content = layouts[depth];
+        depth -= 1;
+        WidgetState* s = &ui.states[b.slot];
+        s.items = b.count;
+        s.extent = b.x;
+        s.content_w = content.right - content.left;
+        Look l = look(Tabs, 0);
+        surface.fill(canvas.Rect{ x: b.row.x, y: b.row.y + b.row.h - 1.0, w: b.row.w, h: 1.0 }, l.bar);
+        // Ctrl+Tab and Ctrl+Shift+Tab, Ctrl+W: from the row, or from a widget of the content
+        if (ui.focus == b.id || focus_marks > b.marks) {
+            for (usize i in 0..ui.edit_count) {
+                Edit e = ui.edits[i];
+                if (e.key == key_tab() && e.ctrl && b.count > 0) {
+                    s.pick = (b.chosen + (e.shift ? b.count - 1 : 1)) % b.count;
+                } else if (e.key == 119 && e.ctrl) {  // W
+                    s.closing = b.chosen;
+                }
+            }
+        }
+        place(max(b.row.w, s.content_w), b.row.h + 8.0 + content.bottom - content.top);
     }
 
     // ---- Grids (spec §10.8) ----
@@ -4503,4 +4706,77 @@ test "a group: its widgets under its title, folded and opened by a click" {
     f.end_group();
     f.finish();
     assert(flag);
+}
+
+// Three tabs, the last one closable, for the test below: which contents were described, and
+// whether the last tab was closed. The content of the first one has a text field.
+i32 tabs_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, TextBuffer* name, bool* closed) {
+    mut i32 described = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.tabs(some(chosen));
+    if (f.tab("One", false, true)) {
+        described += 1;
+        f.text_field(name, 100.0);
+    }
+    if (f.tab("Two", false, true)) {
+        described += 10;
+    }
+    if (f.tab("Three", true, true)) {
+        described += 100;
+    }
+    *closed = f.tab_closed();
+    f.end_tabs();
+    f.finish();
+    return described;
+}
+
+test "tabs: the content of the tab chosen only, a click, the keys, Ctrl+Tab, a closed tab" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut TextBuffer name = TextBuffer{ };
+    mut bool closed = false;
+    ui.mouse_move(399.0, 199.0);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 1);
+    // a click on the second tab: chosen at the next frame, one content per frame
+    ui.mouse_move(100.0, 15.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 1);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 10 && chosen == 1);
+    // the row has the keyboard after the click: Right, then End
+    ui.mouse_move(399.0, 199.0);
+    ui.key(key_right(), true, false, false);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 100 && chosen == 2);
+    ui.key(key_home(), true, false, false);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(chosen == 0 || tabs_frame(&ui, &surface, &chosen, &name, &closed) == 1);
+    assert(chosen == 0);
+    // Ctrl+Tab from the text field of the content
+    ui.key(key_tab(), true, false, false);  // the keyboard to the field
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    ui.key(key_tab(), true, false, true);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 10 && chosen == 1);
+    // the cross of the third tab
+    chosen = 2;
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    ui.mouse_move(0.0, 0.0);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.tabs(some(&chosen));
+    f.tab("One", false, true);
+    f.tab("Two", false, true);
+    f.tab("Three", true, true);
+    canvas.Rect third = f.tab_builds[0].row;
+    f32 end_x = f.tab_builds[0].x;
+    f.end_tabs();
+    f.finish();
+    ui.mouse_move(end_x - 2.0 - 4.0 - 9.0, third.y + third.h / 2.0);  // the middle of the cross of the last tab
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(closed);
 }
