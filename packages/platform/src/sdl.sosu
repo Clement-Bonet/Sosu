@@ -146,6 +146,7 @@ extern "C" {
     bool SDL_RenderFillRect(Renderer* renderer, FRect* rect) uses io;
     bool SDL_RenderPresent(Renderer* renderer) uses io;
     void SDL_Delay(u32 ms) uses io;
+    u64 SDL_GetTicks() uses io;
     Texture* SDL_CreateTexture(Renderer* renderer, u32 format, i32 access, i32 w, i32 h) uses io;
     void SDL_DestroyTexture(Texture* texture) uses io;
     bool SDL_UpdateTexture(Texture* texture, FRect* rect, u8* pixels, i32 pitch) uses io;
@@ -622,5 +623,12 @@ pub void present(Renderer* renderer) uses io {
 pub void delay(u32 ms) uses io {
     unsafe {
         SDL_Delay(ms);
+    }
+}
+
+// Milliseconds since SDL started.
+pub u64 ticks() uses io {
+    unsafe {
+        return SDL_GetTicks();
     }
 }

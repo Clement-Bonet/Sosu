@@ -160,6 +160,9 @@ class App : app.Handler, app.TitleBar {
             TextInput(text) => {
                 ui.type_text(text);
             },
+            TextEditing(text, cursor) => {
+                ui.compose(text, cursor);  // an input method composing
+            },
             Wheel(x, y) => {
                 ui.scroll_wheel(y);
                 ui.scroll_wheel_x(x);  // the sideways wheel: `Scroll` areas
@@ -170,6 +173,7 @@ class App : app.Handler, app.TitleBar {
     }
 
     override void on_frame(canvas.Canvas* surface) uses io {
+        ui.clock(app.now_ms());  // double clicks, tooltips
         w.follow_choice();
         ui.theme = some(dark ? widgets.default_theme() : widgets.light_theme());
         surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });  // the light theme clears it with its own color

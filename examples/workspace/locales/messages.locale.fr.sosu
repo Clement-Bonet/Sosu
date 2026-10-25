@@ -147,3 +147,12 @@ msgstr "Avancé"
 
 msgid "Options"
 msgstr "Options"
+
+msgid "Build and run the program (F5)"
+msgstr "Compiler et exécuter le programme (F5)"
+
+msgid "All files"
+msgstr "Tous les fichiers"
+
+msgid "Name"
+msgstr "Nom"

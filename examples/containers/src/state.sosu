@@ -38,6 +38,15 @@ pub class Demo {
     pub mut i32 count;
     pub mut i32 item;
     pub mut i32 opened;
+    // The inputs: a quantity, a price in cents, a due date, a volume, a memo, a dialog to confirm.
+    pub mut i64 quantity;
+    pub mut i64 price;
+    pub mut widgets.Date due;
+    pub mut i64 volume;
+    pub mut widgets.LongText memo;
+    pub mut bool asking;
+    pub mut i32 confirmed;
+    mut widgets.TextBuffer shown;  // the last number written as text
     // The icons of the tree, drawn here: a folder and a file, 16 pixels.
     pub image.Image folder_icon;
     pub image.Image file_icon;
@@ -62,6 +71,15 @@ pub class Demo {
         count = 0;
         item = 0;
         opened = -1;
+        quantity = 3;
+        price = 1999;
+        due = widgets.Date{ year: 2026, month: 11, day: 15 };
+        volume = 40;
+        memo = widgets.long_text();
+        memo.set("Several lines,\nwith undo (Ctrl+Z) and redo (Ctrl+Y).");
+        asking = false;
+        confirmed = 0;
+        shown = widgets.TextBuffer{ };
         digits = [0; 12];
         i32 src = add("src", -1, true);
         add("main.sosu", src, false);
@@ -131,6 +149,35 @@ pub class Demo {
                 entries[i].open = open;
             }
         }
+    }
+
+    // The total of the order, in cents.
+    pub i64 total() {
+        return quantity * price;
+    }
+
+    // The total, written as money.
+    pub str total_text() {
+        shown = widgets.format_number(total(), widgets.Number{ decimals: 2, decimal: ",", group: " ", symbol: "€" }, true);
+        return shown.text();
+    }
+
+    pub str confirmed_text() {
+        shown = widgets.format_number(confirmed as i64, widgets.Number{ }, true);
+        return shown.text();
+    }
+
+    pub void ask() {
+        asking = true;
+    }
+
+    pub void confirm() {
+        confirmed += 1;
+        asking = false;
+    }
+
+    pub void cancel() {
+        asking = false;
     }
 
     pub void send() {

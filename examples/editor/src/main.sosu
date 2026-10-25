@@ -1,6 +1,7 @@
 // A window whose title bar is drawn by the program (spec §10.5): a search field, a dropdown
 // and a button in it, while dragging the bar moves the window, a double-click maximizes it
-// (on Windows), and its buttons minimize, maximize and close it. Its interface is in
+// (on Windows), and its buttons minimize, maximize and close it; under it, a text area with undo
+// (Ctrl+Z) and Tab typing spaces (spec §10.9). Its interface is in
 // screen.ui.sosu, its state in state.sosu.
 // On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/editor`
 // from the root of the repository, where the font is found.
@@ -62,6 +63,9 @@ class App : app.Handler, app.TitleBar {
             TextInput(text) => {
                 ui.type_text(text);
             },
+            TextEditing(text, cursor) => {
+                ui.compose(text, cursor);
+            },
             Wheel(x, y) => {
                 ui.scroll_wheel(y);
                 ui.scroll_wheel_x(x);  // the sideways wheel: `Scroll` areas
@@ -72,6 +76,7 @@ class App : app.Handler, app.TitleBar {
     }
 
     override void on_frame(canvas.Canvas* surface) uses io {
+        ui.clock(app.now_ms());  // double clicks, tooltips
         surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Editor(&f, editor);

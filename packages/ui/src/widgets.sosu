@@ -1104,7 +1104,7 @@ pub struct Number {
 }
 
 // `value` written as `n` says: with its groups and its symbol when `decorated`.
-TextBuffer format_number(i64 value, Number n, bool decorated) {
+pub TextBuffer format_number(i64 value, Number n, bool decorated) {
     mut u8[24] digits = [0; 24];
     mut usize count = 0;
     mut u64 rest = value < 0 ? (0 - (value + 1)) as u64 + 1 : value as u64;
@@ -2798,7 +2798,8 @@ pub struct Frame {
     pub void progress(i64 value, i64 max_value, f32 width) {
         take_styles();
         Look l = look(Progress, 0);
-        canvas.Rect r = place(width, 12.0);
+        canvas.Rect line = place(width, l.height);
+        canvas.Rect r = canvas.Rect{ x: line.x, y: line.y + (line.h - 12.0) / 2.0, w: line.w, h: 12.0 };  // in the middle of its line
         f32 done = max_value > 0 ? min(max(value as f32 / max_value as f32, 0.0), 1.0) : 0.0;
         surface.fill_rounded(r, 6.0, l.background);
         if (done > 0.0) {
@@ -2810,7 +2811,8 @@ pub struct Frame {
     pub void progress_busy(f32 width) {
         take_styles();
         Look l = look(Progress, 0);
-        canvas.Rect r = place(width, 12.0);
+        canvas.Rect line = place(width, l.height);
+        canvas.Rect r = canvas.Rect{ x: line.x, y: line.y + (line.h - 12.0) / 2.0, w: line.w, h: 12.0 };
         surface.fill_rounded(r, 6.0, l.background);
         f32 part = r.w / 4.0;
         f32 phase = (ui.now % 1500) as f32 / 1500.0;  // a round in a second and a half

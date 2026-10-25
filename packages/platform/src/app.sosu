@@ -202,6 +202,11 @@ pub void minimize() uses io {
     sdl.push_request(1);
 }
 
+// Milliseconds of a clock that only goes forward: give them to `ui.clock` before each frame.
+pub u64 now_ms() uses io {
+    return sdl.ticks();
+}
+
 // Where the text being typed is, in pixels of the window (spec §10.9): the window of the candidates
 // of an input method opens next to it (`ui.caret_area()` gives it).
 pub void set_text_input_area(f32 x, f32 y, f32 w, f32 h) uses io {

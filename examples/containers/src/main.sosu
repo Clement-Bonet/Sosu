@@ -14,10 +14,12 @@ import containers.state;
 class App : app.Handler {
     mut widgets.Ui ui;
     state.Demo* s;
+    mut bool keyboard;  // a text widget has the keyboard
 
     void init(state.Demo* s) {
         ui = widgets.Ui{ };
         self.s = s;
+        keyboard = false;
     }
 
     override bool on_event(app.Event e) uses io {
@@ -33,11 +35,31 @@ class App : app.Handler {
             },
             Click(x, y, button) => {
                 ui.mouse_move(x, y);
-                ui.mouse_button(true);
+                match (button) {
+                    Right => {
+                        ui.right_button(true);
+                    },
+                    _ => {
+                        ui.mouse_button(true);
+                    },
+                }
             },
             Release(x, y, button) => {
                 ui.mouse_move(x, y);
-                ui.mouse_button(false);
+                match (button) {
+                    Right => {
+                        ui.right_button(false);
+                    },
+                    _ => {
+                        ui.mouse_button(false);
+                    },
+                }
+            },
+            TextEditing(text, cursor) => {
+                ui.compose(text, cursor);  // an input method composing
+            },
+            SafeAreaChanged(left, top, right, bottom) => {
+                ui.safe_area(left, top, right, bottom);
             },
             TextInput(text) => {
                 ui.type_text(text);
@@ -52,10 +74,19 @@ class App : app.Handler {
     }
 
     override void on_frame(canvas.Canvas* surface) uses io {
+        ui.clock(app.now_ms());  // double clicks, tooltips, the busy progress bar
         surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Containers(&f, s);
         f.finish();
+        if (ui.wants_text() != keyboard) {  // on a touch screen, the keyboard of the system
+            keyboard = ui.wants_text();
+            app.show_keyboard(keyboard);
+        }
+        if (keyboard) {
+            canvas.Rect at = ui.caret_area();
+            app.set_text_input_area(at.x, at.y, at.w, at.h);  // the candidates of an input method
+        }
     }
 }
 

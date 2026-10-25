@@ -18,6 +18,42 @@ window Containers(state.Demo* s) {
             Tab("Tree") {
                 Files(s)
             }
+            Tab("&Inputs") {
+                Inputs(s)
+            }
+        }
+    }
+    Dialog("Send the order?", open: s.asking, width: 360) {
+        Text("The total is {total}.", total: s.total_text())
+        Row(gap: 8) {
+            Button("&Yes", on_click: s.confirm)
+            Button("&No", on_click: s.cancel)
+        }
+    }
+}
+
+// Numbers, money, a date, a slider and a progress bar, a text area; tooltips and letters with
+// Alt (spec §10.9).
+component Inputs(state.Demo* s) {
+    Grid(columns: [Auto, Fill], gap: 12) {
+        Text("Quantity")
+        NumberField(bind: s.quantity, min: 1, max: 99, width: 120, tooltip: "From 1 to 99: Up and Down change it")
+        Text("Price")
+        MoneyField(bind: s.price, min: 0, symbol: "€", decimal: ",", group: " ", width: 160)
+        Text("Due")
+        DateField(bind: s.due, width: 160)
+        Text("Volume")
+        Row(gap: 12) {
+            Slider(bind: s.volume, min: 0, max: 100, width: 240)
+            Progress(value: s.volume, max: 100, width: 160)
+        }
+        Text("Working")
+        Progress(width: 240)
+        Text("Memo")
+        TextArea(bind: s.memo, rows: 5, width: Fill, placeholder: "Notes on the order")
+        Button("&Send the order", on_click: s.ask, col: 1, tooltip: "Alt+S does it too")
+        if (s.confirmed > 0) {
+            Text("Orders sent: {n}", n: s.confirmed_text(), col: 1)
         }
     }
 }
