@@ -608,6 +608,15 @@ pub struct Ui {
     // The widget under the mouse for its tooltip, and since when (the time of `clock`).
     mut u64 tip_key = 0;
     mut u64 tip_since = 0;
+    // A dialog was open at the last frame (spec §10.9): only its widgets see the mouse.
+    mut bool modal = false;
+    // The date field that has the keyboard, its text being typed, and the month its calendar shows
+    // (and the day the keyboard is on).
+    mut u64 date_of = 0;
+    mut TextBuffer date_text = TextBuffer{ };
+    mut i32 cal_year = 2000;
+    mut i32 cal_month = 1;
+    mut i32 cal_day = 1;
     mut u64 number_of = 0;
     mut TextBuffer number_text = TextBuffer{ };
 
@@ -826,6 +835,108 @@ pub enum Accept {
     Digits,  // 0 to 9
     Integer,  // digits, and `-` first
     Decimal,  // digits, `-` first, and one separator, `.` or `,`
+}
+
+// A date of the calendar (spec §10.9), for a `DateField`.
+pub struct Date {
+    pub mut i32 year = 2000;
+    pub mut i32 month = 1;
+    pub mut i32 day = 1;
+}
+
+bool leap(i32 year) {
+    return year % 4 == 0 && year % 100 != 0 || year % 400 == 0;
+}
+
+i32 days_in(i32 year, i32 month) {
+    if (month == 2) {
+        return leap(year) ? 29 : 28;
+    }
+    return month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31;
+}
+
+pub bool valid_date(Date d) {
+    return d.year >= 1 && d.year <= 9999 && d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= days_in(d.year, d.month);
+}
+
+// The day of the week of a date: 0 for Sunday (the method of Sakamoto).
+i32 weekday(i32 year, i32 month, i32 day) {
+    mut i32[12] shift = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    i32 y = month < 3 ? year - 1 : year;
+    return (y + y / 4 - y / 100 + y / 400 + shift[(month - 1) as usize] + day) % 7;
+}
+
+bool same_date(Date a, Date b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+}
+
+// The format of a `DateField` that gives none.
+pub str default_date_format() {
+    return "dd/mm/yyyy";
+}
+
+// The mask of a date `format` (`dd/mm/yyyy`, `mm/dd/yyyy`, `yyyy-mm-dd`...): its letters become 9.
+TextBuffer mask_of(str format) {
+    mut TextBuffer m = TextBuffer{ };
+    for (usize i in 0..format.len) {
+        u8 c = format.bytes[i];
+        m.append(c == 100 || c == 109 || c == 121 ? "9" : text_of(format.bytes[i..i + 1]));
+    }
+    return m;
+}
+
+// `d` written as `format` says.
+TextBuffer format_date(Date d, str format) {
+    mut TextBuffer out = TextBuffer{ };
+    mut usize i = 0;
+    while (i < format.len) {
+        u8 c = format.bytes[i];
+        mut usize run = 1;
+        while (i + run < format.len && format.bytes[i + run] == c) {
+            run += 1;
+        }
+        i32 value = c == 100 ? d.day : c == 109 ? d.month : c == 121 ? d.year : -1;
+        if (value < 0) {
+            out.append(text_of(format.bytes[i..i + run]));
+        } else {
+            mut u8[4] digits = [48; 4];
+            mut i32 v = value;
+            for (usize k in 0..run) {
+                digits[run - 1 - k] = (48 + v % 10) as u8;
+                v /= 10;
+            }
+            out.append(text_of(digits[0..run]));
+        }
+        i += run;
+    }
+    return out;
+}
+
+// The date of `text` typed as `format` says, if it is complete and valid.
+Date? parse_date(str text, str format) {
+    if (text.len != format.len) {
+        return none;
+    }
+    mut Date d = Date{ year: 0, month: 0, day: 0 };
+    for (usize i in 0..format.len) {
+        u8 c = format.bytes[i];
+        if (c != 100 && c != 109 && c != 121) {
+            continue;
+        }
+        u8 t = text.bytes[i];
+        if (t < 48 || t > 57) {
+            return none;
+        }
+        i32 digit = (t - 48) as i32;
+        if (c == 100) {
+            d.day = d.day * 10 + digit;
+        } else if (c == 109) {
+            d.month = d.month * 10 + digit;
+        } else {
+            d.year = d.year * 10 + digit;
+        }
+    }
+    return valid_date(d) ? some(d) : none;
 }
 
 // What a number field accepts and shows (spec §10.9): its range and step, its decimals (the value
@@ -1134,6 +1245,8 @@ pub struct Theme {
     pub Style slider = Style{ };  // its track; `accent`: its thumb and the part before it
     pub Style progress = Style{ };  // its track; `accent`: what is done
     pub Style tooltip = Style{ };
+    pub Style dialog = Style{ };  // its window; the part `placeholder` is its title
+    pub Style date = Style{ };  // the calendar of a date field; `checked`: the day chosen
 }
 
 // The kinds of widgets, the selectors of a theme.
@@ -1161,6 +1274,8 @@ enum Kind {
     Slider,
     Progress,
     Tooltip,
+    Dialog,
+    Calendar,
 }
 
 // The states of a widget, which can be combined.
@@ -1214,7 +1329,7 @@ pub Style merge(Style weak, Style strong) {
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip) };
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date) };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
@@ -1266,6 +1381,8 @@ Style style_of(Theme t, Kind kind) {
         Slider => t.slider,
         Progress => t.progress,
         Tooltip => t.tooltip,
+        Dialog => t.dialog,
+        Calendar => t.date,
     };
 }
 
@@ -1399,6 +1516,17 @@ Look default_look(Kind kind, u32 states) {
         },
         Progress => {
             background = well();
+        },
+        Dialog => {
+            background = rgb(36, 39, 58, 255);
+            border = face(true, false);
+            border_width = 1.0;
+            padding = 16.0;
+        },
+        Calendar => {
+            background = rgb(49, 50, 68, 255);
+            border = face(true, false);
+            border_width = 1.0;
         },
         Tooltip => {
             background = rgb(49, 50, 68, 255);
@@ -1703,6 +1831,20 @@ pub struct Frame {
     mut u64 keys_taken = 0;  // the edits a shortcut used: one item per key pressed
     mut bool editing = false;  // a text field has the keyboard
     mut str tip = "";  // the tooltip to draw at the end of the frame
+    // The dialog being described: its widgets are those of `order` from `dialog_from`, its size is
+    // kept in `dialog_slot`; whether one was open in this frame; `finishing`: the layers above are
+    // being drawn.
+    mut bool in_dialog = false;
+    mut bool dialog_open = false;
+    mut usize dialog_from = 0;
+    mut usize dialog_to = 0;
+    mut usize dialog_slot = 0;
+    mut bool finishing = false;
+    // The date field whose calendar is open (0: none), its date, and on which day weeks start.
+    mut u64 cal_owner = 0;
+    mut Date*? cal_date = none;
+    mut bool cal_monday = true;
+    mut bool no_edit = false;
     mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
@@ -1974,7 +2116,9 @@ pub struct Frame {
             // the text may have changed since the last frame (a Clear button)
             ui.cursor = min(ui.cursor, text.len());
             ui.anchor = min(ui.anchor, text.len());
-            entered = edit(id, text, format, false);
+            if (!no_edit) {  // the calendar of a date field takes the keys while it is open
+                entered = edit(id, text, format, false);
+            }
         }
 
         Look l = look(TextField, (over(r) ? state_hover() : 0) | (focused ? state_focus() : 0));
@@ -2434,6 +2578,264 @@ pub struct Frame {
         canvas.Rect box = canvas.Rect{ x: x, y: y, w: w, h: h };
         paint(box, l);
         write_px(x + l.padding, y, h, tip, l.color, l.font_size);
+    }
+
+    // ---- Dates (spec §10.9) ----
+
+    // A field bound to a date, typed through the mask of `format` (`dd/mm/yyyy`...), with a button
+    // that opens a calendar of the month above the rest: its arrows change the month, a click or
+    // Enter on a day chooses it, Escape closes it; with the keyboard, the arrows move the day,
+    // Page Up and Page Down the month. Weeks start on Monday with `monday_first`. A date typed
+    // that is not valid leaves the value as it was. Returns true when the date changed.
+    pub bool date_field(Date* date, f32 width, str format, bool monday_first) {
+        u64 id = take_id();
+        bool open = ui.open == id;
+        mut bool changed = false;
+        mut Date next = *date;
+        if (open && ui.focus == id) {  // the keys of the calendar
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                mut i32 move = 0;
+                if (key == key_left() || key == key_right()) {
+                    move = key == key_left() ? -1 : 1;
+                } else if (key == key_up() || key == key_down()) {
+                    move = key == key_up() ? -7 : 7;
+                } else if (key == key_page_up() || key == key_page_down()) {
+                    calendar_month(key == key_page_up() ? -1 : 1);
+                } else if (key == key_enter() || key == key_space()) {
+                    next = Date{ year: ui.cal_year, month: ui.cal_month, day: ui.cal_day };
+                    ui.open = 0;
+                } else if (key == 27) {
+                    ui.open = 0;
+                }
+                if (move != 0) {
+                    ui.cal_day += move;
+                    if (ui.cal_day < 1) {
+                        calendar_month(-1);
+                        ui.cal_day += days_in(ui.cal_year, ui.cal_month);
+                    } else if (ui.cal_day > days_in(ui.cal_year, ui.cal_month)) {
+                        ui.cal_day -= days_in(ui.cal_year, ui.cal_month);
+                        calendar_month(1);
+                    }
+                }
+            }
+        }
+        no_edit = open;
+        mut TextBuffer shown = format_date(*date, format);
+        TextBuffer mask = mask_of(format);
+        bool focused_before = ui.focus == id;
+        field_id(id, focused_before && ui.date_of == id ? short_target(&ui.date_text) : short_target(&shown), width, Format{ mask: mask.text() });
+        no_edit = false;
+        canvas.Rect r = last;
+        bool focused = ui.focus == id;
+        if (focused && ui.date_of != id) {  // it took the keyboard: the date, to edit
+            ui.date_of = id;
+            ui.date_text = format_date(*date, format);
+            ui.cursor = ui.date_text.len;
+            ui.anchor = 0;
+        } else if (focused && !open) {
+            match (parse_date(ui.date_text.text(), format)) {
+                some(typed) => {
+                    next = typed;
+                },
+                none => { },
+            }
+        }
+        // its button, and the calendar above the rest
+        canvas.Rect button = canvas.Rect{ x: r.x + r.w - 26.0, y: r.y + 4.0, w: 22.0, h: r.h - 8.0 };
+        interactive(button);
+        if (click(mix(id, 1), button)) {
+            if (ui.open == id) {
+                ui.open = 0;
+            } else {
+                ui.open = id;
+                ui.focus = id;
+                Date from = valid_date(*date) ? *date : Date{ };
+                ui.cal_year = from.year;
+                ui.cal_month = from.month;
+                ui.cal_day = from.day;
+            }
+        }
+        if (ui.pressed && over(button)) {
+            dropdown_pressed = true;  // the click that opens it does not close it
+        }
+        Look l = look(TextField, 0);
+        canvas.Color mark = over(button) || ui.open == id ? l.accent : l.color;
+        surface.stroke(canvas.Rect{ x: button.x + 4.0, y: button.y + 4.0, w: 14.0, h: button.h - 8.0 }, mark, 1.0);
+        surface.fill(canvas.Rect{ x: button.x + 4.0, y: button.y + 4.0, w: 14.0, h: 3.0 }, mark);
+        if (ui.open == id) {
+            canvas.Rect popup = canvas.Rect{ x: r.x, y: r.y + r.h + 2.0, w: 7.0 * 32.0 + 16.0, h: 32.0 + 24.0 + 6.0 * 28.0 + 8.0 };
+            layer = popup;
+            layer_owner = id;
+            cal_owner = id;
+            cal_date = some(date);
+            cal_monday = monday_first;
+            if (ui.pressed && contains(ui.layer, ui.mouse_x, ui.mouse_y)) {
+                dropdown_pressed = true;
+                f32 mx = ui.mouse_x - popup.x;
+                f32 my = ui.mouse_y - popup.y;
+                if (my < 32.0) {  // the arrows of the month
+                    if (mx < 40.0) {
+                        calendar_month(-1);
+                    } else if (mx > popup.w - 40.0) {
+                        calendar_month(1);
+                    }
+                } else if (my >= 56.0) {
+                    i32 col = ((mx - 8.0) / 32.0) as i32;
+                    i32 row = ((my - 56.0) / 28.0) as i32;
+                    i32 day = row * 7 + col - first_column(monday_first) + 1;
+                    if (col >= 0 && col < 7 && day >= 1 && day <= days_in(ui.cal_year, ui.cal_month)) {
+                        next = Date{ year: ui.cal_year, month: ui.cal_month, day: day };
+                        ui.open = 0;
+                    }
+                }
+            }
+        }
+        if (!same_date(next, *date) && valid_date(next)) {
+            *date = next;
+            changed = true;
+            if (focused) {
+                ui.date_text = format_date(next, format);
+                ui.cursor = ui.date_text.len;
+                ui.anchor = ui.cursor;
+            }
+        }
+        return changed;
+    }
+
+    // The calendar shows the month before (-1) or after (1).
+    void calendar_month(i32 by) {
+        ui.cal_month += by;
+        if (ui.cal_month < 1) {
+            ui.cal_month = 12;
+            ui.cal_year -= 1;
+        } else if (ui.cal_month > 12) {
+            ui.cal_month = 1;
+            ui.cal_year += 1;
+        }
+        ui.cal_day = min(ui.cal_day, days_in(ui.cal_year, ui.cal_month));
+    }
+
+    // The column of the first day of the month shown.
+    i32 first_column(bool monday_first) {
+        i32 first = weekday(ui.cal_year, ui.cal_month, 1);
+        return monday_first ? (first + 6) % 7 : first;
+    }
+
+    // The calendar of the date field that has it open, above everything.
+    void draw_calendar() {
+        canvas.Rect r = layer;
+        Look l = look(Calendar, 0);
+        paint(r, l);
+        mut str[12] months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        mut str[7] days = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+        str title = tr(months[(ui.cal_month - 1) as usize]);
+        str year = decimal(ui.cal_year as i64);
+        canvas.Rect size = measure_px(title, l.font_size);
+        write_px(r.x + (r.w - size.w - 50.0) / 2.0, r.y, 32.0, title, l.color, l.font_size);
+        write_px(r.x + (r.w + size.w - 40.0) / 2.0, r.y, 32.0, year, l.color, l.font_size);
+        for (i32 k in 0..2) {  // the arrows
+            i32 cx = (k == 0 ? r.x + 20.0 : r.x + r.w - 20.0) as i32;
+            i32 cy = (r.y + 16.0) as i32;
+            i32 dir = k == 0 ? -1 : 1;
+            surface.line(cx + 2 * dir * -1, cy - 5, cx + 3 * dir, cy, l.color);
+            surface.line(cx + 3 * dir, cy, cx + 2 * dir * -1, cy + 5, l.color);
+        }
+        for (i32 c in 0..7) {
+            i32 index = cal_monday ? (c + 1) % 7 : c;
+            write_px(r.x + 8.0 + c as f32 * 32.0 + 6.0, r.y + 32.0, 24.0, tr(days[index as usize]), l.hint, l.font_size * 0.8);
+        }
+        Date chosen = match (cal_date) {
+            some(d) => *d,
+            none => Date{ },
+        };
+        i32 offset = first_column(cal_monday);
+        for (i32 day in 1..days_in(ui.cal_year, ui.cal_month) + 1) {
+            i32 cell = day - 1 + offset;
+            canvas.Rect box = canvas.Rect{ x: r.x + 8.0 + (cell % 7) as f32 * 32.0, y: r.y + 56.0 + (cell / 7) as f32 * 28.0, w: 30.0, h: 26.0 };
+            bool is_chosen = chosen.year == ui.cal_year && chosen.month == ui.cal_month && chosen.day == day;
+            if (is_chosen) {
+                surface.fill_rounded(box, 4.0, l.accent);
+            } else if (contains(box, ui.mouse_x, ui.mouse_y)) {
+                surface.fill_rounded(box, 4.0, face(true, false));
+            }
+            if (day == ui.cal_day) {  // the day of the keyboard
+                surface.stroke_rounded(box, 4.0, l.accent, 1.0);
+            }
+            str number = decimal(day as i64);
+            canvas.Rect n = measure_px(number, l.font_size * 0.9);
+            write_px(box.x + (box.w - n.w) / 2.0, box.y, box.h, number, is_chosen ? well() : l.color, l.font_size * 0.9);
+        }
+    }
+
+    // ---- Dialogs (spec §10.9) ----
+
+    // A dialog, while `open`: a window inside the window, centered, `width` wide, over a darkened
+    // backdrop. Its widgets follow, until `end_dialog()`, and only they see the mouse and the
+    // keys (from the next frame). Escape, or its cross, sets `open` to false. Describe it after the
+    // rest of the window (a .ui.sosu file does it), so that it is drawn above.
+    pub bool dialog(str title, f32 width, bool* open) {
+        u64 id = take_id();
+        if (!(*open)) {
+            return false;
+        }
+        take_styles();
+        if (ui.pressed_key(27, false, false)) {  // Escape
+            *open = false;
+            return false;
+        }
+        in_dialog = true;
+        Look l = look(Dialog, 0);
+        usize slot = ui.state_slot(id);
+        WidgetState kept = ui.states[slot];
+        f32 sw = surface.width as f32;
+        f32 sh = surface.height as f32;
+        surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: sw, h: sh }, canvas.Color{ r: 0, g: 0, b: 0, a: 120 });
+        f32 title_h = 40.0;
+        f32 w = min(width, sw - 16.0);
+        f32 h = kept.content_h > 0.0 ? kept.content_h + title_h + l.padding : 160.0;
+        f32 x = (sw - w) / 2.0;
+        f32 y = max((sh - h) / 2.0, 8.0);
+        canvas.Rect r = canvas.Rect{ x: x, y: y, w: w, h: h };
+        paint(r, l);
+        canvas.Color ink_of = color_or(part(Dialog, 0).color, l.color);
+        write_px(x + l.padding, y, title_h, title, ink_of, l.font_size);
+        canvas.Rect cross = canvas.Rect{ x: x + w - 36.0, y: y + 6.0, w: 28.0, h: 28.0 };
+        if (click(mix(id, 1), cross)) {
+            *open = false;
+        }
+        canvas.Color mark = over(cross) ? l.accent : ink_of;
+        i32 cx = (cross.x + 14.0) as i32;
+        i32 cy = (cross.y + 14.0) as i32;
+        surface.line(cx - 5, cy - 5, cx + 5, cy + 5, mark);
+        surface.line(cx - 5, cy + 5, cx + 5, cy - 5, mark);
+        dialog_from = order_count;
+        dialog_slot = slot;
+        if (depth == 15) {
+            return true;
+        }
+        f32 left = x + l.padding;
+        f32 top = y + title_h;
+        depth += 1;
+        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: l.gap, room_w: max(w - 2.0 * l.padding, 0.0) };
+        return true;
+    }
+
+    // The end of the widgets of the dialog.
+    pub void end_dialog() {
+        if (!in_dialog) {
+            return;
+        }
+        Layout done = layouts[depth];
+        if (depth > 0) {
+            depth -= 1;
+        }
+        usize slot = dialog_slot;  // a variable: see the bug noted in `menu`
+        WidgetState* s = &ui.states[slot];
+        s.content_h = done.bottom - done.top;
+        in_dialog = false;
+        dialog_open = true;
+        dialog_to = order_count;
     }
 
     // ---- Text areas (spec §10.9) ----
@@ -3281,11 +3683,17 @@ pub struct Frame {
 
     // Ends the frame: draws the layer above, and the input it used is consumed.
     pub void finish() {
+        finishing = true;
+        ui.modal = dialog_open;
         if (ui.pressed && !dropdown_pressed || ui.open != layer_owner) {
             ui.open = 0;  // a click elsewhere closes the dropdown, as does its disappearance
         }
         if (ui.open != 0) {
-            draw_layer();
+            if (ui.open == cal_owner) {
+                draw_calendar();
+            } else {
+                draw_layer();
+            }
             ui.layer = layer;
         } else {
             ui.layer = nowhere();
@@ -3698,22 +4106,35 @@ pub struct Frame {
 
     // Tab and Shift+Tab: the keyboard to the next or the previous widget of this frame.
     void tab_keys() {
+        // in a dialog, the keyboard stays among its widgets, and goes to the first of them
+        usize low = dialog_open ? dialog_from : 0;
+        usize high = dialog_open ? dialog_to : order_count;
+        usize count = high - low;
+        if (dialog_open && count > 0) {
+            mut bool inside = false;
+            for (usize k in low..high) {
+                inside = inside || order[k] == ui.focus;
+            }
+            if (!inside) {
+                ui.focus = order[low];
+            }
+        }
         if (tab_typed) {
             return;
         }
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
-            if (e.key != key_tab() || e.ctrl || order_count == 0) {
+            if (e.key != key_tab() || e.ctrl || count == 0) {
                 continue;
             }
-            mut usize at_now = order_count;
-            for (usize k in 0..order_count) {
+            mut usize at_now = count;
+            for (usize k in low..high) {
                 if (order[k] == ui.focus) {
-                    at_now = k;
+                    at_now = k - low;
                 }
             }
-            usize next = at_now == order_count ? e.shift ? order_count - 1 : 0 : (at_now + (e.shift ? order_count - 1 : 1)) % order_count;
-            ui.focus = order[next];
+            usize next = at_now == count ? e.shift ? count - 1 : 0 : (at_now + (e.shift ? count - 1 : 1)) % count;
+            ui.focus = order[low + next];
             ui.reveal = true;
             ui.cursor = 0xFFFF;  // a text field: all its text selected
             ui.anchor = 0;
@@ -4806,7 +5227,7 @@ pub struct Frame {
 
     // The mouse is over `r`, and not over the open list of a dropdown, which is above it.
     bool over(canvas.Rect r) {
-        return contains(r, ui.mouse_x, ui.mouse_y) && !ui.on_layer(ui.mouse_x, ui.mouse_y);
+        return contains(r, ui.mouse_x, ui.mouse_y) && !ui.on_layer(ui.mouse_x, ui.mouse_y) && (!ui.modal || in_dialog || finishing);
     }
 
     // Pressed then released over `r`, the press and the release maybe in the same frame.
@@ -6454,4 +6875,126 @@ test "a slider, a progress bar, a tooltip after 500 ms" {
     assert(slider_frame(&ui, &surface, &volume) == "Save the file");
     ui.mouse_move(250.0, 130.0);  // elsewhere: gone
     assert(slider_frame(&ui, &surface, &volume).len == 0);
+}
+
+// A button behind, and a dialog with two buttons, for the test below. Returns what was clicked:
+// 1 the button behind, 2 OK, 3 Cancel.
+i32 dialog_frame(Ui* ui, canvas.Canvas* surface, bool* open) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    if (f.button("Behind")) {
+        clicked = 1;
+    }
+    if (f.dialog("Delete?", 200.0, open)) {
+        f.row();
+        if (f.button("OK")) {
+            clicked = 2;
+        }
+        if (f.button("Cancel")) {
+            clicked = 3;
+        }
+        f.end_row();
+        f.end_dialog();
+    }
+    f.finish();
+    return clicked;
+}
+
+test "a dialog: the widgets behind see neither the mouse nor Tab; Escape and its cross close it" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut Ui ui = Ui{ };
+    mut bool open = true;
+    ui.mouse_move(399.0, 299.0);
+    dialog_frame(&ui, &surface, &open);
+    // the button behind (0, 0) does not take a click while the dialog is open
+    ui.mouse_move(10.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(dialog_frame(&ui, &surface, &open) == 0);
+    // the keyboard is on its first button; Tab goes to the second, then back to the first
+    ui.key(key_space(), true, false, false);
+    assert(dialog_frame(&ui, &surface, &open) == 2);
+    ui.key(key_tab(), true, false, false);
+    dialog_frame(&ui, &surface, &open);
+    ui.key(key_tab(), true, false, false);
+    dialog_frame(&ui, &surface, &open);
+    ui.key(key_space(), true, false, false);
+    assert(dialog_frame(&ui, &surface, &open) == 2);
+    // Escape closes it; the button behind takes clicks again
+    ui.key(27, true, false, false);
+    dialog_frame(&ui, &surface, &open);
+    assert(!open);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(dialog_frame(&ui, &surface, &open) == 1);
+    // open again: its cross closes it. The dialog is 200 wide, centered (x 100), 40 + 32 + 16 high
+    // (y 106): its cross from x 264 to 292, y 112 to 140
+    open = true;
+    ui.mouse_move(399.0, 299.0);
+    dialog_frame(&ui, &surface, &open);
+    dialog_frame(&ui, &surface, &open);
+    ui.mouse_move(278.0, 126.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    dialog_frame(&ui, &surface, &open);
+    assert(!open);
+}
+
+// A date field, for the test below.
+bool date_frame(Ui* ui, canvas.Canvas* surface, Date* date) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    bool changed = f.date_field(date, 200.0, "dd/mm/yyyy", true);
+    f.finish();
+    return changed;
+}
+
+test "dates: their days, typed, and chosen in the calendar with the mouse and the keyboard" {
+    assert(weekday(2026, 10, 25) == 0);  // a Sunday
+    assert(days_in(2024, 2) == 29 && days_in(2026, 2) == 28 && days_in(2000, 2) == 29 && days_in(1900, 2) == 28);
+    assert(format_date(Date{ year: 2026, month: 3, day: 7 }, "dd/mm/yyyy").text() == "07/03/2026");
+    assert(format_date(Date{ year: 2026, month: 3, day: 7 }, "yyyy-mm-dd").text() == "2026-03-07");
+    assert(match (parse_date("31/02/2026", "dd/mm/yyyy")) {
+        some(d) => false,
+        none => true,
+    });
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 300);
+    mut Ui ui = Ui{ };
+    mut Date date = Date{ year: 2026, month: 10, day: 25 };
+    // typed: the whole text selected when it takes the keyboard, then a new date
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    date_frame(&ui, &surface, &date);
+    ui.type_text("01112026");
+    assert(date_frame(&ui, &surface, &date) && date.day == 1 && date.month == 11);
+    // its button opens the calendar of November 2026, which starts on a Sunday: column 6
+    ui.mouse_move(200.0 - 15.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    date_frame(&ui, &surface, &date);
+    assert(ui.open != 0 && ui.cal_month == 11);
+    // Right, then Enter: the 2nd
+    ui.mouse_move(299.0, 299.0);
+    ui.key(key_right(), true, false, false);
+    ui.key(key_enter(), true, false, false);
+    assert(date_frame(&ui, &surface, &date) && date.day == 2 && ui.open == 0);
+    // opened again; its right arrow: December; a click on the 24th (a Thursday: column 3, row 3)
+    ui.mouse_move(200.0 - 15.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    date_frame(&ui, &surface, &date);
+    f32 top = 32.0 + 2.0;  // the calendar, under the field
+    ui.mouse_move(240.0 - 20.0, top + 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    date_frame(&ui, &surface, &date);
+    assert(ui.cal_month == 12);
+    ui.mouse_move(8.0 + 3.0 * 32.0 + 15.0, top + 56.0 + 3.0 * 28.0 + 13.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(date_frame(&ui, &surface, &date) && date.month == 12 && date.day == 24);
 }

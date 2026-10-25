@@ -33,6 +33,11 @@ typedef struct {
     bool ui_in_tabs; /* the items of a `Tabs`: its `Tab` nodes only */
     bool ui_in_tree; /* the items of a `Tree` or a `Branch`: `Branch` and `Leaf` nodes only */
     bool ui_in_component; /* the items at the top of a component: a component can hold the items of a tree */
+    /* the next node is at the top of a window or a component (a `Dialog` must be), and the dialogs of
+       the view being read, emitted at its end so that they are drawn above the rest */
+    bool ui_at_top;
+    bool ui_node_at_top;
+    void *ui_dialogs;
     struct { uint64_t *items; size_t count; size_t cap; } ui_cells;
 } Parser;
 
@@ -1414,6 +1419,8 @@ static const UiNodeKind ui_nodes[] = {
     { "TextArea", 0, false, { "bind", "width", "rows", "wrap", "tabs", "placeholder", "on_enter", "focus", "style", NULL }, false },
     { "Slider", 0, false, { "bind", "min", "max", "step", "width", "on_change", "focus", "style", NULL }, false },
     { "Progress", 0, false, { "value", "max", "width", "style", NULL }, false },
+    { "DateField", 0, false, { "bind", "width", "format", "monday_first", "on_change", "focus", "style", NULL }, false },
+    { "Dialog", 1, false, { "open", "width", "plural", "count", "context", NULL }, true },
     { "NumberField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "on_change", "focus", "style", NULL }, false },
     { "MoneyField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "symbol", "symbol_first", "on_change", "focus", "style", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", "style", NULL }, false },
@@ -1440,7 +1447,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1757,7 +1764,7 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
     }
     bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "TextArea") == 0 ||
                  strcmp(kind->name, "NumberField") == 0 || strcmp(kind->name, "MoneyField") == 0 ||
-                 strcmp(kind->name, "Slider") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
+                 strcmp(kind->name, "Slider") == 0 || strcmp(kind->name, "DateField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
                  strcmp(kind->name, "Radio") == 0 || strcmp(kind->name, "Dropdown") == 0;
     if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
@@ -1767,6 +1774,11 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
     if (strcmp(kind->name, "Radio") == 0 && !ui_prop(args, "value")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Radio` needs `value:`");
         diag_help(d, "give the value it chooses: `Radio(\"Small\", bind: state.size, value: Small)`");
+        return false;
+    }
+    if (strcmp(kind->name, "Dialog") == 0 && !ui_prop(args, "open")) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Dialog` needs `open:`");
+        diag_help(d, "bind it to a `mut bool` that says whether it is open: `Dialog(\"Delete?\", open: state.asking)`");
         return false;
     }
     if (strcmp(kind->name, "Grid") == 0 && !ui_prop(args, "columns")) {
@@ -2151,6 +2163,23 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     size_t start = cur(p)->offset;
     Path path = parse_path(p);
     Name node = path.items[path.count - 1];
+    bool at_top = p->ui_node_at_top;
+    p->ui_node_at_top = false;
+    if (path.count == 1 && name_text_is(node, "Dialog")) {
+        if (!at_top || !p->ui_dialogs) {
+            Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Dialog` is at the top of a window or a component");
+            diag_help(d, "it is drawn above the rest: put it beside the other nodes of the window, not inside one");
+            if (check(p, TOK_LPAREN)) {
+                UiArgs skipped;
+                ui_parse_args(p, &skipped);
+                free(skipped.values.items);
+                free(skipped.props.items);
+            }
+            if (check(p, TOK_LBRACE)) skip_balanced_braces(p);
+            return;
+        }
+        out = (StmtVec *)p->ui_dialogs;  /* emitted at the end of the view */
+    }
     UiArgs args;
     if (check(p, TOK_LPAREN)) {
         ui_parse_args(p, &args);
@@ -2201,7 +2230,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
-        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab", "Branch", "Leaf" };
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab", "Branch", "Leaf", "Dialog" };
         for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
             if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
         }
@@ -2309,6 +2338,37 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *call_args[2] = { value, enabled };
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "DateField")) {
+            /* f.date_field(&bind, width, format, monday_first); on_change when it changed */
+            Expr *format = ui_prop(&args, "format");
+            Expr *monday = ui_prop(&args, "monday_first");
+            if (!format) {  /* `widgets.default_date_format()`: dd/mm/yyyy */
+                Expr *module = ui_expr(p, EXPR_NAME, start, length);
+                module->as.name = ui_name("widgets", start);
+                Expr *callee = ui_expr(p, EXPR_FIELD, start, length);
+                callee->as.field.object = module;
+                callee->as.field.name = ui_name("default_date_format", start);
+                format = ui_call(p, callee, NULL, start, length);
+            }
+            if (!monday) {
+                monday = ui_expr(p, EXPR_BOOL, start, length);
+                monday->as.bool_value = true;
+            }
+            Expr *date_args[4] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 160, true),
+                                   format, monday };
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "date_field", date_args, 4), ui_prop(&args, "on_change")));
+        } else if (name_text_is(node, "Dialog")) {
+            /* if (f.dialog(title, width, &open)) { the nodes; f.end_dialog(); }, at the end of the view */
+            Expr *dialog_args[3] = { value, ui_float(p, ui_prop(&args, "width"), start, 400), ui_address(p, ui_prop(&args, "open")) };
+            StmtVec inner = {0};
+            size_t body_start = cur(p)->offset;
+            ui_parse_children(p, &inner);
+            SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_dialog", NULL, 0)));
+            Stmt *when = new_stmt(p, STMT_IF, start);
+            when->length = length;
+            when->as.if_.cond = ui_frame_call(p, start, length, "dialog", dialog_args, 3);
+            when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+            SOSU_VEC_PUSH(out, when);
         } else if (name_text_is(node, "Slider")) {
             /* f.slider(&bind, width, min, max, step); on_change when it changed */
             Expr *low = ui_prop(&args, "min");
@@ -2544,6 +2604,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
 static void ui_parse_item(Parser *p, StmtVec *out) {
     bool window_top = p->ui_window_top;
     p->ui_window_top = false;
+    bool at_top = p->ui_at_top;
+    p->ui_at_top = false;
     if (check(p, TOK_KW_IF)) {
         Stmt *stmt = new_stmt(p, STMT_IF, advance(p)->offset);
         stmt->as.if_.cond = parse_condition(p);
@@ -2601,6 +2663,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
         return;
     }
     if (check(p, TOK_IDENT)) {
+        p->ui_node_at_top = at_top;
         ui_parse_node(p, out, window_top);
         return;
     }
@@ -2721,9 +2784,11 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
     VEC(FieldInit) settings = {0};
     StmtVec items = {0};
     size_t nodes = 0;
+    StmtVec dialogs = {0};
     p->ui_title_bar = false;
     size_t body_start = cur(p)->offset;
     p->ui_in_component = !is_window;
+    p->ui_dialogs = &dialogs;
     if (expect(p, TOK_LBRACE)) {
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
             size_t before = p->pos;
@@ -2733,6 +2798,7 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
                 if (ui_window_property(p, is_window, items.count > 0, &setting)) SOSU_VEC_PUSH(&settings, setting);
             } else {
                 p->ui_window_top = is_window && nodes == 0;
+                p->ui_at_top = true;
                 ui_parse_item(p, &items);
                 nodes++;
             }
@@ -2742,6 +2808,10 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
         expect(p, TOK_RBRACE);
     }
     p->ui_in_component = false;
+    p->ui_dialogs = NULL;
+    p->ui_at_top = false;
+    for (size_t i = 0; i < dialogs.count; i++) SOSU_VEC_PUSH(&items, dialogs.items[i]);  /* above the rest */
+    free(dialogs.items);
     fn->body = ui_block(p, &items, body_start, span_from(p, body_start));
     fn->length = span_from(p, fn->offset);
     decl->length = fn->length;
