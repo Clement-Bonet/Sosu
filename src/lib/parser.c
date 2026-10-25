@@ -31,6 +31,7 @@ typedef struct {
     /* the items of a `Grid`, and the cells its nodes gave as literals, `row * 64 + col` (spec §10.8) */
     bool ui_in_grid;
     bool ui_in_tabs; /* the items of a `Tabs`: its `Tab` nodes only */
+    bool ui_in_tree; /* the items of a `Tree` or a `Branch`: `Branch` and `Leaf` nodes only */
     struct { uint64_t *items; size_t count; size_t cap; } ui_cells;
 } Parser;
 
@@ -1418,6 +1419,9 @@ static const UiNodeKind ui_nodes[] = {
     { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
     { "Tabs", 0, false, { "bind", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
+    { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
+    { "Branch", 1, false, { "open", "plural", "count", "context", NULL }, true },
+    { "Leaf", 1, false, { "on_click", "plural", "count", "context", NULL }, false },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -1430,7 +1434,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group", "Tabs",
+static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1809,6 +1813,17 @@ static bool ui_check_place(Parser *p, const UiNodeKind *kind, Name node, bool wi
         diag_help(d, "`MenuBar { Menu(\"File\") { ... } Menu(\"Edit\") { ... } }`");
         return false;
     }
+    bool item = kind && (strcmp(kind->name, "Branch") == 0 || strcmp(kind->name, "Leaf") == 0);
+    if (p->ui_in_tree && !item) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a tree contains only `Branch` and `Leaf` nodes");
+        diag_help(d, "`Tree(selected: state.item) { Branch(\"src\") { Leaf(\"main.sosu\") } }`");
+        return false;
+    }
+    if (item && !p->ui_in_tree) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `%s` goes in a `Tree` or a `Branch`", kind->name);
+        diag_help(d, "`Tree(selected: state.item) { Branch(\"src\") { Leaf(\"main.sosu\") } }`");
+        return false;
+    }
     bool tab = kind && strcmp(kind->name, "Tab") == 0;
     if (p->ui_in_tabs && !tab) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Tabs` contains only `Tab` nodes");
@@ -2142,11 +2157,13 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     }
     bool in_grid = p->ui_in_grid;
     bool in_tabs = p->ui_in_tabs;
+    bool in_tree = p->ui_in_tree;
     bool placed = true;
     Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
     if (cell) SOSU_VEC_PUSH(out, cell);
     p->ui_in_grid = false;  /* the children of a node are not cells, unless it is a grid */
     p->ui_in_tabs = false;
+    p->ui_in_tree = false;
     if (!kind) {
         ui_component(p, out, path, &args, start, length);
     } else {
@@ -2161,7 +2178,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
-        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab" };
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab", "Branch", "Leaf" };
         for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
             if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
         }
@@ -2308,6 +2325,39 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             p->ui_dropdown = NULL;
             p->ui_dropdown_change = NULL;
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_dropdown", NULL, 0)));
+        } else if (name_text_is(node, "Tree")) {
+            /* f.tree(width, height, some(&selected) or none), the branches and leaves, f.end_tree() */
+            Expr *selected = ui_prop(&args, "selected");
+            Expr *choice = ui_expr(p, EXPR_NAME, start, length);
+            choice->as.name = ui_name("none", start);
+            if (selected) choice = ui_some(p, ui_address(p, selected));
+            Expr *tree_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree", tree_args, 3)));
+            p->ui_in_tree = true;
+            ui_parse_children(p, out);
+            p->ui_in_tree = false;
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_tree", NULL, 0)));
+        } else if (name_text_is(node, "Branch")) {
+            /* if (f.branch(text, some(&open) or none)) { the branches and leaves; f.end_branch(); } */
+            Expr *open = ui_prop(&args, "open");
+            Expr *state = ui_expr(p, EXPR_NAME, start, length);
+            state->as.name = ui_name("none", start);
+            if (open) state = ui_some(p, ui_address(p, open));
+            Expr *branch_args[2] = { value, state };
+            StmtVec inner = {0};
+            size_t body_start = cur(p)->offset;
+            p->ui_in_tree = true;
+            ui_parse_children(p, &inner);
+            p->ui_in_tree = false;
+            SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_branch", NULL, 0)));
+            Stmt *when = new_stmt(p, STMT_IF, start);
+            when->length = length;
+            when->as.if_.cond = ui_frame_call(p, start, length, "branch", branch_args, 2);
+            when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+            SOSU_VEC_PUSH(out, when);
+        } else if (name_text_is(node, "Leaf")) {
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "leaf", &value, 1), ui_prop(&args, "on_click")));
         } else if (name_text_is(node, "Tabs")) {
             /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
             Expr *bound = ui_prop(&args, "bind");
@@ -2402,6 +2452,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     }
     p->ui_in_grid = in_grid;
     p->ui_in_tabs = in_tabs;
+    p->ui_in_tree = in_tree;
     free(args.values.items);
     free(args.props.items);
 }

@@ -235,6 +235,7 @@ struct WidgetState {
     mut i32 chosen = 0;
     mut i32 pick = -1;
     mut i32 closing = -1;
+    mut bool expanded = false;  // a branch of a tree open
     mut f32 extent = 0.0;
     mut bool reveal = false;  // a list: scroll to the item chosen, after a key moved the choice
 }
@@ -1119,6 +1120,7 @@ struct Layout {
     mut f32 room_w = 0.0;
     mut f32 room_h = 0.0;
     mut i32 grid = -1;  // a grid: its entry of `Frame.grids`
+    mut bool tree = false;  // a list that is a tree: its items are indented branches and leaves
     // A group: where its frame starts, its title (its width and height, 0: none), its look.
     mut bool group = false;
     mut f32 group_x = 0.0;
@@ -1254,6 +1256,11 @@ pub struct Frame {
     mut TabsBuild[4] tab_builds = [TabsBuild{ }; 4];
     mut usize tabs_count = 0;
     mut usize focus_marks = 0;
+    // The tree being described: how deep its branches are open, and the index of the item of
+    // each branch open around the next item (Left goes to it).
+    mut usize tree_level = 0;
+    mut i32[16] tree_parents = [-1; 16];
+    mut bool tree_keys_used = false;  // the keys of this frame acted on an item already
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -3357,7 +3364,7 @@ pub struct Frame {
     // still scroll first; its bars can be dragged by their thumb, or clicked beside it to move
     // by a page; with the keyboard, the arrows, Page Up, Page Down, Home and End scroll it.
     pub void scroll(f32 width, f32 height) {
-        begin_area(width, height, false, none);
+        begin_area(Scroll, width, height, false, none);
     }
 
     pub void end_scroll() {
@@ -3369,14 +3376,168 @@ pub struct Frame {
     // Page Up and Page Down move the choice, which comes into view; the item chosen is
     // highlighted.
     pub void list(f32 width, f32 height, i32*? selected) {
-        begin_area(width, height, true, selected);
+        begin_area(List, width, height, true, selected);
     }
 
     pub void end_list() {
         end_area(true);
     }
 
-    void begin_area(f32 width, f32 height_of, bool is_list, i32*? selected) {
+    // ---- Trees (spec §10.8) ----
+
+    // A tree `width` by `height`: a list whose items are branches (`branch`) and leaves
+    // (`leaf`), indented by their depth, until `end_tree()`. With `selected`, the index of the
+    // item chosen among those shown; Up and Down move it, Right opens a branch or goes to its
+    // first child, Left closes it or goes to its parent, Enter clicks a leaf.
+    pub void tree(f32 width, f32 height, i32*? selected) {
+        begin_area(Tree, width, height, true, selected);
+        if (layouts[depth].is_list) {
+            layouts[depth].tree = true;
+        }
+        tree_level = 0;
+    }
+
+    pub void end_tree() {
+        tree_level = 0;
+        end_area(true);
+    }
+
+    // A branch of the tree being described: a triangle and `text`. A click on the triangle, or
+    // Right and Left when it is chosen, opens and closes it; `open` binds that state, none: the
+    // tree keeps it (closed at first). Returns whether it is open: its children follow, then
+    // `end_branch()`.
+    pub bool branch(str text, bool*? open) {
+        u64 id = take_id();
+        usize slot = ui.state_slot(id);
+        WidgetState* s = &ui.states[slot];
+        mut bool is_open = match (open) {
+            some(flag) => *flag,
+            none => s.expanded,
+        };
+        i32 index = layouts[depth].item;
+        canvas.Rect r = tree_item(text, true, is_open);
+        canvas.Rect toggle = canvas.Rect{ x: r.x, y: r.y, w: 20.0, h: r.h };
+        mut bool change = click(id, toggle);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_right()) {
+                    if (!is_open) {
+                        change = true;
+                    } else {
+                        tree_choose(index + 1);  // its first child
+                    }
+                } else if (key == key_left()) {
+                    if (is_open) {
+                        change = true;
+                    } else {
+                        tree_to_parent();
+                    }
+                } else if (key == key_enter()) {
+                    change = true;
+                }
+            }
+        }
+        if (change) {
+            is_open = !is_open;
+            s.expanded = is_open;
+            match (open) {
+                some(flag) => {
+                    *flag = is_open;
+                },
+                none => { },
+            }
+        }
+        if (is_open && tree_level < 16) {
+            tree_parents[tree_level] = index;
+            tree_level += 1;
+        }
+        return is_open;
+    }
+
+    // The end of the children of an open branch.
+    pub void end_branch() {
+        if (tree_level > 0) {
+            tree_level -= 1;
+        }
+    }
+
+    // A leaf of the tree being described: `text`. Returns true when it is clicked, or when Enter
+    // is pressed while it is chosen.
+    pub bool leaf(str text) {
+        u64 id = take_id();
+        i32 index = layouts[depth].item;
+        canvas.Rect r = tree_item(text, false, false);
+        mut bool clicked = click(id, r);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_enter()) {
+                    clicked = true;
+                } else if (key == key_left()) {
+                    tree_to_parent();
+                }
+            }
+        }
+        return clicked;
+    }
+
+    // An item of the tree: its row, indented, a triangle for a branch, and its text.
+    canvas.Rect tree_item(str text, bool is_branch, bool is_open) {
+        take_styles();
+        Look l = look(Tree, 0);
+        f32 indent = tree_level as f32 * 16.0;
+        canvas.Rect size = measure_px(text, l.font_size);
+        canvas.Rect r = place(indent + 22.0 + size.w + 8.0, l.height);
+        canvas.Rect row = canvas.Rect{ x: r.x + indent, y: r.y, w: r.w - indent, h: r.h };
+        if (is_branch) {  // down when open, right when closed
+            i32 cx = (row.x + 8.0) as i32;
+            i32 cy = (row.y + row.h / 2.0) as i32;
+            if (is_open) {
+                surface.line(cx - 4, cy - 2, cx, cy + 2, l.color);
+                surface.line(cx, cy + 2, cx + 4, cy - 2, l.color);
+            } else {
+                surface.line(cx - 2, cy - 4, cx + 2, cy, l.color);
+                surface.line(cx + 2, cy, cx - 2, cy + 4, l.color);
+            }
+        }
+        write_px(row.x + 22.0, row.y, row.h, text, l.color, l.font_size);
+        last = row;  // what a context menu is for
+        return row;
+    }
+
+    // Whether the keys act on the item `index`: the tree has the keyboard and it is chosen.
+    bool tree_keys(i32 index) {
+        Layout l = layouts[depth];
+        if (!l.tree || ui.focus != l.area_id || tree_keys_used) {
+            return false;
+        }
+        bool chosen_now = match (l.selected) {
+            some(chosen) => *chosen == index,
+            none => false,
+        };
+        tree_keys_used = chosen_now;
+        return chosen_now;
+    }
+
+    void tree_choose(i32 index) {
+        match (layouts[depth].selected) {
+            some(chosen) => {
+                *chosen = index;
+                ui.states[layouts[depth].area as usize].reveal = true;
+            },
+            none => { },
+        }
+    }
+
+    // Left on an item that is not an open branch: the branch that holds it.
+    void tree_to_parent() {
+        if (tree_level > 0) {
+            tree_choose(tree_parents[tree_level - 1]);
+        }
+    }
+
+    void begin_area(Kind kind, f32 width, f32 height_of, bool is_list, i32*? selected) {
         u64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
@@ -3434,7 +3595,7 @@ pub struct Frame {
         }
         s.scroll_y = max(min(s.scroll_y, s.content_h - view_h), 0.0);
         s.scroll_x = max(min(s.scroll_x, s.content_w - view_w), 0.0);
-        Look area_look = look(is_list ? List : Scroll, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
+        Look area_look = look(kind, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
         paint(r, area_look);
         surface.push_clip(canvas.Rect{ x: r.x + 2.0, y: r.y + 2.0, w: view_w - (tall ? 2.0 : 4.0), h: view_h - (wide ? 2.0 : 4.0) });
         if (depth == 15) {
@@ -4779,4 +4940,70 @@ test "tabs: the content of the tab chosen only, a click, the keys, Ctrl+Tab, a c
     ui.mouse_button(false);
     tabs_frame(&ui, &surface, &chosen, &name, &closed);
     assert(closed);
+}
+
+// A tree for the test below: a branch `src` (bound to `open`) with two leaves, then a leaf.
+// Returns the leaf clicked (1, 2, 3; 0: none); `x` gets where the text of `main` starts.
+i32 tree_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, bool* open, f32* x) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.tree(200.0, 150.0, some(chosen));
+    if (f.branch("src", some(open))) {
+        if (f.leaf("main")) {
+            clicked = 1;
+        }
+        *x = f.last.x;
+        if (f.leaf("lib")) {
+            clicked = 2;
+        }
+        f.end_branch();
+    }
+    if (f.leaf("README")) {
+        clicked = 3;
+    }
+    f.end_tree();
+    f.finish();
+    return clicked;
+}
+
+test "a tree: branches open and closed, indentation, the keys" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut bool open = false;
+    mut f32 x = -1.0;
+    ui.mouse_move(299.0, 199.0);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(x == -1.0);  // closed: its leaves are not described
+    // a click on the triangle opens it, and gives the tree the keyboard
+    ui.mouse_move(10.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(open);
+    ui.mouse_move(299.0, 199.0);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(x == 24.0);  // indented by 16, inside the 8 of the list
+    // Right on an open branch: its first child; Down: the next; Left: the parent; Left: closed
+    ui.key(key_right(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(chosen == 1);
+    ui.key(key_down(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(chosen == 2);
+    ui.key(key_enter(), true, false, false);
+    assert(tree_frame(&ui, &surface, &chosen, &open, &x) == 2);
+    ui.key(key_left(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(chosen == 0 && open);
+    ui.key(key_left(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(!open);
+    // closed: the leaf after it is the item 1
+    ui.key(key_down(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    ui.key(key_enter(), true, false, false);
+    assert(chosen == 1 && tree_frame(&ui, &surface, &chosen, &open, &x) == 3);
 }
