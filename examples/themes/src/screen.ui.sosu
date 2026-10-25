@@ -27,27 +27,27 @@ window Themes(state.Demo* s) {
                     Option("Large", value: Large)
                 }
             }
-            Column(style: s.dark() ? look.CardDark : look.CardLight) {
+            Grid(columns: [Auto, Fill], gap: 10, style: s.dark() ? look.CardDark : look.CardLight) {
                 Text("Name")
-                TextField(bind: s.name, width: 320, placeholder: "Your name")
-                Checkbox("Notifications", bind: s.notify)
-                Checkbox("Compact", bind: s.compact)
+                TextField(bind: s.name, width: Fill, placeholder: "Your name")
+                Checkbox("Notifications", bind: s.notify, col: 1)
+                Checkbox("Compact", bind: s.compact, col: 1)
                 Text("Files")
-                List(width: 320, height: 120, selected: s.selected) {
+                List(width: Fill, height: 120, selected: s.selected) {
                     Text("report.txt")
                     Text("photo.png")
                     Text("notes.md")
                     Text("budget.csv")
                     Text("logo.svg")
                 }
-                Row(gap: 8) {
+                Row(gap: 8, span: 2) {
                     Button("Save", on_click: s.save, style: look.Primary)
                     Button("Cancel")
                     Button("Disabled", enabled: false)
                     Button("Delete", on_click: s.delete, style: look.Danger)
                 }
                 if (s.deleted > 0) {
-                    Text("Delete was clicked {times} times.", times: s.times(), style: look.Muted)
+                    Text("Delete was clicked {times} times.", times: s.times(), style: look.Muted, span: 2)
                 }
             }
         }
