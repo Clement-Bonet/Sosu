@@ -135,6 +135,254 @@ pub struct TextBuffer {
     }
 }
 
+// Text that grows, in an arena of its own (spec §10.9): the text of a `TextArea`. It owns its
+// arena, so it is moved, never copied (§6): it lives in the state of the program. Make one with
+// `long_text()`, and free it with `free()`.
+pub struct LongText {
+    mut Arena arena;
+    mut u8[] bytes;
+    mut usize len = 0;
+
+    pub str text() {
+        return slice(0, len);
+    }
+
+    pub void set(str text) {
+        len = 0;
+        insert(0, text);
+    }
+
+    // The number of characters.
+    pub usize count() {
+        mut usize found = 0;
+        for (usize i in 0..len) {
+            if (bytes[i] & 0xC0 != 0x80) {
+                found += 1;
+            }
+        }
+        return found;
+    }
+
+    // Editing, at byte offsets that start a character (0 and `len` included), as `TextBuffer`.
+
+    pub str slice(usize from, usize to) {
+        usize end = min(to, len);
+        return match (str.from_bytes(bytes[min(from, end)..end])) {
+            ok(valid) => valid,
+            err(e) => "",
+        };
+    }
+
+    pub usize next(usize at) {
+        mut usize i = min(at + 1, len);
+        while (i < len && bytes[i] & 0xC0 == 0x80) {
+            i += 1;
+        }
+        return i;
+    }
+
+    pub usize previous(usize at) {
+        if (at == 0) {
+            return 0;
+        }
+        mut usize i = min(at, len) - 1;
+        while (i > 0 && bytes[i] & 0xC0 == 0x80) {
+            i -= 1;
+        }
+        return i;
+    }
+
+    // Inserts `text` at `at`, the bytes growing as needed (twice as many each time).
+    pub bool insert(usize at, str text) {
+        if (at > len) {
+            return false;
+        }
+        if (len + text.len > bytes.len) {
+            mut usize room = max(bytes.len * 2, 64);
+            while (room < len + text.len) {
+                room *= 2;
+            }
+            mut u8[] grown = arena.alloc_slice(u8, room);
+            for (usize i in 0..len) {
+                grown[i] = bytes[i];
+            }
+            bytes = grown;
+        }
+        for (mut usize i = len; i > at; i -= 1) {
+            bytes[i - 1 + text.len] = bytes[i - 1];
+        }
+        for (usize i in 0..text.len) {
+            bytes[at + i] = text.bytes[i];
+        }
+        len += text.len;
+        return true;
+    }
+
+    pub void remove(usize from, usize to) {
+        usize end = min(to, len);
+        usize start = min(from, end);
+        usize removed = end - start;
+        for (mut usize i = start; i + removed < len; i += 1) {
+            bytes[i] = bytes[i + removed];
+        }
+        len -= removed;
+    }
+
+    // Frees its arena: the text is empty after it.
+    pub void free() {
+        arena.free();
+        len = 0;
+    }
+}
+
+// An empty `LongText`.
+pub LongText long_text() {
+    mut Arena arena = Arena.new(4 * KB);
+    u8[] bytes = arena.alloc_slice(u8, 256);
+    return LongText{ arena: arena, bytes: bytes };
+}
+
+// The text a field edits: a `TextBuffer` or a `LongText`, so that one editing core serves both.
+struct Target {
+    TextBuffer*? short_text = none;
+    LongText*? long_text = none;
+
+    usize len() {
+        return match (short_text) {
+            some(t) => t.len,
+            none => match (long_text) {
+                some(t) => t.len,
+                none => 0,
+            },
+        };
+    }
+
+    str slice(usize from, usize to) {
+        return match (short_text) {
+            some(t) => t.slice(from, to),
+            none => match (long_text) {
+                some(t) => t.slice(from, to),
+                none => "",
+            },
+        };
+    }
+
+    str text() {
+        return slice(0, len());
+    }
+
+    usize next(usize at) {
+        return match (short_text) {
+            some(t) => t.next(at),
+            none => match (long_text) {
+                some(t) => t.next(at),
+                none => 0,
+            },
+        };
+    }
+
+    usize previous(usize at) {
+        return match (short_text) {
+            some(t) => t.previous(at),
+            none => match (long_text) {
+                some(t) => t.previous(at),
+                none => 0,
+            },
+        };
+    }
+
+    usize count() {
+        return match (short_text) {
+            some(t) => t.count(),
+            none => match (long_text) {
+                some(t) => t.count(),
+                none => 0,
+            },
+        };
+    }
+
+    bool insert(usize at, str text) {
+        return match (short_text) {
+            some(t) => t.insert(at, text),
+            none => match (long_text) {
+                some(t) => t.insert(at, text),
+                none => false,
+            },
+        };
+    }
+
+    void remove(usize from, usize to) {
+        match (short_text) {
+            some(t) => {
+                t.remove(from, to);
+            },
+            none => {
+                match (long_text) {
+                    some(t) => {
+                        t.remove(from, to);
+                    },
+                    none => { },
+                }
+            },
+        }
+    }
+}
+
+Target short_target(TextBuffer* text) {
+    return Target{ short_text: some(text) };
+}
+
+Target long_target(LongText* text) {
+    return Target{ long_text: some(text) };
+}
+
+// A byte of a word, for Ctrl+Left and Ctrl+Right and the double click: letters, digits, `_`, and
+// every character beyond ASCII.
+bool word_byte(u8 b) {
+    return b >= 48 && b <= 57 || b >= 65 && b <= 90 || b >= 97 && b <= 122 || b == 95 || b >= 0x80;
+}
+
+// The start of the word before `at` (the spaces before it skipped).
+usize word_left(Target t, usize at) {
+    str all = t.text();
+    mut usize i = at;
+    while (i > 0 && !word_byte(all.bytes[t.previous(i)])) {
+        i = t.previous(i);
+    }
+    while (i > 0 && word_byte(all.bytes[t.previous(i)])) {
+        i = t.previous(i);
+    }
+    return i;
+}
+
+// The start of the word after `at` (the end of this one, then its spaces skipped).
+usize word_right(Target t, usize at) {
+    str all = t.text();
+    usize n = t.len();
+    mut usize i = at;
+    while (i < n && word_byte(all.bytes[i])) {
+        i = t.next(i);
+    }
+    while (i < n && !word_byte(all.bytes[i])) {
+        i = t.next(i);
+    }
+    return i;
+}
+
+// A change of the text of a field, for undo and redo: the bytes `at` to `at + removed_len` became
+// the `inserted_len` bytes; both texts are in `Ui.history`, from `text_at`.
+struct Change {
+    mut usize at = 0;
+    mut usize text_at = 0;
+    mut usize removed_len = 0;
+    mut usize inserted_len = 0;
+    mut bool typing = false;  // text typed: what follows joins it, up to the next word
+}
+
+f32 abs_f32(f32 v) {
+    return v < 0.0 ? -v : v;
+}
+
 // The key codes of SDL that text fields use (`platform.app` gives them as they are).
 u32 key_backspace() {
     return 8;
@@ -338,6 +586,30 @@ pub struct Ui {
     // The colors and sizes of the widgets (spec §10.7); none: `default_theme()`.
     pub mut Theme? theme = none;
 
+    // The time (spec §10.9), given by the program before each frame: milliseconds of a monotonic
+    // clock. Without it, what needs time (double clicks, tooltips...) does not happen.
+    mut u64 now = 0;
+    mut bool has_clock = false;
+    // The presses of the left button in a row, near each other in place and time: 2 is a double
+    // click, 3 a triple one.
+    mut u32 presses = 0;
+    mut u64 press_time = 0;
+    mut f32 press_x = 0.0;
+    mut f32 press_y = 0.0;
+    // Undo and redo in the text field that has the keyboard: its identity, its changes (those
+    // before `change_at` are done, the others undone), and their texts.
+    mut u64 history_of = 0;
+    mut Change[64] changes = [Change{ }; 64];
+    mut usize change_count = 0;
+    mut usize change_at = 0;
+    mut u8[4096] history = [0; 4096];
+    mut usize history_used = 0;
+
+    pub void clock(u64 ms) {
+        now = ms;
+        has_clock = true;
+    }
+
     // The input, as `platform.app` gives it.
     pub void mouse_move(f32 x, f32 y) {
         moved = moved || x != mouse_x || y != mouse_y;
@@ -349,6 +621,11 @@ pub struct Ui {
     pub void mouse_button(bool is_down) {
         if (is_down) {
             pressed = true;
+            bool near = abs_f32(mouse_x - press_x) <= 4.0 && abs_f32(mouse_y - press_y) <= 4.0;
+            presses = has_clock && near && now - press_time <= 400 ? presses + 1 : 1;
+            press_time = now;
+            press_x = mouse_x;
+            press_y = mouse_y;
         } else {
             released = true;
         }
@@ -598,7 +875,7 @@ bool fits_slot(u8 m, u8 first) {
 }
 
 // Whether a character starting with byte `first` can go at `at` in `text`.
-bool accepts(Accept accept, u8 first, TextBuffer* text, usize at) {
+bool accepts(Accept accept, u8 first, str text, usize at) {
     bool minus = first == 45 && at == 0 && !has_byte(text, 45);
     bool separator = (first == 46 || first == 44) && !has_byte(text, 46) && !has_byte(text, 44);
     return match (accept) {
@@ -609,9 +886,9 @@ bool accepts(Accept accept, u8 first, TextBuffer* text, usize at) {
     };
 }
 
-bool has_byte(TextBuffer* text, u8 b) {
-    for (usize i in 0..text.len) {
-        if (text.bytes[i] == b) {
+bool has_byte(str text, u8 b) {
+    for (u8 c in text.bytes) {
+        if (c == b) {
             return true;
         }
     }
@@ -1482,6 +1759,15 @@ pub struct Frame {
 
     // The same, keeping only what `format` accepts.
     pub bool text_field_with(TextBuffer* text, f32 width, Format format) {
+        return field(short_target(text), width, format);
+    }
+
+    // A field of one line over a `LongText` (spec §10.9): as long as the text goes.
+    pub bool text_field_long(LongText* text, f32 width, Format format) {
+        return field(long_target(text), width, format);
+    }
+
+    bool field(Target text, f32 width, Format format) {
         u64 id = take_id();
         take_styles();
         Look first = look(TextField, 0);
@@ -1498,7 +1784,8 @@ pub struct Frame {
             ui.active = id;
             ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll, size);
             ui.anchor = ui.cursor;
-        } else if (ui.focus == id && ui.active == id && ui.down) {
+            select_by_clicks(text, 0, text.len());
+        } else if (ui.focus == id && ui.active == id && ui.down && ui.presses < 2) {
             ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll, size);  // dragging selects
         }
         focusable(id, r);
@@ -1507,9 +1794,9 @@ pub struct Frame {
         editing = editing || focused;
         if (focused) {
             // the text may have changed since the last frame (a Clear button)
-            ui.cursor = min(ui.cursor, text.len);
-            ui.anchor = min(ui.anchor, text.len);
-            entered = edit(text, format);
+            ui.cursor = min(ui.cursor, text.len());
+            ui.anchor = min(ui.anchor, text.len());
+            entered = edit(id, text, format, false);
         }
 
         Look l = look(TextField, (over(r) ? state_hover() : 0) | (focused ? state_focus() : 0));
@@ -1532,7 +1819,7 @@ pub struct Frame {
             f32 b = measure_px(text.slice(0, max(ui.anchor, ui.cursor)), size).w;
             surface.fill(canvas.Rect{ x: inner.x + a - shift, y: line_y, w: b - a, h: line }, l.selection);
         }
-        if (text.len == 0 && format.placeholder.len > 0) {
+        if (text.len() == 0 && format.placeholder.len > 0) {
             write_px(inner.x, r.y, r.h, format.placeholder, l.hint, size);
         }
         write_px(inner.x - shift, r.y, r.h, text.text(), l.color, size);
@@ -1543,24 +1830,57 @@ pub struct Frame {
         return entered;
     }
 
+    // A double click selects the word under the cursor, a triple click the text from `from` to
+    // `to` (the line).
+    void select_by_clicks(Target text, usize from, usize to) {
+        if (ui.presses == 2) {
+            str all = text.text();
+            mut usize start = ui.cursor;
+            mut usize end = ui.cursor;
+            while (start > from && word_byte(all.bytes[text.previous(start)])) {
+                start = text.previous(start);
+            }
+            while (end < to && word_byte(all.bytes[end])) {
+                end = text.next(end);
+            }
+            ui.anchor = start;
+            ui.cursor = end;
+        } else if (ui.presses >= 3) {
+            ui.anchor = from;
+            ui.cursor = to;
+        }
+    }
+
     // The byte offset of the character boundary nearest to `x`, from the start of the text.
-    usize index_at(TextBuffer* text, f32 x, f32 size) {
-        mut usize at = 0;
-        while (at < text.len) {
+    usize index_at(Target text, f32 x, f32 size) {
+        return index_in(text, 0, text.len(), x, size);
+    }
+
+    // The same, in the bytes `from` to `to` (a line), `x` from where they start.
+    usize index_in(Target text, usize from, usize to, f32 x, f32 size) {
+        mut usize at = from;
+        mut f32 left = 0.0;
+        while (at < to) {
             usize after = text.next(at);
-            f32 left = measure_px(text.slice(0, at), size).w;
-            f32 right = measure_px(text.slice(0, after), size).w;
+            f32 right = measure_px(text.slice(from, after), size).w;
             if (x < (left + right) / 2.0) {
                 return at;
             }
+            left = right;
             at = after;
         }
-        return text.len;
+        return to;
     }
 
-    // Applies the edits of the frame to the text field that has the keyboard, in order.
-    // Returns true if Enter was pressed.
-    bool edit(TextBuffer* text, Format format) {
+    // Applies the edits of the frame to the text field `id` that has the keyboard, in order.
+    // Returns true if Enter was pressed (Ctrl+Enter, with `lines`, where Enter breaks a line).
+    bool edit(u64 id, Target text, Format format, bool lines) {
+        if (ui.history_of != id) {  // another field: the history of the last one is forgotten
+            ui.history_of = id;
+            ui.change_count = 0;
+            ui.change_at = 0;
+            ui.history_used = 0;
+        }
         mut bool entered = false;
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
@@ -1570,7 +1890,7 @@ pub struct Frame {
                 type_into(text, ui.typed.slice(e.from, e.to), format);
             } else if (e.ctrl && e.key == 97) {  // Ctrl+A: all
                 ui.anchor = 0;
-                ui.cursor = text.len;
+                ui.cursor = text.len();
             } else if (e.ctrl && (e.key == 99 || e.key == 120)) {  // Ctrl+C, Ctrl+X
                 if (start != end) {
                     ui.copied.set(text.slice(start, end));
@@ -1579,43 +1899,128 @@ pub struct Frame {
                         erase_selection(text);
                     }
                 }
+            } else if (e.ctrl && (e.key == 122 && !e.shift)) {  // Ctrl+Z
+                undo(text);
+            } else if (e.ctrl && (e.key == 121 || e.key == 122)) {  // Ctrl+Y, Ctrl+Shift+Z
+                redo(text);
             } else if (e.key == key_backspace() || e.key == key_delete()) {
                 if (start == end) {
-                    ui.anchor = e.key == key_backspace() ? text.previous(ui.cursor) : text.next(ui.cursor);
+                    bool back = e.key == key_backspace();
+                    ui.anchor = e.ctrl ? back ? word_left(text, ui.cursor) : word_right(text, ui.cursor) : back ? text.previous(ui.cursor) : text.next(ui.cursor);
                 }
                 erase_selection(text);
             } else if (e.key == key_left() || e.key == key_right()) {
                 bool left = e.key == key_left();
-                if (start != end && !e.shift) {
+                if (start != end && !e.shift && !e.ctrl) {
                     ui.cursor = left ? start : end;  // the selection ends where the arrow points
+                } else if (e.ctrl) {
+                    ui.cursor = left ? word_left(text, ui.cursor) : word_right(text, ui.cursor);
                 } else {
                     ui.cursor = left ? text.previous(ui.cursor) : text.next(ui.cursor);
                 }
                 if (!e.shift) {
                     ui.anchor = ui.cursor;
                 }
-            } else if (e.key == key_home() || e.key == key_end()) {
-                ui.cursor = e.key == key_home() ? 0 : text.len;
+            } else if (!lines && (e.key == key_home() || e.key == key_end())) {
+                ui.cursor = e.key == key_home() ? 0 : text.len();
                 if (!e.shift) {
                     ui.anchor = ui.cursor;
                 }
             } else if (e.key == key_enter()) {
-                entered = true;
+                if (lines && !e.ctrl) {
+                    type_into(text, "\n", format);
+                } else {
+                    entered = true;
+                }
             }
         }
         return entered;
     }
 
-    void erase_selection(TextBuffer* text) {
+    void erase_selection(Target text) {
         usize start = min(ui.anchor, ui.cursor);
-        text.remove(start, max(ui.anchor, ui.cursor));
+        replace(text, start, max(ui.anchor, ui.cursor), "", false);
         ui.cursor = start;
         ui.anchor = start;
     }
 
+    // The bytes `from` to `to` become `with`, and the change is kept for undo; `typing` joins it
+    // to the letters typed just before. False if the text does not take it (too long).
+    bool replace(Target text, usize from, usize to, str with, bool typing) {
+        if (from == to && with.len == 0) {
+            return true;
+        }
+        str removed = text.slice(from, to);
+        // its texts, kept for undo (when they fit; else the history starts again)
+        if (ui.history_used + removed.len + with.len > 4096 || ui.change_at == 64) {
+            ui.change_count = 0;
+            ui.change_at = 0;
+            ui.history_used = 0;
+        }
+        bool fits = ui.history_used + removed.len + with.len <= 4096;
+        mut bool joined = false;
+        if (fits && typing && ui.change_at > 0 && ui.change_at == ui.change_count) {
+            usize last = ui.change_at - 1;
+            Change c = ui.changes[last];
+            // a word joins the spaces after it; the letter after a space starts the next change
+            bool word_starts = c.inserted_len > 0 && ui.history[ui.history_used - 1] == 32 && with.len > 0 && with.bytes[0] != 32;
+            if (c.typing && !word_starts && c.at + c.inserted_len == from && c.text_at + c.removed_len + c.inserted_len == ui.history_used) {
+                ui.changes[last].inserted_len += with.len;  // the next letter of a word typed
+                joined = true;
+            }
+        }
+        if (fits && !joined) {
+            usize slot = ui.change_at;
+            ui.changes[slot] = Change{ at: from, text_at: ui.history_used, removed_len: removed.len, inserted_len: with.len, typing: typing };
+            for (usize i in 0..removed.len) {
+                ui.history[ui.history_used + i] = removed.bytes[i];
+            }
+            ui.history_used += removed.len;
+            ui.change_at += 1;
+            ui.change_count = ui.change_at;  // what was undone cannot be redone after a change
+        }
+        if (fits) {
+            for (usize i in 0..with.len) {
+                ui.history[ui.history_used + i] = with.bytes[i];
+            }
+            ui.history_used += with.len;
+        }
+        text.remove(from, to);
+        return text.insert(from, with);
+    }
+
+    // Undoes the last change: its inserted text becomes the removed one again.
+    void undo(Target text) {
+        if (ui.change_at == 0) {
+            return;
+        }
+        ui.change_at -= 1;
+        Change c = ui.changes[ui.change_at];
+        str before = text_of(ui.history[c.text_at..c.text_at + c.removed_len]);
+        text.remove(c.at, c.at + c.inserted_len);
+        text.insert(c.at, before);
+        ui.cursor = c.at + c.removed_len;
+        ui.anchor = c.at;
+    }
+
+    // Does again the last change undone.
+    void redo(Target text) {
+        if (ui.change_at == ui.change_count) {
+            return;
+        }
+        Change c = ui.changes[ui.change_at];
+        ui.change_at += 1;
+        usize from = c.text_at + c.removed_len;
+        str after = text_of(ui.history[from..from + c.inserted_len]);
+        text.remove(c.at, c.at + c.removed_len);
+        text.insert(c.at, after);
+        ui.cursor = c.at + c.inserted_len;
+        ui.anchor = ui.cursor;
+    }
+
     // Typed text, at the cursor, instead of the selection: each character that `format`
     // accepts, with the fixed characters of its mask written on the way.
-    void type_into(TextBuffer* text, str typed, Format format) {
+    void type_into(Target text, str typed, Format format) {
         erase_selection(text);
         mut usize at = 0;
         while (at < typed.len) {
@@ -1626,7 +2031,7 @@ pub struct Frame {
                 mut usize position = chars_in(text.slice(0, ui.cursor));
                 while (position < format.mask.len && !is_slot(format.mask.bytes[position])) {
                     str fixed = text_of(format.mask.bytes[position..position + 1]);
-                    if (!text.insert(ui.cursor, fixed)) {
+                    if (!replace(text, ui.cursor, ui.cursor, fixed, true)) {
                         return;
                     }
                     ui.cursor += 1;
@@ -1635,13 +2040,13 @@ pub struct Frame {
                 if (position >= format.mask.len || !fits_slot(format.mask.bytes[position], piece.bytes[0])) {
                     continue;
                 }
-            } else if (!accepts(format.accept, piece.bytes[0], text, ui.cursor)) {
+            } else if (!accepts(format.accept, piece.bytes[0], text.text(), ui.cursor)) {
                 continue;
             }
             if (format.max > 0 && text.count() >= format.max) {
                 return;
             }
-            if (text.insert(ui.cursor, piece)) {
+            if (replace(text, ui.cursor, ui.cursor, piece, true)) {
                 ui.cursor += piece.len;
             }
         }
@@ -5215,4 +5620,67 @@ test "tabs below their content, and a row too long scrolled by its arrows and to
     f.end_tabs();
     f.finish();
     assert(end_x <= 252.0 && end_x > 200.0);
+}
+
+// A frame with one field over `text`, for the tests below.
+void long_frame(Ui* ui, canvas.Canvas* surface, LongText* text) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.text_field_long(text, 300.0, Format{ });
+    f.finish();
+}
+
+test "the editing core: words, undo and redo, double and triple clicks, a long text" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 320, 60);
+    mut Ui ui = Ui{ };
+    mut LongText text = long_text();
+    defer text.free();
+    ui.clock(1000);
+    ui.mouse_move(10.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_frame(&ui, &surface, &text);  // the field has the keyboard
+    ui.type_text("hello brave world");
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "hello brave world");
+    // Ctrl+Backspace removes the last word; Ctrl+Left goes to the start of the previous one
+    ui.key(key_backspace(), true, false, true);
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "hello brave ");
+    ui.key(key_left(), true, false, true);
+    ui.type_text("very ");
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "hello very brave ");
+    // undo: the word typed, then the word removed; redo the first again
+    ui.key(122, true, false, true);
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "hello brave ");
+    ui.key(122, true, false, true);
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "hello brave world");
+    ui.key(121, true, false, true);
+    long_frame(&ui, &surface, &text);
+    assert(text.text() == "hello brave ");
+    // a double click selects a word, a triple click all of it
+    ui.clock(2000);
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    ui.clock(2100);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_frame(&ui, &surface, &text);
+    assert(min(ui.anchor, ui.cursor) == 0 && max(ui.anchor, ui.cursor) == 5);
+    ui.clock(2200);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_frame(&ui, &surface, &text);
+    assert(min(ui.anchor, ui.cursor) == 0 && max(ui.anchor, ui.cursor) == text.len);
+    // a long text: 100 000 bytes
+    text.set("");
+    for (i32 i in 0..10000) {
+        text.insert(text.len, "0123456789");
+    }
+    assert(text.len == 100000 && text.slice(99990, 100000) == "0123456789");
 }
