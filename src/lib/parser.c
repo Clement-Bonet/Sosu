@@ -1411,6 +1411,7 @@ static const UiNodeKind ui_nodes[] = {
     { "Space", 1, false, { NULL }, false },
     { "Button", 1, false, { "on_click", "enabled", "focus", "plural", "count", "context", "style", NULL }, false },
     { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", "style", NULL }, false },
+    { "TextArea", 0, false, { "bind", "width", "rows", "wrap", "tabs", "placeholder", "on_enter", "focus", "style", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", "style", NULL }, false },
     { "Radio", 1, false, { "bind", "value", "on_change", "plural", "count", "context", "style", NULL }, false },
     { "TitleBar", 0, false, { "height", "gap", "padding", "style", NULL }, true },
@@ -1435,7 +1436,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1750,7 +1751,7 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         else diag_help(d, "it has no properties");
         return false;
     }
-    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
+    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "TextArea") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
                  strcmp(kind->name, "Radio") == 0 || strcmp(kind->name, "Dropdown") == 0;
     if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
@@ -2295,6 +2296,20 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *call_args[2] = { value, enabled };
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "TextArea")) {
+            /* f.text_area(&bind, width, rows, widgets.Area{ wrap, tabs, placeholder }), and on_enter on Ctrl+Enter */
+            static const char *const names[] = { "wrap", "tabs", "placeholder" };
+            UiFields fields = {0};
+            for (size_t i = 0; i < 3; i++) {
+                Expr *option = ui_prop(&args, names[i]);
+                if (!option) continue;
+                FieldInit field = { ui_name(names[i], option->offset), i == 2 ? ui_translate(p, &args, option) : option };
+                SOSU_VEC_PUSH(&fields, field);
+            }
+            Expr *rows = ui_prop(&args, "rows");
+            Expr *area_args[4] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   rows ? rows : ui_int(p, start, 5), ui_struct(p, "Area", &fields, start, length) };
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "text_area", area_args, 4), ui_prop(&args, "on_enter")));
         } else if (name_text_is(node, "TextField")) {
             Expr *call_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 200, true),
                                    ui_format(p, &args, start, length) };

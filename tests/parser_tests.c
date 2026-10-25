@@ -600,6 +600,17 @@ static void test_ui_grids(void) {
               "  (block\n"
               "    (return (lit widgets.Window))))\n"
               "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    TextArea(bind: s.notes, rows: 8, wrap: false, placeholder: \"Notes\", on_enter: s.send)\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (if (call (. ui_frame text_area) (& (. s notes)) 300.0 8 (lit widgets.Area (wrap false) (placeholder (call (. ui_frame tr) \"Notes\"))))\n"
+              "      (block\n"
+              "        (call (. s send))))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
     expect_ui("window W() {\n    Tabs(placement: Bottom) { }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame))\n"
               "  (block\n"

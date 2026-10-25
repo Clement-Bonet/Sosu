@@ -822,6 +822,42 @@ pub enum Accept {
     Decimal,  // digits, `-` first, and one separator, `.` or `,`
 }
 
+// What a text area accepts (spec §10.9): lines broken at the last space that fits (`wrap`), Tab
+// typing four spaces instead of moving the keyboard (`tabs`), a hint while it is empty.
+pub struct Area {
+    pub bool wrap = true;
+    pub bool tabs = false;
+    pub str placeholder = "";
+}
+
+// How a text area lays out its lines: their width (0: no wrapping), the size of the text and the
+// height of a line.
+struct AreaLayout {
+    f32 width;
+    f32 size;
+    f32 line_h;
+}
+
+// A visual line of a text area: its bytes `start` to `end`, where the next one starts, and whether
+// it is the last one.
+struct Span {
+    usize start;
+    usize end;
+    usize next;
+    bool last;
+}
+
+// A visual line and its number.
+struct Spot {
+    Span span;
+    i32 line;
+}
+
+// Whether the cursor at `at` is on `line`: at its end too, unless the next line starts there.
+bool in_line(Span line, usize at) {
+    return at >= line.start && (at < line.end || at == line.end && (line.next > line.end || line.last));
+}
+
 pub struct Format {
     pub Accept accept = Any;
     pub usize max = 0;  // characters at most; 0: as many as fit
@@ -1529,6 +1565,7 @@ pub struct Frame {
     mut bool right_taken = false;
     mut u64 keys_taken = 0;  // the edits a shortcut used: one item per key pressed
     mut bool editing = false;  // a text field has the keyboard
+    mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
     // The titles of the bar of menus being described (`menu_bar`): its layout, their identities.
@@ -2051,6 +2088,229 @@ pub struct Frame {
             }
         }
         ui.anchor = ui.cursor;
+    }
+
+    // ---- Text areas (spec §10.9) ----
+
+    // Text on several lines, `rows` lines high, bound to a `LongText`. Enter breaks a line,
+    // Ctrl+Enter returns true (`on_enter`); Up and Down keep the column of the cursor, Page Up and
+    // Page Down move by the height of the area, Home and End go to the ends of the line, Ctrl+Home
+    // and Ctrl+End to those of the text. The area scrolls to keep the cursor in view.
+    pub bool text_area(LongText* text, f32 width, i32 rows, Area options) {
+        Target t = long_target(text);
+        u64 id = take_id();
+        take_styles();
+        Look first = look(TextField, 0);
+        f32 size = first.font_size;
+        f32 line_h = measure_px("Ag", size).h + 4.0;
+        f32 pad = first.padding;
+        canvas.Rect r = place(width, max(rows, 1) as f32 * line_h + 2.0 * pad);
+        interactive(r);
+        usize slot = ui.state_slot(id);
+        f32 text_w = max(r.w - 2.0 * pad - 10.0, 10.0);  // 10: the scroll bar
+        canvas.Rect inner = canvas.Rect{ x: r.x + pad, y: r.y + pad, w: text_w, h: r.h - 2.0 * pad };
+        AreaLayout layout = AreaLayout{ width: options.wrap ? text_w : 0.0, size: size, line_h: line_h };
+        f32 scroll = ui.states[slot].scroll_y;
+        if (ui.pressed && over(r)) {
+            if (ui.focus != id) {
+                ui.focus = id;
+            }
+            focus_taken = true;
+            ui.active = id;
+            ui.cursor = area_index(t, layout, ui.mouse_x - inner.x, ui.mouse_y - inner.y + scroll);
+            ui.anchor = ui.cursor;
+            Span line = logical_line(t, ui.cursor);
+            select_by_clicks(t, line.start, line.end);
+        } else if (ui.focus == id && ui.active == id && ui.down && ui.presses < 2) {
+            ui.cursor = area_index(t, layout, ui.mouse_x - inner.x, ui.mouse_y - inner.y + scroll);
+        }
+        focusable(id, r);
+        bool focused = ui.focus == id;
+        mut bool entered = false;
+        editing = editing || focused;
+        if (focused) {
+            ui.cursor = min(ui.cursor, t.len());
+            ui.anchor = min(ui.anchor, t.len());
+            if (options.tabs) {  // Tab types spaces instead of moving the keyboard
+                tab_typed = true;
+                for (usize i in 0..ui.edit_count) {
+                    if (ui.edits[i].key == key_tab() && !ui.edits[i].ctrl && !ui.edits[i].shift) {
+                        ui.edits[i] = Edit{ from: ui.typed.len, to: ui.typed.len + 4 };
+                        ui.typed.append("    ");
+                    }
+                }
+            }
+            entered = edit(id, t, Format{ }, true);
+            area_keys(t, layout, inner.h);
+        }
+
+        Look l = look(TextField, (over(r) ? state_hover() : 0) | (focused ? state_focus() : 0));
+        paint(r, l);
+        // where the cursor is, to keep it in view
+        if (focused) {
+            Spot at = spot_of(t, layout, ui.cursor);
+            f32 top = at.line as f32 * line_h;
+            WidgetState* s = &ui.states[slot];
+            s.scroll_y = min(s.scroll_y, top);
+            s.scroll_y = max(s.scroll_y, top + line_h - inner.h);
+        }
+        WidgetState kept = ui.states[slot];
+        surface.push_clip(canvas.Rect{ x: inner.x - 2.0, y: r.y + 2.0, w: inner.w + 4.0, h: r.h - 4.0 });
+        usize low = min(ui.anchor, ui.cursor);
+        usize high = max(ui.anchor, ui.cursor);
+        mut usize from = 0;
+        mut i32 index = 0;
+        while (true) {
+            Span line = span_of(t, layout, from);
+            f32 y = inner.y + index as f32 * line_h - kept.scroll_y;
+            if (y + line_h >= r.y && y <= r.y + r.h) {  // in view
+                if (focused && low < high && low <= line.end && high >= line.start) {
+                    usize a = max(low, line.start);
+                    usize b = min(high, line.end);
+                    f32 xa = measure_px(t.slice(line.start, a), size).w;
+                    f32 xb = measure_px(t.slice(line.start, b), size).w + (high > line.end && !line.last ? 6.0 : 0.0);
+                    surface.fill(canvas.Rect{ x: inner.x + xa, y: y, w: xb - xa, h: line_h }, l.selection);
+                }
+                write_px(inner.x, y, line_h, t.slice(line.start, line.end), l.color, size);
+                if (focused && in_line(line, ui.cursor)) {
+                    f32 cx = measure_px(t.slice(line.start, ui.cursor), size).w;
+                    surface.fill(canvas.Rect{ x: inner.x + cx, y: y + 2.0, w: 2.0, h: line_h - 4.0 }, l.accent);
+                }
+            }
+            index += 1;
+            if (line.last) {
+                break;
+            }
+            from = line.next;
+        }
+        if (t.len() == 0 && options.placeholder.len > 0) {
+            write_px(inner.x, inner.y, line_h, options.placeholder, l.hint, size);
+        }
+        surface.pop_clip();
+        // the scroll bar, and the wheel
+        f32 content = index as f32 * line_h;
+        WidgetState* s = &ui.states[slot];
+        s.content_h = content;
+        if (over(r) && content > inner.h && ui.wheel != 0.0) {
+            s.scroll_y -= ui.wheel * line_h * 3.0;
+            ui.wheel = 0.0;
+        }
+        s.scroll_y = max(min(s.scroll_y, content - inner.h), 0.0);
+        if (content > inner.h) {
+            f32 thumb = max(inner.h * inner.h / content, 16.0);
+            f32 ty = inner.y + (inner.h - thumb) * s.scroll_y / (content - inner.h);
+            surface.fill(canvas.Rect{ x: r.x + r.w - 7.0, y: ty, w: 4.0, h: thumb }, l.bar);
+        }
+        return entered;
+    }
+
+    // Up, Down, Page Up, Page Down, Home, End (Ctrl: of the text) in a text area.
+    void area_keys(Target t, AreaLayout layout, f32 view_h) {
+        i32 page = max((view_h / layout.line_h) as i32 - 1, 1);
+        for (usize i in 0..ui.edit_count) {
+            Edit e = ui.edits[i];
+            Spot at = spot_of(t, layout, ui.cursor);
+            mut i32 to_line = -1;
+            if (e.key == key_up() || e.key == key_down()) {
+                to_line = at.line + (e.key == key_up() ? -1 : 1);
+            } else if (e.key == key_page_up() || e.key == key_page_down()) {
+                to_line = at.line + (e.key == key_page_up() ? -page : page);
+            } else if (e.key == key_home() || e.key == key_end()) {
+                if (e.ctrl) {
+                    ui.cursor = e.key == key_home() ? 0 : t.len();
+                } else {
+                    ui.cursor = e.key == key_home() ? at.span.start : at.span.end;
+                }
+            } else {
+                continue;
+            }
+            if (to_line >= 0 || e.key == key_up() || e.key == key_page_up()) {
+                Span target = line_number(t, layout, max(to_line, 0));
+                f32 x = measure_px(t.slice(at.span.start, ui.cursor), layout.size).w;
+                ui.cursor = to_line < 0 ? 0 : index_in(t, target.start, target.end, x, layout.size);
+            }
+            if (!e.shift) {
+                ui.anchor = ui.cursor;
+            }
+        }
+    }
+
+    // The visual line that starts at `from`: up to a line break, or, when wrapping, to the last
+    // space that fits (else to the last character that fits).
+    Span span_of(Target t, AreaLayout layout, usize from) {
+        str all = t.text();
+        usize n = t.len();
+        mut usize at = from;
+        mut f32 w = 0.0;
+        mut usize space = n + 1;  // the last space that fits, if any
+        while (at < n) {
+            if (all.bytes[at] == 10) {  // a line break
+                return Span{ start: from, end: at, next: at + 1, last: false };
+            }
+            usize after = t.next(at);
+            w += measure_px(t.slice(at, after), layout.size).w;
+            if (layout.width > 0.0 && w > layout.width && at > from) {
+                if (space <= n) {
+                    return Span{ start: from, end: space, next: space + 1, last: false };
+                }
+                return Span{ start: from, end: at, next: at, last: false };
+            }
+            if (all.bytes[at] == 32) {
+                space = at;
+            }
+            at = after;
+        }
+        return Span{ start: from, end: n, next: n, last: true };
+    }
+
+    // The visual line `number` (from 0), or the last one.
+    Span line_number(Target t, AreaLayout layout, i32 number) {
+        mut usize from = 0;
+        mut i32 k = 0;
+        while (true) {
+            Span line = span_of(t, layout, from);
+            if (k == number || line.last) {
+                return line;
+            }
+            from = line.next;
+            k += 1;
+        }
+        return span_of(t, layout, 0);
+    }
+
+    // The visual line of the byte `at`, and its number.
+    Spot spot_of(Target t, AreaLayout layout, usize at) {
+        mut usize from = 0;
+        mut i32 k = 0;
+        while (true) {
+            Span line = span_of(t, layout, from);
+            if (in_line(line, at) || line.last) {
+                return Spot{ span: line, line: k };
+            }
+            from = line.next;
+            k += 1;
+        }
+        return Spot{ span: span_of(t, layout, 0), line: 0 };
+    }
+
+    // The byte at (x, y) of a text area, from its first line.
+    usize area_index(Target t, AreaLayout layout, f32 x, f32 y) {
+        Span line = line_number(t, layout, max((y / layout.line_h) as i32, 0));
+        return index_in(t, line.start, line.end, x, layout.size);
+    }
+
+    // The line between the line breaks around `at` (for a triple click).
+    Span logical_line(Target t, usize at) {
+        str all = t.text();
+        mut usize start = min(at, t.len());
+        while (start > 0 && all.bytes[start - 1] != 10) {
+            start -= 1;
+        }
+        mut usize end = min(at, t.len());
+        while (end < t.len() && all.bytes[end] != 10) {
+            end += 1;
+        }
+        return Span{ start: start, end: end, next: end, last: true };
     }
 
     // A title bar across the surface, from the left of the current layout: the widgets that
@@ -3091,6 +3351,9 @@ pub struct Frame {
 
     // Tab and Shift+Tab: the keyboard to the next or the previous widget of this frame.
     void tab_keys() {
+        if (tab_typed) {
+            return;
+        }
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
             if (e.key != key_tab() || e.ctrl || order_count == 0) {
@@ -5683,4 +5946,67 @@ test "the editing core: words, undo and redo, double and triple clicks, a long t
         text.insert(text.len, "0123456789");
     }
     assert(text.len == 100000 && text.slice(99990, 100000) == "0123456789");
+}
+
+// A text area 3 lines high and 200 pixels wide, for the test below; returns Ctrl+Enter.
+bool area_frame(Ui* ui, canvas.Canvas* surface, LongText* text, bool wrap) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    bool entered = f.text_area(text, 200.0, 3, Area{ wrap: wrap });
+    f.finish();
+    return entered;
+}
+
+test "a text area: lines, Up and Down, Home and End, wrapping, scrolling to the cursor" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut LongText text = long_text();
+    defer text.free();
+    ui.mouse_move(10.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    area_frame(&ui, &surface, &text, false);  // the area has the keyboard
+    ui.type_text("first");
+    ui.key(key_enter(), true, false, false);  // Enter breaks the line
+    ui.type_text("second line");
+    assert(!area_frame(&ui, &surface, &text, false));
+    assert(text.text() == "first\nsecond line");
+    // Up keeps the column (the end of "first", shorter), Down comes back to the end of "secon"
+    ui.key(key_home(), true, false, false);
+    area_frame(&ui, &surface, &text, false);
+    assert(ui.cursor == 6);
+    ui.key(key_end(), true, false, false);
+    ui.key(key_up(), true, false, false);
+    area_frame(&ui, &surface, &text, false);
+    assert(ui.cursor == 5);
+    ui.key(key_down(), true, false, false);
+    area_frame(&ui, &surface, &text, false);
+    assert(ui.cursor > 6 && ui.cursor <= 12);
+    ui.key(key_end(), true, false, true);  // Ctrl+End
+    ui.key(key_enter(), true, false, true);  // Ctrl+Enter: on_enter, no line break
+    assert(area_frame(&ui, &surface, &text, false));
+    assert(text.text() == "first\nsecond line" && ui.cursor == text.len);
+    // wrapping: a long line is cut at the last space that fits
+    text.set("one two three four five six seven eight nine ten");
+    ui.cursor = 0;
+    ui.anchor = 0;
+    area_frame(&ui, &surface, &text, true);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    AreaLayout layout = AreaLayout{ width: 200.0 - 16.0 - 10.0, size: 18.0, line_h: 20.0 };
+    Span first = f.span_of(long_target(&text), layout, 0);
+    // (not finished: a frame without the area would forget its keyboard and its scroll)
+    assert(first.end > 0 && first.end < text.len && text.bytes[first.end] == 32 && !first.last);
+    // the cursor at the end of many lines: the area scrolls to show it
+    for (i32 i in 0..10) {
+        text.insert(text.len, "\nline");
+    }
+    ui.key(key_end(), true, false, true);
+    area_frame(&ui, &surface, &text, true);
+    area_frame(&ui, &surface, &text, true);
+    mut bool scrolled = false;
+    for (usize i in 0..64) {
+        scrolled = scrolled || ui.states[i].scroll_y > 0.0;
+    }
+    assert(scrolled);
 }
