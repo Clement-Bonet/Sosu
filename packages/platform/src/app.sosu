@@ -50,6 +50,16 @@ pub enum Event {
     // The text an input method is composing (spec §10.9), not typed yet, and its cursor; an empty
     // text ends the composition.
     TextEditing(str text, i32 cursor),
+    // Touch screens and mobile systems (spec §10.9): a finger, in pixels of the window; the safe area
+    // (what notches and system bars leave, as margins); the display scale; the life of the program
+    // (it is not drawn while it is suspended).
+    Touch(i64 finger, f32 x, f32 y, TouchPhase phase),
+    SafeAreaChanged(f32 left, f32 top, f32 right, f32 bottom),
+    ScaleChanged(f32 scale),
+    Suspend,
+    Resume,
+    LowMemory,
+    Terminating,
     Wheel(f32 x, f32 y),  // the mouse wheel, in steps: y > 0 away from the user (up)
     // Once before the first frame, when `Config` has a title bar: true if the system left it
     // to the program, false if it kept its own (the program's bar is then a tool bar).
@@ -57,6 +67,43 @@ pub enum Event {
     Maximized(bool on),  // the window was maximized, or restored
     LocaleChanged,  // the languages the user prefers changed: see `locales`
     SystemThemeChanged(bool dark),  // the user chose a light or a dark theme for the system
+}
+
+// What a finger does.
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+    Cancel,
+}
+
+// The events that need the window: fingers (their place is from 0 to 1), the safe area and the scale.
+Event? device_event(sdl.Window* window, sdl.Event* event, i32 w, i32 h) uses io {
+    u32 kind = event.kind;
+    if (kind >= 0x700 && kind <= 0x703) {  // SDL_EVENT_FINGER_DOWN, _UP, _MOTION, _CANCELED
+        TouchPhase phase = kind == 0x700 ? Down : kind == 0x701 ? Up : kind == 0x702 ? Move : Cancel;
+        return some(Touch(sdl.finger_of(event), sdl.finger_x(event, w), sdl.finger_y(event, h), phase));
+    }
+    if (kind == 0x215) {  // SDL_EVENT_WINDOW_SAFE_AREA_CHANGED
+        i32[4] r = sdl.safe_area(window);
+        return some(SafeAreaChanged(r[0] as f32, r[1] as f32, (w - r[0] - r[2]) as f32, (h - r[1] - r[3]) as f32));
+    }
+    if (kind == 0x214) {  // SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+        return some(ScaleChanged(sdl.display_scale(window)));
+    }
+    if (kind == 0x101) {
+        return some(Terminating);
+    }
+    if (kind == 0x102) {
+        return some(LowMemory);
+    }
+    if (kind == 0x103) {  // SDL_EVENT_WILL_ENTER_BACKGROUND
+        return some(Suspend);
+    }
+    if (kind == 0x106) {  // SDL_EVENT_DID_ENTER_FOREGROUND
+        return some(Resume);
+    }
+    return none;
 }
 
 // What a program implements: its state lives in the class that implements it.
@@ -380,6 +427,7 @@ pub i32 run(Config config, Handler* handler) uses io {
     // What lives for one frame (the text of the events), emptied before each frame.
     mut Arena frame = Arena.new(4 * KB);
     defer frame.free();
+    mut bool suspended = false;
     mut bool running = true;
     if (wants_bar) {
         running = handler.on_event(CustomTitleBar(custom));
@@ -400,13 +448,24 @@ pub i32 run(Config config, Handler* handler) uses io {
                 }
                 continue;
             }
-            match (translate(event, &frame)) {
+            Event? device = device_event(window, event, screen.surface.width, screen.surface.height);
+            Event? translated = match (device) {
+                some(d) => some(d),
+                none => translate(event, &frame),
+            };
+            match (translated) {
                 some(e) => {
                     match (e) {
                         Resized(width, height) => {
                             if (!screen.resize(width, height)) {
                                 return 1;
                             }
+                        },
+                        Suspend => {
+                            suspended = true;
+                        },
+                        Resume => {
+                            suspended = false;
                         },
                         _ => { },
                     }
@@ -419,6 +478,10 @@ pub i32 run(Config config, Handler* handler) uses io {
         }
         if (!running) {
             break;
+        }
+        if (suspended) {  // in the background: nothing is drawn, the events are awaited slowly
+            sdl.delay(100);
+            continue;
         }
         screen.draw();
         sdl.delay(16);

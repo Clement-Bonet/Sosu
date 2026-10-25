@@ -607,6 +607,22 @@ pub struct Ui {
     mut usize history_used = 0;
     // What an input method is composing (spec §10.9), shown at the cursor of the field that has
     // the keyboard; and where that cursor was at the last frame, for the window of candidates.
+    // Touch screens (spec §10.9): the finger followed (-1: none), where and when it went down, whether
+    // it drags (it scrolls) or pressed long (the right button), its speed for the inertia of a
+    // scroll, in pixels per millisecond, and the margins of the safe area.
+    mut i64 finger = -1;
+    mut f32 finger_x = 0.0;
+    mut f32 finger_y = 0.0;
+    mut u64 finger_time = 0;
+    mut bool dragging = false;
+    mut bool long_press = false;
+    mut f32 speed_x = 0.0;
+    mut f32 speed_y = 0.0;
+    mut u64 last_clock = 0;
+    mut f32 safe_left = 0.0;
+    mut f32 safe_top = 0.0;
+    mut f32 safe_right = 0.0;
+    mut f32 safe_bottom = 0.0;
     mut TextBuffer composing = TextBuffer{ };
     mut canvas.Rect caret = nowhere();
 
@@ -627,8 +643,93 @@ pub struct Ui {
     mut TextBuffer number_text = TextBuffer{ };
 
     pub void clock(u64 ms) {
+        u64 elapsed = has_clock && ms > now ? ms - now : 0;
         now = ms;
         has_clock = true;
+        // a finger held without moving: the right button, once
+        if (finger >= 0 && !dragging && !long_press && now - finger_time >= 500) {
+            long_press = true;
+            mouse_move(finger_x, finger_y);
+            right_button(true);
+        }
+        // the inertia of a scroll by a finger, slowing down
+        if (finger < 0 && (abs_f32(speed_x) > 0.02 || abs_f32(speed_y) > 0.02)) {
+            wheel += speed_y * elapsed as f32 / 40.0;
+            wheel_x -= speed_x * elapsed as f32 / 40.0;
+            f32 keep = elapsed > 0 ? max(1.0 - 0.004 * elapsed as f32, 0.0) : 1.0;
+            speed_x *= keep;
+            speed_y *= keep;
+        }
+    }
+
+    // A finger on a touch screen (`platform.app.Touch`): the first one is the mouse. A tap is a
+    // click, a long press (500 ms, with `clock`) the right button, and a finger that moves scrolls
+    // the area under it, with inertia when it leaves.
+    pub void touch(i64 id, f32 x, f32 y, Finger phase) {
+        match (phase) {
+            Down => {
+                if (finger < 0) {
+                    finger = id;
+                    finger_x = x;
+                    finger_y = y;
+                    finger_time = now;
+                    dragging = false;
+                    last_clock = now;
+                    long_press = false;
+                    speed_x = 0.0;
+                    speed_y = 0.0;
+                    mouse_move(x, y);
+                }
+            },
+            Move => {
+                if (id != finger) {
+                    return;
+                }
+                f32 dx = x - finger_x;
+                f32 dy = y - finger_y;
+                if (!dragging && !long_press && abs_f32(dx) + abs_f32(dy) > 8.0) {
+                    dragging = true;
+                }
+                if (dragging) {
+                    wheel += dy / 40.0;
+                    wheel_x -= dx / 40.0;
+                    u64 elapsed = max(now - last_clock, 1);
+                    speed_x = dx / elapsed as f32;
+                    speed_y = dy / elapsed as f32;
+                    last_clock = now;
+                    finger_x = x;
+                    finger_y = y;
+                }
+            },
+            Up => {
+                if (id != finger) {
+                    return;
+                }
+                if (!dragging && !long_press) {  // a tap: a click
+                    mouse_move(x, y);
+                    mouse_button(true);
+                    mouse_button(false);
+                }
+                if (!dragging) {
+                    speed_x = 0.0;
+                    speed_y = 0.0;
+                }
+                finger = -1;
+            },
+            Cancel => {
+                finger = -1;
+                speed_x = 0.0;
+                speed_y = 0.0;
+            },
+        }
+    }
+
+    // The safe area (`platform.app.SafeAreaChanged`): the frame is placed inside these margins.
+    pub void safe_area(f32 left, f32 top, f32 right, f32 bottom) {
+        safe_left = left;
+        safe_top = top;
+        safe_right = right;
+        safe_bottom = bottom;
     }
 
     // The text an input method composes (`platform.app.TextEditing`): shown underlined at the cursor
@@ -835,6 +936,14 @@ pub enum Align {
 pub enum Side {
     Top,
     Bottom,
+}
+
+// What a finger does on a touch screen (`platform.app.TouchPhase`), for `Ui.touch`.
+pub enum Finger {
+    Down,
+    Move,
+    Up,
+    Cancel,
 }
 
 // What a window button asks of the window.
@@ -5687,7 +5796,10 @@ pub struct Frame {
 // The widgets of a frame, from (x, y) downwards. End it with `finish()`.
 pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
     mut Frame f = Frame{ ui: ui, surface: surface };
-    f.layouts[0] = Layout{ x: x, y: y, left: x, top: y, right: x, bottom: y, room_w: max(surface.width as f32 - x, 0.0), room_h: max(surface.height as f32 - y, 0.0) };
+    // inside the safe area (spec §10.9): notches and system bars leave margins
+    f32 left = x + ui.safe_left;
+    f32 top = y + ui.safe_top;
+    f.layouts[0] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, room_w: max(surface.width as f32 - left - ui.safe_right, 0.0), room_h: max(surface.height as f32 - top - ui.safe_bottom, 0.0) };
     // the background of the window, when the theme gives one (spec §10.7)
     match (ui.theme) {
         some(t) => {
@@ -7649,4 +7761,77 @@ test "input methods: the composition shown at the cursor, then typed; the area o
     ui.type_text("\u{304b}");
     long_frame(&ui, &surface, &text);
     assert(text.text() == "ab\u{304b}" && ui.composing.len == 0);
+}
+
+// A button, a context menu on it, and a long list under it, for the test below: 1 the button
+// clicked, 2 the context menu open.
+i32 touch_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, f32* scroll) {
+    mut i32 seen = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    if (f.button("Tap")) {
+        seen = 1;
+    }
+    f.context_menu();
+    f.menu_item("Copy");
+    f.end_context_menu();
+    if (ui.menus[0] != 0) {
+        seen = 2;
+    }
+    f.list_of(1000, 200.0, 200.0, some(chosen));
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        f.label("item");
+        f.pop_id();
+    }
+    f.end_list();
+    f.finish();
+    for (usize i in 0..64) {
+        if (ui.states[i].items == 1000) {
+            *scroll = ui.states[i].scroll_y;
+        }
+    }
+    return seen;
+}
+
+test "touch: a tap clicks, a long press opens the context menu, a drag scrolls with inertia" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 300);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut f32 scroll = 0.0;
+    ui.clock(1000);
+    touch_frame(&ui, &surface, &chosen, &scroll);
+    // a tap on the button
+    ui.touch(1, 20.0, 16.0, Down);
+    ui.touch(1, 21.0, 16.0, Up);
+    assert(touch_frame(&ui, &surface, &chosen, &scroll) == 1);
+    // a long press on it: its context menu
+    ui.touch(2, 20.0, 16.0, Down);
+    touch_frame(&ui, &surface, &chosen, &scroll);
+    ui.clock(1600);
+    assert(touch_frame(&ui, &surface, &chosen, &scroll) == 2);
+    ui.touch(2, 20.0, 16.0, Up);
+    ui.key(27, true, false, false);  // Escape closes it
+    touch_frame(&ui, &surface, &chosen, &scroll);
+    // a finger dragged up over the list: it scrolls down, then goes on a little
+    ui.touch(3, 100.0, 200.0, Down);  // the list is from y 40 to 240
+    ui.clock(1700);
+    ui.touch(3, 100.0, 150.0, Move);
+    touch_frame(&ui, &surface, &chosen, &scroll);
+    ui.clock(1716);
+    ui.touch(3, 100.0, 100.0, Move);
+    ui.touch(3, 100.0, 100.0, Up);
+    touch_frame(&ui, &surface, &chosen, &scroll);
+    f32 after_drag = scroll;
+    assert(after_drag > 0.0 && chosen == 0);  // scrolled, nothing chosen
+    ui.clock(1800);
+    touch_frame(&ui, &surface, &chosen, &scroll);
+    assert(scroll > after_drag);  // inertia
+    // the safe area: the frame starts inside its margins
+    ui.safe_area(10.0, 30.0, 0.0, 0.0);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.label("top");
+    assert(f.last.x == 10.0 && f.last.y == 30.0);
+    f.finish();
 }
