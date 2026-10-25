@@ -33,6 +33,14 @@ static void test_paths(void) {
     dir = path_dirname("sosuc");
     CHECK(strcmp(dir, ".") == 0, "dirname: `%s`", dir);
     free(dir);
+
+    /* sosuc run as `build/sosuc` is there; run as `sosuc`, it is found in PATH */
+    char *program = path_of_program("build/sosuc");
+    CHECK(strcmp(program, "build/sosuc") == 0, "program with a folder: `%s`", program);
+    free(program);
+    program = path_of_program("no-such-program-in-path");
+    CHECK(strcmp(program, "no-such-program-in-path") == 0, "program not in PATH: `%s`", program);
+    free(program);
 }
 
 typedef struct {
@@ -112,7 +120,7 @@ static void test_manifest(void) {
     expect_manifest_errors("[package]\nname = \"my-app\"\nversion = \"1\"\n", "E0409");
 
     parse_manifest(&parsed, "[package]\nname = \"a\"\nversion = \"1\"\n"
-                            "[link]\nlibs = [\"SDL3\", \"m\",]\n"
+                            "[link]\nlibs = [\"SDL3\", \"m\",]\nsubsystem = \"window\"\n"
                             "[link.windows]\npaths = [\"vendor/lib\"]\ncopy = [ \"vendor/SDL3.dll\" ]  # next to the exe\n"
                             "[link.macos]\nframeworks = []\n");
     check_codes("link sections", &parsed.diags, "");
@@ -121,10 +129,13 @@ static void test_manifest(void) {
     CHECK(parsed.manifest.link[LINK_WINDOWS].paths.count == 1 && parsed.manifest.link[LINK_WINDOWS].copy.count == 1,
           "windows section");
     CHECK(parsed.manifest.link[LINK_MACOS].frameworks.count == 0, "empty list");
+    CHECK(parsed.manifest.link[LINK_ALL].subsystem && strcmp(parsed.manifest.link[LINK_ALL].subsystem, "window") == 0,
+          "subsystem");
     parsed_manifest_free(&parsed);
 
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link.beos]\nlibs = [\"x\"]\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibraries = [\"x\"]\n", "E0402");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nsubsystem = \"gui\"\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibs = \"x\"\n", "E0401");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibs = [\"x\" \"y\"]\n", "E0401");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibs = [\"x\"]\n[link]\n", "E0408");

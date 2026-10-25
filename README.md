@@ -96,7 +96,7 @@ docs/         specification and error codes
 ```
 
 `sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
-(which is `lib/` for `build/sosuc`).
+(which is `lib/` for `build/sosuc`), also when it is found in the `PATH`.
 
 ## Dependencies
 
