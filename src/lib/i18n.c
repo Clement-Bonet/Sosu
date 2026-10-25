@@ -168,7 +168,7 @@ static bool is_ident(const SourceFile *file, const Token *token, const char *tex
 /* The nodes whose first value is a text to translate. */
 static bool is_text_node(const SourceFile *file, const Token *token) {
     static const char *const nodes[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem",
-                                         "Group", "Tab", "Branch", "Leaf" };
+                                         "Group", "Tab", "Branch", "Leaf", "Dialog", "Column" };
     for (size_t i = 0; i < sizeof nodes / sizeof *nodes; i++) {
         if (is_ident(file, token, nodes[i])) return true;
     }
@@ -182,13 +182,14 @@ static size_t line_at(const SourceFile *file, size_t offset) {
 }
 
 /* The arguments of a node of a .ui.sosu file, from its `(` at `open`: its first value if it is a
-   text (for a node of texts), `plural:`, `context:` and `placeholder:`. */
+   text (for a node of texts), `plural:`, `context:`, `placeholder:` and `tooltip:`. */
 static void add_node(I18nTemplate *t, const SourceFile *file, const Token *tokens, size_t count, size_t open,
                      bool texts, const char *path) {
     const Token *text = NULL;
     const Token *plural = NULL;
     const Token *context = NULL;
     const Token *placeholder = NULL;
+    const Token *tip = NULL;
     if (texts && open + 2 < count && tokens[open + 1].kind == TOK_STRING &&
         (tokens[open + 2].kind == TOK_COMMA || tokens[open + 2].kind == TOK_RPAREN)) {
         text = &tokens[open + 1];
@@ -204,6 +205,7 @@ static void add_node(I18nTemplate *t, const SourceFile *file, const Token *token
             if (is_ident(file, &tokens[i], "plural")) plural = &tokens[i + 2];
             if (is_ident(file, &tokens[i], "context")) context = &tokens[i + 2];
             if (is_ident(file, &tokens[i], "placeholder")) placeholder = &tokens[i + 2];
+            if (is_ident(file, &tokens[i], "tooltip")) tip = &tokens[i + 2];
         }
     }
     if (text) {
@@ -211,6 +213,7 @@ static void add_node(I18nTemplate *t, const SourceFile *file, const Token *token
                     path, line_at(file, text->offset));
     }
     if (placeholder) add_message(t, NULL, po_text(file, placeholder), NULL, path, line_at(file, placeholder->offset));
+    if (tip) add_message(t, NULL, po_text(file, tip), NULL, path, line_at(file, tip->offset));
 }
 
 /* `.tr("...")`, `.tr_in("context", "...")`, `.tr_plural("one", "other", n)`,

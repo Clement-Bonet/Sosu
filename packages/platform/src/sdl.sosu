@@ -55,6 +55,41 @@ struct TextInput {
     u8* text;
 }
 
+// SDL_TextEditingEvent: the text being composed by an input method, and its cursor.
+struct TextEditing {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    u32 padding;
+    u8* text;
+    i32 start;
+    i32 length;
+}
+
+// SDL_TouchFingerEvent: a finger on a touch screen, its place from 0 to 1.
+struct TouchFinger {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u64 touch;
+    u64 finger;
+    f32 x;
+    f32 y;
+    f32 dx;
+    f32 dy;
+    f32 pressure;
+    u32 window;
+}
+
+// SDL_Rect.
+struct IntRect {
+    i32 x;
+    i32 y;
+    i32 w;
+    i32 h;
+}
+
 // SDL_KeyboardEvent.
 pub struct Keyboard {
     u32 kind;
@@ -111,11 +146,16 @@ extern "C" {
     bool SDL_RenderFillRect(Renderer* renderer, FRect* rect) uses io;
     bool SDL_RenderPresent(Renderer* renderer) uses io;
     void SDL_Delay(u32 ms) uses io;
+    u64 SDL_GetTicks() uses io;
     Texture* SDL_CreateTexture(Renderer* renderer, u32 format, i32 access, i32 w, i32 h) uses io;
     void SDL_DestroyTexture(Texture* texture) uses io;
     bool SDL_UpdateTexture(Texture* texture, FRect* rect, u8* pixels, i32 pitch) uses io;
     bool SDL_RenderTexture(Renderer* renderer, Texture* texture, FRect* source, FRect* target) uses io;
     bool SDL_StartTextInput(Window* window) uses io;
+    bool SDL_StopTextInput(Window* window) uses io;
+    bool SDL_GetWindowSafeArea(Window* window, IntRect* rect) uses io;
+    f32 SDL_GetWindowDisplayScale(Window* window) uses io;
+    bool SDL_SetTextInputArea(Window* window, IntRect* rect, i32 cursor) uses io;
     u8* SDL_GetClipboardText() uses io;  // to free with SDL_free; "" when empty
     bool SDL_SetClipboardText(u8* text) uses io;
     void SDL_free(u8* memory) uses io;
@@ -194,6 +234,96 @@ pub void start_text_input(Window* window) uses io {
 pub str text_of(Arena* arena, Event* event) {
     unsafe {
         return copy_cstring(arena, (event as TextInput*).text, 255);
+    }
+}
+
+// The text being composed (SDL_EVENT_TEXT_EDITING), and its cursor in characters.
+// A finger of a touch screen (SDL_EVENT_FINGER_*): its number, and its place in pixels of a window
+// `w` by `h`.
+pub i64 finger_of(Event* event) {
+    unsafe {
+        return (event as TouchFinger*).finger as i64;
+    }
+}
+
+pub f32 finger_x(Event* event, i32 w) {
+    unsafe {
+        return (event as TouchFinger*).x * w as f32;
+    }
+}
+
+pub f32 finger_y(Event* event, i32 h) {
+    unsafe {
+        return (event as TouchFinger*).y * h as f32;
+    }
+}
+
+// The safe area of the window: what notches and bars of the system leave, as x, y, w, h.
+pub i32[4] safe_area(Window* window) uses io {
+    mut IntRect r = IntRect{ x: 0, y: 0, w: 0, h: 0 };
+    unsafe {
+        SDL_GetWindowSafeArea(window, &r);
+    }
+    return [r.x, r.y, r.w, r.h];
+}
+
+// The display scale of the window: 1 on most screens, 2 on dense ones.
+pub f32 display_scale(Window* window) uses io {
+    unsafe {
+        return SDL_GetWindowDisplayScale(window);
+    }
+}
+
+// The size of the area of a request of `push_area`.
+pub i32 area_w(Event* event) {
+    return event.rest[0] as i32 | event.rest[1] as i32 << 8;
+}
+
+pub i32 area_h(Event* event) {
+    return event.rest[2] as i32 | event.rest[3] as i32 << 8;
+}
+
+pub str editing_text(Arena* arena, Event* event) {
+    unsafe {
+        return copy_cstring(arena, (event as TextEditing*).text, 255);
+    }
+}
+
+pub i32 editing_cursor(Event* event) {
+    unsafe {
+        return (event as TextEditing*).start;
+    }
+}
+
+// Where the text being typed is: the system shows the candidates of an input method next to it.
+pub void set_text_input_area(Window* window, i32 x, i32 y, i32 w, i32 h) uses io {
+    mut IntRect r = IntRect{ x: x, y: y, w: w, h: h };
+    unsafe {
+        SDL_SetTextInputArea(window, &r, 0);
+    }
+}
+
+// Shows (`on`) or hides the keyboard of the system, on a touch screen.
+pub void text_input(Window* window, bool on) uses io {
+    unsafe {
+        if (on) {
+            SDL_StartTextInput(window);
+        } else {
+            SDL_StopTextInput(window);
+        }
+    }
+}
+
+// Queues a request with a rectangle: the area of the text being typed.
+pub void push_area(i32 x, i32 y, i32 w, i32 h) uses io {
+    mut u8[96] size = [0; 96];  // its width and height, in the first bytes after `word7`
+    size[0] = (w & 0xFF) as u8;
+    size[1] = (w >> 8 & 0xFF) as u8;
+    size[2] = (h & 0xFF) as u8;
+    size[3] = (h >> 8 & 0xFF) as u8;
+    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: 3, word6: x as u32, word7: y as u32, rest: size };
+    unsafe {
+        SDL_PushEvent(&event);
     }
 }
 
@@ -493,5 +623,12 @@ pub void present(Renderer* renderer) uses io {
 pub void delay(u32 ms) uses io {
     unsafe {
         SDL_Delay(ms);
+    }
+}
+
+// Milliseconds since SDL started.
+pub u64 ticks() uses io {
+    unsafe {
+        return SDL_GetTicks();
     }
 }

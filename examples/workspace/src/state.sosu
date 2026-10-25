@@ -38,6 +38,27 @@ pub struct File {
     pub mut bool hidden = false;
 }
 
+// The digits of `text` as a number.
+i64 number(str text) {
+    mut i64 n = 0;
+    for (u8 b in text.bytes) {
+        if (b >= 48 && b <= 57) {
+            n = n * 10 + (b - 48) as i64;
+        }
+    }
+    return n;
+}
+
+// The order of two texts, byte by byte: negative, 0 or positive.
+i64 compare(str a, str b) {
+    for (usize i in 0..min(a.len, b.len)) {
+        if (a.bytes[i] != b.bytes[i]) {
+            return a.bytes[i] as i64 - b.bytes[i] as i64;
+        }
+    }
+    return a.len as i64 - b.len as i64;
+}
+
 // Whether two text buffers hold the same text.
 bool same(widgets.TextBuffer a, widgets.TextBuffer b) {
     str x = a.text();
@@ -95,6 +116,9 @@ pub class Workspace {
     pub mut bool open_images;
     pub mut bool open_binaries;
     pub mut i32 page;
+    // The table of all the files: its row chosen, and its order (spec §10.9).
+    pub mut i32 row;
+    pub mut widgets.Sort order;
 
     void init(image.Image icon) {
         self.icon = icon;
@@ -122,6 +146,8 @@ pub class Workspace {
         open_images = false;
         open_binaries = false;
         page = 0;
+        row = 0;
+        order = widgets.Sort{ };
     }
 
     // Called before each frame: the details follow the file chosen in the list.
@@ -164,6 +190,44 @@ pub class Workspace {
     }
 
     // Chooses the file `i` (Open recent).
+    // The file shown in the row `i` of the table: the files sorted as `order` says (by name, or by
+    // size), the program sorting them itself.
+    pub i32 nth(i32 i) {
+        mut i32[16] rows = [0; 16];
+        for (i32 k in 0..count) {
+            rows[k as usize] = k;
+        }
+        for (i32 k in 1..count) {  // insertion sort: 16 files at most
+            mut i32 j = k;
+            while (j > 0 && before(rows[j as usize], rows[(j - 1) as usize])) {
+                i32 swap = rows[j as usize];
+                rows[j as usize] = rows[(j - 1) as usize];
+                rows[(j - 1) as usize] = swap;
+                j -= 1;
+            }
+        }
+        return rows[min(max(i, 0), 15) as usize];
+    }
+
+    // Whether the file `a` comes before the file `b` in the order of the table.
+    bool before(i32 a, i32 b) {
+        if (order.column < 0) {
+            return a < b;
+        }
+        mut i64 by = 0;
+        if (order.column == 1) {
+            by = number(files[a as usize].size.text()) - number(files[b as usize].size.text());
+        } else {
+            by = compare(files[a as usize].name.text(), files[b as usize].name.text());
+        }
+        return order.descending ? by > 0 : by < 0;
+    }
+
+    // Enter or a double click on a row of the table: its file is chosen.
+    pub void choose_row() {
+        choose(nth(row));
+    }
+
     // Whether the file `i` is of `kind`: the branch of the tree it goes in.
     pub bool is(i32 i, Kind kind) {
         return files[i as usize].kind == kind;

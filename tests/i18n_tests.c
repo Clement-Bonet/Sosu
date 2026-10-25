@@ -38,6 +38,7 @@ static void test_extract(void) {
                         "    Button(\"Save\")\n"
                         "    Menu(\"Save\") { MenuItem(\"Quit\", shortcut: \"Ctrl+Q\") }\n"
                         "    Option(\"\\u{e9}t\\u{e9}\", value: Summer)\n"
+                        "    Slider(bind: s.v, tooltip: \"Louder\")\n"
                         "}\n",
                         "void f(widgets.Frame* f, str x) {\n"
                         "    f.label(f.tr(\"Ready\"));\n"
@@ -46,7 +47,8 @@ static void test_extract(void) {
                         "    f.label(f.tr(x));\n"
                         "}\n",
                         &count);
-    CHECK(count == 11, "11 texts, Save once: %zu", count);
+    CHECK(count == 12, "12 texts, Save once: %zu", count);
+    CHECK(has(pot, "#: src/screen.ui.sosu:11\nmsgid \"Louder\"\n"), "a tooltip");
     CHECK(has(pot, "\"Plural-Forms: nplurals=2; plural=(n != 1);\\n\""), "a header");
     CHECK(has(pot, "#: src/screen.ui.sosu:2\nmsgid \"Files\"\nmsgstr \"\"\n"), "the title of a window");
     CHECK(has(pot, "msgid \"Hello, {name}\"\nmsgstr \"\"\n"), "a value in braces");

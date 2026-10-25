@@ -58,7 +58,7 @@ window Workspace(state.Workspace* w) {
             Option("macOS", value: MacOs)
         }
         Button("Build", on_click: w.build)
-        Button("Run", on_click: w.run)
+        Button("Run", on_click: w.run, tooltip: "Build and run the program (F5)")
     }
     Grid(columns: [260, Fill, 380], rows: [Fill], gap: 24, padding: 16) {
         Column(gap: 8) {
@@ -108,10 +108,8 @@ window Workspace(state.Workspace* w) {
         Column(gap: 8) {
             Text("Output")
             Text(w.status.text())
-            List(width: 380, height: Fill) {
-                for (i32 i in 0..w.lines) {
-                    Text(w.output[i].text())
-                }
+            List(count: w.lines, item: i, width: 380, height: Fill) {
+                Text(w.output[i].text())
             }
         }
     }
@@ -125,6 +123,19 @@ component Details(state.Workspace* w) {
         }
         Tab("Advanced") {
             Advanced(w)
+        }
+        Tab("All files") {
+            Table(count: w.count, item: i, selected: w.row, sort: w.order, width: Fill, height: 260, on_activate: w.choose_row) {
+                Column("Name", width: Fill, sortable: true) {
+                    Text(w.files[w.nth(i)].name.text())
+                }
+                Column("Size (KB)", width: 110, sortable: true, align: End) {
+                    Text(w.files[w.nth(i)].size.text())
+                }
+                Column("Modified", width: Auto) {
+                    Text(w.files[w.nth(i)].date.text())
+                }
+            }
         }
     }
     Row(gap: 8) {

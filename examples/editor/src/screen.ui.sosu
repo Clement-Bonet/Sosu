@@ -16,6 +16,7 @@ window Editor(state.Editor* editor) {
         Button("Run", on_click: editor.run)
     }
     Column(gap: 8, padding: 16) {
+        TextArea(bind: editor.document, rows: 18, width: Fill, wrap: false, tabs: true, placeholder: "Your code")
         Text(editor.output.text())
     }
 }

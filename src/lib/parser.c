@@ -33,6 +33,11 @@ typedef struct {
     bool ui_in_tabs; /* the items of a `Tabs`: its `Tab` nodes only */
     bool ui_in_tree; /* the items of a `Tree` or a `Branch`: `Branch` and `Leaf` nodes only */
     bool ui_in_component; /* the items at the top of a component: a component can hold the items of a tree */
+    /* the next node is at the top of a window or a component (a `Dialog` must be), and the dialogs of
+       the view being read, emitted at its end so that they are drawn above the rest */
+    bool ui_at_top;
+    bool ui_node_at_top;
+    void *ui_dialogs;
     struct { uint64_t *items; size_t count; size_t cap; } ui_cells;
 } Parser;
 
@@ -1396,7 +1401,7 @@ typedef struct {
     const char *name;
     size_t values;        /* values in order, before the properties */
     bool optional;        /* the value can be left out (a checkbox without a label) */
-    const char *props[12]; /* NULL-terminated */
+    const char *props[16]; /* NULL-terminated */
     bool children;        /* `{ ... }` after the arguments */
 } UiNodeKind;
 
@@ -1404,13 +1409,21 @@ static const UiNodeKind ui_nodes[] = {
     { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
     { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", "focus", "style", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "count", "item", "focus", "style", NULL }, true },
+    { "Table", 0, false, { "count", "item", "width", "height", "selected", "sort", "on_activate", "focus", "style", NULL }, true },
     { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
     { "Text", 1, false, { "plural", "count", "context", "style", NULL }, false },
     { "Title", 1, false, { "plural", "count", "context", "style", NULL }, false },
     { "Space", 1, false, { NULL }, false },
     { "Button", 1, false, { "on_click", "enabled", "focus", "plural", "count", "context", "style", NULL }, false },
     { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", "style", NULL }, false },
+    { "TextArea", 0, false, { "bind", "width", "rows", "wrap", "tabs", "placeholder", "on_enter", "focus", "style", NULL }, false },
+    { "Slider", 0, false, { "bind", "min", "max", "step", "width", "on_change", "focus", "style", NULL }, false },
+    { "Progress", 0, false, { "value", "max", "width", "style", NULL }, false },
+    { "DateField", 0, false, { "bind", "width", "format", "monday_first", "on_change", "focus", "style", NULL }, false },
+    { "Dialog", 1, false, { "open", "width", "plural", "count", "context", NULL }, true },
+    { "NumberField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "on_change", "focus", "style", NULL }, false },
+    { "MoneyField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "symbol", "symbol_first", "on_change", "focus", "style", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", "style", NULL }, false },
     { "Radio", 1, false, { "bind", "value", "on_change", "plural", "count", "context", "style", NULL }, false },
     { "TitleBar", 0, false, { "height", "gap", "padding", "style", NULL }, true },
@@ -1435,7 +1448,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Table", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1750,7 +1763,9 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         else diag_help(d, "it has no properties");
         return false;
     }
-    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
+    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "TextArea") == 0 ||
+                 strcmp(kind->name, "NumberField") == 0 || strcmp(kind->name, "MoneyField") == 0 ||
+                 strcmp(kind->name, "Slider") == 0 || strcmp(kind->name, "DateField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
                  strcmp(kind->name, "Radio") == 0 || strcmp(kind->name, "Dropdown") == 0;
     if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
@@ -1760,6 +1775,11 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
     if (strcmp(kind->name, "Radio") == 0 && !ui_prop(args, "value")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Radio` needs `value:`");
         diag_help(d, "give the value it chooses: `Radio(\"Small\", bind: state.size, value: Small)`");
+        return false;
+    }
+    if (strcmp(kind->name, "Dialog") == 0 && !ui_prop(args, "open")) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Dialog` needs `open:`");
+        diag_help(d, "bind it to a `mut bool` that says whether it is open: `Dialog(\"Delete?\", open: state.asking)`");
         return false;
     }
     if (strcmp(kind->name, "Grid") == 0 && !ui_prop(args, "columns")) {
@@ -1968,6 +1988,12 @@ static Expr *ui_style_of(Parser *p, Expr *value) {
         diag_help(d, "give the styles one by one: `style: [Card, c ? Danger : Normal]`");
         return value;
     }
+    if (value->kind == EXPR_CALL) {  /* `Size(22)`: a style with parameters, its numbers of pixels f32 */
+        for (size_t i = 0; i < value->as.call.arg_count; i++) {
+            value->as.call.args[i] = ui_float(p, value->as.call.args[i], value->offset, 0);
+        }
+        return value;
+    }
     const Expr *path = value;
     while (path->kind == EXPR_FIELD) path = path->as.field.object;
     if (path->kind != EXPR_NAME) return value;
@@ -2139,11 +2165,111 @@ static void ui_grid_sizes(Parser *p, StmtVec *out, Expr *sizes, const char *meth
     }
 }
 
+/* The items in view of a long list or a table: `for (i32 item in ui_frame.first_shown()..
+   ui_frame.last_shown()) { ui_frame.push_id(item as u64); the items; ui_frame.pop_id(); }`. */
+static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, size_t start, size_t length) {
+    if (!item || item->kind != EXPR_NAME) {
+        Diagnostic *d = error_at(p, "E0215", item ? item->offset : start, item ? item->length : length,
+                                 "`count:` needs `item:`, the name of the index of the item described");
+        diag_help(d, "`List(count: s.count, item: i) { Text(s.names[i]) }`");
+        p->panic = false;
+        free(items->items);
+        return;
+    }
+    Expr *range = ui_expr(p, EXPR_RANGE, start, length);
+    range->as.range.start = ui_frame_call(p, start, length, "first_shown", NULL, 0);
+    range->as.range.end = ui_frame_call(p, start, length, "last_shown", NULL, 0);
+    range->as.range.inclusive = false;
+    Expr *use = ui_expr(p, EXPR_NAME, item->offset, item->length);
+    use->as.name = item->as.name;
+    Expr *key = ui_expr(p, EXPR_CAST, item->offset, item->length);
+    key->as.cast.value = use;
+    key->as.cast.type = ui_type(p, item->offset, NULL, "u64");
+    StmtVec body = {0};
+    SOSU_VEC_PUSH(&body, ui_frame_stmt(p, item->offset, item->length, "push_id", key));
+    for (size_t i = 0; i < items->count; i++) SOSU_VEC_PUSH(&body, items->items[i]);
+    free(items->items);
+    SOSU_VEC_PUSH(&body, ui_frame_stmt(p, start, length, "pop_id", NULL));
+    Stmt *loop = new_stmt(p, STMT_FOR_IN, start);
+    loop->length = length;
+    loop->as.for_in.is_mut = false;
+    loop->as.for_in.type = ui_type(p, item->offset, NULL, "i32");
+    loop->as.for_in.name = item->as.name;
+    loop->as.for_in.iterable = range;
+    loop->as.for_in.body = ui_block(p, &body, start, length);
+    SOSU_VEC_PUSH(out, loop);
+}
+
+/* The columns of a `Table`: `Column(title, width: size, sortable: true, align: End) { its cell }`,
+   each giving `ui_frame.table_column(...)` to `header` and its cell, after `ui_frame.table_cell()`,
+   to `cells`. */
+static void ui_table_columns(Parser *p, StmtVec *header, StmtVec *cells) {
+    if (!expect(p, TOK_LBRACE)) return;
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        size_t before = p->pos;
+        size_t start = cur(p)->offset;
+        if (!check(p, TOK_IDENT) || !token_is(p, cur(p), "Column")) {
+            Diagnostic *d = error_at(p, "E0215", cur(p)->offset, cur(p)->length, "a `Table` contains only `Column` nodes");
+            diag_help(d, "`Table(count: s.count, item: i) { Column(\"Name\", width: Fill) { Text(s.names[i]) } }`");
+            skip_balanced_braces(p);
+            p->panic = false;
+            if (p->pos == before) advance(p);
+            continue;
+        }
+        advance(p);
+        UiArgs args;
+        if (check(p, TOK_LPAREN)) ui_parse_args(p, &args);
+        else memset(&args, 0, sizeof args);
+        size_t length = span_from(p, start);
+        Expr *title = args.values.count ? ui_translate(p, &args, args.values.items[0]) : NULL;
+        if (!title) {
+            error_at(p, "E0215", start, length, "a `Column` of a table has a title: `Column(\"Name\") { ... }`");
+            p->panic = false;
+            title = ui_expr(p, EXPR_NAME, start, length);
+            title->as.name = ui_name("none", start);
+        }
+        Expr *width = ui_prop(&args, "width");
+        Expr *sortable = ui_prop(&args, "sortable");
+        Expr *align = ui_prop(&args, "align");
+        if (!sortable) {
+            sortable = ui_expr(p, EXPR_BOOL, start, length);
+            sortable->as.bool_value = false;
+        }
+        if (align && align->kind == EXPR_NAME) align = ui_variant(p, align, "Align", align->as.name);
+        Expr *column_args[4] = { title, width ? ui_size(p, width) : ui_variant(p, ui_expr(p, EXPR_NAME, start, length), "Size", ui_name("Auto", start)),
+                                 sortable, align ? align : ui_variant(p, ui_expr(p, EXPR_NAME, start, length), "Align", ui_name("Start", start)) };
+        SOSU_VEC_PUSH(header, ui_stmt(p, ui_frame_call(p, start, length, "table_column", column_args, 4)));
+        SOSU_VEC_PUSH(cells, ui_stmt(p, ui_frame_call(p, start, length, "table_cell", NULL, 0)));
+        if (check(p, TOK_LBRACE)) ui_parse_children(p, cells);
+        free(args.values.items);
+        free(args.props.items);
+        if (p->pos == before) advance(p);
+    }
+    expect(p, TOK_RBRACE);
+}
+
 /* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
 static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     size_t start = cur(p)->offset;
     Path path = parse_path(p);
     Name node = path.items[path.count - 1];
+    bool at_top = p->ui_node_at_top;
+    p->ui_node_at_top = false;
+    if (path.count == 1 && name_text_is(node, "Dialog")) {
+        if (!at_top || !p->ui_dialogs) {
+            Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `Dialog` is at the top of a window or a component");
+            diag_help(d, "it is drawn above the rest: put it beside the other nodes of the window, not inside one");
+            if (check(p, TOK_LPAREN)) {
+                UiArgs skipped;
+                ui_parse_args(p, &skipped);
+                free(skipped.values.items);
+                free(skipped.props.items);
+            }
+            if (check(p, TOK_LBRACE)) skip_balanced_braces(p);
+            return;
+        }
+        out = (StmtVec *)p->ui_dialogs;  /* emitted at the end of the view */
+    }
     UiArgs args;
     if (check(p, TOK_LPAREN)) {
         ui_parse_args(p, &args);
@@ -2169,6 +2295,13 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     bool placed = true;
     Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
     if (cell) SOSU_VEC_PUSH(out, cell);
+    Expr *tip = NULL;  /* `tooltip:`, on any node: `ui_frame.tooltip(text)` after it */
+    size_t kept_props = 0;
+    for (size_t i = 0; i < args.props.count; i++) {
+        if (name_text_is(args.props.items[i].name, "tooltip")) tip = args.props.items[i].value;
+        else args.props.items[kept_props++] = args.props.items[i];
+    }
+    args.props.count = kept_props;
     p->ui_in_grid = false;  /* the children of a node are not cells, unless it is a grid */
     p->ui_in_tabs = false;
     p->ui_in_tree = false;
@@ -2187,7 +2320,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
-        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab", "Branch", "Leaf" };
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem", "Group", "Tab", "Branch", "Leaf", "Dialog" };
         for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
             if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
         }
@@ -2227,11 +2360,40 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
                 choice = ui_expr(p, EXPR_NAME, start, length);
                 choice->as.name = ui_name("none", start);
             }
-            Expr *list_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
-                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
-            ui_parse_children(p, out);
+            Expr *list_args[4] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice, NULL };
+            Expr *count = ui_prop(&args, "count");
+            if (count) {  /* a long list: f.list_of(count, ...), and its items in view only */
+                Expr *long_args[4] = { count, list_args[0], list_args[1], choice };
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list_of", long_args, 4)));
+                StmtVec items = {0};
+                ui_parse_children(p, &items);
+                ui_shown_loop(p, out, ui_prop(&args, "item"), &items, start, length);
+            } else {
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
+                ui_parse_children(p, out);
+            }
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
+        } else if (name_text_is(node, "Table")) {
+            /* f.table(count, width, height, selected, sort), f.table_column(...) for each column,
+               f.table_rows(), the rows in view (a cell per column), if (f.end_table()) { on_activate } */
+            Expr *selected = ui_prop(&args, "selected");
+            Expr *sort = ui_prop(&args, "sort");
+            Expr *none_selected = ui_expr(p, EXPR_NAME, start, length);
+            none_selected->as.name = ui_name("none", start);
+            Expr *none_sort = ui_expr(p, EXPR_NAME, start, length);
+            none_sort->as.name = ui_name("none", start);
+            Expr *count = ui_prop(&args, "count");
+            Expr *table_args[5] = { count ? count : ui_int(p, start, 0), ui_extent(p, ui_prop(&args, "width"), start, 400, true),
+                                    ui_extent(p, ui_prop(&args, "height"), start, 240, false),
+                                    selected ? ui_some(p, ui_address(p, selected)) : none_selected,
+                                    sort ? ui_some(p, ui_address(p, sort)) : none_sort };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "table", table_args, 5)));
+            StmtVec cells = {0};
+            ui_table_columns(p, out, &cells);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "table_rows", NULL, 0)));
+            ui_shown_loop(p, out, ui_prop(&args, "item"), &cells, start, length);
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "end_table", NULL, 0), ui_prop(&args, "on_activate")));
         } else if (name_text_is(node, "Scroll")) {
             /* f.scroll(width, height), the nodes, f.end_scroll() */
             Expr *size[2] = { ui_extent(p, ui_prop(&args, "width"), start, 0, true),
@@ -2295,6 +2457,87 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *call_args[2] = { value, enabled };
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "DateField")) {
+            /* f.date_field(&bind, width, format, monday_first); on_change when it changed */
+            Expr *format = ui_prop(&args, "format");
+            Expr *monday = ui_prop(&args, "monday_first");
+            if (!format) {  /* `widgets.default_date_format()`: dd/mm/yyyy */
+                Expr *module = ui_expr(p, EXPR_NAME, start, length);
+                module->as.name = ui_name("widgets", start);
+                Expr *callee = ui_expr(p, EXPR_FIELD, start, length);
+                callee->as.field.object = module;
+                callee->as.field.name = ui_name("default_date_format", start);
+                format = ui_call(p, callee, NULL, start, length);
+            }
+            if (!monday) {
+                monday = ui_expr(p, EXPR_BOOL, start, length);
+                monday->as.bool_value = true;
+            }
+            Expr *date_args[4] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 160, true),
+                                   format, monday };
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "date_field", date_args, 4), ui_prop(&args, "on_change")));
+        } else if (name_text_is(node, "Dialog")) {
+            /* if (f.dialog(title, width, &open)) { the nodes; f.end_dialog(); }, at the end of the view */
+            Expr *dialog_args[3] = { value, ui_float(p, ui_prop(&args, "width"), start, 400), ui_address(p, ui_prop(&args, "open")) };
+            StmtVec inner = {0};
+            size_t body_start = cur(p)->offset;
+            ui_parse_children(p, &inner);
+            SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_dialog", NULL, 0)));
+            Stmt *when = new_stmt(p, STMT_IF, start);
+            when->length = length;
+            when->as.if_.cond = ui_frame_call(p, start, length, "dialog", dialog_args, 3);
+            when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
+            SOSU_VEC_PUSH(out, when);
+        } else if (name_text_is(node, "Slider")) {
+            /* f.slider(&bind, width, min, max, step); on_change when it changed */
+            Expr *low = ui_prop(&args, "min");
+            Expr *high = ui_prop(&args, "max");
+            Expr *step = ui_prop(&args, "step");
+            Expr *slider_args[5] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 200, true),
+                                     low ? low : ui_int(p, start, 0), high ? high : ui_int(p, start, 100),
+                                     step ? step : ui_int(p, start, 1) };
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "slider", slider_args, 5), ui_prop(&args, "on_change")));
+        } else if (name_text_is(node, "Progress")) {
+            /* f.progress(value, max, width), or f.progress_busy(width) without a value */
+            Expr *done = ui_prop(&args, "value");
+            Expr *total = ui_prop(&args, "max");
+            Expr *width = ui_extent(p, ui_prop(&args, "width"), start, 200, true);
+            Expr *progress_args[3] = { done, total ? total : ui_int(p, start, 100), width };
+            SOSU_VEC_PUSH(out, ui_stmt(p, done ? ui_frame_call(p, start, length, "progress", progress_args, 3)
+                                               : ui_frame_call(p, start, length, "progress_busy", &width, 1)));
+        } else if (name_text_is(node, "NumberField") || name_text_is(node, "MoneyField")) {
+            /* f.number_field(&bind, width, widgets.Number{ ... }) or f.money_field(...); on_change when it changed */
+            bool money = name_text_is(node, "MoneyField");
+            static const char *const names[] = { "min", "max", "step", "decimals", "decimal", "group", "symbol", "symbol_first" };
+            UiFields fields = {0};
+            for (size_t i = 0; i < 8; i++) {
+                Expr *option = ui_prop(&args, names[i]);
+                if (!option) continue;
+                FieldInit field = { ui_name(names[i], option->offset), i < 2 ? ui_some(p, option) : option };
+                SOSU_VEC_PUSH(&fields, field);
+            }
+            if (money && !ui_prop(&args, "decimals")) {  /* money has cents unless it says otherwise */
+                FieldInit field = { ui_name("decimals", start), ui_int(p, start, 2) };
+                SOSU_VEC_PUSH(&fields, field);
+            }
+            Expr *number_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 160, true),
+                                     ui_struct(p, "Number", &fields, start, length) };
+            Expr *call = ui_frame_call(p, start, length, money ? "money_field" : "number_field", number_args, 3);
+            SOSU_VEC_PUSH(out, ui_when(p, call, ui_prop(&args, "on_change")));
+        } else if (name_text_is(node, "TextArea")) {
+            /* f.text_area(&bind, width, rows, widgets.Area{ wrap, tabs, placeholder }), and on_enter on Ctrl+Enter */
+            static const char *const names[] = { "wrap", "tabs", "placeholder" };
+            UiFields fields = {0};
+            for (size_t i = 0; i < 3; i++) {
+                Expr *option = ui_prop(&args, names[i]);
+                if (!option) continue;
+                FieldInit field = { ui_name(names[i], option->offset), i == 2 ? ui_translate(p, &args, option) : option };
+                SOSU_VEC_PUSH(&fields, field);
+            }
+            Expr *rows = ui_prop(&args, "rows");
+            Expr *area_args[4] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   rows ? rows : ui_int(p, start, 5), ui_struct(p, "Area", &fields, start, length) };
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "text_area", area_args, 4), ui_prop(&args, "on_enter")));
         } else if (name_text_is(node, "TextField")) {
             Expr *call_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 200, true),
                                    ui_format(p, &args, start, length) };
@@ -2467,6 +2710,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_grid", NULL, 0)));
         }
     }
+    if (tip && placed) SOSU_VEC_PUSH(out, ui_frame_stmt(p, tip->offset, tip->length, "tooltip", ui_translate(p, &args, tip)));
     p->ui_in_grid = in_grid;
     p->ui_in_tabs = in_tabs;
     p->ui_in_tree = in_tree;
@@ -2479,6 +2723,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
 static void ui_parse_item(Parser *p, StmtVec *out) {
     bool window_top = p->ui_window_top;
     p->ui_window_top = false;
+    bool at_top = p->ui_at_top;
+    p->ui_at_top = false;
     if (check(p, TOK_KW_IF)) {
         Stmt *stmt = new_stmt(p, STMT_IF, advance(p)->offset);
         stmt->as.if_.cond = parse_condition(p);
@@ -2536,6 +2782,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
         return;
     }
     if (check(p, TOK_IDENT)) {
+        p->ui_node_at_top = at_top;
         ui_parse_node(p, out, window_top);
         return;
     }
@@ -2656,9 +2903,11 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
     VEC(FieldInit) settings = {0};
     StmtVec items = {0};
     size_t nodes = 0;
+    StmtVec dialogs = {0};
     p->ui_title_bar = false;
     size_t body_start = cur(p)->offset;
     p->ui_in_component = !is_window;
+    p->ui_dialogs = &dialogs;
     if (expect(p, TOK_LBRACE)) {
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
             size_t before = p->pos;
@@ -2668,6 +2917,7 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
                 if (ui_window_property(p, is_window, items.count > 0, &setting)) SOSU_VEC_PUSH(&settings, setting);
             } else {
                 p->ui_window_top = is_window && nodes == 0;
+                p->ui_at_top = true;
                 ui_parse_item(p, &items);
                 nodes++;
             }
@@ -2677,6 +2927,10 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
         expect(p, TOK_RBRACE);
     }
     p->ui_in_component = false;
+    p->ui_dialogs = NULL;
+    p->ui_at_top = false;
+    for (size_t i = 0; i < dialogs.count; i++) SOSU_VEC_PUSH(&items, dialogs.items[i]);  /* above the rest */
+    free(dialogs.items);
     fn->body = ui_block(p, &items, body_start, span_from(p, body_start));
     fn->length = span_from(p, fn->offset);
     decl->length = fn->length;
@@ -2716,11 +2970,13 @@ static const char *const ui_theme_selectors[][2] = {
     { "List", "list" }, { "Scroll", "scroll" }, { "Column", "column" }, { "Row", "row" },
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
     { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
+    { "Slider", "slider" }, { "Progress", "progress" }, { "Tooltip", "tooltip" }, { "Dialog", "dialog" },
+    { "DateField", "date" }, { "Table", "table" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
     "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
-    "Image, Grid, Group, Tabs, Tree"
+    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip, Dialog, DateField, Table"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };
@@ -2860,7 +3116,8 @@ static Expr *ui_parse_style_body(Parser *p, size_t offset, size_t length) {
 }
 
 /* `pub widgets.type name() { body }` */
-static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, StmtVec *body, size_t body_offset) {
+static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, StmtVec *body, size_t body_offset,
+                         Param *params, size_t param_count) {
     Decl *decl = arena_alloc(p->arena, sizeof *decl);
     decl->kind = DECL_FN;
     decl->is_pub = true;
@@ -2870,8 +3127,8 @@ static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, 
     fn->offset = offset;
     fn->name = name;
     fn->ret = ui_type(p, offset, "widgets", type);
-    fn->params = NULL;
-    fn->param_count = 0;
+    fn->params = params;
+    fn->param_count = param_count;
     fn->body = ui_block(p, body, body_offset, span_from(p, body_offset));
     fn->length = span_from(p, offset);
     decl->length = fn->length;
@@ -2890,11 +3147,14 @@ static Decl *ui_parse_style(Parser *p) {
     size_t offset = advance(p)->offset;
     Name name;
     expect_name(p, &name, "a style name");
+    Param *params = NULL;  /* `style Size(f32 px)`: a style with parameters */
+    size_t param_count = 0;
+    if (check(p, TOK_LPAREN)) parse_params(p, &params, &param_count, false);
     size_t body_offset = cur(p)->offset;
     Expr *style = ui_parse_style_body(p, name.offset, name.length);
     StmtVec body = {0};
     SOSU_VEC_PUSH(&body, ui_return(p, style));
-    return ui_function(p, offset, name, "Style", &body, body_offset);
+    return ui_function(p, offset, name, "Style", &body, body_offset, params, param_count);
 }
 
 /* A name of a theme, `accent: #89B4FA`; `own`: given by the body being read, not its parent. */
@@ -2918,6 +3178,9 @@ typedef struct {
     size_t body;
     size_t parent;
     bool valid;
+    Param *params;  /* `theme Brand(canvas.Color accent)`: its parameters */
+    size_t param_count;
+    ExprVec parent_args;  /* `: Brand(#D20F39)`: what it gives its parent */
 } UiTheme;
 
 typedef VEC(UiTheme) UiThemes;
@@ -2999,9 +3262,14 @@ static void ui_parse_theme_body(Parser *p, UiThemeBody *out) {
 
 /* What the theme `index` says, with its parents: their bodies are read again, so that the
    names a theme changes apply to the selectors it inherits (`theme Light : Dark`). */
-static void ui_inherit(Parser *p, const UiThemes *themes, size_t index, UiThemeBody *out) {
+static void ui_inherit(Parser *p, const UiThemes *themes, size_t index, const ExprVec *args, UiThemeBody *out) {
     const UiTheme *theme = &themes->items[index];
-    if (theme->parent != SIZE_MAX) ui_inherit(p, themes, theme->parent, out);
+    if (theme->parent != SIZE_MAX) ui_inherit(p, themes, theme->parent, &theme->parent_args, out);
+    /* its parameters: names of the theme, given by the theme that starts from it */
+    for (size_t i = 0; i < theme->param_count && i < args->count; i++) {
+        UiThemeName entry = { theme->params[i].name, ui_float(p, args->items[i], args->items[i]->offset, 0), false };
+        SOSU_VEC_PUSH(&out->names, entry);
+    }
     size_t pos = p->pos;
     p->pos = theme->body;
     ui_parse_theme_body(p, out);
@@ -3015,12 +3283,25 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
     size_t errors = p->diags->error_count;
     Name name;
     expect_name(p, &name, "a theme name");
+    Param *params = NULL;  /* `theme Brand(canvas.Color accent)` */
+    size_t param_count = 0;
+    if (check(p, TOK_LPAREN)) parse_params(p, &params, &param_count, false);
     UiThemeBody body;
     memset(&body, 0, sizeof body);
     size_t parent = SIZE_MAX;
+    ExprVec parent_args = {0};
     if (accept(p, TOK_COLON)) {
         Name base;
         if (expect_name(p, &base, "the theme it starts from")) {
+            if (accept(p, TOK_LPAREN)) {  /* `: Brand(#D20F39)` */
+                if (!check(p, TOK_RPAREN)) {
+                    do {
+                        Expr *arg = parse_expr(p);
+                        SOSU_VEC_PUSH(&parent_args, arg);
+                    } while (accept(p, TOK_COMMA));
+                }
+                expect_closing(p, TOK_RPAREN);
+            }
             for (size_t i = 0; i < themes->count; i++) {
                 if (names_equal(themes->items[i].name, base)) parent = i;
             }
@@ -3029,12 +3310,18 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
                                          (int)base.length, base.text);
                 diag_help(d, "a theme starts from a theme written above it, in the same file");
                 p->panic = false;
+            } else if (themes->items[parent].param_count != parent_args.count) {
+                Diagnostic *d = error_at(p, "E0215", base.offset, base.length, "`%.*s` takes %zu value%s, not %zu",
+                                         (int)base.length, base.text, themes->items[parent].param_count,
+                                         themes->items[parent].param_count == 1 ? "" : "s", parent_args.count);
+                diag_help(d, "give the values of its parameters: `theme Red : %.*s(#D20F39) { }`", (int)base.length, base.text);
+                p->panic = false;
             } else if (themes->items[parent].valid) {
-                ui_inherit(p, themes, parent, &body);
+                ui_inherit(p, themes, parent, &parent_args, &body);
             }
         }
     }
-    UiTheme theme = { name, p->pos, parent, false };
+    UiTheme theme = { name, p->pos, parent, false, params, param_count, parent_args };
     size_t body_offset = cur(p)->offset;
     ui_parse_theme_body(p, &body);
     theme.valid = p->diags->error_count == errors;
@@ -3071,7 +3358,7 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
         SOSU_VEC_PUSH(&fields, field);
     }
     SOSU_VEC_PUSH(&items, ui_return(p, ui_struct(p, "Theme", &fields, name.offset, name.length)));
-    return ui_function(p, offset, name, "Theme", &items, body_offset);
+    return ui_function(p, offset, name, "Theme", &items, body_offset, params, param_count);
 }
 
 static bool ui_imports_widgets(const Decl *decl) {
@@ -3124,6 +3411,7 @@ Module *parse_ui_module(const SourceFile *file, const TokenList *tokens, Arena *
         import->as.import.items = arena_copy(arena, names, sizeof names);
         SOSU_VEC_PUSH(&decls, import);
     }
+    for (size_t i = 0; i < themes.count; i++) free(themes.items[i].parent_args.items);
     free(themes.items);
     Module *module = arena_alloc(arena, sizeof *module);
     module->count = decls.count;

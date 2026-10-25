@@ -772,9 +772,13 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `Image` | available | a PNG image (`render.image`), scaled; the icon of a window, beside its title (§10.5) |
 | `TextField` (one line) | available | the editing core: cursor, selection, clipboard, scrolling; 256 bytes |
 | `TextField` with a format | available | `accept:` (`Digits`, `Integer`, `Decimal`), `max:`, `mask:` (`"99/99/9999"`) |
-| `NumberField` | planned | bound to a number, not to text: `NumberField(bind: quantity)`, with `min:` and `max:`; one widget per type until generics (`i64`, `f64`) |
-| `MoneyField` | planned | bound to an integer of minor units (`i64` cents), never to a float; `symbol:` and `decimal:` given explicitly (`symbol: "€", decimal: ","`) rather than read from the locale of the system |
-| `TextArea` (several lines) | planned | the same editing core, plus Up / Down, line wrapping and scrolling; `rows:` gives its height; text in a buffer that grows in an arena |
+| `NumberField` | available | bound to an `i64`, with `decimals:` for fixed-point numbers, `min:`, `max:`, `step:` (§10.9) |
+| `MoneyField` | available | a `NumberField` with a symbol and groups of thousands, 2 decimals by default (§10.9) |
+| `Slider`, `Progress` | available | an `i64` dragged or moved by keys; a bar with a value, or busy (§10.9) |
+| `DateField` | available | a mask and a calendar above the rest (§10.9) |
+| `Dialog` | available | modal, centered, above the rest (§10.9) |
+| `Table` | available | columns of sizes, sorting, borders dragged, rows chosen, only those in view (§10.9) |
+| `TextArea` (several lines) | available | bound to a `LongText`: lines, wrapping, Up and Down, undo, scrolling (§10.9) |
 | `Radio` | available | `Radio("Small", bind: size, value: Small)`: the translator generates the comparison and the assignment for the `enum` (`==` on enums without data), so the widget itself needs no generics |
 | `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. Not yet: a selection of several items |
 | `Scroll` | available | `Scroll(width: 300, height: 200) { ... }`: any content, scrolled by the wheel (the innermost area first), its bars and the keyboard (§10.6) |
@@ -1101,6 +1105,101 @@ Open questions:
 - The content of a tab that is not chosen: forgotten, or described hidden, so that its scrolls and its focus survive? (decided: forgotten; immediate mode does not describe it, and the program has the state that matters)
 - `Auto` sizes from the last frame, or a first pass that measures without drawing? (decided: the last frame, as the painted columns; a pass of measure would describe every frame twice)
 - Trees of many items (a file system): every visible item is described at each frame, as a `List`; virtualization (describing only what is in view) needs the height of each item before it is described. (proposed: later, with `List` of many items, by a fixed height of item)
+
+### 10.9 The rest of the interface: text, numbers, tables, popups, input, mobile
+
+Status: available. Everything the interface still lacked, in one branch, in batches, each with its tests: the editing core, `TextArea`, `NumberField` and `MoneyField`, `Slider` and `Progress`, tooltips, dialogs, `DateField`, long lists and `Table`, mnemonics, styles and themes with parameters, the built-in font beyond ASCII, input methods, then touch screens and mobile events.
+
+#### The editing core
+
+- `widgets.LongText`: text that grows, in an arena of its own (§6: a value that owns an arena is moved, so it lives in a state class). `TextBuffer` (256 bytes) stays for short fields. Both offer `text()`, `set`, `insert`, `remove`, and the editing core works on either. The translator does not know types, so `TextField(bind: x)` takes a `TextBuffer` and `TextArea` a `LongText`; in code, `f.text_field_long(&x, width, format)` is a field of one line over a `LongText`.
+- Moving and deleting by word: Ctrl+Left and Ctrl+Right (with Shift: selecting), Ctrl+Backspace and Ctrl+Delete; a double click selects a word, a triple click the line (the text, in a field of one line).
+- Undo and redo: Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, in the field that has the keyboard. `Ui` keeps the edits of that field (64 at most, their text in a pool of 4 KB); typing letters in a row is one edit; the history is forgotten when the keyboard goes to another widget.
+
+#### `TextArea`
+
+- `TextArea(bind: s.notes, rows: 8, width: Fill, wrap: true, placeholder: "Notes")`: text on several lines, bound to a `LongText`. Enter breaks a line (Ctrl+Enter is `on_enter:`); Tab moves the keyboard, unless the area has `tabs: true`: Tab then types four spaces.
+- Up and Down keep the column of the cursor; Page Up and Page Down move by the height of the area; Home and End go to the ends of the line, Ctrl+Home and Ctrl+End to those of the text.
+- `wrap: true` breaks lines at the last space that fits (else anywhere); `wrap: false` scrolls sideways. The area scrolls as a `Scroll` (§10.6) to keep the cursor in view; the mouse places the cursor and selects, by line.
+
+#### `NumberField` and `MoneyField`
+
+- Numbers are integers, also when they have decimals: `NumberField(bind: s.price, decimals: 2)` binds an `i64` in hundredths, so no float is ever rounded on its way to the screen and back. One widget, without generics.
+- `NumberField(bind: x, min:, max:, step:, decimals: 0, decimal: ".", group: "")`: digits, one `-` first, and one decimal separator; Up and Down (and the wheel over it, when it has the keyboard) add or take `step`; two small buttons on the right do the same. The text being typed may be out of range or incomplete (`-`, `12.`): the value is set when the text is a number in range, and the field shows the value again when it loses the keyboard.
+- `MoneyField(bind: s.total, symbol: "€", decimals: 2, decimal: ",", group: " ", symbol_first: false)`: a `NumberField` that shows its symbol and its groups of thousands when it does not have the keyboard. Separators are explicit (§14.2), not read from the system.
+- `f.number_field(i64* value, Number format)` and `f.money_field(...)`, `widgets.Number` gathering `min`, `max`, `step`, `decimals`, `decimal`, `group`, `symbol`.
+
+#### `Slider` and `Progress`
+
+- `Slider(bind: s.volume, min: 0, max: 100, step: 1, width: 200)`: an `i64`, dragged by its thumb, clicked on its track, Left / Right / Home / End / Page Up / Page Down with the keyboard.
+- `Progress(value: s.done, max: s.total, width: Fill)`: a bar; `Progress(width: 200)` without a value moves by itself (indeterminate), which needs the time (below).
+
+#### Time, tooltips
+
+- `ui` does no input or output (§10.4): the program gives it the time, `ui.clock(ms)`, a monotonic time in milliseconds, before each frame: `ui.clock(app.now_ms())` (`now_ms` reads the clock of SDL with the effect `io`, which `on_frame` has; `std.time` would need the effect `time`). Without it, what needs time (tooltips, an indeterminate progress, the caret blinking) stays still.
+- `tooltip: "Save the file"` on any widget: after 500 ms over it without moving, a small box under the mouse, on the layer above, until the mouse leaves; its text is translated as every literal.
+
+#### Dialogs
+
+- `Dialog(open: s.asking, title: "Delete the file?", width: 400) { ... }`: a window inside the window, centered, over a darkened backdrop, on the layer above. While it is open, the widgets under it see neither the mouse nor the keys; Tab stays inside it; Escape, or a click on its cross, sets `open` to false. Its content is described where the node is, and drawn above the rest at `finish()` as the open menus are.
+- What it becomes: `if (f.dialog(title, width, &open)) { the nodes; f.end_dialog(); }`.
+
+#### `DateField`
+
+- `DateField(bind: s.due, monday_first: true, format: "dd/mm/yyyy")`: a field with a mask (§10.4) and a button that opens a calendar of the month on the layer above (as a dropdown): arrows for the months, a click or Enter on a day chooses it, Escape closes. `widgets.Date { year, month, day }`; a date not valid in the field leaves the value as it was.
+- The names of the months and days are English texts translated by the catalog (§10.7), as the other literals of `ui`.
+
+#### Long lists and `Table`
+
+- A `List` of many items describes only those in view: `List(count: s.count, item: i, selected: s.chosen, height: Fill) { Text(s.names[i]) }`. `item: i` names the index of the item being described, an `i32`; every item is as high as the first one (measured at the last frame), so the list knows which ones show without describing the others. What it becomes: `f.list_of(count, width, height, selected)`, then `for (i32 i in f.first_shown()..f.last_shown()) { push_id(i), the nodes, pop_id() }`, `f.end_list()`.
+- `Table(count: s.count, item: i, selected: s.row, sort: s.order, height: Fill) { Column("Name", width: Fill, sortable: true) { Text(s.files[i].name) } Column("Size", width: 100, align: End) { Text(s.size_text(i)) } }`: a header with the titles of the columns, then rows of cells, only those in view, as a long `List`.
+  - The widths of the columns are sizes (§10.8: pixels, `Auto`, `Fill`); the border between two titles can be dragged, and the width chosen is kept by the identity of the table.
+  - `sort:` binds a `widgets.Sort { column, descending }`: a click on a sortable title sets it (again: descending); the program sorts its rows (`ui` only shows the order with an arrow on the title).
+  - Rows are chosen as the items of a `List` (click, Up, Down, Page Up, Page Down, Home, End); `on_activate:` on Enter or a double click.
+  - What it becomes: `f.table(count, width, height, selected, sort)`, `f.table_column(title, size, sortable, align)` for each column, then for each row shown, `f.table_cell()` before the nodes of each column, and `f.end_table()`.
+- Trees stay described whole (they hold fewer items than lists, and their items are not all as high).
+
+#### Mnemonics
+
+- `&` in the text of a `Menu`, a `MenuItem`, a `Button`, a `Checkbox`, a `Radio` or a `Tab` marks its letter: `Menu("&File")`, `Button("&Save")`; `&&` is an `&`. The letter is underlined while Alt is held, or once the menus have the keyboard.
+- Alt and the letter opens the menu of the bar, clicks the button, checks the box, chooses the radio or the tab; in an open menu, the letter alone chooses the item. Letters given twice: the first one in the order of the frame. Translations carry their own `&`.
+
+#### Styles and themes with parameters
+
+- `style Size(f32 px) { font_size: px }` becomes `pub widgets.Style Size(f32 px)`, and `style: Size(22)` calls it; a theme can have parameters too, `theme Brand(canvas.Color accent) : Dark { ... }`, and a theme that starts from it gives them: `theme Red : Brand(#D20F39) { }`. Parameters are typed as the parameters of a function (§5).
+- States of a widget other than those of §10.7: still not in v0; an expression in `style:` covers the state of the program.
+
+#### The built-in font beyond ASCII
+
+- Without a TrueType font (`ui.font`), the 8 by 8 font of `render` draws ASCII only. It gains the letters of Latin-1 and of Latin Extended-A (French, German, Spanish, Italian, Portuguese, the Nordic and Central European languages), each drawn as its base letter and a mark above or below it (acute, grave, circumflex, diaeresis, tilde, ring, cedilla, caron, ogonek...), from a table of 2 bytes per letter. Other characters stay boxes.
+
+#### Input methods
+
+- The composition of an input method (Chinese, Japanese, Korean, accents typed in two keys) is shown in the field that has the keyboard, underlined, before it becomes text: `platform` gives the event `TextEditing(str text, i32 cursor)` (`SDL_EVENT_TEXT_EDITING`) and `ui.compose(text, cursor)` receives it; an empty text ends the composition.
+- `ui.caret_area()`: the rectangle of the cursor of the field that has the keyboard, which `platform` passes to the system (`app.set_text_input_area(x, y, w, h)`, `SDL_SetTextInputArea`) so that the window of candidates opens next to it.
+
+#### Touch screens and mobile events (§10.3)
+
+- `platform` gives `Touch(i64 finger, f32 x, f32 y, TouchPhase phase)` (`Down`, `Move`, `Up`, `Cancel`; `SDL_EVENT_FINGER_*`, in pixels of the window). `ui.touch(...)` treats the first finger as the mouse (a tap is a click; a long press, 500 ms, is the right button), and a finger that drags in a `Scroll`, a list or a table scrolls it, with inertia, instead of selecting. On the desktop, SDL also gives the first finger as the mouse: a program forwards either (the examples forward the mouse), not both.
+- The virtual keyboard: `ui.wants_text()` is true while a text widget has the keyboard; the program shows or hides the keyboard of the system when it changes, `app.show_keyboard(on)` (`SDL_StartTextInput`, `SDL_StopTextInput`); the safe area says what the keyboard leaves.
+- Safe areas: `SafeAreaChanged(f32 left, f32 top, f32 right, f32 bottom)` (`SDL_GetWindowSafeArea`); `ui.safe_area(...)`, and `widgets.begin` places the frame inside it (the background of the window is still drawn everywhere).
+- Orientation and size: `Resized` already says it; a grid with `Fill` follows. The display scale: `ScaleChanged(f32 scale)` (`SDL_GetWindowDisplayScale`); a program keeps its widgets readable on a dense screen through its theme, `widgets.over(theme, widgets.Theme{ all: widgets.Props{ font_size: some(18.0 * scale) } })` (scaling every size of `ui` is for later).
+- The life of the program: `Suspend` (`SDL_EVENT_WILL_ENTER_BACKGROUND`), `Resume` (`SDL_EVENT_DID_ENTER_FOREGROUND`), `LowMemory`, `Terminating`. While suspended, `platform` does not call `on_frame` and looks for events every 100 ms (on iOS, drawing in the background is not allowed). On mobile systems, SDL gives these events through an event watch: that is for step 9 (§13).
+- On the desktop, a touch screen gives the same events; building for Android and iOS is step 9 of the roadmap (§13), outside this branch: the events are written and tested here, and run there.
+
+#### Tests
+
+- `ui`: words, undo and redo, a `LongText` of 100 KB; a `TextArea` (lines, wrapping, Up and Down, scrolling to the cursor); numbers typed, out of range, stepped, shown with their groups and symbol; a slider dragged and moved by keys; a tooltip after 500 ms; a dialog that takes the mouse and the keys and closes with Escape; a calendar opened, a day chosen; a list of 100 000 items described by the items in view only; a table sorted, a column resized, a row chosen; mnemonics with Alt; a composition shown then typed; a tap, a long press and a drag that scrolls.
+- `render`: the accented letters of the built-in font, against their base letters.
+- The translator: every new node and property, `item:` and `count:`, styles and themes with parameters, mnemonics in translated texts.
+- `platform`: the translation of the new SDL events (touch, text editing, life, safe area) is checked by `sosuc check`, and tried on a window: running `platform` needs SDL and a display, which the tests of the CI do not have.
+- `examples/editor` gains a `TextArea` with undo; `examples/workspace` its output in a long list, its files in a `Table` (name, size, date, sortable) and a tooltip; `examples/containers` a tab of inputs: numbers, money, a date, a slider, progress bars, a text area, a dialog, letters with Alt.
+
+Open questions:
+
+- A tab character in a `TextArea`: never in v0 (Tab moves the keyboard, as in a browser), or typed when the area has `tabs: true`? (decided: `tabs: true`, off by default; it types four spaces)
+- `NumberField` with an `f64` once there are generics, or integers with decimals for good? (decided: integers; a float field can come later, for measurements)
+- The time given by the program (`ui.clock`) or read by `ui` with the effect `time`? (decided: given; `ui` stays without effects, and its tests choose the time)
 
 ## 11. Targets and compilation
 

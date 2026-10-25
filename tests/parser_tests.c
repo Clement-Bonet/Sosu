@@ -600,6 +600,89 @@ static void test_ui_grids(void) {
               "  (block\n"
               "    (return (lit widgets.Window))))\n"
               "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    TextArea(bind: s.notes, rows: 8, wrap: false, placeholder: \"Notes\", on_enter: s.send)\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (if (call (. ui_frame text_area) (& (. s notes)) 300.0 8 (lit widgets.Area (wrap false) (placeholder (call (. ui_frame tr) \"Notes\"))))\n"
+              "      (block\n"
+              "        (call (. s send))))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    MoneyField(bind: s.total, min: 0, symbol: \"€\", decimal: \",\")\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame money_field) (& (. s total)) 160.0 (lit widgets.Number (min (call some 0)) (decimal \",\") (symbol \"€\") (decimals 2)))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Slider(bind: s.volume, max: 10, tooltip: \"Volume\")\n    Progress(value: s.done)\n    Progress\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame slider) (& (. s volume)) 200.0 0 10 1)\n"
+              "    (call (. ui_frame tooltip) (call (. ui_frame tr) \"Volume\"))\n"
+              "    (call (. ui_frame progress) (. s done) 100 200.0)\n"
+              "    (call (. ui_frame progress_busy) 200.0)))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Dialog(\"Sure?\", open: s.asking) {\n        Button(\"OK\")\n    }\n    DateField(bind: s.due)\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 86)\n"
+              "    (call (. ui_frame date_field) (& (. s due)) 160.0 (call (. widgets default_date_format)) true)\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (if (call (. ui_frame dialog) (call (. ui_frame tr) \"Sure?\") 400.0 (& (. s asking)))\n"
+              "      (block\n"
+              "        (call (. ui_frame at) 63)\n"
+              "        (call (. ui_frame button) (call (. ui_frame tr) \"OK\"))\n"
+              "        (call (. ui_frame end_dialog))))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W(S* s) {\n    Column {\n        Dialog(\"a\", open: s.x) { }\n    }\n}\n", "E0215", 3, 9);
+    expect_ui("window W(S* s) {\n    List(count: s.n, item: i) {\n        Text(s.names[i])\n    }\n"
+              "    Table(count: s.n, item: k, sort: s.order, on_activate: s.open) {\n"
+              "        Column(\"Name\", width: Fill, sortable: true) {\n            Text(s.names[k])\n        }\n"
+              "        Column(\"Size\", width: 80, align: End) {\n            Text(s.sizes[k])\n        }\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame list_of) (. s n) 300.0 200.0 none)\n"
+              "    (for-in i32 i (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
+              "      (block\n"
+              "        (call (. ui_frame push_id) (as i u64))\n"
+              "        (call (. ui_frame label) (index (. s names) i))\n"
+              "        (call (. ui_frame pop_id))))\n"
+              "    (call (. ui_frame end_list))\n"
+              "    (call (. ui_frame at) 84)\n"
+              "    (call (. ui_frame table) (. s n) 400.0 240.0 none (call some (& (. s order))))\n"
+              "    (call (. ui_frame table_column) (call (. ui_frame tr) \"Name\") (call (. (. widgets Size) Fill) 1.0) true (. (. widgets Align) Start))\n"
+              "    (call (. ui_frame table_column) (call (. ui_frame tr) \"Size\") (call (. (. widgets Size) Pixels) 80) false (. (. widgets Align) End))\n"
+              "    (call (. ui_frame table_rows))\n"
+              "    (for-in i32 k (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
+              "      (block\n"
+              "        (call (. ui_frame push_id) (as k u64))\n"
+              "        (call (. ui_frame table_cell))\n"
+              "        (call (. ui_frame label) (index (. s names) k))\n"
+              "        (call (. ui_frame table_cell))\n"
+              "        (call (. ui_frame label) (index (. s sizes) k))\n"
+              "        (call (. ui_frame pop_id))))\n"
+              "    (if (call (. ui_frame end_table))\n"
+              "      (block\n"
+              "        (call (. s open))))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W(S* s) {\n    List(count: s.n) { }\n}\n", "E0215", 2, 5);
     expect_ui("window W() {\n    Tabs(placement: Bottom) { }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame))\n"
               "  (block\n"
@@ -685,6 +768,31 @@ static void test_ui_themes(void) {
     expect_ui_error("theme T { Label { color: #FFFFFF } }\n", "E0215", 1, 11);
     expect_ui_error("theme T : Missing { }\n", "E0215", 1, 11);
     expect_ui_error("theme T { a: 1\n    a: 2 }\n", "E0215", 2, 5);
+    expect_ui("style Size(f32 px) { font_size: px }\n"
+              "theme Brand(canvas.Color tint) { accent: tint }\n"
+              "theme Red : Brand(#D20F39) { }\n"
+              "window W() {\n    Text(\"a\", style: Size(22))\n}\n",
+              "(fn pub widgets.Style Size ((f32 px))\n"
+              "  (block\n"
+              "    (return (lit widgets.Style (normal (lit widgets.Props (font_size (call some px))))))))\n"
+              "(fn pub widgets.Theme Brand ((canvas.Color tint))\n"
+              "  (block\n"
+              "    (var auto accent tint)\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent))))))))\n"
+              "(fn pub widgets.Theme Red ()\n"
+              "  (block\n"
+              "    (var auto tint (call (. widgets rgb) 210 15 57 255))\n"
+              "    (var auto accent tint)\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent))))))))\n"
+              "(fn pub void W ((widgets.Frame* ui_frame))\n"
+              "  (block\n"
+              "    (call (. ui_frame style) (call Size 22))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("theme Brand(canvas.Color tint) { }\ntheme Red : Brand { }\n", "E0215", 2, 13);
     expect_ui_error("window W() {\n    Text(\"a\", style: c ? [A, B] : A)\n}\n", "E0215", 2, 26);
 }
 

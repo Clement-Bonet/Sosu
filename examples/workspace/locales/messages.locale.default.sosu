@@ -16,11 +16,11 @@ msgstr ""
 msgid "New file"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:19 examples/workspace/src/screen.ui.sosu:131
+#: examples/workspace/src/screen.ui.sosu:19 examples/workspace/src/screen.ui.sosu:142
 msgid "Save"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:20 examples/workspace/src/screen.ui.sosu:132
+#: examples/workspace/src/screen.ui.sosu:20 examples/workspace/src/screen.ui.sosu:143
 msgid "Revert"
 msgstr ""
 
@@ -92,6 +92,10 @@ msgstr ""
 msgid "macOS"
 msgstr ""
 
+#: examples/workspace/src/screen.ui.sosu:61
+msgid "Build and run the program (F5)"
+msgstr ""
+
 #: examples/workspace/src/screen.ui.sosu:65
 msgid "{count} file"
 msgid_plural "{count} files"
@@ -122,74 +126,82 @@ msgstr ""
 msgid "Output"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:123
+#: examples/workspace/src/screen.ui.sosu:121
 msgid "General"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:126
+#: examples/workspace/src/screen.ui.sosu:124
 msgid "Advanced"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:138
-msgid "File name"
+#: examples/workspace/src/screen.ui.sosu:127
+msgid "All files"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:141
+#: examples/workspace/src/screen.ui.sosu:129
+msgid "Name"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:132 examples/workspace/src/screen.ui.sosu:152
 msgid "Size (KB)"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:145
+#: examples/workspace/src/screen.ui.sosu:135 examples/workspace/src/screen.ui.sosu:156
 msgid "Modified"
 msgstr ""
 
 #: examples/workspace/src/screen.ui.sosu:149
+msgid "File name"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:160
 msgid "Licence"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:150
+#: examples/workspace/src/screen.ui.sosu:161
 msgid "0.00"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:153
+#: examples/workspace/src/screen.ui.sosu:164
 msgid "Kind"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:155
+#: examples/workspace/src/screen.ui.sosu:166
 msgid "Source"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:156
+#: examples/workspace/src/screen.ui.sosu:167
 msgid "Binary"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:157
+#: examples/workspace/src/screen.ui.sosu:168
 msgid "Image"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:163
+#: examples/workspace/src/screen.ui.sosu:174
 msgid "Encoding"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:165
+#: examples/workspace/src/screen.ui.sosu:176
 msgid "UTF-8"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:166
+#: examples/workspace/src/screen.ui.sosu:177
 msgid "Latin-1"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:167
+#: examples/workspace/src/screen.ui.sosu:178
 msgid "UTF-16"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:169
+#: examples/workspace/src/screen.ui.sosu:180
 msgid "Options"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:170
+#: examples/workspace/src/screen.ui.sosu:181
 msgid "Read only"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:171
+#: examples/workspace/src/screen.ui.sosu:182
 msgid "Hidden"
 msgstr ""
