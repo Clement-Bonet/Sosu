@@ -32,6 +32,7 @@ typedef struct {
     bool ui_in_grid;
     bool ui_in_tabs; /* the items of a `Tabs`: its `Tab` nodes only */
     bool ui_in_tree; /* the items of a `Tree` or a `Branch`: `Branch` and `Leaf` nodes only */
+    bool ui_in_component; /* the items at the top of a component: a component can hold the items of a tree */
     struct { uint64_t *items; size_t count; size_t cap; } ui_cells;
 } Parser;
 
@@ -1417,11 +1418,11 @@ static const UiNodeKind ui_nodes[] = {
     { "Option", 1, false, { "value", "plural", "count", "context", NULL }, false },
     { "Image", 1, false, { "size", "style", NULL }, false },
     { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
-    { "Tabs", 0, false, { "bind", "focus", "style", NULL }, true },
+    { "Tabs", 0, false, { "bind", "placement", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
     { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
-    { "Branch", 1, false, { "open", "plural", "count", "context", NULL }, true },
-    { "Leaf", 1, false, { "on_click", "plural", "count", "context", NULL }, false },
+    { "Branch", 1, false, { "open", "icon", "plural", "count", "context", NULL }, true },
+    { "Leaf", 1, false, { "on_click", "icon", "plural", "count", "context", NULL }, false },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -1814,12 +1815,12 @@ static bool ui_check_place(Parser *p, const UiNodeKind *kind, Name node, bool wi
         return false;
     }
     bool item = kind && (strcmp(kind->name, "Branch") == 0 || strcmp(kind->name, "Leaf") == 0);
-    if (p->ui_in_tree && !item) {
+    if (p->ui_in_tree && kind && !item) {  /* a component may describe items */
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a tree contains only `Branch` and `Leaf` nodes");
         diag_help(d, "`Tree(selected: state.item) { Branch(\"src\") { Leaf(\"main.sosu\") } }`");
         return false;
     }
-    if (item && !p->ui_in_tree) {
+    if (item && !p->ui_in_tree && !p->ui_in_component) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a `%s` goes in a `Tree` or a `Branch`", kind->name);
         diag_help(d, "`Tree(selected: state.item) { Branch(\"src\") { Leaf(\"main.sosu\") } }`");
         return false;
@@ -2068,7 +2069,8 @@ static bool ui_cell_property(Name name) {
 
 /* The cell of a node in a `Grid`: its properties `row:`, `col:`, `span:`, `row_span:` and
    `align:` are taken out of `args`, and become `ui_frame.cell(row, col, span, row_span, align)`
-   before it; NULL when it gives none. Outside a grid they are an error (`*valid` false). */
+   before it; NULL when it gives none. Outside a grid, `align:` alone becomes
+   `ui_frame.align(...)`, and the others are an error (`*valid` false). */
 static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, bool *valid) {
     Expr *row = NULL, *col = NULL, *span = NULL, *row_span = NULL, *align = NULL;
     size_t kept = 0;
@@ -2078,7 +2080,7 @@ static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, 
             args->props.items[kept++] = prop;
             continue;
         }
-        if (!p->ui_in_grid) {
+        if (!p->ui_in_grid && !name_text_is(prop.name, "align")) {
             Diagnostic *d = error_at(p, "E0215", prop.name.offset, prop.name.length, "`%.*s:` places a node in a `Grid`",
                                      (int)prop.name.length, prop.name.text);
             diag_help(d, "put the node in a grid: `Grid(columns: [Auto, Fill]) { ... }`");
@@ -2096,6 +2098,11 @@ static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, 
         *slot = prop.value;
     }
     args->props.count = kept;
+    if (!p->ui_in_grid) {  /* `align:` in a column or a row: `ui_frame.align(...)` */
+        if (!align) return NULL;
+        if (align->kind == EXPR_NAME) align = ui_variant(p, align, "Align", align->as.name);
+        return ui_frame_stmt(p, align->offset, align->length, "align", align);
+    }
     if (!row && !col && !span && !row_span && !align) return NULL;
     if (row && col && row->kind == EXPR_INT && col->kind == EXPR_INT) {
         uint64_t key = row->as.int_value * 64 + col->as.int_value;
@@ -2158,12 +2165,14 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     bool in_grid = p->ui_in_grid;
     bool in_tabs = p->ui_in_tabs;
     bool in_tree = p->ui_in_tree;
+    bool in_component = p->ui_in_component;
     bool placed = true;
     Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
     if (cell) SOSU_VEC_PUSH(out, cell);
     p->ui_in_grid = false;  /* the children of a node are not cells, unless it is a grid */
     p->ui_in_tabs = false;
     p->ui_in_tree = false;
+    p->ui_in_component = false;
     if (!kind) {
         ui_component(p, out, path, &args, start, length);
     } else {
@@ -2344,7 +2353,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *state = ui_expr(p, EXPR_NAME, start, length);
             state->as.name = ui_name("none", start);
             if (open) state = ui_some(p, ui_address(p, open));
-            Expr *branch_args[2] = { value, state };
+            Expr *icon = ui_prop(&args, "icon");
+            Expr *branch_args[3] = { value, state, icon ? ui_some(p, icon) : NULL };
             StmtVec inner = {0};
             size_t body_start = cur(p)->offset;
             p->ui_in_tree = true;
@@ -2353,18 +2363,25 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_branch", NULL, 0)));
             Stmt *when = new_stmt(p, STMT_IF, start);
             when->length = length;
-            when->as.if_.cond = ui_frame_call(p, start, length, "branch", branch_args, 2);
+            when->as.if_.cond = ui_frame_call(p, start, length, icon ? "branch_with" : "branch", branch_args, icon ? 3 : 2);
             when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
             SOSU_VEC_PUSH(out, when);
         } else if (name_text_is(node, "Leaf")) {
-            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "leaf", &value, 1), ui_prop(&args, "on_click")));
+            Expr *icon = ui_prop(&args, "icon");
+            Expr *leaf_args[2] = { value, icon ? ui_some(p, icon) : NULL };
+            Expr *leaf = ui_frame_call(p, start, length, icon ? "leaf_with" : "leaf", leaf_args, icon ? 2 : 1);
+            SOSU_VEC_PUSH(out, ui_when(p, leaf, ui_prop(&args, "on_click")));
         } else if (name_text_is(node, "Tabs")) {
             /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
             Expr *bound = ui_prop(&args, "bind");
             Expr *chosen = ui_expr(p, EXPR_NAME, start, length);
             chosen->as.name = ui_name("none", start);
             if (bound) chosen = ui_some(p, ui_address(p, bound));
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tabs", &chosen, 1)));
+            Expr *placement = ui_prop(&args, "placement");
+            if (placement && placement->kind == EXPR_NAME) placement = ui_variant(p, placement, "Side", placement->as.name);
+            Expr *tabs_args[2] = { chosen, placement };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, placement ? "tabs_at" : "tabs", tabs_args,
+                                                        placement ? 2 : 1)));
             p->ui_in_tabs = true;
             ui_parse_children(p, out);
             p->ui_in_tabs = false;
@@ -2453,6 +2470,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     p->ui_in_grid = in_grid;
     p->ui_in_tabs = in_tabs;
     p->ui_in_tree = in_tree;
+    p->ui_in_component = in_component;
     free(args.values.items);
     free(args.props.items);
 }
@@ -2640,6 +2658,7 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
     size_t nodes = 0;
     p->ui_title_bar = false;
     size_t body_start = cur(p)->offset;
+    p->ui_in_component = !is_window;
     if (expect(p, TOK_LBRACE)) {
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
             size_t before = p->pos;
@@ -2657,6 +2676,7 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
         }
         expect(p, TOK_RBRACE);
     }
+    p->ui_in_component = false;
     fn->body = ui_block(p, &items, body_start, span_from(p, body_start));
     fn->length = span_from(p, fn->offset);
     decl->length = fn->length;

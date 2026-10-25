@@ -1,0 +1,13 @@
+// A screen whose texts are translated: a plural, and a button whose title is longer in French.
+import languages.state;
+
+window Saver(state.Counter* c) {
+    title: "Files"
+    width: 400
+    height: 200
+
+    Column(padding: 8) {
+        Text("{count} file", plural: "{count} files", count: c.files)
+        Button("Save", on_click: c.save)
+    }
+}

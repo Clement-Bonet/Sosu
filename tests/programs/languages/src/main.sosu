@@ -1,0 +1,59 @@
+// Drives the screen of screen.ui.sosu in English then in French, with the themes of
+// look.ui.sosu: the title of the window, the background of each theme, and a click far to the
+// right of the button, which only its French title reaches.
+import std.io;
+import i18n.catalog;
+import render.canvas;
+import ui.widgets;
+import languages.look;
+import languages.screen;
+import languages.state;
+
+void frame(widgets.Ui* ui, canvas.Canvas* surface, state.Counter* c) {
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    screen.Saver(&f, c);
+    f.finish();
+}
+
+// A click at (x, y), over two frames: the press and the release.
+void click(widgets.Ui* ui, canvas.Canvas* surface, state.Counter* c, f32 x, f32 y) {
+    ui.mouse_move(x, y);
+    ui.mouse_button(true);
+    frame(ui, surface, c);
+    ui.mouse_button(false);
+    frame(ui, surface, c);
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut widgets.Ui ui = widgets.Ui{ };
+    state.Counter* c = arena.new(state.Counter);
+    widgets.Window window = screen.SaverConfig();
+
+    // The button is at y 56-88 (padding 8, a line of text, the gap); its English title ends
+    // before x 150, its French one after.
+    ui.theme = some(look.Dark());
+    frame(&ui, &surface, c);
+    io.print("English: {}, background {}", window.title, surface.at(2, 2) == 0xFF1E1E2E);
+    click(&ui, &surface, c, 30.0, 70.0);
+    click(&ui, &surface, c, 150.0, 70.0);
+    io.print("saved: {}", c.saved);
+
+    match (catalog.load(&arena, "tests/programs/languages/locales/messages.locale.fr.sosu")) {
+        ok(french) => {
+            ui.catalog = some(french);
+            io.print("French: {}", french.text(window.title));
+        },
+        err(e) => {
+            io.print("the French catalog is missing");
+        },
+    }
+    ui.theme = some(look.Light());
+    frame(&ui, &surface, c);
+    io.print("background {}", surface.at(2, 2) == 0xFFEFF1F5);
+    click(&ui, &surface, c, 150.0, 70.0);
+    io.print("saved: {}", c.saved);
+    return 0;
+}

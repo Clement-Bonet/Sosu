@@ -1,0 +1,9 @@
+# A screen in two languages and two themes (spec §10.7), driven without a window.
+[package]
+name = "languages"
+version = "0.1.0"
+
+[dependencies]
+render = { path = "../../../packages/render" }
+ui = { path = "../../../packages/ui" }
+i18n = { path = "../../../packages/i18n" }

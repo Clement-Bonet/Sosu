@@ -1,0 +1,14 @@
+// The state of the screen: how many times its button was clicked, and how many files it has.
+pub class Counter {
+    pub mut i32 saved;
+    pub mut i32 files;
+
+    void init() {
+        saved = 0;
+        files = 3;
+    }
+
+    pub void save() {
+        saved += 1;
+    }
+}

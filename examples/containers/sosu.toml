@@ -1,0 +1,10 @@
+# The containers of `ui` (spec §10.8): a grid, groups, tabs and a tree, in a window whose grid
+# follows its size.
+[package]
+name = "containers"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }

@@ -1,0 +1,5 @@
+English: Files, background true
+saved: 1
+French: Fichiers
+background true
+saved: 2
