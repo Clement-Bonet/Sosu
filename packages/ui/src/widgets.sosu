@@ -641,6 +641,8 @@ pub struct Ui {
     // option highlighted in the open list, and an option to choose at the next frame.
     mut u64 open = 0;
     mut canvas.Rect layer = nowhere();
+    mut f32 drop_scroll = 0.0;  // how far the open list of a dropdown is scrolled (spec §10.10)
+    mut bool drop_reveal = false;  // the keyboard moved its highlight: it comes into view
     mut i32 highlight = -1;
     mut u64 pick_dropdown = 0;
     mut i32 pick_option = -1;
@@ -1410,6 +1412,11 @@ bool has_byte(str text, u8 b) {
     return false;
 }
 
+// `c` in lower case, for an ASCII letter.
+u8 lower(u8 c) {
+    return c >= 65 && c <= 90 ? c + 32 : c;
+}
+
 // The colors of the widgets.
 canvas.Color ink() {
     return canvas.Color{ r: 205, g: 214, b: 244 };
@@ -2129,7 +2136,7 @@ pub struct Frame {
     mut str dropdown_hint = "";  // its placeholder
     mut Look drop_look = default_look(Dropdown, 0);  // its look
     mut canvas.Rect layer = nowhere();
-    mut str[16] options = [""; 16];
+    mut str[64] options = [""; 64];
     mut usize option_count = 0;
     mut i32 option_chosen = -1;
     mut bool dropdown_pressed = false;  // a press went to a dropdown or to one of its options
@@ -3660,6 +3667,7 @@ pub struct Frame {
                         ui.open = 0;
                     } else if (e.key == key_up() || e.key == key_down()) {
                         ui.highlight = max(ui.highlight + (e.key == key_up() ? -1 : 1), 0);
+                        ui.drop_reveal = true;
                     } else if (e.key == key_enter() || e.key == key_space()) {
                         option_enter = ui.highlight;
                         ui.open = 0;
@@ -3675,11 +3683,13 @@ pub struct Frame {
         dropdown_id = id;
         box = r;
         dropdown_hint = placeholder;
+        option_count = 0;
+        option_chosen = -1;
         if (ui.open == id) {
             layer_owner = id;
             layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
-            option_count = 0;
-            option_chosen = -1;
+        } else {
+            ui.drop_scroll = 0.0;
         }
         u32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0) | (ui.open == id ? state_open() : 0);
         drop_look = look(Dropdown, states);
@@ -3712,19 +3722,24 @@ pub struct Frame {
             ui.pick_dropdown = 0;  // Up or Down, the list closed, at the last frame
             return true;
         }
-        if (layer_owner != dropdown_id || option_count >= 16) {
+        if (option_count >= 64) {
             return false;
         }
-        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h, w: layer.w, h: height };
-        options[option_count] = text;
+        options[option_count] = text;  // kept also when it is closed: letters typed find it
         if (chosen) {
             option_chosen = option_count as i32;
         }
         option_count += 1;
+        if (layer_owner != dropdown_id) {
+            return false;
+        }
+        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h - ui.drop_scroll, w: layer.w, h: height };
         layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: layer.h + height };
-        if (ui.open == dropdown_id && ui.pressed && contains(r, ui.mouse_x, ui.mouse_y)) {
+        if (ui.open == dropdown_id && ui.pressed && contains(r, ui.mouse_x, ui.mouse_y) && contains(ui.layer, ui.mouse_x, ui.mouse_y)) {
             ui.open = 0;
             dropdown_pressed = true;
+            ui.focus = dropdown_id;  // the dropdown keeps the keyboard
+            focus_taken = true;
             return true;
         }
         return false;
@@ -3739,6 +3754,44 @@ pub struct Frame {
         if (dropdown_id != 0 && option_index > 0) {
             if (ui.open == dropdown_id) {  // the highlight: on the option chosen at first
                 ui.highlight = ui.highlight < 0 ? max(option_current, 0) : min(ui.highlight, option_index - 1);
+            }
+            // a letter typed: the next option that starts with it
+            for (usize i in 0..ui.edit_count) {
+                Edit e = ui.edits[i];
+                if (e.key != 0 || e.to <= e.from || ui.focus != dropdown_id && ui.open != dropdown_id) {
+                    continue;
+                }
+                u8 letter = lower(ui.typed.bytes[e.from]);
+                i32 from = ui.open == dropdown_id ? ui.highlight : option_current;
+                for (i32 k in 1..option_count as i32 + 1) {
+                    i32 at = (from + k) % option_count as i32;
+                    str name = options[at as usize];
+                    if (name.len > 0 && lower(name.bytes[0]) == letter) {
+                        if (ui.open == dropdown_id) {
+                            ui.highlight = at;
+                            ui.drop_reveal = true;
+                        } else {
+                            ui.pick_dropdown = dropdown_id;
+                            ui.pick_option = at;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (ui.open == dropdown_id) {  // the list: no lower than the window, and scrolled
+                f32 full = layer.h;
+                f32 room = max(surface.height as f32 - layer.y - 8.0, height * 3.0);
+                layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: min(full, room) };
+                if (contains(ui.layer, ui.mouse_x, ui.mouse_y) && ui.wheel != 0.0) {
+                    ui.drop_scroll -= ui.wheel * height * 3.0;
+                    ui.wheel = 0.0;
+                }
+                if (ui.drop_reveal) {  // the option of the keyboard, in view
+                    f32 lit = ui.highlight as f32 * height;
+                    ui.drop_scroll = max(min(ui.drop_scroll, lit), lit + height - layer.h);
+                    ui.drop_reveal = false;
+                }
+                ui.drop_scroll = max(min(ui.drop_scroll, full - layer.h), 0.0);
             }
             if (option_move != 0) {  // the choice moved, closed: chosen at the next frame
                 ui.pick_dropdown = dropdown_id;
@@ -4165,8 +4218,12 @@ pub struct Frame {
     void draw_layer() {
         Look m = look(Menu, 0);
         surface.fill_rounded(layer, m.radius, face(false, false));
+        surface.push_clip(layer);
         for (usize i in 0..option_count) {
-            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height, w: layer.w, h: height };
+            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height - ui.drop_scroll, w: layer.w, h: height };
+            if (r.y + r.h < layer.y || r.y > layer.y + layer.h) {
+                continue;
+            }
             if (i as i32 == option_chosen) {
                 surface.fill(r, m.selection);
             }
@@ -4176,6 +4233,13 @@ pub struct Frame {
                 surface.fill(r, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
             }
             write_px(r.x + 8.0, r.y, height, options[i], m.color, m.font_size);
+        }
+        surface.pop_clip();
+        f32 full = option_count as f32 * height;
+        if (full > layer.h) {  // a bar: where the list is
+            f32 thumb = max(layer.h * layer.h / full, 16.0);
+            f32 y = layer.y + (layer.h - thumb) * ui.drop_scroll / (full - layer.h);
+            surface.fill(canvas.Rect{ x: layer.x + layer.w - 7.0, y: y + 2.0, w: 4.0, h: thumb - 4.0 }, m.accent);
         }
         surface.stroke_rounded(layer, m.radius, m.accent, 2.0);
     }
@@ -8460,4 +8524,54 @@ test "a long tree: only the rows in view, their depth, a triangle that asks to t
     long_tree_frame(&ui, &surface, &chosen, &toggled);
     long_tree_frame(&ui, &surface, &chosen, &toggled);
     assert(toggled == 99990);
+}
+
+// A dropdown of 50 options named "a0".."e9" (the letter changes every 10), for the test below.
+i32 long_dropdown_frame(Ui* ui, canvas.Canvas* surface, i32* chosen) {
+    mut str[5] letters = ["a", "b", "c", "d", "e"];
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.dropdown(150.0);
+    for (i32 i in 0..50) {
+        str name = f.with2("{l}{d}", "l", letters[(i / 10) as usize], "d", f.decimal((i % 10) as i64));
+        if (f.option(name, *chosen == i) && *chosen != i) {
+            *chosen = i;
+        }
+    }
+    f.end_dropdown();
+    f.finish();
+    return *chosen;
+}
+
+test "a dropdown of 50 options: its list fits the window and scrolls; a letter goes to an option" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 300);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_dropdown_frame(&ui, &surface, &chosen);  // open
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(ui.open != 0 && ui.layer.h <= 300.0 - 32.0 - 8.0);
+    // d: the first option that starts with it, in view
+    ui.type_text("d");
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(ui.highlight == 30 && ui.drop_scroll > 0.0);
+    // the wheel: further down; a click on the first option shown is the option under the mouse
+    ui.mouse_move(20.0, 100.0);
+    ui.scroll_wheel(-1.0);
+    long_dropdown_frame(&ui, &surface, &chosen);
+    f32 scroll = ui.drop_scroll;
+    f32 offset = 100.0 - 32.0;
+    i32 under = ((offset + scroll) / 32.0) as i32;
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(chosen == under && ui.open == 0);
+    // closed, with the keyboard: a letter chooses the next option that starts with it
+    ui.type_text("b");
+    long_dropdown_frame(&ui, &surface, &chosen);
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(chosen == 10);
 }
