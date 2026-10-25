@@ -1201,6 +1201,97 @@ Open questions:
 - `NumberField` with an `f64` once there are generics, or integers with decimals for good? (decided: integers; a float field can come later, for measurements)
 - The time given by the program (`ui.clock`) or read by `ui` with the effect `time`? (decided: given; `ui` stays without effects, and its tests choose the time)
 
+### 10.10 Item templates, and the last points of the interface
+
+Status: design, not implemented yet. One branch, in batches: item templates, the selection of several items, long trees, the last limits of widgets, fonts, the formatter of `.ui.sosu` files, macOS in the CI, then two points under the interface (a bug of the C generator, the cost of themes).
+
+#### Item templates
+
+In XAML, an `ItemTemplate` (a `DataTemplate`) says how each item of a list is drawn, apart from the list and its data. In a `.ui.sosu` file, the body of a list already describes each item, and a component is already a template that can be reused; what is missing is an item made of several widgets that is still one item, and a look that follows its state.
+
+```sosu
+// a template: a component that describes one item
+component FileItem(state.File* f) {
+    Item(gap: 10, padding: 6, style: theme.FileItem) {
+        Image(f.icon, size: 32)
+        Column(gap: 2) {
+            Text(f.name.text())
+            Text(f.size_text(), style: theme.Muted)
+        }
+        Space(Fill)
+        Button("Open", on_click: f.open)
+    }
+}
+
+window Files(state.Files* s) {
+    List(count: s.count, item: i, selected: s.chosen, height: Fill) {
+        FileItem(s.files[i])
+    }
+}
+
+// theme.ui.sosu: the look of the items, in their states
+style FileItem {
+    radius: 6
+    hover { background: #313244 }
+    checked { background: #45475A, color: #FFFFFF }   // the item chosen
+    focus { border: #89B4FA, border_width: 1 }        // the item chosen, while the list has the keyboard
+}
+```
+
+- `Item { ... }`: one item of the list, tree or table that holds it, made of the widgets inside it, laid out in a row (`vertical: true`: a column), with `gap:` and `padding:`. Without `Item`, each widget placed in a list is an item, as today.
+- Its states: `hover` (the mouse is over it), `checked` (it is the item chosen, or one of the items chosen), `focus` (chosen while the list has the keyboard), `disabled` (`enabled: false`: it cannot be chosen). Its look comes from the selector `Item` of the theme, its styles, and these states; `color`, `font_size` and `accent` are inherited by the widgets inside it, so that a chosen item can change the color of its texts.
+- The widgets inside an item still work: a button in an item is clicked, not the item; a click elsewhere on the item chooses it.
+- A template is a component: `FileItem(s.files[i])` in a `List`, a `Leaf { FileItem(f) }`... It can take the index (`FileItem(s.files[i], i)`) and test the state of the program (`if (s.chosen == i) { ... }`), as any component.
+- In a long list, every item is as high as the first one (§10.9); in a list of `for`, items may differ in height.
+- The same in the other containers: `Leaf { ... }` and `Branch(open: ...) { Item { ... } children }` hold widgets instead of a text (the first `Item` of a branch is its line, the rest its children); a `Column` of a `Table` already holds widgets for its cells; `Option { ... }` of a `Dropdown` holds widgets, its text given by `text:` for the box when it is closed.
+- What it becomes: `f.item(horizontal, gap, padding, enabled)`, the widgets, `f.end_item()`: one place of the list, its background painted in the states of its item.
+
+#### The selection of several items
+
+- `List(selection: s.chosen_set)`, `Table(selection: ...)`: `widgets.Selection`, a set of indices kept in a `LongText`-like growing store (`add`, `remove`, `contains`, `clear`, `count`, iteration). Ctrl+click adds or removes an item, Shift+click and Shift+arrows extend from the anchor, Ctrl+A chooses all, Space toggles the item of the keyboard. `selected:` (one index) stays for lists of one choice.
+
+#### Long trees
+
+- `Tree(count: s.count, item: i, depth: s.depth(i), branch: s.has_children(i), open: s.open(i))`: a tree described as a flat list of its visible rows (the program flattens it), so that only the rows in view are described, as a long list. Toggling a branch calls `on_toggle: s.toggle(i)`. The nested form (`Branch { ... }`) stays for trees of few items.
+
+#### The last limits of widgets
+
+- `Dropdown`: more than 16 options, and a list that scrolls (the wheel, Up and Down, a bar) when it is longer than the room under it; typing letters goes to the first option that starts with them.
+- The display scale: `ui.scale`, every size of `ui` (heights, paddings, gaps, fonts, bars) multiplied by it, from `ScaleChanged`; the program no longer scales its theme itself.
+- Input methods in a `TextArea`: the composition drawn at its cursor, as in a field.
+- Drag and drop between items: `List(on_drop: s.move(from, to))` reorders the items of a list; an item dragged shows where it would go. Drop of files from the system (`SDL_EVENT_DROP_FILE`): the event `FilesDropped(str[] paths)`, for the program.
+
+#### Fonts
+
+- Kerning: the `kern` table of TrueType fonts, applied between letters when they are measured and drawn.
+- Fallback: `ui.fonts`, a list of fonts; a character missing in the first is drawn with the next one that has it (a Latin font, then a font of symbols or of another script).
+- CFF outlines (`.otf`) and hinting stay for later: the fonts given with Sosu are TrueType, and a scale of 18 pixels does not need hinting to stay readable.
+
+#### The formatter of `.ui.sosu` files
+
+- `sosuc fmt` formats `.ui.sosu` files too: one node per line, properties after the values, the children indented, `theme` and `style` blocks with one property per line and their states after them, comments kept. The language server formats them as `.sosu` files.
+
+#### macOS in the CI
+
+- A third job, `macOS (clang)`, on `macos-latest`: SDL3 from Homebrew, `make test`, and the window test with the dummy video driver.
+
+#### Under the interface
+
+- The bug of the C generator: `a.b[i] = v` (and `&a.b[i]`) wrote into a copy of `a.b` when the index needs temporaries (a call, `min(...)`): the access becomes a pointer to the array, then the element. The workarounds of `ui` (an index in a variable) are removed, and `tests/programs` checks writes through fields and calls.
+- Themes copied: the look of a widget no longer copies the `Theme` of `ui` (17 KB) several times: `look` reads the theme through a pointer, and the styles of a node are kept by reference for the frame.
+
+#### Tests
+
+- `ui`: an item of several widgets chosen by a click, its button clicked without choosing it, its look in its states, the color of its texts inherited; a selection with Ctrl and Shift; a long tree of 100 000 rows; a dropdown of 50 options scrolled and typed into; the scale; a composition in a text area; an item dragged; kerning and a fallback font measured.
+- The translator: `Item`, items in `Leaf` and `Branch`, `Option { ... }`, `selection:`, the flat `Tree`, `on_drop:`; `sosuc fmt` on `.ui.sosu` files (and that formatting twice changes nothing).
+- `tests/programs`: writes through fields and calls (the bug of the generator).
+- `examples/workspace`: its files with a template (icon, name, size), several of them chosen; `examples/containers`: a long tree.
+
+Open questions:
+
+- `Item` or `ListItem`? (proposed: `Item`: the same node in lists, trees and tables)
+- The selection: a set kept by `ui` (the program reads it), or a store of the program bound with `selection:`? (proposed: of the program, as `selected:`)
+
 ## 11. Targets and compilation
 
 ### 11.1 Targets
