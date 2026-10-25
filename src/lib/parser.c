@@ -415,7 +415,7 @@ static TypeExpr *parse_base_type(Parser *p) {
 
 static bool starts_operand(TokenKind kind) {
     switch (kind) {
-    case TOK_IDENT: case TOK_INT: case TOK_FLOAT: case TOK_STRING: case TOK_CHAR: case TOK_LPAREN:
+    case TOK_IDENT: case TOK_INT: case TOK_FLOAT: case TOK_STRING: case TOK_CHAR: case TOK_COLOR: case TOK_LPAREN:
     case TOK_KW_TRUE: case TOK_KW_FALSE: case TOK_KW_SELF: case TOK_KW_BASE:
     case TOK_KW_TRY: case TOK_KW_MATCH:
     case TOK_MINUS: case TOK_BANG: case TOK_TILDE: case TOK_AMP: case TOK_STAR:
@@ -698,6 +698,31 @@ static Expr *parse_primary(Parser *p) {
     case TOK_ERROR:
         expr = new_expr(p, EXPR_ERROR, token->offset);
         break;
+    case TOK_COLOR: {
+        /* `#89B4FA` in a .ui.sosu file: `widgets.rgb(0x89, 0xB4, 0xFA, 0xFF)` (spec §10.7) */
+        static const char *const parts[2] = { "widgets", "rgb" };
+        Expr *module = new_expr(p, EXPR_NAME, token->offset);
+        module->length = token->length;
+        module->as.name.text = parts[0];
+        module->as.name.length = 7;
+        module->as.name.offset = token->offset;
+        Expr *callee = new_expr(p, EXPR_FIELD, token->offset);
+        callee->length = token->length;
+        callee->as.field.object = module;
+        callee->as.field.name.text = parts[1];
+        callee->as.field.name.length = 3;
+        callee->as.field.name.offset = token->offset;
+        expr = new_expr(p, EXPR_CALL, token->offset);
+        expr->as.call.callee = callee;
+        expr->as.call.arg_count = 4;
+        expr->as.call.args = arena_alloc(p->arena, 4 * sizeof(Expr *));
+        for (int i = 0; i < 4; i++) {
+            Expr *byte = new_expr(p, EXPR_INT, token->offset); /* length 0: a number not in the source */
+            byte->as.int_value = token->int_value >> (24 - 8 * i) & 0xFF;
+            expr->as.call.args[i] = byte;
+        }
+        break;
+    }
     case TOK_LPAREN: {
         if (at_lambda(p)) return parse_lambda(p);
         advance(p);

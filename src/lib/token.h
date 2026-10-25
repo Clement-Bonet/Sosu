@@ -40,6 +40,7 @@ typedef enum {
     TOK_FLOAT,
     TOK_STRING,
     TOK_CHAR,
+    TOK_COLOR, /* #RRGGBB or #RRGGBBAA, in .ui.sosu files only: int_value is 0xRRGGBBAA */
 #define X(name, text) TOK_##name,
     SOSU_KEYWORDS(X)
     SOSU_PUNCTUATION(X)
