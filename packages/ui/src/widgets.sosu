@@ -3393,7 +3393,7 @@ pub struct Frame {
     canvas.Rect aligned(Layout l, canvas.Rect r) {
         Align how = next_align;
         next_align = Start;
-        f32 room = l.horizontal ? (l.room_h > 0.0 ? max(l.top + l.room_h - l.y, r.h) : max(height, r.h)) : (l.room_w > 0.0 ? max(l.left + l.room_w - l.x, r.w) : r.w);
+        f32 room = l.horizontal ? l.room_h > 0.0 ? max(l.top + l.room_h - l.y, r.h) : max(height, r.h) : l.room_w > 0.0 ? max(l.left + l.room_w - l.x, r.w) : r.w;
         f32 size = l.horizontal ? r.h : r.w;
         f32 shift = match (how) {
             Start => 0.0,
@@ -3488,6 +3488,11 @@ pub struct Frame {
     // tree keeps it (closed at first). Returns whether it is open: its children follow, then
     // `end_branch()`.
     pub bool branch(str text, bool*? open) {
+        return branch_with(text, open, none);
+    }
+
+    // The same, with `icon` before its text (16 pixels high).
+    pub bool branch_with(str text, bool*? open, image.Image? icon) {
         u64 id = take_id();
         usize slot = ui.state_slot(id);
         WidgetState* s = &ui.states[slot];
@@ -3496,7 +3501,7 @@ pub struct Frame {
             none => s.expanded,
         };
         i32 index = layouts[depth].item;
-        canvas.Rect r = tree_item(text, true, is_open);
+        canvas.Rect r = tree_item(text, true, is_open, icon);
         canvas.Rect toggle = canvas.Rect{ x: r.x, y: r.y, w: 20.0, h: r.h };
         mut bool change = click(id, toggle);
         if (tree_keys(index)) {
@@ -3546,9 +3551,14 @@ pub struct Frame {
     // A leaf of the tree being described: `text`. Returns true when it is clicked, or when Enter
     // is pressed while it is chosen.
     pub bool leaf(str text) {
+        return leaf_with(text, none);
+    }
+
+    // The same, with `icon` before its text (16 pixels high).
+    pub bool leaf_with(str text, image.Image? icon) {
         u64 id = take_id();
         i32 index = layouts[depth].item;
-        canvas.Rect r = tree_item(text, false, false);
+        canvas.Rect r = tree_item(text, false, false, icon);
         mut bool clicked = click(id, r);
         if (tree_keys(index)) {
             for (usize i in 0..ui.edit_count) {
@@ -3563,13 +3573,20 @@ pub struct Frame {
         return clicked;
     }
 
-    // An item of the tree: its row, indented, a triangle for a branch, and its text.
-    canvas.Rect tree_item(str text, bool is_branch, bool is_open) {
+    // An item of the tree: its row, indented, a triangle for a branch, its icon and its text.
+    canvas.Rect tree_item(str text, bool is_branch, bool is_open, image.Image? icon) {
         take_styles();
         Look l = look(Tree, 0);
         f32 indent = tree_level as f32 * 16.0;
         canvas.Rect size = measure_px(text, l.font_size);
-        canvas.Rect r = place(indent + 22.0 + size.w + 8.0, l.height);
+        mut f32 icon_w = 0.0;
+        match (icon) {
+            some(img) => {
+                icon_w = img.height > 0 ? 16.0 * img.width as f32 / img.height as f32 + 6.0 : 0.0;
+            },
+            none => { },
+        }
+        canvas.Rect r = place(indent + 22.0 + icon_w + size.w + 8.0, l.height);
         canvas.Rect row = canvas.Rect{ x: r.x + indent, y: r.y, w: r.w - indent, h: r.h };
         if (is_branch) {  // down when open, right when closed
             i32 cx = (row.x + 8.0) as i32;
@@ -3582,7 +3599,15 @@ pub struct Frame {
                 surface.line(cx + 2, cy, cx - 2, cy + 4, l.color);
             }
         }
-        write_px(row.x + 22.0, row.y, row.h, text, l.color, l.font_size);
+        match (icon) {
+            some(img) => {
+                if (icon_w > 0.0) {
+                    surface.draw_image(img, canvas.Rect{ x: row.x + 22.0, y: row.y + (row.h - 16.0) / 2.0, w: icon_w - 6.0, h: 16.0 });
+                }
+            },
+            none => { },
+        }
+        write_px(row.x + 22.0 + icon_w, row.y, row.h, text, l.color, l.font_size);
         last = row;  // what a context menu is for
         return row;
     }

@@ -1,5 +1,6 @@
 // The state of the example: the tab shown, a form, the options of the groups, and a tree of
 // folders and files. Its interface is in screen.ui.sosu.
+import render.image;
 import ui.widgets;
 
 pub enum Country {
@@ -37,10 +38,15 @@ pub class Demo {
     pub mut i32 count;
     pub mut i32 item;
     pub mut i32 opened;
+    // The icons of the tree, drawn here: a folder and a file, 16 pixels.
+    pub image.Image folder_icon;
+    pub image.Image file_icon;
     mut u8[12] digits;
 
-    void init() {
+    void init(Arena* arena) {
         page = 0;
+        folder_icon = icon(arena, true);
+        file_icon = icon(arena, false);
         first_name = widgets.TextBuffer{ };
         last_name = widgets.TextBuffer{ };
         email = widgets.TextBuffer{ };
@@ -67,6 +73,27 @@ pub class Demo {
         add("folder.png", icons, false);
         add("logo.png", assets, false);
         add("sosu.toml", -1, false);
+    }
+
+    // A folder (yellow, with a tab) or a file (a white page, its corner folded), 16 by 16 pixels.
+    image.Image icon(Arena* arena, bool folder) {
+        mut u32[] pixels = arena.alloc_slice(u32, 256);
+        for (i32 y in 0..16) {
+            for (i32 x in 0..16) {
+                mut u32 c = 0;  // transparent
+                if (folder) {
+                    bool tab = y >= 2 && y < 4 && x >= 1 && x < 7;
+                    bool body = y >= 4 && y < 14 && x >= 1 && x < 15;
+                    c = tab || body ? (y == 4 ? 0xFFE0A030 : 0xFFF9C74F) : 0;
+                } else {
+                    bool page = y >= 1 && y < 15 && x >= 3 && x < 13 && !(x >= 9 && y < 1 + x - 8);
+                    bool line = page && x >= 5 && x < 11 && y >= 6 && y % 3 == 0;
+                    c = line ? 0xFF8A8FA3 : page ? 0xFFE8ECF4 : 0;
+                }
+                pixels[(y * 16 + x) as usize] = c;
+            }
+        }
+        return image.Image{ width: 16, height: 16, pixels: pixels };
     }
 
     i32 add(str name, i32 parent, bool folder) {

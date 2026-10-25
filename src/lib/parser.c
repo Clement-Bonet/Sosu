@@ -1421,8 +1421,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Tabs", 0, false, { "bind", "placement", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
     { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
-    { "Branch", 1, false, { "open", "plural", "count", "context", NULL }, true },
-    { "Leaf", 1, false, { "on_click", "plural", "count", "context", NULL }, false },
+    { "Branch", 1, false, { "open", "icon", "plural", "count", "context", NULL }, true },
+    { "Leaf", 1, false, { "on_click", "icon", "plural", "count", "context", NULL }, false },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -2353,7 +2353,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *state = ui_expr(p, EXPR_NAME, start, length);
             state->as.name = ui_name("none", start);
             if (open) state = ui_some(p, ui_address(p, open));
-            Expr *branch_args[2] = { value, state };
+            Expr *icon = ui_prop(&args, "icon");
+            Expr *branch_args[3] = { value, state, icon ? ui_some(p, icon) : NULL };
             StmtVec inner = {0};
             size_t body_start = cur(p)->offset;
             p->ui_in_tree = true;
@@ -2362,11 +2363,14 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_branch", NULL, 0)));
             Stmt *when = new_stmt(p, STMT_IF, start);
             when->length = length;
-            when->as.if_.cond = ui_frame_call(p, start, length, "branch", branch_args, 2);
+            when->as.if_.cond = ui_frame_call(p, start, length, icon ? "branch_with" : "branch", branch_args, icon ? 3 : 2);
             when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
             SOSU_VEC_PUSH(out, when);
         } else if (name_text_is(node, "Leaf")) {
-            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "leaf", &value, 1), ui_prop(&args, "on_click")));
+            Expr *icon = ui_prop(&args, "icon");
+            Expr *leaf_args[2] = { value, icon ? ui_some(p, icon) : NULL };
+            Expr *leaf = ui_frame_call(p, start, length, icon ? "leaf_with" : "leaf", leaf_args, icon ? 2 : 1);
+            SOSU_VEC_PUSH(out, ui_when(p, leaf, ui_prop(&args, "on_click")));
         } else if (name_text_is(node, "Tabs")) {
             /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
             Expr *bound = ui_prop(&args, "bind");

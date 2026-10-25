@@ -62,7 +62,7 @@ class App : app.Handler {
 i32 main() uses io {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
-    state.Demo* s = arena.new(state.Demo);
+    state.Demo* s = arena.new(state.Demo, &arena);
     App* handler = arena.new(App, s);
     match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
         ok(noto) => {
