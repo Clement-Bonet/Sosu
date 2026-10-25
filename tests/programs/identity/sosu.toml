@@ -1,0 +1,9 @@
+# Widgets that keep their identity when others appear before them (spec §10.6), driven
+# without a window.
+[package]
+name = "identity"
+version = "0.1.0"
+
+[dependencies]
+render = { path = "../../../packages/render" }
+ui = { path = "../../../packages/ui" }

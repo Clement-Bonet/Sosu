@@ -1,0 +1,37 @@
+// The state of the screen: a search field that may appear, a title, and notes named by an id.
+import ui.widgets;
+
+pub class Notes {
+    pub mut bool show_search;
+    pub mut widgets.TextBuffer search;
+    pub mut widgets.TextBuffer title;
+    pub mut widgets.TextBuffer[4] texts;
+    pub mut i32[4] ids;
+    pub mut i32 count;
+    mut i32 next_id;
+
+    void init() {
+        show_search = false;
+        search = widgets.TextBuffer{ };
+        title = widgets.TextBuffer{ };
+        texts = [widgets.TextBuffer{ }; 4];
+        ids = [1, 2, 0, 0];
+        count = 2;
+        next_id = 3;
+    }
+
+    // A new note, first: the others move down one place.
+    pub void add_first() {
+        if (count == 4) {
+            return;
+        }
+        for (mut i32 i = count; i > 0; i -= 1) {
+            texts[i as usize] = texts[(i - 1) as usize];
+            ids[i as usize] = ids[(i - 1) as usize];
+        }
+        texts[0] = widgets.TextBuffer{ };
+        ids[0] = next_id;
+        next_id += 1;
+        count += 1;
+    }
+}

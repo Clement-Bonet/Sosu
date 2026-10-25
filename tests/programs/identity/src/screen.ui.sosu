@@ -1,0 +1,20 @@
+// A search field that may appear before the title being edited, and notes in a `Scroll`, named
+// by their id: the field that has the keyboard keeps it whatever appears before it.
+import identity.state;
+
+window Notes(state.Notes* n) {
+    title: "Notes"
+    width: 400
+    height: 300
+
+    if (n.show_search) {
+        TextField(bind: n.search, width: 200)
+    }
+    TextField(bind: n.title, width: 200, focus: true)
+    Scroll(width: 300, height: 100) {
+        for (i32 i in 0..n.count, key: n.ids[i]) {
+            TextField(bind: n.texts[i], width: 200)
+        }
+    }
+    Button("Add", on_click: n.add_first)
+}

@@ -64,6 +64,7 @@ class App : app.Handler, app.TitleBar {
             },
             Wheel(x, y) => {
                 ui.scroll_wheel(y);
+                ui.scroll_wheel_x(x);  // the sideways wheel: `Scroll` areas
             },
             _ => { },
         }

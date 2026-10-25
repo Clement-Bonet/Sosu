@@ -709,9 +709,10 @@ Translation in v0:
 | `Checkbox(s, bind: x, on_change: h)` | `if (f.checkbox(s, &x)) { h(); }`; without `s`, `f.checkbox_alone(&x)` |
 | `Radio(s, bind: x, value: v, on_change: h)` | `if (f.radio(s, x == v) && x != v) { x = v; h(); }`: one radio per value of an `enum` without data, `v` written without its type (`Small`); choosing the radio already chosen changes nothing |
 | `List(width: w, height: h, selected: i) { ... }` | `f.list(w, h, some(&i))` (or `none`), the nodes, `f.end_list()`: each node in the list is an item; `i` (an `i32`, -1 for none) is the item chosen; `width` is 300 and `height` 200 by default |
+| `Scroll(width: w, height: h) { ... }` | `f.scroll(w, h)`, the nodes, `f.end_scroll()`; `width` and `height` are required |
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
-- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. A node without arguments may leave out its parentheses: `List { ... }`.
+- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
 - Not yet: `style` and `theme` blocks, `style:`, `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
@@ -752,7 +753,7 @@ children     = "{" { item } "}" ;
    - Formats: `Format{ accept, max, mask }`. `accept` is `Any`, `Digits`, `Integer` (and `-` first) or `Decimal` (and `-` first, and one `.` or `,`); `max` limits the characters; a mask such as `99/99/9999` takes a digit for `9`, a letter for `A`, anything for `*`, and writes its other characters when the cursor reaches them. What does not fit is not typed.
    - Lists: the widgets placed directly in a list are its items, one under the other, clipped to it. The mouse wheel over it scrolls it (`ui.scroll_wheel(steps)`, 40 pixels a step), within its content; a bar on its right shows where. With `selected`, a click chooses an item and gives the list the keyboard, Up and Down move the choice, which comes into view, and the item chosen is highlighted. `Ui` keeps the scroll of 8 lists between frames.
    - Menus: `menu(title)` ... `end_menu()` describes a menu at each frame, open or not, so that the shortcuts of its items work when it is closed. Outside of a menu, its title is placed as a widget (side by side in `menu_bar()` ... `end_menu_bar()`): a click opens the menu under it, and while a menu opened by its title is open, the mouse over another title opens that one. In a menu, `menu(title)` is an entry with a chevron that opens a submenu beside it when the mouse is over it (4 levels). `context_menu()` ... `end_context_menu()` is the menu of the widget placed just before it (a list: the whole list), opened under the mouse by the right button (`ui.right_button(down)`); when several match, as an item and its list, the first described opens. `menu_item(text)` is true when it is clicked; `menu_item_enabled(text, enabled)` dims it; `menu_item_with(text, shortcut, enabled)` shows a shortcut at its right, `"Ctrl+S"`, `"Ctrl+Shift+Z"`, `"F5"`, `"Delete"` (`Cmd` is `Ctrl`), which works even with the menu closed: a key press triggers the first item described that has it, and a shortcut without Ctrl, other than F1 to F12, does nothing while a text field has the keyboard. `separator()` draws a line. A click elsewhere, a right press elsewhere or Escape closes the menus; an open menu stays on the surface, and its width follows its widest entry from the next frame.
-   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `right_button`, `scroll_wheel`, `type_text`, `key(code, down, shift, ctrl)`), so its tests run without SDL, and puts what it copies on the clipboard (`examples/form` shows the few lines). The translator of `.ui.sosu` generates the calls to the widgets.
+   - `ui` does not depend on `platform`: the program passes it the input (`mouse_move`, `mouse_button`, `right_button`, `scroll_wheel`, `scroll_wheel_x`, `type_text`, `key(code, down, shift, ctrl)`), so its tests run without SDL, and puts what it copies on the clipboard (`examples/form` shows the few lines). The translator of `.ui.sosu` generates the calls to the widgets.
 
 Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file (§10.2), each one with a method of `widgets.Frame` behind it.
 
@@ -769,7 +770,8 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `MoneyField` | planned | bound to an integer of minor units (`i64` cents), never to a float; `symbol:` and `decimal:` given explicitly (`symbol: "€", decimal: ","`) rather than read from the locale of the system |
 | `TextArea` (several lines) | planned | the same editing core, plus Up / Down, line wrapping and scrolling; `rows:` gives its height; text in a buffer that grows in an arena |
 | `Radio` | available | `Radio("Small", bind: size, value: Small)`: the translator generates the comparison and the assignment for the `enum` (`==` on enums without data), so the widget itself needs no generics |
-| `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. Not yet: dragging the bar, a selection of several items |
+| `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. Not yet: a selection of several items |
+| `Scroll` | available | `Scroll(width: 300, height: 200) { ... }`: any content, scrolled by the wheel (the innermost area first), its bars and the keyboard (§10.6) |
 | `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. Not yet: choosing with the keyboard, scrolling a long list (16 options at most) |
 | `MenuBar`, `Menu`, `MenuItem`, `Separator` | available | menus drawn by `ui`, in a title bar as in VS Code, or anywhere; submenus; shortcuts |
 | `ContextMenu` | available | the menu of the widget placed before it, opened by the right button |
@@ -781,7 +783,7 @@ Foundations, to build first, since most planned widgets rely on them:
 2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat. Done (key repeat comes from the system); not yet: moving by word (Ctrl+Left), undo.
 3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`.
 4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame. Done for dropdowns and menus: `Ui` keeps the rectangles of the open list of a dropdown and of the open menus, and the widgets under them do not see the mouse.
-5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`). Designed in §10.6, with the identity of the widgets and the scrolling of any area.
+5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`). Done, with the identity of the widgets and the scrolling of any area (§10.6).
 
 Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling (done), `Dropdown` with the layer above (done), then `TextArea`. Worth adding afterwards: slider, progress bar, tabs, dialogs, number spinner, date picker, tooltips, menus.
 
@@ -847,7 +849,7 @@ Tests: the tests of `ui` check the drag area, the window buttons and their reque
 
 ### 10.6 Foundations of the widgets: identity, keyboard, scrolling
 
-Status: design, not implemented yet. The first of the batches that complete `ui` (grid, frames, tabs, tree, table, text area...): what they all rely on.
+The first of the batches that complete `ui` (grid, frames, tabs, tree, table, text area...): what they all rely on.
 
 #### Identity of the widgets
 
