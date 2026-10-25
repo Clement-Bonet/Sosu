@@ -1,0 +1,736 @@
+// i18n.catalog: catalogs of translations, read from gettext .po files (spec §10.7).
+//
+// A catalog maps a source text (with its context, if any) to its translation, and to its
+// plural forms, chosen by the rule of the language (`Plural-Forms` in the header of the
+// file). What is missing, empty, or marked `fuzzy` (not yet checked by a translator) shows the
+// source text. The file is read through checked reads: a damaged file gives `Damaged` with
+// its line, never a read outside of its bytes.
+import std.io;
+
+pub enum I18nError {
+    Unreadable,  // the file cannot be read
+    Damaged(u32 line),  // a line that is not of the format
+}
+
+// A translation: its context ("" for none), its source text, and its forms (`msgstr`, or
+// `msgstr[0]`, `msgstr[1]`...).
+struct Entry {
+    str context;
+    str id;
+    str[] forms;
+}
+
+pub class Catalog {
+    Entry[] entries;
+    u32[] table;  // open addressing: an index of `entries` plus 1, or 0 for an empty slot
+    str rule;  // the expression of `Plural-Forms`, "" for the rule of English
+    usize forms;  // how many plural forms the language has
+
+    void init(Entry[] entries, u32[] table, str rule, usize forms) {
+        self.entries = entries;
+        self.table = table;
+        self.rule = rule;
+        self.forms = forms;
+    }
+
+    // The translation of `source`, or `source` itself.
+    pub str text(str source) {
+        return in_context("", source);
+    }
+
+    // The same, for one meaning of `source` (`msgctxt`).
+    pub str in_context(str context, str source) {
+        return match (find(context, source)) {
+            some(i) => entries[i].forms.len > 0 && entries[i].forms[0].len > 0 ? entries[i].forms[0] : source,
+            none => source,
+        };
+    }
+
+    // The form of `one` (its plural: `other`) for `n` things, translated.
+    pub str plural(str one, str other, i64 n) {
+        return plural_in_context("", one, other, n);
+    }
+
+    pub str plural_in_context(str context, str one, str other, i64 n) {
+        usize form = plural_form(n);
+        match (find(context, one)) {
+            some(i) => {
+                Entry e = entries[i];
+                if (form < e.forms.len && e.forms[form].len > 0) {
+                    return e.forms[form];
+                }
+            },
+            none => { },
+        }
+        return n == 1 ? one : other;  // the source language: English
+    }
+
+    // The plural form for `n`, by the rule of the language (0 for one thing in English).
+    pub usize plural_form(i64 n) {
+        if (rule.len == 0) {
+            return n == 1 ? 0 : 1;
+        }
+        mut Rule r = Rule{ text: rule, n: n };
+        i64 form = r.ternary();
+        if (r.failed || form < 0 || form as u64 >= forms as u64) {
+            return n == 1 ? 0 : 1;
+        }
+        return form as usize;
+    }
+
+    // How many translations the catalog holds.
+    pub usize count() {
+        return entries.len;
+    }
+
+    usize? find(str context, str id) {
+        if (table.len == 0) {
+            return none;
+        }
+        usize mask = table.len - 1;
+        mut usize at = key_hash(context, id) as usize & mask;
+        while (table[at] != 0) {
+            usize i = (table[at] - 1) as usize;
+            if (same(entries[i].id, id) && same(entries[i].context, context)) {
+                return some(i);
+            }
+            at = at + 1 & mask;
+        }
+        return none;
+    }
+}
+
+bool same(str a, str b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (usize i in 0..a.len) {
+        if (a.bytes[i] != b.bytes[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// FNV-1a over the context, a separator (4, as gettext), and the text.
+u32 key_hash(str context, str id) {
+    mut u32 h = 0x811C9DC5;
+    for (u8 b in context.bytes) {
+        h = wrapping_mul(h ^ b as u32, 0x01000193);
+    }
+    h = wrapping_mul(h ^ 4, 0x01000193);
+    for (u8 b in id.bytes) {
+        h = wrapping_mul(h ^ b as u32, 0x01000193);
+    }
+    return h;
+}
+
+// ---- The plural rule: a C expression of `n` ----
+
+struct Rule {
+    str text;
+    i64 n;
+    mut usize at = 0;
+    mut bool failed = false;
+
+    u8 peek() {
+        while (at < text.len && (text.bytes[at] == 32 || text.bytes[at] == 9)) {
+            at += 1;
+        }
+        return at < text.len ? text.bytes[at] : 0;
+    }
+
+    // `a` and then `b` (the second byte of an operator), if they come next.
+    bool eat(u8 a, u8 b) {
+        u8 c = peek();
+        if (c != a) {
+            return false;
+        }
+        if (b == 0) {
+            bool doubled = at + 1 < text.len && (text.bytes[at + 1] == 61 || text.bytes[at + 1] == a && (a == 38 || a == 124));
+            if (doubled) {  // `<` is not `<=`, `!` is not `!=`, `&` alone is not `&&`
+                return false;
+            }
+            at += 1;
+            return true;
+        }
+        if (at + 1 < text.len && text.bytes[at + 1] == b) {
+            at += 2;
+            return true;
+        }
+        return false;
+    }
+
+    i64 ternary() {
+        i64 c = either();
+        if (eat(63, 0)) {  // ?
+            i64 a = ternary();
+            if (!eat(58, 0)) {  // :
+                failed = true;
+            }
+            i64 b = ternary();
+            return c != 0 ? a : b;
+        }
+        return c;
+    }
+
+    i64 either() {
+        mut i64 v = both();
+        while (eat(124, 124)) {  // ||
+            i64 w = both();
+            v = v != 0 || w != 0 ? 1 : 0;
+        }
+        return v;
+    }
+
+    i64 both() {
+        mut i64 v = equal();
+        while (eat(38, 38)) {  // &&
+            i64 w = equal();
+            v = v != 0 && w != 0 ? 1 : 0;
+        }
+        return v;
+    }
+
+    i64 equal() {
+        mut i64 v = compare();
+        while (true) {
+            if (eat(61, 61)) {
+                v = v == compare() ? 1 : 0;
+            } else if (eat(33, 61)) {
+                v = v != compare() ? 1 : 0;
+            } else {
+                return v;
+            }
+        }
+        return v;
+    }
+
+    i64 compare() {
+        mut i64 v = sum();
+        while (true) {
+            if (eat(60, 61)) {
+                v = v <= sum() ? 1 : 0;
+            } else if (eat(62, 61)) {
+                v = v >= sum() ? 1 : 0;
+            } else if (eat(60, 0)) {
+                v = v < sum() ? 1 : 0;
+            } else if (eat(62, 0)) {
+                v = v > sum() ? 1 : 0;
+            } else {
+                return v;
+            }
+        }
+        return v;
+    }
+
+    i64 sum() {
+        mut i64 v = product();
+        while (true) {
+            if (eat(43, 0)) {
+                v = wrapping_add(v, product());
+            } else if (eat(45, 0)) {
+                v = wrapping_sub(v, product());
+            } else {
+                return v;
+            }
+        }
+        return v;
+    }
+
+    i64 product() {
+        mut i64 v = unary();
+        while (true) {
+            bool times = eat(42, 0);
+            bool divide = !times && eat(47, 0);
+            bool modulo = !times && !divide && eat(37, 0);
+            if (!times && !divide && !modulo) {
+                return v;
+            }
+            i64 w = unary();
+            if ((divide || modulo) && w == 0) {
+                failed = true;
+                return 0;
+            }
+            v = times ? wrapping_mul(v, w) : divide ? v / w : v % w;
+        }
+        return v;
+    }
+
+    i64 unary() {
+        if (eat(33, 0)) {  // !
+            return unary() == 0 ? 1 : 0;
+        }
+        return primary();
+    }
+
+    i64 primary() {
+        u8 c = peek();
+        if (c == 40) {  // (
+            at += 1;
+            i64 v = ternary();
+            if (!eat(41, 0)) {
+                failed = true;
+            }
+            return v;
+        }
+        if (c == 110) {  // n
+            at += 1;
+            return n;
+        }
+        if (c >= 48 && c <= 57) {
+            mut i64 v = 0;
+            while (at < text.len && text.bytes[at] >= 48 && text.bytes[at] <= 57 && v < 100000000) {
+                v = v * 10 + (text.bytes[at] - 48) as i64;
+                at += 1;
+            }
+            return v;
+        }
+        failed = true;
+        return 0;
+    }
+}
+
+// ---- Reading a .po file ----
+
+// A field of an entry being read (`msgid`, `msgstr[1]`...): the quoted pieces of its lines,
+// as offsets in the file, without their quotes and still escaped.
+struct Field {
+    mut bool present = false;
+    mut usize[32] starts = [0; 32];
+    mut usize[32] ends = [0; 32];
+    mut usize count = 0;
+
+    void add(usize start, usize end) {
+        present = true;
+        if (count < 32) {
+            starts[count] = start;
+            ends[count] = end;
+            count += 1;
+        }
+    }
+}
+
+// The entry being read: its context, its source and plural texts, its forms (8 at most).
+struct Reading {
+    mut Field context = Field{ };
+    mut Field id = Field{ };
+    mut Field plural = Field{ };
+    mut Field[8] forms = [Field{ }; 8];
+    mut bool fuzzy = false;
+    mut i32 last = -1;  // the field that continuation lines add to: 0 context, 1 id, 2 plural, 3+ forms
+
+    bool translated() {
+        for (usize i in 0..8) {
+            if (forms[i].present) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// The text of a field: its pieces, joined, with their escapes decoded, in `arena`.
+str decode(Arena* arena, str file, Field f) {
+    mut usize length = 0;
+    for (usize k in 0..f.count) {
+        length += f.ends[k] - f.starts[k];
+    }
+    mut u8[] bytes = arena.alloc_slice(u8, length);
+    mut usize out = 0;
+    for (usize k in 0..f.count) {
+        mut usize i = f.starts[k];
+        while (i < f.ends[k]) {
+            u8 c = file.bytes[i];
+            if (c == 92 && i + 1 < f.ends[k]) {  // a backslash
+                u8 e = file.bytes[i + 1];
+                bytes[out] = e == 110 ? 10 : e == 116 ? 9 : e == 114 ? 13 : e;  // \n \t \r, \" \\ ...
+                i += 2;
+            } else {
+                bytes[out] = c;
+                i += 1;
+            }
+            out += 1;
+        }
+    }
+    return match (str.from_bytes(bytes[0..out])) {
+        ok(text) => text,
+        err(e) => "",
+    };
+}
+
+bool starts_with(str text, usize at, str prefix) {
+    if (at + prefix.len > text.len) {
+        return false;
+    }
+    for (usize i in 0..prefix.len) {
+        if (text.bytes[at + i] != prefix.bytes[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether `needle` is in `text` between `from` and `to`.
+bool contains_between(str text, str needle, usize from, usize to) {
+    return match (index_of(text, needle, from)) {
+        some(at) => at + needle.len <= to,
+        none => false,
+    };
+}
+
+// The offset of `needle` in `text` from `from`, or none.
+usize? index_of(str text, str needle, usize from) {
+    mut usize at = from;
+    while (at + needle.len <= text.len) {
+        if (starts_with(text, at, needle)) {
+            return some(at);
+        }
+        at += 1;
+    }
+    return none;
+}
+
+// The header's `Plural-Forms: nplurals=N; plural=EXPR;`: N, and EXPR copied in `arena`.
+struct PluralForms {
+    mut usize count = 2;
+    mut str rule = "";
+}
+
+PluralForms plural_forms(str header) {
+    mut PluralForms p = PluralForms{ };
+    match (index_of(header, "nplurals=", 0)) {
+        some(at) => {
+            mut usize i = at + 9;
+            mut usize n = 0;
+            while (i < header.len && header.bytes[i] >= 48 && header.bytes[i] <= 57 && n < 100) {
+                n = n * 10 + (header.bytes[i] - 48) as usize;
+                i += 1;
+            }
+            if (n >= 1 && n <= 8) {
+                p.count = n;
+            }
+        },
+        none => { },
+    }
+    match (index_of(header, "plural=", 0)) {
+        some(at) => {
+            mut usize end = at + 7;
+            while (end < header.len && header.bytes[end] != 59 && header.bytes[end] != 10) {  // ; or a new line
+                end += 1;
+            }
+            p.rule = match (str.from_bytes(header.bytes[at + 7..end])) {
+                ok(text) => text,
+                err(e) => "",
+            };
+        },
+        none => { },
+    }
+    return p;
+}
+
+// The quoted string of a line, from `from`: its content between the quotes, or none.
+bool quoted(str file, usize from, usize end, usize* start, usize* stop) {
+    mut usize i = from;
+    while (i < end && (file.bytes[i] == 32 || file.bytes[i] == 9)) {
+        i += 1;
+    }
+    mut usize last = end;
+    while (last > i && (file.bytes[last - 1] == 32 || file.bytes[last - 1] == 9 || file.bytes[last - 1] == 13)) {
+        last -= 1;
+    }
+    if (i >= last || file.bytes[i] != 34 || last - i < 2 || file.bytes[last - 1] != 34) {
+        return false;
+    }
+    *start = i + 1;
+    *stop = last - 1;
+    return true;
+}
+
+// Reads the catalog of the .po file at `path`; what it holds is allocated in `arena`.
+pub Catalog*!I18nError load(Arena* arena, str path) uses io {
+    str file = match (io.read_file(arena, path)) {
+        ok(text) => text,
+        err(e) => {
+            return err(Unreadable);
+        },
+    };
+    return parse(arena, file);
+}
+
+// Reads the catalog of the text of a .po file.
+pub Catalog*!I18nError parse(Arena* arena, str file) {
+    // At most one entry per `msgid` line.
+    mut usize capacity = 0;
+    mut usize at = 0;
+    while (at < file.len) {
+        if (starts_with(file, at, "msgid ")) {
+            capacity += 1;
+        }
+        while (at < file.len && file.bytes[at] != 10) {
+            at += 1;
+        }
+        at += 1;
+    }
+    mut Entry[] entries = arena.alloc_slice(Entry, capacity);
+    mut usize count = 0;
+    mut PluralForms plurals = PluralForms{ };
+    mut Reading r = Reading{ };
+    mut bool fuzzy_next = false;
+    mut u32 line = 0;
+    at = 0;
+    while (at <= file.len) {
+        // the line: from `at` to `end`, its spaces before skipped
+        mut usize end = at;
+        while (end < file.len && file.bytes[end] != 10) {
+            end += 1;
+        }
+        line += 1;
+        mut usize i = at;
+        while (i < end && (file.bytes[i] == 32 || file.bytes[i] == 9 || file.bytes[i] == 13)) {
+            i += 1;
+        }
+        bool last_line = end >= file.len;
+        if (i < end && file.bytes[i] == 35) {  // a comment; `#, fuzzy` marks the next entry
+            if (starts_with(file, i, "#,") && contains_between(file, "fuzzy", i, end)) {
+                fuzzy_next = true;
+            }
+        } else if (i < end) {
+            mut usize start = 0;
+            mut usize stop = 0;
+            if (file.bytes[i] == 34) {  // a continuation line
+                if (r.last < 0 || !quoted(file, i, end, &start, &stop)) {
+                    return err(Damaged(line));
+                }
+                add_piece(&r, start, stop);
+            } else {
+                mut usize word = i;
+                while (word < end && file.bytes[word] != 32) {
+                    word += 1;
+                }
+                str keyword = match (str.from_bytes(file.bytes[i..word])) {
+                    ok(text) => text,
+                    err(e) => "",
+                };
+                if (!quoted(file, word, end, &start, &stop)) {
+                    return err(Damaged(line));
+                }
+                bool begins = same(keyword, "msgctxt") || same(keyword, "msgid");
+                if (begins && (r.translated() || same(keyword, "msgid") && r.id.present)) {
+                    count = flush(arena, file, &r, entries, count, &plurals);
+                }
+                if (begins && !r.context.present && !r.id.present) {
+                    r.fuzzy = fuzzy_next;
+                    fuzzy_next = false;
+                }
+                if (same(keyword, "msgctxt")) {
+                    r.last = 0;
+                } else if (same(keyword, "msgid")) {
+                    r.last = 1;
+                } else if (same(keyword, "msgid_plural")) {
+                    r.last = 2;
+                } else if (same(keyword, "msgstr")) {
+                    r.last = 3;
+                } else if (keyword.len == 9 && starts_with(keyword, 0, "msgstr[") && keyword.bytes[8] == 93 && keyword.bytes[7] >= 48 && keyword.bytes[7] <= 55) {
+                    r.last = 3 + (keyword.bytes[7] - 48) as i32;  // msgstr[0] to msgstr[7]
+                } else {
+                    return err(Damaged(line));
+                }
+                add_piece(&r, start, stop);
+            }
+        }
+        if (last_line) {
+            break;
+        }
+        at = end + 1;
+    }
+    count = flush(arena, file, &r, entries, count, &plurals);
+
+    // The table: a power of 2, at least twice as large as the entries.
+    mut usize size = 8;
+    while (size < 2 * count) {
+        size *= 2;
+    }
+    mut u32[] table = arena.alloc_slice(u32, size);
+    for (usize e in 0..count) {
+        mut usize slot = key_hash(entries[e].context, entries[e].id) as usize & size - 1;
+        while (table[slot] != 0) {
+            slot = slot + 1 & size - 1;
+        }
+        table[slot] = (e + 1) as u32;
+    }
+    return ok(arena.new(Catalog, entries[0..count], table, plurals.rule, plurals.count));
+}
+
+void add_piece(Reading* r, usize start, usize stop) {
+    if (r.last == 0) {
+        r.context.add(start, stop);
+    } else if (r.last == 1) {
+        r.id.add(start, stop);
+    } else if (r.last == 2) {
+        r.plural.add(start, stop);
+    } else if (r.last >= 3) {
+        r.forms[(r.last - 3) as usize].add(start, stop);
+    }
+}
+
+// Ends the entry being read: kept unless it is fuzzy or the header (whose plural rule is read).
+usize flush(Arena* arena, str file, Reading* r, Entry[] entries, usize count, PluralForms* plurals) {
+    if (!r.id.present) {
+        *r = Reading{ };
+        return count;
+    }
+    str id = decode(arena, file, r.id);
+    mut usize kept = count;
+    if (id.len == 0 && !r.context.present) {  // the header
+        *plurals = plural_forms(decode(arena, file, r.forms[0]));
+    } else if (!r.fuzzy && count < entries.len) {
+        mut usize n = 0;
+        for (usize k in 0..8) {
+            if (r.forms[k].present) {
+                n = k + 1;
+            }
+        }
+        mut str[] forms = arena.alloc_slice(str, n);
+        for (usize k in 0..n) {
+            forms[k] = decode(arena, file, r.forms[k]);
+        }
+        str context = r.context.present ? decode(arena, file, r.context) : "";
+        entries[count] = Entry{ context: context, id: id, forms: forms };
+        kept = count + 1;
+    }
+    *r = Reading{ };
+    return kept;
+}
+
+// The language, among `available`, that suits best the first of `wanted` that can be found
+// (languages written `fr`, `fr-CA` or `fr_CA`, in any case): the same, else the same language
+// without its region. None if no wanted language is available.
+pub usize? best(str[] available, str[] wanted) {
+    for (str w in wanted) {
+        for (usize i in 0..available.len) {
+            if (same_tag(available[i], w, false)) {
+                return some(i);
+            }
+        }
+        for (usize i in 0..available.len) {
+            if (same_tag(available[i], w, true)) {
+                return some(i);
+            }
+        }
+    }
+    return none;
+}
+
+// Whether two language tags are the same (`language_only`: their languages, before - or _).
+bool same_tag(str a, str b, bool language_only) {
+    usize la = language_only ? language_length(a) : a.len;
+    usize lb = language_only ? language_length(b) : b.len;
+    if (la != lb) {
+        return false;
+    }
+    for (usize i in 0..la) {
+        u8 x = a.bytes[i] == 95 ? 45 : a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
+        u8 y = b.bytes[i] == 95 ? 45 : b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
+        if (x != y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+usize language_length(str tag) {
+    for (usize i in 0..tag.len) {
+        if (tag.bytes[i] == 45 || tag.bytes[i] == 95) {
+            return i;
+        }
+    }
+    return tag.len;
+}
+
+// ---- Tests ----
+
+Catalog* parsed(Arena* arena, str text) {
+    return match (parse(arena, text)) {
+        ok(c) => c,
+        err(e) => arena.new(Catalog, arena.alloc_slice(Entry, 0), arena.alloc_slice(u32, 0), "", 2),
+    };
+}
+
+test "a .po file: texts, contexts, plurals, strings on several lines, escapes" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Catalog* c = match (load(&arena, "packages/i18n/tests/fr.po")) {
+        ok(found) => found,
+        err(e) => parsed(&arena, ""),
+    };
+    assert(c.count() == 6);  // Quit is fuzzy: not taken
+    assert(same(c.text("Save"), "Enregistrer") && same(c.text("Missing"), "Missing"));
+    assert(same(c.in_context("verb", "Open"), "Ouvrir") && same(c.in_context("state", "Open"), "Ouvert"));
+    assert(same(c.text("Open"), "Open"));  // without context: another text
+    assert(same(c.plural("{count} file", "{count} files", 0), "{count} fichier"));  // French: 0 is singular
+    assert(same(c.plural("{count} file", "{count} files", 1), "{count} fichier"));
+    assert(same(c.plural("{count} file", "{count} files", 2), "{count} fichiers"));
+    assert(same(c.plural("{n} cat", "{n} cats", 0), "{n} cats"));  // not translated: English
+    assert(same(c.text("A long text"), "Un \"long\" texte\tici"));
+    assert(same(c.text("Quit"), "Quit") && same(c.text("Help"), "Help"));  // fuzzy, empty
+}
+
+test "plural rules of other languages" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Catalog* russian = parsed(&arena, "msgid \"\"\nmsgstr \"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\\n\"\n");
+    i64[8] ns = [1, 2, 5, 11, 21, 22, 25, 111];
+    usize[8] ru = [0, 1, 2, 2, 0, 1, 2, 2];
+    for (usize i in 0..8) {
+        assert(russian.plural_form(ns[i]) == ru[i]);
+    }
+    Catalog* arabic = parsed(&arena, "msgid \"\"\nmsgstr \"Plural-Forms: nplurals=6; plural=(n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 && n%100<=10 ? 3 : n%100>=11 ? 4 : 5);\\n\"\n");
+    i64[6] an = [0, 1, 2, 3, 11, 100];
+    usize[6] ar = [0, 1, 2, 3, 4, 5];
+    for (usize i in 0..6) {
+        assert(arabic.plural_form(an[i]) == ar[i]);
+    }
+    Catalog* english = parsed(&arena, "msgid \"a\"\nmsgstr \"b\"\n");  // no header: English
+    assert(english.plural_form(1) == 0 && english.plural_form(0) == 1 && english.plural_form(2) == 1);
+}
+
+test "a damaged file gives its line" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    i32 line = match (parse(&arena, "msgid \"a\"\nmsgstr \"b\"\n\nmsgid unquoted\n")) {
+        ok(c) => 0,
+        err(e) => match (e) {
+            Unreadable => -1,
+            Damaged(at) => at as i32,
+        },
+    };
+    assert(line == 4);
+    bool unreadable = match (load(&arena, "packages/i18n/none.po")) {
+        ok(c) => false,
+        err(e) => match (e) {
+            Unreadable => true,
+            Damaged(at) => false,
+        },
+    };
+    assert(unreadable);
+}
+
+i32 index_or_minus(usize? found) {
+    return match (found) {
+        some(i) => i as i32,
+        none => -1,
+    };
+}
+
+test "the best language" {
+    mut str[3] available = ["en", "fr", "pt-BR"];
+    mut str[2] canadian = ["fr-CA", "en"];
+    mut str[1] brazilian = ["pt_br"];
+    mut str[1] portuguese = ["pt-PT"];
+    mut str[1] german = ["de"];
+    assert(index_or_minus(best(available[0..3], canadian[0..2])) == 1);  // fr-CA: French
+    assert(index_or_minus(best(available[0..3], brazilian[0..1])) == 2);
+    assert(index_or_minus(best(available[0..3], portuguese[0..1])) == 2);  // the language without the region
+    assert(index_or_minus(best(available[0..3], german[0..1])) == -1);
+}

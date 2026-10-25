@@ -1,0 +1,2 @@
+// i18n: translations of the texts of a program (spec §10.7). Programs import `i18n.catalog`.
+import i18n.catalog;

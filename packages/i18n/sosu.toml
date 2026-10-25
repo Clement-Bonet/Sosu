@@ -1,0 +1,4 @@
+# Translations (spec §10.7): catalogs of gettext .po files, read in Sosu.
+[package]
+name = "i18n"
+version = "0.1.0"
