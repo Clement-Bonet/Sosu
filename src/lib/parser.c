@@ -1372,16 +1372,17 @@ typedef struct {
 static const UiNodeKind ui_nodes[] = {
     { "Column", 0, false, { "gap", "padding", NULL }, true },
     { "Row", 0, false, { "gap", "padding", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "focus", NULL }, true },
+    { "Scroll", 0, false, { "width", "height", NULL }, true },
     { "Text", 1, false, { NULL }, false },
     { "Title", 1, false, { NULL }, false },
     { "Space", 1, false, { NULL }, false },
-    { "Button", 1, false, { "on_click", "enabled", NULL }, false },
-    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", NULL }, false },
+    { "Button", 1, false, { "on_click", "enabled", "focus", NULL }, false },
+    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "focus", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
     { "Radio", 1, false, { "bind", "value", "on_change", NULL }, false },
     { "TitleBar", 0, false, { "height", "gap", "padding", NULL }, true },
-    { "Dropdown", 0, false, { "bind", "width", "on_change", NULL }, true },
+    { "Dropdown", 0, false, { "bind", "width", "on_change", "focus", NULL }, true },
     { "Option", 1, false, { "value", NULL }, false },
     { "Image", 1, false, { "size", NULL }, false },
     { "MenuBar", 0, false, { NULL }, true },
@@ -1391,9 +1392,13 @@ static const UiNodeKind ui_nodes[] = {
     { "ContextMenu", 0, false, { NULL }, true },
 };
 
-#define UI_CONTAINERS                                                                                         \
-    "only `Column`, `Row`, `List`, `TitleBar`, `Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other " \
-    "nodes"
+#define UI_CONTAINERS                                                                                      \
+    "only `Column`, `Row`, `List`, `Scroll`, `TitleBar`, `Dropdown`, `MenuBar`, `Menu` and `ContextMenu` " \
+    "contain other nodes"
+
+/* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
+static const char *const ui_identified[] = { "Button", "TextField", "Checkbox", "Radio", "List",
+                                             "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
 
@@ -1445,6 +1450,13 @@ static Expr *ui_frame_call(Parser *p, size_t at_offset, size_t at_length, const 
     return call;
 }
 
+/* An integer that is not in the source: its value is in `int_value` (see codegen). */
+static Expr *ui_int(Parser *p, size_t offset, uint64_t value) {
+    Expr *literal = ui_expr(p, EXPR_INT, offset, 0);
+    literal->as.int_value = value;
+    return literal;
+}
+
 /* A number of pixels: `8` stands for `8.0`; `fallback` when it is absent. An added float
    literal has no text in the source: its value is in `int_value` (see codegen). */
 static Expr *ui_float(Parser *p, Expr *value, size_t offset, uint64_t fallback) {
@@ -1469,6 +1481,11 @@ static Stmt *ui_stmt(Parser *p, Expr *expr) {
     stmt->length = expr->length;
     stmt->as.expr = expr;
     return stmt;
+}
+
+/* `ui_frame.method(value)` as a statement, or `ui_frame.method()` when `value` is NULL. */
+static Stmt *ui_frame_stmt(Parser *p, size_t offset, size_t length, const char *method, Expr *value) {
+    return ui_stmt(p, ui_frame_call(p, offset, length, method, &value, value ? 1 : 0));
 }
 
 static Stmt *ui_block(Parser *p, StmtVec *items, size_t offset, size_t length) {
@@ -1578,6 +1595,11 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
     if (strcmp(kind->name, "Radio") == 0 && !ui_prop(args, "value")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Radio` needs `value:`");
         diag_help(d, "give the value it chooses: `Radio(\"Small\", bind: state.size, value: Small)`");
+        return false;
+    }
+    if (strcmp(kind->name, "Scroll") == 0 && (!ui_prop(args, "width") || !ui_prop(args, "height"))) {
+        Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`Scroll` needs `width:` and `height:`");
+        diag_help(d, "give the size of the area: `Scroll(width: 300, height: 200) { ... }`");
         return false;
     }
     if (strcmp(kind->name, "Option") == 0 && !ui_prop(args, "value")) {
@@ -1728,7 +1750,10 @@ static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_
     call->as.call.callee = callee;
     call->as.call.arg_count = values.count;
     call->as.call.args = FINISH(p, values);
+    /* in a scope of its own, named by its place: two uses of a component are distinct */
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "push_id", ui_int(p, start, start)));
     SOSU_VEC_PUSH(out, ui_stmt(p, call));
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "pop_id", NULL));
 }
 
 /* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
@@ -1768,6 +1793,24 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
+        bool identified = false;
+        for (size_t i = 0; i < sizeof ui_identified / sizeof *ui_identified; i++) {
+            identified = identified || strcmp(kind->name, ui_identified[i]) == 0;
+        }
+        if (valid && identified) {
+            /* `if (focus) { f.focus_here(); }`, then `f.at(site)`: its place in the file */
+            Expr *focus = ui_prop(&args, "focus");
+            if (focus) {
+                StmtVec take = {0};
+                SOSU_VEC_PUSH(&take, ui_frame_stmt(p, focus->offset, focus->length, "focus_here", NULL));
+                Stmt *when = new_stmt(p, STMT_IF, focus->offset);
+                when->length = focus->length;
+                when->as.if_.cond = focus;
+                when->as.if_.then_block = ui_block(p, &take, focus->offset, focus->length);
+                SOSU_VEC_PUSH(out, when);
+            }
+            SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "at", ui_int(p, start, start)));
+        }
         if (!valid) {
             if (kind->children && check(p, TOK_LBRACE)) ui_parse_children(p, out);
         } else if (name_text_is(node, "List")) {
@@ -1790,6 +1833,12 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
+        } else if (name_text_is(node, "Scroll")) {
+            /* f.scroll(width, height), the nodes, f.end_scroll() */
+            Expr *size[2] = { ui_float(p, ui_prop(&args, "width"), start, 0), ui_float(p, ui_prop(&args, "height"), start, 0) };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "scroll", size, 2)));
+            ui_parse_children(p, out);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_scroll", NULL, 0)));
         } else if (name_text_is(node, "Column") || name_text_is(node, "Row")) {
             Expr *layout[2] = { ui_float(p, ui_prop(&args, "gap"), start, 8), ui_float(p, ui_prop(&args, "padding"), start, 0) };
             const char *open = name_text_is(node, "Row") ? "row_with" : "column";
@@ -1909,17 +1958,42 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
         return;
     }
     if (check(p, TOK_KW_FOR)) {
-        Stmt *stmt = new_stmt(p, STMT_FOR_IN, advance(p)->offset);
+        /* f.push_id(site), then the loop, each iteration in a scope: f.push_item() (its number) or
+           f.push_id(key as u64), its nodes, f.pop_id(); then f.pop_id() (spec §10.6) */
+        size_t start = advance(p)->offset;
+        Stmt *stmt = new_stmt(p, STMT_FOR_IN, start);
         expect(p, TOK_LPAREN);
         parse_binding(p, &stmt->as.for_in.is_mut, &stmt->as.for_in.type, &stmt->as.for_in.name);
         if (!accept(p, TOK_KW_IN)) report_expected(p, "E0200", "`in` (a .ui.sosu file loops over a range or a slice)", false);
         stmt->as.for_in.iterable = parse_expr(p);
+        Expr *key = NULL;
+        if (accept(p, TOK_COMMA)) {
+            if (check(p, TOK_IDENT) && token_is(p, cur(p), "key") && kind_at(p, 1) == TOK_COLON) {
+                advance(p);
+                advance(p);
+                key = parse_expr(p);
+            } else {
+                report_expected(p, "E0215", "`key:` (what names an item of the loop)", false);
+            }
+        }
         expect_closing(p, TOK_RPAREN);
+        size_t length = span_from(p, start);
         StmtVec items = {0};
+        if (key) {
+            Expr *cast = ui_expr(p, EXPR_CAST, key->offset, key->length);
+            cast->as.cast.value = key;
+            cast->as.cast.type = ui_type(p, key->offset, NULL, "u64");
+            SOSU_VEC_PUSH(&items, ui_frame_stmt(p, key->offset, key->length, "push_id", cast));
+        } else {
+            SOSU_VEC_PUSH(&items, ui_frame_stmt(p, start, length, "push_item", NULL));
+        }
         size_t body_start = cur(p)->offset;
         ui_parse_children(p, &items);
+        SOSU_VEC_PUSH(&items, ui_frame_stmt(p, start, length, "pop_id", NULL));
         stmt->as.for_in.body = ui_block(p, &items, body_start, span_from(p, body_start));
+        SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "push_id", ui_int(p, start, start)));
         SOSU_VEC_PUSH(out, close_stmt(p, stmt));
+        SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "pop_id", NULL));
         return;
     }
     if (check(p, TOK_IDENT)) {

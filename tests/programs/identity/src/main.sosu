@@ -1,0 +1,65 @@
+// Drives the screen of screen.ui.sosu with simulated input, frame after frame: the widget that
+// has the keyboard keeps it when a field appears before it, or a note is inserted before it.
+import std.io;
+import render.canvas;
+import ui.widgets;
+import identity.screen;
+import identity.state;
+
+void frame(widgets.Ui* ui, canvas.Canvas* surface, state.Notes* n) {
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    screen.Notes(&f, n);
+    f.finish();
+}
+
+void click(widgets.Ui* ui, f32 x, f32 y) {
+    ui.mouse_move(x, y);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+}
+
+void notes(state.Notes* n) uses io {
+    mut widgets.TextBuffer line = widgets.TextBuffer{ };
+    for (i32 i in 0..n.count) {
+        line.append(n.texts[i].text());
+        line.append(i + 1 < n.count ? "|" : "");
+    }
+    io.print("notes: {} [{}]", n.count, line.text());
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(2 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    state.Notes* n = arena.new(state.Notes);
+
+    frame(&ui, &surface, n);  // `focus: true`: the title has the keyboard
+    ui.type_text("A");
+    frame(&ui, &surface, n);
+    n.show_search = true;  // a field appears before it
+    ui.type_text("B");
+    frame(&ui, &surface, n);
+    io.print("title: {}, search: {}", n.title.text(), n.search.count());
+
+    // The search 0 to 32, the title 40 to 72, the Scroll 80 to 180, its notes from 88, 40 apart:
+    // the note 2, second, 128 to 160.
+    click(&ui, 20.0, 140.0);
+    ui.type_text("x");
+    frame(&ui, &surface, n);
+    n.add_first();  // a note comes before it: the note 2 is third now
+    ui.type_text("y");
+    frame(&ui, &surface, n);
+    notes(n);
+
+    ui.key(9, true, false, false);  // Tab: from the note 2 (the last one) to Add
+    frame(&ui, &surface, n);
+    ui.key(13, true, false, false);  // Enter clicks it
+    frame(&ui, &surface, n);
+    ui.type_text("z");  // the keyboard stayed on Add: nothing typed
+    frame(&ui, &surface, n);
+    notes(n);
+    io.print("identities used twice: {}", ui.duplicates);
+    return 0;
+}
