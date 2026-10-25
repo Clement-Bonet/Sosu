@@ -415,7 +415,7 @@ static TypeExpr *parse_base_type(Parser *p) {
 
 static bool starts_operand(TokenKind kind) {
     switch (kind) {
-    case TOK_IDENT: case TOK_INT: case TOK_FLOAT: case TOK_STRING: case TOK_CHAR: case TOK_LPAREN:
+    case TOK_IDENT: case TOK_INT: case TOK_FLOAT: case TOK_STRING: case TOK_CHAR: case TOK_COLOR: case TOK_LPAREN:
     case TOK_KW_TRUE: case TOK_KW_FALSE: case TOK_KW_SELF: case TOK_KW_BASE:
     case TOK_KW_TRY: case TOK_KW_MATCH:
     case TOK_MINUS: case TOK_BANG: case TOK_TILDE: case TOK_AMP: case TOK_STAR:
@@ -698,6 +698,31 @@ static Expr *parse_primary(Parser *p) {
     case TOK_ERROR:
         expr = new_expr(p, EXPR_ERROR, token->offset);
         break;
+    case TOK_COLOR: {
+        /* `#89B4FA` in a .ui.sosu file: `widgets.rgb(0x89, 0xB4, 0xFA, 0xFF)` (spec §10.7) */
+        static const char *const parts[2] = { "widgets", "rgb" };
+        Expr *module = new_expr(p, EXPR_NAME, token->offset);
+        module->length = token->length;
+        module->as.name.text = parts[0];
+        module->as.name.length = 7;
+        module->as.name.offset = token->offset;
+        Expr *callee = new_expr(p, EXPR_FIELD, token->offset);
+        callee->length = token->length;
+        callee->as.field.object = module;
+        callee->as.field.name.text = parts[1];
+        callee->as.field.name.length = 3;
+        callee->as.field.name.offset = token->offset;
+        expr = new_expr(p, EXPR_CALL, token->offset);
+        expr->as.call.callee = callee;
+        expr->as.call.arg_count = 4;
+        expr->as.call.args = arena_alloc(p->arena, 4 * sizeof(Expr *));
+        for (int i = 0; i < 4; i++) {
+            Expr *byte = new_expr(p, EXPR_INT, token->offset); /* length 0: a number not in the source */
+            byte->as.int_value = token->int_value >> (24 - 8 * i) & 0xFF;
+            expr->as.call.args[i] = byte;
+        }
+        break;
+    }
     case TOK_LPAREN: {
         if (at_lambda(p)) return parse_lambda(p);
         advance(p);
@@ -1365,29 +1390,29 @@ typedef struct {
     const char *name;
     size_t values;        /* values in order, before the properties */
     bool optional;        /* the value can be left out (a checkbox without a label) */
-    const char *props[8]; /* NULL-terminated */
+    const char *props[12]; /* NULL-terminated */
     bool children;        /* `{ ... }` after the arguments */
 } UiNodeKind;
 
 static const UiNodeKind ui_nodes[] = {
-    { "Column", 0, false, { "gap", "padding", NULL }, true },
-    { "Row", 0, false, { "gap", "padding", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", "focus", NULL }, true },
-    { "Scroll", 0, false, { "width", "height", NULL }, true },
-    { "Text", 1, false, { NULL }, false },
-    { "Title", 1, false, { NULL }, false },
+    { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
+    { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "focus", "style", NULL }, true },
+    { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
+    { "Text", 1, false, { "plural", "count", "context", "style", NULL }, false },
+    { "Title", 1, false, { "plural", "count", "context", "style", NULL }, false },
     { "Space", 1, false, { NULL }, false },
-    { "Button", 1, false, { "on_click", "enabled", "focus", NULL }, false },
-    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "focus", NULL }, false },
-    { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
-    { "Radio", 1, false, { "bind", "value", "on_change", NULL }, false },
-    { "TitleBar", 0, false, { "height", "gap", "padding", NULL }, true },
-    { "Dropdown", 0, false, { "bind", "width", "on_change", "focus", NULL }, true },
-    { "Option", 1, false, { "value", NULL }, false },
-    { "Image", 1, false, { "size", NULL }, false },
-    { "MenuBar", 0, false, { NULL }, true },
-    { "Menu", 1, false, { NULL }, true },
-    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", NULL }, false },
+    { "Button", 1, false, { "on_click", "enabled", "focus", "plural", "count", "context", "style", NULL }, false },
+    { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", "style", NULL }, false },
+    { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", "style", NULL }, false },
+    { "Radio", 1, false, { "bind", "value", "on_change", "plural", "count", "context", "style", NULL }, false },
+    { "TitleBar", 0, false, { "height", "gap", "padding", "style", NULL }, true },
+    { "Dropdown", 0, false, { "bind", "width", "on_change", "placeholder", "focus", "style", NULL }, true },
+    { "Option", 1, false, { "value", "plural", "count", "context", NULL }, false },
+    { "Image", 1, false, { "size", "style", NULL }, false },
+    { "MenuBar", 0, false, { "style", NULL }, true },
+    { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
+    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
     { "Separator", 0, false, { NULL }, false },
     { "ContextMenu", 0, false, { NULL }, true },
 };
@@ -1537,8 +1562,8 @@ static void ui_parse_args(Parser *p, UiArgs *args) {
 
 /* Properties of the spec (§10.2) that v0 does not implement yet. */
 static bool ui_planned_property(Name name) {
-    return name_text_is(name, "style") || name_text_is(name, "align") || name_text_is(name, "row") ||
-           name_text_is(name, "col") || name_text_is(name, "span");
+    return name_text_is(name, "align") || name_text_is(name, "row") || name_text_is(name, "col") ||
+           name_text_is(name, "span");
 }
 
 /* The value of the property `name`, or NULL. */
@@ -1550,6 +1575,137 @@ static Expr *ui_prop(const UiArgs *args, const char *name) {
 }
 
 /* Checks the values and properties given to a widget. */
+/* ---- Translations (spec §10.7) ---- */
+
+/* Whether the literal `text` holds `{name}`. */
+static bool ui_has_placeholder(const Parser *p, const Expr *text, const char *name, size_t length) {
+    if (!text || text->kind != EXPR_STRING) return false;
+    const char *s = p->file->text + text->offset;
+    for (size_t i = 0; i + length + 1 < text->length; i++) {
+        if (s[i] == '{' && s[i + length + 1] == '}' && memcmp(s + i + 1, name, length) == 0) return true;
+    }
+    return false;
+}
+
+/* The value of the property named `length` bytes at `name`, or NULL. */
+static Expr *ui_prop_named(const UiArgs *args, const char *name, size_t length) {
+    for (size_t i = 0; i < args->props.count; i++) {
+        Name prop = args->props.items[i].name;
+        if (prop.length == length && memcmp(prop.text, name, length) == 0) return args->props.items[i].value;
+    }
+    return NULL;
+}
+
+static bool is_name_char(char c) {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+/* `{name}` in a literal: the offset of its `{` in the file, and the length of the name. */
+typedef struct {
+    size_t offset;
+    size_t length;
+} UiPlaceholder;
+typedef VEC(UiPlaceholder) UiPlaceholders;
+
+/* Adds the placeholders of the literal `text` to `out`, each name once. */
+static void ui_placeholders(const Parser *p, const Expr *text, UiPlaceholders *out) {
+    if (!text || text->kind != EXPR_STRING) return;
+    const char *file = p->file->text;
+    for (size_t i = text->offset + 1; i + 1 < text->offset + text->length; i++) {
+        if (file[i] != '{') continue;
+        size_t end = i + 1;
+        while (end < text->offset + text->length && is_name_char(file[end])) end++;
+        if (end == i + 1 || file[end] != '}') continue;
+        bool seen = false;
+        for (size_t k = 0; k < out->count; k++) {
+            UiPlaceholder q = out->items[k];
+            seen = seen || (q.length == end - i - 1 && memcmp(file + q.offset + 1, file + i + 1, q.length) == 0);
+        }
+        if (!seen) {
+            UiPlaceholder found = { i, end - i - 1 };
+            SOSU_VEC_PUSH(out, found);
+        }
+        i = end;
+    }
+}
+
+/* A literal text of a node, translated: `ui_frame.tr("...")`, or `tr_in`, `tr_plural`,
+   `tr_plural_in` with `context:` and `plural:` (and `count:`); then its values in braces, given
+   by the properties of the same names, filled by `with1` to `with4`. Anything else is data, and
+   is returned as it is. */
+static Expr *ui_translate(Parser *p, const UiArgs *args, Expr *text) {
+    if (!text || text->kind != EXPR_STRING) return text;
+    size_t at = text->offset;
+    size_t length = text->length;
+    Expr *context = ui_prop(args, "context");
+    Expr *plural = ui_prop(args, "plural");
+    Expr *count = ui_prop(args, "count");
+    if (context && context->kind != EXPR_STRING) {
+        error_at(p, "E0215", context->offset, context->length, "`context:` is a literal text, read by the translators");
+        context = NULL;
+    }
+    if (plural && plural->kind != EXPR_STRING) {
+        error_at(p, "E0215", plural->offset, plural->length, "`plural:` is a literal text, read by the translators");
+        plural = NULL;
+    }
+    if (plural && !count) {
+        Diagnostic *d = error_at(p, "E0215", plural->offset, plural->length, "`plural:` needs `count:`");
+        diag_help(d, "give the number that chooses the form: `count: files.len`");
+        plural = NULL;
+    }
+    Expr *number = NULL;
+    if (count) {
+        number = ui_expr(p, EXPR_CAST, count->offset, count->length);
+        number->as.cast.value = count;
+        number->as.cast.type = ui_type(p, count->offset, NULL, "i64");
+    }
+    Expr *call_args[4];
+    size_t n = 0;
+    if (context) call_args[n++] = context;
+    call_args[n++] = text;
+    if (plural) {
+        call_args[n++] = plural;
+        call_args[n++] = number;
+    }
+    const char *method = plural ? (context ? "tr_plural_in" : "tr_plural") : (context ? "tr_in" : "tr");
+    Expr *result = ui_frame_call(p, at, length, method, call_args, n);
+
+    UiPlaceholders names = {0};
+    ui_placeholders(p, text, &names);
+    ui_placeholders(p, plural, &names);
+    Expr *pairs[8];
+    size_t pair_count = 0;
+    for (size_t k = 0; k <= names.count; k++) {
+        if (k < names.count) {
+            UiPlaceholder q = names.items[k];
+            const char *name = p->file->text + q.offset + 1;
+            Expr *value = ui_prop_named(args, name, q.length);
+            if (q.length == 5 && memcmp(name, "count", 5) == 0 && number) {
+                value = ui_frame_call(p, count->offset, count->length, "decimal", &number, 1);
+            }
+            if (!value) {
+                Diagnostic *d = error_at(p, "E0215", q.offset, q.length + 2, "`{%.*s}` has no value", (int)q.length, name);
+                diag_help(d, "give it after the text: `%.*s: value` (a `str`)", (int)q.length, name);
+                continue;
+            }
+            /* its name, a string whose quotes are the braces of the placeholder */
+            Expr *key = ui_expr(p, EXPR_STRING, q.offset, q.length + 2);
+            pairs[pair_count++] = key;
+            pairs[pair_count++] = value;
+        }
+        if (pair_count == 8 || (k == names.count && pair_count > 0)) {
+            static const char *const fills[] = { "with1", "with2", "with3", "with4" };
+            Expr *fill_args[9];
+            fill_args[0] = result;
+            memcpy(fill_args + 1, pairs, pair_count * sizeof *pairs);
+            result = ui_frame_call(p, at, length, fills[pair_count / 2 - 1], fill_args, pair_count + 1);
+            pair_count = 0;
+        }
+    }
+    free(names.items);
+    return result;
+}
+
 static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const UiArgs *args) {
     if (args->values.count != kind->values && !(kind->optional && args->values.count == 0)) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length,
@@ -1570,6 +1726,12 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         bool known = false;
         for (size_t j = 0; kind->props[j]; j++) known = known || name_text_is(prop, kind->props[j]);
         if (known) continue;
+        Expr *first = args->values.count ? args->values.items[0] : NULL;
+        if (ui_has_placeholder(p, first, prop.text, prop.length) ||
+            ui_has_placeholder(p, ui_prop(args, "plural"), prop.text, prop.length) ||
+            ui_has_placeholder(p, ui_prop(args, "placeholder"), prop.text, prop.length)) {
+            continue;  /* a value in braces: `Text("Hello, {name}", name: n)` */
+        }
         if (ui_planned_property(prop)) {
             error_at(p, "E0216", prop.offset, prop.length, "`%.*s:` is not supported yet", (int)prop.length, prop.text);
             return false;
@@ -1693,11 +1855,12 @@ static Stmt *ui_choice(Parser *p, const char *method, Expr *label, Expr *bound, 
    TextField, or NULL when it has none of them. `accept: Digits` names a variant of
    `widgets.Accept`: it is qualified here, since the type is known. */
 static Expr *ui_format(Parser *p, const UiArgs *args, size_t offset, size_t length) {
-    static const char *const names[] = { "accept", "max", "mask" };
+    static const char *const names[] = { "accept", "max", "mask", "placeholder" };
     VEC(FieldInit) fields = {0};
-    for (size_t i = 0; i < 3; i++) {
+    for (size_t i = 0; i < 4; i++) {
         Expr *value = ui_prop(args, names[i]);
         if (!value) continue;
+        if (i == 3) value = ui_translate(p, args, value);  /* the placeholder */
         if (i == 0 && value->kind == EXPR_NAME) {
             Expr *module = ui_expr(p, EXPR_NAME, value->offset, value->length);
             module->as.name = ui_name("widgets", value->offset);
@@ -1756,6 +1919,55 @@ static void ui_component(Parser *p, StmtVec *out, Path path, UiArgs *args, size_
     SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "pop_id", NULL));
 }
 
+static Expr *ui_call(Parser *p, Expr *callee, Expr *arg, size_t offset, size_t length);
+typedef VEC(FieldInit) UiFields;
+static Expr *ui_struct(Parser *p, const char *type, UiFields *fields, size_t offset, size_t length);
+
+/* A style given to a node: `Danger` and `theme.Danger` are called, `Normal` changes nothing
+   (`widgets.Style{ }`), a choice `c ? a : b` is a choice between styles; any other value is a
+   `widgets.Style` already. */
+static Expr *ui_style_of(Parser *p, Expr *value) {
+    if (value->kind == EXPR_TERNARY) {
+        value->as.ternary.then_expr = ui_style_of(p, value->as.ternary.then_expr);
+        value->as.ternary.else_expr = ui_style_of(p, value->as.ternary.else_expr);
+        return value;
+    }
+    if (value->kind == EXPR_ARRAY) {
+        Diagnostic *d = error_at(p, "E0215", value->offset, value->length, "several styles are not a choice");
+        diag_help(d, "give the styles one by one: `style: [Card, c ? Danger : Normal]`");
+        return value;
+    }
+    const Expr *path = value;
+    while (path->kind == EXPR_FIELD) path = path->as.field.object;
+    if (path->kind != EXPR_NAME) return value;
+    Name last = value->kind == EXPR_FIELD ? value->as.field.name : value->as.name;
+    if (name_text_is(last, "Normal")) return ui_struct(p, "Style", NULL, value->offset, value->length);
+    if (last.length && last.text[0] >= 'A' && last.text[0] <= 'Z') {
+        return ui_call(p, value, NULL, value->offset, value->length);
+    }
+    return value;
+}
+
+/* `style: s` or `style: [a, b]`: `ui_frame.style(...)` for each, in order, before the node. */
+static void ui_node_styles(Parser *p, StmtVec *out, Expr *styles) {
+    if (!styles) return;
+    if (styles->kind == EXPR_ARRAY && !styles->as.array.repeat) {
+        for (size_t i = 0; i < styles->as.array.count; i++) ui_node_styles(p, out, styles->as.array.items[i]);
+        return;
+    }
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, styles->offset, styles->length, "style", ui_style_of(p, styles)));
+}
+
+/* The gap or the padding of a `Column` or a `Row`: `-1.0` when it is not given, that of the
+   theme and the styles. */
+static Expr *ui_layout_size(Parser *p, Expr *value, size_t offset) {
+    if (value) return ui_float(p, value, offset, 0);
+    Expr *minus = ui_expr(p, EXPR_UNARY, offset, 0);
+    minus->as.unary.op = TOK_MINUS;
+    minus->as.unary.operand = ui_float(p, NULL, offset, 1);
+    return minus;
+}
+
 /* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
 static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     size_t start = cur(p)->offset;
@@ -1793,10 +2005,15 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem" };
+        for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
+            if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
+        }
         bool identified = false;
         for (size_t i = 0; i < sizeof ui_identified / sizeof *ui_identified; i++) {
             identified = identified || strcmp(kind->name, ui_identified[i]) == 0;
         }
+        if (valid) ui_node_styles(p, out, ui_prop(&args, "style"));
         if (valid && identified) {
             /* `if (focus) { f.focus_here(); }`, then `f.at(site)`: its place in the file */
             Expr *focus = ui_prop(&args, "focus");
@@ -1840,7 +2057,8 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_scroll", NULL, 0)));
         } else if (name_text_is(node, "Column") || name_text_is(node, "Row")) {
-            Expr *layout[2] = { ui_float(p, ui_prop(&args, "gap"), start, 8), ui_float(p, ui_prop(&args, "padding"), start, 0) };
+            Expr *layout[2] = { ui_layout_size(p, ui_prop(&args, "gap"), start),
+                                ui_layout_size(p, ui_prop(&args, "padding"), start) };
             const char *open = name_text_is(node, "Row") ? "row_with" : "column";
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, layout, 2)));
             ui_parse_children(p, out);
@@ -1921,9 +2139,12 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_title_bar", NULL, 0)));
         } else if (name_text_is(node, "Dropdown")) {
-            /* f.dropdown(width), the options, f.end_dropdown() */
+            /* f.dropdown(width) or f.dropdown_with(width, placeholder), the options, f.end_dropdown() */
             Expr *width = ui_float(p, ui_prop(&args, "width"), start, 160);
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "dropdown", &width, 1)));
+            Expr *hint = ui_translate(p, &args, ui_prop(&args, "placeholder"));
+            Expr *drop_args[2] = { width, hint };
+            const char *open = hint ? "dropdown_with" : "dropdown";
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, drop_args, hint ? 2 : 1)));
             p->ui_dropdown = ui_prop(&args, "bind");
             p->ui_dropdown_change = ui_prop(&args, "on_change");
             ui_parse_children(p, out);
@@ -2156,6 +2377,380 @@ static void ui_parse_view(Parser *p, Decl ***decls, size_t *count, size_t *cap) 
     free(settings.items);
 }
 
+/* ---- Themes and styles (spec §10.7) ---- */
+
+static const char *const ui_style_props[] = { "color", "background", "border", "border_width", "radius",
+                                              "padding", "gap", "height", "font_size", "accent", NULL };
+#define UI_STYLE_PROPS "color, background, border, border_width, radius, padding, gap, height, font_size, accent"
+
+/* The states and parts of a style: the fields of `widgets.Style` after `normal`. */
+static const char *const ui_style_states[] = { "hover", "pressed", "focus", "disabled", "checked",
+                                               "open", "placeholder", "selection", "bar", NULL };
+#define UI_STYLE_STATES "hover, pressed, focus, disabled, checked, open, placeholder, selection, bar"
+#define UI_STYLE_PARTS 10 /* `normal` and the states */
+
+/* The selectors of a theme: a node, and its field in `widgets.Theme`. */
+static const char *const ui_theme_selectors[][2] = {
+    { "Window", "window" }, { "Text", "text" }, { "Title", "title" }, { "Button", "button" },
+    { "TextField", "text_field" }, { "Checkbox", "checkbox" }, { "Radio", "radio" }, { "Dropdown", "dropdown" },
+    { "List", "list" }, { "Scroll", "scroll" }, { "Column", "column" }, { "Row", "row" },
+    { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
+};
+#define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
+#define UI_SELECTOR_NAMES \
+    "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, Image"
+
+/* The properties a theme gives every widget, in `all`: those that are inherited. */
+static const char *const ui_theme_all[] = { "color", "font_size", "accent" };
+
+
+static bool ui_color_property(Name name) {
+    return name_text_is(name, "color") || name_text_is(name, "background") || name_text_is(name, "border") ||
+           name_text_is(name, "accent");
+}
+
+/* `name(arg)`, or `name()` when `arg` is NULL */
+static Expr *ui_call(Parser *p, Expr *callee, Expr *arg, size_t offset, size_t length) {
+    Expr *call = ui_expr(p, EXPR_CALL, offset, length);
+    call->as.call.callee = callee;
+    call->as.call.arg_count = arg ? 1 : 0;
+    call->as.call.args = arena_alloc(p->arena, sizeof(Expr *));
+    call->as.call.args[0] = arg;
+    return call;
+}
+
+static Expr *ui_some(Parser *p, Expr *value) {
+    Expr *some = ui_expr(p, EXPR_NAME, value->offset, value->length);
+    some->as.name = ui_name("some", value->offset);
+    return ui_call(p, some, value, value->offset, value->length);
+}
+
+/* `widgets.type{ fields }` */
+static Expr *ui_struct(Parser *p, const char *type, UiFields *fields, size_t offset, size_t length) {
+    Expr *literal = ui_expr(p, EXPR_STRUCT_LIT, offset, length);
+    literal->as.struct_lit.type = ui_type(p, offset, "widgets", type);
+    literal->as.struct_lit.field_count = fields ? fields->count : 0;
+    literal->as.struct_lit.fields = fields && fields->count ? FINISH(p, *fields) : arena_alloc(p->arena, sizeof(FieldInit));
+    return literal;
+}
+
+static bool ui_field_given(Parser *p, const UiFields *fields, Name name) {
+    for (size_t i = 0; i < fields->count; i++) {
+        if (names_equal(fields->items[i].name, name)) {
+            error_at(p, "E0215", name.offset, name.length, "`%.*s` is given twice", (int)name.length, name.text);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A value of a style or a theme: a color, `#RRGGBB`, or a number of pixels (`6` stands for `6.0`). */
+static Expr *ui_style_value(Parser *p, bool color) {
+    bool no_struct_literal = p->no_struct_literal;
+    p->no_struct_literal = true;  /* `Button {` on the next line starts a selector */
+    Expr *value = parse_expr(p);
+    p->no_struct_literal = no_struct_literal;
+    return color ? value : ui_float(p, value, value->offset, 0);
+}
+
+/* `name: value` in a style, as the field `name: some(value)` of `widgets.Props`. */
+static void ui_parse_style_prop(Parser *p, UiFields *props) {
+    Name name = make_name(p, advance(p));
+    advance(p);  /* `:` */
+    bool known = false;
+    for (size_t i = 0; ui_style_props[i]; i++) known = known || name_text_is(name, ui_style_props[i]);
+    if (!known) {
+        Diagnostic *d = error_at(p, "E0215", name.offset, name.length, "a style has no property `%.*s`",
+                                 (int)name.length, name.text);
+        diag_help(d, "its properties are: " UI_STYLE_PROPS);
+        return;
+    }
+    if (ui_field_given(p, props, name)) return;
+    FieldInit field;
+    field.name = name;
+    field.value = ui_some(p, ui_style_value(p, ui_color_property(name)));
+    SOSU_VEC_PUSH(props, field);
+}
+
+/* `{ properties, state { properties } ... }`: a `widgets.Style{ ... }`. */
+static Expr *ui_parse_style_body(Parser *p, size_t offset, size_t length) {
+    UiFields parts[UI_STYLE_PARTS];
+    memset(parts, 0, sizeof parts);
+    bool given[UI_STYLE_PARTS] = {0};
+    if (expect(p, TOK_LBRACE)) {
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            size_t before = p->pos;
+            size_t line = line_of(p, cur(p)->offset);
+            if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_COLON) {
+                ui_parse_style_prop(p, &parts[0]);
+            } else if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_LBRACE) {
+                Name state = make_name(p, advance(p));
+                size_t index = 0;
+                for (size_t i = 0; ui_style_states[i]; i++) {
+                    if (name_text_is(state, ui_style_states[i])) index = i + 1;
+                }
+                if (!index || given[index]) {
+                    if (!index) {
+                        Diagnostic *d = error_at(p, "E0215", state.offset, state.length,
+                                                 "`%.*s` is not a state of a widget", (int)state.length, state.text);
+                        diag_help(d, "the states and parts are: " UI_STYLE_STATES);
+                    } else {
+                        error_at(p, "E0215", state.offset, state.length, "`%.*s` is given twice", (int)state.length,
+                                 state.text);
+                    }
+                    skip_balanced_braces(p);
+                } else {
+                    given[index] = true;
+                    advance(p);  /* `{` */
+                    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                        size_t inner = p->pos;
+                        size_t inner_line = line_of(p, cur(p)->offset);
+                        if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_COLON) {
+                            ui_parse_style_prop(p, &parts[index]);
+                        } else {
+                            report_expected(p, "E0215", "a property, `name: value`", false);
+                        }
+                        accept(p, TOK_COMMA);
+                        if (p->panic) ui_sync(p, inner_line);
+                        if (p->pos == inner) advance(p);
+                    }
+                    expect(p, TOK_RBRACE);
+                }
+            } else {
+                report_expected(p, "E0215", "a property, `name: value`, or a state, `hover { ... }`", false);
+            }
+            accept(p, TOK_COMMA);
+            if (p->panic) ui_sync(p, line);
+            if (p->pos == before) advance(p);
+        }
+        expect(p, TOK_RBRACE);
+    }
+    UiFields fields = {0};
+    for (size_t i = 0; i < UI_STYLE_PARTS; i++) {
+        if (!parts[i].count) continue;
+        FieldInit field;
+        field.name = ui_name(i ? ui_style_states[i - 1] : "normal", offset);
+        field.value = ui_struct(p, "Props", &parts[i], offset, length);
+        SOSU_VEC_PUSH(&fields, field);
+    }
+    return ui_struct(p, "Style", &fields, offset, length);
+}
+
+/* `pub widgets.type name() { body }` */
+static Decl *ui_function(Parser *p, size_t offset, Name name, const char *type, StmtVec *body, size_t body_offset) {
+    Decl *decl = arena_alloc(p->arena, sizeof *decl);
+    decl->kind = DECL_FN;
+    decl->is_pub = true;
+    decl->offset = offset;
+    FnDecl *fn = &decl->as.fn;
+    fn->is_pub = true;
+    fn->offset = offset;
+    fn->name = name;
+    fn->ret = ui_type(p, offset, "widgets", type);
+    fn->params = NULL;
+    fn->param_count = 0;
+    fn->body = ui_block(p, body, body_offset, span_from(p, body_offset));
+    fn->length = span_from(p, offset);
+    decl->length = fn->length;
+    return decl;
+}
+
+static Stmt *ui_return(Parser *p, Expr *value) {
+    Stmt *ret = new_stmt(p, STMT_RETURN, value->offset);
+    ret->length = value->length;
+    ret->as.expr = value;
+    return ret;
+}
+
+/* `style Name { ... }`: `pub widgets.Style Name() { return widgets.Style{ ... }; }` */
+static Decl *ui_parse_style(Parser *p) {
+    size_t offset = advance(p)->offset;
+    Name name;
+    expect_name(p, &name, "a style name");
+    size_t body_offset = cur(p)->offset;
+    Expr *style = ui_parse_style_body(p, name.offset, name.length);
+    StmtVec body = {0};
+    SOSU_VEC_PUSH(&body, ui_return(p, style));
+    return ui_function(p, offset, name, "Style", &body, body_offset);
+}
+
+/* A name of a theme, `accent: #89B4FA`; `own`: given by the body being read, not its parent. */
+typedef struct {
+    Name name;
+    Expr *value;
+    bool own;
+} UiThemeName;
+
+/* What a theme says, with what it inherits. */
+typedef struct {
+    VEC(UiThemeName) names;
+    Expr *selectors[UI_SELECTORS]; /* `widgets.Style` values */
+    bool own[UI_SELECTORS];
+} UiThemeBody;
+
+/* A theme of the file: its name, the place of its body, its parent (SIZE_MAX: none), and
+   whether it was read without errors (a theme can start from it). */
+typedef struct {
+    Name name;
+    size_t body;
+    size_t parent;
+    bool valid;
+} UiTheme;
+
+typedef VEC(UiTheme) UiThemes;
+
+/* The body of a theme at the current place, over `out`, which holds what it inherits. */
+static void ui_parse_theme_body(Parser *p, UiThemeBody *out) {
+    for (size_t i = 0; i < out->names.count; i++) out->names.items[i].own = false;
+    memset(out->own, 0, sizeof out->own);
+    if (!expect(p, TOK_LBRACE)) return;
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        size_t before = p->pos;
+        size_t line = line_of(p, cur(p)->offset);
+        if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_COLON) {
+            /* a name: a color or a number used below, `color`, `font_size` and `accent` for every widget */
+            Name name = make_name(p, advance(p));
+            advance(p);  /* `:` */
+            Expr *value = ui_style_value(p, true);
+            if (value->kind == EXPR_INT) value = ui_float(p, value, value->offset, 0);
+            UiThemeName *found = NULL;
+            for (size_t i = 0; i < out->names.count; i++) {
+                if (names_equal(out->names.items[i].name, name)) found = &out->names.items[i];
+            }
+            if (found && found->own) {
+                error_at(p, "E0215", name.offset, name.length, "`%.*s` is given twice", (int)name.length, name.text);
+            } else if (found) {
+                found->value = value;  /* the parent's, changed */
+                found->own = true;
+            } else {
+                UiThemeName entry = { name, value, true };
+                SOSU_VEC_PUSH(&out->names, entry);
+            }
+        } else if (check(p, TOK_IDENT) && kind_at(p, 1) == TOK_LBRACE) {
+            Name node = make_name(p, cur(p));
+            size_t index = UI_SELECTORS;
+            for (size_t i = 0; i < UI_SELECTORS; i++) {
+                if (name_text_is(node, ui_theme_selectors[i][0])) index = i;
+            }
+            if (index == UI_SELECTORS || out->own[index]) {
+                if (index == UI_SELECTORS) {
+                    Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "a theme cannot style `%.*s`",
+                                             (int)node.length, node.text);
+                    diag_help(d, "its selectors are: " UI_SELECTOR_NAMES);
+                } else {
+                    error_at(p, "E0215", node.offset, node.length, "`%.*s` is given twice", (int)node.length, node.text);
+                }
+                advance(p);
+                skip_balanced_braces(p);
+            } else {
+                advance(p);
+                Expr *style = ui_parse_style_body(p, node.offset, node.length);
+                Expr *inherited = out->selectors[index];
+                if (inherited) {
+                    /* `widgets.merge(parent, style)`: what the theme says, over what it inherits */
+                    Expr *module = ui_expr(p, EXPR_NAME, node.offset, node.length);
+                    module->as.name = ui_name("widgets", node.offset);
+                    Expr *merge = ui_expr(p, EXPR_FIELD, node.offset, node.length);
+                    merge->as.field.object = module;
+                    merge->as.field.name = ui_name("merge", node.offset);
+                    Expr *call = ui_call(p, merge, inherited, node.offset, node.length);
+                    Expr **args = arena_alloc(p->arena, 2 * sizeof *args);
+                    args[0] = inherited;
+                    args[1] = style;
+                    call->as.call.args = args;
+                    call->as.call.arg_count = 2;
+                    style = call;
+                }
+                out->selectors[index] = style;
+                out->own[index] = true;
+            }
+        } else {
+            report_expected(p, "E0215", "a name, `accent: #89B4FA`, or a selector, `Button { ... }`", false);
+        }
+        accept(p, TOK_COMMA);
+        if (p->panic) ui_sync(p, line);
+        if (p->pos == before) advance(p);
+    }
+    expect(p, TOK_RBRACE);
+}
+
+/* What the theme `index` says, with its parents: their bodies are read again, so that the
+   names a theme changes apply to the selectors it inherits (`theme Light : Dark`). */
+static void ui_inherit(Parser *p, const UiThemes *themes, size_t index, UiThemeBody *out) {
+    const UiTheme *theme = &themes->items[index];
+    if (theme->parent != SIZE_MAX) ui_inherit(p, themes, theme->parent, out);
+    size_t pos = p->pos;
+    p->pos = theme->body;
+    ui_parse_theme_body(p, out);
+    p->pos = pos;
+}
+
+/* `theme Name [: Parent] { ... }`: `pub widgets.Theme Name() { auto name = value; ...
+   return widgets.Theme{ all: ..., selector: style, ... }; }` */
+static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
+    size_t offset = advance(p)->offset;
+    size_t errors = p->diags->error_count;
+    Name name;
+    expect_name(p, &name, "a theme name");
+    UiThemeBody body;
+    memset(&body, 0, sizeof body);
+    size_t parent = SIZE_MAX;
+    if (accept(p, TOK_COLON)) {
+        Name base;
+        if (expect_name(p, &base, "the theme it starts from")) {
+            for (size_t i = 0; i < themes->count; i++) {
+                if (names_equal(themes->items[i].name, base)) parent = i;
+            }
+            if (parent == SIZE_MAX) {
+                Diagnostic *d = error_at(p, "E0215", base.offset, base.length, "no theme `%.*s` before this one",
+                                         (int)base.length, base.text);
+                diag_help(d, "a theme starts from a theme written above it, in the same file");
+                p->panic = false;
+            } else if (themes->items[parent].valid) {
+                ui_inherit(p, themes, parent, &body);
+            }
+        }
+    }
+    UiTheme theme = { name, p->pos, parent, false };
+    size_t body_offset = cur(p)->offset;
+    ui_parse_theme_body(p, &body);
+    theme.valid = p->diags->error_count == errors;
+    SOSU_VEC_PUSH(themes, theme);
+
+    StmtVec items = {0};
+    UiFields all = {0};
+    for (size_t i = 0; i < body.names.count; i++) {
+        UiThemeName entry = body.names.items[i];
+        Stmt *var = new_stmt(p, STMT_VAR, entry.name.offset);
+        var->length = entry.name.length;
+        var->as.var.is_mut = false;
+        var->as.var.type = NULL;  /* `auto` */
+        var->as.var.name = entry.name;
+        var->as.var.init = entry.value;
+        SOSU_VEC_PUSH(&items, var);
+        for (size_t j = 0; j < sizeof ui_theme_all / sizeof *ui_theme_all; j++) {
+            if (!name_text_is(entry.name, ui_theme_all[j])) continue;
+            Expr *use = ui_expr(p, EXPR_NAME, entry.name.offset, entry.name.length);
+            use->as.name = entry.name;
+            FieldInit field = { entry.name, ui_some(p, use) };
+            SOSU_VEC_PUSH(&all, field);
+        }
+    }
+    free(body.names.items);
+    UiFields fields = {0};
+    if (all.count) {
+        FieldInit field = { ui_name("all", name.offset), ui_struct(p, "Props", &all, name.offset, name.length) };
+        SOSU_VEC_PUSH(&fields, field);
+    }
+    for (size_t i = 0; i < UI_SELECTORS; i++) {
+        if (!body.selectors[i]) continue;
+        FieldInit field = { ui_name(ui_theme_selectors[i][1], name.offset), body.selectors[i] };
+        SOSU_VEC_PUSH(&fields, field);
+    }
+    SOSU_VEC_PUSH(&items, ui_return(p, ui_struct(p, "Theme", &fields, name.offset, name.length)));
+    return ui_function(p, offset, name, "Theme", &items, body_offset);
+}
+
 static bool ui_imports_widgets(const Decl *decl) {
     return decl->kind == DECL_IMPORT && decl->as.import.count == 2 && name_text_is(decl->as.import.items[0], "ui") &&
            name_text_is(decl->as.import.items[1], "widgets");
@@ -2166,6 +2761,7 @@ Module *parse_ui_module(const SourceFile *file, const TokenList *tokens, Arena *
     init_parser(&p, file, tokens, arena, diags);
     VEC(Decl *) decls = {0};
     bool widgets = false;
+    UiThemes themes = {0};  /* those of the file, which a theme can start from */
     while (!check(&p, TOK_EOF)) {
         size_t before = p.pos;
         const Token *token = cur(&p);
@@ -2177,18 +2773,17 @@ Module *parse_ui_module(const SourceFile *file, const TokenList *tokens, Arena *
             }
         } else if (token_is(&p, token, "window") || token_is(&p, token, "component")) {
             ui_parse_view(&p, &decls.items, &decls.count, &decls.cap);
-        } else if (token_is(&p, token, "style") || token_is(&p, token, "theme")) {
-            Diagnostic *d = error_at(&p, "E0216", token->offset, token->length, "`%.*s` blocks are not supported yet",
-                                     (int)token->length, file->text + token->offset);
-            diag_help(d, "styles will come with the themes of the `ui` package");
-            while (!check(&p, TOK_EOF) && !check(&p, TOK_LBRACE)) advance(&p);
-            skip_balanced_braces(&p);
+        } else if (token_is(&p, token, "style") && kind_at(&p, 1) == TOK_IDENT) {
+            SOSU_VEC_PUSH(&decls, ui_parse_style(&p));
+            p.panic = false;
+        } else if (token_is(&p, token, "theme") && kind_at(&p, 1) == TOK_IDENT) {
+            SOSU_VEC_PUSH(&decls, ui_parse_theme(&p, &themes));
             p.panic = false;
         } else {
             char found[64];
             describe_token(&p, token, found, sizeof found);
             Diagnostic *d = error_at(&p, "E0203", token->offset, token->length, "expected a declaration, found %s", found);
-            diag_help(d, "a .ui.sosu file contains `import`, `window` and `component`");
+            diag_help(d, "a .ui.sosu file contains `import`, `window`, `component`, `theme` and `style`");
             /* skip it whole: up to its block, included */
             while (!check(&p, TOK_EOF) && !check(&p, TOK_LBRACE) && !check(&p, TOK_KW_IMPORT)) advance(&p);
             if (check(&p, TOK_LBRACE)) skip_balanced_braces(&p);
@@ -2206,6 +2801,7 @@ Module *parse_ui_module(const SourceFile *file, const TokenList *tokens, Arena *
         import->as.import.items = arena_copy(arena, names, sizeof names);
         SOSU_VEC_PUSH(&decls, import);
     }
+    free(themes.items);
     Module *module = arena_alloc(arena, sizeof *module);
     module->count = decls.count;
     module->decls = finish_vec(&p, decls.items, decls.count, sizeof *decls.items);

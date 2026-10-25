@@ -1,0 +1,4 @@
+# Translations (spec §10.7): catalogs in the format of gettext (`messages.locale.fr.sosu`), read in Sosu.
+[package]
+name = "i18n"
+version = "0.1.0"

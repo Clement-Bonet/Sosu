@@ -10,6 +10,7 @@
 
 #include "codegen.h"
 #include "fmt.h"
+#include "i18n.h"
 #include "lsp.h"
 #include "path.h"
 #include "sema.h"
@@ -32,6 +33,8 @@ static void usage(FILE *out) {
           "  test    compile and run the test blocks of a package\n"
           "  fmt     format files or packages in place (--check: only report)\n"
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
+          "  i18n extract [package] [-o messages.locale.default.sosu]\n"
+          "          write the template of the catalogs of translations (spec 10.7)\n"
           "\n"
           "options:\n"
           "  --format=text|json   diagnostics format (default: text)\n"
@@ -458,6 +461,10 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
             fprintf(stderr, "sosuc: `%s`: `.ui.sosu` files have no formatter yet\n", path);
             continue;
         }
+        if (program_is_locale_file(path)) {
+            fprintf(stderr, "sosuc: `%s`: a catalog of translations is not formatted\n", path);
+            continue;
+        }
         if (has_suffix(path, ".sosu")) {
             status |= format_file(path, check);
             continue;
@@ -480,6 +487,56 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
         program_free(&program);
     }
     free(lib);
+    return status;
+}
+
+/* `sosuc i18n extract [package] [-o messages.locale.default.sosu]`: the template of the
+   catalogs of translations of a package (spec §10.7), on stdout or in a file. */
+static int command_i18n(int argc, char **argv, const char *argv0) {
+    if (argc < 1 || strcmp(argv[0], "extract") != 0) {
+        fputs("usage: sosuc i18n extract [package] [-o messages.locale.default.sosu]\n", stderr);
+        return 2;
+    }
+    const char *path = ".";
+    const char *out = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else if (argv[i][0] != '-') {
+            path = argv[i];
+        } else {
+            fprintf(stderr, "sosuc: unknown option `%s`\n", argv[i]);
+            return 2;
+        }
+    }
+    char *lib = library_dir(argv0);
+    Program program;
+    program_load(&program, path, lib);
+    free(lib);
+    if (program.fatal) {
+        fprintf(stderr, "sosuc: %s\n", program.fatal);
+        program_free(&program);
+        return 1;
+    }
+    I18nTemplate *t = i18n_template_new();
+    const Package *root = program.packages.items[0];
+    for (size_t i = 0; i < program.units.count; i++) {
+        const Unit *unit = program.units.items[i];
+        if (unit->package == root) i18n_template_add(t, &unit->file, unit->file.path);
+    }
+    char *text = i18n_template_text(t);
+    int status = 0;
+    if (!out) {
+        fputs(text, stdout);
+    } else if (write_file(out, text)) {
+        printf("%zu texts to translate written to %s\n", i18n_template_count(t), out);
+    } else {
+        fprintf(stderr, "sosuc: cannot write `%s`\n", out);
+        status = 1;
+    }
+    free(text);
+    i18n_template_free(t);
+    program_free(&program);
     return status;
 }
 
@@ -544,6 +601,8 @@ int main(int argc, char **argv) {
         usage(stdout);
         return 0;
     }
+
+    if (strcmp(command, "i18n") == 0) return command_i18n(argc - 2, argv + 2, argv[0]);
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;

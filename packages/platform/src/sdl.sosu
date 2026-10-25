@@ -71,6 +71,12 @@ pub struct Keyboard {
 }
 
 pub struct Texture { }
+
+// SDL_Locale: a language (`fr`), and a country (`FR`) or NULL.
+pub struct Locale {
+    u8* language;
+    u8* country;
+}
 pub struct Surface { }
 
 // SDL_Point: a point of a window, for its hit test.
@@ -124,6 +130,8 @@ extern "C" {
     Surface* SDL_CreateSurfaceFrom(i32 w, i32 h, u32 format, u8* pixels, i32 pitch) uses io;
     void SDL_DestroySurface(Surface* surface) uses io;
     bool SDL_SetWindowIcon(Window* window, Surface* icon) uses io;
+    Locale** SDL_GetPreferredLocales(i32* count) uses io;  // to free with SDL_free
+    i32 SDL_GetSystemTheme() uses io;  // 0: unknown, 1: light, 2: dark
     // SDL_EventFilter: called as each event arrives, before the queue.
     bool SDL_AddEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
     void SDL_RemoveEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
@@ -319,6 +327,52 @@ pub void set_icon(Window* window, u32[] pixels, i32 width, i32 height) uses io {
             SDL_DestroySurface(surface);
         }
     }
+}
+
+// The languages the user prefers, the first one first, written `fr-FR` (or `fr`), in `arena`.
+pub str[] preferred_locales(Arena* arena) uses io {
+    mut str[] found = arena.alloc_slice(str, 0);
+    mut i32 count = 0;
+    unsafe {
+        Locale** list = SDL_GetPreferredLocales(&count);
+        if (list as u64 == 0) {
+            return found;
+        }
+        found = arena.alloc_slice(str, count as usize);
+        for (usize i in 0..count as usize) {
+            Locale* l = *(list + i);
+            str language = copy_cstring(arena, l.language, 16);
+            str country = l.country as u64 == 0 ? "" : copy_cstring(arena, l.country, 16);
+            found[i] = country.len == 0 ? language : joined(arena, language, country);
+        }
+        SDL_free(list as u8*);
+    }
+    return found;
+}
+
+// `language-country`, in `arena`.
+str joined(Arena* arena, str language, str country) {
+    mut u8[] bytes = arena.alloc_slice(u8, language.len + 1 + country.len);
+    for (usize i in 0..language.len) {
+        bytes[i] = language.bytes[i];
+    }
+    bytes[language.len] = 45;  // -
+    for (usize i in 0..country.len) {
+        bytes[language.len + 1 + i] = country.bytes[i];
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(text) => text,
+        err(e) => language,
+    };
+}
+
+// The theme the user chose for the system: 0 unknown, 1 light, 2 dark.
+pub i32 system_theme() uses io {
+    mut i32 theme = 0;
+    unsafe {
+        theme = SDL_GetSystemTheme();
+    }
+    return theme;
 }
 
 // Gives the window its title bar and borders back, or takes them away.

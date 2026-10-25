@@ -8,3 +8,4 @@ version = "0.1.0"
 platform = { path = "../../packages/platform" }
 render = { path = "../../packages/render" }
 ui = { path = "../../packages/ui" }
+i18n = { path = "../../packages/i18n" }

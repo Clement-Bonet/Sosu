@@ -52,6 +52,8 @@ pub enum Event {
     // to the program, false if it kept its own (the program's bar is then a tool bar).
     CustomTitleBar(bool active),
     Maximized(bool on),  // the window was maximized, or restored
+    LocaleChanged,  // the languages the user prefers changed: see `locales`
+    SystemThemeChanged(bool dark),  // the user chose a light or a dark theme for the system
 }
 
 // What a program implements: its state lives in the class that implements it.
@@ -66,13 +68,19 @@ Button button_of(u8 index) {
 }
 
 // The event the program receives, if it is one `platform` handles. Text goes to `frame`.
-Event? translate(sdl.Event* event, Arena* frame) {
+Event? translate(sdl.Event* event, Arena* frame) uses io {
     u32 kind = event.kind;
     if (kind == 0x100) {  // SDL_EVENT_QUIT
         return some(Quit);
     }
     if (kind == 0x206) {  // SDL_EVENT_WINDOW_RESIZED
         return some(Resized(event.word5 as i32, event.word6 as i32));
+    }
+    if (kind == 0x107) {  // SDL_EVENT_LOCALE_CHANGED
+        return some(LocaleChanged);
+    }
+    if (kind == 0x108) {  // SDL_EVENT_SYSTEM_THEME_CHANGED
+        return some(SystemThemeChanged(sdl.system_theme() == 2));
     }
     if (kind == 0x20A || kind == 0x20B) {  // SDL_EVENT_WINDOW_MAXIMIZED, SDL_EVENT_WINDOW_RESTORED
         return some(Maximized(kind == 0x20A));
@@ -116,6 +124,24 @@ pub void set_clipboard(Arena* arena, str text) uses io {
 // Asks the window to close: `on_event` then receives `Quit`, as for the window button.
 pub void request_quit() uses io {
     sdl.push_quit();
+}
+
+// The theme of the system, as the user chose it.
+pub enum SystemTheme {
+    Unknown,
+    Light,
+    Dark,
+}
+
+pub SystemTheme system_theme() uses io {
+    i32 theme = sdl.system_theme();
+    return theme == 1 ? Light : theme == 2 ? Dark : Unknown;
+}
+
+// The languages the user prefers, the first one first, written `fr-FR` or `fr`, in `arena`
+// (spec §10.7): to choose a catalog of translations (`i18n.catalog.best`).
+pub str[] locales(Arena* arena) uses io {
+    return sdl.preferred_locales(arena);
 }
 
 // Minimizes the window (the button of a title bar drawn by the program).

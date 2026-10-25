@@ -426,6 +426,25 @@ static void lex_char(Lexer *lx) {
     emit(lx, TOK_ERROR, start);
 }
 
+/* `#RRGGBB` or `#RRGGBBAA` in a .ui.sosu file (spec §10.7): a color. */
+static bool lex_color(Lexer *lx) {
+    size_t n = strlen(lx->file->path);
+    if (n < 8 || strcmp(lx->file->path + n - 8, ".ui.sosu") != 0) return false;
+    size_t start = lx->pos;
+    size_t digits = 0;
+    while (start + 1 + digits < lx->len && is_hex_digit(lx->src[start + 1 + digits])) digits++;
+    if ((digits != 6 && digits != 8) || (start + 1 + digits < lx->len && is_ident_char(lx->src[start + 1 + digits]))) {
+        return false;
+    }
+    uint64_t value = 0;
+    for (size_t i = 0; i < digits; i++) value = value * 16 + digit_value(lx->src[start + 1 + i]);
+    if (digits == 6) value = value << 8 | 0xFF; /* opaque */
+    lx->pos = start + 1 + digits;
+    Token *token = emit(lx, TOK_COLOR, start);
+    token->int_value = value;
+    return true;
+}
+
 /* ---- Symbols ---- */
 
 static void lex_unexpected(Lexer *lx) {
@@ -515,6 +534,7 @@ bool lex_file_comments(const SourceFile *file, TokenList *tokens, CommentList *c
         else if (is_digit(c)) lex_number(&lx);
         else if (c == '"') lex_string(&lx);
         else if (c == '\'') lex_char(&lx);
+        else if (c == '#' && lex_color(&lx)) continue;
         else lex_symbol(&lx);
     }
     lx.pos = lx.len;

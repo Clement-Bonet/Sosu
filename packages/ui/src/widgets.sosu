@@ -5,6 +5,7 @@
 // `Ui` keeps what lasts between frames: the input received since the last one, the widget
 // pressed and the text field that has the focus. `Frame` places the widgets of one frame,
 // one under the other, or side by side between `row()` and `end_row()`.
+import i18n.catalog;
 import render.canvas;
 import render.image;
 import render.truetype;
@@ -318,6 +319,10 @@ pub struct Ui {
     // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
     // em for each step of scale: 18 for labels, 27 for titles.
     pub mut truetype.Font*? font = none;
+    // The translations of the texts (spec §10.7); none: the language of the source.
+    pub mut catalog.Catalog*? catalog = none;
+    // The colors and sizes of the widgets (spec §10.7); none: `default_theme()`.
+    pub mut Theme? theme = none;
 
     // The input, as `platform.app` gives it.
     pub void mouse_move(f32 x, f32 y) {
@@ -510,6 +515,8 @@ pub struct Format {
     // 9: a digit, A: a letter, *: any character; the other characters are written as they
     // are, when the cursor reaches them (`99/99/9999` for a date). Empty: no mask.
     pub str mask = "";
+    // A hint drawn, dimmed, while the text is empty (spec §10.7). Empty: none.
+    pub str placeholder = "";
 }
 
 str text_of(u8[] bytes) {
@@ -591,8 +598,316 @@ canvas.Color accent() {
     return canvas.Color{ r: 137, g: 180, b: 250 };
 }
 
+// The color of placeholders.
+canvas.Color hint() {
+    return canvas.Color{ r: 127, g: 132, b: 156 };
+}
+
 canvas.Color well() {
     return canvas.Color{ r: 24, g: 24, b: 37 };
+}
+
+// ---- Themes and styles (spec §10.7) ----
+
+// A color from its components: `#RRGGBB` and `#RRGGBBAA` in .ui.sosu files.
+pub canvas.Color rgb(u8 r, u8 g, u8 b, u8 a) {
+    return canvas.Color{ r: r, g: g, b: b, a: a };
+}
+
+// What a theme or a style says about a widget, in a state or a part: each property may be left
+// out, to come from a weaker rule.
+pub struct Props {
+    pub canvas.Color? color = none;  // of text
+    pub canvas.Color? background = none;
+    pub canvas.Color? border = none;  // its color
+    pub f32? border_width = none;
+    pub f32? radius = none;  // of the corners
+    pub f32? padding = none;
+    pub f32? gap = none;  // between the widgets of a column or a row
+    pub f32? height = none;  // of a line of widgets
+    pub f32? font_size = none;  // pixels per em
+    pub canvas.Color? accent = none;  // marks, cursor, ring of the keyboard, selection
+}
+
+// A style, the class of CSS: properties, and those of the states and parts of a widget.
+pub struct Style {
+    pub Props normal = Props{ };
+    pub Props hover = Props{ };
+    pub Props pressed = Props{ };
+    pub Props focus = Props{ };  // it has the keyboard
+    pub Props disabled = Props{ };
+    pub Props checked = Props{ };  // a checkbox checked, a radio chosen
+    pub Props open = Props{ };  // a dropdown, a menu
+    pub Props placeholder = Props{ };  // the hint of a field or of a dropdown
+    pub Props selection = Props{ };  // the text selected, the item chosen
+    pub Props bar = Props{ };  // the scroll bars
+}
+
+// A theme: a style for each kind of widget, and `all`, whose `color`, `font_size` and `accent`
+// every widget inherits.
+pub struct Theme {
+    pub Props all = Props{ };
+    pub Style window = Style{ };
+    pub Style text = Style{ };
+    pub Style title = Style{ };
+    pub Style button = Style{ };
+    pub Style text_field = Style{ };
+    pub Style checkbox = Style{ };
+    pub Style radio = Style{ };
+    pub Style dropdown = Style{ };
+    pub Style list = Style{ };
+    pub Style scroll = Style{ };
+    pub Style column = Style{ };
+    pub Style row = Style{ };
+    pub Style title_bar = Style{ };
+    pub Style menu_bar = Style{ };
+    pub Style menu = Style{ };
+    pub Style image = Style{ };
+}
+
+// The kinds of widgets, the selectors of a theme.
+enum Kind {
+    Window,
+    Text,
+    Title,
+    Button,
+    TextField,
+    Checkbox,
+    Radio,
+    Dropdown,
+    List,
+    Scroll,
+    Column,
+    Row,
+    TitleBar,
+    MenuBar,
+    Menu,
+    Image,
+}
+
+// The states of a widget, which can be combined.
+u32 state_hover() {
+    return 1;
+}
+
+u32 state_pressed() {
+    return 2;
+}
+
+u32 state_focus() {
+    return 4;
+}
+
+u32 state_disabled() {
+    return 8;
+}
+
+u32 state_checked() {
+    return 16;
+}
+
+u32 state_open() {
+    return 32;
+}
+
+canvas.Color? or_color(canvas.Color? strong, canvas.Color? weak) {
+    return match (strong) {
+        some(c) => some(c),
+        none => weak,
+    };
+}
+
+f32? or_f32(f32? strong, f32? weak) {
+    return match (strong) {
+        some(v) => some(v),
+        none => weak,
+    };
+}
+
+// `strong` over `weak`: what `strong` says, else what `weak` says.
+Props merge_props(Props weak, Props strong) {
+    return Props{ color: or_color(strong.color, weak.color), background: or_color(strong.background, weak.background), border: or_color(strong.border, weak.border), border_width: or_f32(strong.border_width, weak.border_width), radius: or_f32(strong.radius, weak.radius), padding: or_f32(strong.padding, weak.padding), gap: or_f32(strong.gap, weak.gap), height: or_f32(strong.height, weak.height), font_size: or_f32(strong.font_size, weak.font_size), accent: or_color(strong.accent, weak.accent) };
+}
+
+// `strong` over `weak`, state by state and part by part: a theme that starts from another one.
+pub Style merge(Style weak, Style strong) {
+    return Style{ normal: merge_props(weak.normal, strong.normal), hover: merge_props(weak.hover, strong.hover), pressed: merge_props(weak.pressed, strong.pressed), focus: merge_props(weak.focus, strong.focus), disabled: merge_props(weak.disabled, strong.disabled), checked: merge_props(weak.checked, strong.checked), open: merge_props(weak.open, strong.open), placeholder: merge_props(weak.placeholder, strong.placeholder), selection: merge_props(weak.selection, strong.selection), bar: merge_props(weak.bar, strong.bar) };
+}
+
+// The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
+pub Theme over(Theme weak, Theme strong) {
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image) };
+}
+
+// What `s` says about a widget in `states`, the states in the order of the spec.
+Props in_states(Style s, u32 states) {
+    mut Props p = s.normal;
+    if (states & state_hover() != 0) {
+        p = merge_props(p, s.hover);
+    }
+    if (states & state_pressed() != 0) {
+        p = merge_props(p, s.pressed);
+    }
+    if (states & state_focus() != 0) {
+        p = merge_props(p, s.focus);
+    }
+    if (states & state_disabled() != 0) {
+        p = merge_props(p, s.disabled);
+    }
+    if (states & state_checked() != 0) {
+        p = merge_props(p, s.checked);
+    }
+    if (states & state_open() != 0) {
+        p = merge_props(p, s.open);
+    }
+    return p;
+}
+
+Style style_of(Theme t, Kind kind) {
+    return match (kind) {
+        Window => t.window,
+        Text => t.text,
+        Title => t.title,
+        Button => t.button,
+        TextField => t.text_field,
+        Checkbox => t.checkbox,
+        Radio => t.radio,
+        Dropdown => t.dropdown,
+        List => t.list,
+        Scroll => t.scroll,
+        Column => t.column,
+        Row => t.row,
+        TitleBar => t.title_bar,
+        MenuBar => t.menu_bar,
+        Menu => t.menu,
+        Image => t.image,
+    };
+}
+
+// The look of a widget: every property, resolved.
+struct Look {
+    canvas.Color color;
+    canvas.Color background;
+    canvas.Color border;
+    f32 border_width;
+    f32 radius;
+    f32 padding;
+    f32 gap;
+    f32 height;
+    f32 font_size;
+    canvas.Color accent;
+    canvas.Color hint;  // placeholders
+    canvas.Color selection;
+    canvas.Color bar;
+}
+
+// The scale of the built-in font for `size` pixels per em (9 a step).
+i32 scale_of(f32 size) {
+    return max((size / 9.0 + 0.5) as i32, 1);
+}
+
+canvas.Color clear() {
+    return canvas.Color{ r: 0, g: 0, b: 0, a: 0 };
+}
+
+canvas.Color color_or(canvas.Color? c, canvas.Color fallback) {
+    return match (c) {
+        some(v) => v,
+        none => fallback,
+    };
+}
+
+f32 f32_or(f32? v, f32 fallback) {
+    return match (v) {
+        some(x) => x,
+        none => fallback,
+    };
+}
+
+// The theme of `ui` when the program sets none: the colors of the widgets since the start, so
+// that a program without a theme looks as before. Its rules are in `default_look`.
+pub Theme default_theme() {
+    return Theme{ };
+}
+
+// The look of a widget of `kind` in `states` when no rule says otherwise: the weakest level
+// of the cascade.
+Look default_look(Kind kind, u32 states) {
+    bool hot = states & state_hover() != 0;
+    bool down = states & state_pressed() != 0;
+    bool focus = states & state_focus() != 0;
+    bool off = states & state_disabled() != 0;
+    bool open = states & state_open() != 0;
+    mut canvas.Color color = ink();
+    mut canvas.Color background = clear();
+    mut canvas.Color border = clear();
+    mut f32 border_width = 0.0;
+    mut f32 padding = 0.0;
+    mut f32 font_size = 18.0;
+    match (kind) {
+        Title => {
+            font_size = 27.0;
+        },
+        Button => {
+            background = off ? well() : face(hot, down);
+            color = off ? face(false, false) : ink();
+            padding = 16.0;
+        },
+        TextField => {
+            background = well();
+            border = focus ? accent() : face(hot, false);
+            border_width = 2.0;
+            padding = 8.0;
+        },
+        Dropdown => {
+            background = well();
+            border = focus || open ? accent() : face(hot, false);
+            border_width = 2.0;
+            padding = 8.0;
+        },
+        List => {
+            background = well();
+            border = focus ? accent() : face(false, false);
+            border_width = 2.0;
+        },
+        Scroll => {
+            background = well();
+            border = focus ? accent() : face(false, false);
+            border_width = 2.0;
+        },
+        Checkbox => {
+            background = face(hot, down);
+        },
+        Radio => {
+            background = face(hot, down);
+        },
+        TitleBar => {
+            background = rgb(17, 17, 27, 255);
+        },
+        MenuBar => {
+            background = open ? face(false, true) : hot ? face(true, false) : clear();
+            padding = 12.0;
+        },
+        Menu => {
+            background = rgb(49, 50, 68, 255);
+            border = face(true, false);
+            border_width = 1.0;
+        },
+        _ => { },
+    }
+    return Look{ color: color, background: background, border: border, border_width: border_width, radius: 0.0, padding: padding, gap: 8.0, height: 32.0, font_size: font_size, accent: accent(), hint: hint(), selection: rgb(137, 180, 250, 90), bar: face(true, false) };
+}
+
+// A light theme, given by `ui`.
+pub Theme light_theme() {
+    canvas.Color text = rgb(76, 79, 105, 255);
+    canvas.Color accent = rgb(30, 102, 245, 255);
+    canvas.Color surface = rgb(204, 208, 218, 255);
+    canvas.Color page = rgb(239, 241, 245, 255);
+    canvas.Color mantle = rgb(230, 233, 239, 255);
+    Props field = Props{ background: some(rgb(255, 255, 255, 255)), border: some(surface) };
+    Props focus = Props{ border: some(accent) };
+    return Theme{ all: Props{ color: some(text), accent: some(accent) }, window: Style{ normal: Props{ background: some(page) } }, button: Style{ normal: Props{ background: some(surface) }, hover: Props{ background: some(rgb(188, 192, 204, 255)) }, pressed: Props{ background: some(rgb(172, 176, 190, 255)) }, disabled: Props{ background: some(mantle), color: some(rgb(156, 160, 176, 255)) } }, text_field: Style{ normal: field, focus: focus, placeholder: Props{ color: some(rgb(140, 143, 161, 255)) } }, checkbox: Style{ normal: Props{ background: some(surface) }, hover: Props{ background: some(rgb(188, 192, 204, 255)) } }, radio: Style{ normal: Props{ background: some(surface) }, hover: Props{ background: some(rgb(188, 192, 204, 255)) } }, dropdown: Style{ normal: field, focus: focus, open: focus, placeholder: Props{ color: some(rgb(140, 143, 161, 255)) } }, list: Style{ normal: field, focus: focus }, scroll: Style{ normal: field, focus: focus, bar: Props{ background: some(rgb(172, 176, 190, 255)) } }, title_bar: Style{ normal: Props{ background: some(rgb(220, 224, 232, 255)) } }, menu_bar: Style{ hover: Props{ background: some(surface) }, open: Props{ background: some(rgb(188, 192, 204, 255)) } }, menu: Style{ normal: Props{ background: some(rgb(255, 255, 255, 255)), border: some(surface) } } };
 }
 
 // What a window of a `.ui.sosu` file says about itself (spec §10.2).
@@ -639,6 +954,19 @@ bool same_text(str a, str b) {
         u8 x = a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
         u8 y = b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
         if (x != y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether `name` is in `text` at `at`.
+bool same_bytes(str text, usize at, str name) {
+    if (at + name.len > text.len) {
+        return false;
+    }
+    for (usize i in 0..name.len) {
+        if (text.bytes[at + i] != name.bytes[i]) {
             return false;
         }
     }
@@ -722,6 +1050,13 @@ struct Layout {
     mut f32 bar_h = 0.0;
     mut i32 item = 0;
     mut i32*? selected = none;
+    // What its widgets inherit (spec §10.7), and, when it is painted (a background, a border),
+    // its identity, which keeps its size from the last frame, and its look.
+    mut canvas.Color? color = none;
+    mut f32? font_size = none;
+    mut canvas.Color? accent = none;
+    mut u64 painted = 0;
+    mut Look look = default_look(Column, 0);
 }
 
 // The widgets of one frame, drawn on `surface`.
@@ -737,6 +1072,7 @@ pub struct Frame {
     mut u64[16] scopes = [0xCBF29CE484222325; 16];
     mut u32[16] calls = [0; 16];
     mut u64[16] iterations = [0; 16];
+    mut u32[16] containers = [0; 16];  // the columns and rows painted so far, in each scope
     mut usize scope = 0;
     mut usize scopes_lost = 0;
     mut u32 site = 0;
@@ -750,6 +1086,14 @@ pub struct Frame {
     mut u64[256] order = [0; 256];
     mut usize order_count = 0;
     mut bool focus_taken = false;  // a widget took the focus in this frame
+    // The styles given to the next node (`style`), and those of the node being described.
+    mut Style[4] pending = [Style{ }; 4];
+    mut usize pending_count = 0;
+    mut Style[4] node_styles = [Style{ }; 4];
+    mut usize node_style_count = 0;
+    // The texts made in this frame (translations with values, numbers), until its end.
+    mut u8[8192] pool = [0; 8192];
+    mut usize pool_used = 0;
     f32 height = 32.0;  // of a line of widgets
     // The title bar being placed: the depth of its row (0: none), its rectangle, and the
     // interactive widgets in it.
@@ -768,6 +1112,8 @@ pub struct Frame {
     mut i32 option_current = -1;
     mut i32 option_enter = -1;
     mut i32 option_move = 0;
+    mut str dropdown_hint = "";  // its placeholder
+    mut Look drop_look = default_look(Dropdown, 0);  // its look
     mut canvas.Rect layer = nowhere();
     mut str[16] options = [""; 16];
     mut usize option_count = 0;
@@ -792,13 +1138,14 @@ pub struct Frame {
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
+    // A negative `gap` or `padding`: that of the theme and of the styles (8 and 0 by default).
     pub void column(f32 gap, f32 padding) {
-        open(false, gap, padding);
+        open_styled(Column, false, gap, padding);
     }
 
     // The same, side by side.
     pub void row_with(f32 gap, f32 padding) {
-        open(true, gap, padding);
+        open_styled(Row, true, gap, padding);
     }
 
     pub void end() {
@@ -807,12 +1154,48 @@ pub struct Frame {
         }
         Layout done = layouts[depth];
         depth -= 1;
-        place(done.right - done.left + 2.0 * done.padding, done.bottom - done.top + 2.0 * done.padding);
+        canvas.Rect r = place(done.right - done.left + 2.0 * done.padding, done.bottom - done.top + 2.0 * done.padding);
+        if (done.painted != 0) {  // its size, for its background at the next frame; its border
+            usize slot = ui.state_slot(done.painted);  // a variable: see the bug noted in `menu`
+            WidgetState* s = &ui.states[slot];
+            s.content_w = r.w;
+            s.content_h = r.h;
+            if (done.look.border.a > 0 && done.look.border_width > 0.0) {
+                surface.stroke_rounded(r, done.look.radius, done.look.border, done.look.border_width);
+            }
+        }
+    }
+
+    // A column or a row, with the styles of its node: its gap and padding, its background (drawn
+    // at the size it had at the last frame, since its widgets come after it), and what its
+    // widgets inherit.
+    void open_styled(Kind kind, bool horizontal, f32 gap, f32 padding) {
+        take_styles();
+        Look l = look(kind, 0);
+        Props p = explicit_props(kind, 0);
+        Layout parent = layouts[depth];
+        mut u64 painted = 0;
+        if (l.background.a > 0 || l.border.a > 0 && l.border_width > 0.0) {
+            painted = container_id();
+            WidgetState s = ui.states[ui.state_slot(painted)];
+            if (s.content_w > 0.0 && l.background.a > 0) {
+                surface.fill_rounded(canvas.Rect{ x: parent.x, y: parent.y, w: s.content_w, h: s.content_h }, l.radius, l.background);
+            }
+        }
+        usize before = depth;
+        open(horizontal, gap >= 0.0 ? gap : l.gap, padding >= 0.0 ? padding : l.padding);
+        if (depth > before) {
+            layouts[depth].color = or_color(p.color, parent.color);
+            layouts[depth].font_size = or_f32(p.font_size, parent.font_size);
+            layouts[depth].accent = or_color(p.accent, parent.accent);
+            layouts[depth].painted = painted;
+            layouts[depth].look = l;
+        }
     }
 
     // The widgets that follow go side by side, until `end_row()`.
     pub void row() {
-        open(true, 8.0, 0.0);
+        open_styled(Row, true, -1.0, -1.0);
     }
 
     pub void end_row() {
@@ -830,14 +1213,17 @@ pub struct Frame {
 
     // Text, at the size of the widgets (font at scale 2).
     pub void label(str text) {
-        canvas.Rect size = measure(text, 2);
-        canvas.Rect r = place(size.w, max(size.h, height));
-        write(r.x, r.y, height, text, ink(), 2);
+        take_styles();
+        Look l = look(Text, 0);
+        canvas.Rect size = measure_px(text, l.font_size);
+        canvas.Rect r = place(size.w, max(size.h, l.height));
+        write_px(r.x, r.y, r.h, text, l.color, l.font_size);
     }
 
     // An image `size` pixels high (0: its own height), as wide as its proportions say; in a
     // row higher than it, it is centered vertically.
     pub void image(image.Image img, f32 size) {
+        take_styles();
         if (img.width <= 0 || img.height <= 0) {
             return;
         }
@@ -848,11 +1234,13 @@ pub struct Frame {
         surface.draw_image(img, canvas.Rect{ x: r.x, y: r.y + (box - h) / 2.0, w: w, h: h });
     }
 
-    // Bigger text (font at scale 3).
+    // Bigger text (27 pixels per em, with the theme of `ui`).
     pub void title(str text) {
-        canvas.Rect size = measure(text, 3);
+        take_styles();
+        Look l = look(Title, 0);
+        canvas.Rect size = measure_px(text, l.font_size);
         canvas.Rect r = place(size.w, size.h + 8.0);
-        write(r.x, r.y, size.h, text, ink(), 3);
+        write_px(r.x, r.y, size.h, text, l.color, l.font_size);
     }
 
     // Returns true when it is clicked: pressed, then released over it.
@@ -864,21 +1252,25 @@ pub struct Frame {
     // With the keyboard, Space or Enter clicks it.
     pub bool button_enabled(str text, bool enabled) {
         u64 id = take_id();
-        canvas.Rect size = measure(text, 2);
-        canvas.Rect r = place(size.w + 32.0, height);
+        take_styles();
+        Look first = look(Button, enabled ? 0 : state_disabled());
+        canvas.Rect size = measure_px(text, first.font_size);
+        canvas.Rect r = place(size.w + 2.0 * first.padding, first.height);
         interactive(r);
         if (!enabled) {
-            surface.fill(r, well());
-            write(r.x + 16.0, r.y, height, text, face(false, false), 2);
+            paint(r, first);
+            write_px(r.x + first.padding, r.y, r.h, text, first.color, first.font_size);
             return false;
         }
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, true);
         bool hot = over(r);
-        surface.fill(r, face(hot, ui.active == id && hot));
-        write(r.x + 16.0, r.y, height, text, ink(), 2);
+        u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0);
+        Look l = look(Button, states);
+        paint(r, l);
+        write_px(r.x + l.padding, r.y, r.h, text, l.color, l.font_size);
         if (ui.focus == id) {
-            ring(r);
+            ring(r, l.accent);
         }
         return clicked;
     }
@@ -887,22 +1279,27 @@ pub struct Frame {
     // keyboard).
     pub bool checkbox(str text, bool* value) {
         u64 id = take_id();
-        canvas.Rect size = measure(text, 2);
-        canvas.Rect r = place(size.w + 32.0, height);
+        take_styles();
+        Look first = look(Checkbox, 0);
+        canvas.Rect size = measure_px(text, first.font_size);
+        canvas.Rect r = place(size.w + 32.0, first.height);
         interactive(r);
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, false);
         if (clicked) {
             *value = !(*value);
         }
-        canvas.Rect box = canvas.Rect{ x: r.x + 2.0, y: r.y + 6.0, w: 20.0, h: 20.0 };
-        surface.fill(box, face(over(r), ui.active == id && over(r)));
+        bool hot = over(r);
+        u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (*value ? state_checked() : 0);
+        Look l = look(Checkbox, states);
+        canvas.Rect box = canvas.Rect{ x: r.x + 2.0, y: r.y + (r.h - 20.0) / 2.0, w: 20.0, h: 20.0 };
+        paint(box, l);
         if (*value) {
-            surface.fill(canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 }, accent());
+            surface.fill_rounded(canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 }, max(l.radius - 3.0, 0.0), l.accent);
         }
-        write(r.x + 32.0, r.y, height, text, ink(), 2);
+        write_px(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
         if (ui.focus == id) {
-            ring(r);
+            ring(r, l.accent);
         }
         return clicked;
     }
@@ -916,21 +1313,26 @@ pub struct Frame {
     // true when it is clicked (the program then chooses it, see `Radio` in .ui.sosu files).
     pub bool radio(str text, bool chosen) {
         u64 id = take_id();
-        canvas.Rect size = measure(text, 2);
-        canvas.Rect r = place(size.w + 32.0, height);
+        take_styles();
+        Look first = look(Radio, 0);
+        canvas.Rect size = measure_px(text, first.font_size);
+        canvas.Rect r = place(size.w + 32.0, first.height);
         interactive(r);
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, false);
+        bool hot = over(r);
+        u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (chosen ? state_checked() : 0);
+        Look l = look(Radio, states);
         if (ui.focus == id) {
-            ring(r);
+            ring(r, l.accent);
         }
         f32 cx = r.x + 12.0;
-        f32 cy = r.y + height / 2.0;
-        surface.fill_circle(cx, cy, 10.0, face(over(r), ui.active == id && over(r)));
+        f32 cy = r.y + r.h / 2.0;
+        surface.fill_circle(cx, cy, 10.0, l.background);
         if (chosen) {
-            surface.fill_circle(cx, cy, 5.0, accent());
+            surface.fill_circle(cx, cy, 5.0, l.accent);
         }
-        write(r.x + 32.0, r.y, height, text, ink(), 2);
+        write_px(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
         return clicked;
     }
 
@@ -943,9 +1345,12 @@ pub struct Frame {
     // The same, keeping only what `format` accepts.
     pub bool text_field_with(TextBuffer* text, f32 width, Format format) {
         u64 id = take_id();
-        canvas.Rect r = place(width, height);
+        take_styles();
+        Look first = look(TextField, 0);
+        f32 size = first.font_size;
+        canvas.Rect r = place(width, first.height);
         interactive(r);
-        canvas.Rect inner = canvas.Rect{ x: r.x + 8.0, y: r.y, w: max(width - 16.0, 0.0), h: height };
+        canvas.Rect inner = canvas.Rect{ x: r.x + first.padding, y: r.y, w: max(width - 2.0 * first.padding, 0.0), h: r.h };
         if (ui.pressed && over(r)) {
             if (ui.focus != id) {
                 ui.focus = id;
@@ -953,10 +1358,10 @@ pub struct Frame {
             }
             focus_taken = true;
             ui.active = id;
-            ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll);
+            ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll, size);
             ui.anchor = ui.cursor;
         } else if (ui.focus == id && ui.active == id && ui.down) {
-            ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll);  // dragging selects
+            ui.cursor = index_at(text, ui.mouse_x - inner.x + ui.scroll, size);  // dragging selects
         }
         focusable(id, r);
         bool focused = ui.focus == id;
@@ -969,10 +1374,12 @@ pub struct Frame {
             entered = edit(text, format);
         }
 
-        surface.fill(r, well());
-        surface.stroke(r, focused ? accent() : face(over(r), false), 2.0);
+        Look l = look(TextField, (over(r) ? state_hover() : 0) | (focused ? state_focus() : 0));
+        paint(r, l);
         surface.push_clip(canvas.Rect{ x: inner.x - 2.0, y: r.y + 2.0, w: inner.w + 4.0, h: r.h - 4.0 });
-        f32 caret = measure(text.slice(0, focused ? ui.cursor : 0), 2).w;
+        f32 caret = measure_px(text.slice(0, focused ? ui.cursor : 0), size).w;
+        f32 line = min(20.0, r.h - 4.0);  // the height of the selection and of the cursor
+        f32 line_y = r.y + (r.h - line) / 2.0;
         if (focused) {  // keep the cursor in view
             if (caret - ui.scroll > inner.w - 2.0) {
                 ui.scroll = caret - inner.w + 2.0;
@@ -983,26 +1390,28 @@ pub struct Frame {
         }
         f32 shift = focused ? ui.scroll : 0.0;
         if (focused && ui.anchor != ui.cursor) {
-            f32 a = measure(text.slice(0, min(ui.anchor, ui.cursor)), 2).w;
-            f32 b = measure(text.slice(0, max(ui.anchor, ui.cursor)), 2).w;
-            canvas.Color selected = canvas.Color{ r: 137, g: 180, b: 250, a: 90 };
-            surface.fill(canvas.Rect{ x: inner.x + a - shift, y: r.y + 6.0, w: b - a, h: 20.0 }, selected);
+            f32 a = measure_px(text.slice(0, min(ui.anchor, ui.cursor)), size).w;
+            f32 b = measure_px(text.slice(0, max(ui.anchor, ui.cursor)), size).w;
+            surface.fill(canvas.Rect{ x: inner.x + a - shift, y: line_y, w: b - a, h: line }, l.selection);
         }
-        write(inner.x - shift, r.y, height, text.text(), ink(), 2);
+        if (text.len == 0 && format.placeholder.len > 0) {
+            write_px(inner.x, r.y, r.h, format.placeholder, l.hint, size);
+        }
+        write_px(inner.x - shift, r.y, r.h, text.text(), l.color, size);
         if (focused) {
-            surface.fill(canvas.Rect{ x: inner.x + caret - shift, y: r.y + 6.0, w: 2.0, h: 20.0 }, accent());
+            surface.fill(canvas.Rect{ x: inner.x + caret - shift, y: line_y, w: 2.0, h: line }, l.accent);
         }
         surface.pop_clip();
         return entered;
     }
 
     // The byte offset of the character boundary nearest to `x`, from the start of the text.
-    usize index_at(TextBuffer* text, f32 x) {
+    usize index_at(TextBuffer* text, f32 x, f32 size) {
         mut usize at = 0;
         while (at < text.len) {
             usize after = text.next(at);
-            f32 left = measure(text.slice(0, at), 2).w;
-            f32 right = measure(text.slice(0, after), 2).w;
+            f32 left = measure_px(text.slice(0, at), size).w;
+            f32 right = measure_px(text.slice(0, after), size).w;
             if (x < (left + right) / 2.0) {
                 return at;
             }
@@ -1108,14 +1517,16 @@ pub struct Frame {
         Layout l = layouts[depth];
         bar = canvas.Rect{ x: l.x, y: l.y, w: max(surface.width as f32 - l.x, 0.0), h: bar_height };
         bar_widget_count = 0;
-        surface.fill(bar, canvas.Color{ r: 17, g: 17, b: 27 });
+        take_styles();
+        paint(bar, look(TitleBar, 0));
+        Props p = explicit_props(TitleBar, 0);
         if (depth == 15) {
             return;  // too deep: the widgets stay in the current layout
         }
         f32 x = bar.x + padding;
         f32 y = bar.y + max((bar_height - height) / 2.0, 0.0);
         depth += 1;
-        layouts[depth] = Layout{ horizontal: true, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap };
+        layouts[depth] = Layout{ horizontal: true, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, color: or_color(p.color, l.color), font_size: or_f32(p.font_size, l.font_size), accent: or_color(p.accent, l.accent) };
         bar_depth = depth;
     }
 
@@ -1140,28 +1551,32 @@ pub struct Frame {
     // Minimize, maximize (or restore) and close, at the right end of the title bar.
     void window_buttons() {
         f32 w = 46.0;
+        canvas.Color mark = look(TitleBar, 0).color;  // that of the theme: light or dark
+        canvas.Color white = canvas.Color{ r: 255, g: 255, b: 255 };
         ui.bar_buttons = canvas.Rect{ x: bar.x + bar.w - 3.0 * w, y: bar.y, w: 3.0 * w, h: bar.h };
         for (i32 i in 0..3) {
             u64 id = take_id();
             canvas.Rect r = canvas.Rect{ x: ui.bar_buttons.x + i as f32 * w, y: bar.y, w: w, h: bar.h };
             bool clicked = click(id, r);
-            if (over(r)) {
+            bool hot = over(r);
+            if (hot) {
                 bool held = ui.active == id;
-                surface.fill(r, i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 } : face(!held, held));
+                surface.fill(r, i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 } : look(Button, state_hover() | (held ? state_pressed() : 0)).background);
             }
+            canvas.Color ink_of = i == 2 && hot ? white : mark;
             i32 cx = (r.x + w / 2.0) as i32;
             i32 cy = (r.y + bar.h / 2.0) as i32;
             if (i == 0) {
-                surface.line(cx - 5, cy, cx + 5, cy, ink());
+                surface.line(cx - 5, cy, cx + 5, cy, ink_of);
             } else if (i == 1 && ui.maximized) {  // restore: two squares
-                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 3) as f32, w: 8.0, h: 8.0 }, ink(), 1.0);
-                surface.line(cx - 3, cy - 5, cx + 5, cy - 5, ink());
-                surface.line(cx + 5, cy - 5, cx + 5, cy + 3, ink());
+                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 3) as f32, w: 8.0, h: 8.0 }, ink_of, 1.0);
+                surface.line(cx - 3, cy - 5, cx + 5, cy - 5, ink_of);
+                surface.line(cx + 5, cy - 5, cx + 5, cy + 3, ink_of);
             } else if (i == 1) {
-                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 5) as f32, w: 10.0, h: 10.0 }, ink(), 1.0);
+                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 5) as f32, w: 10.0, h: 10.0 }, ink_of, 1.0);
             } else {
-                surface.line(cx - 5, cy - 5, cx + 5, cy + 5, ink());
-                surface.line(cx - 5, cy + 5, cx + 5, cy - 5, ink());
+                surface.line(cx - 5, cy - 5, cx + 5, cy + 5, ink_of);
+                surface.line(cx - 5, cy + 5, cx + 5, cy - 5, ink_of);
             }
             if (clicked) {
                 if (i == 0) {
@@ -1189,8 +1604,14 @@ pub struct Frame {
     // With the keyboard: Space, Enter or Alt+Down opens it; closed, Up and Down change the
     // choice; open, Up and Down move the highlight, Enter or Space chooses, Escape closes.
     pub void dropdown(f32 width) {
+        dropdown_with(width, "");
+    }
+
+    // The same, showing `placeholder`, dimmed, while no option is chosen.
+    pub void dropdown_with(f32 width, str placeholder) {
         u64 id = take_id();
-        canvas.Rect r = place(width, height);
+        take_styles();
+        canvas.Rect r = place(width, look(Dropdown, 0).height);
         interactive(r);
         focusable(id, r);
         if (ui.pressed && over(r)) {
@@ -1224,18 +1645,20 @@ pub struct Frame {
         }
         dropdown_id = id;
         box = r;
+        dropdown_hint = placeholder;
         if (ui.open == id) {
             layer_owner = id;
             layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
             option_count = 0;
             option_chosen = -1;
         }
-        surface.fill(r, well());
-        surface.stroke(r, ui.open == id || ui.focus == id ? accent() : face(over(r), false), 2.0);
+        u32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0) | (ui.open == id ? state_open() : 0);
+        drop_look = look(Dropdown, states);
+        paint(r, drop_look);
         i32 cx = (r.x + r.w - 16.0) as i32;  // a chevron, pointing down
         i32 cy = (r.y + height / 2.0) as i32;
-        surface.line(cx - 5, cy - 2, cx, cy + 3, ink());
-        surface.line(cx, cy + 3, cx + 5, cy - 2, ink());
+        surface.line(cx - 5, cy - 2, cx, cy + 3, drop_look.color);
+        surface.line(cx, cy + 3, cx + 5, cy - 2, drop_look.color);
     }
 
     // An option of the dropdown being described, drawn in its box when `chosen`; returns
@@ -1250,7 +1673,7 @@ pub struct Frame {
         if (chosen) {
             option_current = index;
             surface.push_clip(canvas.Rect{ x: box.x + 2.0, y: box.y + 2.0, w: max(box.w - 32.0, 0.0), h: box.h - 4.0 });
-            write(box.x + 8.0, box.y, height, text, ink(), 2);
+            write_px(box.x + drop_look.padding, box.y, box.h, text, drop_look.color, drop_look.font_size);
             surface.pop_clip();
         }
         if (index == option_enter) {
@@ -1279,6 +1702,11 @@ pub struct Frame {
     }
 
     pub void end_dropdown() {
+        if (dropdown_id != 0 && option_current < 0 && dropdown_hint.len > 0) {
+            surface.push_clip(canvas.Rect{ x: box.x + 2.0, y: box.y + 2.0, w: max(box.w - 32.0, 0.0), h: box.h - 4.0 });
+            write_px(box.x + drop_look.padding, box.y, box.h, dropdown_hint, drop_look.hint, drop_look.font_size);
+            surface.pop_clip();
+        }
         if (dropdown_id != 0 && option_index > 0) {
             if (ui.open == dropdown_id) {  // the highlight: on the option chosen at first
                 ui.highlight = ui.highlight < 0 ? max(option_current, 0) : min(ui.highlight, option_index - 1);
@@ -1318,7 +1746,9 @@ pub struct Frame {
             return;
         }
         if (menu_level == 0) {
-            canvas.Rect r = place(measure(title, 2).w + 24.0, height);
+            take_styles();
+            Look first = look(MenuBar, 0);
+            canvas.Rect r = place(measure_px(title, first.font_size).w + 2.0 * first.padding, first.height);
             interactive(r);
             bool hot = over(r);
             mut bool keyed = false;  // its title highlighted by the keyboard (F10, Alt)
@@ -1341,13 +1771,12 @@ pub struct Frame {
                 ui.menus[0] = id;
             }
             bool open = ui.menus[0] == id;
-            if (open || hot || keyed) {
-                surface.fill(r, open ? face(false, true) : face(true, false));
-            }
+            Look tl = look(MenuBar, (open ? state_open() : 0) | (hot || keyed ? state_hover() : 0));
+            paint(r, tl);
             if (keyed) {
-                ring(r);
+                ring(r, accent());
             }
-            write(r.x + 12.0, r.y, height, title, ink(), 2);
+            write_px(r.x + tl.padding, r.y, r.h, title, tl.color, tl.font_size);
             start_popup(id, open, r.x, r.y + r.h);
             return;
         }
@@ -1515,8 +1944,8 @@ pub struct Frame {
     // An open menu, over everything else.
     void draw_popup(Popup p) {
         canvas.Rect frame = canvas.Rect{ x: p.x, y: p.y, w: p.w, h: p.h + 8.0 };
-        surface.fill(frame, canvas.Color{ r: 49, g: 50, b: 68 });
-        surface.stroke(frame, face(true, false), 1.0);
+        Look m = look(Menu, 0);
+        paint(frame, m);
         mut f32 y = p.y + 4.0;
         for (usize i in 0..p.count) {
             if (p.kinds[i] == 1) {
@@ -1528,10 +1957,10 @@ pub struct Frame {
             bool open_beside = p.kinds[i] == 2 && p.level + 1 < 4 && ui.menus[p.level + 1] == p.submenus[i] && p.submenus[i] != 0;
             bool keyed = ui.menu_cursor[p.level] == i as i32;
             if (p.enabled[i] && (contains(r, ui.mouse_x, ui.mouse_y) || open_beside || keyed)) {
-                surface.fill(r, canvas.Color{ r: 137, g: 180, b: 250, a: 70 });
+                surface.fill(r, m.selection);
             }
-            canvas.Color color = p.enabled[i] ? ink() : face(true, false);
-            write(p.x + 12.0, y, 28.0, p.labels[i], color, 2);
+            canvas.Color color = p.enabled[i] ? m.color : face(true, false);
+            write_px(p.x + 12.0, y, 28.0, p.labels[i], color, m.font_size);
             if (p.keys[i].len > 0) {
                 f32 kw = measure(p.keys[i], 2).w;
                 write(p.x + p.w - 12.0 - kw, y, 28.0, p.keys[i], face(true, false), 2);
@@ -1684,20 +2113,21 @@ pub struct Frame {
 
     // The open list of a dropdown, over everything else.
     void draw_layer() {
-        surface.fill(layer, face(false, false));
+        Look m = look(Menu, 0);
+        surface.fill_rounded(layer, m.radius, face(false, false));
         for (usize i in 0..option_count) {
             canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height, w: layer.w, h: height };
             if (i as i32 == option_chosen) {
-                surface.fill(r, canvas.Color{ r: 137, g: 180, b: 250, a: 70 });
+                surface.fill(r, m.selection);
             }
             if (i as i32 == ui.highlight) {  // with the keyboard
-                surface.stroke(r, accent(), 2.0);
+                surface.stroke(r, m.accent, 2.0);
             } else if (contains(r, ui.mouse_x, ui.mouse_y)) {
                 surface.fill(r, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
             }
-            write(r.x + 8.0, r.y, height, options[i], ink(), 2);
+            write_px(r.x + 8.0, r.y, height, options[i], m.color, m.font_size);
         }
-        surface.stroke(layer, accent(), 2.0);
+        surface.stroke_rounded(layer, m.radius, m.accent, 2.0);
     }
 
     // Ends the frame: draws the layer above, and the input it used is consumed.
@@ -1762,6 +2192,225 @@ pub struct Frame {
         }
     }
 
+    // ---- Themes and styles (spec §10.7) ----
+
+    // The next node (a widget, a column...) takes `s` too, over the theme; several: the later
+    // ones win (4 at most).
+    pub void style(Style s) {
+        if (pending_count < 4) {
+            pending[pending_count] = s;
+            pending_count += 1;
+        }
+    }
+
+    // The node being described takes the pending styles.
+    void take_styles() {
+        node_styles = pending;
+        node_style_count = pending_count;
+        pending_count = 0;
+    }
+
+    // What the theme and the styles of the node say about it, in `states`; and its parts.
+    Props explicit_props(Kind kind, u32 states) {
+        mut Props p = Props{ };
+        match (ui.theme) {
+            some(t) => {
+                p = in_states(style_of(t, kind), states);
+            },
+            none => { },
+        }
+        for (usize i in 0..node_style_count) {
+            p = merge_props(p, in_states(node_styles[i], states));
+        }
+        return p;
+    }
+
+    Props part(Kind kind, u32 which) {
+        mut Props p = Props{ };
+        match (ui.theme) {
+            some(t) => {
+                Style s = style_of(t, kind);
+                p = which == 0 ? s.placeholder : which == 1 ? s.selection : s.bar;
+            },
+            none => { },
+        }
+        for (usize i in 0..node_style_count) {
+            Style s = node_styles[i];
+            p = merge_props(p, which == 0 ? s.placeholder : which == 1 ? s.selection : s.bar);
+        }
+        return p;
+    }
+
+    // The look of the node being described: the cascade, from the defaults of `ui` to the
+    // styles of the node; `color`, `font_size` and `accent` inherited from the layout holding it.
+    Look look(Kind kind, u32 states) {
+        Look d = default_look(kind, states);
+        Props p = explicit_props(kind, states);
+        mut Props all = Props{ };
+        match (ui.theme) {
+            some(t) => {
+                all = t.all;
+            },
+            none => { },
+        }
+        Layout l = layouts[depth];
+        // a disabled button and a title keep their own default unless a rule says otherwise
+        bool own_color = states & state_disabled() != 0;
+        canvas.Color inherited = color_or(l.color, color_or(all.color, d.color));
+        f32 size = kind == Title ? d.font_size : f32_or(l.font_size, f32_or(all.font_size, d.font_size));
+        return Look{ color: color_or(p.color, own_color ? d.color : inherited), background: color_or(p.background, d.background), border: color_or(p.border, d.border), border_width: f32_or(p.border_width, d.border_width), radius: f32_or(p.radius, d.radius), padding: f32_or(p.padding, d.padding), gap: f32_or(p.gap, d.gap), height: f32_or(p.height, d.height), font_size: f32_or(p.font_size, size), accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))), hint: color_or(part(kind, 0).color, d.hint), selection: color_or(part(kind, 1).background, d.selection), bar: color_or(part(kind, 2).background, d.bar) };
+    }
+
+    // The background and the border of `r`, as `l` says.
+    void paint(canvas.Rect r, Look l) {
+        if (l.background.a > 0) {
+            surface.fill_rounded(r, l.radius, l.background);
+        }
+        if (l.border.a > 0 && l.border_width > 0.0) {
+            surface.stroke_rounded(r, l.radius, l.border, l.border_width);
+        }
+    }
+
+    // The size of `text` at `size` pixels per em, in the font of `ui`, or else the built-in one.
+    canvas.Rect measure_px(str text, f32 size) {
+        return match (ui.font) {
+            some(f) => canvas.Rect{ x: 0.0, y: 0.0, w: f.measure(text, size), h: f.line_height(size) },
+            none => canvas.text_size(text, scale_of(size)),
+        };
+    }
+
+    // `text` at `size`, from x, in the middle of a box `box` high from y.
+    void write_px(f32 x, f32 y, f32 box, str text, canvas.Color color, f32 size) {
+        f32 top = y + (box - measure_px(text, size).h) / 2.0;
+        match (ui.font) {
+            some(f) => {
+                surface.text_with(f, size, x, top, text, color);
+            },
+            none => {
+                surface.text(x, top, text, color, scale_of(size));
+            },
+        }
+    }
+
+    // The identity of a painted column or row: its place among those of its scope.
+    u64 container_id() {
+        u64 id = mix(scopes[scope], 0xC0000000 | containers[scope] as u64);
+        containers[scope] += 1;
+        return id;
+    }
+
+    // ---- Translations (spec §10.7) ----
+
+    // `source`, translated by `ui.catalog`, or itself.
+    pub str tr(str source) {
+        return match (ui.catalog) {
+            some(c) => c.text(source),
+            none => source,
+        };
+    }
+
+    // The same, for one meaning of `source` (`msgctxt`).
+    pub str tr_in(str context, str source) {
+        return match (ui.catalog) {
+            some(c) => c.in_context(context, source),
+            none => source,
+        };
+    }
+
+    // The form of `one` (its plural: `other`) for `n` things, translated.
+    pub str tr_plural(str one, str other, i64 n) {
+        return match (ui.catalog) {
+            some(c) => c.plural(one, other, n),
+            none => n == 1 ? one : other,
+        };
+    }
+
+    pub str tr_plural_in(str context, str one, str other, i64 n) {
+        return match (ui.catalog) {
+            some(c) => c.plural_in_context(context, one, other, n),
+            none => n == 1 ? one : other,
+        };
+    }
+
+    // `text` with `{name}` replaced by `value` (`with2` to `with4`: more values). The result lasts
+    // until the end of the frame; when the frame has no room left (8 KB of such texts), `text`.
+    pub str with1(str text, str name, str value) {
+        return fill(text, [name, "", "", ""], [value, "", "", ""], 1);
+    }
+
+    pub str with2(str text, str name1, str value1, str name2, str value2) {
+        return fill(text, [name1, name2, "", ""], [value1, value2, "", ""], 2);
+    }
+
+    pub str with3(str text, str name1, str value1, str name2, str value2, str name3, str value3) {
+        return fill(text, [name1, name2, name3, ""], [value1, value2, value3, ""], 3);
+    }
+
+    pub str with4(str text, str name1, str value1, str name2, str value2, str name3, str value3, str name4, str value4) {
+        return fill(text, [name1, name2, name3, name4], [value1, value2, value3, value4], 4);
+    }
+
+    // `n` in decimal digits, until the end of the frame.
+    pub str decimal(i64 n) {
+        mut u8[20] digits = [0; 20];
+        mut usize count = 0;
+        mut u64 rest = n < 0 ? (0 - (n + 1)) as u64 + 1 : n as u64;
+        while (count == 0 || rest > 0) {
+            digits[count] = (48 + rest % 10) as u8;
+            rest /= 10;
+            count += 1;
+        }
+        usize start = pool_used;
+        if (pool_used + count + 1 > 8192) {
+            return "?";
+        }
+        if (n < 0) {
+            pool[pool_used] = 45;  // -
+            pool_used += 1;
+        }
+        for (usize i in 0..count) {
+            pool[pool_used] = digits[count - 1 - i];
+            pool_used += 1;
+        }
+        return text_of(pool[start..pool_used]);
+    }
+
+    str fill(str text, str[4] names, str[4] values, usize count) {
+        usize start = pool_used;
+        mut usize i = 0;
+        while (i < text.len) {
+            mut bool replaced = false;
+            if (text.bytes[i] == 123) {  // {
+                for (usize k in 0..count) {
+                    str name = names[k];
+                    if (i + name.len + 1 < text.len && text.bytes[i + name.len + 1] == 125 && same_bytes(text, i + 1, name)) {
+                        if (pool_used + values[k].len > 8192) {
+                            pool_used = start;
+                            return text;
+                        }
+                        for (u8 b in values[k].bytes) {
+                            pool[pool_used] = b;
+                            pool_used += 1;
+                        }
+                        i += name.len + 2;
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if (!replaced) {
+                if (pool_used == 8192) {
+                    pool_used = start;
+                    return text;
+                }
+                pool[pool_used] = text.bytes[i];
+                pool_used += 1;
+                i += 1;
+            }
+        }
+        return text_of(pool[start..pool_used]);
+    }
+
     // ---- Identities and the keyboard (spec §10.6) ----
 
     // The next widget's place in its scope: the offset of its node in a .ui.sosu file. Without
@@ -1781,6 +2430,7 @@ pub struct Frame {
         scopes[scope + 1] = mix(scopes[scope], key);
         scope += 1;
         calls[scope] = 0;
+        containers[scope] = 0;
         iterations[scope] = 0;
     }
 
@@ -1874,9 +2524,9 @@ pub struct Frame {
         }
     }
 
-    // The ring of the widget that has the keyboard.
-    void ring(canvas.Rect r) {
-        surface.stroke(canvas.Rect{ x: r.x - 3.0, y: r.y - 3.0, w: r.w + 6.0, h: r.h + 6.0 }, accent(), 2.0);
+    // The ring of the widget that has the keyboard, in `color` (its accent).
+    void ring(canvas.Rect r, canvas.Color color) {
+        surface.stroke(canvas.Rect{ x: r.x - 3.0, y: r.y - 3.0, w: r.w + 6.0, h: r.h + 6.0 }, color, 2.0);
     }
 
     // Space (and Enter, with `enter`) pressed while `id` has the keyboard.
@@ -1952,7 +2602,7 @@ pub struct Frame {
                 }
                 WidgetState* s = &ui.states[l.area as usize];
                 if (*chosen == index) {
-                    surface.fill(row, canvas.Color{ r: 137, g: 180, b: 250, a: 70 });
+                    surface.fill(row, l.look.selection);
                     if (s.reveal) {  // the item chosen with a key comes into view
                         f32 top = r.y - l.frame.y + s.scroll_y;
                         s.scroll_y = min(s.scroll_y, top);
@@ -1994,6 +2644,7 @@ pub struct Frame {
 
     void begin_area(f32 width, f32 height_of, bool is_list, i32*? selected) {
         u64 id = take_id();
+        take_styles();
         canvas.Rect r = place(width, height_of);
         interactive(r);
         usize slot = ui.state_slot(id);
@@ -2049,8 +2700,8 @@ pub struct Frame {
         }
         s.scroll_y = max(min(s.scroll_y, s.content_h - view_h), 0.0);
         s.scroll_x = max(min(s.scroll_x, s.content_w - view_w), 0.0);
-        surface.fill(r, well());
-        surface.stroke(r, ui.focus == id ? accent() : face(false, false), 2.0);
+        Look area_look = look(is_list ? List : Scroll, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
+        paint(r, area_look);
         surface.push_clip(canvas.Rect{ x: r.x + 2.0, y: r.y + 2.0, w: view_w - (tall ? 2.0 : 4.0), h: view_h - (wide ? 2.0 : 4.0) });
         if (depth == 15) {
             return;  // too deep: the widgets stay in the current layout
@@ -2059,7 +2710,7 @@ pub struct Frame {
         f32 left = r.x + 8.0 - s.scroll_x;
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected };
+        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, look: area_look };
     }
 
     void end_area(bool is_list) {
@@ -2101,12 +2752,12 @@ pub struct Frame {
         if (s.content_h > view_h) {  // the bars show where the content is
             f32 thumb = max(view_h * view_h / s.content_h, 16.0);
             f32 y = r.y + (view_h - thumb) * s.scroll_y / (s.content_h - view_h);
-            surface.fill(canvas.Rect{ x: r.x + r.w - 7.0, y: y + 2.0, w: 4.0, h: thumb - 4.0 }, face(ui.active == mix(done.area_id, 1), false));
+            surface.fill(canvas.Rect{ x: r.x + r.w - 7.0, y: y + 2.0, w: 4.0, h: thumb - 4.0 }, ui.active == mix(done.area_id, 1) ? done.look.accent : done.look.bar);
         }
         if (!is_list && s.content_w > view_w) {
             f32 thumb = max(view_w * view_w / s.content_w, 16.0);
             f32 x = r.x + (view_w - thumb) * s.scroll_x / (s.content_w - view_w);
-            surface.fill(canvas.Rect{ x: x + 2.0, y: r.y + r.h - 7.0, w: thumb - 4.0, h: 4.0 }, face(ui.active == mix(done.area_id, 2), false));
+            surface.fill(canvas.Rect{ x: x + 2.0, y: r.y + r.h - 7.0, w: thumb - 4.0, h: 4.0 }, ui.active == mix(done.area_id, 2) ? done.look.accent : done.look.bar);
         }
         last = r;
         last_id = done.area_id;
@@ -2155,6 +2806,18 @@ pub struct Frame {
 pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
     mut Frame f = Frame{ ui: ui, surface: surface };
     f.layouts[0] = Layout{ x: x, y: y, left: x, top: y, right: x, bottom: y };
+    // the background of the window, when the theme gives one (spec §10.7)
+    match (ui.theme) {
+        some(t) => {
+            match (in_states(t.window, 0).background) {
+                some(c) => {
+                    surface.clear(c);
+                },
+                none => { },
+            }
+        },
+        none => { },
+    }
     return f;
 }
 
@@ -3077,4 +3740,145 @@ test "focus_here gives the keyboard the first time only" {
     f.text_field(&text, 200.0);
     f.finish();
     assert(ui.focus == 0);
+}
+
+test "placeholders: shown while the text is empty, never typed" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    mut TextBuffer text = TextBuffer{ };
+    Format search = Format{ placeholder: "Search" };
+    // the built-in font: "Search" from x 8, 16 pixels a character, in the color of hints
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.text_field_with(&text, 200.0, search);
+    f.finish();
+    mut bool dimmed = false;
+    for (i32 x in 8..24) {
+        for (i32 y in 8..24) {
+            dimmed = dimmed || surface.at(x, y) == canvas.pack(hint());
+        }
+    }
+    assert(dimmed && text.len == 0);
+    click_at(&ui, 20.0, 10.0);
+    ui.type_text("a");
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.text_field_with(&text, 200.0, search);
+    f.finish();
+    mut bool still = false;
+    for (i32 x in 8..120) {
+        for (i32 y in 8..24) {
+            still = still || surface.at(x, y) == canvas.pack(hint());
+        }
+    }
+    assert(!still && text.text().len == 1);
+
+    // a dropdown with no option chosen shows its placeholder
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+    f = begin(&ui, &surface, 0.0, 50.0);
+    f.dropdown_with(160.0, "Pick");
+    f.option("One", false);
+    f.end_dropdown();
+    f.finish();
+    mut bool picked = false;
+    for (i32 x in 8..72) {
+        for (i32 y in 58..74) {
+            picked = picked || surface.at(x, y) == canvas.pack(hint());
+        }
+    }
+    assert(picked);
+}
+
+bool is_text(str a, str b) {
+    return a.len == b.len && same_bytes(a, 0, b);
+}
+
+test "texts translated, with values and plurals" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 100, 100);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    assert(is_text(f.tr("Save"), "Save"));  // no catalog: the source
+    assert(is_text(f.tr_plural("{count} file", "{count} files", 1), "{count} file"));
+    f.finish();
+    match (catalog.load(&arena, "packages/i18n/tests/messages.locale.fr.sosu")) {
+        ok(c) => {
+            ui.catalog = some(c);
+        },
+        err(e) => { },
+    }
+    f = begin(&ui, &surface, 0.0, 0.0);
+    assert(is_text(f.tr("Save"), "Enregistrer") && is_text(f.tr_in("verb", "Open"), "Ouvrir"));
+    str files = f.tr_plural("{count} file", "{count} files", 0);  // French: 0 is singular
+    assert(is_text(f.with1(files, "count", f.decimal(0)), "0 fichier"));
+    assert(is_text(f.with2("{a} and {b}, {a}", "a", "x", "b", "yz"), "x and yz, x"));
+    assert(is_text(f.with1("{unknown} {", "name", "v"), "{unknown} {"));
+    assert(is_text(f.decimal(-42), "-42") && is_text(f.decimal(1234567), "1234567"));
+    f.finish();
+}
+
+// Whether a pixel of `r` on `surface` is `color`.
+bool has_pixel(canvas.Canvas* surface, canvas.Rect r, canvas.Color color) {
+    u32 wanted = canvas.pack(color);
+    for (i32 y in r.y as i32..(r.y + r.h) as i32) {
+        for (i32 x in r.x as i32..(r.x + r.w) as i32) {
+            if (surface.at(x, y) == wanted) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+test "themes and styles: the cascade" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 300);
+    mut Ui ui = Ui{ };
+    canvas.Color dark = rgb(10, 20, 30, 255);
+    canvas.Color hot = rgb(40, 50, 60, 255);
+    canvas.Color red = rgb(200, 0, 0, 255);
+    canvas.Color green = rgb(0, 200, 0, 255);
+    canvas.Color pink = rgb(255, 0, 255, 255);
+    canvas.Color blue = rgb(0, 0, 200, 255);
+    canvas.Color page = rgb(1, 2, 3, 255);
+    ui.theme = some(Theme{ window: Style{ normal: Props{ background: some(page) } }, button: Style{ normal: Props{ background: some(dark), radius: some(6.0) }, hover: Props{ background: some(hot) } } });
+    Style danger = Style{ normal: Props{ background: some(red) } };
+    Style safe = Style{ normal: Props{ background: some(green) } };
+    Style card = Style{ normal: Props{ background: some(blue), color: some(pink), padding: some(8.0) } };
+    ui.mouse_move(299.0, 299.0);  // over nothing
+    for (i32 round in 0..2) {  // a painted column has its background from the second frame
+        mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+        f.button("A");  // y 0 to 32
+        f.style(danger);
+        f.button("B");  // 40 to 72
+        f.style(danger);
+        f.style(safe);  // the later one wins
+        f.button("C");  // 80 to 112
+        f.style(card);
+        f.column(-1.0, -1.0);  // from y 120, its padding 8
+        f.label("x");
+        f.end();
+        f.finish();
+    }
+    assert(surface.at(250, 290) == canvas.pack(page));  // the window
+    assert(surface.at(3, 16) == canvas.pack(dark) && surface.at(0, 0) == canvas.pack(page));  // rounded: its corner left out
+    assert(surface.at(3, 56) == canvas.pack(red) && surface.at(3, 96) == canvas.pack(green));
+    assert(surface.at(3, 123) == canvas.pack(blue));  // the column, in its padding
+    assert(has_pixel(&surface, canvas.Rect{ x: 8.0, y: 128.0, w: 20.0, h: 32.0 }, pink));  // the label inherits its color
+    ui.mouse_move(16.0, 16.0);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.button("A");
+    f.finish();
+    assert(surface.at(3, 16) == canvas.pack(hot));  // hover
+
+    ui.theme = some(light_theme());
+    ui.mouse_move(299.0, 299.0);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.button("A");
+    f.finish();
+    assert(surface.at(250, 290) == canvas.pack(rgb(239, 241, 245, 255)) && surface.at(3, 16) == canvas.pack(rgb(204, 208, 218, 255)));
 }

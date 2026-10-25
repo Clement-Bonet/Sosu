@@ -348,9 +348,12 @@ static void check_alone(LspServer *s, Document *doc, const char *owner, Publishe
     TokenList tokens = {0};
     DiagList diags = {0};
     Arena arena = {0};
-    lex_file(&file, &tokens, &diags);
-    if (program_is_ui_file(doc->path)) parse_ui_module(&file, &tokens, &arena, &diags);
-    else parse_module(&file, &tokens, &arena, &diags);
+    /* a catalog of translations is gettext, not Sosu: nothing to report */
+    if (!program_is_locale_file(doc->path)) {
+        lex_file(&file, &tokens, &diags);
+        if (program_is_ui_file(doc->path)) parse_ui_module(&file, &tokens, &arena, &diags);
+        else parse_module(&file, &tokens, &arena, &diags);
+    }
     publish(s, doc->uri, &diags, &file);
     published_add(fresh, doc->path, sosu_strdup(doc->uri), owner);
     arena_free(&arena);
