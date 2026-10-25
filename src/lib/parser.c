@@ -1409,7 +1409,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
     { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", "focus", "style", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "count", "item", "focus", "style", NULL }, true },
+    { "Table", 0, false, { "count", "item", "width", "height", "selected", "sort", "on_activate", "focus", "style", NULL }, true },
     { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
     { "Text", 1, false, { "plural", "count", "context", "style", NULL }, false },
     { "Title", 1, false, { "plural", "count", "context", "style", NULL }, false },
@@ -1447,7 +1448,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Table", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -2158,6 +2159,89 @@ static void ui_grid_sizes(Parser *p, StmtVec *out, Expr *sizes, const char *meth
     }
 }
 
+/* The items in view of a long list or a table: `for (i32 item in ui_frame.first_shown()..
+   ui_frame.last_shown()) { ui_frame.push_id(item as u64); the items; ui_frame.pop_id(); }`. */
+static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, size_t start, size_t length) {
+    if (!item || item->kind != EXPR_NAME) {
+        Diagnostic *d = error_at(p, "E0215", item ? item->offset : start, item ? item->length : length,
+                                 "`count:` needs `item:`, the name of the index of the item described");
+        diag_help(d, "`List(count: s.count, item: i) { Text(s.names[i]) }`");
+        p->panic = false;
+        free(items->items);
+        return;
+    }
+    Expr *range = ui_expr(p, EXPR_RANGE, start, length);
+    range->as.range.start = ui_frame_call(p, start, length, "first_shown", NULL, 0);
+    range->as.range.end = ui_frame_call(p, start, length, "last_shown", NULL, 0);
+    range->as.range.inclusive = false;
+    Expr *use = ui_expr(p, EXPR_NAME, item->offset, item->length);
+    use->as.name = item->as.name;
+    Expr *key = ui_expr(p, EXPR_CAST, item->offset, item->length);
+    key->as.cast.value = use;
+    key->as.cast.type = ui_type(p, item->offset, NULL, "u64");
+    StmtVec body = {0};
+    SOSU_VEC_PUSH(&body, ui_frame_stmt(p, item->offset, item->length, "push_id", key));
+    for (size_t i = 0; i < items->count; i++) SOSU_VEC_PUSH(&body, items->items[i]);
+    free(items->items);
+    SOSU_VEC_PUSH(&body, ui_frame_stmt(p, start, length, "pop_id", NULL));
+    Stmt *loop = new_stmt(p, STMT_FOR_IN, start);
+    loop->length = length;
+    loop->as.for_in.is_mut = false;
+    loop->as.for_in.type = ui_type(p, item->offset, NULL, "i32");
+    loop->as.for_in.name = item->as.name;
+    loop->as.for_in.iterable = range;
+    loop->as.for_in.body = ui_block(p, &body, start, length);
+    SOSU_VEC_PUSH(out, loop);
+}
+
+/* The columns of a `Table`: `Column(title, width: size, sortable: true, align: End) { its cell }`,
+   each giving `ui_frame.table_column(...)` to `header` and its cell, after `ui_frame.table_cell()`,
+   to `cells`. */
+static void ui_table_columns(Parser *p, StmtVec *header, StmtVec *cells) {
+    if (!expect(p, TOK_LBRACE)) return;
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        size_t before = p->pos;
+        size_t start = cur(p)->offset;
+        if (!check(p, TOK_IDENT) || !token_is(p, cur(p), "Column")) {
+            Diagnostic *d = error_at(p, "E0215", cur(p)->offset, cur(p)->length, "a `Table` contains only `Column` nodes");
+            diag_help(d, "`Table(count: s.count, item: i) { Column(\"Name\", width: Fill) { Text(s.names[i]) } }`");
+            skip_balanced_braces(p);
+            p->panic = false;
+            if (p->pos == before) advance(p);
+            continue;
+        }
+        advance(p);
+        UiArgs args;
+        if (check(p, TOK_LPAREN)) ui_parse_args(p, &args);
+        else memset(&args, 0, sizeof args);
+        size_t length = span_from(p, start);
+        Expr *title = args.values.count ? ui_translate(p, &args, args.values.items[0]) : NULL;
+        if (!title) {
+            error_at(p, "E0215", start, length, "a `Column` of a table has a title: `Column(\"Name\") { ... }`");
+            p->panic = false;
+            title = ui_expr(p, EXPR_NAME, start, length);
+            title->as.name = ui_name("none", start);
+        }
+        Expr *width = ui_prop(&args, "width");
+        Expr *sortable = ui_prop(&args, "sortable");
+        Expr *align = ui_prop(&args, "align");
+        if (!sortable) {
+            sortable = ui_expr(p, EXPR_BOOL, start, length);
+            sortable->as.bool_value = false;
+        }
+        if (align && align->kind == EXPR_NAME) align = ui_variant(p, align, "Align", align->as.name);
+        Expr *column_args[4] = { title, width ? ui_size(p, width) : ui_variant(p, ui_expr(p, EXPR_NAME, start, length), "Size", ui_name("Auto", start)),
+                                 sortable, align ? align : ui_variant(p, ui_expr(p, EXPR_NAME, start, length), "Align", ui_name("Start", start)) };
+        SOSU_VEC_PUSH(header, ui_stmt(p, ui_frame_call(p, start, length, "table_column", column_args, 4)));
+        SOSU_VEC_PUSH(cells, ui_stmt(p, ui_frame_call(p, start, length, "table_cell", NULL, 0)));
+        if (check(p, TOK_LBRACE)) ui_parse_children(p, cells);
+        free(args.values.items);
+        free(args.props.items);
+        if (p->pos == before) advance(p);
+    }
+    expect(p, TOK_RBRACE);
+}
+
 /* A node: a widget of `ui_nodes`, or a component (`TaskRow(t)`, `tasks.TaskRow(t)`). */
 static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     size_t start = cur(p)->offset;
@@ -2270,11 +2354,40 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
                 choice = ui_expr(p, EXPR_NAME, start, length);
                 choice->as.name = ui_name("none", start);
             }
-            Expr *list_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
-                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
-            ui_parse_children(p, out);
+            Expr *list_args[4] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
+                                   ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice, NULL };
+            Expr *count = ui_prop(&args, "count");
+            if (count) {  /* a long list: f.list_of(count, ...), and its items in view only */
+                Expr *long_args[4] = { count, list_args[0], list_args[1], choice };
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list_of", long_args, 4)));
+                StmtVec items = {0};
+                ui_parse_children(p, &items);
+                ui_shown_loop(p, out, ui_prop(&args, "item"), &items, start, length);
+            } else {
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "list", list_args, 3)));
+                ui_parse_children(p, out);
+            }
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
+        } else if (name_text_is(node, "Table")) {
+            /* f.table(count, width, height, selected, sort), f.table_column(...) for each column,
+               f.table_rows(), the rows in view (a cell per column), if (f.end_table()) { on_activate } */
+            Expr *selected = ui_prop(&args, "selected");
+            Expr *sort = ui_prop(&args, "sort");
+            Expr *none_selected = ui_expr(p, EXPR_NAME, start, length);
+            none_selected->as.name = ui_name("none", start);
+            Expr *none_sort = ui_expr(p, EXPR_NAME, start, length);
+            none_sort->as.name = ui_name("none", start);
+            Expr *count = ui_prop(&args, "count");
+            Expr *table_args[5] = { count ? count : ui_int(p, start, 0), ui_extent(p, ui_prop(&args, "width"), start, 400, true),
+                                    ui_extent(p, ui_prop(&args, "height"), start, 240, false),
+                                    selected ? ui_some(p, ui_address(p, selected)) : none_selected,
+                                    sort ? ui_some(p, ui_address(p, sort)) : none_sort };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "table", table_args, 5)));
+            StmtVec cells = {0};
+            ui_table_columns(p, out, &cells);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "table_rows", NULL, 0)));
+            ui_shown_loop(p, out, ui_prop(&args, "item"), &cells, start, length);
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "end_table", NULL, 0), ui_prop(&args, "on_activate")));
         } else if (name_text_is(node, "Scroll")) {
             /* f.scroll(width, height), the nodes, f.end_scroll() */
             Expr *size[2] = { ui_extent(p, ui_prop(&args, "width"), start, 0, true),
@@ -2851,12 +2964,13 @@ static const char *const ui_theme_selectors[][2] = {
     { "List", "list" }, { "Scroll", "scroll" }, { "Column", "column" }, { "Row", "row" },
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
     { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
-    { "Slider", "slider" }, { "Progress", "progress" }, { "Tooltip", "tooltip" },
+    { "Slider", "slider" }, { "Progress", "progress" }, { "Tooltip", "tooltip" }, { "Dialog", "dialog" },
+    { "DateField", "date" }, { "Table", "table" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
     "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
-    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip"
+    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip, Dialog, DateField, Table"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };

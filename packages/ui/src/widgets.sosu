@@ -486,6 +486,7 @@ struct WidgetState {
     mut bool expanded = false;  // a branch of a tree open
     mut f32 extent = 0.0;
     mut bool reveal = false;  // a list: scroll to the item chosen, after a key moved the choice
+    mut f32 item_h = 0.0;  // a long list: the height of its items, measured at the last frame
 }
 
 // The state of an interface between frames.
@@ -1247,6 +1248,7 @@ pub struct Theme {
     pub Style tooltip = Style{ };
     pub Style dialog = Style{ };  // its window; the part `placeholder` is its title
     pub Style date = Style{ };  // the calendar of a date field; `checked`: the day chosen
+    pub Style table = Style{ };  // its rows; the part `bar`: its header and its scroll bar
 }
 
 // The kinds of widgets, the selectors of a theme.
@@ -1276,6 +1278,7 @@ enum Kind {
     Tooltip,
     Dialog,
     Calendar,
+    Table,
 }
 
 // The states of a widget, which can be combined.
@@ -1329,7 +1332,7 @@ pub Style merge(Style weak, Style strong) {
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date) };
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date), table: merge(weak.table, strong.table) };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
@@ -1383,6 +1386,7 @@ Style style_of(Theme t, Kind kind) {
         Tooltip => t.tooltip,
         Dialog => t.dialog,
         Calendar => t.date,
+        Table => t.table,
     };
 }
 
@@ -1522,6 +1526,11 @@ Look default_look(Kind kind, u32 states) {
             border = face(true, false);
             border_width = 1.0;
             padding = 16.0;
+        },
+        Table => {
+            background = well();
+            border = focus ? accent() : face(false, false);
+            border_width = 2.0;
         },
         Calendar => {
             background = rgb(49, 50, 68, 255);
@@ -1705,6 +1714,7 @@ struct Layout {
     mut f32 room_h = 0.0;
     mut i32 grid = -1;  // a grid: its entry of `Frame.grids`
     mut bool tree = false;  // a list that is a tree: its items are indented branches and leaves
+    mut i32 long_count = -1;  // a long list: how many items it has (-1: not one)
     // A group: where its frame starts, its title (its width and height, 0: none), its look.
     mut bool group = false;
     mut f32 group_x = 0.0;
@@ -1733,6 +1743,38 @@ struct TabsBuild {
     mut bool closed = false;
     mut usize marks = 0;
     mut usize depth = 0;  // that of the layout of its content
+}
+
+// How the rows of a `Table` are sorted (spec §10.9): by `column` (-1: none), maybe descending. The
+// program sorts them; the table shows it and changes it when a title is clicked.
+pub struct Sort {
+    pub mut i32 column = -1;
+    pub mut bool descending = false;
+}
+
+// The table being described: its rectangle, rows, columns (titles, sizes, alignments), their places
+// once laid out, the widths its cells measured in this frame, the next cell, and whether a row
+// was activated (Enter, a double click).
+struct TableBuild {
+    mut u64 id = 0;
+    mut canvas.Rect rect = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    mut i32 count = 0;
+    mut i32*? selected = none;
+    mut Sort*? sort = none;
+    mut str[16] titles = [""; 16];
+    mut Size[16] sizes = [Auto; 16];
+    mut bool[16] sortable = [false; 16];
+    mut Align[16] aligns = [Start; 16];
+    mut usize columns = 0;
+    mut f32[16] col_x = [0.0; 16];
+    mut f32[16] col_w = [0.0; 16];
+    mut f32[16] seen_w = [0.0; 16];
+    mut usize memory = 0;
+    mut usize cell = 0;
+    mut bool cell_open = false;
+    mut f32 row_y = 0.0;
+    mut u64 area_id = 0;
+    mut bool activated = false;
 }
 
 // A grid being described: its columns and rows, laid out at its first cell, the next free
@@ -1845,6 +1887,9 @@ pub struct Frame {
     mut Date*? cal_date = none;
     mut bool cal_monday = true;
     mut bool no_edit = false;
+    mut TableBuild table_build = TableBuild{ };  // the table being described (one at a time)
+    mut i32 shown_first = 0;  // a long list: the items in view, `shown_first` to `shown_last` excluded
+    mut i32 shown_last = 0;
     mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
@@ -4534,6 +4579,11 @@ pub struct Frame {
         usize g = grid_count;
         grid_count += 1;
         layouts[depth].grid = g as i32;
+        grids[g] = GridBuild{ memory: grid_memory(id) };
+    }
+
+    // The entry of `Ui.grid_ids` of the grid or the table `id`: its own, or a new one.
+    usize grid_memory(u64 id) {
         mut usize memory = 7;
         mut bool found = false;
         for (usize i in 0..8) {
@@ -4558,7 +4608,7 @@ pub struct Frame {
             }
         }
         ui.grid_seen[memory] = true;
-        grids[g] = GridBuild{ memory: memory };
+        return memory;
     }
 
     // A column of the grid being described, 16 at most.
@@ -4851,6 +4901,10 @@ pub struct Frame {
     void item_placed(Layout l, canvas.Rect r) {
         i32 index = l.item;
         layouts[depth].item += 1;
+        if (l.long_count >= 0 && index == shown_first) {
+            usize area = l.area as usize;
+            ui.states[area].item_h = r.h;  // the height of the items of a long list, for the next frame
+        }
         canvas.Rect row = canvas.Rect{ x: l.frame.x, y: r.y, w: l.frame.w - l.bar_w, h: r.h };
         bool inside = over(row) && over(l.frame);
         match (l.selected) {
@@ -4898,6 +4952,209 @@ pub struct Frame {
 
     pub void end_list() {
         end_area(true);
+    }
+
+    // A long list of `count` items (spec §10.9), `width` by `height`: only the items in view are
+    // described, those from `first_shown()` to `last_shown()` excluded, each as high as the first
+    // one; then `end_list()`.
+    pub void list_of(i32 count, f32 width, f32 height_of, i32*? selected) {
+        u64 id = take_id();
+        take_styles();
+        canvas.Rect r = place(width, height_of);
+        interactive(r);
+        open_area(id, List, r, true, selected, max(count, 0));
+    }
+
+    // ---- Tables (spec §10.9) ----
+
+    // A table of `count` rows, `width` by `height`: its columns follow (`table_column`), then
+    // `table_rows()`, then the rows in view (`first_shown()` to `last_shown()`), each cell after
+    // `table_cell()`, then `end_table()`, true when a row was activated (Enter, a double click).
+    // Rows are chosen as the items of a list; `sort`, when given, is set by a click on the title
+    // of a sortable column (again: descending); the border between two titles can be dragged.
+    pub void table(i32 count, f32 width, f32 height_of, i32*? selected, Sort*? sort) {
+        ensure_cell();
+        u64 id = take_id();
+        take_styles();
+        canvas.Rect r = place(width, height_of);
+        interactive(r);
+        table_build = TableBuild{ id: id, rect: r, count: max(count, 0), selected: selected, sort: sort, memory: grid_memory(id) };
+    }
+
+    // A column of the table being described, 16 at most: its title, its width (pixels, `Auto`,
+    // `Fill`), whether a click on its title sorts by it, and where its cells are aligned.
+    pub void table_column(str title, Size size, bool sortable, Align align) {
+        usize k = table_build.columns;
+        if (k < 16) {
+            table_build.titles[k] = title;
+            table_build.sizes[k] = size;
+            table_build.sortable[k] = sortable;
+            table_build.aligns[k] = align;
+            table_build.columns = k + 1;
+        }
+    }
+
+    // Lays out the columns, draws the header, and opens the rows.
+    pub void table_rows() {
+        TableBuild b = table_build;
+        u64 id = b.id;
+        canvas.Rect r = b.rect;
+        Look l = look(Table, 0);
+        f32 header_h = l.height;
+        usize memory = b.memory;
+        // the widths: dragged by the user (kept in the heights of its memory), else its sizes
+        f32 room = max(r.w - 10.0, 0.0);
+        mut f32 fixed = 0.0;
+        mut f32 weights = 0.0;
+        mut f32[16] widths = [0.0; 16];
+        for (usize i in 0..b.columns) {
+            f32 dragged = ui.grid_heights[memory * 64 + i];
+            f32 title = measure_px(b.titles[i], l.font_size).w + 28.0;
+            if (dragged > 0.0) {
+                widths[i] = dragged;
+            } else {
+                match (b.sizes[i]) {
+                    Pixels(px) => {
+                        widths[i] = px;
+                    },
+                    Auto => {
+                        widths[i] = max(ui.grid_widths[memory * 16 + i], title);
+                    },
+                    Fill(weight) => {
+                        weights += max(weight, 0.0);
+                    },
+                }
+            }
+            fixed += widths[i];
+        }
+        mut f32 x = r.x;
+        for (usize i in 0..b.columns) {
+            if (ui.grid_heights[memory * 64 + i] <= 0.0) {
+                match (b.sizes[i]) {
+                    Fill(weight) => {
+                        widths[i] = weights > 0.0 ? max(room - fixed, 0.0) * max(weight, 0.0) / weights : 0.0;
+                    },
+                    _ => { },
+                }
+            }
+            table_build.col_x[i] = x;
+            table_build.col_w[i] = widths[i];
+            x += widths[i];
+        }
+        // the header: titles, the arrow of the sort, borders that can be dragged
+        canvas.Rect header = canvas.Rect{ x: r.x, y: r.y, w: r.w, h: header_h };
+        mut bool gripped = false;  // the borders first: a press on one is not a click on a title
+        for (usize i in 0..b.columns) {
+            canvas.Rect grip = canvas.Rect{ x: table_build.col_x[i] + widths[i] - 3.0, y: r.y, w: 6.0, h: header_h };
+            if (ui.pressed && over(grip)) {
+                ui.active = mix(id, 0x600 | i as u64);
+                ui.drag_offset = ui.mouse_x - (table_build.col_x[i] + widths[i]);
+                gripped = true;
+            }
+        }
+        Props bar = part(Table, 2);
+        surface.fill(header, color_or(bar.background, face(false, false)));
+        for (usize i in 0..b.columns) {
+            canvas.Rect title = canvas.Rect{ x: table_build.col_x[i], y: r.y, w: widths[i], h: header_h };
+            u64 grip_id = mix(id, 0x600 | i as u64);
+            if (!gripped && b.sortable[i] && click(mix(id, 0x500 | i as u64), canvas.Rect{ x: title.x, y: title.y, w: title.w - 3.0, h: title.h })) {
+                match (b.sort) {
+                    some(order) => {
+                        order.descending = order.column == i as i32 ? !order.descending : false;
+                        order.column = i as i32;
+                    },
+                    none => { },
+                }
+            }
+            if (ui.active == grip_id && ui.down) {
+                ui.grid_heights[memory * 64 + i] = max(ui.mouse_x - ui.drag_offset - title.x, 24.0);
+            }
+            surface.push_clip(title);
+            write_px(title.x + 8.0, title.y, title.h, b.titles[i], l.color, l.font_size);
+            match (b.sort) {
+                some(order) => {
+                    if (order.column == i as i32) {  // the arrow of the sort
+                        i32 cx = (title.x + title.w - 14.0) as i32;
+                        i32 cy = (title.y + title.h / 2.0) as i32;
+                        i32 dir = order.descending ? 1 : -1;
+                        surface.line(cx - 4, cy - 2 * dir, cx, cy + 2 * dir, l.accent);
+                        surface.line(cx, cy + 2 * dir, cx + 4, cy - 2 * dir, l.accent);
+                    }
+                },
+                none => { },
+            }
+            surface.pop_clip();
+            surface.fill(canvas.Rect{ x: title.x + title.w - 1.0, y: title.y + 6.0, w: 1.0, h: title.h - 12.0 }, l.border);
+        }
+        // the rows: a long list under the header
+        u64 area = mix(id, 0xA11);
+        table_build.area_id = area;
+        open_area(area, Table, canvas.Rect{ x: r.x, y: r.y + header_h, w: r.w, h: max(r.h - header_h, 0.0) }, true, b.selected, b.count);
+    }
+
+    // The next cell: in the next column of the row, or of a new row after the last column.
+    pub void table_cell() {
+        if (table_build.columns == 0) {
+            return;
+        }
+        if (table_build.cell_open) {
+            close_cell();
+        }
+        usize k = table_build.cell;
+        if (k == 0) {  // a new row: an item of the list, as wide as the columns
+            usize last_col = table_build.columns - 1;
+            f32 wide = table_build.col_x[last_col] + table_build.col_w[last_col] - table_build.rect.x;
+            canvas.Rect row = place(wide, height);
+            table_build.row_y = row.y;
+            if (ui.pressed && ui.presses == 2 && over(row)) {
+                table_build.activated = true;
+            }
+        }
+        if (depth == 15) {
+            return;
+        }
+        f32 x = table_build.col_x[k] + 6.0;
+        f32 w = max(table_build.col_w[k] - 12.0, 0.0);
+        surface.push_clip(canvas.Rect{ x: x - 4.0, y: table_build.row_y, w: w + 8.0, h: height });
+        depth += 1;
+        layouts[depth] = Layout{ x: x, y: table_build.row_y, left: x, top: table_build.row_y, right: x, bottom: table_build.row_y, gap: 0.0, room_w: w };
+        next_align = table_build.aligns[k];
+        table_build.cell_open = true;
+        table_build.cell = (k + 1) % table_build.columns;
+    }
+
+    // Closes the cell being described: it measures its column, for `Auto` at the next frame.
+    void close_cell() {
+        Layout done = layouts[depth];
+        usize k = (table_build.cell + table_build.columns - 1) % table_build.columns;
+        table_build.seen_w[k] = max(table_build.seen_w[k], done.right - done.left + 12.0);
+        depth -= 1;
+        surface.pop_clip();
+        table_build.cell_open = false;
+        next_align = Start;
+    }
+
+    pub bool end_table() {
+        if (table_build.cell_open) {
+            close_cell();
+        }
+        bool focused = ui.focus == table_build.area_id;
+        end_area(true);
+        usize memory = table_build.memory;
+        for (usize i in 0..16) {
+            ui.grid_widths[memory * 16 + i] = table_build.seen_w[i];
+        }
+        bool activated = table_build.activated || focused && ui.pressed_key(key_enter(), false, false);
+        table_build = TableBuild{ };
+        return activated;
+    }
+
+    pub i32 first_shown() {
+        return shown_first;
+    }
+
+    pub i32 last_shown() {
+        return shown_last;
     }
 
     // ---- Trees (spec §10.8) ----
@@ -5084,8 +5341,21 @@ pub struct Frame {
         take_styles();
         canvas.Rect r = place(width, height_of);
         interactive(r);
+        open_area(id, kind, r, is_list, selected, -1);
+    }
+
+    // The area `r` of a `Scroll`, a list or a table: with `count` >= 0, a long list of that many items
+    // as high as the first one, of which only those in view are described (`first_shown` to
+    // `last_shown`).
+    void open_area(u64 id, Kind kind, canvas.Rect r, bool is_list, i32*? selected, i32 count) {
         usize slot = ui.state_slot(id);
         WidgetState* s = &ui.states[slot];
+        bool long_list = count >= 0;
+        f32 item_h = s.item_h > 0.0 ? s.item_h : height;
+        if (long_list) {
+            s.items = count;
+            s.content_h = count as f32 * item_h;
+        }
         bool tall = s.content_h > r.h;
         bool wide = !is_list && s.content_w > r.w;
         f32 bar_w = tall ? 10.0 : 0.0;
@@ -5148,6 +5418,29 @@ pub struct Frame {
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
         layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, look: area_look, room_w: max(view_w - 16.0, 0.0) };
+        shown_first = 0;
+        shown_last = 0;
+        if (long_list) {  // the items in view: the first ones are skipped, where they would be
+            WidgetState* kept = &ui.states[slot];
+            match (selected) {
+                some(chosen) => {
+                    if (kept.reveal) {
+                        f32 at = *chosen as f32 * item_h;
+                        kept.scroll_y = max(min(kept.scroll_y, at), at + item_h - view_h);
+                        kept.scroll_y = max(min(kept.scroll_y, kept.content_h - view_h), 0.0);
+                        kept.reveal = false;
+                    }
+                },
+                none => { },
+            }
+            shown_first = min((kept.scroll_y / item_h) as i32, count);
+            shown_last = min(shown_first + (view_h / item_h) as i32 + 2, count);
+            f32 skipped = shown_first as f32 * item_h;
+            layouts[depth].y = r.y - kept.scroll_y + skipped;
+            layouts[depth].bottom = layouts[depth].y;
+            layouts[depth].item = shown_first;
+            layouts[depth].long_count = count;
+        }
     }
 
     void end_area(bool is_list) {
@@ -5162,6 +5455,11 @@ pub struct Frame {
         s.content_w = is_list ? 0.0 : done.right - done.left + 16.0;
         if (is_list) {
             s.items = done.item;
+        }
+        if (done.long_count >= 0) {  // a long list: all its items, as high as the first one
+            f32 item_h = s.item_h > 0.0 ? s.item_h : height;
+            s.content_h = done.long_count as f32 * item_h;
+            s.items = done.long_count;
         }
         surface.pop_clip();
         canvas.Rect r = done.frame;
@@ -6997,4 +7295,137 @@ test "dates: their days, typed, and chosen in the calendar with the mouse and th
     ui.mouse_button(true);
     ui.mouse_button(false);
     assert(date_frame(&ui, &surface, &date) && date.month == 12 && date.day == 24);
+}
+
+// A long list of 100 000 items, 200 pixels high, for the test below: how many were described.
+i32 long_list_frame(Ui* ui, canvas.Canvas* surface, i32* chosen) {
+    mut i32 described = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.list_of(100000, 200.0, 200.0, some(chosen));
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        f.label("item");
+        f.pop_id();
+        described += 1;
+    }
+    f.end_list();
+    f.finish();
+    return described;
+}
+
+test "a long list: 100 000 items, only those in view described" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 220);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    ui.mouse_move(10.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(long_list_frame(&ui, &surface, &chosen) <= 9);  // 200 / 32, and two more
+    ui.key(key_end(), true, false, false);  // the last item, which comes into view
+    long_list_frame(&ui, &surface, &chosen);
+    long_list_frame(&ui, &surface, &chosen);
+    assert(chosen == 99999);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.list_of(100000, 200.0, 200.0, some(&chosen));
+    assert(f.last_shown() == 100000 && f.first_shown() > 99990);
+    f.end_list();
+    f.finish();
+    // a click in it chooses the item under the mouse
+    ui.key(key_home(), true, false, false);
+    long_list_frame(&ui, &surface, &chosen);
+    ui.mouse_move(10.0, 32.0 * 3.0 + 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_list_frame(&ui, &surface, &chosen);
+    assert(chosen == 3);
+}
+
+// A table of 50 files, 3 columns (Name: Fill, Size: 100 aligned at the end, Kind: Auto), for the
+// test below; `cells` gets the rectangles of the cells of its first row. Returns its activation.
+bool table_frame(Ui* ui, canvas.Canvas* surface, i32* row, Sort* sort, canvas.Rect[3]* cells) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.table(50, 400.0, 200.0, some(row), some(sort));
+    f.table_column("Name", Fill(1.0), true, Start);
+    f.table_column("Size", Pixels(100.0), true, End);
+    f.table_column("Kind", Auto, false, Start);
+    f.table_rows();
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        f.table_cell();
+        f.label("file");
+        canvas.Rect name = f.last;
+        f.table_cell();
+        f.label("12");
+        canvas.Rect size = f.last;
+        f.table_cell();
+        f.label("source");
+        if (i == 0) {
+            (*cells)[0] = name;
+            (*cells)[1] = size;
+            (*cells)[2] = f.last;
+        }
+        f.pop_id();
+    }
+    bool activated = f.end_table();
+    f.finish();
+    return activated;
+}
+
+test "a table: columns, alignment, sorting, a border dragged, a row chosen and activated" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 420, 220);
+    mut Ui ui = Ui{ };
+    mut i32 row = 0;
+    mut Sort sort = Sort{ };
+    mut canvas.Rect[3] cells = [nowhere(); 3];
+    ui.mouse_move(419.0, 219.0);
+    table_frame(&ui, &surface, &row, &sort, &cells);
+    table_frame(&ui, &surface, &row, &sort, &cells);  // Auto measured
+    // Kind: Auto, as wide as "source" or its title; Size: 100; Name: the rest of 390
+    assert(cells[0].x == 6.0);
+    assert(cells[1].x + cells[1].w <= cells[2].x - 6.0 && cells[1].x > cells[0].x + 100.0);  // aligned at its end
+    // the places of the columns, as the table laid them out
+    mut Frame g = begin(&ui, &surface, 0.0, 0.0);
+    g.table(50, 400.0, 200.0, some(&row), some(&sort));
+    g.table_column("Name", Fill(1.0), true, Start);
+    g.table_column("Size", Pixels(100.0), true, End);
+    g.table_column("Kind", Auto, false, Start);
+    g.table_rows();
+    f32 border = g.table_build.col_x[1];
+    assert(g.table_build.col_w[1] == 100.0 && g.table_build.col_x[2] + g.table_build.col_w[2] == 390.0);
+    g.end_table();
+    g.finish();
+    // a click on the title Size: sorted by it; again: descending
+    ui.mouse_move(border + 50.0, 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    table_frame(&ui, &surface, &row, &sort, &cells);
+    assert(sort.column == 1 && !sort.descending);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    table_frame(&ui, &surface, &row, &sort, &cells);
+    assert(sort.column == 1 && sort.descending);
+    // the border after Name dragged 50 pixels to the left: Name is narrower
+    f32 name_end = cells[1].x;
+    ui.mouse_move(border, 10.0);
+    ui.mouse_button(true);
+    table_frame(&ui, &surface, &row, &sort, &cells);
+    ui.mouse_move(border - 50.0, 10.0);
+    table_frame(&ui, &surface, &row, &sort, &cells);
+    ui.mouse_button(false);
+    table_frame(&ui, &surface, &row, &sort, &cells);
+    assert(cells[1].x < name_end - 40.0);
+    // a click on the third row chooses it; a double click activates it
+    ui.clock(1000);
+    ui.mouse_move(50.0, 32.0 + 2.0 * 32.0 + 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(!table_frame(&ui, &surface, &row, &sort, &cells) && row == 2);
+    ui.clock(1100);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(table_frame(&ui, &surface, &row, &sort, &cells));
 }

@@ -168,7 +168,7 @@ static bool is_ident(const SourceFile *file, const Token *token, const char *tex
 /* The nodes whose first value is a text to translate. */
 static bool is_text_node(const SourceFile *file, const Token *token) {
     static const char *const nodes[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem",
-                                         "Group", "Tab", "Branch", "Leaf", "Dialog" };
+                                         "Group", "Tab", "Branch", "Leaf", "Dialog", "Column" };
     for (size_t i = 0; i < sizeof nodes / sizeof *nodes; i++) {
         if (is_ident(file, token, nodes[i])) return true;
     }
