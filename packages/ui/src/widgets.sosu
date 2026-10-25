@@ -1256,6 +1256,7 @@ pub struct Frame {
     mut TabsBuild[4] tab_builds = [TabsBuild{ }; 4];
     mut usize tabs_count = 0;
     mut usize focus_marks = 0;
+    mut Align next_align = Start;  // `align`: for the next widget placed in a column or a row
     // The tree being described: how deep its branches are open, and the index of the item of
     // each branch open around the next item (Left goes to it).
     mut usize tree_level = 0;
@@ -2699,6 +2700,7 @@ pub struct Frame {
         if (depth == 15) {
             return;  // too deep: the widgets stay in the current layout
         }
+        next_align = Start;  // a column or a row starts where it is; its widgets are aligned
         ensure_cell();
         f32 room_w = max(fill_width() - 2.0 * padding, 0.0);
         f32 room_h = max(fill_height() - 2.0 * padding, 0.0);
@@ -3315,9 +3317,9 @@ pub struct Frame {
             return r;
         }
         Layout l = layouts[depth];
-        canvas.Rect r = canvas.Rect{ x: l.x, y: l.y, w: w, h: h };
-        layouts[depth].right = max(l.right, l.x + w);
-        layouts[depth].bottom = max(l.bottom, l.y + h);
+        canvas.Rect r = aligned(l, canvas.Rect{ x: l.x, y: l.y, w: w, h: h });
+        layouts[depth].right = max(l.right, r.x + r.w);
+        layouts[depth].bottom = max(l.bottom, r.y + r.h);
         if (l.horizontal) {
             layouts[depth].x += w + l.gap;
         } else {
@@ -3330,6 +3332,33 @@ pub struct Frame {
         placed_id = 0;
         last = r;
         return r;
+    }
+
+    // The place of the next widget, across its column or its row, as `align` asked (spec §10.8): in
+    // a column, within the width it has room for; in a row, within its height, or a line.
+    pub void align(Align how) {
+        next_align = how;
+    }
+
+    canvas.Rect aligned(Layout l, canvas.Rect r) {
+        Align how = next_align;
+        next_align = Start;
+        f32 room = l.horizontal ? (l.room_h > 0.0 ? max(l.top + l.room_h - l.y, r.h) : max(height, r.h)) : (l.room_w > 0.0 ? max(l.left + l.room_w - l.x, r.w) : r.w);
+        f32 size = l.horizontal ? r.h : r.w;
+        f32 shift = match (how) {
+            Start => 0.0,
+            Center => (room - size) / 2.0,
+            End => room - size,
+            Stretch => 0.0,
+        };
+        bool stretch = match (how) {
+            Stretch => true,
+            _ => false,
+        };
+        if (l.horizontal) {
+            return canvas.Rect{ x: r.x, y: r.y + shift, w: r.w, h: stretch ? room : r.h };
+        }
+        return canvas.Rect{ x: r.x + shift, y: r.y, w: stretch ? room : r.w, h: r.h };
     }
 
     // A widget placed in a list is one of its items: it can be chosen, and is highlighted.
@@ -5023,4 +5052,29 @@ test "tabs bound to a tab other than the first keep it from the first frame" {
     chosen = 7;  // beyond the last tab: the last one
     tabs_frame(&ui, &surface, &chosen, &name, &closed);
     assert(chosen == 2);
+}
+
+test "align: across the room of a column" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(399.0, 199.0);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.align(Center);
+    f.label("mid");
+    canvas.Rect mid = f.last;
+    f.align(End);
+    f.label("end");
+    canvas.Rect end_r = f.last;
+    f.align(Stretch);
+    f.button("wide");
+    canvas.Rect wide = f.last;
+    f.label("start");
+    canvas.Rect start = f.last;
+    f.finish();
+    assert(mid.x > 0.0 && mid.x + mid.w / 2.0 == 200.0);
+    assert(end_r.x + end_r.w == 400.0);
+    assert(wide.x == 0.0 && wide.w == 400.0);
+    assert(start.x == 0.0);  // the next one is at the start again
 }

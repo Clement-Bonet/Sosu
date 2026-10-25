@@ -500,7 +500,16 @@ static void test_ui_files(void) {
     expect_ui_error("window W() {\n    TextField(width: 9)\n}\n", "E0215", 2, 5);
     expect_ui_error("window W() {\n    Text(\"a\")\n    title: \"late\"\n}\n", "E0215", 3, 5);
     expect_ui_error("component C() {\n    width: 3\n}\n", "E0215", 2, 5);
-    expect_ui_error("window W() {\n    Row(align: End) { }\n}\n", "E0215", 2, 9);
+    expect_ui_error("window W() {\n    Row(span: 2) { }\n}\n", "E0215", 2, 9);
+    expect_ui("window W() {\n    Text(\"a\", align: Center)\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame))\n"
+              "  (block\n"
+              "    (call (. ui_frame align) (. (. widgets Align) Center))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
     expect_ui_error("window W() {\n    Mine(size: 2)\n}\n", "E0215", 2, 10);
     expect_ui_error("window W() {\n    Text(\"a\") { }\n}\n", "E0215", 2, 15);
     expect_ui_error("struct S { }\n", "E0203", 1, 1);

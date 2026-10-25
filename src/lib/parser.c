@@ -2069,7 +2069,8 @@ static bool ui_cell_property(Name name) {
 
 /* The cell of a node in a `Grid`: its properties `row:`, `col:`, `span:`, `row_span:` and
    `align:` are taken out of `args`, and become `ui_frame.cell(row, col, span, row_span, align)`
-   before it; NULL when it gives none. Outside a grid they are an error (`*valid` false). */
+   before it; NULL when it gives none. Outside a grid, `align:` alone becomes
+   `ui_frame.align(...)`, and the others are an error (`*valid` false). */
 static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, bool *valid) {
     Expr *row = NULL, *col = NULL, *span = NULL, *row_span = NULL, *align = NULL;
     size_t kept = 0;
@@ -2079,7 +2080,7 @@ static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, 
             args->props.items[kept++] = prop;
             continue;
         }
-        if (!p->ui_in_grid) {
+        if (!p->ui_in_grid && !name_text_is(prop.name, "align")) {
             Diagnostic *d = error_at(p, "E0215", prop.name.offset, prop.name.length, "`%.*s:` places a node in a `Grid`",
                                      (int)prop.name.length, prop.name.text);
             diag_help(d, "put the node in a grid: `Grid(columns: [Auto, Fill]) { ... }`");
@@ -2097,6 +2098,11 @@ static Stmt *ui_take_cell(Parser *p, UiArgs *args, size_t start, size_t length, 
         *slot = prop.value;
     }
     args->props.count = kept;
+    if (!p->ui_in_grid) {  /* `align:` in a column or a row: `ui_frame.align(...)` */
+        if (!align) return NULL;
+        if (align->kind == EXPR_NAME) align = ui_variant(p, align, "Align", align->as.name);
+        return ui_frame_stmt(p, align->offset, align->length, "align", align);
+    }
     if (!row && !col && !span && !row_span && !align) return NULL;
     if (row && col && row->kind == EXPR_INT && col->kind == EXPR_INT) {
         uint64_t key = row->as.int_value * 64 + col->as.int_value;
