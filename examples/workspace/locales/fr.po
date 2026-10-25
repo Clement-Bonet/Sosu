@@ -1,0 +1,131 @@
+# The French catalog of examples/workspace, from messages.pot (sosuc i18n extract).
+msgid ""
+msgstr ""
+"Language: fr\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+msgid "Sosu workspace"
+msgstr "Espace de travail Sosu"
+
+msgid "File"
+msgstr "Fichier"
+
+msgid "New file"
+msgstr "Nouveau fichier"
+
+msgid "Save"
+msgstr "Enregistrer"
+
+msgid "Revert"
+msgstr "Annuler les modifications"
+
+msgid "Open recent"
+msgstr "Ouvrir un fichier récent"
+
+msgid "Quit"
+msgstr "Quitter"
+
+msgid "Edit"
+msgstr "Édition"
+
+msgid "Duplicate"
+msgstr "Dupliquer"
+
+msgid "Remove"
+msgstr "Supprimer"
+
+msgid "Clear the output"
+msgstr "Effacer la sortie"
+
+msgid "Build"
+msgstr "Compiler"
+
+msgid "Run"
+msgstr "Exécuter"
+
+msgid "Mode"
+msgstr "Mode"
+
+msgid "Debug"
+msgstr "Débogage"
+
+msgid "Release"
+msgstr "Optimisé"
+
+msgid "Help"
+msgstr "Aide"
+
+msgid "About Sosu"
+msgstr "À propos de Sosu"
+
+msgid "Search a file"
+msgstr "Rechercher un fichier"
+
+msgid "Windows"
+msgstr "Windows"
+
+msgid "Linux"
+msgstr "Linux"
+
+msgid "macOS"
+msgstr "macOS"
+
+msgid "{count} file"
+msgid_plural "{count} files"
+msgstr[0] "{count} fichier"
+msgstr[1] "{count} fichiers"
+
+msgid "Add"
+msgstr "Ajouter"
+
+msgid "Choose a file in the list."
+msgstr "Choisissez un fichier dans la liste."
+
+msgid "Output"
+msgstr "Sortie"
+
+msgid "File name"
+msgstr "Nom du fichier"
+
+msgid "Size (KB)"
+msgstr "Taille (Ko)"
+
+msgid "Modified"
+msgstr "Modifié le"
+
+msgid "Licence"
+msgstr "Licence"
+
+msgid "0.00"
+msgstr "0,00"
+
+msgid "Kind"
+msgstr "Type"
+
+msgid "Source"
+msgstr "Source"
+
+msgid "Binary"
+msgstr "Binaire"
+
+msgid "Image"
+msgstr "Image"
+
+msgid "Encoding"
+msgstr "Encodage"
+
+msgid "UTF-8"
+msgstr "UTF-8"
+
+msgid "Latin-1"
+msgstr "Latin-1"
+
+msgid "UTF-16"
+msgstr "UTF-16"
+
+msgid "Read only"
+msgstr "Lecture seule"
+
+msgid "Hidden"
+msgstr "Masqué"

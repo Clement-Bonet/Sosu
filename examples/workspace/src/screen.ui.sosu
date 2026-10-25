@@ -6,7 +6,7 @@ import workspace.state;
 
 window Workspace(state.Workspace* w) {
     title: "Sosu workspace"
-    width: 1180
+    width: 1280
     height: 720
     icon: "examples/workspace/assets/sosu.png"
 
@@ -46,8 +46,8 @@ window Workspace(state.Workspace* w) {
             }
         }
         Space(16)
-        TextField(bind: w.search, width: 260, on_enter: w.find)
-        Dropdown(bind: w.mode, width: 120, on_change: w.mode_changed) {
+        TextField(bind: w.search, width: 260, on_enter: w.find, placeholder: "Search a file")
+        Dropdown(bind: w.mode, width: 140, on_change: w.mode_changed) {
             Option("Debug", value: Debug)
             Option("Release", value: Release)
         }
@@ -61,7 +61,7 @@ window Workspace(state.Workspace* w) {
     }
     Row(gap: 24, padding: 16) {
         Column(gap: 8) {
-            Text("Files")
+            Text("{count} file", plural: "{count} files", count: w.count)
             List(width: 260, height: 520, selected: w.chosen) {
                 for (i32 i in 0..w.count) {
                     Text(w.files[i].name.text())
@@ -100,7 +100,7 @@ window Workspace(state.Workspace* w) {
 
 // The details of the file chosen, edited until Save or Revert.
 component Details(state.Workspace* w) {
-    TextField(bind: w.details.name, width: 400)
+    TextField(bind: w.details.name, width: 400, placeholder: "File name")
     Row(gap: 16) {
         Column(gap: 4) {
             Text("Size (KB)")
@@ -112,7 +112,7 @@ component Details(state.Workspace* w) {
         }
         Column(gap: 4) {
             Text("Licence")
-            TextField(bind: w.details.price, width: 108, accept: Decimal, max: 8)
+            TextField(bind: w.details.price, width: 108, accept: Decimal, max: 8, placeholder: "0.00")
         }
     }
     Text("Kind")
