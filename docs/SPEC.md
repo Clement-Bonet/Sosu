@@ -713,7 +713,7 @@ Translation in v0:
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
-- Not yet: `style` and `theme` blocks and `style:` (designed in §10.7), `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+- `theme` and `style` blocks, and `style:` on a node: see §10.7. Not yet: `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
 
@@ -726,7 +726,7 @@ item         = node | "if" "(" expr ")" children [ "else" ( item | children ) ]
 node         = path [ "(" [ argument { "," argument } ] ")" ] [ children ] ;
 argument     = IDENT ":" expr | expr ;
 children     = "{" { item } "}" ;
-theme        = "theme" IDENT [ ":" path ] "{" { property | selector } "}" ;   (* §10.7, design *)
+theme        = "theme" IDENT [ ":" IDENT ] "{" { property | selector } "}" ;  (* §10.7 *)
 style        = "style" IDENT "{" { property | state } "}" ;
 selector     = IDENT "{" { property | state } "}" ;                (* a widget: Button, TextField... *)
 state        = IDENT "{" property { [ "," ] property } "}" ;        (* hover, focus, placeholder... *)
@@ -899,7 +899,7 @@ Today a widget is the number of its call in the frame. A widget that appears (`i
 
 ### 10.7 Placeholders, translations, themes and styles
 
-Status: design, not implemented yet. Three batches, in this order: placeholders (small), translations, then themes and styles.
+Status: available (placeholders, translations, themes and styles).
 
 #### Placeholders
 
@@ -915,7 +915,7 @@ A program is written in one language (the source language, English in the exampl
 - A new package, `i18n`, without dependencies (in Sosu, through checked reads, as `render.truetype`): `i18n.load(arena, path) -> Catalog*!I18nError` (`Unreadable`, `Damaged` with the line), `catalog.text(source)`, `catalog.plural(one, other, n)`, `catalog.in_context(context, source)`, and `i18n.best(available, wanted) -> usize?`, which picks a language among those available from the preferred ones (`fr-CA`, then `fr`, then none).
 - `platform`: `app.locales(arena) -> str[]`, the preferred languages of the user (`SDL_GetPreferredLocales`), first the most preferred, written `fr-FR`; the event `LocaleChanged` when they change.
 - `ui`: `ui.catalog: i18n.Catalog*?` (none: the source language). Every literal text of a `.ui.sosu` file is translated: the labels of `Text`, `Title`, `Button`, `Checkbox`, `Radio`, `Option`, `Menu`, `MenuItem`, placeholders, and the `title` of a window. A text that is an expression (`Text(task.title)`) is data, and is not translated. In code written by hand: `f.tr("Save")`.
-- Values in a text: `Text("Hello, {name}", name: user.name)`. The braces name values given by the node; each one must be given, and each value given must be used (an error otherwise, E0215). A translator can move them: `"Bonjour, {name}"`. A value is a `str` or an integer; an integer is written in decimal digits (separators of thousands and decimals by language: later, with `NumberField`).
+- Values in a text: `Text("Hello, {name}", name: user.name)`. The braces name values given by the node; each one must be given, and each value given must be used (an error otherwise, E0215). A translator can move them: `"Bonjour, {name}"`. A value in braces is a `str` (the translator works on the syntax, before the types are known); only `count:` is an integer, written in decimal digits (`f.decimal(n)` in code). Separators of thousands and decimals by language: later, with `NumberField`.
 - Plurals: `Text("{count} file", plural: "{count} files", count: n)`: `count`, an integer, chooses the form, by the rule of the catalog (by the rule of English without one).
 - The same text in two meanings (`"Open"`, the verb and the state): `context: "verb"`, the `msgctxt` of gettext.
 - Extraction: `sosuc i18n extract [package] -o locales/messages.locale.default.sosu` writes the template of the catalogs: every literal text of the `.ui.sosu` files of the package, and the literal arguments of `f.tr(...)` in its `.sosu` files, each with its file and line (`#: screen.ui.sosu:12`), its context and plural. Translators start from it (`msginit`, Poedit, after renaming the file `.pot`), and update their catalogs from it (`msgmerge`): `sosuc` writes the template, it does not merge.
@@ -989,7 +989,10 @@ window Tasks(state.Tasks* s) {
 - States, inside a selector or a style: `hover`, `pressed`, `focus` (has the keyboard), `disabled`, `checked` (a checkbox checked, a radio chosen, an item chosen), `open` (a dropdown, a menu); and the parts `placeholder` (the hint of a field or of a dropdown), `selection` (the text selected), `bar` (the scroll bars of a `Scroll` or a list). Several states can apply: `focus` and `hover` both, in the order of this list.
 - Selectors of a theme: the widgets by the name of their node (`Window`, `Text`, `Title`, `Button`, `TextField`, `Checkbox`, `Radio`, `Dropdown`, `List`, `Scroll`, `Column`, `Row`, `TitleBar`, `MenuBar`, `Menu` for the open menus, `Image`), with their states.
 - The cascade, from the weakest: the theme `Default` of `ui` (the colors of today), the selector of the widget in the theme, its states, then the styles of the node in their order, and their states. `color` and `font_size` are inherited: a `Column(style: Card)` gives its text color to the labels inside, unless they have their own.
-- What they become: `theme Dark` becomes `pub widgets.Theme Dark()`, `style Danger` `pub widgets.Style Danger()`, values that the program keeps and passes; `theme.Normal` is a style that changes nothing (`widgets.Style{ }`). A node with `style: s` is described between `f.push_style(s)` and `f.pop_style()`; `style: [a, b]` pushes both. Themes and styles have no parameters in v0.
+- What they become: `theme Dark` becomes `pub widgets.Theme Dark()`, `style Danger` `pub widgets.Style Danger()`, values that the program keeps and passes; `theme.Normal` is a style that changes nothing (`widgets.Style{ }`). In `style:`, a name that starts with a capital (`Danger`, `theme.Danger`) is called; any other expression is a `widgets.Style` already (`s.style`). Themes and styles have no parameters in v0.
+- The names of a theme become constants of its function (`auto accent = widgets.rgb(...)`; a whole number is an `f32`); those named `color`, `font_size` and `accent` are also its `all`. A selector or a style becomes a `widgets.Style{ normal: widgets.Props{ ... }, hover: ... }`, each property `some(value)`.
+- `theme Light : Dark`: the parent is a theme written above, in the same file. Its body is read again with the names of `Light`, so that a name `Light` changes applies to the selectors it inherits; a selector both give is `widgets.merge(parent, child)`. `widgets.over(weak, strong)` does the same for two themes in code: `widgets.over(theme, widgets.Theme{ all: widgets.Props{ font_size: some(22.0) } })`.
+- A node with `style: s` is preceded by `f.style(s)`, which the next node takes (4 styles at most, the later ones win); `style: [a, b]` gives both, in order. A `Column` or a `Row` without `gap:` or `padding:` takes them from the theme and its styles (`f.column(-1.0, -1.0)`).
 - The program chooses the theme: `ui.theme = theme.Dark()`, at any time; without one, `widgets.default_theme()`. `ui` also gives `widgets.light_theme()`. `platform` says what the user chose: `app.system_theme() -> SystemTheme` (`Light`, `Dark`, `Unknown`, from `SDL_GetSystemTheme`) and the event `SystemThemeChanged(dark)`; a program that follows the system switches between two themes.
 - `Window { background: ... }` is drawn by `widgets.begin` over the whole surface, so the program no longer clears it itself (it still can, before `begin`).
 - Not in v0: selectors by position (`Column > Text`), styles by state of the program other than through an expression (`style: s.late ? Danger : Normal` covers it), transitions and animations, other fonts than one per size (bold and italic need more fonts in `ui.font`).

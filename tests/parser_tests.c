@@ -300,7 +300,7 @@ static void test_ui_files(void) {
               "        Button(\"OK\", on_click: s.ok, enabled: s.ready)\n    }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
               "  (block\n"
-              "    (call (. ui_frame column) 4 0.0)\n"
+              "    (call (. ui_frame column) 4 (- 1.0))\n"
               "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
               "    (call (. ui_frame at) 80)\n"
               "    (if (call (. ui_frame button_enabled) (call (. ui_frame tr) \"OK\") (. s ready))\n"
@@ -503,12 +503,59 @@ static void test_ui_files(void) {
     expect_ui_error("window W() {\n    Row(align: End) { }\n}\n", "E0216", 2, 9);
     expect_ui_error("window W() {\n    Mine(size: 2)\n}\n", "E0215", 2, 10);
     expect_ui_error("window W() {\n    Text(\"a\") { }\n}\n", "E0215", 2, 15);
-    expect_ui_error("style Muted { color: Gray }\nwindow W() { }\n", "E0216", 1, 1);
     expect_ui_error("struct S { }\n", "E0203", 1, 1);
+}
+
+/* `theme` and `style` blocks, and `style:` on nodes (spec §10.7). */
+static void test_ui_themes(void) {
+    expect_ui("style Danger {\n    background: #F38BA8\n    radius: 6\n    hover { background: #EBA0AC, border_width: 2 }\n}\n",
+              "(fn pub widgets.Style Danger ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 243 139 168 255))) (radius (call some 6)))) (hover (lit widgets.Props (background (call some (call (. widgets rgb) 235 160 172 255))) (border_width (call some 2))))))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("theme Dark {\n    accent: #89B4FA\n    surface: #313244\n    Window { background: #1E1E2E }\n"
+              "    Button {\n        background: surface\n        focus { border: accent }\n    }\n}\n"
+              "theme Light : Dark {\n    surface: #CCD0DA\n    Window { background: #EFF1F5 }\n}\n",
+              "(fn pub widgets.Theme Dark ()\n"
+              "  (block\n"
+              "    (var auto accent (call (. widgets rgb) 137 180 250 255))\n"
+              "    (var auto surface (call (. widgets rgb) 49 50 68 255))\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent)))) (window (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 30 30 46 255))))))) (button (lit widgets.Style (normal (lit widgets.Props (background (call some surface)))) (focus (lit widgets.Props (border (call some accent))))))))))\n"
+              "(fn pub widgets.Theme Light ()\n"
+              "  (block\n"
+              "    (var auto accent (call (. widgets rgb) 137 180 250 255))\n"
+              "    (var auto surface (call (. widgets rgb) 204 208 218 255))\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (accent (call some accent)))) (window (call (. widgets merge) (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 30 30 46 255)))))) (lit widgets.Style (normal (lit widgets.Props (background (call some (call (. widgets rgb) 239 241 245 255)))))))) (button (lit widgets.Style (normal (lit widgets.Props (background (call some surface)))) (focus (lit widgets.Props (border (call some accent))))))))))\n"
+              "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Column(style: Card) {\n        Text(\"a\", style: s.late ? theme.Danger : Normal)\n"
+              "        Button(\"b\", style: [Card, s.mine])\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame style) (call Card))\n"
+              "    (call (. ui_frame column) (- 1.0) (- 1.0))\n"
+              "    (call (. ui_frame style) (?: (. s late) (call (. theme Danger)) (lit widgets.Style)))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
+              "    (call (. ui_frame style) (call Card))\n"
+              "    (call (. ui_frame style) (. s mine))\n"
+              "    (call (. ui_frame at) 108)\n"
+              "    (call (. ui_frame button) (call (. ui_frame tr) \"b\"))\n"
+              "    (call (. ui_frame end))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("style S { colour: #FFFFFF }\n", "E0215", 1, 11);
+    expect_ui_error("style S { active { color: #FFFFFF } }\n", "E0215", 1, 11);
+    expect_ui_error("style S { radius: 2, radius: 3 }\n", "E0215", 1, 22);
+    expect_ui_error("theme T { Label { color: #FFFFFF } }\n", "E0215", 1, 11);
+    expect_ui_error("theme T : Missing { }\n", "E0215", 1, 11);
+    expect_ui_error("theme T { a: 1\n    a: 2 }\n", "E0215", 2, 5);
+    expect_ui_error("window W() {\n    Text(\"a\", style: c ? [A, B] : A)\n}\n", "E0215", 2, 26);
 }
 
 int main(void) {
     test_ui_files();
+    test_ui_themes();
     test_precedence();
     test_casts();
     test_postfix();

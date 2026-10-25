@@ -1551,28 +1551,32 @@ pub struct Frame {
     // Minimize, maximize (or restore) and close, at the right end of the title bar.
     void window_buttons() {
         f32 w = 46.0;
+        canvas.Color mark = look(TitleBar, 0).color;  // that of the theme: light or dark
+        canvas.Color white = canvas.Color{ r: 255, g: 255, b: 255 };
         ui.bar_buttons = canvas.Rect{ x: bar.x + bar.w - 3.0 * w, y: bar.y, w: 3.0 * w, h: bar.h };
         for (i32 i in 0..3) {
             u64 id = take_id();
             canvas.Rect r = canvas.Rect{ x: ui.bar_buttons.x + i as f32 * w, y: bar.y, w: w, h: bar.h };
             bool clicked = click(id, r);
-            if (over(r)) {
+            bool hot = over(r);
+            if (hot) {
                 bool held = ui.active == id;
-                surface.fill(r, i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 } : face(!held, held));
+                surface.fill(r, i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 } : look(Button, state_hover() | (held ? state_pressed() : 0)).background);
             }
+            canvas.Color ink_of = i == 2 && hot ? white : mark;
             i32 cx = (r.x + w / 2.0) as i32;
             i32 cy = (r.y + bar.h / 2.0) as i32;
             if (i == 0) {
-                surface.line(cx - 5, cy, cx + 5, cy, ink());
+                surface.line(cx - 5, cy, cx + 5, cy, ink_of);
             } else if (i == 1 && ui.maximized) {  // restore: two squares
-                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 3) as f32, w: 8.0, h: 8.0 }, ink(), 1.0);
-                surface.line(cx - 3, cy - 5, cx + 5, cy - 5, ink());
-                surface.line(cx + 5, cy - 5, cx + 5, cy + 3, ink());
+                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 3) as f32, w: 8.0, h: 8.0 }, ink_of, 1.0);
+                surface.line(cx - 3, cy - 5, cx + 5, cy - 5, ink_of);
+                surface.line(cx + 5, cy - 5, cx + 5, cy + 3, ink_of);
             } else if (i == 1) {
-                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 5) as f32, w: 10.0, h: 10.0 }, ink(), 1.0);
+                surface.stroke(canvas.Rect{ x: (cx - 5) as f32, y: (cy - 5) as f32, w: 10.0, h: 10.0 }, ink_of, 1.0);
             } else {
-                surface.line(cx - 5, cy - 5, cx + 5, cy + 5, ink());
-                surface.line(cx - 5, cy + 5, cx + 5, cy - 5, ink());
+                surface.line(cx - 5, cy - 5, cx + 5, cy + 5, ink_of);
+                surface.line(cx - 5, cy + 5, cx + 5, cy - 5, ink_of);
             }
             if (clicked) {
                 if (i == 0) {

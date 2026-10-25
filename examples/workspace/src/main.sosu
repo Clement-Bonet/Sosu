@@ -9,6 +9,9 @@
 // Its texts are in English, translated by the catalogs of locales/ (spec §10.7): French, when
 // the user prefers it, or with the environment variable SOSU_LANG=fr (SOSU_LANG=en: English).
 //
+// It is dark or light as the system is, and follows it when it changes; SOSU_THEME=light or
+// SOSU_THEME=dark chooses (spec §10.7).
+//
 // On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/workspace`
 // from the root of the repository, where the font is found.
 import std.io;
@@ -81,11 +84,15 @@ class App : app.Handler, app.TitleBar {
     mut widgets.Ui ui;
     state.Workspace* w;
     Arena* arena;  // of `main`: the catalogs of translations
+    mut bool dark;  // the theme of the system, unless SOSU_THEME chooses
+    mut bool forced;
 
     void init(state.Workspace* w, Arena* arena) {
         ui = widgets.Ui{ };
         self.w = w;
         self.arena = arena;
+        dark = true;
+        forced = false;
     }
 
     // Asked by the system between two frames: the empty space and the labels of the title
@@ -107,6 +114,11 @@ class App : app.Handler, app.TitleBar {
             },
             LocaleChanged => {
                 ui.catalog = choose_language(arena);  // the next frame is in that language
+            },
+            SystemThemeChanged(on) => {
+                if (!forced) {
+                    dark = on;  // the next frame is in that theme
+                }
             },
             Key(code, down, mods) => {
                 bool ctrl = mods.ctrl || mods.command;  // Cmd on macOS
@@ -159,7 +171,8 @@ class App : app.Handler, app.TitleBar {
 
     override void on_frame(canvas.Canvas* surface) uses io {
         w.follow_choice();
-        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        ui.theme = some(dark ? widgets.default_theme() : widgets.light_theme());
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });  // the light theme clears it with its own color
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Workspace(&f, w);
         f.finish();
@@ -211,6 +224,12 @@ i32 main() uses io {
     state.Workspace* w = arena.new(state.Workspace, icon);
     App* handler = arena.new(App, w, &arena);
     handler.ui.catalog = choose_language(&arena);
+    str theme = env(&arena, "SOSU_THEME");
+    handler.forced = theme.len > 0;
+    handler.dark = handler.forced ? theme != "light" : match (app.system_theme()) {
+        Light => false,
+        _ => true,
+    };
     match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
         ok(noto) => {
             handler.ui.font = some(noto);
