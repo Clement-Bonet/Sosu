@@ -1,0 +1,11 @@
+// The themes of the screen: Light starts from Dark.
+theme Dark {
+    surface: #313244
+    Window { background: #1E1E2E }
+    Button { background: surface }
+}
+
+theme Light : Dark {
+    surface: #CCD0DA
+    Window { background: #EFF1F5 }
+}
