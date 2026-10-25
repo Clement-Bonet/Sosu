@@ -471,7 +471,7 @@ test "text" {
     assert(c.at(13, 0) == 0 && c.at(18, 0) == 0);
 
     c.clear(Color{ r: 0, g: 0, b: 0, a: 0 });
-    c.text(0.0, 0.0, "\u{e9}", white, 1);  // not ASCII: a box
+    c.text(0.0, 0.0, "\u{3b1}", white, 1);  // neither ASCII nor Latin (spec §10.9): a box
     assert(c.at(1, 1) == 0xFFFFFFFF && c.at(6, 1) == 0xFFFFFFFF && c.at(3, 3) == 0);
     c.text(35.0, 15.0, "clipped", white, 3);
 }

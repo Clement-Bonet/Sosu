@@ -1,6 +1,7 @@
 // render.font: the built-in font, 8 by 8 pixels, for the printable ASCII characters
-// (U+0020 to U+007E). Its glyphs come from font8x8 by Daniel Hepper (public domain), after
-// the IBM PC font. Other characters are drawn as a box.
+// (U+0020 to U+007E), and the letters of Latin-1 and Latin Extended-A (U+00C0 to U+017F, spec
+// §10.9), each drawn as its base letter and a mark. Its glyphs come from font8x8 by Daniel Hepper
+// (public domain), after the IBM PC font. Other characters are drawn as a box.
 
 // The size of a glyph, in pixels of the font.
 pub i32 size() {
@@ -16,6 +17,9 @@ pub i32 line_height() {
 // from the left.
 pub u64 glyph(char c) {
     u32 code = c as u32;
+    if (code >= 0xC0 && code <= 0x17F) {
+        return accented(code);
+    }
     if (code < 0x20 || code > 0x7E) {
         return 0x007E424242427E00;  // a box
     }
@@ -117,4 +121,480 @@ pub u64 glyph(char c) {
         0x0000000000003B6E,  // ~
     ];
     return glyphs[(code - 0x20) as usize];
+}
+
+// The glyph of a letter of U+00C0 to U+017F: its base letter (a capital one row lower when its
+// mark is above it) and its mark, or a glyph of its own; a box when it has neither.
+u64 accented(u32 code) {
+    u8[192] bases = [
+        65,
+        65,
+        65,
+        65,
+        65,
+        65,
+        0,
+        67,
+        69,
+        69,
+        69,
+        69,
+        73,
+        73,
+        73,
+        73,
+        68,
+        78,
+        79,
+        79,
+        79,
+        79,
+        79,
+        120,
+        79,
+        85,
+        85,
+        85,
+        85,
+        89,
+        1,
+        2,
+        97,
+        97,
+        97,
+        97,
+        97,
+        97,
+        3,
+        99,
+        101,
+        101,
+        101,
+        101,
+        105,
+        105,
+        105,
+        105,
+        4,
+        110,
+        111,
+        111,
+        111,
+        111,
+        111,
+        45,
+        111,
+        117,
+        117,
+        117,
+        117,
+        121,
+        5,
+        121,
+        65,
+        97,
+        65,
+        97,
+        65,
+        97,
+        67,
+        99,
+        67,
+        99,
+        67,
+        99,
+        67,
+        99,
+        68,
+        100,
+        68,
+        100,
+        69,
+        101,
+        69,
+        101,
+        69,
+        101,
+        69,
+        101,
+        69,
+        101,
+        71,
+        103,
+        71,
+        103,
+        71,
+        103,
+        71,
+        103,
+        72,
+        104,
+        72,
+        104,
+        73,
+        105,
+        73,
+        105,
+        73,
+        105,
+        73,
+        105,
+        73,
+        6,
+        0,
+        0,
+        74,
+        106,
+        75,
+        107,
+        107,
+        76,
+        108,
+        76,
+        108,
+        76,
+        108,
+        76,
+        108,
+        76,
+        108,
+        78,
+        110,
+        78,
+        110,
+        78,
+        110,
+        0,
+        78,
+        110,
+        79,
+        111,
+        79,
+        111,
+        79,
+        111,
+        7,
+        8,
+        82,
+        114,
+        82,
+        114,
+        82,
+        114,
+        83,
+        115,
+        83,
+        115,
+        83,
+        115,
+        83,
+        115,
+        84,
+        116,
+        84,
+        116,
+        84,
+        116,
+        85,
+        117,
+        85,
+        117,
+        85,
+        117,
+        85,
+        117,
+        85,
+        117,
+        85,
+        117,
+        87,
+        119,
+        89,
+        121,
+        89,
+        90,
+        122,
+        90,
+        122,
+        90,
+        122,
+        0,
+    ];
+    u8[192] marks = [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        16,
+        7,
+        1,
+        2,
+        3,
+        5,
+        1,
+        2,
+        3,
+        5,
+        15,
+        4,
+        1,
+        2,
+        3,
+        4,
+        5,
+        0,
+        14,
+        1,
+        2,
+        3,
+        5,
+        2,
+        16,
+        16,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        16,
+        7,
+        1,
+        2,
+        3,
+        5,
+        1,
+        2,
+        3,
+        5,
+        16,
+        4,
+        1,
+        2,
+        3,
+        4,
+        5,
+        0,
+        14,
+        1,
+        2,
+        3,
+        5,
+        2,
+        16,
+        5,
+        9,
+        9,
+        10,
+        10,
+        12,
+        12,
+        2,
+        2,
+        3,
+        3,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        15,
+        15,
+        9,
+        9,
+        10,
+        10,
+        11,
+        11,
+        12,
+        12,
+        8,
+        8,
+        3,
+        3,
+        10,
+        10,
+        11,
+        11,
+        7,
+        7,
+        3,
+        3,
+        15,
+        15,
+        4,
+        4,
+        9,
+        9,
+        10,
+        10,
+        12,
+        12,
+        11,
+        16,
+        0,
+        0,
+        3,
+        3,
+        7,
+        7,
+        0,
+        2,
+        2,
+        7,
+        7,
+        8,
+        8,
+        11,
+        11,
+        14,
+        14,
+        2,
+        2,
+        7,
+        7,
+        8,
+        8,
+        0,
+        0,
+        0,
+        9,
+        9,
+        10,
+        10,
+        13,
+        13,
+        16,
+        16,
+        2,
+        2,
+        7,
+        7,
+        8,
+        8,
+        2,
+        2,
+        3,
+        3,
+        7,
+        7,
+        8,
+        8,
+        7,
+        7,
+        8,
+        8,
+        15,
+        15,
+        4,
+        4,
+        9,
+        9,
+        10,
+        10,
+        6,
+        6,
+        13,
+        13,
+        12,
+        12,
+        3,
+        3,
+        3,
+        3,
+        5,
+        2,
+        2,
+        11,
+        11,
+        8,
+        8,
+        0,
+    ];
+    usize index = (code - 0xC0) as usize;
+    u8 letter_of = bases[index];
+    u8 mark = marks[index];
+    if (mark == 16) {  // a letter of its own: Æ Þ ß æ ð þ ı Œ œ
+        mut u64[9] own = [0; 9];
+        own[0] = 0x007616163F16167C;  // Æ
+        own[1] = 0x0003031F33331F03;  // Þ
+        own[2] = 0x031B33331B331E00;  // ß
+        own[3] = 0x00760B7E48760000;  // æ
+        own[4] = 0x001E3333333E180C;  // ð
+        own[5] = 0x03031F33331F0300;  // þ
+        own[6] = 0x001E0C0C0C0E0000;  // ı
+        own[7] = 0x007E09093909097E;  // Œ
+        own[8] = 0x0076097949360000;  // œ
+        return own[letter_of as usize];
+    }
+    if (letter_of == 0) {
+        return 0x007E424242427E00;  // a box
+    }
+    mut u64 letter = glyph(letter_of as char);
+    bool capital = letter_of >= 65 && letter_of <= 90;
+    bool below = mark == 7 || mark == 12;  // cedilla, ogonek
+    bool above = mark != 0 && !below && mark < 14;
+    if (letter_of == 105 || letter_of == 106) {  // i and j lose their dot under a mark
+        letter = letter & 0xFFFFFFFFFFFF0000;
+    }
+    if (capital && above) {
+        letter = letter << 8;  // a row lower: the mark goes in the top row
+    }
+    // the marks above: a lower case letter has two free rows, a capital one
+    mut u64[14] high = [0; 14];
+    high[1] = 0x0804;  // grave
+    high[2] = 0x0810;  // acute
+    high[3] = 0x1408;  // circumflex
+    high[4] = 0x0D16;  // tilde
+    high[5] = 0x3600;  // diaeresis
+    high[6] = 0x1C14;  // ring
+    high[8] = 0x0814;  // caron
+    high[9] = 0x1E00;  // macron
+    high[10] = 0x1C22;  // breve
+    high[11] = 0x0C00;  // dot
+    high[13] = 0x2412;  // double acute
+    mut u64[14] top = [0; 14];
+    top[1] = 0x0C;
+    top[2] = 0x18;
+    top[3] = 0x1C;
+    top[4] = 0x1E;
+    top[5] = 0x36;
+    top[6] = 0x1C;
+    top[8] = 0x1C;
+    top[9] = 0x1E;
+    top[10] = 0x22;
+    top[11] = 0x0C;
+    top[13] = 0x36;
+    if (above) {
+        return letter | (capital ? top[mark as usize] : high[mark as usize]);
+    }
+    if (mark == 7) {  // cedilla
+        return letter | 0x1800000000000000;
+    }
+    if (mark == 12) {  // ogonek
+        return letter | 0x3000000000000000;
+    }
+    if (mark == 14) {  // stroke: across o, O, l and L
+        return letter | (letter_of == 108 || letter_of == 76 ? 0x0000000804100000 : 0x0002040810204000);
+    }
+    if (mark == 15) {  // bar: D, d, H, h, T, t
+        return letter | (letter_of == 68 ? 0x0000000007000000 : capital ? 0x00000000007F0000 : 0x0000000000007800);
+    }
+    return letter;
+}
+
+test "accented letters: their base letter and a mark" {
+    // é: e, and an acute in its two free rows; É: E a row lower, its acute in the top row
+    assert(glyph('\u{e9}') & 0xFFFFFFFFFFFF0000 == glyph('e') && glyph('\u{e9}') & 0xFFFF == 0x0810);
+    assert(glyph('\u{c9}') >> 8 == glyph('E') & 0x00FFFFFFFFFFFFFF && glyph('\u{c9}') & 0xFF == 0x18);
+    // ç: c and a cedilla below; ï: i without its dot, and a diaeresis
+    assert(glyph('\u{e7}') == glyph('c') | 0x1800000000000000);
+    assert(glyph('\u{ef}') & 0xFFFF == 0x3600);
+    // ß, Ł, ő; a Greek letter: a box
+    assert(glyph('\u{df}') == 0x031B33331B331E00);
+    assert(glyph('\u{141}') != glyph('L') && glyph('\u{151}') != glyph('o'));
+    assert(glyph('\u{3b1}') == 0x007E424242427E00);
 }

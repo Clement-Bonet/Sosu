@@ -11,12 +11,15 @@ pub class Editor {
     pub mut widgets.TextBuffer output;
     pub mut Mode mode;
     pub mut i32 builds;
+    pub mut widgets.LongText document;  // the text being edited (spec §10.9)
 
     void init() {
         search = widgets.TextBuffer{ };
         output = widgets.TextBuffer{ };
         mode = Debug;
         builds = 0;
+        document = widgets.long_text();
+        document.set("i32 main() {\n    return 0;\n}\n");
     }
 
     pub void find() {
