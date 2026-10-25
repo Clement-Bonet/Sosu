@@ -604,6 +604,9 @@ pub struct Ui {
     mut usize change_at = 0;
     mut u8[4096] history = [0; 4096];
     mut usize history_used = 0;
+    // The number field that has the keyboard, and its text being typed (spec §10.9).
+    mut u64 number_of = 0;
+    mut TextBuffer number_text = TextBuffer{ };
 
     pub void clock(u64 ms) {
         now = ms;
@@ -820,6 +823,115 @@ pub enum Accept {
     Digits,  // 0 to 9
     Integer,  // digits, and `-` first
     Decimal,  // digits, `-` first, and one separator, `.` or `,`
+}
+
+// What a number field accepts and shows (spec §10.9): its range and step, its decimals (the value
+// is an integer of hundredths with 2), its separators, and for money, its symbol.
+pub struct Number {
+    pub i64? min = none;
+    pub i64? max = none;
+    pub i64 step = 1;
+    pub i32 decimals = 0;
+    pub str decimal = ".";
+    pub str group = "";  // between thousands, when the field does not have the keyboard
+    pub str symbol = "";
+    pub bool symbol_first = false;
+}
+
+// `value` written as `n` says: with its groups and its symbol when `decorated`.
+TextBuffer format_number(i64 value, Number n, bool decorated) {
+    mut u8[24] digits = [0; 24];
+    mut usize count = 0;
+    mut u64 rest = value < 0 ? (0 - (value + 1)) as u64 + 1 : value as u64;
+    usize places = max(n.decimals, 0) as usize;
+    while (count == 0 || rest > 0 || count <= places) {
+        digits[count] = (48 + rest % 10) as u8;
+        rest /= 10;
+        count += 1;
+    }
+    mut TextBuffer out = TextBuffer{ };
+    if (decorated && n.symbol_first && n.symbol.len > 0) {
+        out.append(n.symbol);
+    }
+    if (value < 0) {
+        out.append("-");
+    }
+    usize whole = count - places;
+    for (usize i in 0..whole) {
+        if (decorated && n.group.len > 0 && i > 0 && (whole - i) % 3 == 0) {
+            out.append(n.group);
+        }
+        out.append(text_of(digits[count - 1 - i..count - i]));
+    }
+    if (places > 0) {
+        out.append(n.decimal);
+        for (usize i in whole..count) {
+            out.append(text_of(digits[count - 1 - i..count - i]));
+        }
+    }
+    if (decorated && !n.symbol_first && n.symbol.len > 0) {
+        out.append(" ");
+        out.append(n.symbol);
+    }
+    return out;
+}
+
+// The value of `text` typed in a number field: digits, a `-` first, a separator `.` or `,` and
+// at most `decimals` digits after it; none when it is not one (yet).
+i64? parse_number(str text, Number n) {
+    usize places = max(n.decimals, 0) as usize;
+    mut i64 value = 0;
+    mut bool negative = false;
+    mut bool digits = false;
+    mut bool separated = false;
+    mut usize after = 0;
+    for (usize i in 0..text.len) {
+        u8 c = text.bytes[i];
+        if (c == 45 && i == 0) {
+            negative = true;
+        } else if ((c == 46 || c == 44) && !separated && places > 0) {
+            separated = true;
+        } else if (c >= 48 && c <= 57) {
+            if (separated) {
+                after += 1;
+                if (after > places) {
+                    return none;
+                }
+            }
+            if (value > 922337203685477580) {
+                return none;
+            }
+            value = value * 10 + (c - 48) as i64;
+            digits = true;
+        } else {
+            return none;
+        }
+    }
+    if (!digits) {
+        return none;
+    }
+    for (usize i in after..places) {
+        value *= 10;
+    }
+    return some(negative ? -value : value);
+}
+
+// `value` within the range of `n`.
+i64 clamp_number(i64 value, Number n) {
+    mut i64 v = value;
+    match (n.min) {
+        some(low) => {
+            v = v < low ? low : v;
+        },
+        none => { },
+    }
+    match (n.max) {
+        some(high) => {
+            v = v > high ? high : v;
+        },
+        none => { },
+    }
+    return v;
 }
 
 // What a text area accepts (spec §10.9): lines broken at the last space that fits (`wrap`), Tab
@@ -1805,7 +1917,10 @@ pub struct Frame {
     }
 
     bool field(Target text, f32 width, Format format) {
-        u64 id = take_id();
+        return field_id(take_id(), text, width, format);
+    }
+
+    bool field_id(u64 id, Target text, f32 width, Format format) {
         take_styles();
         Look first = look(TextField, 0);
         f32 size = first.font_size;
@@ -2088,6 +2203,94 @@ pub struct Frame {
             }
         }
         ui.anchor = ui.cursor;
+    }
+
+    // ---- Numbers and money (spec §10.9) ----
+
+    // A field bound to an integer (spec §10.9): with `decimals`, a number of hundredths, thousandths...
+    // While it has the keyboard, its text is typed freely; the value changes when the text is a
+    // number in range, and the field shows the value again when it loses the keyboard. Up and
+    // Down, the wheel when it has the keyboard, and its two buttons add or take `step`. Returns
+    // true when the value changed.
+    pub bool number_field(i64* value, f32 width, Number n) {
+        u64 id = take_id();
+        mut bool focused = ui.focus == id;
+        if (focused && ui.number_of != id) {  // it just took the keyboard: the value, to edit
+            ui.number_of = id;
+            ui.number_text = format_number(*value, n, false);
+        }
+        mut i64 next = *value;
+        if (focused) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_up() || key == key_down()) {
+                    next = clamp_number(next + (key == key_up() ? n.step : -n.step), n);
+                }
+            }
+        }
+        mut TextBuffer shown = format_number(*value, n, true);
+        Format accept = Format{ accept: n.decimals > 0 ? Decimal : Integer };
+        field_id(id, focused ? short_target(&ui.number_text) : short_target(&shown), width, accept);
+        canvas.Rect r = last;
+        focused = ui.focus == id;
+        if (focused && ui.number_of != id) {  // it took the keyboard in this frame (a click)
+            ui.number_of = id;
+            ui.number_text = format_number(*value, n, false);
+            ui.cursor = ui.number_text.len;
+            ui.anchor = 0;
+        } else if (focused && ui.number_of == id) {
+            match (parse_number(ui.number_text.text(), n)) {
+                some(typed) => {
+                    if (clamp_number(typed, n) == typed && next == *value) {
+                        next = typed;
+                    }
+                },
+                none => { },
+            }
+        }
+        // the two buttons, on the right of the field, and the wheel
+        Look l = look(TextField, 0);
+        canvas.Rect up = canvas.Rect{ x: r.x + r.w - 20.0, y: r.y + 2.0, w: 18.0, h: r.h / 2.0 - 2.0 };
+        canvas.Rect down = canvas.Rect{ x: up.x, y: r.y + r.h / 2.0, w: 18.0, h: r.h / 2.0 - 2.0 };
+        if (click(mix(id, 1), up)) {
+            next = clamp_number(next + n.step, n);
+        }
+        if (click(mix(id, 2), down)) {
+            next = clamp_number(next - n.step, n);
+        }
+        if (focused && over(r) && ui.wheel != 0.0) {
+            next = clamp_number(next + (ui.wheel > 0.0 ? n.step : -n.step), n);
+            ui.wheel = 0.0;
+        }
+        for (i32 k in 0..2) {
+            canvas.Rect b = k == 0 ? up : down;
+            canvas.Color mark = over(b) ? l.accent : l.color;
+            i32 cx = (b.x + 9.0) as i32;
+            i32 cy = (b.y + b.h / 2.0) as i32;
+            i32 dir = k == 0 ? -1 : 1;
+            surface.line(cx - 4, cy - 2 * dir, cx, cy + 2 * dir, mark);
+            surface.line(cx, cy + 2 * dir, cx + 4, cy - 2 * dir, mark);
+        }
+        bool changed = next != *value;
+        if (changed) {
+            *value = next;
+            bool typed_now = match (parse_number(ui.number_text.text(), n)) {
+                some(typed) => typed == next,
+                none => false,
+            };
+            if (focused && !typed_now) {
+                ui.number_text = format_number(next, n, false);  // a step: the text follows
+                ui.cursor = ui.number_text.len;
+                ui.anchor = ui.cursor;
+            }
+        }
+        return changed;
+    }
+
+    // A number field for money: its symbol and its groups shown when it does not have the
+    // keyboard; 2 decimals unless `n` says otherwise.
+    pub bool money_field(i64* value, f32 width, Number n) {
+        return number_field(value, width, n);
     }
 
     // ---- Text areas (spec §10.9) ----
@@ -6009,4 +6212,56 @@ test "a text area: lines, Up and Down, Home and End, wrapping, scrolling to the 
         scrolled = scrolled || ui.states[i].scroll_y > 0.0;
     }
     assert(scrolled);
+}
+
+// A money field in euros, for the test below.
+bool money_frame(Ui* ui, canvas.Canvas* surface, i64* cents) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    bool changed = f.money_field(cents, 200.0, Number{ min: some(0), max: some(100000000), step: 100, decimals: 2, decimal: ",", group: " ", symbol: "€" });
+    f.finish();
+    return changed;
+}
+
+test "numbers and money: shown with their groups and symbol, typed, out of range, stepped" {
+    Number euros = Number{ decimals: 2, decimal: ",", group: " ", symbol: "€" };
+    assert(format_number(123456789, euros, true).text() == "1 234 567,89 €");
+    assert(format_number(-5, euros, false).text() == "-0,05");
+    assert(format_number(42, Number{ }, true).text() == "42");
+    assert(format_number(1000, Number{ symbol: "$", symbol_first: true, group: "," }, true).text() == "$1,000");
+    i64 parsed = match (parse_number("12,5", euros)) {
+        some(v) => v,
+        none => -1,
+    };
+    assert(parsed == 1250);
+    assert(match (parse_number("1.234", euros)) {
+        some(v) => false,
+        none => true,
+    });  // 3 decimals: not a number of hundredths
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 60);
+    mut Ui ui = Ui{ };
+    mut i64 cents = 1999;
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    money_frame(&ui, &surface, &cents);  // the field has the keyboard: its text is "19,99"
+    assert(ui.number_text.text() == "19,99");
+    ui.key(97, true, false, true);  // Ctrl+A, then typed
+    ui.type_text("1234,5");
+    assert(money_frame(&ui, &surface, &cents) && cents == 123450);
+    ui.key(97, true, false, true);
+    ui.type_text("-3");  // out of range: the value stays
+    assert(!money_frame(&ui, &surface, &cents) && cents == 123450);
+    ui.key(97, true, false, true);
+    ui.type_text("10");
+    money_frame(&ui, &surface, &cents);
+    ui.key(key_up(), true, false, false);  // + 1,00
+    assert(money_frame(&ui, &surface, &cents) && cents == 1100 && ui.number_text.text() == "11,00");
+    // its lower button: - 1,00
+    ui.mouse_move(190.0, 24.0);  // the field is 32 high: its lower button from 16 to 30
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    money_frame(&ui, &surface, &cents);
+    assert(cents == 1000);
 }

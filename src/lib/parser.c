@@ -1396,7 +1396,7 @@ typedef struct {
     const char *name;
     size_t values;        /* values in order, before the properties */
     bool optional;        /* the value can be left out (a checkbox without a label) */
-    const char *props[12]; /* NULL-terminated */
+    const char *props[16]; /* NULL-terminated */
     bool children;        /* `{ ... }` after the arguments */
 } UiNodeKind;
 
@@ -1412,6 +1412,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Button", 1, false, { "on_click", "enabled", "focus", "plural", "count", "context", "style", NULL }, false },
     { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", "style", NULL }, false },
     { "TextArea", 0, false, { "bind", "width", "rows", "wrap", "tabs", "placeholder", "on_enter", "focus", "style", NULL }, false },
+    { "NumberField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "on_change", "focus", "style", NULL }, false },
+    { "MoneyField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "symbol", "symbol_first", "on_change", "focus", "style", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", "style", NULL }, false },
     { "Radio", 1, false, { "bind", "value", "on_change", "plural", "count", "context", "style", NULL }, false },
     { "TitleBar", 0, false, { "height", "gap", "padding", "style", NULL }, true },
@@ -1436,7 +1438,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1751,7 +1753,8 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         else diag_help(d, "it has no properties");
         return false;
     }
-    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "TextArea") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
+    bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "TextArea") == 0 ||
+                 strcmp(kind->name, "NumberField") == 0 || strcmp(kind->name, "MoneyField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
                  strcmp(kind->name, "Radio") == 0 || strcmp(kind->name, "Dropdown") == 0;
     if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
@@ -2296,6 +2299,25 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *call_args[2] = { value, enabled };
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "NumberField") || name_text_is(node, "MoneyField")) {
+            /* f.number_field(&bind, width, widgets.Number{ ... }) or f.money_field(...); on_change when it changed */
+            bool money = name_text_is(node, "MoneyField");
+            static const char *const names[] = { "min", "max", "step", "decimals", "decimal", "group", "symbol", "symbol_first" };
+            UiFields fields = {0};
+            for (size_t i = 0; i < 8; i++) {
+                Expr *option = ui_prop(&args, names[i]);
+                if (!option) continue;
+                FieldInit field = { ui_name(names[i], option->offset), i < 2 ? ui_some(p, option) : option };
+                SOSU_VEC_PUSH(&fields, field);
+            }
+            if (money && !ui_prop(&args, "decimals")) {  /* money has cents unless it says otherwise */
+                FieldInit field = { ui_name("decimals", start), ui_int(p, start, 2) };
+                SOSU_VEC_PUSH(&fields, field);
+            }
+            Expr *number_args[3] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 160, true),
+                                     ui_struct(p, "Number", &fields, start, length) };
+            Expr *call = ui_frame_call(p, start, length, money ? "money_field" : "number_field", number_args, 3);
+            SOSU_VEC_PUSH(out, ui_when(p, call, ui_prop(&args, "on_change")));
         } else if (name_text_is(node, "TextArea")) {
             /* f.text_area(&bind, width, rows, widgets.Area{ wrap, tabs, placeholder }), and on_enter on Ctrl+Enter */
             static const char *const names[] = { "wrap", "tabs", "placeholder" };
