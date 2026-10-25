@@ -6,6 +6,7 @@ version = "0.1.0"
 
 [link]
 libs = ["SDL3"]
+subsystem = "window"  # its programs open windows: no console behind them in release, on Windows
 
 [link.windows]
 paths = ["vendor/SDL3/lib/x64"]
