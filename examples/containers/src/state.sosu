@@ -102,7 +102,7 @@ pub class Demo {
                 if (folder) {
                     bool tab = y >= 2 && y < 4 && x >= 1 && x < 7;
                     bool body = y >= 4 && y < 14 && x >= 1 && x < 15;
-                    c = tab || body ? (y == 4 ? 0xFFE0A030 : 0xFFF9C74F) : 0;
+                    c = tab || body ? y == 4 ? 0xFFE0A030 : 0xFFF9C74F : 0;
                 } else {
                     bool page = y >= 1 && y < 15 && x >= 3 && x < 13 && !(x >= 9 && y < 1 + x - 8);
                     bool line = page && x >= 5 && x < 11 && y >= 6 && y % 3 == 0;

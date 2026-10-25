@@ -151,9 +151,46 @@ static void test_repository_files(void) {
     }
 }
 
+/* `.ui.sosu` files (spec §10.10): from their tokens, the lines kept, indented by their brackets. */
+static char *format_ui_text(const char *text) {
+    SourceFile file;
+    source_from_string(&file, "screen.ui.sosu", text);
+    DiagList diags = {0};
+    char *result = format_source(&file, &diags);
+    diag_free(&diags);
+    source_free(&file);
+    return result;
+}
+
+static void expect_ui_format(const char *input, const char *expected) {
+    char *result = format_ui_text(input);
+    CHECK(result && strcmp(result, expected) == 0, "format:\n%s\n--- got:\n%s--- expected:\n%s", input,
+          result ? result : "(error)\n", expected);
+    if (result) {  /* formatting again changes nothing */
+        char *again = format_ui_text(result);
+        CHECK(again && strcmp(again, result) == 0, "format twice:\n%s--- got:\n%s", result, again ? again : "(error)\n");
+        free(again);
+    }
+    free(result);
+}
+
+static void test_interface_files(void) {
+    expect_ui_format("window W(S* s) {\ntitle:\"Hi\"\n   Column(gap:8 ,padding: 4){\n  Text( \"a\" ,style:s.big ? Big : Normal)   // a comment\n"
+                     "\n\n\n        Button(\"OK\",on_click : s.ok)\n}\n}\n",
+                     "window W(S* s) {\n    title: \"Hi\"\n    Column(gap: 8, padding: 4) {\n        Text(\"a\", style: s.big ? Big : Normal)  // a comment\n"
+                     "\n        Button(\"OK\", on_click: s.ok)\n    }\n}\n");
+    expect_ui_format("theme Dark {\n  accent: #89B4FA\nButton { background: accent\nhover { color: #FFFFFF } }\n}\n",
+                     "theme Dark {\n    accent: #89B4FA\n    Button { background: accent\n        hover { color: #FFFFFF } }\n}\n");
+    expect_ui_format("window W() {\n    Text(\"a\",\n        context: \"b\")\n}\n", "window W() {\n    Text(\"a\",\n        context: \"b\")\n}\n");
+    char *broken = format_ui_text("window W( {\n");
+    CHECK(broken == NULL, "a file with errors is not formatted");
+    free(broken);
+}
+
 int main(void) {
     test_canonical();
     test_comments_and_blank_lines();
+    test_interface_files();
     test_repository_files();
     return test_summary("fmt tests");
 }

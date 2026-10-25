@@ -780,7 +780,126 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
     }
 }
 
+/* ---- Interface files (spec §10.10) ----
+
+   A .ui.sosu file becomes calls of widgets as it is parsed, so its syntax tree is not its
+   source: it is formatted from its tokens and comments instead. Its lines stay where they are
+   (one blank line at most between them); each is indented by the braces and the brackets open
+   before it, and the spaces between its tokens follow the rules of `ui_space`, or else the
+   source (whether it had a space). */
+
+typedef struct {
+    size_t offset;
+    size_t length;
+    TokenKind kind; /* TOK_EOF for a comment */
+} UiPiece;
+
+static int ui_piece_order(const void *a, const void *b) {
+    size_t x = ((const UiPiece *)a)->offset, y = ((const UiPiece *)b)->offset;
+    return x < y ? -1 : x > y;
+}
+
+static bool ui_opens(TokenKind k) { return k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE; }
+static bool ui_closes(TokenKind k) { return k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE; }
+
+/* Whether a space goes between `a` and `b` on a line; `before_a` is the piece before `a` (NULL:
+   `a` starts the line); `spaced`: the source had one. */
+static bool ui_space(const UiPiece *before_a, const UiPiece *a, const UiPiece *b, bool spaced) {
+    if (b->kind == TOK_EOF || a->kind == TOK_EOF) return true;  /* comments */
+    if (b->kind == TOK_COMMA || b->kind == TOK_RPAREN || b->kind == TOK_RBRACKET || b->kind == TOK_DOT ||
+        b->kind == TOK_SEMICOLON) {
+        return false;
+    }
+    if (a->kind == TOK_LPAREN || a->kind == TOK_LBRACKET || a->kind == TOK_DOT) return false;
+    if (a->kind == TOK_COMMA || a->kind == TOK_SEMICOLON || a->kind == TOK_COLON) return true;
+    if (b->kind == TOK_COLON) {  /* `name: value`, a property; else the `:` of `c ? a : b` or of a theme */
+        bool property = a->kind == TOK_IDENT && (!before_a || before_a->kind == TOK_LPAREN ||
+                                                 before_a->kind == TOK_COMMA || before_a->kind == TOK_LBRACE);
+        return !property && spaced;
+    }
+    if (b->kind == TOK_LBRACE || a->kind == TOK_LBRACE || b->kind == TOK_RBRACE) return true;
+    if (b->kind == TOK_LPAREN && (a->kind == TOK_IDENT || a->kind == TOK_RPAREN || a->kind == TOK_RBRACKET)) return false;
+    if (b->kind == TOK_LBRACKET && (a->kind == TOK_IDENT || a->kind == TOK_RPAREN || a->kind == TOK_RBRACKET)) return false;
+    return spaced;
+}
+
+static char *format_ui(const SourceFile *file, DiagList *diags) {
+    TokenList tokens = {0};
+    CommentList comments = {0};
+    Arena arena = {0};
+    size_t errors_before = diags->error_count;
+    lex_file_comments(file, &tokens, &comments, diags);
+    TokenList check = {0};
+    DiagList ignored = {0};
+    lex_file(file, &check, &ignored);
+    parse_ui_module(file, &check, &arena, diags);  /* a file with errors is not formatted */
+    token_list_free(&check);
+    diag_free(&ignored);
+    if (diags->error_count != errors_before) {
+        arena_free(&arena);
+        free(comments.items);
+        token_list_free(&tokens);
+        return NULL;
+    }
+    size_t count = 0;
+    UiPiece *pieces = sosu_alloc((tokens.count + comments.count + 1) * sizeof *pieces);
+    for (size_t i = 0; i < tokens.count; i++) {
+        if (tokens.items[i].kind == TOK_EOF) continue;
+        pieces[count++] = (UiPiece){ tokens.items[i].offset, tokens.items[i].length, tokens.items[i].kind };
+    }
+    for (size_t i = 0; i < comments.count; i++) {
+        pieces[count++] = (UiPiece){ comments.items[i].offset, comments.items[i].length, TOK_EOF };
+    }
+    qsort(pieces, count, sizeof *pieces, ui_piece_order);
+
+    Buf out = {0};
+    put_n(&out, "", 0);
+    int depth = 0;
+    size_t last_line = 0;
+    size_t i = 0;
+    while (i < count) {
+        size_t line, column;
+        source_position(file, pieces[i].offset, &line, &column);
+        if (last_line > 0 && line > last_line + 1) put_n(&out, "\n", 1);  /* one blank line at most */
+        size_t end = i;  /* the pieces of this line */
+        for (;;) {
+            if (end >= count) break;
+            size_t piece_line, piece_column;
+            source_position(file, pieces[end].offset, &piece_line, &piece_column);
+            if (piece_line != line) break;
+            end++;
+        }
+        int closing = 0;  /* the brackets that close at the start of the line are outdented */
+        while (i + closing < end && ui_closes(pieces[i + closing].kind)) closing++;
+        int indent = depth - closing > 0 ? depth - closing : 0;
+        for (int k = 0; k < indent; k++) put_n(&out, "    ", 4);
+        for (size_t k = i; k < end; k++) {
+            if (k > i) {
+                const UiPiece *a = &pieces[k - 1];
+                bool spaced = pieces[k].offset > a->offset + a->length;
+                if (pieces[k].kind == TOK_EOF && a->kind != TOK_EOF) put_n(&out, "  ", 2);  /* a comment after code */
+                else if (ui_space(k - 1 > i ? &pieces[k - 2] : NULL, a, &pieces[k], spaced)) put_n(&out, " ", 1);
+            }
+            put_n(&out, file->text + pieces[k].offset, pieces[k].length);
+            if (ui_opens(pieces[k].kind)) depth++;
+            if (ui_closes(pieces[k].kind) && depth > 0) depth--;
+        }
+        put_n(&out, "\n", 1);
+        size_t end_line, end_column;  /* a comment over several lines ends lower */
+        source_position(file, pieces[end - 1].offset + pieces[end - 1].length, &end_line, &end_column);
+        last_line = end_line;
+        i = end;
+    }
+    free(pieces);
+    arena_free(&arena);
+    free(comments.items);
+    token_list_free(&tokens);
+    return out.items;
+}
+
 char *format_source(const SourceFile *file, DiagList *diags) {
+    size_t path_length = strlen(file->path);
+    if (path_length >= 8 && strcmp(file->path + path_length - 8, ".ui.sosu") == 0) return format_ui(file, diags);
     TokenList tokens = {0};
     CommentList comments = {0};
     Arena arena = {0};

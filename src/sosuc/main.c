@@ -469,10 +469,6 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
     char *lib = library_dir(argv0);
     for (int i = 0; i < count; i++) {
         const char *path = paths[i];
-        if (has_suffix(path, ".ui.sosu")) {
-            fprintf(stderr, "sosuc: `%s`: `.ui.sosu` files have no formatter yet\n", path);
-            continue;
-        }
         if (program_is_locale_file(path)) {
             fprintf(stderr, "sosuc: `%s`: a catalog of translations is not formatted\n", path);
             continue;
@@ -490,8 +486,7 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
             const Package *root = program.packages.items[0];
             for (size_t j = 0; j < program.units.count; j++) {
                 const Unit *unit = program.units.items[j];
-                /* interface files have no formatter yet: the one of .sosu files would break them */
-                if (unit->package == root && !program_is_ui_file(unit->file.path)) {
+                if (unit->package == root) {  /* .sosu and .ui.sosu files */
                     status |= format_file(unit->file.path, check);
                 }
             }
