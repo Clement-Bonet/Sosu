@@ -2686,7 +2686,7 @@ static const char *const ui_style_props[] = { "color", "background", "border", "
 /* The states and parts of a style: the fields of `widgets.Style` after `normal`. */
 static const char *const ui_style_states[] = { "hover", "pressed", "focus", "disabled", "checked",
                                                "open", "placeholder", "selection", "bar", NULL };
-#define UI_STYLE_STATES "hover, pressed, focus, disabled, checked, open, placeholder, selection, bar"
+#define UI_STYLE_STATES "hover, pressed, focus, disabled, checked, open, placeholder, selection, bar, title"
 #define UI_STYLE_PARTS 10 /* `normal` and the states */
 
 /* The selectors of a theme: a node, and its field in `widgets.Theme`. */
@@ -2695,10 +2695,12 @@ static const char *const ui_theme_selectors[][2] = {
     { "TextField", "text_field" }, { "Checkbox", "checkbox" }, { "Radio", "radio" }, { "Dropdown", "dropdown" },
     { "List", "list" }, { "Scroll", "scroll" }, { "Column", "column" }, { "Row", "row" },
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
+    { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
-    "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, Image"
+    "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
+    "Image, Grid, Group, Tabs, Tree"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };
@@ -2789,6 +2791,7 @@ static Expr *ui_parse_style_body(Parser *p, size_t offset, size_t length) {
                 for (size_t i = 0; ui_style_states[i]; i++) {
                     if (name_text_is(state, ui_style_states[i])) index = i + 1;
                 }
+                if (name_text_is(state, "title")) index = 7;  /* the title of a `Group`: the part `placeholder` */
                 if (!index || given[index]) {
                     if (!index) {
                         Diagnostic *d = error_at(p, "E0215", state.offset, state.length,

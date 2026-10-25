@@ -88,6 +88,13 @@ pub class Workspace {
     mut i32 created;
     // Quit, from the menu: `main` closes the window.
     pub mut bool quitting;
+    // The tree of the files: its item chosen, and its branches open (one per kind of file); the
+    // tab of the details shown.
+    pub mut i32 tree_item;
+    pub mut bool open_sources;
+    pub mut bool open_images;
+    pub mut bool open_binaries;
+    pub mut i32 page;
 
     void init(image.Image icon) {
         self.icon = icon;
@@ -110,6 +117,11 @@ pub class Workspace {
         status.set("Ready");
         created = 0;
         quitting = false;
+        tree_item = 1;
+        open_sources = true;
+        open_images = false;
+        open_binaries = false;
+        page = 0;
     }
 
     // Called before each frame: the details follow the file chosen in the list.
@@ -152,6 +164,11 @@ pub class Workspace {
     }
 
     // Chooses the file `i` (Open recent).
+    // Whether the file `i` is of `kind`: the branch of the tree it goes in.
+    pub bool is(i32 i, Kind kind) {
+        return files[i as usize].kind == kind;
+    }
+
     pub void choose(i32 i) {
         if (i >= 0 && i < count) {
             chosen = i;
