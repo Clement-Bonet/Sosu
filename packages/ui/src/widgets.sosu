@@ -734,6 +734,11 @@ pub Style merge(Style weak, Style strong) {
     return Style{ normal: merge_props(weak.normal, strong.normal), hover: merge_props(weak.hover, strong.hover), pressed: merge_props(weak.pressed, strong.pressed), focus: merge_props(weak.focus, strong.focus), disabled: merge_props(weak.disabled, strong.disabled), checked: merge_props(weak.checked, strong.checked), open: merge_props(weak.open, strong.open), placeholder: merge_props(weak.placeholder, strong.placeholder), selection: merge_props(weak.selection, strong.selection), bar: merge_props(weak.bar, strong.bar) };
 }
 
+// The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
+pub Theme over(Theme weak, Theme strong) {
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image) };
+}
+
 // What `s` says about a widget in `states`, the states in the order of the spec.
 Props in_states(Style s, u32 states) {
     mut Props p = s.normal;

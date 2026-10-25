@@ -1,0 +1,261 @@
+// Themes and styles of `ui` (spec §10.7). The radio buttons choose the theme: that of the
+// system (followed when the user changes it), dark (`default_theme`), light (`light_theme`) or
+// violet, made here from the light one. The size changes `all.font_size`, which every widget
+// inherits. Some widgets take a style over the theme, as a class of CSS: `primary` and `danger`
+// buttons, a `card` column, `muted` texts.
+//
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/themes` from
+// the root of the repository, where the font is found.
+import std.io;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import ui.widgets;
+
+// ---- Themes ----
+
+// Light, with violet for the window, the bars and the accent.
+widgets.Theme violet_theme() {
+    canvas.Color violet = widgets.rgb(136, 57, 239, 255);
+    return widgets.over(widgets.light_theme(), widgets.Theme{
+        all: widgets.Props{ color: some(widgets.rgb(54, 33, 89, 255)), accent: some(violet) },
+        window: widgets.Style{ normal: widgets.Props{ background: some(widgets.rgb(237, 228, 252, 255)) } },
+        title: widgets.Style{ normal: widgets.Props{ color: some(violet) } },
+        button: widgets.Style{ normal: widgets.Props{ radius: some(12.0) } },
+    });
+}
+
+// `t` with its texts `size` pixels per em.
+widgets.Theme sized(widgets.Theme t, f32 size) {
+    return widgets.over(t, widgets.Theme{ all: widgets.Props{ font_size: some(size) } });
+}
+
+// ---- Styles ----
+
+// A button that calls for the main action: in the accent of the theme.
+widgets.Style primary(canvas.Color accent, bool dark) {
+    canvas.Color ink = dark ? widgets.rgb(30, 30, 46, 255) : widgets.rgb(255, 255, 255, 255);
+    return widgets.Style{
+        normal: widgets.Props{ background: some(accent), color: some(ink), radius: some(6.0) },
+        hover: widgets.Props{ background: some(widgets.rgb(accent.r, accent.g, accent.b, 210)) },
+        pressed: widgets.Props{ background: some(widgets.rgb(accent.r, accent.g, accent.b, 170)) },
+    };
+}
+
+// A button whose action cannot be undone.
+widgets.Style danger() {
+    return widgets.Style{
+        normal: widgets.Props{ background: some(widgets.rgb(210, 15, 57, 255)), color: some(widgets.rgb(255, 255, 255, 255)), radius: some(6.0) },
+        hover: widgets.Props{ background: some(widgets.rgb(230, 69, 83, 255)) },
+        pressed: widgets.Props{ background: some(widgets.rgb(170, 10, 45, 255)) },
+    };
+}
+
+// A framed column, for a group of widgets.
+widgets.Style card(bool dark) {
+    canvas.Color face = dark ? widgets.rgb(49, 50, 68, 255) : widgets.rgb(255, 255, 255, 255);
+    canvas.Color edge = dark ? widgets.rgb(69, 71, 90, 255) : widgets.rgb(204, 208, 218, 255);
+    return widgets.Style{ normal: widgets.Props{ background: some(face), border: some(edge), border_width: some(1.0), radius: some(10.0), padding: some(16.0), gap: some(10.0) } };
+}
+
+// A text of less importance.
+widgets.Style muted() {
+    return widgets.Style{ normal: widgets.Props{ color: some(widgets.rgb(127, 132, 156, 255)), font_size: some(15.0) } };
+}
+
+// ---- The window ----
+
+enum Choice {
+    System,
+    Dark,
+    Light,
+    Violet,
+}
+
+class Demo : app.Handler {
+    mut widgets.Ui ui;
+    mut Choice choice;
+    mut bool system_dark;  // the theme of the system
+    mut i32 size;  // 0: small, 1: normal, 2: large
+    mut widgets.TextBuffer name;
+    mut bool notify;
+    mut bool compact;
+    mut i32 selected;
+    mut i32 deleted;
+
+    void init(bool system_dark) {
+        ui = widgets.Ui{ };
+        choice = System;
+        self.system_dark = system_dark;
+        size = 1;
+        name = widgets.TextBuffer{ };
+        notify = true;
+        compact = false;
+        selected = 0;
+        deleted = 0;
+    }
+
+    bool dark() {
+        return match (choice) {
+            System => system_dark,
+            Dark => true,
+            Light => false,
+            Violet => false,
+        };
+    }
+
+    widgets.Theme theme() {
+        widgets.Theme t = match (choice) {
+            System => system_dark ? widgets.default_theme() : widgets.light_theme(),
+            Dark => widgets.default_theme(),
+            Light => widgets.light_theme(),
+            Violet => violet_theme(),
+        };
+        f32 px = size == 0 ? 15.0 : size == 2 ? 22.0 : 18.0;
+        return sized(t, px);
+    }
+
+    canvas.Color accent() {
+        return match (choice) {
+            Violet => widgets.rgb(136, 57, 239, 255),
+            _ => dark() ? widgets.rgb(137, 180, 250, 255) : widgets.rgb(30, 102, 245, 255),
+        };
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            SystemThemeChanged(on) => {
+                system_dark = on;  // followed when `System` is chosen
+            },
+            Key(code, down, mods) => {
+                ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        ui.theme = some(theme());
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });  // the dark theme leaves the background to the program
+        mut widgets.Frame f = widgets.begin(&ui, surface, 24.0, 20.0);
+        f.title("Themes and styles");
+        f.style(muted());
+        f.label("The theme colors every widget; a style changes some of them, as a class of CSS.");
+        f.space(8.0);
+        f.row_with(24.0, 0.0);
+        settings(&f);
+        form(&f);
+        f.end();
+        f.finish();
+    }
+
+    // The theme and the size of the texts.
+    void settings(widgets.Frame* f) {
+        f.style(card(dark()));
+        f.column(-1.0, -1.0);
+        f.label("Theme");
+        if (f.radio("Of the system", choice == System)) {
+            choice = System;
+        }
+        if (f.radio("Dark", choice == Dark)) {
+            choice = Dark;
+        }
+        if (f.radio("Light", choice == Light)) {
+            choice = Light;
+        }
+        if (f.radio("Violet", choice == Violet)) {
+            choice = Violet;
+        }
+        f.style(muted());
+        f.label(system_dark ? "The system is dark." : "The system is light.");
+        f.space(6.0);
+        f.label("Size of the texts");
+        f.dropdown(200.0);
+        if (f.option("Small", size == 0)) {
+            size = 0;
+        }
+        if (f.option("Normal", size == 1)) {
+            size = 1;
+        }
+        if (f.option("Large", size == 2)) {
+            size = 2;
+        }
+        f.end_dropdown();
+        f.end();
+    }
+
+    // Widgets of every kind, some with a style.
+    void form(widgets.Frame* f) uses io {
+        f.style(card(dark()));
+        f.column(-1.0, -1.0);
+        f.label("Name");
+        f.text_field_with(&name, 320.0, widgets.Format{ placeholder: "Your name" });
+        f.checkbox("Notifications", &notify);
+        f.checkbox("Compact", &compact);
+        f.label("Files");
+        f.list(320.0, 120.0, some(&selected));
+        f.label("report.txt");
+        f.label("photo.png");
+        f.label("notes.md");
+        f.label("budget.csv");
+        f.label("logo.svg");
+        f.end_list();
+        f.row();
+        f.style(primary(accent(), dark()));
+        if (f.button("Save")) {
+            io.print("saved");
+        }
+        f.button("Cancel");
+        f.button_enabled("Disabled", false);
+        f.style(danger());
+        if (f.button("Delete")) {
+            deleted += 1;
+        }
+        f.end_row();
+        if (deleted > 0) {
+            f.style(muted());
+            f.label("Delete was clicked.");
+        }
+        f.end();
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    bool dark = match (app.system_theme()) {
+        Light => false,
+        _ => true,
+    };
+    Demo* demo = arena.new(Demo, dark);
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(noto) => {
+            demo.ui.font = some(noto);
+        },
+        err(e) => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    return app.run(app.Config{ title: "Themes", width: 900, height: 600 }, demo as app.Handler*);
+}

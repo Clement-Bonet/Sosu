@@ -38,6 +38,7 @@ test: all
 	./build/sosuc check examples/form
 	./build/sosuc check examples/editor
 	./build/sosuc check examples/workspace
+	./build/sosuc check examples/themes
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
