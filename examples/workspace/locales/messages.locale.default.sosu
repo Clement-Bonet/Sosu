@@ -4,168 +4,192 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#: examples/workspace/src/screen.ui.sosu:8
+#: examples/workspace/src/screen.ui.sosu:9
 msgid "Sosu workspace"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:16
+#: examples/workspace/src/screen.ui.sosu:17
 msgid "File"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:17 examples/workspace/src/screen.ui.sosu:71
+#: examples/workspace/src/screen.ui.sosu:18 examples/workspace/src/screen.ui.sosu:94
 msgid "New file"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:18 examples/workspace/src/screen.ui.sosu:136
+#: examples/workspace/src/screen.ui.sosu:19 examples/workspace/src/screen.ui.sosu:131
 msgid "Save"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:19 examples/workspace/src/screen.ui.sosu:137
+#: examples/workspace/src/screen.ui.sosu:20 examples/workspace/src/screen.ui.sosu:132
 msgid "Revert"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:21
+#: examples/workspace/src/screen.ui.sosu:22
 msgid "Open recent"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:27
+#: examples/workspace/src/screen.ui.sosu:28
 msgid "Quit"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:29
+#: examples/workspace/src/screen.ui.sosu:30
 msgid "Edit"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:30 examples/workspace/src/screen.ui.sosu:72
+#: examples/workspace/src/screen.ui.sosu:31 examples/workspace/src/screen.ui.sosu:95
 msgid "Duplicate"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:31 examples/workspace/src/screen.ui.sosu:74 examples/workspace/src/screen.ui.sosu:78
+#: examples/workspace/src/screen.ui.sosu:32 examples/workspace/src/screen.ui.sosu:68 examples/workspace/src/screen.ui.sosu:97
 msgid "Remove"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:33
+#: examples/workspace/src/screen.ui.sosu:34
 msgid "Clear the output"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:35 examples/workspace/src/screen.ui.sosu:36 examples/workspace/src/screen.ui.sosu:59
+#: examples/workspace/src/screen.ui.sosu:36 examples/workspace/src/screen.ui.sosu:37 examples/workspace/src/screen.ui.sosu:60
 msgid "Build"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:37 examples/workspace/src/screen.ui.sosu:60
+#: examples/workspace/src/screen.ui.sosu:38 examples/workspace/src/screen.ui.sosu:61
 msgid "Run"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:39
+#: examples/workspace/src/screen.ui.sosu:40
 msgid "Mode"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:40 examples/workspace/src/screen.ui.sosu:51
+#: examples/workspace/src/screen.ui.sosu:41 examples/workspace/src/screen.ui.sosu:52
 msgid "Debug"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:41 examples/workspace/src/screen.ui.sosu:52
+#: examples/workspace/src/screen.ui.sosu:42 examples/workspace/src/screen.ui.sosu:53
 msgid "Release"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:44
+#: examples/workspace/src/screen.ui.sosu:45
 msgid "Help"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:45
+#: examples/workspace/src/screen.ui.sosu:46
 msgid "About Sosu"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:49
+#: examples/workspace/src/screen.ui.sosu:50
 msgid "Search a file"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:55
+#: examples/workspace/src/screen.ui.sosu:56
 msgid "Windows"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:56
+#: examples/workspace/src/screen.ui.sosu:57
 msgid "Linux"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:57
+#: examples/workspace/src/screen.ui.sosu:58
 msgid "macOS"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:64
+#: examples/workspace/src/screen.ui.sosu:65
 msgid "{count} file"
 msgid_plural "{count} files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: examples/workspace/src/screen.ui.sosu:77
+#: examples/workspace/src/screen.ui.sosu:67
 msgid "Add"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:86
-msgid "Choose a file in the list."
+#: examples/workspace/src/screen.ui.sosu:71
+msgid "Sources"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:90
+#: examples/workspace/src/screen.ui.sosu:78
+msgid "Images"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:85
+msgid "Binaries"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:105
+msgid "Choose a file in the tree."
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:109
 msgid "Output"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:103
-msgid "File name"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:106
-msgid "Size (KB)"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:110
-msgid "Modified"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:114
-msgid "Licence"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:115
-msgid "0.00"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:118
-msgid "Kind"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:120
-msgid "Source"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:121
-msgid "Binary"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:122
-msgid "Image"
-msgstr ""
-
-#: examples/workspace/src/screen.ui.sosu:124
-msgid "Encoding"
+#: examples/workspace/src/screen.ui.sosu:123
+msgid "General"
 msgstr ""
 
 #: examples/workspace/src/screen.ui.sosu:126
+msgid "Advanced"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:138
+msgid "File name"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:141
+msgid "Size (KB)"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:145
+msgid "Modified"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:149
+msgid "Licence"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:150
+msgid "0.00"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:153
+msgid "Kind"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:155
+msgid "Source"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:156
+msgid "Binary"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:157
+msgid "Image"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:163
+msgid "Encoding"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:165
 msgid "UTF-8"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:127
+#: examples/workspace/src/screen.ui.sosu:166
 msgid "Latin-1"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:128
+#: examples/workspace/src/screen.ui.sosu:167
 msgid "UTF-16"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:131
+#: examples/workspace/src/screen.ui.sosu:169
+msgid "Options"
+msgstr ""
+
+#: examples/workspace/src/screen.ui.sosu:170
 msgid "Read only"
 msgstr ""
 
-#: examples/workspace/src/screen.ui.sosu:132
+#: examples/workspace/src/screen.ui.sosu:171
 msgid "Hidden"
 msgstr ""

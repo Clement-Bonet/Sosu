@@ -115,11 +115,14 @@ static int command_parse(const char *path, DiagFormat format) {
     return status;
 }
 
-/* Folder of the `core` and `std` packages: $SOSU_HOME/lib, or ../lib next to sosuc. */
+/* Folder of the `core` and `std` packages: $SOSU_HOME/lib, or ../lib next to sosuc, wherever it
+   was run from (`sosuc` alone was found in PATH, as an editor runs it). */
 static char *library_dir(const char *argv0) {
     const char *home = getenv("SOSU_HOME");
     if (home && home[0]) return path_join(home, "lib");
-    char *bin = path_dirname(argv0);
+    char *program = path_of_program(argv0);
+    char *bin = path_dirname(program);
+    free(program);
     char *lib = path_join(bin, "../lib");
     free(bin);
     return lib;
@@ -182,6 +185,7 @@ typedef struct {
     StringList paths; /* relative to the current folder */
     StringList frameworks;
     StringList copy;
+    bool window; /* a package is for programs with windows: no console in release (Windows) */
 } Links;
 
 static void add_unique(StringList *list, char *item) {
@@ -215,6 +219,7 @@ static void collect_links(const Program *program, Links *links) {
                 add_unique(&links->frameworks, sosu_strdup(link->frameworks.items[j]));
             }
             for (size_t j = 0; j < link->copy.count; j++) add_unique(&links->copy, package_path(package, link->copy.items[j]));
+            if (link->subsystem && strcmp(link->subsystem, "window") == 0) links->window = true;
         }
     }
 }
@@ -303,6 +308,10 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         char *c = shell_path(c_file);
         char *out = shell_path(exe);
         char *link_args = link_arguments(links, true);
+        if (optimize && links->window) {  /* a program with windows: no console behind them */
+            append(&link_args, "%s", link_args[0] ? " /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
+                                                   : " /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup");
+        }
         char *script = sosu_format(
             "@echo off\r\n"
             "where cl >nul 2>nul && goto :have_cl\r\n"
@@ -344,6 +353,9 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     {
         (void)build_dir;
         char *link_args = link_arguments(links, false);
+#ifdef _WIN32
+        if (optimize && links->window) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
+#endif
         command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"%s", cc && cc[0] ? cc : "cc",
                               optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, exe, link_args);
         free(link_args);

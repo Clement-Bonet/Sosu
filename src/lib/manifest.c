@@ -298,6 +298,23 @@ static bool parse_string_array(Toml *t, StringList *list) {
 
 static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
     LinkSection *section = &t->manifest->link[t->link];
+    if (key_is(t, key_start, key_length, "subsystem")) {
+        if (section->subsystem) {
+            error_at(t, "E0408", key_start, key_length, "duplicate key `subsystem`");
+            return;
+        }
+        size_t value_start = t->pos;
+        char *value = parse_string(t);
+        if (!value) return;
+        if (strcmp(value, "window") != 0 && strcmp(value, "console") != 0) {
+            Diagnostic *d = error_at(t, "E0402", value_start, t->pos - value_start, "unknown subsystem `%s`", value);
+            diag_help(d, "a program is a `\"window\"` program or a `\"console\"` one");
+            free(value);
+            return;
+        }
+        section->subsystem = value;
+        return;
+    }
     StringList *list = key_is(t, key_start, key_length, "libs")         ? &section->libs
                      : key_is(t, key_start, key_length, "paths")        ? &section->paths
                      : key_is(t, key_start, key_length, "frameworks")   ? &section->frameworks
@@ -306,7 +323,7 @@ static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
     if (!list) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [%s]", (int)key_length,
                                  t->s + key_start, t->link == LINK_ALL ? "link" : "link.<target>");
-        diag_help(d, "a link section contains `libs`, `paths`, `frameworks` and `copy`");
+        diag_help(d, "a link section contains `libs`, `paths`, `frameworks`, `copy` and `subsystem`");
         return;
     }
     if (list->count > 0) {
@@ -435,6 +452,7 @@ void manifest_free(Manifest *manifest) {
             for (size_t k = 0; k < lists[j]->count; k++) free(lists[j]->items[k]);
             free(lists[j]->items);
         }
+        free(manifest->link[i].subsystem);
     }
     memset(manifest, 0, sizeof *manifest);
 }

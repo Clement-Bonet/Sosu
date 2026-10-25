@@ -79,8 +79,8 @@ msgstr[1] "{count} fichiers"
 msgid "Add"
 msgstr "Ajouter"
 
-msgid "Choose a file in the list."
-msgstr "Choisissez un fichier dans la liste."
+msgid "Choose a file in the tree."
+msgstr "Choisissez un fichier dans l’arbre."
 
 msgid "Output"
 msgstr "Sortie"
@@ -129,3 +129,21 @@ msgstr "Lecture seule"
 
 msgid "Hidden"
 msgstr "Masqué"
+
+msgid "Sources"
+msgstr "Sources"
+
+msgid "Images"
+msgstr "Images"
+
+msgid "Binaries"
+msgstr "Binaires"
+
+msgid "General"
+msgstr "Général"
+
+msgid "Advanced"
+msgstr "Avancé"
+
+msgid "Options"
+msgstr "Options"

@@ -1,5 +1,6 @@
 #include "path.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -70,4 +71,44 @@ char *path_dirname(const char *path) {
     memcpy(result, path, length);
     result[length] = '\0';
     return result;
+}
+
+static bool file_exists(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    fclose(file);
+    return true;
+}
+
+char *path_of_program(const char *argv0) {
+    for (const char *c = argv0; *c; c++) {
+        if (is_separator(*c)) return sosu_strdup(argv0);
+    }
+    const char *search = getenv("PATH");
+#ifdef _WIN32
+    const char list = ';';
+    bool has_extension = strchr(argv0, '.') != NULL;
+#else
+    const char list = ':';
+    bool has_extension = true;
+#endif
+    for (const char *start = search; start && *start;) {
+        const char *end = strchr(start, list);
+        size_t length = end ? (size_t)(end - start) : strlen(start);
+        if (length > 0) {
+            char *dir = sosu_format("%.*s", (int)length, start);
+            char *candidate = path_join(dir, argv0);
+            char *with_exe = has_extension ? NULL : sosu_format("%s.exe", candidate);
+            free(dir);
+            if (with_exe && file_exists(with_exe)) {
+                free(candidate);
+                return with_exe;
+            }
+            free(with_exe);
+            if (file_exists(candidate)) return candidate;
+            free(candidate);
+        }
+        start = end ? end + 1 : NULL;
+    }
+    return sosu_strdup(argv0);
 }

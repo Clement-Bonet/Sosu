@@ -229,6 +229,14 @@ struct WidgetState {
     mut f32 content_w = 0.0;  // the size of its content at the last frame
     mut f32 content_h = 0.0;
     mut i32 items = 0;  // a list: how many items
+    mut bool closed = false;  // a group folded, a branch of a tree closed
+    // Tabs: the tab chosen when the program does not bind it, a tab to choose and a tab to close
+    // at the next frame (-1: none), how many tabs it had, and the width of its row of tabs.
+    mut i32 chosen = 0;
+    mut i32 pick = -1;
+    mut i32 closing = -1;
+    mut bool expanded = false;  // a branch of a tree open
+    mut f32 extent = 0.0;
     mut bool reveal = false;  // a list: scroll to the item chosen, after a key moved the choice
 }
 
@@ -253,6 +261,12 @@ pub struct Ui {
     mut bool reveal = false;
     mut WidgetState[64] states = [WidgetState{ }; 64];
     pub mut u32 duplicates = 0;
+    // The grids (spec §10.8), 8 at most: their identities, whether each was seen in this frame,
+    // and the size of the content of each column (16) and row (64) at the last frame.
+    mut u64[8] grid_ids = [0; 8];
+    mut bool[8] grid_seen = [false; 8];
+    mut f32[128] grid_widths = [0.0; 128];
+    mut f32[512] grid_heights = [0.0; 512];
     // In the text field that has the keyboard: the cursor and the other end of the selection
     // (byte offsets), and how far its text is scrolled to keep the cursor in view.
     mut usize cursor = 0;
@@ -484,6 +498,22 @@ pub struct Ui {
     }
 }
 
+// The size of a column or a row of a grid (spec §10.8): pixels, that of its content at the last
+// frame, or a share of what is left, by weight.
+pub enum Size {
+    Pixels(f32 px),
+    Auto,
+    Fill(f32 weight),
+}
+
+// Where a widget goes in its cell, when it is narrower.
+pub enum Align {
+    Start,
+    Center,
+    End,
+    Stretch,  // as wide as its cell
+}
+
 // What a window button asks of the window.
 pub enum WindowRequest {
     Minimize,
@@ -663,6 +693,10 @@ pub struct Theme {
     pub Style menu_bar = Style{ };
     pub Style menu = Style{ };
     pub Style image = Style{ };
+    pub Style grid = Style{ };
+    pub Style group = Style{ };  // its part `placeholder` is its title
+    pub Style tabs = Style{ };  // a tab: `checked` the one chosen; the part `bar` the row
+    pub Style tree = Style{ };
 }
 
 // The kinds of widgets, the selectors of a theme.
@@ -683,6 +717,10 @@ enum Kind {
     MenuBar,
     Menu,
     Image,
+    Grid,
+    Group,
+    Tabs,
+    Tree,
 }
 
 // The states of a widget, which can be combined.
@@ -736,7 +774,7 @@ pub Style merge(Style weak, Style strong) {
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image) };
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree) };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
@@ -781,6 +819,10 @@ Style style_of(Theme t, Kind kind) {
         MenuBar => t.menu_bar,
         Menu => t.menu,
         Image => t.image,
+        Grid => t.grid,
+        Group => t.group,
+        Tabs => t.tabs,
+        Tree => t.tree,
     };
 }
 
@@ -892,6 +934,22 @@ Look default_look(Kind kind, u32 states) {
             background = rgb(49, 50, 68, 255);
             border = face(true, false);
             border_width = 1.0;
+        },
+        Group => {
+            border = face(true, false);
+            border_width = 1.0;
+            padding = 12.0;
+        },
+        Tabs => {  // a tab; the one chosen is `checked`
+            bool chosen = states & state_checked() != 0;
+            background = chosen ? well() : hot ? face(true, false) : clear();
+            color = off ? face(false, false) : ink();
+            padding = 14.0;
+        },
+        Tree => {
+            background = well();
+            border = focus ? accent() : face(false, false);
+            border_width = 2.0;
         },
         _ => { },
     }
@@ -1057,6 +1115,61 @@ struct Layout {
     mut canvas.Color? accent = none;
     mut u64 painted = 0;
     mut Look look = default_look(Column, 0);
+    // The room its widgets have, from `left` and `top` (spec §10.8): what `Fill` fills; 0 when
+    // it is not known (in a row, the height).
+    mut f32 room_w = 0.0;
+    mut f32 room_h = 0.0;
+    mut i32 grid = -1;  // a grid: its entry of `Frame.grids`
+    mut bool tree = false;  // a list that is a tree: its items are indented branches and leaves
+    // A group: where its frame starts, its title (its width and height, 0: none), its look.
+    mut bool group = false;
+    mut f32 group_x = 0.0;
+    mut f32 group_y = 0.0;
+    mut f32 title_w = 0.0;
+    mut f32 title_h = 0.0;
+    mut bool folded = false;
+}
+
+// A `Tabs` being described (spec §10.8): its identity and its entry of `Ui.states`, the tab
+// chosen, the tabs so far and where the next one goes in its row, the row and how far it is
+// scrolled, whether the last tab was closed, and the keyboard marks before its content.
+struct TabsBuild {
+    mut u64 id = 0;
+    mut usize slot = 0;
+    mut i32*? bound = none;
+    mut i32 chosen = 0;
+    mut i32 count = 0;
+    mut f32 x = 0.0;
+    mut canvas.Rect row = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    mut f32 offset = 0.0;
+    mut bool closed = false;
+    mut usize marks = 0;
+    mut usize depth = 0;  // that of the layout of its content
+}
+
+// A grid being described: its columns and rows, laid out at its first cell, the next free
+// cell, the cell of the next widget, and the sizes measured in this frame, for the next one.
+struct GridBuild {
+    mut usize memory = 0;  // its entry of `Ui.grid_ids`
+    mut Size[16] columns = [Auto; 16];
+    mut usize column_count = 0;
+    mut Size[64] rows = [Auto; 64];
+    mut usize row_count = 0;
+    mut bool ready = false;
+    mut f32[16] col_x = [0.0; 16];
+    mut f32[16] col_w = [0.0; 16];
+    mut f32[65] row_y = [0.0; 65];
+    mut f32[16] seen_w = [0.0; 16];
+    mut f32[64] seen_h = [0.0; 64];
+    mut i32 next_row = 0;
+    mut i32 next_col = 0;
+    mut bool has_cell = false;
+    mut canvas.Rect cell = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    mut i32 cell_row = 0;
+    mut i32 cell_col = 0;
+    mut bool single_w = true;  // the cell spans one column: its widget measures it
+    mut bool single_h = true;
+    mut Align align = Start;
 }
 
 // The widgets of one frame, drawn on `surface`.
@@ -1135,6 +1248,19 @@ pub struct Frame {
     mut usize menu_bar_depth = 0;
     mut u64[16] bar_titles = [0; 16];
     mut usize bar_title_count = 0;
+    // The grids being described, the outermost first (spec §10.8).
+    mut GridBuild[4] grids = [GridBuild{ }; 4];
+    mut usize grid_count = 0;
+    // The tabs being described, the outermost first, and how many times the widget that has the
+    // keyboard was placed so far (Ctrl+Tab: whether it is inside the content of a `Tabs`).
+    mut TabsBuild[4] tab_builds = [TabsBuild{ }; 4];
+    mut usize tabs_count = 0;
+    mut usize focus_marks = 0;
+    // The tree being described: how deep its branches are open, and the index of the item of
+    // each branch open around the next item (Left goes to it).
+    mut usize tree_level = 0;
+    mut i32[16] tree_parents = [-1; 16];
+    mut bool tree_keys_used = false;  // the keys of this frame acted on an item already
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -1170,6 +1296,7 @@ pub struct Frame {
     // at the size it had at the last frame, since its widgets come after it), and what its
     // widgets inherit.
     void open_styled(Kind kind, bool horizontal, f32 gap, f32 padding) {
+        ensure_cell();  // in a grid, it starts in its cell
         take_styles();
         Look l = look(kind, 0);
         Props p = explicit_props(kind, 0);
@@ -2148,13 +2275,19 @@ pub struct Frame {
         if (ui.pressed && !focus_taken) {
             ui.focus = 0;  // a click elsewhere takes the keyboard away
         }
-        tab();
+        tab_keys();
         mut bool focus_seen = ui.focus == 0;  // the widget that has the keyboard disappeared
         for (usize i in 0..order_count) {
             focus_seen = focus_seen || order[i] == ui.focus;
         }
         if (!focus_seen) {
             ui.focus = 0;
+        }
+        for (usize i in 0..8) {  // the same for the grids
+            if (!ui.grid_seen[i]) {
+                ui.grid_ids[i] = 0;
+            }
+            ui.grid_seen[i] = false;
         }
         for (usize i in 0..64) {  // what a widget no longer described kept is forgotten
             if (!ui.states[i].seen) {
@@ -2502,6 +2635,9 @@ pub struct Frame {
             ui.focus = id;
             focus_taken = true;
         }
+        if (ui.focus == id) {
+            focus_marks += 1;
+        }
         if (ui.focus == id && ui.reveal) {
             ui.reveal = false;
             reveal(r);
@@ -2538,7 +2674,7 @@ pub struct Frame {
     }
 
     // Tab and Shift+Tab: the keyboard to the next or the previous widget of this frame.
-    void tab() {
+    void tab_keys() {
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
             if (e.key != key_tab() || e.ctrl || order_count == 0) {
@@ -2563,14 +2699,619 @@ pub struct Frame {
         if (depth == 15) {
             return;  // too deep: the widgets stay in the current layout
         }
+        ensure_cell();
+        f32 room_w = max(fill_width() - 2.0 * padding, 0.0);
+        f32 room_h = max(fill_height() - 2.0 * padding, 0.0);
         f32 x = layouts[depth].x + padding;
         f32 y = layouts[depth].y + padding;
         depth += 1;
-        layouts[depth] = Layout{ horizontal: horizontal, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, padding: padding };
+        layouts[depth] = Layout{ horizontal: horizontal, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, padding: padding, room_w: room_w, room_h: room_h };
+    }
+
+    // The width the next widget can fill (spec §10.8): its cell in a grid, else what is left of
+    // its layout; 0 when it is not known.
+    pub f32 fill_width() {
+        Layout l = layouts[depth];
+        if (l.grid >= 0) {
+            ensure_cell();  // the next free cell, if the widget gave none
+            return grids[l.grid as usize].cell.w;
+        }
+        return l.room_w > 0.0 ? max(l.left + l.room_w - l.x, 0.0) : 0.0;
+    }
+
+    // The same, its height.
+    pub f32 fill_height() {
+        Layout l = layouts[depth];
+        if (l.grid >= 0) {
+            ensure_cell();
+            return grids[l.grid as usize].cell.h;
+        }
+        return l.room_h > 0.0 ? max(l.top + l.room_h - l.y, 0.0) : 0.0;
+    }
+
+    // ---- Groups (spec §10.8) ----
+
+    // A frame with `title` on its border ("": a frame alone): the widgets that follow, until
+    // `end_group()`, go in a column inside it. A negative `gap` or `padding`: that of the theme.
+    pub void group(str title, f32 gap, f32 padding) {
+        group_open(title, gap, padding, false, none);
+    }
+
+    // A frame without a title.
+    pub void group_untitled(f32 gap, f32 padding) {
+        group_open("", gap, padding, false, none);
+    }
+
+    // The same, folding: a click on its title, or Space when it has the keyboard, folds it to its
+    // title or opens it. `open` binds that state; none: the group keeps it. Returns whether it
+    // is open: its widgets are described only then, but `end_group()` always follows.
+    pub bool group_folding(str title, f32 gap, f32 padding, bool*? open) {
+        return group_open(title, gap, padding, true, open);
+    }
+
+    bool group_open(str title, f32 gap, f32 padding, bool folding, bool*? bound) {
+        ensure_cell();
+        u64 id = take_id();
+        take_styles();
+        Look l = look(Group, 0);
+        Layout parent = layouts[depth];
+        canvas.Rect size = title.len > 0 ? measure_px(title, l.font_size) : canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        f32 mark = folding ? 18.0 : 0.0;  // the triangle before the title
+        f32 title_w = size.w + mark;
+        canvas.Rect head = canvas.Rect{ x: parent.x + 10.0, y: parent.y, w: title_w + 8.0, h: size.h };
+        usize slot = ui.state_slot(id);
+        mut bool is_open = true;
+        if (folding) {
+            WidgetState* s = &ui.states[slot];
+            is_open = match (bound) {
+                some(flag) => *flag,
+                none => !s.closed,
+            };
+            focusable(id, head);
+            interactive(head);
+            if (click(id, head) || activated(id, true)) {
+                is_open = !is_open;
+                match (bound) {
+                    some(flag) => {
+                        *flag = is_open;
+                    },
+                    none => { },
+                }
+                s.closed = !is_open;
+            }
+            if (ui.focus == id) {
+                ring(head, l.accent);
+            }
+        }
+        // its background, at the size it had at the last frame
+        WidgetState kept = ui.states[slot];
+        if (l.background.a > 0 && kept.content_w > 0.0) {
+            surface.fill_rounded(canvas.Rect{ x: parent.x, y: parent.y + size.h / 2.0, w: kept.content_w, h: kept.content_h - size.h / 2.0 }, l.radius, l.background);
+        }
+        Props p = explicit_props(Group, 0);
+        canvas.Color ink_of = color_or(part(Group, 0).color, l.color);
+        f32 tx = parent.x + 14.0;
+        if (folding) {  // a triangle: down when open, right when folded
+            i32 cx = (tx + 6.0) as i32;
+            i32 cy = (parent.y + size.h / 2.0) as i32;
+            if (is_open) {
+                surface.line(cx - 5, cy - 2, cx, cy + 3, ink_of);
+                surface.line(cx, cy + 3, cx + 5, cy - 2, ink_of);
+            } else {
+                surface.line(cx - 2, cy - 5, cx + 3, cy, ink_of);
+                surface.line(cx + 3, cy, cx - 2, cy + 5, ink_of);
+            }
+        }
+        if (title.len > 0) {
+            write_px(tx + mark, parent.y, size.h, title, ink_of, l.font_size);
+        }
+        usize before = depth;
+        open(false, gap >= 0.0 ? gap : l.gap, padding >= 0.0 ? padding : l.padding);
+        if (depth > before) {
+            layouts[depth].y += size.h / 2.0;  // under the title, which is on the border
+            layouts[depth].top += size.h / 2.0;
+            layouts[depth].bottom = layouts[depth].top;
+            layouts[depth].color = or_color(p.color, parent.color);
+            layouts[depth].font_size = or_f32(p.font_size, parent.font_size);
+            layouts[depth].accent = or_color(p.accent, parent.accent);
+            layouts[depth].painted = id;
+            layouts[depth].look = l;
+            layouts[depth].group = true;
+            layouts[depth].group_x = parent.x;
+            layouts[depth].group_y = parent.y;
+            layouts[depth].title_w = title.len > 0 || folding ? title_w + 8.0 : 0.0;
+            layouts[depth].title_h = size.h;
+            layouts[depth].folded = !is_open;
+        }
+        return is_open;
+    }
+
+    // The end of a group: its frame is drawn around its widgets, open on its title.
+    pub void end_group() {
+        Layout done = layouts[depth];
+        if (!done.group) {
+            end();
+            return;
+        }
+        depth -= 1;
+        f32 w = max(done.right - done.left, done.title_w + 20.0 - 2.0 * done.padding) + 2.0 * done.padding;
+        f32 h = done.folded ? done.title_h : done.bottom - done.top + 2.0 * done.padding + done.title_h / 2.0;
+        canvas.Rect r = place(w, h);
+        usize slot = ui.state_slot(done.painted);
+        WidgetState* s = &ui.states[slot];
+        s.content_w = r.w;
+        s.content_h = r.h;
+        Look l = done.look;
+        if (done.folded) {  // folded: its title, on a line
+            f32 top = r.y + done.title_h / 2.0;
+            surface.fill(canvas.Rect{ x: r.x + 10.0 + done.title_w, y: top, w: max(r.w - 10.0 - done.title_w, 0.0), h: max(l.border_width, 1.0) }, l.border);
+        } else if (l.border.a > 0 && l.border_width > 0.0) {  // four sides, the top one cut by the title
+            f32 bw = l.border_width;
+            f32 top = r.y + done.title_h / 2.0;
+            f32 cut = done.title_w > 0.0 ? done.title_w : 0.0;
+            surface.fill(canvas.Rect{ x: r.x, y: top, w: 10.0, h: bw }, l.border);
+            surface.fill(canvas.Rect{ x: r.x + 10.0 + cut, y: top, w: max(r.w - 10.0 - cut, 0.0), h: bw }, l.border);
+            surface.fill(canvas.Rect{ x: r.x, y: top, w: bw, h: r.y + r.h - top }, l.border);
+            surface.fill(canvas.Rect{ x: r.x + r.w - bw, y: top, w: bw, h: r.y + r.h - top }, l.border);
+            surface.fill(canvas.Rect{ x: r.x, y: r.y + r.h - bw, w: r.w, h: bw }, l.border);
+        }
+    }
+
+    // ---- Tabs (spec §10.8) ----
+
+    // A row of tabs, then the content of the tab chosen: `tab(...)` for each tab, true for the
+    // one chosen, whose widgets follow; then `end_tabs()`. `chosen` binds the index of the tab
+    // chosen; none: the tabs keep it. A click, the keys of the row (Left, Right, Home, End) and
+    // Ctrl+Tab choose at the next frame, so that one content only is described in a frame.
+    pub void tabs(i32*? chosen) {
+        ensure_cell();
+        u64 id = take_id();
+        take_styles();
+        Look l = look(Tabs, 0);
+        Layout parent = layouts[depth];
+        if (tabs_count == 4 || depth == 15) {
+            open(false, l.gap, 0.0);  // too deep: a column
+            return;
+        }
+        usize slot = ui.state_slot(id);
+        WidgetState* s = &ui.states[slot];
+        mut i32 current = match (chosen) {
+            some(index) => *index,
+            none => s.chosen,
+        };
+        if (s.pick >= 0) {
+            current = s.pick;
+            s.pick = -1;
+        }
+        current = min(max(current, 0), max(s.items - 1, 0));
+        match (chosen) {
+            some(index) => {
+                *index = current;
+            },
+            none => { },
+        }
+        s.chosen = current;
+        f32 row_h = l.height + 4.0;
+        f32 width = fill_width() > 0.0 ? fill_width() : max(s.extent, s.content_w);
+        canvas.Rect row = canvas.Rect{ x: parent.x, y: parent.y, w: width, h: row_h };
+        Look bar = look(Tabs, 0);
+        Props row_props = part(Tabs, 2);
+        match (row_props.background) {
+            some(c) => {
+                surface.fill(row, c);
+            },
+            none => { },
+        }
+        // the row scrolls with the wheel when its tabs are wider than it
+        if (over(row) && s.extent > row.w) {
+            s.scroll_x = max(min(s.scroll_x - (ui.wheel + ui.wheel_x) * 40.0, s.extent - row.w), 0.0);
+            ui.wheel = 0.0;
+            ui.wheel_x = 0.0;
+        }
+        focusable(id, row);
+        if (ui.focus == id) {
+            for (usize i in 0..ui.edit_count) {
+                Edit e = ui.edits[i];
+                if (e.key == key_left() || e.key == key_right()) {
+                    s.pick = min(max(current + (e.key == key_left() ? -1 : 1), 0), max(s.items - 1, 0));
+                } else if (e.key == key_home() || e.key == key_end()) {
+                    s.pick = e.key == key_home() ? 0 : max(s.items - 1, 0);
+                }
+            }
+        }
+        usize t = tabs_count;
+        tabs_count += 1;
+        open(false, bar.gap, 0.0);
+        layouts[depth].y += row_h + 8.0;  // the content, under the row
+        layouts[depth].top += row_h + 8.0;
+        layouts[depth].bottom = layouts[depth].top;
+        tab_builds[t] = TabsBuild{ id: id, slot: slot, bound: chosen, chosen: current, row: row, offset: s.scroll_x, marks: focus_marks, depth: depth };
+    }
+
+    // A tab of the `Tabs` being described: true when it is the one chosen, whose widgets follow.
+    // `closable` puts a cross on it (`tab_closed()` then says it was clicked); a tab not
+    // `enabled` is dimmed and cannot be chosen.
+    pub bool tab(str title, bool closable, bool enabled) {
+        if (tabs_count == 0) {
+            return false;
+        }
+        usize t = tabs_count - 1;
+        TabsBuild b = tab_builds[t];
+        i32 index = b.count;
+        tab_builds[t].count += 1;
+        u64 id = mix(b.id, 0x7AB00000 | index as u64);
+        Look first = look(Tabs, 0);
+        canvas.Rect size = measure_px(title, first.font_size);
+        f32 cross = closable ? 22.0 : 0.0;
+        f32 w = size.w + 2.0 * first.padding + cross;
+        canvas.Rect r = canvas.Rect{ x: b.row.x + b.x - b.offset, y: b.row.y, w: w, h: b.row.h };
+        tab_builds[t].x += w + 2.0;
+        bool chosen = index == b.chosen;
+        canvas.Rect close_box = canvas.Rect{ x: r.x + r.w - cross - 4.0, y: r.y + (r.h - 18.0) / 2.0, w: 18.0, h: 18.0 };
+        surface.push_clip(b.row);
+        bool hot = over(r) && over(b.row);
+        mut bool closed = false;
+        if (enabled) {
+            if (closable && click(mix(id, 1), close_box) && over(b.row)) {
+                closed = true;
+            } else if (click(id, r) && over(b.row) && !chosen) {
+                ui.states[b.slot].pick = index;
+            }
+        }
+        WidgetState* s = &ui.states[b.slot];
+        if (s.closing == index) {  // Ctrl+W at the last frame
+            s.closing = -1;
+            closed = closable;
+        }
+        tab_builds[t].closed = closed;
+        u32 states = (hot ? state_hover() : 0) | (chosen ? state_checked() : 0) | (enabled ? 0 : state_disabled());
+        Look l = look(Tabs, states);
+        paint(r, l);
+        write_px(r.x + l.padding, r.y, r.h, title, l.color, l.font_size);
+        if (chosen) {  // the mark of the tab chosen
+            surface.fill(canvas.Rect{ x: r.x, y: r.y + r.h - 3.0, w: r.w, h: 3.0 }, l.accent);
+            if (ui.focus == b.id) {
+                ring(r, l.accent);
+            }
+        }
+        if (closable) {
+            canvas.Color mark = over(close_box) ? l.accent : l.color;
+            i32 cx = (close_box.x + 9.0) as i32;
+            i32 cy = (close_box.y + 9.0) as i32;
+            surface.line(cx - 4, cy - 4, cx + 4, cy + 4, mark);
+            surface.line(cx - 4, cy + 4, cx + 4, cy - 4, mark);
+        }
+        surface.pop_clip();
+        if (enabled) {
+            interactive(r);
+        }
+        return chosen;
+    }
+
+    // Whether the cross of the last tab was clicked (or Ctrl+W pressed on it): the program
+    // then removes it.
+    pub bool tab_closed() {
+        if (tabs_count == 0) {
+            return false;
+        }
+        bool closed = tab_builds[tabs_count - 1].closed;
+        tab_builds[tabs_count - 1].closed = false;
+        return closed;
+    }
+
+    // The end of the tabs: the line under the row, the keys of the tabs, and their place.
+    pub void end_tabs() {
+        if (tabs_count == 0 || tab_builds[tabs_count - 1].depth != depth) {
+            end();
+            return;
+        }
+        tabs_count -= 1;
+        TabsBuild b = tab_builds[tabs_count];
+        Layout content = layouts[depth];
+        depth -= 1;
+        WidgetState* s = &ui.states[b.slot];
+        s.items = b.count;
+        s.extent = b.x;
+        s.content_w = content.right - content.left;
+        Look l = look(Tabs, 0);
+        surface.fill(canvas.Rect{ x: b.row.x, y: b.row.y + b.row.h - 1.0, w: b.row.w, h: 1.0 }, l.bar);
+        // Ctrl+Tab and Ctrl+Shift+Tab, Ctrl+W: from the row, or from a widget of the content
+        if (ui.focus == b.id || focus_marks > b.marks) {
+            for (usize i in 0..ui.edit_count) {
+                Edit e = ui.edits[i];
+                if (e.key == key_tab() && e.ctrl && b.count > 0) {
+                    s.pick = (b.chosen + (e.shift ? b.count - 1 : 1)) % b.count;
+                } else if (e.key == 119 && e.ctrl) {  // W
+                    s.closing = b.chosen;
+                }
+            }
+        }
+        place(max(b.row.w, s.content_w), b.row.h + 8.0 + content.bottom - content.top);
+    }
+
+    // ---- Grids (spec §10.8) ----
+
+    // A grid: its columns (`grid_column`) and rows (`grid_row`) follow, then its widgets, each
+    // after `cell` (or in the next free cell), until `end_grid()`. A negative `gap` or `padding`:
+    // that of the theme and of the styles.
+    pub void grid(f32 gap, f32 padding) {
+        u64 id = take_id();
+        usize before = depth;
+        open_styled(Grid, false, gap, padding);  // painted as a column, with its styles
+        if (depth == before || grid_count == 4) {
+            return;  // too deep: a column
+        }
+        usize g = grid_count;
+        grid_count += 1;
+        layouts[depth].grid = g as i32;
+        mut usize memory = 7;
+        mut bool found = false;
+        for (usize i in 0..8) {
+            if (ui.grid_ids[i] == id) {
+                memory = i;
+                found = true;
+            }
+        }
+        if (!found) {
+            for (usize i in 0..8) {
+                if (!found && (ui.grid_ids[i] == 0 || !ui.grid_seen[i])) {
+                    memory = i;
+                    found = true;
+                }
+            }
+            ui.grid_ids[memory] = id;
+            for (usize i in 0..16) {
+                ui.grid_widths[memory * 16 + i] = 0.0;
+            }
+            for (usize i in 0..64) {
+                ui.grid_heights[memory * 64 + i] = 0.0;
+            }
+        }
+        ui.grid_seen[memory] = true;
+        grids[g] = GridBuild{ memory: memory };
+    }
+
+    // A column of the grid being described, 16 at most.
+    pub void grid_column(Size size) {
+        i32 g = layouts[depth].grid;
+        if (g >= 0) {
+            GridBuild* b = &grids[g as usize];
+            if (b.column_count < 16 && !b.ready) {
+                b.columns[b.column_count] = size;
+                b.column_count += 1;
+            }
+        }
+    }
+
+    // A row of the grid being described, 64 at most; the rows not given are `Auto`.
+    pub void grid_row(Size size) {
+        i32 g = layouts[depth].grid;
+        if (g >= 0) {
+            GridBuild* b = &grids[g as usize];
+            if (b.row_count < 64 && !b.ready) {
+                b.rows[b.row_count] = size;
+                b.row_count += 1;
+            }
+        }
+    }
+
+    // The widths of the columns and the heights of the rows of the grid `g`, from its sizes,
+    // the room of its layout and what its cells measured at the last frame.
+    void ready_grid(usize g) {
+        GridBuild* b = &grids[g];
+        if (b.ready) {
+            return;
+        }
+        b.ready = true;
+        if (b.column_count == 0) {
+            b.columns[0] = Fill(1.0);
+            b.column_count = 1;
+        }
+        Layout l = layouts[depth];
+        usize memory = b.memory;
+        mut f32 fixed = l.gap * (b.column_count - 1) as f32;
+        mut f32 weights = 0.0;
+        for (usize i in 0..b.column_count) {
+            f32 seen = ui.grid_widths[memory * 16 + i];
+            match (b.columns[i]) {
+                Pixels(px) => {
+                    b.col_w[i] = px;
+                    fixed += px;
+                },
+                Auto => {
+                    b.col_w[i] = seen;
+                    fixed += seen;
+                },
+                Fill(weight) => {
+                    b.col_w[i] = seen;  // if the room is not known: as Auto
+                    weights += max(weight, 0.0);
+                },
+            }
+        }
+        if (l.room_w > 0.0 && weights > 0.0) {
+            f32 left = max(l.room_w - fixed, 0.0);
+            for (usize i in 0..b.column_count) {
+                match (b.columns[i]) {
+                    Fill(weight) => {
+                        b.col_w[i] = left * max(weight, 0.0) / weights;
+                    },
+                    _ => { },
+                }
+            }
+        }
+        mut f32 x = l.left;
+        for (usize i in 0..b.column_count) {
+            b.col_x[i] = x;
+            x += b.col_w[i] + l.gap;
+        }
+        // the rows: those given, then `Auto`; an `Auto` row not measured yet is a line high
+        mut f32[64] heights = [0.0; 64];
+        mut f32 used = 0.0;
+        mut f32 row_weights = 0.0;
+        for (usize i in 0..64) {
+            f32 seen = ui.grid_heights[memory * 64 + i];
+            Size size = i < b.row_count ? b.rows[i] : Auto;
+            match (size) {
+                Pixels(px) => {
+                    heights[i] = px;
+                },
+                Auto => {
+                    heights[i] = seen > 0.0 ? seen : height;
+                },
+                Fill(weight) => {
+                    heights[i] = seen > 0.0 ? seen : height;
+                    row_weights += max(weight, 0.0);
+                },
+            }
+            if (i < b.row_count) {
+                match (size) {
+                    Fill(weight) => { },
+                    _ => {
+                        used += heights[i];
+                    },
+                }
+            }
+        }
+        if (l.room_h > 0.0 && row_weights > 0.0) {
+            f32 left = max(l.room_h - used - l.gap * max(b.row_count as f32 - 1.0, 0.0), 0.0);
+            for (usize i in 0..b.row_count) {
+                match (b.rows[i]) {
+                    Fill(weight) => {
+                        heights[i] = left * max(weight, 0.0) / row_weights;
+                    },
+                    _ => { },
+                }
+            }
+        }
+        mut f32 y = l.top;
+        for (usize i in 0..64) {
+            b.row_y[i] = y;
+            y += heights[i] + l.gap;
+        }
+        b.row_y[64] = y;
+    }
+
+    // The cell of the next widget: row `row` and column `col` (from 0; negative: the next free
+    // cell, row by row), over `span` columns and `row_span` rows; `align` places it in the cell.
+    pub void cell(i32 row, i32 col, i32 span, i32 row_span, Align align) {
+        i32 g = layouts[depth].grid;
+        if (g < 0) {
+            return;
+        }
+        usize index = g as usize;
+        ready_grid(index);
+        GridBuild* b = &grids[index];
+        i32 columns = b.column_count as i32;
+        mut i32 r = row;
+        mut i32 c = col;
+        if (r < 0 && c < 0) {  // the next free cell
+            r = b.next_row;
+            c = b.next_col;
+        } else if (r < 0) {  // a column: in this row if it is still free, else in the next one
+            r = c >= b.next_col ? b.next_row : b.next_row + 1;
+        } else if (c < 0) {  // a row: its next free cell, or its first one
+            c = r == b.next_row ? b.next_col : 0;
+        }
+        r = min(max(r, 0), 63);
+        c = min(max(c, 0), columns - 1);
+        i32 wide = min(max(span, 1), columns - c);
+        i32 tall = min(max(row_span, 1), 64 - r);
+        b.next_row = c + wide >= columns ? r + 1 : r;
+        b.next_col = c + wide >= columns ? 0 : c + wide;
+        usize first = c as usize;
+        usize last_col = (c + wide - 1) as usize;
+        usize top = r as usize;
+        usize bottom = (r + tall) as usize;
+        f32 x = b.col_x[first];
+        f32 y = b.row_y[top];
+        b.cell = canvas.Rect{ x: x, y: y, w: b.col_x[last_col] + b.col_w[last_col] - x, h: b.row_y[bottom] - layouts[depth].gap - y };
+        b.cell_row = r;
+        b.cell_col = c;
+        b.single_w = wide == 1;
+        b.single_h = tall == 1;
+        b.align = align;
+        b.has_cell = true;
+        layouts[depth].x = x;  // a column or a row opened in the cell starts there
+        layouts[depth].y = y;
+    }
+
+    // A widget `w` by `h` placed in its cell, as its alignment says; it measures its column and
+    // its row for the next frame.
+    canvas.Rect place_in_grid(usize g, f32 w, f32 h) {
+        if (!grids[g].has_cell) {
+            cell(-1, -1, 1, 1, Start);
+        }
+        GridBuild* b = &grids[g];
+        b.has_cell = false;
+        canvas.Rect c = b.cell;
+        canvas.Rect r = match (b.align) {
+            Start => canvas.Rect{ x: c.x, y: c.y, w: w, h: h },
+            Center => canvas.Rect{ x: c.x + max(c.w - w, 0.0) / 2.0, y: c.y, w: w, h: h },
+            End => canvas.Rect{ x: c.x + max(c.w - w, 0.0), y: c.y, w: w, h: h },
+            Stretch => canvas.Rect{ x: c.x, y: c.y, w: max(c.w, w), h: h },
+        };
+        if (b.single_w) {
+            usize col = b.cell_col as usize;
+            b.seen_w[col] = max(b.seen_w[col], w);
+        }
+        if (b.single_h) {
+            usize row = b.cell_row as usize;
+            b.seen_h[row] = max(b.seen_h[row], h);
+        }
+        layouts[depth].right = max(layouts[depth].right, max(r.x + r.w, c.x + c.w));
+        layouts[depth].bottom = max(layouts[depth].bottom, r.y + r.h);
+        return r;
+    }
+
+    // In a grid, the next widget without `cell` takes the next free cell.
+    void ensure_cell() {
+        i32 g = layouts[depth].grid;
+        if (g >= 0 && !grids[g as usize].has_cell) {
+            cell(-1, -1, 1, 1, Start);
+        }
+    }
+
+    // The end of the grid: what its cells measured is kept for the next frame, and the grid
+    // takes its place in the layout that holds it.
+    pub void end_grid() {
+        i32 g = layouts[depth].grid;
+        if (g < 0) {
+            end();
+            return;
+        }
+        usize index = g as usize;
+        ready_grid(index);
+        GridBuild* b = &grids[index];
+        usize memory = b.memory;
+        for (usize i in 0..16) {
+            ui.grid_widths[memory * 16 + i] = b.seen_w[i];
+        }
+        mut usize rows = b.row_count;
+        for (usize i in 0..64) {
+            ui.grid_heights[memory * 64 + i] = b.seen_h[i];
+            if (b.seen_h[i] > 0.0) {
+                rows = max(rows, i + 1);
+            }
+        }
+        // its size: all its columns, and its rows down to the last one used or given
+        usize last_col = b.column_count - 1;
+        layouts[depth].right = max(layouts[depth].right, b.col_x[last_col] + b.col_w[last_col]);
+        if (rows > 0) {
+            layouts[depth].bottom = max(layouts[depth].bottom, b.row_y[rows] - layouts[depth].gap);
+        }
+        grid_count -= 1;
+        end();
     }
 
     // The place of the next widget, of size `w` by `h`, in the current layout.
     canvas.Rect place(f32 w, f32 h) {
+        if (layouts[depth].grid >= 0) {
+            canvas.Rect r = place_in_grid(layouts[depth].grid as usize, w, h);
+            last_id = placed_id;
+            placed_id = 0;
+            last = r;
+            return r;
+        }
         Layout l = layouts[depth];
         canvas.Rect r = canvas.Rect{ x: l.x, y: l.y, w: w, h: h };
         layouts[depth].right = max(l.right, l.x + w);
@@ -2623,7 +3364,7 @@ pub struct Frame {
     // still scroll first; its bars can be dragged by their thumb, or clicked beside it to move
     // by a page; with the keyboard, the arrows, Page Up, Page Down, Home and End scroll it.
     pub void scroll(f32 width, f32 height) {
-        begin_area(width, height, false, none);
+        begin_area(Scroll, width, height, false, none);
     }
 
     pub void end_scroll() {
@@ -2635,14 +3376,168 @@ pub struct Frame {
     // Page Up and Page Down move the choice, which comes into view; the item chosen is
     // highlighted.
     pub void list(f32 width, f32 height, i32*? selected) {
-        begin_area(width, height, true, selected);
+        begin_area(List, width, height, true, selected);
     }
 
     pub void end_list() {
         end_area(true);
     }
 
-    void begin_area(f32 width, f32 height_of, bool is_list, i32*? selected) {
+    // ---- Trees (spec §10.8) ----
+
+    // A tree `width` by `height`: a list whose items are branches (`branch`) and leaves
+    // (`leaf`), indented by their depth, until `end_tree()`. With `selected`, the index of the
+    // item chosen among those shown; Up and Down move it, Right opens a branch or goes to its
+    // first child, Left closes it or goes to its parent, Enter clicks a leaf.
+    pub void tree(f32 width, f32 height, i32*? selected) {
+        begin_area(Tree, width, height, true, selected);
+        if (layouts[depth].is_list) {
+            layouts[depth].tree = true;
+        }
+        tree_level = 0;
+    }
+
+    pub void end_tree() {
+        tree_level = 0;
+        end_area(true);
+    }
+
+    // A branch of the tree being described: a triangle and `text`. A click on the triangle, or
+    // Right and Left when it is chosen, opens and closes it; `open` binds that state, none: the
+    // tree keeps it (closed at first). Returns whether it is open: its children follow, then
+    // `end_branch()`.
+    pub bool branch(str text, bool*? open) {
+        u64 id = take_id();
+        usize slot = ui.state_slot(id);
+        WidgetState* s = &ui.states[slot];
+        mut bool is_open = match (open) {
+            some(flag) => *flag,
+            none => s.expanded,
+        };
+        i32 index = layouts[depth].item;
+        canvas.Rect r = tree_item(text, true, is_open);
+        canvas.Rect toggle = canvas.Rect{ x: r.x, y: r.y, w: 20.0, h: r.h };
+        mut bool change = click(id, toggle);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_right()) {
+                    if (!is_open) {
+                        change = true;
+                    } else {
+                        tree_choose(index + 1);  // its first child
+                    }
+                } else if (key == key_left()) {
+                    if (is_open) {
+                        change = true;
+                    } else {
+                        tree_to_parent();
+                    }
+                } else if (key == key_enter()) {
+                    change = true;
+                }
+            }
+        }
+        if (change) {
+            is_open = !is_open;
+            s.expanded = is_open;
+            match (open) {
+                some(flag) => {
+                    *flag = is_open;
+                },
+                none => { },
+            }
+        }
+        if (is_open && tree_level < 16) {
+            tree_parents[tree_level] = index;
+            tree_level += 1;
+        }
+        return is_open;
+    }
+
+    // The end of the children of an open branch.
+    pub void end_branch() {
+        if (tree_level > 0) {
+            tree_level -= 1;
+        }
+    }
+
+    // A leaf of the tree being described: `text`. Returns true when it is clicked, or when Enter
+    // is pressed while it is chosen.
+    pub bool leaf(str text) {
+        u64 id = take_id();
+        i32 index = layouts[depth].item;
+        canvas.Rect r = tree_item(text, false, false);
+        mut bool clicked = click(id, r);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_enter()) {
+                    clicked = true;
+                } else if (key == key_left()) {
+                    tree_to_parent();
+                }
+            }
+        }
+        return clicked;
+    }
+
+    // An item of the tree: its row, indented, a triangle for a branch, and its text.
+    canvas.Rect tree_item(str text, bool is_branch, bool is_open) {
+        take_styles();
+        Look l = look(Tree, 0);
+        f32 indent = tree_level as f32 * 16.0;
+        canvas.Rect size = measure_px(text, l.font_size);
+        canvas.Rect r = place(indent + 22.0 + size.w + 8.0, l.height);
+        canvas.Rect row = canvas.Rect{ x: r.x + indent, y: r.y, w: r.w - indent, h: r.h };
+        if (is_branch) {  // down when open, right when closed
+            i32 cx = (row.x + 8.0) as i32;
+            i32 cy = (row.y + row.h / 2.0) as i32;
+            if (is_open) {
+                surface.line(cx - 4, cy - 2, cx, cy + 2, l.color);
+                surface.line(cx, cy + 2, cx + 4, cy - 2, l.color);
+            } else {
+                surface.line(cx - 2, cy - 4, cx + 2, cy, l.color);
+                surface.line(cx + 2, cy, cx - 2, cy + 4, l.color);
+            }
+        }
+        write_px(row.x + 22.0, row.y, row.h, text, l.color, l.font_size);
+        last = row;  // what a context menu is for
+        return row;
+    }
+
+    // Whether the keys act on the item `index`: the tree has the keyboard and it is chosen.
+    bool tree_keys(i32 index) {
+        Layout l = layouts[depth];
+        if (!l.tree || ui.focus != l.area_id || tree_keys_used) {
+            return false;
+        }
+        bool chosen_now = match (l.selected) {
+            some(chosen) => *chosen == index,
+            none => false,
+        };
+        tree_keys_used = chosen_now;
+        return chosen_now;
+    }
+
+    void tree_choose(i32 index) {
+        match (layouts[depth].selected) {
+            some(chosen) => {
+                *chosen = index;
+                ui.states[layouts[depth].area as usize].reveal = true;
+            },
+            none => { },
+        }
+    }
+
+    // Left on an item that is not an open branch: the branch that holds it.
+    void tree_to_parent() {
+        if (tree_level > 0) {
+            tree_choose(tree_parents[tree_level - 1]);
+        }
+    }
+
+    void begin_area(Kind kind, f32 width, f32 height_of, bool is_list, i32*? selected) {
         u64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
@@ -2700,7 +3595,7 @@ pub struct Frame {
         }
         s.scroll_y = max(min(s.scroll_y, s.content_h - view_h), 0.0);
         s.scroll_x = max(min(s.scroll_x, s.content_w - view_w), 0.0);
-        Look area_look = look(is_list ? List : Scroll, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
+        Look area_look = look(kind, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
         paint(r, area_look);
         surface.push_clip(canvas.Rect{ x: r.x + 2.0, y: r.y + 2.0, w: view_w - (tall ? 2.0 : 4.0), h: view_h - (wide ? 2.0 : 4.0) });
         if (depth == 15) {
@@ -2710,7 +3605,7 @@ pub struct Frame {
         f32 left = r.x + 8.0 - s.scroll_x;
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, look: area_look };
+        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, look: area_look, room_w: max(view_w - 16.0, 0.0) };
     }
 
     void end_area(bool is_list) {
@@ -2805,7 +3700,7 @@ pub struct Frame {
 // The widgets of a frame, from (x, y) downwards. End it with `finish()`.
 pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
     mut Frame f = Frame{ ui: ui, surface: surface };
-    f.layouts[0] = Layout{ x: x, y: y, left: x, top: y, right: x, bottom: y };
+    f.layouts[0] = Layout{ x: x, y: y, left: x, top: y, right: x, bottom: y, room_w: max(surface.width as f32 - x, 0.0), room_h: max(surface.height as f32 - y, 0.0) };
     // the background of the window, when the theme gives one (spec §10.7)
     match (ui.theme) {
         some(t) => {
@@ -3881,4 +4776,234 @@ test "themes and styles: the cascade" {
     f.button("A");
     f.finish();
     assert(surface.at(250, 290) == canvas.pack(rgb(239, 241, 245, 255)) && surface.at(3, 16) == canvas.pack(rgb(204, 208, 218, 255)));
+}
+
+// A grid of three columns (100 pixels, `Auto`, `Fill`), for the test below: the rectangles of
+// its widgets, and of a label placed after it.
+canvas.Rect[6] grid_frame(Ui* ui, canvas.Canvas* surface) {
+    mut canvas.Rect[6] r = [nowhere(); 6];
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.grid(10.0, 0.0);
+    f.grid_column(Pixels(100.0));
+    f.grid_column(Auto);
+    f.grid_column(Fill(1.0));
+    f.label("ab");  // the next free cell: (0, 0)
+    r[0] = f.last;
+    f.button("OK");  // (0, 1)
+    r[1] = f.last;
+    f.cell(0, 2, 1, 1, Stretch);
+    f.label("wide");
+    r[2] = f.last;
+    f.label("next");  // (1, 0)
+    r[3] = f.last;
+    f.cell(-1, -1, 3, 1, End);  // (1, 1), over the 2 columns left
+    f.label("end");
+    r[4] = f.last;
+    f.end_grid();
+    f.label("after");
+    r[5] = f.last;
+    f.finish();
+    return r;
+}
+
+test "a grid: pixels, Auto and Fill columns, the next free cell, spans and alignment" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(399.0, 199.0);
+    canvas.Rect[6] first = grid_frame(&ui, &surface);
+    f32 ok_w = first[1].w;  // the Auto column is measured at the first frame
+    assert(first[0].x == 0.0 && first[0].y == 0.0);
+    canvas.Rect[6] r = grid_frame(&ui, &surface);
+    assert(r[1].x == 110.0 && r[1].y == 0.0);
+    f32 third = 110.0 + ok_w + 10.0;
+    assert(r[2].x == third && r[2].w == 400.0 - third);  // Fill, and Stretch
+    assert(r[3].x == 0.0 && r[3].y == 42.0);  // the row below, a line high
+    assert(r[4].x + r[4].w == 400.0 && r[4].y == 42.0);  // End of the 2 columns
+    assert(r[5].x == 0.0 && r[5].y == 82.0);  // under its 2 rows (74), then the gap of the frame
+}
+
+test "a group: its widgets under its title, folded and opened by a click" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(299.0, 199.0);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    assert(f.group_folding("Options", 8.0, 12.0, none));
+    f.label("inside");
+    canvas.Rect inside = f.last;
+    f.end_group();
+    canvas.Rect open_box = f.last;
+    f.finish();
+    assert(inside.x == 12.0 && inside.y > 12.0);  // inside its padding, under the title
+    assert(open_box.h > inside.h + 24.0);
+    // a click on its title folds it: its widgets are not described, and it is its title only
+    ui.mouse_move(30.0, 5.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    bool open_now = f.group_folding("Options", 8.0, 12.0, none);
+    f.end_group();
+    f.finish();
+    assert(!open_now);
+    ui.mouse_move(299.0, 199.0);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    assert(!f.group_folding("Options", 8.0, 12.0, none));  // it stays folded
+    f.end_group();
+    assert(f.last.h < open_box.h);
+    f.finish();
+    // bound to the program, and with the keyboard: Space opens it
+    mut bool flag = false;
+    ui.key(key_tab(), true, false, false);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.group_folding("Options", 8.0, 12.0, some(&flag));
+    f.end_group();
+    f.finish();
+    ui.key(key_space(), true, false, false);
+    f = begin(&ui, &surface, 0.0, 0.0);
+    assert(f.group_folding("Options", 8.0, 12.0, some(&flag)));
+    f.end_group();
+    f.finish();
+    assert(flag);
+}
+
+// Three tabs, the last one closable, for the test below: which contents were described, and
+// whether the last tab was closed. The content of the first one has a text field.
+i32 tabs_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, TextBuffer* name, bool* closed) {
+    mut i32 described = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.tabs(some(chosen));
+    if (f.tab("One", false, true)) {
+        described += 1;
+        f.text_field(name, 100.0);
+    }
+    if (f.tab("Two", false, true)) {
+        described += 10;
+    }
+    if (f.tab("Three", true, true)) {
+        described += 100;
+    }
+    *closed = f.tab_closed();
+    f.end_tabs();
+    f.finish();
+    return described;
+}
+
+test "tabs: the content of the tab chosen only, a click, the keys, Ctrl+Tab, a closed tab" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut TextBuffer name = TextBuffer{ };
+    mut bool closed = false;
+    ui.mouse_move(399.0, 199.0);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 1);
+    // a click on the second tab: chosen at the next frame, one content per frame
+    ui.mouse_move(100.0, 15.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 1);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 10 && chosen == 1);
+    // the row has the keyboard after the click: Right, then End
+    ui.mouse_move(399.0, 199.0);
+    ui.key(key_right(), true, false, false);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 100 && chosen == 2);
+    ui.key(key_home(), true, false, false);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(chosen == 0 || tabs_frame(&ui, &surface, &chosen, &name, &closed) == 1);
+    assert(chosen == 0);
+    // Ctrl+Tab from the text field of the content
+    ui.key(key_tab(), true, false, false);  // the keyboard to the field
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    ui.key(key_tab(), true, false, true);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(tabs_frame(&ui, &surface, &chosen, &name, &closed) == 10 && chosen == 1);
+    // the cross of the third tab
+    chosen = 2;
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    ui.mouse_move(0.0, 0.0);
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.tabs(some(&chosen));
+    f.tab("One", false, true);
+    f.tab("Two", false, true);
+    f.tab("Three", true, true);
+    canvas.Rect third = f.tab_builds[0].row;
+    f32 end_x = f.tab_builds[0].x;
+    f.end_tabs();
+    f.finish();
+    ui.mouse_move(end_x - 2.0 - 4.0 - 9.0, third.y + third.h / 2.0);  // the middle of the cross of the last tab
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    tabs_frame(&ui, &surface, &chosen, &name, &closed);
+    assert(closed);
+}
+
+// A tree for the test below: a branch `src` (bound to `open`) with two leaves, then a leaf.
+// Returns the leaf clicked (1, 2, 3; 0: none); `x` gets where the text of `main` starts.
+i32 tree_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, bool* open, f32* x) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.tree(200.0, 150.0, some(chosen));
+    if (f.branch("src", some(open))) {
+        if (f.leaf("main")) {
+            clicked = 1;
+        }
+        *x = f.last.x;
+        if (f.leaf("lib")) {
+            clicked = 2;
+        }
+        f.end_branch();
+    }
+    if (f.leaf("README")) {
+        clicked = 3;
+    }
+    f.end_tree();
+    f.finish();
+    return clicked;
+}
+
+test "a tree: branches open and closed, indentation, the keys" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut bool open = false;
+    mut f32 x = -1.0;
+    ui.mouse_move(299.0, 199.0);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(x == -1.0);  // closed: its leaves are not described
+    // a click on the triangle opens it, and gives the tree the keyboard
+    ui.mouse_move(10.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(open);
+    ui.mouse_move(299.0, 199.0);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(x == 24.0);  // indented by 16, inside the 8 of the list
+    // Right on an open branch: its first child; Down: the next; Left: the parent; Left: closed
+    ui.key(key_right(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(chosen == 1);
+    ui.key(key_down(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(chosen == 2);
+    ui.key(key_enter(), true, false, false);
+    assert(tree_frame(&ui, &surface, &chosen, &open, &x) == 2);
+    ui.key(key_left(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(chosen == 0 && open);
+    ui.key(key_left(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    assert(!open);
+    // closed: the leaf after it is the item 1
+    ui.key(key_down(), true, false, false);
+    tree_frame(&ui, &surface, &chosen, &open, &x);
+    ui.key(key_enter(), true, false, false);
+    assert(chosen == 1 && tree_frame(&ui, &surface, &chosen, &open, &x) == 3);
 }

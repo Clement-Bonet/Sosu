@@ -443,7 +443,7 @@ shared = { path = "../shared" }
 - More generally, `import pkg.a.b;` refers to `src/a/b.sosu` of `pkg`, which must be the current package, one of its dependencies, or `core` / `std`. `import pkg;` alone is an error: an import always names a module.
 - The entry file of a package is `src/main.sosu` for an application, or `src/lib.sosu` for a library. The compiler loads the modules reachable by `import` from it.
 - The modules of a package may import each other.
-- The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`.
+- The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`: the folder of the program run, or, when it was run by its name alone (an editor runs `sosuc lsp`), the folder of PATH where it was found.
 - `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
@@ -474,6 +474,7 @@ C libraries are declared in the `sosu.toml` of the package that uses them, never
 ```toml
 [link]                          # every target
 libs = ["SDL3"]                 # SDL3.lib with MSVC, -lSDL3 with gcc and clang
+subsystem = "window"            # its programs open windows: no console in release, on Windows
 
 [link.windows]                  # added on one target: windows, linux, macos, android, ios
 paths = ["vendor/SDL3/lib/x64"] # where the linker looks, relative to the package
@@ -484,6 +485,7 @@ frameworks = ["Cocoa"]
 ```
 
 - `libs`: library names, translated for the C compiler; `paths`: folders searched by the linker; `frameworks`: macOS and iOS frameworks; `copy`: files placed next to the program (a DLL must be beside the `.exe` on Windows).
+- `subsystem`: `"window"` for a package whose programs open windows (`platform` declares it). In a `--release` build on Windows, a program that links such a package has no console behind its windows (`/SUBSYSTEM:WINDOWS` with MSVC, `-mwindows` with MinGW); a debug build keeps it, for `io.print`. `"console"` is the default.
 - Paths are relative to the package, never absolute, so that the manifest works on every machine.
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
@@ -713,7 +715,7 @@ Translation in v0:
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
-- `theme` and `style` blocks, and `style:` on a node: see §10.7. Not yet: `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+- `theme` and `style` blocks, and `style:` on a node: see §10.7. `Grid` and the places of its nodes (`row:`, `col:`, `span:`, `align:`), `Group`, `Tabs` and `Tree`: see §10.8. Not yet: `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
 
@@ -780,6 +782,10 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `MenuBar`, `Menu`, `MenuItem`, `Separator` | available | menus drawn by `ui`, in a title bar as in VS Code, or anywhere; submenus; shortcuts |
 | `ContextMenu` | available | the menu of the widget placed before it, opened by the right button |
 | `TitleBar` | available | a title bar drawn by the program, with widgets in it (§10.5) |
+| `Grid` | available | columns and rows in pixels, `Auto` or `Fill`; cells, spans, alignment (§10.8) |
+| `Group` | available | a frame with a title on its border; it can fold (§10.8) |
+| `Tabs`, `Tab` | available | the content of the tab chosen only; closable tabs, Ctrl+Tab (§10.8) |
+| `Tree`, `Branch`, `Leaf` | available | a list of indented items; branches open and close with the mouse and the keyboard (§10.8) |
 
 Foundations, to build first, since most planned widgets rely on them:
 
@@ -1005,6 +1011,96 @@ window Tasks(state.Tasks* s) {
 - `ui`: the cascade (theme, state, styles in order, inheritance of `color`), rounded corners drawn, a frame drawn with `light_theme` and with a theme of a `.ui.sosu` file.
 - `sosuc i18n extract` on a package: the template, its references, contexts and plurals; `tests/programs` drives a screen in two languages and two themes.
 - `examples/workspace` in French and English, in a light and a dark theme following the system.
+
+### 10.8 Containers: grid, group, tabs, tree
+
+Status: available. Written in four batches, in this order: `Grid` (it brings the sizes that fill what is left), `Group`, `Tabs`, then `Tree`. Each relies on §10.6 (identities, the table of states, the keyboard) and §10.7 (themes: each one is a selector, with its states and parts).
+
+```sosu
+window Settings(state.Settings* s) {
+    Tabs(bind: s.page) {
+        Tab("General") {
+            Grid(columns: [Auto, Fill], gap: 8) {
+                Text("Name", row: 0, col: 0)
+                TextField(bind: s.name, row: 0, col: 1)
+                Text("Folder", row: 1, col: 0)
+                TextField(bind: s.folder, row: 1, col: 1)
+                Group("Options", row: 2, col: 0, span: 2) {
+                    Checkbox("Open at start", bind: s.at_start)
+                    Checkbox("Check for updates", bind: s.updates)
+                }
+            }
+        }
+        Tab("Files", closable: true, on_close: s.close_files) {
+            Tree(selected: s.file) {
+                for (Node* n in s.roots, key: n.id) {
+                    Branch(n.name, open: n.expanded) {
+                        for (Node* c in n.children, key: c.id) {
+                            Leaf(c.name, on_click: s.open(c))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+#### Sizes
+
+Until now a widget has the size it asks for, and `Scroll` needs `width:` and `height:`. A grid divides space between its columns, so a size can now be one of:
+
+- a number of pixels: `120`;
+- `Auto`: as large as its content, measured at the last frame (as a painted column already keeps its size, §10.7); the first frame lays it out at 0, the next one at its size, and the program draws continuously, so this is not seen;
+- `Fill`, or `Fill(2)`: a share of what is left, after the numbers and the `Auto` sizes, in proportion to the weights (1 by default).
+
+`widgets.Size` is an enum with data: `Pixels(f32 px)`, `Auto`, `Fill(f32 weight)`, for the columns and rows of a grid. In a `.ui.sosu` file, a number stands for `Pixels(n)`, and `Auto`, `Fill` (a weight of 1) and `Fill(2)` are written without qualifier. `width:` and `height:` of `Scroll`, `List`, `Tree`, `TextField` and `Dropdown` take `Fill` too, which becomes `f.fill_width()` or `f.fill_height()`: what is left of the layout, or the cell in a grid (`Auto` is the size of the widget). So `Scroll(width: Fill, height: Fill)` fills its cell; a `Scroll` still needs a size when nothing around it gives one.
+
+#### Grid
+
+- `Grid(columns: [...], rows: [...], gap: g, padding: p) { ... }`: `columns` is required (16 at most); `rows` is optional, `Auto` for each row not given (64 rows at most). `gap` is between cells, both ways.
+- A node in a grid gives its cell: `row: r, col: c` (from 0), and `span: n` (columns) or `row_span: n`. A node without them takes the next free cell, row by row, as text is written: the common form of a form is then `Text`, field, `Text`, field. A cell taken twice is an error at run time only if the program computes it; literal places are checked by the translator (E0215).
+- `align:` places a widget in its cell when it is narrower: `Start` (the default), `Center`, `End`, `Stretch` (a field or a button as wide as its cell). In a grid only: across a `Column` or a `Row`, later. A node with `col:` and no `row:` goes in the current row if that column is still free, else in the next one; with `row:` and no `col:`, in the next free cell of that row.
+- What it becomes: `f.grid(gap, padding)`, `f.grid_column(size)` for each column and `f.grid_row(size)` for each row given, then `f.cell(row, col, span, row_span, align)` before each node that gives its place (`-1`: the next free cell), and `f.end_grid()`. The sizes measured by its cells at the last frame are kept in `Ui` by the identity of the grid (8 grids, 16 columns and 64 rows each); a container placed in a cell starts there, and fills its width. A grid is painted as a column: its style can give it a background and a border.
+- A grid with `Fill` columns fills the width it is given: the window, a cell, a tab, or a `Scroll`'s width. A grid at the top of a window fills the window, so a form follows its resizing.
+
+#### Group
+
+- `Group("Options") { ... }`: a frame with a title, drawn on its border (the `fieldset` of HTML, the `GroupBox` of WPF), holding a column of nodes; `Group { ... }` without a title is a frame alone. The title is translated, as every literal text (§10.7).
+- `gap:` and `padding:` as a `Column`; `collapsible: true` adds a triangle before the title: a click (or Space, when the title has the keyboard) folds the group to its title. Its state is kept by identity, or bound: `open: s.options_open`.
+- What it becomes: `f.group(title, gap, padding)` (`f.group_untitled(gap, padding)` without a title), the nodes, `f.end_group()`; when it folds, `if (f.group_folding(title, gap, padding, some(&open) or none)) { the nodes }`, then `f.end_group()`. A group that folds has a title.
+- Theme: the selector `Group`, with the part `title` (in `widgets.Style`, the field `placeholder`).
+
+#### Tabs
+
+- `Tabs(bind: s.page) { Tab("General") { ... } Tab("Files") { ... } }`: a row of tabs, and under it the content of the tab chosen only; `bind:` is an `i32`, the index of the tab (from 0). Without `bind:`, `Tabs` keeps its choice by identity.
+- `Tab(title, closable: true, on_close: handler)`: a cross on the tab (`on_close:` alone gives it one); `enabled: false` dims it. The row is above the content; `placement:` (below, left, right) is for later.
+- The content of a tab that is not chosen is not described at all: its widgets do not exist in that frame, and keep nothing (§10.6), except what the program keeps; a `Scroll` in it is at its top again when it comes back. Keeping it is a question below.
+- Too many tabs for the width: the row scrolls with the wheel; arrows at its ends are for later.
+- Keyboard: the row of tabs takes the keyboard (Tab); Left and Right, Home and End choose; Ctrl+Tab and Ctrl+Shift+Tab choose the next and previous tab from anywhere inside the `Tabs`, Ctrl+W closes a closable tab.
+- What it becomes: `f.tabs(some(&page) or none)`, then for each tab `if (f.tab(title, closable, enabled)) { the nodes }` (`f.tab` returns true for the tab chosen, the only one to describe its content), `if (f.tab_closed()) { on_close(); }` when it has `on_close:`, and `f.end_tabs()`. Each tab is drawn when it is described, its title measured then; a click or a key chooses at the next frame, so a frame describes one content only.
+- Theme: the selector `Tabs`, its states `hover`, `checked` (the tab chosen), `disabled`, and the part `bar` (the row).
+
+#### Tree
+
+- `Tree(selected: s.file, width: w, height: h) { ... }`: a `List` whose items are indented branches and leaves; it scrolls as a `List` (it is one), and is chosen the same way. `selected:` is an `i32`, the index of the visible item, as for `List`; `Leaf(..., on_click: ...)` gives a leaf its own action.
+- `Branch(text, open: s.n.expanded) { ... }`: a triangle and a text; its children, `Branch` and `Leaf` nodes (in `if` and `for` too), are described only when it is open. `open:` binds the state to a `mut bool` of the program; without it, the branch keeps it by identity, closed at first (a `for` with a `key:` is then needed for it to follow its item, §10.6). `icon:`, later.
+- `Leaf(text)`: an item without children. Branches and leaves holding other widgets (`Branch { Checkbox(...) Text(...) }`) are for later, with drag and drop between items.
+- Keyboard, on the item chosen: Up and Down move; Right opens a branch, or goes to its first child; Left closes it, or goes to its parent; Enter is `on_click`; `*` opens all under it (later).
+- What it becomes: `f.tree(width, height, some(&selected) or none)`, then `if (f.branch(text, some(&open) or none)) { children; f.end_branch(); }` and `if (f.leaf(text)) { on_click(); }` (`leaf` is true when clicked, or on Enter), and `f.end_tree()`. The depth of a branch indents its items by 16 pixels.
+- Theme: the selector `Tree`, its states `hover`, `checked` (the item chosen), `focus`, `open` (a branch), and the parts `selection` and `bar` of `List`.
+
+#### Tests
+
+- `ui`: a grid with pixels, `Auto` and `Fill` columns, at two widths; the next free cell; `span`; `align`; a `Scroll` that fills its cell. A group, folded and open. Tabs: the content of the chosen tab only, the keys, Ctrl+Tab, a closed tab, the row that scrolls. A tree: branches open and closed, bound and kept by identity, the keys, the indentation, a choice that survives a branch opened above it.
+- The translator: `Grid` with `row:`, `col:`, `span:`, `align:`; `Size` values (`Auto`, `Fill`, `Fill(2)`, a number); cells given twice (E0215); `Group`, `Tabs` and `Tab`, `Tree`, `Branch` and `Leaf`; a `Tab` outside `Tabs`, a `Leaf` outside a `Tree` (E0215).
+- `examples/workspace`: its three panes in a grid that follows the window, the details of a file in tabs (General, Advanced), the files in a tree of folders, a group of options.
+
+Open questions:
+
+- The content of a tab that is not chosen: forgotten, or described hidden, so that its scrolls and its focus survive? (decided: forgotten; immediate mode does not describe it, and the program has the state that matters)
+- `Auto` sizes from the last frame, or a first pass that measures without drawing? (decided: the last frame, as the painted columns; a pass of measure would describe every frame twice)
+- Trees of many items (a file system): every visible item is described at each frame, as a `List`; virtualization (describing only what is in view) needs the height of each item before it is described. (proposed: later, with `List` of many items, by a fixed height of item)
 
 ## 11. Targets and compilation
 
