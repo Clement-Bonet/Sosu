@@ -6,7 +6,7 @@
 /* The texts to translate of a package (spec §10.7), for `sosuc i18n extract`: the literal texts
    of its .ui.sosu files (labels, placeholders, the titles of windows, with their `plural:` and
    `context:`), and the literal arguments of `tr`, `tr_in`, `tr_plural` and `tr_plural_in` in its
-   .sosu files. Written as the template of the catalogs, in the format of gettext (.pot). */
+   .sosu files. Written as the template of the catalogs, in the format of gettext (`messages.locale.default.sosu`). */
 
 typedef struct I18nTemplate I18nTemplate;
 

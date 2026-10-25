@@ -1,4 +1,4 @@
-// i18n.catalog: catalogs of translations, read from gettext .po files (spec §10.7).
+// i18n.catalog: catalogs of translations, read from gettext files (`messages.locale.fr.sosu`) (spec §10.7).
 //
 // A catalog maps a source text (with its context, if any) to its translation, and to its
 // plural forms, chosen by the rule of the language (`Plural-Forms` in the header of the
@@ -291,7 +291,7 @@ struct Rule {
     }
 }
 
-// ---- Reading a .po file ----
+// ---- Reading a catalog ----
 
 // A field of an entry being read (`msgid`, `msgstr[1]`...): the quoted pieces of its lines,
 // as offsets in the file, without their quotes and still escaped.
@@ -447,7 +447,7 @@ bool quoted(str file, usize from, usize end, usize* start, usize* stop) {
     return true;
 }
 
-// Reads the catalog of the .po file at `path`; what it holds is allocated in `arena`.
+// Reads the catalog file at `path`; what it holds is allocated in `arena`.
 pub Catalog*!I18nError load(Arena* arena, str path) uses io {
     str file = match (io.read_file(arena, path)) {
         ok(text) => text,
@@ -458,7 +458,7 @@ pub Catalog*!I18nError load(Arena* arena, str path) uses io {
     return parse(arena, file);
 }
 
-// Reads the catalog of the text of a .po file.
+// Reads the catalog of the text of a catalog file.
 pub Catalog*!I18nError parse(Arena* arena, str file) {
     // At most one entry per `msgid` line.
     mut usize capacity = 0;
@@ -657,10 +657,10 @@ Catalog* parsed(Arena* arena, str text) {
     };
 }
 
-test "a .po file: texts, contexts, plurals, strings on several lines, escapes" {
+test "a catalog: texts, contexts, plurals, strings on several lines, escapes" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
-    Catalog* c = match (load(&arena, "packages/i18n/tests/fr.po")) {
+    Catalog* c = match (load(&arena, "packages/i18n/tests/messages.locale.fr.sosu")) {
         ok(found) => found,
         err(e) => parsed(&arena, ""),
     };
@@ -706,7 +706,7 @@ test "a damaged file gives its line" {
         },
     };
     assert(line == 4);
-    bool unreadable = match (load(&arena, "packages/i18n/none.po")) {
+    bool unreadable = match (load(&arena, "packages/i18n/none.locale.fr.sosu")) {
         ok(c) => false,
         err(e) => match (e) {
             Unreadable => true,

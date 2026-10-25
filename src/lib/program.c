@@ -175,6 +175,15 @@ bool program_is_ui_file(const char *path) {
     return length >= 8 && strcmp(path + length - 8, ".ui.sosu") == 0;
 }
 
+bool program_is_locale_file(const char *path) {
+    const char *name = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/' || *c == '\\') name = c + 1;
+    }
+    size_t length = strlen(name);
+    return length >= 5 && strcmp(name + length - 5, ".sosu") == 0 && strstr(name, ".locale.") != NULL;
+}
+
 /* Lexes and parses a unit whose file is loaded, and adds it to the program. */
 static void finish_unit(Program *program, Unit *unit, Package *package, char *module) {
     unit->index = program->units.count;

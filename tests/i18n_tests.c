@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "i18n.h"
+#include "program.h"
 #include "test.h"
 
 /* The template of the texts of `ui` (a .ui.sosu file) and `code` (a .sosu file). */
@@ -63,7 +64,17 @@ static void test_extract(void) {
     free(pot);
 }
 
+/* Catalogs are named `<name>.locale.<language>.sosu`: gettext, not Sosu. */
+static void test_locale_files(void) {
+    CHECK(program_is_locale_file("locales/messages.locale.fr-ch.sosu"), "a language and a country");
+    CHECK(program_is_locale_file("locales\\messages.locale.default.sosu"), "the template, a Windows path");
+    CHECK(!program_is_locale_file("src/locale.sosu"), "a module named locale");
+    CHECK(!program_is_locale_file("src/screen.ui.sosu"), "an interface");
+    CHECK(!program_is_locale_file("my.locale.d/main.sosu"), "the name of a folder");
+}
+
 int main(void) {
     test_extract();
+    test_locale_files();
     return test_summary("i18n tests");
 }

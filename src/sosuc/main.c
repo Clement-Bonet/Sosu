@@ -33,7 +33,7 @@ static void usage(FILE *out) {
           "  test    compile and run the test blocks of a package\n"
           "  fmt     format files or packages in place (--check: only report)\n"
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
-          "  i18n extract [package] [-o file.pot]\n"
+          "  i18n extract [package] [-o messages.locale.default.sosu]\n"
           "          write the template of the catalogs of translations (spec 10.7)\n"
           "\n"
           "options:\n"
@@ -461,6 +461,10 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
             fprintf(stderr, "sosuc: `%s`: `.ui.sosu` files have no formatter yet\n", path);
             continue;
         }
+        if (program_is_locale_file(path)) {
+            fprintf(stderr, "sosuc: `%s`: a catalog of translations is not formatted\n", path);
+            continue;
+        }
         if (has_suffix(path, ".sosu")) {
             status |= format_file(path, check);
             continue;
@@ -486,11 +490,11 @@ static int command_fmt(const char **paths, int count, bool check, const char *ar
     return status;
 }
 
-/* `sosuc i18n extract [package] [-o file.pot]`: the template of the catalogs of translations of
-   a package (spec §10.7), on stdout or in a file. */
+/* `sosuc i18n extract [package] [-o messages.locale.default.sosu]`: the template of the
+   catalogs of translations of a package (spec §10.7), on stdout or in a file. */
 static int command_i18n(int argc, char **argv, const char *argv0) {
     if (argc < 1 || strcmp(argv[0], "extract") != 0) {
-        fputs("usage: sosuc i18n extract [package] [-o file.pot]\n", stderr);
+        fputs("usage: sosuc i18n extract [package] [-o messages.locale.default.sosu]\n", stderr);
         return 2;
     }
     const char *path = ".";

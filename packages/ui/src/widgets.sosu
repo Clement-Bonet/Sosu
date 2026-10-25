@@ -3800,7 +3800,7 @@ test "texts translated, with values and plurals" {
     assert(is_text(f.tr("Save"), "Save"));  // no catalog: the source
     assert(is_text(f.tr_plural("{count} file", "{count} files", 1), "{count} file"));
     f.finish();
-    match (catalog.load(&arena, "packages/i18n/tests/fr.po")) {
+    match (catalog.load(&arena, "packages/i18n/tests/messages.locale.fr.sosu")) {
         ok(c) => {
             ui.catalog = some(c);
         },

@@ -71,7 +71,7 @@ catalog.Catalog*? choose_language(Arena* arena) uses io {
     if (chosen == 0) {
         return none;
     }
-    return match (catalog.load(arena, "examples/workspace/locales/fr.po")) {
+    return match (catalog.load(arena, "examples/workspace/locales/messages.locale.fr.sosu")) {
         ok(c) => some(c),
         err(e) => none,
     };
