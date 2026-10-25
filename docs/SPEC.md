@@ -1060,7 +1060,7 @@ Until now a widget has the size it asks for, and `Scroll` needs `width:` and `he
 
 - `Grid(columns: [...], rows: [...], gap: g, padding: p) { ... }`: `columns` is required (16 at most); `rows` is optional, `Auto` for each row not given (64 rows at most). `gap` is between cells, both ways.
 - A node in a grid gives its cell: `row: r, col: c` (from 0), and `span: n` (columns) or `row_span: n`. A node without them takes the next free cell, row by row, as text is written: the common form of a form is then `Text`, field, `Text`, field. A cell taken twice is an error at run time only if the program computes it; literal places are checked by the translator (E0215).
-- `align:` places a widget in its cell when it is narrower: `Start` (the default), `Center`, `End`, `Stretch` (a field or a button as wide as its cell). In a grid only: across a `Column` or a `Row`, later. A node with `col:` and no `row:` goes in the current row if that column is still free, else in the next one; with `row:` and no `col:`, in the next free cell of that row.
+- `align:` places a widget in its cell when it is narrower: `Start` (the default), `Center`, `End`, `Stretch` (a field or a button as wide as its cell). Across a `Column` or a `Row`, `align:` places a widget in the room the layout has (`f.align(how)` before it): in a column, the width it can fill; in a row, its height, or a line. A column or a row is not aligned itself. A node with `col:` and no `row:` goes in the current row if that column is still free, else in the next one; with `row:` and no `col:`, in the next free cell of that row.
 - What it becomes: `f.grid(gap, padding)`, `f.grid_column(size)` for each column and `f.grid_row(size)` for each row given, then `f.cell(row, col, span, row_span, align)` before each node that gives its place (`-1`: the next free cell), and `f.end_grid()`. The sizes measured by its cells at the last frame are kept in `Ui` by the identity of the grid (8 grids, 16 columns and 64 rows each); a container placed in a cell starts there, and fills its width. A grid is painted as a column: its style can give it a background and a border.
 - A grid with `Fill` columns fills the width it is given: the window, a cell, a tab, or a `Scroll`'s width. A grid at the top of a window fills the window, so a form follows its resizing.
 
@@ -1074,27 +1074,27 @@ Until now a widget has the size it asks for, and `Scroll` needs `width:` and `he
 #### Tabs
 
 - `Tabs(bind: s.page) { Tab("General") { ... } Tab("Files") { ... } }`: a row of tabs, and under it the content of the tab chosen only; `bind:` is an `i32`, the index of the tab (from 0). Without `bind:`, `Tabs` keeps its choice by identity.
-- `Tab(title, closable: true, on_close: handler)`: a cross on the tab (`on_close:` alone gives it one); `enabled: false` dims it. The row is above the content; `placement:` (below, left, right) is for later.
+- `Tab(title, closable: true, on_close: handler)`: a cross on the tab (`on_close:` alone gives it one); `enabled: false` dims it. `Tabs(placement: Bottom)` puts the row below the content: at the bottom of the room it has, or under the content of the last frame (`Top` by default; left and right: later).
 - The content of a tab that is not chosen is not described at all: its widgets do not exist in that frame, and keep nothing (§10.6), except what the program keeps; a `Scroll` in it is at its top again when it comes back. Keeping it is a question below.
-- Too many tabs for the width: the row scrolls with the wheel; arrows at its ends are for later.
+- Too many tabs for the width: two arrows at the end of the row scroll it by 120 pixels, as the wheel does; a tab chosen (a click, a key, Ctrl+Tab) comes into view.
 - Keyboard: the row of tabs takes the keyboard (Tab); Left and Right, Home and End choose; Ctrl+Tab and Ctrl+Shift+Tab choose the next and previous tab from anywhere inside the `Tabs`, Ctrl+W closes a closable tab.
-- What it becomes: `f.tabs(some(&page) or none)`, then for each tab `if (f.tab(title, closable, enabled)) { the nodes }` (`f.tab` returns true for the tab chosen, the only one to describe its content), `if (f.tab_closed()) { on_close(); }` when it has `on_close:`, and `f.end_tabs()`. Each tab is drawn when it is described, its title measured then; a click or a key chooses at the next frame, so a frame describes one content only.
+- What it becomes: `f.tabs(some(&page) or none)` (`f.tabs_at(chosen, widgets.Side.Bottom)` with `placement:`), then for each tab `if (f.tab(title, closable, enabled)) { the nodes }` (`f.tab` returns true for the tab chosen, the only one to describe its content), `if (f.tab_closed()) { on_close(); }` when it has `on_close:`, and `f.end_tabs()`. Each tab is drawn when it is described, its title measured then; a click or a key chooses at the next frame, so a frame describes one content only.
 - Theme: the selector `Tabs`, its states `hover`, `checked` (the tab chosen), `disabled`, and the part `bar` (the row).
 
 #### Tree
 
 - `Tree(selected: s.file, width: w, height: h) { ... }`: a `List` whose items are indented branches and leaves; it scrolls as a `List` (it is one), and is chosen the same way. `selected:` is an `i32`, the index of the visible item, as for `List`; `Leaf(..., on_click: ...)` gives a leaf its own action.
-- `Branch(text, open: s.n.expanded) { ... }`: a triangle and a text; its children, `Branch` and `Leaf` nodes (in `if` and `for` too), are described only when it is open. `open:` binds the state to a `mut bool` of the program; without it, the branch keeps it by identity, closed at first (a `for` with a `key:` is then needed for it to follow its item, §10.6). `icon:`, later.
+- `Branch(text, open: s.n.expanded) { ... }`: a triangle and a text; its children, `Branch` and `Leaf` nodes (in `if` and `for` too), are described only when it is open. `open:` binds the state to a `mut bool` of the program; without it, the branch keeps it by identity, closed at first (a `for` with a `key:` is then needed for it to follow its item, §10.6). `icon: state.folder` (an `image.Image`) puts it before the text, 16 pixels high, for a leaf too.
 - `Leaf(text)`: an item without children. Branches and leaves holding other widgets (`Branch { Checkbox(...) Text(...) }`) are for later, with drag and drop between items.
 - Keyboard, on the item chosen: Up and Down move; Right opens a branch, or goes to its first child; Left closes it, or goes to its parent; Enter is `on_click`; `*` opens all under it (later).
-- What it becomes: `f.tree(width, height, some(&selected) or none)`, then `if (f.branch(text, some(&open) or none)) { children; f.end_branch(); }` and `if (f.leaf(text)) { on_click(); }` (`leaf` is true when clicked, or on Enter), and `f.end_tree()`. The depth of a branch indents its items by 16 pixels.
+- What it becomes: `f.tree(width, height, some(&selected) or none)`, then `if (f.branch(text, some(&open) or none)) { children; f.end_branch(); }` and `if (f.leaf(text)) { on_click(); }` (`leaf` is true when clicked, or on Enter; `branch_with` and `leaf_with` with an icon), and `f.end_tree()`. The depth of a branch indents its items by 16 pixels.
 - Theme: the selector `Tree`, its states `hover`, `checked` (the item chosen), `focus`, `open` (a branch), and the parts `selection` and `bar` of `List`.
 
 #### Tests
 
 - `ui`: a grid with pixels, `Auto` and `Fill` columns, at two widths; the next free cell; `span`; `align`; a `Scroll` that fills its cell. A group, folded and open. Tabs: the content of the chosen tab only, the keys, Ctrl+Tab, a closed tab, the row that scrolls. A tree: branches open and closed, bound and kept by identity, the keys, the indentation, a choice that survives a branch opened above it.
 - The translator: `Grid` with `row:`, `col:`, `span:`, `align:`; `Size` values (`Auto`, `Fill`, `Fill(2)`, a number); cells given twice (E0215); `Group`, `Tabs` and `Tab`, `Tree`, `Branch` and `Leaf`; a `Tab` outside `Tabs`, a `Leaf` outside a `Tree` (E0215).
-- `examples/workspace`: its three panes in a grid that follows the window, the details of a file in tabs (General, Advanced), the files in a tree of folders, a group of options.
+- `examples/containers`: a grid with every size, span and alignment; groups; tabs; a tree of folders, recursive, with icons. `examples/workspace`: its three panes in a grid that follows the window, the details of a file in tabs (General, Advanced), the files in a tree of folders, a group of options.
 
 Open questions:
 

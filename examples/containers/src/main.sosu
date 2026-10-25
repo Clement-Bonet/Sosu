@@ -1,0 +1,77 @@
+// The containers of `ui` (spec §10.8): a grid, groups, tabs and a tree. The window is in
+// screen.ui.sosu, its state in state.sosu; the tabs fill the window and follow its size.
+//
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/containers`
+// from the root of the repository, where the font is found.
+import std.io;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import ui.widgets;
+import containers.screen;
+import containers.state;
+
+class App : app.Handler {
+    mut widgets.Ui ui;
+    state.Demo* s;
+
+    void init(state.Demo* s) {
+        ui = widgets.Ui{ };
+        self.s = s;
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Key(code, down, mods) => {
+                ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+                ui.scroll_wheel_x(x);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Containers(&f, s);
+        f.finish();
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    state.Demo* s = arena.new(state.Demo, &arena);
+    App* handler = arena.new(App, s);
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(noto) => {
+            handler.ui.font = some(noto);
+        },
+        err(e) => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    widgets.Window window = screen.ContainersConfig();
+    return app.run(app.Config{ title: window.title, width: window.width, height: window.height }, handler as app.Handler*);
+}

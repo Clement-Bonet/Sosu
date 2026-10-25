@@ -1,0 +1,112 @@
+// The window of the example: three tabs, one per kind of container (spec §10.8). The tabs fill
+// the window; the grid of the first one, its width.
+import containers.state;
+
+window Containers(state.Demo* s) {
+    title: "Containers"
+    width: 960
+    height: 640
+
+    Grid(columns: [Fill], rows: [Fill], padding: 16) {
+        Tabs(bind: s.page) {
+            Tab("Grid") {
+                Form(s)
+            }
+            Tab("Groups") {
+                Groups(s)
+            }
+            Tab("Tree") {
+                Files(s)
+            }
+        }
+    }
+}
+
+// A form in a grid: labels as wide as the widest (`Auto`), fields that fill the rest (`Fill`),
+// cells over two columns, and the four alignments.
+component Form(state.Demo* s) {
+    Grid(columns: [Auto, Fill, Auto, Fill], gap: 12) {
+        Text("First name")
+        TextField(bind: s.first_name, width: Fill, placeholder: "Ada")
+        Text("Last name")
+        TextField(bind: s.last_name, width: Fill, placeholder: "Lovelace")
+
+        Text("Email")
+        TextField(bind: s.email, width: Fill, placeholder: "ada@example.org", span: 3)
+
+        Text("Country")
+        Dropdown(bind: s.country, width: Fill) {
+            Option("France", value: France)
+            Option("Switzerland", value: Switzerland)
+            Option("Belgium", value: Belgium)
+        }
+        Checkbox("Newsletter", bind: s.newsletter, col: 3)
+
+        Text("Notes", row: 3, col: 0)
+        Scroll(width: Fill, height: 120, row: 3, col: 1, span: 3) {
+            Text("A Scroll as wide as the three columns it spans.")
+            Text("Its height is given: 120 pixels.")
+        }
+
+        Text("Start", row: 4, col: 1)
+        Text("Center", row: 4, col: 2, align: Center)
+        Text("End", row: 4, col: 3, align: End)
+        Button("Stretch: as wide as its cell", row: 5, col: 1, span: 3, align: Stretch)
+
+        Row(gap: 8, row: 6, col: 1, span: 3) {
+            Button("Send", on_click: s.send)
+            Button("Clear", on_click: s.clear)
+            if (s.sent > 0) {
+                Text("Sent {times} times.", times: s.times())
+            }
+        }
+    }
+}
+
+// Groups: a frame with a title, one that folds (bound to the program), a frame without a title,
+// and a group in a group.
+component Groups(state.Demo* s) {
+    Row(gap: 16) {
+        Group("Appearance") {
+            Checkbox("Dark", bind: s.dark)
+            Checkbox("Sounds", bind: s.sounds)
+        }
+        Group("Details", open: s.details_open) {
+            Text("It folds: click its title, or Space.")
+            Group("Updates") {
+                Checkbox("Check for updates", bind: s.updates)
+            }
+        }
+        Group {
+            Text("A frame without a title.")
+        }
+    }
+}
+
+// A tree of folders, as deep as they go, and what it opened.
+component Files(state.Demo* s) {
+    Row(gap: 8) {
+        Button("Open all", on_click: s.open_all(true))
+        Button("Close all", on_click: s.open_all(false))
+        Text("Opened: {name}", name: s.opened_name())
+    }
+    Tree(selected: s.item, width: 360, height: Fill) {
+        Folder(s, -1)
+    }
+}
+
+// The folders and the files of the folder `parent` (-1: the top), the folders first.
+component Folder(state.Demo* s, i32 parent) {
+    for (i32 i in 0..s.count, key: i) {
+        if (s.in_folder(i, parent, true)) {
+            Branch(s.name(i), open: s.entries[i].open, icon: s.folder_icon) {
+                Folder(s, i)
+            }
+        }
+    }
+    for (i32 i in 0..s.count, key: i) {
+        if (s.in_folder(i, parent, false)) {
+            Leaf(s.name(i), on_click: s.open_file(i), icon: s.file_icon)
+        }
+    }
+}

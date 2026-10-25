@@ -1,0 +1,16 @@
+# The French catalog of the test.
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+msgid "Files"
+msgstr "Fichiers"
+
+msgid "{count} file"
+msgid_plural "{count} files"
+msgstr[0] "{count} fichier"
+msgstr[1] "{count} fichiers"
+
+msgid "Save"
+msgstr "Enregistrer les fichiers"
