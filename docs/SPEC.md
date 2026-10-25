@@ -713,12 +713,12 @@ Translation in v0:
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
-- Not yet: `style` and `theme` blocks, `style:`, `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
+- Not yet: `style` and `theme` blocks and `style:` (designed in §10.7), `align:`, grids (`row:`, `col:`, `span:`), `bind:` on other widgets than `TextField`, `Checkbox`, `Radio` and `Dropdown` (error E0216). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
 
 ```ebnf
-ui_file      = { import | view } ;
+ui_file      = { import | view | theme | style } ;
 view         = ( "window" | "component" ) IDENT params [ effects ] "{" { property } { item } "}" ;
 property     = IDENT ":" expr ;                                (* window only: title, width, height, icon *)
 item         = node | "if" "(" expr ")" children [ "else" ( item | children ) ]
@@ -726,6 +726,10 @@ item         = node | "if" "(" expr ")" children [ "else" ( item | children ) ]
 node         = path [ "(" [ argument { "," argument } ] ")" ] [ children ] ;
 argument     = IDENT ":" expr | expr ;
 children     = "{" { item } "}" ;
+theme        = "theme" IDENT [ ":" path ] "{" { property | selector } "}" ;   (* §10.7, design *)
+style        = "style" IDENT "{" { property | state } "}" ;
+selector     = IDENT "{" { property | state } "}" ;                (* a widget: Button, TextField... *)
+state        = IDENT "{" property { [ "," ] property } "}" ;        (* hover, focus, placeholder... *)
 ```
 
 ### 10.3 Mobile specifics
@@ -893,6 +897,112 @@ Today a widget is the number of its call in the frame. A widget that appears (`i
 - The translator: `at`, `push_id` and `pop_id` around loops and components, `key:`, `focus:`, `Scroll`.
 - `tests/programs`: a screen with an `if` that inserts a field before the field being edited, which keeps the keyboard.
 
+### 10.7 Placeholders, translations, themes and styles
+
+Status: design, not implemented yet. Three batches, in this order: placeholders (small), translations, then themes and styles.
+
+#### Placeholders
+
+- `TextField(bind: x, placeholder: "Search…")`: a hint drawn in the field, dimmed, while its text is empty, even when it has the keyboard; it never becomes text. `Format` gains `placeholder` (a `str`, "" for none): `text_field_with(&x, w, Format{ placeholder: "Search…" })`.
+- `Dropdown(bind: x, placeholder: "Choose…")`: shown in its box while no option is chosen (no option is drawn chosen). `f.dropdown_with(width, placeholder)`.
+- The color of the hint comes from the theme (`placeholder` in `TextField` and `Dropdown`, below). A literal placeholder is translated, as every literal text of a `.ui.sosu` file (below).
+
+#### Translations
+
+A program is written in one language (the source language, English in the examples), and translated by catalogs, one per language, read at run time: changing the language is choosing another catalog, and the next frame is in that language.
+
+- Catalogs are gettext `.po` files: the format of translators and of their tools (Poedit, Weblate, Crowdin), with the source text as the key. `sosuc` reads the subset of the format that matters: `msgid`, `msgstr`, `msgctxt`, `msgid_plural` and `msgstr[n]`, comments, strings on several lines, the escapes `\"`, `\\`, `\n`, `\t`; and the header's `Plural-Forms`, whose expression (`n != 1`, `n > 1`, the Slavic forms with `%`, `&&`, `||`, `?:`) is evaluated by `i18n`. A missing or empty translation shows the source text.
+- A new package, `i18n`, without dependencies (in Sosu, through checked reads, as `render.truetype`): `i18n.load(arena, path) -> Catalog*!I18nError` (`Unreadable`, `Damaged` with the line), `catalog.text(source)`, `catalog.plural(one, other, n)`, `catalog.in_context(context, source)`, and `i18n.best(available, wanted) -> usize?`, which picks a language among those available from the preferred ones (`fr-CA`, then `fr`, then none).
+- `platform`: `app.locales(arena) -> str[]`, the preferred languages of the user (`SDL_GetPreferredLocales`), first the most preferred, written `fr-FR`; the event `LocaleChanged` when they change.
+- `ui`: `ui.catalog: i18n.Catalog*?` (none: the source language). Every literal text of a `.ui.sosu` file is translated: the labels of `Text`, `Title`, `Button`, `Checkbox`, `Radio`, `Option`, `Menu`, `MenuItem`, placeholders, and the `title` of a window. A text that is an expression (`Text(task.title)`) is data, and is not translated. In code written by hand: `f.tr("Save")`.
+- Values in a text: `Text("Hello, {name}", name: user.name)`. The braces name values given by the node; each one must be given, and each value given must be used (an error otherwise, E0215). A translator can move them: `"Bonjour, {name}"`. A value is a `str` or an integer; an integer is written in decimal digits (separators of thousands and decimals by language: later, with `NumberField`).
+- Plurals: `Text("{count} file", plural: "{count} files", count: n)`: `count`, an integer, chooses the form, by the rule of the catalog (by the rule of English without one).
+- The same text in two meanings (`"Open"`, the verb and the state): `context: "verb"`, the `msgctxt` of gettext.
+- Extraction: `sosuc i18n extract [package] -o locales/messages.pot` writes the template of the catalogs: every literal text of the `.ui.sosu` files of the package, and the literal arguments of `f.tr(...)` in its `.sosu` files, each with its file and line (`#: screen.ui.sosu:12`), its context and plural. Translators start from it (`msginit`, Poedit), and update their catalogs from it (`msgmerge`): `sosuc` writes the template, it does not merge.
+- What is not translated in v0: the shortcuts of menus (`Ctrl+S`), the direction of text (right to left), numbers, dates and money formatted by language.
+
+#### Themes and styles
+
+The colors and sizes of the widgets, fixed in the code of `ui` today, come from a theme; styles (the classes of CSS) change them for some nodes. Both are written in `.ui.sosu` files, beside the windows, and checked by the compiler as the rest.
+
+```sosu
+// theme.ui.sosu
+theme Dark {
+    accent: #89B4FA               // names of the theme: colors and numbers used below
+    surface: #313244
+    text: #CDD6F4
+
+    Window { background: #1E1E2E }
+    Text { color: text }
+    Button {
+        background: surface
+        color: text
+        radius: 6
+        padding: 16
+        hover { background: #45475A }
+        pressed { background: #181825 }
+        focus { border: accent, border_width: 2 }
+        disabled { color: #6C7086 }
+    }
+    TextField {
+        background: #181825
+        placeholder { color: #7F849C }
+        focus { border: accent }
+    }
+}
+
+theme Light : Dark {              // a theme can start from another one, and change what differs
+    accent: #1E66F5
+    surface: #CCD0DA
+    text: #4C4F69
+    Window { background: #EFF1F5 }
+}
+
+style Danger {
+    background: #F38BA8
+    color: #1E1E2E
+    hover { background: #EBA0AC }
+}
+
+style Card {
+    background: #181825
+    border: #313244
+    radius: 8
+    padding: 12
+}
+```
+
+```sosu
+// screen.ui.sosu
+import app.theme;
+
+window Tasks(state.Tasks* s) {
+    Column(style: theme.Card) {
+        Text(s.title, style: s.late ? theme.Danger : theme.Normal)
+        Button("Delete", on_click: s.delete, style: theme.Danger)
+        Button("Archive", style: [theme.Card, theme.Danger])  // several: the later ones win
+    }
+}
+```
+
+- Properties: `color` (of text), `background`, `border` (its color), `border_width`, `radius` (rounded corners, antialiased: `render` gains `fill_rounded` and `stroke_rounded`), `padding` (inside the widget or the layout), `gap` (between the widgets of a `Column` or a `Row`), `height` (of a line of widgets), `font_size` (pixels per em), `accent` (the mark of a checkbox or a radio, the cursor of a text field, the ring of the keyboard, the selection). A value is a color, `#RRGGBB` or `#RRGGBBAA` (a token of `.ui.sosu` files), a number, or a name of the theme; any Sosu expression of the right type (a `canvas.Color`, an `f32`) is accepted too.
+- States, inside a selector or a style: `hover`, `pressed`, `focus` (has the keyboard), `disabled`, `checked` (a checkbox checked, a radio chosen, an item chosen), `open` (a dropdown, a menu); and the parts `placeholder` (the hint of a field or of a dropdown), `selection` (the text selected), `bar` (the scroll bars of a `Scroll` or a list). Several states can apply: `focus` and `hover` both, in the order of this list.
+- Selectors of a theme: the widgets by the name of their node (`Window`, `Text`, `Title`, `Button`, `TextField`, `Checkbox`, `Radio`, `Dropdown`, `List`, `Scroll`, `Column`, `Row`, `TitleBar`, `MenuBar`, `Menu` for the open menus, `Image`), with their states.
+- The cascade, from the weakest: the theme `Default` of `ui` (the colors of today), the selector of the widget in the theme, its states, then the styles of the node in their order, and their states. `color` and `font_size` are inherited: a `Column(style: Card)` gives its text color to the labels inside, unless they have their own.
+- What they become: `theme Dark` becomes `pub widgets.Theme Dark()`, `style Danger` `pub widgets.Style Danger()`, values that the program keeps and passes; `theme.Normal` is a style that changes nothing (`widgets.Style{ }`). A node with `style: s` is described between `f.push_style(s)` and `f.pop_style()`; `style: [a, b]` pushes both. Themes and styles have no parameters in v0.
+- The program chooses the theme: `ui.theme = theme.Dark()`, at any time; without one, `widgets.default_theme()`. `ui` also gives `widgets.light_theme()`. `platform` says what the user chose: `app.system_theme() -> SystemTheme` (`Light`, `Dark`, `Unknown`, from `SDL_GetSystemTheme`) and the event `SystemThemeChanged(dark)`; a program that follows the system switches between two themes.
+- `Window { background: ... }` is drawn by `widgets.begin` over the whole surface, so the program no longer clears it itself (it still can, before `begin`).
+- Not in v0: selectors by position (`Column > Text`), styles by state of the program other than through an expression (`style: s.late ? Danger : Normal` covers it), transitions and animations, other fonts than one per size (bold and italic need more fonts in `ui.font`).
+
+#### Tests
+
+- Placeholders: drawn while the text is empty, not with text, never typed into the text; the dropdown with no option chosen.
+- `i18n`: `.po` files read (contexts, plurals, strings on several lines, escapes, a damaged file with its line), the plural rules of English, French, Russian and Arabic, `best` with regions and fallbacks.
+- The translator: literals translated, expressions not; values in braces, missing or unused (errors); plural and context; `theme` and `style` blocks, `#RRGGBB`, inheritance of themes, `style:` with one style, several, an expression.
+- `ui`: the cascade (theme, state, styles in order, inheritance of `color`), rounded corners drawn, a frame drawn with `light_theme` and with a theme of a `.ui.sosu` file.
+- `sosuc i18n extract` on a package: the template, its references, contexts and plurals; `tests/programs` drives a screen in two languages and two themes.
+- `examples/workspace` in French and English, in a light and a dark theme following the system.
+
 ## 11. Targets and compilation
 
 ### 11.1 Targets
@@ -1004,8 +1114,8 @@ pattern      = "_" | path [ "(" [ IDENT { "," IDENT } ] ")" ] ;
 ui_file     = { import | window | component | style | theme } ;
 window      = "window" IDENT "(" [ params ] ")" "{" { prop } node "}" ;
 component   = "component" IDENT "(" [ params ] ")" "{" node "}" ;
-style       = "style" IDENT "{" prop { "," prop } "}" ;
-theme       = "theme" IDENT "{" { prop | style } "}" ;
+style       = "style" IDENT "{" { prop | state } "}" ;                 (* see §10.2 and §10.7 *)
+theme       = "theme" IDENT [ ":" IDENT ] "{" { prop | selector } "}" ;
 prop        = IDENT ":" expr ;
 node        = IDENT [ "(" [ arg { "," arg } ] ")" ] [ "{" { node | if | for | match } "}" ] ;
 arg         = [ IDENT ":" ] expr ;
@@ -1080,6 +1190,9 @@ Widgets of `ui` (§10.4):
 - Identity of the widgets: decided, see §10.6 (a hash of the place of the node in the file and of the keys of the loops around it).
 - The key of an item in a loop: an expression after the loop, `for (Task* t in state.tasks, key: t.id)`, or a node `Key(t.id) { ... }`? (proposed: `key:` in the loop; it says what the loop is over, and adds no node)
 - Alt alone for the menus: Windows and Linux do it, macOS does not (its menus are in the bar of the system, §14.2 above). (proposed: Alt and F10 everywhere in v0, the same on every system)
+- Catalogs of translations: gettext `.po` files, read at run time, or a format of Sosu compiled into the program? (proposed: `.po`, the format of translators and of their tools; reading it at run time lets a program change language without being rebuilt, and lets a translator try a catalog)
+- The key of a translation: the source text (gettext), or a name (`greeting.hello`)? (proposed: the source text; the `.ui.sosu` file stays readable, and a missing translation shows a real text)
+- Styles and themes with parameters (`style Size(f32 s) { font_size: s }`), and styles chosen by the state of a widget other than those of §10.7? (proposed: not in v0; an expression in `style:` covers the state of the program)
 - Formats of numbers and money: read from the locale of the system, or given explicitly? (proposed: explicit in v0, `decimal: ","`; the same program then shows the same thing everywhere, and tests do not depend on the machine)
 - Money: an integer of minor units (`i64` cents), or a decimal type of the language? (proposed: `i64` minor units in v0; a currency with 3 decimals gives `places: 3`)
 - `NumberField` without generics: one widget per type (`i64`, `f64`), or a text field and a conversion by the program? (proposed: one per type until generics, then a single generic one)
