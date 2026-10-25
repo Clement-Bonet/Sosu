@@ -443,7 +443,7 @@ shared = { path = "../shared" }
 - More generally, `import pkg.a.b;` refers to `src/a/b.sosu` of `pkg`, which must be the current package, one of its dependencies, or `core` / `std`. `import pkg;` alone is an error: an import always names a module.
 - The entry file of a package is `src/main.sosu` for an application, or `src/lib.sosu` for a library. The compiler loads the modules reachable by `import` from it.
 - The modules of a package may import each other.
-- The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`.
+- The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`: the folder of the program run, or, when it was run by its name alone (an editor runs `sosuc lsp`), the folder of PATH where it was found.
 - `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
@@ -474,6 +474,7 @@ C libraries are declared in the `sosu.toml` of the package that uses them, never
 ```toml
 [link]                          # every target
 libs = ["SDL3"]                 # SDL3.lib with MSVC, -lSDL3 with gcc and clang
+subsystem = "window"            # its programs open windows: no console in release, on Windows
 
 [link.windows]                  # added on one target: windows, linux, macos, android, ios
 paths = ["vendor/SDL3/lib/x64"] # where the linker looks, relative to the package
@@ -484,6 +485,7 @@ frameworks = ["Cocoa"]
 ```
 
 - `libs`: library names, translated for the C compiler; `paths`: folders searched by the linker; `frameworks`: macOS and iOS frameworks; `copy`: files placed next to the program (a DLL must be beside the `.exe` on Windows).
+- `subsystem`: `"window"` for a package whose programs open windows (`platform` declares it). In a `--release` build on Windows, a program that links such a package has no console behind its windows (`/SUBSYSTEM:WINDOWS` with MSVC, `-mwindows` with MinGW); a debug build keeps it, for `io.print`. `"console"` is the default.
 - Paths are relative to the package, never absolute, so that the manifest works on every machine.
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.

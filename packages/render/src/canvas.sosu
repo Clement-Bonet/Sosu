@@ -121,28 +121,60 @@ pub struct Canvas {
     }
 
     // The coverage of a rounded rectangle (`ring` > 0: only its border, that wide), blended.
+    // Only the pixels near a corner, or cut by an edge, are sampled (16 samples each); the others
+    // are inside or outside whole: the middle of a ring is skipped.
     void rounded(Rect rect, f32 r, f32 ring, Color color) {
         i32 x0 = max(clamp(rect.x, width), clip.x0);
         i32 y0 = max(clamp(rect.y, height), clip.y0);
-        i32 x1 = min(clamp(rect.x + rect.w, width), clip.x1);
-        i32 y1 = min(clamp(rect.y + rect.h, height), clip.y1);
+        // up to the last column and row, which the right and bottom edges cut when they are fractional
+        i32 x1 = min(clamp(rect.x + rect.w + 1.0, width), clip.x1);
+        i32 y1 = min(clamp(rect.y + rect.h + 1.0, height), clip.y1);
+        Rect hole = Rect{ x: rect.x + ring, y: rect.y + ring, w: rect.w - 2.0 * ring, h: rect.h - 2.0 * ring };
+        f32 margin = max(r, ring) + 1.0;  // farther from the edges: no corner, no border
         for (mut i32 y = y0; y < y1; y += 1) {
-            for (mut i32 x = x0; x < x1; x += 1) {
-                mut u32 inside = 0;
-                for (mut i32 sy = 0; sy < 4; sy += 1) {
-                    for (mut i32 sx = 0; sx < 4; sx += 1) {
-                        f32 px = x as f32 + (sx as f32 + 0.5) / 4.0;
-                        f32 py = y as f32 + (sy as f32 + 0.5) / 4.0;
-                        bool outer = in_rounded(rect, r, px, py);
-                        bool inner = ring > 0.0 && in_rounded(Rect{ x: rect.x + ring, y: rect.y + ring, w: rect.w - 2.0 * ring, h: rect.h - 2.0 * ring }, max(r - ring, 0.0), px, py);
-                        inside += outer && !inner ? 1 : 0;
+            f32 cy = y as f32 + 0.5;
+            f32 dy = min(cy - rect.y, rect.y + rect.h - cy);  // to the top or the bottom
+            mut i32 x = x0;
+            while (x < x1) {
+                f32 cx = x as f32 + 0.5;
+                f32 dx = min(cx - rect.x, rect.x + rect.w - cx);
+                if (ring > 0.0 && dy > margin && dx > margin) {  // in the hole: to the right border
+                    x = max(x + 1, (rect.x + rect.w - margin) as i32);
+                    continue;
+                }
+                mut u32 inside = 16;
+                if (dx <= r + 1.0 && dy <= r + 1.0) {
+                    inside = coverage(rect, r, ring, hole, x, y);  // near a corner
+                } else {
+                    f32 d = min(dx, dy);  // to the nearest straight edge
+                    if (d < 0.5 || ring > 0.0 && d > ring - 0.5 && d < ring + 0.5) {
+                        inside = coverage(rect, r, ring, hole, x, y);  // cut by an edge
+                    } else if (ring > 0.0 && d >= ring + 0.5) {
+                        inside = 0;
                     }
                 }
                 if (inside > 0) {
                     blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
                 }
+                x += 1;
             }
         }
+    }
+
+    // How many of 16 samples of the pixel (x, y) are in the rounded rectangle, and out of its
+    // `hole` for a ring.
+    u32 coverage(Rect rect, f32 r, f32 ring, Rect hole, i32 x, i32 y) {
+        mut u32 inside = 0;
+        for (mut i32 sy = 0; sy < 4; sy += 1) {
+            for (mut i32 sx = 0; sx < 4; sx += 1) {
+                f32 px = x as f32 + (sx as f32 + 0.5) / 4.0;
+                f32 py = y as f32 + (sy as f32 + 0.5) / 4.0;
+                bool outer = in_rounded(rect, r, px, py);
+                bool inner = ring > 0.0 && in_rounded(hole, max(r - ring, 0.0), px, py);
+                inside += outer && !inner ? 1 : 0;
+            }
+        }
+        return inside;
     }
 
     // The border of a rectangle, `thickness` pixels wide, inside the rectangle.
@@ -519,4 +551,41 @@ test "rounded rectangles" {
     assert(c.at(20, 20) == 0xFFFF0000 && c.at(20, 30) == 0 && c.at(0, 30) == 0xFFFF0000);
     c.fill_rounded(Rect{ x: 30.0, y: 0.0, w: 10.0, h: 10.0 }, 0.0, Color{ r: 0, g: 0, b: 255 });  // radius 0: square
     assert(c.at(39, 0) == 0xFF0000FF);
+}
+
+test "rounded rectangles: the pixels sampled alone are those of every pixel sampled" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut Rect[5] rects = [Rect{ x: 3.0, y: 2.0, w: 50.0, h: 30.0 }; 5];
+    rects[1] = Rect{ x: 2.3, y: 1.6, w: 57.4, h: 41.7 };
+    rects[2] = Rect{ x: 5.5, y: 4.25, w: 20.0, h: 52.5 };
+    rects[3] = Rect{ x: 0.0, y: 0.0, w: 64.0, h: 64.0 };
+    rects[4] = Rect{ x: 10.7, y: 9.2, w: 8.6, h: 7.3 };
+    mut f32[4] radii = [0.6, 4.0, 9.5, 30.0];
+    mut f32[4] rings = [0.0, 1.0, 2.5, 6.0];
+    Color color = Color{ r: 200, g: 120, b: 40, a: 200 };
+    for (usize i in 0..5) {
+        for (usize k in 0..4) {
+            for (usize m in 0..4) {
+                Rect rect = rects[i];
+                f32 r = max(min(radii[k], min(rect.w, rect.h) / 2.0), 0.0);
+                f32 ring = rings[m];
+                mut Canvas fast = create(&arena, 64, 64);
+                mut Canvas every = create(&arena, 64, 64);
+                fast.rounded(rect, r, ring, color);
+                Rect hole = Rect{ x: rect.x + ring, y: rect.y + ring, w: rect.w - 2.0 * ring, h: rect.h - 2.0 * ring };
+                for (mut i32 y = 0; y < 64; y += 1) {
+                    for (mut i32 x = 0; x < 64; x += 1) {
+                        u32 inside = every.coverage(rect, r, ring, hole, x, y);
+                        if (inside > 0) {
+                            every.blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
+                        }
+                    }
+                }
+                for (usize p in 0..64 * 64) {
+                    assert(fast.pixels[p] == every.pixels[p]);
+                }
+            }
+        }
+    }
 }

@@ -20,6 +20,7 @@
    [link.windows]                 # added on one target: windows, linux, macos, android, ios
    paths = ["vendor/SDL3/lib/x64"]
    copy = ["vendor/SDL3/lib/x64/SDL3.dll"]
+   subsystem = "window"           # programs that link this package have no console in release
 
    Values are strings, one-line arrays of strings, or one-line inline tables of strings;
    `#` starts a comment. */
@@ -49,6 +50,8 @@ typedef struct {
     StringList paths;      /* folders where the linker looks for them */
     StringList frameworks; /* macOS and iOS frameworks */
     StringList copy;       /* files placed next to the program (DLLs...) */
+    char *subsystem;       /* "window": a program that links it opens windows, without a console (in release, on
+                              Windows); "console"; NULL when not given */
 } LinkSection;
 
 typedef struct {
