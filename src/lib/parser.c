@@ -1374,20 +1374,20 @@ static const UiNodeKind ui_nodes[] = {
     { "Row", 0, false, { "gap", "padding", NULL }, true },
     { "List", 0, false, { "width", "height", "selected", "focus", NULL }, true },
     { "Scroll", 0, false, { "width", "height", NULL }, true },
-    { "Text", 1, false, { NULL }, false },
-    { "Title", 1, false, { NULL }, false },
+    { "Text", 1, false, { "plural", "count", "context", NULL }, false },
+    { "Title", 1, false, { "plural", "count", "context", NULL }, false },
     { "Space", 1, false, { NULL }, false },
-    { "Button", 1, false, { "on_click", "enabled", "focus", NULL }, false },
+    { "Button", 1, false, { "on_click", "enabled", "focus", "plural", "count", "context", NULL }, false },
     { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", NULL }, false },
-    { "Checkbox", 1, true, { "bind", "on_change", NULL }, false },
-    { "Radio", 1, false, { "bind", "value", "on_change", NULL }, false },
+    { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", NULL }, false },
+    { "Radio", 1, false, { "bind", "value", "on_change", "plural", "count", "context", NULL }, false },
     { "TitleBar", 0, false, { "height", "gap", "padding", NULL }, true },
     { "Dropdown", 0, false, { "bind", "width", "on_change", "placeholder", "focus", NULL }, true },
-    { "Option", 1, false, { "value", NULL }, false },
+    { "Option", 1, false, { "value", "plural", "count", "context", NULL }, false },
     { "Image", 1, false, { "size", NULL }, false },
     { "MenuBar", 0, false, { NULL }, true },
-    { "Menu", 1, false, { NULL }, true },
-    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", NULL }, false },
+    { "Menu", 1, false, { "plural", "count", "context", NULL }, true },
+    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
     { "Separator", 0, false, { NULL }, false },
     { "ContextMenu", 0, false, { NULL }, true },
 };
@@ -1550,6 +1550,137 @@ static Expr *ui_prop(const UiArgs *args, const char *name) {
 }
 
 /* Checks the values and properties given to a widget. */
+/* ---- Translations (spec §10.7) ---- */
+
+/* Whether the literal `text` holds `{name}`. */
+static bool ui_has_placeholder(const Parser *p, const Expr *text, const char *name, size_t length) {
+    if (!text || text->kind != EXPR_STRING) return false;
+    const char *s = p->file->text + text->offset;
+    for (size_t i = 0; i + length + 1 < text->length; i++) {
+        if (s[i] == '{' && s[i + length + 1] == '}' && memcmp(s + i + 1, name, length) == 0) return true;
+    }
+    return false;
+}
+
+/* The value of the property named `length` bytes at `name`, or NULL. */
+static Expr *ui_prop_named(const UiArgs *args, const char *name, size_t length) {
+    for (size_t i = 0; i < args->props.count; i++) {
+        Name prop = args->props.items[i].name;
+        if (prop.length == length && memcmp(prop.text, name, length) == 0) return args->props.items[i].value;
+    }
+    return NULL;
+}
+
+static bool is_name_char(char c) {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+/* `{name}` in a literal: the offset of its `{` in the file, and the length of the name. */
+typedef struct {
+    size_t offset;
+    size_t length;
+} UiPlaceholder;
+typedef VEC(UiPlaceholder) UiPlaceholders;
+
+/* Adds the placeholders of the literal `text` to `out`, each name once. */
+static void ui_placeholders(const Parser *p, const Expr *text, UiPlaceholders *out) {
+    if (!text || text->kind != EXPR_STRING) return;
+    const char *file = p->file->text;
+    for (size_t i = text->offset + 1; i + 1 < text->offset + text->length; i++) {
+        if (file[i] != '{') continue;
+        size_t end = i + 1;
+        while (end < text->offset + text->length && is_name_char(file[end])) end++;
+        if (end == i + 1 || file[end] != '}') continue;
+        bool seen = false;
+        for (size_t k = 0; k < out->count; k++) {
+            UiPlaceholder q = out->items[k];
+            seen = seen || (q.length == end - i - 1 && memcmp(file + q.offset + 1, file + i + 1, q.length) == 0);
+        }
+        if (!seen) {
+            UiPlaceholder found = { i, end - i - 1 };
+            SOSU_VEC_PUSH(out, found);
+        }
+        i = end;
+    }
+}
+
+/* A literal text of a node, translated: `ui_frame.tr("...")`, or `tr_in`, `tr_plural`,
+   `tr_plural_in` with `context:` and `plural:` (and `count:`); then its values in braces, given
+   by the properties of the same names, filled by `with1` to `with4`. Anything else is data, and
+   is returned as it is. */
+static Expr *ui_translate(Parser *p, const UiArgs *args, Expr *text) {
+    if (!text || text->kind != EXPR_STRING) return text;
+    size_t at = text->offset;
+    size_t length = text->length;
+    Expr *context = ui_prop(args, "context");
+    Expr *plural = ui_prop(args, "plural");
+    Expr *count = ui_prop(args, "count");
+    if (context && context->kind != EXPR_STRING) {
+        error_at(p, "E0215", context->offset, context->length, "`context:` is a literal text, read by the translators");
+        context = NULL;
+    }
+    if (plural && plural->kind != EXPR_STRING) {
+        error_at(p, "E0215", plural->offset, plural->length, "`plural:` is a literal text, read by the translators");
+        plural = NULL;
+    }
+    if (plural && !count) {
+        Diagnostic *d = error_at(p, "E0215", plural->offset, plural->length, "`plural:` needs `count:`");
+        diag_help(d, "give the number that chooses the form: `count: files.len`");
+        plural = NULL;
+    }
+    Expr *number = NULL;
+    if (count) {
+        number = ui_expr(p, EXPR_CAST, count->offset, count->length);
+        number->as.cast.value = count;
+        number->as.cast.type = ui_type(p, count->offset, NULL, "i64");
+    }
+    Expr *call_args[4];
+    size_t n = 0;
+    if (context) call_args[n++] = context;
+    call_args[n++] = text;
+    if (plural) {
+        call_args[n++] = plural;
+        call_args[n++] = number;
+    }
+    const char *method = plural ? (context ? "tr_plural_in" : "tr_plural") : (context ? "tr_in" : "tr");
+    Expr *result = ui_frame_call(p, at, length, method, call_args, n);
+
+    UiPlaceholders names = {0};
+    ui_placeholders(p, text, &names);
+    ui_placeholders(p, plural, &names);
+    Expr *pairs[8];
+    size_t pair_count = 0;
+    for (size_t k = 0; k <= names.count; k++) {
+        if (k < names.count) {
+            UiPlaceholder q = names.items[k];
+            const char *name = p->file->text + q.offset + 1;
+            Expr *value = ui_prop_named(args, name, q.length);
+            if (q.length == 5 && memcmp(name, "count", 5) == 0 && number) {
+                value = ui_frame_call(p, count->offset, count->length, "decimal", &number, 1);
+            }
+            if (!value) {
+                Diagnostic *d = error_at(p, "E0215", q.offset, q.length + 2, "`{%.*s}` has no value", (int)q.length, name);
+                diag_help(d, "give it after the text: `%.*s: value` (a `str`)", (int)q.length, name);
+                continue;
+            }
+            /* its name, a string whose quotes are the braces of the placeholder */
+            Expr *key = ui_expr(p, EXPR_STRING, q.offset, q.length + 2);
+            pairs[pair_count++] = key;
+            pairs[pair_count++] = value;
+        }
+        if (pair_count == 8 || (k == names.count && pair_count > 0)) {
+            static const char *const fills[] = { "with1", "with2", "with3", "with4" };
+            Expr *fill_args[9];
+            fill_args[0] = result;
+            memcpy(fill_args + 1, pairs, pair_count * sizeof *pairs);
+            result = ui_frame_call(p, at, length, fills[pair_count / 2 - 1], fill_args, pair_count + 1);
+            pair_count = 0;
+        }
+    }
+    free(names.items);
+    return result;
+}
+
 static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const UiArgs *args) {
     if (args->values.count != kind->values && !(kind->optional && args->values.count == 0)) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length,
@@ -1570,6 +1701,12 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         bool known = false;
         for (size_t j = 0; kind->props[j]; j++) known = known || name_text_is(prop, kind->props[j]);
         if (known) continue;
+        Expr *first = args->values.count ? args->values.items[0] : NULL;
+        if (ui_has_placeholder(p, first, prop.text, prop.length) ||
+            ui_has_placeholder(p, ui_prop(args, "plural"), prop.text, prop.length) ||
+            ui_has_placeholder(p, ui_prop(args, "placeholder"), prop.text, prop.length)) {
+            continue;  /* a value in braces: `Text("Hello, {name}", name: n)` */
+        }
         if (ui_planned_property(prop)) {
             error_at(p, "E0216", prop.offset, prop.length, "`%.*s:` is not supported yet", (int)prop.length, prop.text);
             return false;
@@ -1698,6 +1835,7 @@ static Expr *ui_format(Parser *p, const UiArgs *args, size_t offset, size_t leng
     for (size_t i = 0; i < 4; i++) {
         Expr *value = ui_prop(args, names[i]);
         if (!value) continue;
+        if (i == 3) value = ui_translate(p, args, value);  /* the placeholder */
         if (i == 0 && value->kind == EXPR_NAME) {
             Expr *module = ui_expr(p, EXPR_NAME, value->offset, value->length);
             module->as.name = ui_name("widgets", value->offset);
@@ -1793,6 +1931,10 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             valid = false;
         }
         Expr *value = args.values.count ? args.values.items[0] : NULL;
+        static const char *const ui_texts[] = { "Text", "Title", "Button", "Checkbox", "Radio", "Option", "Menu", "MenuItem" };
+        for (size_t i = 0; valid && value && i < sizeof ui_texts / sizeof *ui_texts; i++) {
+            if (strcmp(kind->name, ui_texts[i]) == 0) value = ui_translate(p, &args, value);
+        }
         bool identified = false;
         for (size_t i = 0; i < sizeof ui_identified / sizeof *ui_identified; i++) {
             identified = identified || strcmp(kind->name, ui_identified[i]) == 0;
@@ -1923,7 +2065,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         } else if (name_text_is(node, "Dropdown")) {
             /* f.dropdown(width) or f.dropdown_with(width, placeholder), the options, f.end_dropdown() */
             Expr *width = ui_float(p, ui_prop(&args, "width"), start, 160);
-            Expr *hint = ui_prop(&args, "placeholder");
+            Expr *hint = ui_translate(p, &args, ui_prop(&args, "placeholder"));
             Expr *drop_args[2] = { width, hint };
             const char *open = hint ? "dropdown_with" : "dropdown";
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, drop_args, hint ? 2 : 1)));

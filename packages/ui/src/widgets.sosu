@@ -5,6 +5,7 @@
 // `Ui` keeps what lasts between frames: the input received since the last one, the widget
 // pressed and the text field that has the focus. `Frame` places the widgets of one frame,
 // one under the other, or side by side between `row()` and `end_row()`.
+import i18n.catalog;
 import render.canvas;
 import render.image;
 import render.truetype;
@@ -318,6 +319,8 @@ pub struct Ui {
     // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
     // em for each step of scale: 18 for labels, 27 for titles.
     pub mut truetype.Font*? font = none;
+    // The translations of the texts (spec §10.7); none: the language of the source.
+    pub mut catalog.Catalog*? catalog = none;
 
     // The input, as `platform.app` gives it.
     pub void mouse_move(f32 x, f32 y) {
@@ -652,6 +655,19 @@ bool same_text(str a, str b) {
     return true;
 }
 
+// Whether `name` is in `text` at `at`.
+bool same_bytes(str text, usize at, str name) {
+    if (at + name.len > text.len) {
+        return false;
+    }
+    for (usize i in 0..name.len) {
+        if (text.bytes[at + i] != name.bytes[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The key of a shortcut: a character (a letter, without case), F1 to F12, or a named key.
 u32 key_named(str name) {
     if (name.len == 1) {
@@ -757,6 +773,9 @@ pub struct Frame {
     mut u64[256] order = [0; 256];
     mut usize order_count = 0;
     mut bool focus_taken = false;  // a widget took the focus in this frame
+    // The texts made in this frame (translations with values, numbers), until its end.
+    mut u8[8192] pool = [0; 8192];
+    mut usize pool_used = 0;
     f32 height = 32.0;  // of a line of widgets
     // The title bar being placed: the depth of its row (0: none), its rectangle, and the
     // interactive widgets in it.
@@ -1782,6 +1801,118 @@ pub struct Frame {
                 surface.text(x, top, text, color, scale);
             },
         }
+    }
+
+    // ---- Translations (spec §10.7) ----
+
+    // `source`, translated by `ui.catalog`, or itself.
+    pub str tr(str source) {
+        return match (ui.catalog) {
+            some(c) => c.text(source),
+            none => source,
+        };
+    }
+
+    // The same, for one meaning of `source` (`msgctxt`).
+    pub str tr_in(str context, str source) {
+        return match (ui.catalog) {
+            some(c) => c.in_context(context, source),
+            none => source,
+        };
+    }
+
+    // The form of `one` (its plural: `other`) for `n` things, translated.
+    pub str tr_plural(str one, str other, i64 n) {
+        return match (ui.catalog) {
+            some(c) => c.plural(one, other, n),
+            none => n == 1 ? one : other,
+        };
+    }
+
+    pub str tr_plural_in(str context, str one, str other, i64 n) {
+        return match (ui.catalog) {
+            some(c) => c.plural_in_context(context, one, other, n),
+            none => n == 1 ? one : other,
+        };
+    }
+
+    // `text` with `{name}` replaced by `value` (`with2` to `with4`: more values). The result lasts
+    // until the end of the frame; when the frame has no room left (8 KB of such texts), `text`.
+    pub str with1(str text, str name, str value) {
+        return fill(text, [name, "", "", ""], [value, "", "", ""], 1);
+    }
+
+    pub str with2(str text, str name1, str value1, str name2, str value2) {
+        return fill(text, [name1, name2, "", ""], [value1, value2, "", ""], 2);
+    }
+
+    pub str with3(str text, str name1, str value1, str name2, str value2, str name3, str value3) {
+        return fill(text, [name1, name2, name3, ""], [value1, value2, value3, ""], 3);
+    }
+
+    pub str with4(str text, str name1, str value1, str name2, str value2, str name3, str value3, str name4, str value4) {
+        return fill(text, [name1, name2, name3, name4], [value1, value2, value3, value4], 4);
+    }
+
+    // `n` in decimal digits, until the end of the frame.
+    pub str decimal(i64 n) {
+        mut u8[20] digits = [0; 20];
+        mut usize count = 0;
+        mut u64 rest = n < 0 ? (0 - (n + 1)) as u64 + 1 : n as u64;
+        while (count == 0 || rest > 0) {
+            digits[count] = (48 + rest % 10) as u8;
+            rest /= 10;
+            count += 1;
+        }
+        usize start = pool_used;
+        if (pool_used + count + 1 > 8192) {
+            return "?";
+        }
+        if (n < 0) {
+            pool[pool_used] = 45;  // -
+            pool_used += 1;
+        }
+        for (usize i in 0..count) {
+            pool[pool_used] = digits[count - 1 - i];
+            pool_used += 1;
+        }
+        return text_of(pool[start..pool_used]);
+    }
+
+    str fill(str text, str[4] names, str[4] values, usize count) {
+        usize start = pool_used;
+        mut usize i = 0;
+        while (i < text.len) {
+            mut bool replaced = false;
+            if (text.bytes[i] == 123) {  // {
+                for (usize k in 0..count) {
+                    str name = names[k];
+                    if (i + name.len + 1 < text.len && text.bytes[i + name.len + 1] == 125 && same_bytes(text, i + 1, name)) {
+                        if (pool_used + values[k].len > 8192) {
+                            pool_used = start;
+                            return text;
+                        }
+                        for (u8 b in values[k].bytes) {
+                            pool[pool_used] = b;
+                            pool_used += 1;
+                        }
+                        i += name.len + 2;
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if (!replaced) {
+                if (pool_used == 8192) {
+                    pool_used = start;
+                    return text;
+                }
+                pool[pool_used] = text.bytes[i];
+                pool_used += 1;
+                i += 1;
+            }
+        }
+        return text_of(pool[start..pool_used]);
     }
 
     // ---- Identities and the keyboard (spec §10.6) ----
@@ -3148,4 +3279,33 @@ test "placeholders: shown while the text is empty, never typed" {
         }
     }
     assert(picked);
+}
+
+bool is_text(str a, str b) {
+    return a.len == b.len && same_bytes(a, 0, b);
+}
+
+test "texts translated, with values and plurals" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 100, 100);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    assert(is_text(f.tr("Save"), "Save"));  // no catalog: the source
+    assert(is_text(f.tr_plural("{count} file", "{count} files", 1), "{count} file"));
+    f.finish();
+    match (catalog.load(&arena, "packages/i18n/tests/fr.po")) {
+        ok(c) => {
+            ui.catalog = some(c);
+        },
+        err(e) => { },
+    }
+    f = begin(&ui, &surface, 0.0, 0.0);
+    assert(is_text(f.tr("Save"), "Enregistrer") && is_text(f.tr_in("verb", "Open"), "Ouvrir"));
+    str files = f.tr_plural("{count} file", "{count} files", 0);  // French: 0 is singular
+    assert(is_text(f.with1(files, "count", f.decimal(0)), "0 fichier"));
+    assert(is_text(f.with2("{a} and {b}, {a}", "a", "x", "b", "yz"), "x and yz, x"));
+    assert(is_text(f.with1("{unknown} {", "name", "v"), "{unknown} {"));
+    assert(is_text(f.decimal(-42), "-42") && is_text(f.decimal(1234567), "1234567"));
+    f.finish();
 }
