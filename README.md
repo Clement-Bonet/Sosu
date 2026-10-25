@@ -16,7 +16,7 @@ English is the working language of the project: code, comments, compiler message
 | 5. C interop, SDL3 window | done: `extern "C"`, linking (`[link]` in sosu.toml), the `platform` package and the window example (Windows, Linux) |
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release`, a language server (`sosuc lsp`) |
-| 8. `platform` / `render` / `ui` | done on the desktop: window, keyboard, mouse and text events, drawing in a canvas of pixels, text (TrueType fonts read and drawn in Sosu, and a built-in 8 by 8 font), widgets in immediate mode (`ui`), `.ui.sosu` interface files (no styles yet) |
+| 8. `platform` / `render` / `ui` / `i18n` | done on the desktop: window, keyboard, mouse, touch and text events, drawing in a canvas of pixels, text (TrueType fonts read and drawn in Sosu, and a built-in 8 by 8 font with the Latin accented letters), widgets in immediate mode (`ui`), `.ui.sosu` interface files with themes, styles and translations; touch and mobile events written, Android and iOS builds are step 9 |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -49,6 +49,7 @@ sosuc test tests/programs/testing   # runs its `test` blocks
 sosuc build tests/programs/basics   # writes build/basics.c and build/basics(.exe)
 sosuc check tests/packages/app      # checks without compiling
 sosuc fmt packages/platform         # formats in place (spec §7.6); --check only reports
+sosuc i18n extract examples/workspace -o examples/workspace/locales/messages.locale.default.sosu   # the texts to translate (spec §10.7)
 sosuc lsp                           # the language server of editors (spec §11.4), on stdin and stdout
 sosuc lex tests/samples/hello.sosu  # tokens of a file (debugging)
 sosuc parse tests/samples/hello.sosu --format=json   # syntax tree; JSON diagnostics on stderr
@@ -86,10 +87,14 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   codegen     C code generation
   json        JSON reader and writer (for the language server)
   lsp         the language server: diagnostics while typing, hover, definition, completion
+  i18n        the texts to translate of a package, for its catalogs (`sosuc i18n extract`)
 src/sosuc/    command-line driver
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
-packages/     platform (window and events, on SDL3), render (pixels, shapes, text), ui (widgets)
-examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars)
+packages/     platform (window and events, on SDL3), render (pixels, shapes, text, PNG images), ui (widgets),
+              i18n (catalogs of translations)
+examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
+              area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
+              trees, inputs)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification and error codes
@@ -113,28 +118,56 @@ their exact commit: keep it in version control.
 
 ## Windows and widgets (spec §10)
 
-Three packages, written in Sosu:
+Four packages, written in Sosu:
 
 - `packages/platform` opens a window with SDL3 and hands the program its events (keyboard, mouse,
-  typed text) and a canvas of pixels each frame. The program keeps its state in a class that
-  implements `app.Handler`.
-- `packages/render` draws in that canvas: rectangles, borders, lines, transparency, and text with
-  a built-in 8 by 8 font.
+  typed text, input methods, touch screens, the safe area, suspend and resume) and a canvas of pixels
+  each frame. The program keeps its state in a class that implements `app.Handler`. A window can
+  draw its own title bar (spec §10.5), and a program linked with `--release` has no console on
+  Windows.
+- `packages/render` draws in that canvas: rectangles (with rounded corners), borders, lines,
+  transparency, PNG images, text in a TrueType font or a built-in 8 by 8 font.
 - `packages/ui` adds widgets in immediate mode: at each frame, the program describes its interface
-  from its state (`if (f.button("Greet")) { ... }`).
+  from its state (`if (f.button("Greet")) { ... }`). Most programs describe it in `.ui.sosu`
+  files, which `sosuc` turns into those calls.
+- `packages/i18n` reads the catalogs of translations, `messages.locale.fr.sosu` (the content of
+  gettext); `sosuc i18n extract` writes the texts to translate.
 
-`examples/window` moves a rectangle with the arrows and the mouse; `examples/form` is a small form
-with a text field, a checkbox and buttons; `examples/editor` draws its own title bar, with a
-search field, a dropdown and a button in it, which still moves, maximizes and closes the window; `examples/workspace` goes further, in the
-manner of VS Code: its icon, menus, a search field and two dropdowns in the title bar, over a list of
-files (with a context menu), the details of the file chosen (every widget of `ui`) and an output pane. With
-`SOSU_SYSTEM_TITLE_BAR` set, it keeps the title bar of the system, and its own becomes a tool bar.
+The widgets of `ui`:
+
+| Kind | Widgets |
+|---|---|
+| Text and buttons | `Text`, `Title`, `Image`, `Button`, `Checkbox`, `Radio`, `Space` |
+| Text input | `TextField` (masks, formats, placeholders), `TextArea` (lines, undo), `NumberField`, `MoneyField`, `DateField` (a calendar) |
+| Choices and values | `Dropdown`, `Slider`, `Progress` |
+| Lists | `List` (and long lists, only the items in view described), `Table` (sorting, resizable columns), `Tree` |
+| Layout | `Column`, `Row`, `Grid` (pixels, `Auto`, `Fill`), `Group`, `Tabs`, `Scroll` |
+| Windows | `TitleBar`, `MenuBar`, `Menu`, `ContextMenu`, `Dialog`, tooltips |
+
+They have identities that survive an `if` or an insertion in a loop, the keyboard (Tab, the keys
+of each widget, Alt and a letter), themes and styles written in `.ui.sosu` files (spec §10.7), and
+their literal texts are translated (spec §10.7).
+
+The examples:
+
+- `examples/window`: a rectangle moved with the arrows and the mouse;
+- `examples/form`: a small form with a text field, a checkbox and buttons;
+- `examples/editor`: its own title bar (a search field, a dropdown, a button), over a text area;
+- `examples/workspace`: in the manner of VS Code: its icon, menus, a search field and two dropdowns
+  in the title bar, over a tree of files, the details of the file chosen in tabs, a table of all the
+  files and an output pane; in English or French (`SOSU_LANG=fr`), light or dark as the system
+  (`SOSU_THEME`). With `SOSU_SYSTEM_TITLE_BAR` set, it keeps the title bar of the system, and its
+  own becomes a tool bar;
+- `examples/themes`: themes and styles of a `.ui.sosu` file, following the system;
+- `examples/containers`: a grid, groups, a tree of folders, and every input widget.
+
 On Windows:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File packages\platform\fetch-sdl3.ps1   :: once: SDL3 3.4.18, checked by SHA-256
 build\sosuc run examples\window
-build\sosuc run examples\form
+build\sosuc run examples\containers
+build\sosuc build --release examples\workspace   :: optimized, without a console
 ```
 
 The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On Linux,
@@ -143,14 +176,18 @@ The script downloads SDL3 into `packages/platform/vendor/` (ignored by Git). On 
 ```sh
 sudo apt install libsdl3-dev    # Ubuntu 25.04 or later, Debian 13 or later
 ./build/sosuc run examples/window
-./build/sosuc run examples/form
-./build/sosuc run examples/editor
+./build/sosuc run examples/containers
 ./build/sosuc run examples/workspace
 ```
 
-The tests of `render` and `ui` need no screen (`sosuc test packages/render`, `sosuc test
-packages/ui`). `tests/window` opens a window, draws one frame and closes itself: the CI runs it on
-Linux and Windows with `SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
+Programs are run from the root of the repository, where they find their font and their catalogs.
+`sosuc run` builds without optimizations: build with `--release` to measure the speed of a
+program.
+
+The tests of `render`, `ui` and `i18n` need no screen (`sosuc test packages/ui`), and
+`tests/programs` drives screens of `.ui.sosu` files without a window. `tests/window` opens a window,
+draws one frame and closes itself: the CI runs it on Linux and Windows with
+`SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
 
 ## Branches
 
@@ -168,7 +205,9 @@ tests everywhere.
 - [docs/SPEC.md](docs/SPEC.md): the language. Points the first draft left open were settled while
   writing the compiler and are part of it now: literals (§3.1), operators and struct literals (§5.1),
   moves and `.copy()` (§6), `match` (§7.1), packages, imports and `sosu.lock` (§8.1), the v0
-  interface of `platform`, `render` and `ui` (§10.4), the full grammar (§12), decisions and open
+  interface of `platform`, `render` and `ui` (§10.4), title bars (§10.5), the foundations of the
+  widgets (§10.6), translations, themes and styles (§10.7), containers (§10.8), the rest of the
+  widgets, input methods and touch screens (§10.9), the full grammar (§12), decisions and open
   questions (§14).
 - [docs/errors.md](docs/errors.md): every error code, with an example.
 
