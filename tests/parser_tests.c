@@ -620,6 +620,18 @@ static void test_ui_grids(void) {
               "  (block\n"
               "    (return (lit widgets.Window))))\n"
               "(import ui.widgets)\n");
+    expect_ui("window W(S* s) {\n    Slider(bind: s.volume, max: 10, tooltip: \"Volume\")\n    Progress(value: s.done)\n    Progress\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame at) 21)\n"
+              "    (call (. ui_frame slider) (& (. s volume)) 200.0 0 10 1)\n"
+              "    (call (. ui_frame tooltip) (call (. ui_frame tr) \"Volume\"))\n"
+              "    (call (. ui_frame progress) (. s done) 100 200.0)\n"
+              "    (call (. ui_frame progress_busy) 200.0)))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
     expect_ui("window W() {\n    Tabs(placement: Bottom) { }\n}\n",
               "(fn pub void W ((widgets.Frame* ui_frame))\n"
               "  (block\n"

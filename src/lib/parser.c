@@ -1412,6 +1412,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Button", 1, false, { "on_click", "enabled", "focus", "plural", "count", "context", "style", NULL }, false },
     { "TextField", 0, false, { "bind", "width", "on_enter", "accept", "max", "mask", "placeholder", "focus", "style", NULL }, false },
     { "TextArea", 0, false, { "bind", "width", "rows", "wrap", "tabs", "placeholder", "on_enter", "focus", "style", NULL }, false },
+    { "Slider", 0, false, { "bind", "min", "max", "step", "width", "on_change", "focus", "style", NULL }, false },
+    { "Progress", 0, false, { "value", "max", "width", "style", NULL }, false },
     { "NumberField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "on_change", "focus", "style", NULL }, false },
     { "MoneyField", 0, false, { "bind", "width", "min", "max", "step", "decimals", "decimal", "group", "symbol", "symbol_first", "on_change", "focus", "style", NULL }, false },
     { "Checkbox", 1, true, { "bind", "on_change", "plural", "count", "context", "style", NULL }, false },
@@ -1438,7 +1440,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -1754,7 +1756,8 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         return false;
     }
     bool binds = strcmp(kind->name, "TextField") == 0 || strcmp(kind->name, "TextArea") == 0 ||
-                 strcmp(kind->name, "NumberField") == 0 || strcmp(kind->name, "MoneyField") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
+                 strcmp(kind->name, "NumberField") == 0 || strcmp(kind->name, "MoneyField") == 0 ||
+                 strcmp(kind->name, "Slider") == 0 || strcmp(kind->name, "Checkbox") == 0 ||
                  strcmp(kind->name, "Radio") == 0 || strcmp(kind->name, "Dropdown") == 0;
     if (binds && !ui_prop(args, "bind")) {
         Diagnostic *d = error_at(p, "E0215", node.offset, node.length, "`%s` needs `bind:`", kind->name);
@@ -2173,6 +2176,13 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     bool placed = true;
     Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
     if (cell) SOSU_VEC_PUSH(out, cell);
+    Expr *tip = NULL;  /* `tooltip:`, on any node: `ui_frame.tooltip(text)` after it */
+    size_t kept_props = 0;
+    for (size_t i = 0; i < args.props.count; i++) {
+        if (name_text_is(args.props.items[i].name, "tooltip")) tip = args.props.items[i].value;
+        else args.props.items[kept_props++] = args.props.items[i];
+    }
+    args.props.count = kept_props;
     p->ui_in_grid = false;  /* the children of a node are not cells, unless it is a grid */
     p->ui_in_tabs = false;
     p->ui_in_tree = false;
@@ -2299,6 +2309,23 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *call_args[2] = { value, enabled };
             Expr *button = ui_frame_call(p, start, length, enabled ? "button_enabled" : "button", call_args, enabled ? 2 : 1);
             SOSU_VEC_PUSH(out, ui_when(p, button, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "Slider")) {
+            /* f.slider(&bind, width, min, max, step); on_change when it changed */
+            Expr *low = ui_prop(&args, "min");
+            Expr *high = ui_prop(&args, "max");
+            Expr *step = ui_prop(&args, "step");
+            Expr *slider_args[5] = { ui_address(p, ui_prop(&args, "bind")), ui_extent(p, ui_prop(&args, "width"), start, 200, true),
+                                     low ? low : ui_int(p, start, 0), high ? high : ui_int(p, start, 100),
+                                     step ? step : ui_int(p, start, 1) };
+            SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "slider", slider_args, 5), ui_prop(&args, "on_change")));
+        } else if (name_text_is(node, "Progress")) {
+            /* f.progress(value, max, width), or f.progress_busy(width) without a value */
+            Expr *done = ui_prop(&args, "value");
+            Expr *total = ui_prop(&args, "max");
+            Expr *width = ui_extent(p, ui_prop(&args, "width"), start, 200, true);
+            Expr *progress_args[3] = { done, total ? total : ui_int(p, start, 100), width };
+            SOSU_VEC_PUSH(out, ui_stmt(p, done ? ui_frame_call(p, start, length, "progress", progress_args, 3)
+                                               : ui_frame_call(p, start, length, "progress_busy", &width, 1)));
         } else if (name_text_is(node, "NumberField") || name_text_is(node, "MoneyField")) {
             /* f.number_field(&bind, width, widgets.Number{ ... }) or f.money_field(...); on_change when it changed */
             bool money = name_text_is(node, "MoneyField");
@@ -2504,6 +2531,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_grid", NULL, 0)));
         }
     }
+    if (tip && placed) SOSU_VEC_PUSH(out, ui_frame_stmt(p, tip->offset, tip->length, "tooltip", ui_translate(p, &args, tip)));
     p->ui_in_grid = in_grid;
     p->ui_in_tabs = in_tabs;
     p->ui_in_tree = in_tree;
@@ -2753,11 +2781,12 @@ static const char *const ui_theme_selectors[][2] = {
     { "List", "list" }, { "Scroll", "scroll" }, { "Column", "column" }, { "Row", "row" },
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
     { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
+    { "Slider", "slider" }, { "Progress", "progress" }, { "Tooltip", "tooltip" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
     "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
-    "Image, Grid, Group, Tabs, Tree"
+    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };

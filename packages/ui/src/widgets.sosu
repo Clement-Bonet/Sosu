@@ -605,6 +605,9 @@ pub struct Ui {
     mut u8[4096] history = [0; 4096];
     mut usize history_used = 0;
     // The number field that has the keyboard, and its text being typed (spec §10.9).
+    // The widget under the mouse for its tooltip, and since when (the time of `clock`).
+    mut u64 tip_key = 0;
+    mut u64 tip_since = 0;
     mut u64 number_of = 0;
     mut TextBuffer number_text = TextBuffer{ };
 
@@ -1128,6 +1131,9 @@ pub struct Theme {
     pub Style group = Style{ };  // its part `placeholder` is its title
     pub Style tabs = Style{ };  // a tab: `checked` the one chosen; the part `bar` the row
     pub Style tree = Style{ };
+    pub Style slider = Style{ };  // its track; `accent`: its thumb and the part before it
+    pub Style progress = Style{ };  // its track; `accent`: what is done
+    pub Style tooltip = Style{ };
 }
 
 // The kinds of widgets, the selectors of a theme.
@@ -1152,6 +1158,9 @@ enum Kind {
     Group,
     Tabs,
     Tree,
+    Slider,
+    Progress,
+    Tooltip,
 }
 
 // The states of a widget, which can be combined.
@@ -1205,7 +1214,7 @@ pub Style merge(Style weak, Style strong) {
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree) };
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip) };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
@@ -1254,6 +1263,9 @@ Style style_of(Theme t, Kind kind) {
         Group => t.group,
         Tabs => t.tabs,
         Tree => t.tree,
+        Slider => t.slider,
+        Progress => t.progress,
+        Tooltip => t.tooltip,
     };
 }
 
@@ -1381,6 +1393,19 @@ Look default_look(Kind kind, u32 states) {
             background = well();
             border = focus ? accent() : face(false, false);
             border_width = 2.0;
+        },
+        Slider => {
+            background = face(hot, false);
+        },
+        Progress => {
+            background = well();
+        },
+        Tooltip => {
+            background = rgb(49, 50, 68, 255);
+            border = face(true, false);
+            border_width = 1.0;
+            padding = 8.0;
+            font_size = 15.0;
         },
         _ => { },
     }
@@ -1677,6 +1702,7 @@ pub struct Frame {
     mut bool right_taken = false;
     mut u64 keys_taken = 0;  // the edits a shortcut used: one item per key pressed
     mut bool editing = false;  // a text field has the keyboard
+    mut str tip = "";  // the tooltip to draw at the end of the frame
     mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
@@ -2291,6 +2317,123 @@ pub struct Frame {
     // keyboard; 2 decimals unless `n` says otherwise.
     pub bool money_field(i64* value, f32 width, Number n) {
         return number_field(value, width, n);
+    }
+
+    // ---- Sliders, progress, tooltips (spec §10.9) ----
+
+    // A slider bound to an integer from `low` to `high`, by `step`: its thumb is dragged, a click
+    // on its track moves it there; Left and Right, Page Up and Page Down (a tenth), Home and End
+    // with the keyboard. Returns true when the value changed.
+    pub bool slider(i64* value, f32 width, i64 low, i64 high, i64 step) {
+        u64 id = take_id();
+        take_styles();
+        Look first = look(Slider, 0);
+        canvas.Rect r = place(width, first.height);
+        interactive(r);
+        focusable(id, r);
+        i64 range = max(high - low, 1);
+        f32 left = r.x + 8.0;
+        f32 track = max(r.w - 16.0, 1.0);
+        mut i64 next = *value;
+        if (ui.pressed && over(r)) {
+            ui.active = id;
+        }
+        if (ui.active == id && ui.down) {  // dragged, or clicked on its track
+            f32 at = max(min((ui.mouse_x - left) / track, 1.0), 0.0);
+            next = low + (at * range as f32 + 0.5) as i64;
+        }
+        if (ui.focus == id) {
+            i64 page = max(range / 10, step);
+            for (usize i in 0..ui.edit_count) {
+                u32 key = ui.edits[i].key;
+                if (key == key_left() || key == key_right()) {
+                    next += key == key_left() ? -step : step;
+                } else if (key == key_page_up() || key == key_page_down()) {
+                    next += key == key_page_down() ? -page : page;
+                } else if (key == key_home() || key == key_end()) {
+                    next = key == key_home() ? low : high;
+                }
+            }
+        }
+        if (step > 1) {  // on a step from `low`
+            next = low + (next - low + step / 2) / step * step;
+        }
+        next = next < low ? low : next > high ? high : next;
+        bool changed = next != *value;
+        *value = next;
+        Look l = look(Slider, (over(r) ? state_hover() : 0) | (ui.active == id ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0));
+        f32 x = left + track * (next - low) as f32 / range as f32;
+        f32 cy = r.y + r.h / 2.0;
+        surface.fill_rounded(canvas.Rect{ x: left, y: cy - 2.0, w: track, h: 4.0 }, 2.0, l.background);
+        surface.fill_rounded(canvas.Rect{ x: left, y: cy - 2.0, w: x - left, h: 4.0 }, 2.0, l.accent);
+        surface.fill_circle(x, cy, ui.active == id ? 9.0 : 8.0, l.accent);
+        if (ui.focus == id) {
+            ring(r, l.accent);
+        }
+        return changed;
+    }
+
+    // A bar that shows `value` of `max` done.
+    pub void progress(i64 value, i64 max_value, f32 width) {
+        take_styles();
+        Look l = look(Progress, 0);
+        canvas.Rect r = place(width, 12.0);
+        f32 done = max_value > 0 ? min(max(value as f32 / max_value as f32, 0.0), 1.0) : 0.0;
+        surface.fill_rounded(r, 6.0, l.background);
+        if (done > 0.0) {
+            surface.fill_rounded(canvas.Rect{ x: r.x, y: r.y, w: r.w * done, h: r.h }, 6.0, l.accent);
+        }
+    }
+
+    // A bar for work whose end is not known: a part of it moves, with the time of `ui.clock`.
+    pub void progress_busy(f32 width) {
+        take_styles();
+        Look l = look(Progress, 0);
+        canvas.Rect r = place(width, 12.0);
+        surface.fill_rounded(r, 6.0, l.background);
+        f32 part = r.w / 4.0;
+        f32 phase = (ui.now % 1500) as f32 / 1500.0;  // a round in a second and a half
+        f32 x = r.x - part + (r.w + part) * phase;
+        surface.push_clip(r);
+        surface.fill_rounded(canvas.Rect{ x: x, y: r.y, w: part, h: r.h }, 6.0, l.accent);
+        surface.pop_clip();
+    }
+
+    // A tooltip for the widget placed last: `text`, after 500 ms over it without moving, near the
+    // mouse, above everything (drawn by `finish()`).
+    pub void tooltip(str text) {
+        canvas.Rect r = last;
+        u64 key = last_id != 0 ? last_id : mix(r.x as u64 * 65536 + r.y as u64, 0x7007);
+        if (!over(r)) {
+            if (ui.tip_key == key) {
+                ui.tip_key = 0;
+            }
+            return;
+        }
+        if (ui.tip_key != key || ui.moved) {  // the mouse came, or moved: the wait starts again
+            ui.tip_key = key;
+            ui.tip_since = ui.now;
+        }
+        if (ui.has_clock && ui.now - ui.tip_since >= 500) {
+            tip = text;
+        }
+    }
+
+    // Draws the tooltip of this frame, if any.
+    void draw_tooltip() {
+        if (tip.len == 0) {
+            return;
+        }
+        take_styles();
+        Look l = look(Tooltip, 0);
+        canvas.Rect size = measure_px(tip, l.font_size);
+        f32 w = size.w + 2.0 * l.padding;
+        f32 h = size.h + l.padding;
+        f32 x = min(ui.mouse_x + 12.0, max(surface.width as f32 - w - 4.0, 0.0));
+        f32 y = ui.mouse_y + 20.0 + h > surface.height as f32 ? ui.mouse_y - h - 8.0 : ui.mouse_y + 20.0;
+        canvas.Rect box = canvas.Rect{ x: x, y: y, w: w, h: h };
+        paint(box, l);
+        write_px(x + l.padding, y, h, tip, l.color, l.font_size);
     }
 
     // ---- Text areas (spec §10.9) ----
@@ -3148,6 +3291,7 @@ pub struct Frame {
             ui.layer = nowhere();
         }
         finish_menus();
+        draw_tooltip();  // above everything
         if (ui.released) {
             ui.active = 0;
         }
@@ -6264,4 +6408,50 @@ test "numbers and money: shown with their groups and symbol, typed, out of range
     ui.mouse_button(false);
     money_frame(&ui, &surface, &cents);
     assert(cents == 1000);
+}
+
+// A slider from 0 to 100, and a button with a tooltip, for the test below.
+str slider_frame(Ui* ui, canvas.Canvas* surface, i64* volume) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.slider(volume, 216.0, 0, 100, 1);
+    f.button("Save");
+    f.tooltip("Save the file");
+    f.progress(*volume, 100, 200.0);
+    str tip = f.tip;
+    f.finish();
+    return tip;
+}
+
+test "a slider, a progress bar, a tooltip after 500 ms" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 140);
+    mut Ui ui = Ui{ };
+    mut i64 volume = 0;
+    ui.clock(0);
+    // pressed in the middle of its track (8 to 208): 50, then dragged to the end
+    ui.mouse_move(108.0, 16.0);
+    ui.mouse_button(true);
+    slider_frame(&ui, &surface, &volume);
+    assert(volume == 50);
+    ui.mouse_move(260.0, 16.0);
+    slider_frame(&ui, &surface, &volume);
+    assert(volume == 100);
+    ui.mouse_button(false);
+    slider_frame(&ui, &surface, &volume);
+    // it has the keyboard: Home, then Right
+    ui.key(key_home(), true, false, false);
+    ui.key(key_right(), true, false, false);
+    slider_frame(&ui, &surface, &volume);
+    assert(volume == 1);
+    // over the button: no tooltip before 500 ms, one after
+    ui.mouse_move(20.0, 50.0);
+    ui.clock(1000);
+    assert(slider_frame(&ui, &surface, &volume).len == 0);
+    ui.clock(1400);
+    assert(slider_frame(&ui, &surface, &volume).len == 0);
+    ui.clock(1600);
+    assert(slider_frame(&ui, &surface, &volume) == "Save the file");
+    ui.mouse_move(250.0, 130.0);  // elsewhere: gone
+    assert(slider_frame(&ui, &surface, &volume).len == 0);
 }
