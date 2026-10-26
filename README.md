@@ -17,6 +17,7 @@ English is the working language of the project: code, comments, compiler message
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release`, a language server (`sosuc lsp`) |
 | 8. `platform` / `render` / `ui` / `i18n` | done on the desktop: window, keyboard, mouse, touch and text events, drawing in a canvas of pixels, text (TrueType fonts read and drawn in Sosu, and a built-in 8 by 8 font with the Latin accented letters), widgets in immediate mode (`ui`), `.ui.sosu` interface files with themes, styles and translations; touch and mobile events written, Android and iOS builds are step 9 |
+| 10. Generics | done: functions, structs, enums and classes with type parameters and constraints, effects as parameters, `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (spec §5.4) |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and

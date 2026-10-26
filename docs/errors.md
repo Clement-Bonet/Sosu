@@ -44,6 +44,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0214 | expected a node in a `.ui.sosu` file | `42` among the nodes of a window |
 | E0215 | invalid node or property in a `.ui.sosu` file | `Button("OK", on_tap: f)`, `TextField()` without `bind:`, `Text("a") { }`, a property after the nodes, a `TitleBar` that is not the first node of a window, an `Option` outside a `Dropdown`, a `MenuItem` outside a menu, `row:` outside a `Grid`, a cell given twice, a `Tab` outside `Tabs`, a `Leaf` outside a `Tree`, a `Dialog` inside another node or without `open:`, `List(count:)` without `item:`, a style property or state that does not exist, a theme that starts from no theme |
 | E0216 | not supported yet in a `.ui.sosu` file | not given any more: `style`, `theme`, `align:` and the grids it was given for are supported (spec §10.7, §10.8) |
+| E0217 | generic declaration not supported yet | a method with type parameters of its own, a generic interface, a generic class with a parent class, an interface or a `virtual` method, an effect parameter outside a function, a generic C function (spec §5.4) |
 
 ## Semantic analysis
 
@@ -97,6 +98,10 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0354 | invalid arena allocation | `a.alloc(3)`, `a.alloc(Node)` with a pointer inside, `a.alloc(SomeClass)` |
 | E0355 | wrong number of elements in an array literal | `i32[3] a = [1, 2];` |
 | E0356 | use of a moved value, or invalid move | `Arena b = a;` then `a.free()`, a move inside a loop, out of a field |
+| E0360 | generic function: arguments not inferred, or used as a value | `auto x = zero();` (write `zero<i32>()`), `auto g = largest;` (spec §5.4) |
+| E0361 | wrong type arguments | `Pair p` for a `Pair<A, B>`, `Pair<i32>`, `Point<i32>` for a type that is not generic |
+| E0362 | a type argument does not fit its parameter | `largest(flags)` with `bool` for `<T: Ordered>`, `Vec<Arena>` (a resource), `greet(3)` for `<T: Named>` |
+| E0364 | unknown constraint | `<T: Sortable>`; the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash` and interfaces |
 
 ## Code generation
 
