@@ -41,6 +41,8 @@ struct TypeExpr {
     TypeKind kind;
     size_t offset;
     size_t length;
+    TypeExpr **args; /* NAME: the type arguments `Pair<A, B>` (spec §5.4) */
+    size_t arg_count;
     union {
         Path name;
         TypeExpr *inner; /* POINTER, OPTION, SLICE */
@@ -125,6 +127,12 @@ struct Expr {
     Resolution resolution;
     const void *target;
     size_t target_index;
+    TypeExpr **type_args; /* NAME and FIELD: written after a generic name, `f<i32>(x)` */
+    size_t type_arg_count;
+    struct Type **type_values; /* set by semantic analysis: the arguments of a generic function called */
+    size_t type_value_count;
+    unsigned *effect_values; /* and its effect parameters (one mask each) */
+    size_t effect_value_count;
     union {
         uint64_t int_value;
         uint32_t char_value;
@@ -189,6 +197,19 @@ typedef struct {
     Name name;
 } Param;
 
+/* A type parameter `T: Ordered + Hash`, or an effect parameter `uses E` (spec §5.4). */
+typedef struct {
+    Name name;
+    Path *constraints;
+    size_t constraint_count;
+    bool is_effect;
+} TypeParam;
+
+typedef struct {
+    TypeParam *items;
+    size_t count;
+} TypeParams;
+
 typedef enum {
     CONTRACT_REQUIRES,
     CONTRACT_ENSURES,
@@ -208,9 +229,11 @@ typedef enum {
 typedef struct {
     bool is_pub;
     bool is_unsafe;
+    bool is_export; /* `export "C"`: offered to other languages under its own name (spec §9.2) */
     MethodKind method_kind;
     TypeExpr *ret;
     Name name;
+    TypeParams type_params;
     Param *params;
     size_t param_count;
     Path effects;
@@ -252,6 +275,7 @@ typedef struct {
     bool is_pub;
     size_t offset;
     size_t length;
+    TypeParams type_params; /* STRUCT, CLASS, INTERFACE, ENUM */
     union {
         Path import;
         /* STRUCT, CLASS and INTERFACE (methods only) */

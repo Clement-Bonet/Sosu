@@ -106,6 +106,32 @@ static void test_casts(void) {
     expect_expr("x as i32?", "(as x i32?)");
 }
 
+/* Generics (spec §5.4): parameters, arguments in types and expressions, `<` still a comparison. */
+static void test_generics(void) {
+    expect_expr("a < b", "(< a b)");
+    expect_expr("x as i32 < y", "(< (as x i32) y)");
+    expect_expr("f(a < b, c > d)", "(call f (< a b) (> c d))");
+    expect_expr("f<i32>(x)", "(call f<i32> x)");
+    expect_expr("vec.new<str>(&arena)", "(call (. vec new<str>) (& arena))");
+    expect_expr("Pair<str, i32>{ first: \"x\", second: 1 }", "(lit Pair<str, i32> (first \"x\") (second 1))");
+    expect_expr("Tree<i32>.Leaf(3)", "(call (. Tree<i32> Leaf) 3)");
+    expect_expr("x as Vec<i32>*", "(as x Vec<i32>*)");
+    expect_expr("a >> b", "(>> a b)");
+    expect_module("struct Pair<A, B> {\n    A first;\n    B second;\n}\n",
+                  "(struct Pair<A, B>\n  (field A first)\n  (field B second))\n");
+    expect_module("enum Tree<T> {\n    Leaf(T value),\n    Node(Tree<T>* left, Tree<T>* right),\n}\n",
+                  "(enum Tree<T>\n  Leaf((T value))\n  Node((Tree<T>* left) (Tree<T>* right)))\n");
+    expect_module("T largest<T: Ordered + Hash, uses E>(T[] items) uses E {\n    return items[0];\n}\n",
+                  "(fn T largest<T: Ordered + Hash, uses E> ((T[] items)) (uses E)\n  (block\n    (return (index items 0))))\n");
+    expect_module("void f() {\n    Vec<Vec<i32>*>* v = make();\n    Map<str, Vec<i32>> m = make();\n}\n",
+                  "(fn void f ()\n  (block\n    (var Vec<Vec<i32>*>* v (call make))\n    (var Map<str, Vec<i32>> m (call make))))\n");
+    expect_module("class Vec<T> {\n    T[] items;\n}\n", "(class Vec<T>\n  (field T[] items))\n");
+    expect_module("export \"C\" f32 lib_dot(f32 a) {\n    return a;\n}\n",
+                  "(fn export f32 lib_dot ((f32 a))\n  (block\n    (return a)))\n");
+    expect_error("export \"Rust\" void f() { }", "E0218", 1, 8, 1);
+    expect_error("export \"C\" struct S { }", "E0218", 1, 12, 1);
+}
+
 static void test_postfix(void) {
     expect_expr("a.b.c(1, 2)[i]", "(index (call (. (. a b) c) 1 2) i)");
     expect_expr("*(p + 4)", "(* (+ p 4))");
@@ -887,6 +913,7 @@ int main(void) {
     test_ui_grids();
     test_precedence();
     test_casts();
+    test_generics();
     test_postfix();
     test_statements();
     test_declarations();

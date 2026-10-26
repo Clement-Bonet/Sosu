@@ -160,6 +160,7 @@ typedef enum {
 
 typedef struct {
     bool release; /* optimized C, no overflow checks or contracts by default */
+    int lib;      /* --lib: 1 a static library, 2 a shared one (spec §9.2); 0 a program */
     CodegenOptions checks;
 } BuildOptions;
 
@@ -291,6 +292,30 @@ static bool copy_files(const Links *links, const char *build_dir) {
     return true;
 }
 
+#ifdef _WIN32
+/* A .bat script that runs `commands` with MSVC, found like build.bat does when cl.exe is not
+   already on the PATH. */
+static char *msvc_script(const char *commands) {
+    return sosu_format(
+        "@echo off\r\n"
+        "where cl >nul 2>nul && goto :have_cl\r\n"
+        "set \"VSWHERE=%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\\vswhere.exe\"\r\n"
+        "if not exist \"%%VSWHERE%%\" goto :no_cl\r\n"
+        "for /f \"usebackq tokens=*\" %%%%i in (`\"%%VSWHERE%%\" -latest -products * -requires "
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set \"VSDIR=%%%%i\"\r\n"
+        "if not defined VSDIR goto :no_cl\r\n"
+        "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
+        "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul || goto :no_cl\r\n"
+        ":have_cl\r\n"
+        "%s"
+        "exit /b 0\r\n"
+        ":no_cl\r\n"
+        "echo sosuc: no C compiler found: install Visual Studio with the C++ tools, or set SOSU_CC 1>&2\r\n"
+        "exit /b 2\r\n",
+        commands);
+}
+#endif
+
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
 static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize,
                       const Links *links) {
@@ -312,24 +337,12 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             append(&link_args, "%s", link_args[0] ? " /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
                                                    : " /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup");
         }
-        char *script = sosu_format(
-            "@echo off\r\n"
-            "where cl >nul 2>nul && goto :have_cl\r\n"
-            "set \"VSWHERE=%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\\vswhere.exe\"\r\n"
-            "if not exist \"%%VSWHERE%%\" goto :no_cl\r\n"
-            "for /f \"usebackq tokens=*\" %%%%i in (`\"%%VSWHERE%%\" -latest -products * -requires "
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set \"VSDIR=%%%%i\"\r\n"
-            "if not defined VSDIR goto :no_cl\r\n"
-            "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
-            "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul || goto :no_cl\r\n"
-            ":have_cl\r\n"
+        char *commands = sosu_format(
             "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\"%s "
-            ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n"
-            "exit /b 0\r\n"
-            ":no_cl\r\n"
-            "echo sosuc: no C compiler found: install Visual Studio with the C++ tools, or set SOSU_CC 1>&2\r\n"
-            "exit /b 2\r\n",
+            ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n",
             optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, link_args, dir, dir);
+        char *script = msvc_script(commands);
+        free(commands);
         bool written = write_file(bat, script);
         char *native_bat = shell_path(bat);
         command = written ? sosu_format("\"%s\"", native_bat) : NULL;
@@ -365,6 +378,229 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     free(runtime);
     free(runtime_c);
     return status == 0;
+}
+
+/* ---- Libraries (spec §9.2) ---- */
+
+/* The files of a library of `name` in build/, by kind of library and system. */
+typedef struct {
+    char *library; /* the static library, or the shared one */
+    char *import;  /* MSVC: the import library of a DLL; NULL elsewhere */
+    char *runtime; /* a static library: the runtime, linked once by the host */
+} LibraryFiles;
+
+static LibraryFiles library_files(const char *build_dir, const char *name, bool shared, bool msvc) {
+    LibraryFiles files = {0};
+    char *file;
+    if (shared) {
+#if defined(_WIN32)
+        file = sosu_format("%s.dll", name);
+        if (msvc) {
+            char *import = sosu_format("%s.dll.lib", name);
+            files.import = path_join(build_dir, import);
+            free(import);
+        }
+#elif defined(__APPLE__)
+        file = sosu_format("lib%s.dylib", name);
+#else
+        file = sosu_format("lib%s.so", name);
+#endif
+    } else {
+        file = msvc ? sosu_format("%s.lib", name) : sosu_format("lib%s.a", name);
+        files.runtime = path_join(build_dir, msvc ? "sosu_rt.lib" : "libsosu_rt.a");
+    }
+    files.library = path_join(build_dir, file);
+    free(file);
+    return files;
+}
+
+static void free_library_files(LibraryFiles *files) {
+    free(files->library);
+    free(files->import);
+    free(files->runtime);
+}
+
+/* Compiles the generated C file of a library, and the runtime, into `files`. */
+static bool compile_library(const char *build_dir, const char *c_file, const char *name, const char *lib, bool optimize,
+                            bool shared, const Links *links, const LibraryFiles *files) {
+    char *runtime = path_join(lib, "runtime");
+    char *runtime_c = path_join(runtime, "sosu_rt.c");
+    const char *cc = getenv("SOSU_CC");
+    char *command = NULL;
+#ifdef _WIN32
+    if (!cc || !cc[0]) {
+        char *bat = path_join(build_dir, "compile.bat");
+        char *dir = shell_path(build_dir);
+        char *rt = shell_path(runtime);
+        char *rt_c = shell_path(runtime_c);
+        char *c = shell_path(c_file);
+        char *out = shell_path(files->library);
+        char *flags = sosu_format("/nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\"",
+                                  optimize ? "/O2" : "/Od", rt, dir, dir);
+        char *log = sosu_format(">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)", dir, dir);
+        char *commands;
+        if (shared) {
+            char *import = shell_path(files->import);
+            char *link_args = link_arguments(links, true);
+            if (!link_args[0]) append(&link_args, "%s", " /link");
+            append(&link_args, " /IMPLIB:\"%s\"", import);
+            commands = sosu_format("cl %s /LD /DSOSU_SHARED /Fe\"%s\" \"%s\" \"%s\"%s %s\r\n", flags, out, c, rt_c,
+                                   link_args, log);
+            free(import);
+            free(link_args);
+        } else {
+            char *runtime_lib = shell_path(files->runtime);
+            commands = sosu_format("cl %s /c \"%s\" \"%s\" %s\r\n"
+                                   "lib /nologo /OUT:\"%s\" \"%s\\%s.obj\" %s\r\n"
+                                   "lib /nologo /OUT:\"%s\" \"%s\\sosu_rt.obj\" %s\r\n",
+                                   flags, c, rt_c, log, out, dir, name, log, runtime_lib, dir, log);
+            free(runtime_lib);
+        }
+        char *script = msvc_script(commands);
+        if (write_file(bat, script)) {
+            char *native_bat = shell_path(bat);
+            command = sosu_format("\"%s\"", native_bat);
+            free(native_bat);
+        } else {
+            fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
+        }
+        free(script);
+        free(commands);
+        free(log);
+        free(flags);
+        free(out);
+        free(c);
+        free(rt_c);
+        free(rt);
+        free(dir);
+        free(bat);
+    } else
+#endif
+    {
+        const char *compiler = cc && cc[0] ? cc : "cc";
+        const char *level = optimize ? "-O2" : "-O0";
+        if (shared) {
+            char *link_args = link_arguments(links, false);
+#ifdef __APPLE__
+            const char *kind = "-dynamiclib";
+#else
+            const char *kind = "-shared";
+#endif
+            command = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC %s -fvisibility=hidden -DSOSU_SHARED -I\"%s\" \"%s\" \"%s\" "
+                                  "-o \"%s\"%s",
+                                  compiler, level, kind, runtime, c_file, runtime_c, files->library, link_args);
+            free(link_args);
+        } else {
+            char *object = sosu_format("%s/%s.o", build_dir, name);
+            char *rt_object = sosu_format("%s/sosu_rt.o", build_dir);
+            command = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
+                                  "\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
+                                  "ar rcs \"%s\" \"%s\" && ar rcs \"%s\" \"%s\"",
+                                  compiler, level, runtime, c_file, object, compiler, level, runtime, runtime_c, rt_object,
+                                  files->library, object, files->runtime, rt_object);
+            free(object);
+            free(rt_object);
+        }
+    }
+    int status = command ? shell_run(command) : 1;
+    free(command);
+    free(runtime);
+    free(runtime_c);
+    return status == 0;
+}
+
+/* The libraries a host must link with a static library: its [link] sections. */
+static bool write_link_list(const char *build_dir, const char *name, const Links *links) {
+    if (links->libs.count == 0 && links->paths.count == 0 && links->frameworks.count == 0) return true;
+    char *file = sosu_format("%s.links", name);
+    char *path = path_join(build_dir, file);
+    char *text = sosu_strdup("# what a host links with this static library (spec 9.2)\n");
+    for (size_t i = 0; i < links->paths.count; i++) append(&text, "path %s\n", links->paths.items[i]);
+    for (size_t i = 0; i < links->libs.count; i++) append(&text, "lib %s\n", links->libs.items[i]);
+    for (size_t i = 0; i < links->frameworks.count; i++) append(&text, "framework %s\n", links->frameworks.items[i]);
+    bool ok = write_file(path, text);
+    if (!ok) fprintf(stderr, "sosuc: cannot write `%s`\n", path);
+    free(text);
+    free(path);
+    free(file);
+    return ok;
+}
+
+/* `sosuc build --lib[=static|shared]`: the package (entry `src/lib.sosu`) as a C library and its
+   header, in build/. */
+static int command_build_library(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *options) {
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    char *header = NULL;
+    bool ok = program_load(&program, dir, lib);
+    if (ok) {
+        const char *module = program.units.items[0]->module;
+        size_t length = strlen(module);
+        if (length < 4 || strcmp(module + length - 4, ".lib") != 0) {
+            fprintf(stderr, "sosuc: `--lib` builds a library, whose entry is `src/lib.sosu`; this package has `src/main.sosu`\n");
+            ok = false;
+        }
+    }
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, CODEGEN_LIBRARY, options->checks);
+        ok = source != NULL;
+        if (ok) header = codegen_header(&sema, &program);
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+
+    int status = program.fatal || !program.units.count ? 2 : 1;
+    if (ok) {
+        const Package *root = program.packages.items[0];
+        char *build_dir = path_join(root->root, "build");
+        shell_make_dir(build_dir);
+        char *c_name = sosu_format("%s.c", root->name);
+        char *h_name = sosu_format("%s.h", root->name);
+        char *c_file = path_join(build_dir, c_name);
+        char *h_file = path_join(build_dir, h_name);
+        const char *cc = getenv("SOSU_CC");
+#ifdef _WIN32
+        bool msvc = !cc || !cc[0];
+#else
+        bool msvc = false;
+        (void)cc;
+#endif
+        bool shared = options->lib == 2;
+        LibraryFiles files = library_files(build_dir, root->name, shared, msvc);
+        Links links;
+        collect_links(&program, &links);
+        if (!write_file(c_file, source) || !write_file(h_file, header)) {
+            fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
+            status = 2;
+        } else if (!compile_library(build_dir, c_file, root->name, lib, options->release, shared, &links, &files)) {
+            fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
+            status = 2;
+        } else if ((!shared && !write_link_list(build_dir, root->name, &links)) || !copy_files(&links, build_dir)) {
+            status = 2;
+        } else {
+            printf("built %s", files.library);
+            if (files.import) printf(", %s", files.import);
+            if (files.runtime) printf(", %s", files.runtime);
+            printf(" and %s\n", h_file);
+            status = 0;
+        }
+        free_links(&links);
+        free_library_files(&files);
+        free(h_file);
+        free(c_file);
+        free(h_name);
+        free(c_name);
+        free(build_dir);
+    }
+    free(header);
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
 }
 
 static int command_build(const char *dir, const char *argv0, DiagFormat format, BuildMode mode, const BuildOptions *options) {
@@ -613,7 +849,7 @@ int main(int argc, char **argv) {
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
-    BuildOptions options = { false, { true, true, true } };
+    BuildOptions options = { false, 0, { true, true, true } };
     int checks = -1;    /* --checks: -1 when not given */
     int contracts = -1; /* --contracts */
     bool is_fmt = strcmp(command, "fmt") == 0;
@@ -631,6 +867,10 @@ int main(int argc, char **argv) {
             format = FORMAT_JSON;
         } else if (strcmp(argv[i], "--release") == 0) {
             options.release = true;
+        } else if (strcmp(argv[i], "--lib") == 0 || strcmp(argv[i], "--lib=static") == 0) {
+            options.lib = 1;
+        } else if (strcmp(argv[i], "--lib=shared") == 0) {
+            options.lib = 2;
         } else if (strcmp(argv[i], "--checks=on") == 0 || strcmp(argv[i], "--checks=off") == 0) {
             checks = argv[i][10] == 'n';
         } else if (strcmp(argv[i], "--contracts=check") == 0 || strcmp(argv[i], "--contracts=off") == 0) {
@@ -663,6 +903,11 @@ int main(int argc, char **argv) {
         }
         return command[0] == 'l' ? command_lex(path, format) : command_parse(path, format);
     }
+    if (options.lib && strcmp(command, "build") != 0) {
+        fprintf(stderr, "sosuc: `--lib` goes with `sosuc build`\n");
+        return 2;
+    }
+    if (strcmp(command, "build") == 0 && options.lib) return command_build_library(path ? path : ".", argv[0], format, &options);
     if (strcmp(command, "build") == 0) return command_build(path ? path : ".", argv[0], format, MODE_BUILD, &options);
     if (strcmp(command, "run") == 0) return command_build(path ? path : ".", argv[0], format, MODE_RUN, &options);
     if (strcmp(command, "test") == 0) return command_build(path ? path : ".", argv[0], format, MODE_TEST, &options);

@@ -42,9 +42,10 @@ static Type *check_expr(Body *b, Expr *e, Type *expected);
 static void check_assignable(Body *b, Expr *target);
 static void check_stmt(Body *b, Stmt *stmt);
 static void check_block(Body *b, Stmt *block);
+static Type *named_instance(Body *b, const Expr *named, Type *type, Type *expected);
 
 static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB",
-                                             "wrapping_add", "wrapping_sub", "wrapping_mul" };
+                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash" };
 
 /* ---- Helpers ---- */
 
@@ -73,7 +74,14 @@ static Type *builtin(Body *b, const char *name) { return type_builtin(&b->s->typ
 static Type *error_type(Body *b) { return b->s->types.error; }
 static Type *void_type(Body *b) { return b->s->types.void_; }
 static bool is_error(const Type *t) { return t->tag == T_ERROR; }
-static bool is_numeric(const Type *t) { return t->tag == T_INT || t->tag == T_FLOAT; }
+/* A type parameter allows what its constraints say (spec §5.4). */
+static bool has_constraint(const Type *t, uint32_t constraint) {
+    return t->tag == T_PARAM && (t->as.param.constraints & constraint);
+}
+static bool is_numeric(const Type *t) {
+    return t->tag == T_INT || t->tag == T_FLOAT || has_constraint(t, CONSTRAINT_NUMBER);
+}
+static bool is_integer(const Type *t) { return t->tag == T_INT || has_constraint(t, CONSTRAINT_INTEGER); }
 
 /* Type names for one message; freed by release_names. */
 typedef struct {
@@ -332,6 +340,11 @@ static Ref resolve_ref(Body *b, Expr *e, Type *expected) {
     case REF_MODULE:
         return member_of_module(b, outer.module, name);
     case REF_TYPE:
+        outer.type = named_instance(b, object, outer.type, expected);
+        if (is_error(outer.type)) {
+            ref.kind = REF_ERROR;
+            return ref;
+        }
         if (outer.type->tag == T_ENUM && find_variant(outer.type->as.info, name, &ref.variant)) {
             ref.kind = REF_VARIANT;
             ref.info = outer.type->as.info;
@@ -409,7 +422,14 @@ static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
         }
         return ref.local->type;
     case REF_FIELD: return ref.field->type;
-    case REF_FN: return ref.fn->type;
+    case REF_FN:
+        if (ref.fn->param_count || ref.fn->effect_param_count) {
+            Diagnostic *d = error_expr(b, "E0360", e, "`%.*s` is generic: it is called, not used as a value",
+                                       NAME_ARGS(ref.fn->decl->name));
+            diag_help(d, "wrap the call in a function of its own, with the types it needs (spec §5.4)");
+            return error_type(b);
+        }
+        return ref.fn->type;
     case REF_VARIANT: return variant_value(b, e, ref.info, ref.variant);
     case REF_ERROR: return error_type(b);
     case REF_METHOD: {
@@ -634,6 +654,17 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         check_expect(b, args[0], builtin(b, "bool"));
         return void_type(b);
     }
+    if (strcmp(name, "hash") == 0) {
+        Type *type = check_expr(b, args[0], NULL);
+        if (!is_error(type) && !(sema_constraints_of(type) & CONSTRAINT_HASH)) {
+            TypeNames n = {0};
+            Diagnostic *d = error_expr(b, "E0334", args[0], "`hash` needs a number, a `bool`, a `char`, a `str`, a pointer "
+                                                             "or an enum without data, found `%s`", tn(&n, type));
+            if (type->tag == T_PARAM) diag_help(d, "add the constraint `Hash`: `<%.*s: Hash>`", NAME_ARGS(type->name));
+            release_names(&n);
+        }
+        return builtin(b, "ui64");
+    }
     if (strcmp(name, "abs") == 0) {
         Type *type = check_expr(b, args[0], expected);
         bool ok = type->tag == T_FLOAT || (type->tag == T_INT && type->as.integer.is_signed) || is_error(type);
@@ -700,6 +731,251 @@ static bool is_print(const Expr *callee, Ref object) {
            name_is(callee->as.field.name, "print");
 }
 
+/* ---- Generics (spec §5.4) ---- */
+
+#define EFFECT_UNBOUND 0xFFFFFFFFu
+
+static bool is_nominal(const Type *t) {
+    return t->tag == T_STRUCT || t->tag == T_CLASS || t->tag == T_INTERFACE || t->tag == T_ENUM;
+}
+
+/* The generic a nominal type comes from (itself when it is not an instance), and its arguments
+   (its own parameters for the generic itself). */
+static TypeInfo *generic_of(const Type *t) { return t->as.info->generic ? t->as.info->generic : t->as.info; }
+
+static Type **args_of(const Type *t) { return t->as.info->generic ? t->type_args : t->as.info->params; }
+
+/* Binds the parameters of `fn` held by `pattern` so that it becomes `actual`. False if they
+   cannot match. A parameter of the function being checked (not of `fn`) is a type as any other. */
+static bool unify(FnInfo *fn, Type *pattern, Type *actual, Type **bound, unsigned *effects) {
+    if (is_error(pattern) || is_error(actual)) return true;
+    if (pattern->tag == T_PARAM) {
+        for (size_t i = 0; i < fn->param_count; i++) {
+            if (fn->params[i] != pattern) continue;
+            if (!bound[i]) bound[i] = actual;
+            return bound[i] == actual;
+        }
+        return pattern == actual;
+    }
+    if (pattern->tag != actual->tag) return false;
+    switch (pattern->tag) {
+    case T_POINTER: case T_OPTION: case T_SLICE:
+        return unify(fn, pattern->as.inner, actual->as.inner, bound, effects);
+    case T_ARRAY:
+        return pattern->as.array.size == actual->as.array.size &&
+               unify(fn, pattern->as.array.element, actual->as.array.element, bound, effects);
+    case T_RESULT:
+        return unify(fn, pattern->as.result.value, actual->as.result.value, bound, effects) &&
+               unify(fn, pattern->as.result.error, actual->as.result.error, bound, effects);
+    case T_FN: {
+        if (pattern->as.fn.param_count != actual->as.fn.param_count) return false;
+        for (size_t i = 0; i < pattern->as.fn.param_count; i++) {
+            if (!unify(fn, pattern->as.fn.params[i], actual->as.fn.params[i], bound, effects)) return false;
+        }
+        if (!unify(fn, pattern->as.fn.ret, actual->as.fn.ret, bound, effects)) return false;
+        unsigned own = pattern->as.fn.effects & ~EFFECT_PARAMS;
+        unsigned params = pattern->as.fn.effects & EFFECT_PARAMS;
+        if (!params || !fn->effect_param_count) return pattern->as.fn.effects == actual->as.fn.effects;
+        if (own & ~actual->as.fn.effects) return false;
+        unsigned rest = actual->as.fn.effects & ~own; /* what the first effect parameter stands for */
+        for (size_t k = 0; k < fn->effect_param_count; k++) {
+            if (!(params & (EFFECT_PARAM << k))) continue;
+            if (effects[k] == EFFECT_UNBOUND) effects[k] = rest;
+            return effects[k] == rest;
+        }
+        return true;
+    }
+    case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM: {
+        TypeInfo *generic = generic_of(pattern);
+        if (generic != generic_of(actual)) return false;
+        if (generic->param_count == 0) return pattern == actual;
+        Type **pa = args_of(pattern);
+        Type **aa = args_of(actual);
+        for (size_t i = 0; i < generic->param_count; i++) {
+            if (!unify(fn, pa[i], aa[i], bound, effects)) return false;
+        }
+        return true;
+    }
+    default:
+        return pattern == actual;
+    }
+}
+
+/* True if every parameter of `fn` in `type` is bound. */
+static bool all_bound(FnInfo *fn, const Type *type, Type **bound, const unsigned *effects) {
+    switch (type->tag) {
+    case T_PARAM:
+        for (size_t i = 0; i < fn->param_count; i++) {
+            if (fn->params[i] == type) return bound[i] != NULL;
+        }
+        return true;
+    case T_POINTER: case T_OPTION: case T_SLICE: return all_bound(fn, type->as.inner, bound, effects);
+    case T_ARRAY: return all_bound(fn, type->as.array.element, bound, effects);
+    case T_RESULT:
+        return all_bound(fn, type->as.result.value, bound, effects) && all_bound(fn, type->as.result.error, bound, effects);
+    case T_FN:
+        for (size_t k = 0; k < fn->effect_param_count; k++) {
+            if ((type->as.fn.effects & (EFFECT_PARAM << k)) && effects[k] == EFFECT_UNBOUND) return false;
+        }
+        for (size_t i = 0; i < type->as.fn.param_count; i++) {
+            if (!all_bound(fn, type->as.fn.params[i], bound, effects)) return false;
+        }
+        return all_bound(fn, type->as.fn.ret, bound, effects);
+    case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM: {
+        TypeInfo *generic = generic_of(type);
+        Type **args = args_of(type);
+        for (size_t i = 0; i < generic->param_count; i++) {
+            if (!all_bound(fn, args[i], bound, effects)) return false;
+        }
+        return true;
+    }
+    default:
+        return true;
+    }
+}
+
+/* An argument whose type comes from the type expected for it: checked once the parameters
+   it depends on are known. */
+static bool is_contextual(const Expr *e) {
+    if (is_untyped_literal(e) || e->kind == EXPR_ARRAY) return true;
+    if (e->kind == EXPR_NAME) return name_is(e->as.name, "none");
+    if (e->kind == EXPR_CALL && e->as.call.callee->kind == EXPR_NAME) {
+        Name name = e->as.call.callee->as.name;
+        return name_is(name, "ok") || name_is(name, "err");
+    }
+    return e->kind == EXPR_STRUCT_LIT && e->as.struct_lit.type->arg_count == 0;
+}
+
+static Type *bind(Body *b, FnInfo *fn, Type *type, Type **bound, const unsigned *effects) {
+    return sema_subst(b->s, type, fn->params, bound, fn->param_count, effects, fn->effect_param_count);
+}
+
+/* A call of a generic function: its type arguments are written, or inferred from its
+   arguments, then from the type expected for its result (spec §5.4). */
+static Type *call_generic(Body *b, Expr *e, FnInfo *fn, Name name, Type *expected) {
+    Expr *callee = e->as.call.callee;
+    Type *type = fn->type;
+    if (is_error(type)) {
+        check_args_loosely(b, e);
+        return type;
+    }
+    size_t n = fn->param_count;
+    size_t m = fn->effect_param_count;
+    Type **bound = arena_alloc(&b->s->arena, (n + 1) * sizeof *bound);
+    unsigned *effects = arena_alloc(&b->s->arena, (m + 1) * sizeof *effects);
+    for (size_t k = 0; k < m; k++) effects[k] = EFFECT_UNBOUND;
+    if (callee->type_arg_count) {
+        if (callee->type_arg_count != n) {
+            Diagnostic *d = error_expr(b, "E0361", callee, "`%.*s` takes %zu type argument%s, but %zu %s given",
+                                       NAME_ARGS(name), n, n == 1 ? "" : "s", callee->type_arg_count,
+                                       callee->type_arg_count == 1 ? "was" : "were");
+            diag_help(d, "give a type for each parameter, or leave them all out to infer them");
+            check_args_loosely(b, e);
+            return error_type(b);
+        }
+        for (size_t k = 0; k < n; k++) bound[k] = sema_resolve_type(b->s, b->unit, callee->type_args[k], POSITION_VALUE);
+    }
+    size_t count = e->as.call.arg_count;
+    if (count != type->as.fn.param_count) {
+        Diagnostic *d = error_expr(b, "E0336", callee, "`%.*s` takes %zu argument%s, but %zu %s given", NAME_ARGS(name),
+                                   type->as.fn.param_count, type->as.fn.param_count == 1 ? "" : "s", count,
+                                   count == 1 ? "was" : "were");
+        char *signature = type_to_string(type);
+        diag_help(d, "its signature is `%s`", signature);
+        free(signature);
+        check_args_loosely(b, e);
+        return error_type(b);
+    }
+    bool *checked = calloc(count + 1, sizeof *checked);
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < count; i++) {
+            if (checked[i]) continue;
+            Expr *arg = e->as.call.args[i];
+            Type *param = type->as.fn.params[i];
+            if (all_bound(fn, param, bound, effects)) {
+                check_expect(b, arg, bind(b, fn, param, bound, effects));
+                checked[i] = true;
+                continue;
+            }
+            if (pass == 0 && is_contextual(arg)) continue;
+            Type *found = check_expr(b, arg, NULL);
+            checked[i] = true;
+            if (!unify(fn, param, found, bound, effects)) report_mismatch(b, arg, bind(b, fn, param, bound, effects), found);
+        }
+        if (pass == 0 && expected && !is_error(expected)) unify(fn, type->as.fn.ret, expected, bound, effects);
+    }
+    free(checked);
+    bool ok = true;
+    for (size_t k = 0; k < n; k++) {
+        if (bound[k]) continue;
+        Diagnostic *d = error_expr(b, "E0360", callee, "the type `%.*s` of `%.*s` cannot be inferred here",
+                                   NAME_ARGS(fn->params[k]->name), NAME_ARGS(name));
+        diag_help(d, "write the type arguments: `%.*s<...>(...)` (spec §5.4)", NAME_ARGS(name));
+        bound[k] = error_type(b);
+        ok = false;
+    }
+    for (size_t k = 0; k < m; k++) {
+        if (effects[k] == EFFECT_UNBOUND) effects[k] = 0;
+    }
+    for (size_t k = 0; ok && k < n; k++) {
+        ok &= sema_check_type_arg(b->s, b->unit, callee->offset, callee->length, bound[k], fn->params[k], name);
+    }
+    for (size_t i = 0; i < count; i++) consume(b, e->as.call.args[i]);
+    Type *instance = bind(b, fn, type, bound, effects);
+    callee->type = instance;
+    callee->type_values = bound;
+    callee->type_value_count = n;
+    callee->effect_values = effects;
+    callee->effect_value_count = m;
+    if (!ok) return error_type(b);
+    char what[96];
+    snprintf(what, sizeof what, "calling `%.*s`", NAME_ARGS(name));
+    report_missing_effects(b, callee, instance->as.fn.effects, what);
+    if (fn->decl->is_unsafe && b->unsafe_depth == 0) {
+        Diagnostic *d = error_expr(b, "E0341", callee, "`%.*s` can only be called in an `unsafe` block", NAME_ARGS(name));
+        diag_help(d, "unsafe functions are called in `unsafe { ... }` (spec §7.7)");
+    }
+    return instance->as.fn.ret;
+}
+
+/* A type named in an expression (`Tree<i32>.Leaf(1)`, `arena.new(Vec<i32>, ...)`): a
+   generic needs its arguments, written after it or given by the type expected. */
+static Type *named_instance(Body *b, const Expr *named, Type *type, Type *expected) {
+    TypeInfo *info = is_nominal(type) ? type->as.info : NULL;
+    bool generic = info && info->param_count > 0 && !info->generic;
+    if (!generic) {
+        if (named->type_arg_count && !is_error(type)) {
+            TypeNames n = {0};
+            error_expr(b, "E0361", named, "`%s` is not generic: it takes no type arguments", tn(&n, type));
+            release_names(&n);
+            return error_type(b);
+        }
+        return type;
+    }
+    if (named->type_arg_count == 0) {
+        if (expected && is_nominal(expected) && generic_of(expected) == info) return expected;
+        TypeNames n = {0};
+        Diagnostic *d = error_expr(b, "E0361", named, "`%.*s` is generic: give its type arguments", NAME_ARGS(info->name));
+        diag_help(d, "write `%s`, with a type for each parameter", tn(&n, info->type));
+        release_names(&n);
+        return error_type(b);
+    }
+    if (named->type_arg_count != info->param_count) {
+        error_expr(b, "E0361", named, "`%.*s` takes %zu type argument%s, but %zu %s given", NAME_ARGS(info->name),
+                   info->param_count, info->param_count == 1 ? "" : "s", named->type_arg_count,
+                   named->type_arg_count == 1 ? "was" : "were");
+        return error_type(b);
+    }
+    Type **args = arena_alloc(&b->s->arena, info->param_count * sizeof *args);
+    bool ok = true;
+    for (size_t i = 0; i < info->param_count; i++) {
+        const TypeExpr *te = named->type_args[i];
+        args[i] = sema_resolve_type(b->s, b->unit, te, POSITION_VALUE);
+        ok &= sema_check_type_arg(b->s, b->unit, te->offset, te->length, args[i], info->params[i], info->name);
+    }
+    return ok ? sema_instance(b->s, info, args)->type : error_type(b);
+}
+
 /* ---- Arenas (spec §6) ---- */
 
 /* A type given as an argument: `arena.alloc(Point)`, `arena.new(shapes.Circle, ...)`.
@@ -718,13 +994,13 @@ static Type *type_argument(Body *b, Expr *arg) {
     if (count == 1) count = 2;
     else count = 1;
     Path path = { names, count };
-    return sema_resolve_named(b->s, b->unit, path, arg->offset, arg->length);
+    return named_instance(b, arg, sema_resolve_named(b->s, b->unit, path, arg->offset, arg->length), NULL);
 }
 
 /* True if all-zero memory is a valid value of `type` (no pointer, which is never null). */
 static bool zeroable(const Type *type) {
     switch (type->tag) {
-    case T_POINTER: case T_FN: case T_ARENA: case T_INTERFACE:
+    case T_POINTER: case T_FN: case T_ARENA: case T_INTERFACE: case T_PARAM: /* a parameter may be a pointer */
         return false;
     case T_ARRAY:
         return zeroable(type->as.array.element);
@@ -839,10 +1115,11 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
     if (type->tag == T_CLASS || type->tag == T_INTERFACE) {
         Diagnostic *d = error_expr(b, "E0354", args[0], "a class is created with `arena.new`, which calls its `init`");
         diag_help(d, "write `arena.new(%.*s, ...)`", NAME_ARGS(type->name));
-    } else if (!zeroable(type)) {
+    } else if (!zeroable(type) && b->unsafe_depth == 0) {
         Diagnostic *d = error_expr(b, "E0354", args[0], "`%.*s` gives zeroed memory, which is not a valid `%s`",
                                    NAME_ARGS(name), tn(&n, type));
-        diag_help(d, "it contains a pointer, which is never null: use a struct with `init` and `arena.new`, or `T*?`");
+        diag_help(d, "it contains a pointer, which is never null: use a struct with `init` and `arena.new`, or `T*?`; in "
+                     "`unsafe`, the memory may be given before it holds valid values (spec §5.4)");
     }
     release_names(&n);
     if (is_slice) return type_slice(&b->s->types, type);
@@ -859,8 +1136,9 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
         check_args_loosely(b, e);
         return error_type(b);
     }
-    if (base->tag == T_STRUCT || base->tag == T_CLASS || base->tag == T_INTERFACE) {
-        TypeInfo *info = base->as.info;
+    bool through_bound = base->tag == T_PARAM && base->as.param.bound; /* `<T: Drawable>`: `t.draw(r)` */
+    if (base->tag == T_STRUCT || base->tag == T_CLASS || base->tag == T_INTERFACE || through_bound) {
+        TypeInfo *info = through_bound ? base->as.param.bound : base->as.info;
         MethodInfo *method = find_method(info, name);
         if (method) {
             if (method->owner->unit != b->unit && !method->decl->is_pub && method->owner->type->tag != T_INTERFACE) {
@@ -945,6 +1223,10 @@ static Type *check_call(Body *b, Expr *e, Type *expected) {
     case REF_VALUE:
         return call_method(b, e, expected);
     case REF_FN:
+        if (ref.fn->param_count || ref.fn->effect_param_count) return call_generic(b, e, ref.fn, name, expected);
+        if (callee->type_arg_count) {
+            error_expr(b, "E0361", callee, "`%.*s` is not generic: it takes no type arguments", NAME_ARGS(name));
+        }
         callee->type = ref.fn->type;
         return call_with(b, e, ref.fn->type, name, ref.fn->decl->is_unsafe || ref.fn->is_extern);
     case REF_METHOD:
@@ -1054,12 +1336,26 @@ static Type *check_cast(Body *b, Expr *e) {
     return target;
 }
 
+/* The constraint that allows `op` on a type parameter. */
+static const char *constraint_for(TokenKind op) {
+    switch (op) {
+    case TOK_EQ_EQ: case TOK_BANG_EQ: return "Equal";
+    case TOK_LT: case TOK_LT_EQ: case TOK_GT: case TOK_GT_EQ: return "Ordered";
+    case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH: return "Number";
+    default: return "Integer";
+    }
+}
+
 static void report_operands(Body *b, Expr *e, const char *need, Type *lt, Type *rt) {
     if (is_error(lt) || is_error(rt)) return;
     TypeNames n = {0};
     Diagnostic *d = error_expr(b, "E0334", e, "`%s` needs %s, found `%s` and `%s`",
                                token_kind_spelling(e->as.binary.op), need, tn(&n, lt), tn(&n, rt));
     if (is_numeric(lt) && is_numeric(rt)) diag_help(d, "convert one side with `as` (spec §5.3)");
+    else if (lt->tag == T_PARAM || rt->tag == T_PARAM) {
+        diag_help(d, "a type parameter allows what its constraints say: add one, e.g. `<%.*s: %s>` (spec §5.4)",
+                  NAME_ARGS((lt->tag == T_PARAM ? lt : rt)->name), constraint_for(e->as.binary.op));
+    }
     release_names(&n);
 }
 
@@ -1072,6 +1368,8 @@ static bool is_comparable(const Type *type) {
         return true;
     case T_INT: case T_FLOAT: case T_BOOL: case T_CHAR: case T_STR: case T_POINTER: case T_ERROR:
         return true;
+    case T_PARAM:
+        return type->as.param.constraints & CONSTRAINT_EQUAL;
     default:
         return false;
     }
@@ -1095,7 +1393,7 @@ static Type *check_binary(Body *b, Expr *e, Type *expected) {
             return lt;
         }
         if (is_error(lt) || is_error(rt)) return is_error(lt) ? rt : lt;
-        if (op == TOK_PERCENT && (lt->tag != T_INT || lt != rt)) {
+        if (op == TOK_PERCENT && (!is_integer(lt) || lt != rt)) {
             report_operands(b, e, "two integers of the same type", lt, rt);
         } else if (!is_numeric(lt) || lt != rt) {
             report_operands(b, e, "two numbers of the same type", lt, rt);
@@ -1109,8 +1407,9 @@ static Type *check_binary(Body *b, Expr *e, Type *expected) {
         return bool_type;
     case TOK_LT: case TOK_LT_EQ: case TOK_GT: case TOK_GT_EQ:
         check_pair(b, left, right, NULL, &lt, &rt);
-        if (!is_error(lt) && !is_error(rt) && (lt != rt || !(is_numeric(lt) || lt->tag == T_CHAR))) {
-            report_operands(b, e, "two numbers (or characters) of the same type", lt, rt);
+        bool ordered = is_numeric(lt) || lt->tag == T_CHAR || lt->tag == T_STR || has_constraint(lt, CONSTRAINT_ORDERED);
+        if (!is_error(lt) && !is_error(rt) && (lt != rt || !ordered)) {
+            report_operands(b, e, "two numbers, characters or texts of the same type", lt, rt);
         }
         return bool_type;
     case TOK_AMP_AMP: case TOK_PIPE_PIPE:
@@ -1119,14 +1418,14 @@ static Type *check_binary(Body *b, Expr *e, Type *expected) {
         return bool_type;
     case TOK_AMP: case TOK_PIPE: case TOK_CARET:
         check_pair(b, left, right, expected, &lt, &rt);
-        if (!is_error(lt) && !is_error(rt) && (lt->tag != T_INT || lt != rt)) {
+        if (!is_error(lt) && !is_error(rt) && (!is_integer(lt) || lt != rt)) {
             report_operands(b, e, "two integers of the same type", lt, rt);
         }
         return lt;
     case TOK_SHL: case TOK_SHR:
         lt = check_expr(b, left, expected);
         rt = check_expr(b, right, NULL);
-        if (!is_error(lt) && !is_error(rt) && (lt->tag != T_INT || rt->tag != T_INT)) {
+        if (!is_error(lt) && !is_error(rt) && (!is_integer(lt) || !is_integer(rt))) {
             report_operands(b, e, "integers", lt, rt);
         }
         return lt;
@@ -1157,6 +1456,9 @@ static Type *check_unary(Body *b, Expr *e, Type *expected) {
         if (!is_error(type) && !is_signed) {
             Diagnostic *d = error_expr(b, "E0334", e, "`-` needs a signed integer or a signed float, found `%s`", tn(&n, type));
             if (type->tag == T_FLOAT) diag_help(d, "an unsigned float is never negative: convert it first, `x as f64`");
+            else if (type->tag == T_PARAM) {
+                diag_help(d, "a parameter may stand for an unsigned type: write `(0 as %.*s) - x`", NAME_ARGS(type->name));
+            }
         }
         break;
     case TOK_BANG:
@@ -1164,7 +1466,7 @@ static Type *check_unary(Body *b, Expr *e, Type *expected) {
         break;
     case TOK_TILDE:
         type = check_expr(b, operand, expected);
-        if (!is_error(type) && type->tag != T_INT) error_expr(b, "E0334", e, "`~` needs an integer, found `%s`", tn(&n, type));
+        if (!is_error(type) && !is_integer(type)) error_expr(b, "E0334", e, "`~` needs an integer, found `%s`", tn(&n, type));
         break;
     case TOK_AMP:
         type = check_expr(b, operand, NULL);
@@ -1273,7 +1575,7 @@ static Type *check_index(Body *b, Expr *e) {
     Type *base = object->tag == T_POINTER ? object->as.inner : object;
     Type *index = check_expr(b, e->as.index.index, builtin(b, "usize"));
     TypeNames n = {0};
-    if (!is_error(index) && index->tag != T_INT) {
+    if (!is_error(index) && !is_integer(index)) {
         error_expr(b, "E0334", e->as.index.index, "an index must be an integer, not `%s`", tn(&n, index));
     }
     Type *result = error_type(b);
@@ -1332,9 +1634,17 @@ static Type *check_array(Body *b, Expr *e, Type *expected) {
     return type_array(&b->s->types, element, size);
 }
 
-static Type *check_struct_literal(Body *b, Expr *e) {
+static Type *check_struct_literal(Body *b, Expr *e, Type *expected) {
     const TypeExpr *te = e->as.struct_lit.type;
     Type *type = sema_resolve_named(b->s, b->unit, te->as.name, te->offset, te->length);
+    if (type->tag == T_STRUCT && type->as.info->param_count && !type->as.info->generic) {
+        /* `Pair<A, B>{ ... }`, or `Pair{ ... }` where a `Pair<A, B>` is expected (spec §5.4) */
+        if (te->arg_count) type = sema_resolve_type(b->s, b->unit, te, POSITION_VALUE);
+        else if (expected && is_nominal(expected) && generic_of(expected) == type->as.info) type = expected;
+        else type = sema_resolve_type(b->s, b->unit, te, POSITION_VALUE); /* reports the missing arguments */
+    } else if (te->arg_count) {
+        type = sema_resolve_type(b->s, b->unit, te, POSITION_VALUE);
+    }
     size_t count = e->as.struct_lit.field_count;
     FieldInit *inits = e->as.struct_lit.fields;
     if (type->tag != T_STRUCT) {
@@ -1577,7 +1887,7 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
     case EXPR_FIELD:
         return check_field(b, e, expected);
     case EXPR_STRUCT_LIT:
-        return check_struct_literal(b, e);
+        return check_struct_literal(b, e, expected);
     case EXPR_MATCH:
         return check_match(b, e, expected, false);
     case EXPR_ARRAY:
@@ -1702,7 +2012,7 @@ static void check_assign(Body *b, Stmt *stmt) {
     }
     if (op == TOK_SHL_EQ || op == TOK_SHR_EQ) {
         Type *vt = check_expr(b, value, NULL);
-        if (!is_error(tt) && !is_error(vt) && (tt->tag != T_INT || vt->tag != T_INT)) {
+        if (!is_error(tt) && !is_error(vt) && (!is_integer(tt) || !is_integer(vt))) {
             TypeNames n = {0};
             error_expr(b, "E0334", value, "`%s` needs integers, found `%s` and `%s`", token_kind_spelling(op), tn(&n, tt),
                        tn(&n, vt));
@@ -1718,7 +2028,7 @@ static void check_assign(Body *b, Stmt *stmt) {
         if (b->unsafe_depth == 0) error_expr(b, "E0341", value, "pointer arithmetic is only allowed in an `unsafe` block");
         return;
     }
-    bool ok = tt == vt && (bitwise ? tt->tag == T_INT : is_numeric(tt));
+    bool ok = tt == vt && (bitwise ? is_integer(tt) : is_numeric(tt));
     if (!ok) {
         TypeNames n = {0};
         error_expr(b, "E0334", value, "`%s` needs %s, found `%s` and `%s`", token_kind_spelling(op),
@@ -1838,7 +2148,7 @@ static void check_for_in(Body *b, Stmt *stmt) {
         Type *lt, *rt;
         check_pair(b, iterable->as.range.start, iterable->as.range.end, declared, &lt, &rt);
         iterable->type = lt;
-        if (!is_error(lt) && !is_error(rt) && (lt->tag != T_INT || lt != rt)) {
+        if (!is_error(lt) && !is_error(rt) && (!is_integer(lt) || lt != rt)) {
             TypeNames n = {0};
             error_expr(b, "E0352", iterable, "a range needs two integers of the same type, found `%s` and `%s`", tn(&n, lt),
                        tn(&n, rt));
@@ -2016,13 +2326,43 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
     free(b.locals.items);
 }
 
+/* ---- Instances, checked again before they are generated (spec §5.4) ---- */
+
+void sema_check_instance_fn(Sema *s, FnInfo *fn, Type **args, const unsigned *effects) {
+    const TypeEnv *saved = s->env;
+    s->env = sema_fn_env(s, fn, args, effects);
+    Type *type = sema_subst(s, fn->type, fn->params, args, fn->param_count, effects, fn->effect_param_count);
+    check_function(s, fn->unit, fn->decl, NULL, type);
+    s->env = saved;
+}
+
+void sema_check_instance_method(Sema *s, TypeInfo *instance, MethodInfo *method) {
+    const TypeEnv *saved = s->env;
+    s->env = sema_info_env(s, instance->generic, instance->type->type_args);
+    check_function(s, instance->unit, method->decl, instance, method->type);
+    s->env = saved;
+}
+
+void sema_check_instance_field(Sema *s, TypeInfo *instance, const FieldInfo *field) {
+    const TypeEnv *saved = s->env;
+    s->env = sema_info_env(s, instance->generic, instance->type->type_args);
+    Body b;
+    init_body(&b, s, instance->unit, NULL, instance->name, s->types.void_, 0);
+    check_expect(&b, field->decl->init, field->type);
+    free(b.locals.items);
+    s->env = saved;
+}
+
 void sema_check_bodies(Sema *s) {
     for (size_t i = 0; i < s->fns.count; i++) {
         FnInfo *fn = s->fns.items[i];
+        s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;
         if (!fn->is_extern) check_function(s, fn->unit, fn->decl, NULL, fn->type);
+        s->env = NULL;
     }
     for (size_t i = 0; i < s->type_infos.count; i++) {
         TypeInfo *info = s->type_infos.items[i];
+        s->env = info->param_count ? sema_info_env(s, info, info->params) : NULL;
         for (size_t j = 0; j < info->field_count; j++) {
             const FieldInfo *field = &info->fields[j];
             if (!field->decl->init) continue;
@@ -2034,6 +2374,7 @@ void sema_check_bodies(Sema *s) {
         for (size_t j = 0; j < info->method_count; j++) {
             check_function(s, info->unit, info->methods[j].decl, info, info->methods[j].type);
         }
+        s->env = NULL;
     }
     for (size_t i = 0; i < s->program->units.count; i++) {
         Unit *unit = s->program->units.items[i];

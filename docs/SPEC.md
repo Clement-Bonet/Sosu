@@ -16,7 +16,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 1. No hidden cost: no implicit allocation or copy.
 2. Value types (`struct`) are the foundation; class instances live in arenas (see §5.2).
 3. Immutable by default (`mut` to modify).
-4. Syntax that is simple to parse (no generics in v0).
+4. Syntax that is simple to parse (generics with `<T>`, which cannot be misread since comparisons do not chain, §5.4).
 5. The whole language is in English: keywords, standard library, std identifiers, compiler messages.
 6. Symbols inherited from C/C++, with their inconsistencies fixed (see §5.1).
 7. Local readability: a fragment of code can be understood without knowing the whole project (no implicit conversion, no hidden control flow, no undefined behavior).
@@ -53,13 +53,14 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 |---|---|
 | Integers | `i8 i16 i32 i64 ui8 ui16 ui32 ui64 isize usize` |
 | Floats | `f32 f64`, and the unsigned floats `uf32 uf64` |
+| Type parameter | `T` of a generic declaration (§5.4) |
 | Others | `bool char void` |
 | String | `str` (valid UTF-8, pointer + length, not owned) |
 | Pointer | `T*` (never null; possibly absent pointer: `T*?`) |
 | Option | `T?` (values `some(x)` or `none`) |
 | Result | `T!E` (values `ok(x)` or `err(e)`) |
 | Array | `T[N]` (fixed size), `T[]` (view: pointer + length); `x[a..b]` is the view of the elements `a` to `b - 1` of an array or a view |
-| User-defined | `struct`, `enum` (sum types, see §7.1) |
+| User-defined | `struct`, `enum` (sum types, see §7.1); generic: `Pair<A, B>` (§5.4) |
 
 Conversions: always explicit with `as` (`x as f32`).
 
@@ -105,7 +106,7 @@ i32 main() uses io {
 ```
 
 Parsing note: a statement starting with `Ident Ident` is a declaration, otherwise an expression
-(enough as long as there are no generics). More precisely, a statement is a declaration when it
+(the type read with its arguments, `Pair<str, i32> p`, §5.4). More precisely, a statement is a declaration when it
 starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `ui8[4] buf`, `i32!E r`).
 
 Every variable receives its value where it is declared: `i32 x;` is an error. There are no global
@@ -213,7 +214,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 ### 5.3 Names, values and typing rules
 
 - **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
-- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet). They are part of the compiler, since they work for several types and Sosu v0 has no generics.
+- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet), and `hash(x) -> ui64` (§5.4). They are part of the compiler, since they work for several types and existed before generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: ui8`, `1` is a `ui8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
@@ -228,9 +229,124 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`.
 - **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `ui8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as ui8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
 - **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`. It ends the line. A float always prints with a dot (`25.0`).
-- **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`.
+- **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`. **`<`**, `<=`, `>` and `>=` compare numbers, `char` and `str` (byte by byte, which is the order of the code points in UTF-8).
 - **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as ui8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
 - **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only.
+
+### 5.4 Generics (step 10)
+
+Status: available. One branch, in batches: generic functions and structs, their checking and their monomorphization; generic enums and classes; the constraints; the containers `Vec` and `HashMap` of `std`; effects as parameters; then the tooling (formatter, language server, diagnostics). What differs from the design is said at the end.
+
+```sosu
+import std.io;
+import std.vec;
+
+// a generic function: its type parameters after the name, inferred at the call
+T largest<T: Ordered>(T[] items) requires items.len > 0 {
+    mut T best = items[0];
+    for (T x in items) {
+        if (x > best) {
+            best = x;
+        }
+    }
+    return best;
+}
+
+// a generic struct, and an enum
+pub struct Pair<A, B> {
+    pub A first;
+    pub B second;
+}
+
+pub enum Tree<T> {
+    Leaf(T value),
+    Node(Tree<T>* left, Tree<T>* right),
+}
+
+i32 main() uses io {
+    mut i32[3] scores = [3, 9, 4];
+    i32 top = largest(scores[0..3]);                 // T = i32, from the argument
+    Pair<str, i32> entry = Pair{ first: "x", second: 1 };  // the arguments, from the expected type
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    vec.Vec<str>* names = vec.new(&arena);           // T = str, from the expected type
+    names.push("Ada");
+    io.print("{} {} {}", top, entry.first, names.len());
+    return 0;
+}
+```
+
+#### Declarations and syntax
+
+- Type parameters follow the name of a function, a `struct`, an `enum` or a `class`: `<T>`, `<K, V>`, each with its constraints after a colon (`<T: Ordered>`, `<K: Hash + Equal, V>`). A generic type is written with its arguments: `Pair<str, i32>`, `Vec<Tree<i32>*>*`.
+- `<` after a name is a list of types, never a comparison, wherever the list is followed by `{`, `(`, `.`, a name, or the end of an argument (`,`, `)`: `arena.new(Vec<i32>, a)`): `Pair<i32, str>{ ... }`, `largest<i32>(xs)`, `Vec<i32> v`. The two readings cannot both be valid, since comparisons do not chain (§5.1): `a < b > c` is already an error. The parsing note of §5 becomes: a statement is a declaration when it starts with a type followed by a name, the type being read with its arguments.
+- The arguments of a generic function are inferred from its arguments, then from the type expected for its result (`vec.Vec<str>* names = vec.new(&arena)`); when neither says, they are written: `vec.new<str>(&arena)`. A generic type is always written with its arguments, except in a literal whose expected type is known.
+- The methods of a generic type use its parameters (`void push(T value)`); a method has no parameters of its own in this step.
+
+#### What a type parameter can be
+
+- A type argument is a value type: a number, `bool`, `char`, `str`, a pointer (to a class too: `Vec<Node*>`), a struct, an enum, an option, a result, an array or a view. A class is not a value: `Vec<Node>` is an error that proposes `Vec<Node*>`.
+- In this step, an argument cannot own a resource (an `Arena`, §6): every `T` is copied by value, as a plain struct, so that generic code needs no moves. `Vec<Arena>` is an error.
+
+#### Constraints and checking
+
+- A generic body is checked once, against its constraints, not for each use: an operation on a `T` is allowed only if its constraints allow it, and an error is reported in the generic code, where it is, never inside an instance. A use is checked against the constraints only.
+- Without constraint, a `T` is assigned, passed, returned, stored and pointed to (`T*`), nothing else.
+- Built-in constraints, satisfied by the types listed:
+  - `Equal`: `==` and `!=` (numbers, `bool`, `char`, `str`, pointers, enums without data);
+  - `Ordered`: `Equal`, and `<`, `<=`, `>`, `>=` (numbers, `char`, `str`);
+  - `Number`: `Ordered`, and `+`, `-`, `*`, `/`, `min`, `max`, the conversions with `as` from and to the other numbers (`1 as T`: a literal is never a `T` by itself), and `io.print` (the integers and the floats). Not `-x` nor `abs`, since a `T` may be unsigned: write `(0 as T) - x`;
+  - `Integer`: `Number`, and `%`, the bitwise operators and the shifts (the integers);
+  - `Hash`: `Equal`, and `hash(x) -> ui64`, a built-in function (numbers, `bool`, `char`, `str`, pointers, enums without data).
+- An interface as a constraint: `<T: Drawable>` takes a pointer to a class that implements it (`T` is `Button*`), and `t.draw(r)` is a direct call in each instance, not a virtual one.
+- Several constraints are joined by `+`.
+
+#### What it becomes
+
+- Monomorphization: each set of arguments used gives its own C code (`Pair<str, i32>` becomes `T_main__Pair__str__i32`, `largest<i32>` becomes `F_main__largest__i32`), once per program even if several modules use it. No boxing, no table of functions: a generic is as fast as the code written by hand.
+- A generic declared in a package and used in another is generated in the program that uses it.
+- Each instance is checked again with its arguments just before it is generated, so that its expressions have the types of the instance; the constraints make sure that this check finds nothing new.
+- The diagnostics name the types as they are written: `Pair<str, i32>`.
+
+#### Generic enums and classes
+
+- `enum Tree<T> { Leaf(T value), Node(Tree<T>* left, Tree<T>* right) }`: the variants use the parameters; a variant is written with or without the name of the enum, as today (`Leaf(3)`, `Tree<i32>.Leaf(3)`).
+- `class Vec<T>`: a generic class is created by `arena.new(Vec<i32>, args)` and handled through a pointer, as any class. In this step, a generic class has no parent class and no `virtual` method, and an interface is not generic.
+
+#### Containers: `std.vec` and `std.map`
+
+- `vec.Vec<T>`, a class: its elements in the arena given at its creation, which it grows into (twice as many each time; the old elements stay in the arena until it is freed, as everything allocated there). `vec.new(arena)`; `push(x)`, `pop() -> T?`, `get(i) -> T?`, `at(i) -> T*` (stops out of range), `set(i, x)`, `insert(i, x)`, `remove(i) -> T`, `len()`, `clear()`, `items() -> T[]` (a view of its elements, for `for (T x in v.items())`, valid until the next push).
+- `map.HashMap<K: Hash, V>`, a class: open addressing in the arena given at its creation. `map.new(arena)`; `put(k, v)`, `get(k) -> V?`, `at(k) -> V*?`, `has(k)`, `remove(k) -> V?` (the keys after it move back, without tombstones), `len()`, `clear()`, and the iteration by `keys(arena) -> K[]` and `values(arena) -> V[]` (copies in the arena given, in the same order). Three quarters full, it moves to twice as many slots.
+- `NumberField` stays bound to an `i64` (§10.9): the decision of §10.9 does not change.
+
+#### Effects as parameters
+
+- A function can take an effect as a parameter, written `uses E` in the list (`<T, uses E>`), and give it to a function type and to its own `uses`: `void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E`. Called with a function that uses `io`, `each` uses `io` there; with a function without effects, `each` has none. This closes the limitation of §7.4.
+
+#### Tooling
+
+- `sosuc fmt` prints the parameters and the arguments without spaces inside the brackets, a space after each comma: `Pair<str, i32>`, `<K: Hash + Equal, V>`.
+- The language server shows a generic with its constraints, on hover; on a call, what its parameters are there (``here: `T` is `i32` ``); a method or a field of an instance names it with its arguments (``method of `Pair<str, i32>` ``).
+
+#### Tests
+
+- The parser: the parameters and their constraints, the arguments in types and in expressions (`f<i32>(x)`, `Pair<A, B>{ ... }`), and that `a < b` stays a comparison.
+- Sema: a body checked against its constraints (`x > y` without `Ordered` is an error in the generic code), the inference of arguments from the arguments and from the expected type, an argument that does not satisfy a constraint, a class or a resource as an argument, an effect given as a parameter.
+- `tests/programs`: instances of functions, structs, enums and classes with several arguments, generics of another package; `Vec` and `HashMap` of numbers, of texts, of pointers, and of 100 000 elements.
+- `examples`: one example rewritten with `Vec` where it keeps fixed arrays today.
+
+#### Decisions, and what differs from the design
+
+- `<T>`, not `[T]`: `[T]` would mix with arrays `T[N]` and indexing, and `<` cannot be misread since comparisons do not chain.
+- A generic body is checked once, against its constraints, as in C# and Rust.
+- No resource as an argument in this step (`Vec<Arena>`, a struct holding a `LongText`): the containers hold plain values and pointers.
+- `Vec` and `HashMap` are classes that grow in an arena given to them: no hidden allocation, they are held by pointer anywhere and nested (`Vec<Vec<i32>*>*`) without moves.
+- Methods with their own parameters (`map<U>(...)`) and generic interfaces (`Iterator<T>`) come later, after lambdas.
+- A variant has named fields, as every variant (`Leaf(T value)`), and a view is passed where a slice is expected (`largest(scores[0..3])`): the example of the design had written them otherwise.
+- `Number` has no `abs` and no `-x` (a `T` may be unsigned); `Ordered` also orders texts, and `<` on `str` is available outside generics too (byte by byte, §5.3).
+- `keys` and `values` of a `HashMap` take the arena of their copy.
+- In an `unsafe` block, `alloc`, `try_alloc` and `alloc_slice` give memory even for a type that zeroed memory does not make valid (a pointer, a type parameter): `Vec` and `HashMap` are written so, and read only what they wrote (§6).
+- A function type with effects gets a C name of its own (`T_F1i32voidE1`), so that two types differing only by their effects are two C types.
 
 ## 6. Memory
 
@@ -247,7 +363,7 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - `alloc` stops the program with a message when memory runs out; `try_alloc` returns `T*?` to handle that case yourself.
 - `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
 - The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
-- `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only.
+- `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only. In an `unsafe` block, `alloc`, `try_alloc` and `alloc_slice` accept any type that is not a class: the memory is zeroed, and the program writes a valid value in it before reading it (as `std.vec` does, §5.4).
 - An `Arena` owns its blocks: it is moved, not copied (below).
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
@@ -343,7 +459,7 @@ Rules:
 - They are part of the function type (`fn(i32) -> i32 uses io`). An overriding method (`override`) cannot add an effect to the method it overrides.
 - `extern "C"` functions declare their effects by hand; `unsafe` does not bypass effects.
 - `test` blocks may use every effect.
-- Known limitation: no effect polymorphism in v0. A higher-order library function (`map`, for example) only accepts callbacks without effects; generics (v1) will make it possible to abstract over them.
+- A higher-order function abstracts over the effects of its callbacks with an effect parameter: `void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E` (§5.4).
 
 ```sosu
 void log(str msg) uses io { ... }
@@ -406,7 +522,7 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 | `std` (OS layer) | files, input / output, `print`, time, environment, processes, `std.app` (application data, cache and document folders, mobile sandbox included), randomness |
 | Packages | `platform`, `render`, `ui`, networking, HTTP, JSON, regex, audio, 2D graphics, cryptography, C bindings |
 
-- Without generics, `Vec<T>` and `HashMap<K, V>` cannot be written in Sosu: v0 is limited to slices and arenas; containers arrive with generics (v1, monomorphized).
+- The containers are written in Sosu with generics: `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (§5.4).
 - Modules and packages: see §8.1.
 
 ### 8.0 The standard library in v0
@@ -415,6 +531,7 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 
 - `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> ui8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
 - `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`.
+- `std.vec` and `std.map`: `Vec<T>` and `HashMap<K: Hash, V>`, which grow in the arena given to them (§5.4).
 - `std.random`: `random.Rng`, a generator holding its state (SplitMix64; not for cryptography): `next()` (64 bits), `below(bound)`, `between(low, high)`, `unit()` (a float in [0, 1)). `random.seeded(seed)` gives the same numbers for the same seed, without effect; `random.from_system()` seeds it differently on each run, with the effect `random`.
 - `core.prelude`: `Utf8Error` (§5.3).
 
@@ -493,9 +610,9 @@ frameworks = ["Cocoa"]
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
 
-### 9.2 Using Sosu from other languages (planned)
+### 9.2 Using Sosu from other languages
 
-Status: design, not implemented yet. The grammar of §12 will gain `export` when it is.
+Status: available: `export "C"`, `sosuc build --lib` and `--lib=shared`, the header and the guard, tested by a C host (`tests/programs/library`). Mobile (§11.2) comes next, from the same output. What differs from the design is said at the end.
 
 A library written in Sosu is offered to other languages through the C ABI, which they all know how to call: C and C++ directly, C# with P/Invoke, Java with the FFM API (or JNI), Python with `ctypes` or `cffi`, Rust, Go, Swift. `sosuc` produces a C library and its header; each language uses its own tools on them. The compiler contains nothing specific to C#, Java or any other language.
 
@@ -522,30 +639,32 @@ Exported functions:
 - `export "C"` marks a function of the top level that the library offers. Its C name is its Sosu name, unchanged: the author chooses it, usually prefixed with the name of the library, since C has a single namespace. Two exports with the same name are an error; a C keyword or a name starting with `sosu_` is refused.
 - Methods are not exported: a function takes the object instead (`export "C" void doc_close(Doc* d)`).
 - Types allowed in the signature of an export, whose C form the header gives:
-  - integers, floats and `bool` (`int32_t`, `float`, `bool`...), `char` (`uint32_t`, a Unicode scalar value);
+  - integers, floats and `bool` (`int32_t`, `float`, `bool`...; `usize` is `uint64_t`), `char` (`uint32_t`, a Unicode scalar value);
   - `struct`s whose fields are all allowed (C layout, §9), and pointers to the allowed types;
-  - `str` (`sosu_str`: `const uint8_t *ptr; size_t len;`, UTF-8, not terminated by a NUL) and `T[]` (`ptr` and `len`);
+  - `str` (`sosu_str`: `const uint8_t *ptr; size_t len;`, UTF-8, not terminated by a NUL) and `T[]` (`sosu_slice_<T>`: `T *ptr; size_t len;`, e.g. `sosu_slice_int64_t`); both are defined under a guard, so that the headers of two libraries can be included together;
   - a pointer to a class, as an opaque pointer (`typedef struct geometry_Shape geometry_Shape;`): the host only passes it back to exported functions;
-  - function types made of allowed types, for callbacks into the host.
-- Not allowed in v0: `T?`, `T!E`, `enum`s (with or without data), `Arena` by value, interfaces. An export translates them (a `bool` result and an out pointer, an error code...).
+  - function types made of allowed types, for callbacks into the host. The header names them `<package>_fn1`, `<package>_fn2`...
+- `enum`s without data, as `typedef struct <package>_<Enum> { uint32_t tag; } <package>_<Enum>;` and the constants of their variants (`geometry_Mode_Add = 0`...), in the order of the declaration.
+- Not allowed in v0 (E0366): `T?`, `T!E`, `enum`s with data, `Arena` by value, interfaces, an array by value (a view `T[]` is passed instead; arrays stay allowed in the fields of a struct), generics and their instances. An export translates them (a `bool` result and an out pointer, an error code...).
 - Effects and contracts are kept: an export can have any `uses` clause (the host is outside the effect system, as C is), and its `requires` are checked on entry, like any call from the host.
 
 Building:
 
-- `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/<name>.a`, or `.lib` with MSVC); `--lib=shared` into a shared one (`.so`, `.dll` with its import library, `.dylib`). Both come with `build/<name>.h`.
+- `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/lib<name>.a`, or `build/<name>.lib` with MSVC), and the runtime into a library of its own (`build/libsosu_rt.a`, `build/sosu_rt.lib`) that the host links once, however many Sosu libraries it uses; `--lib=shared` into a shared one with the runtime inside (`lib<name>.so`, `lib<name>.dylib`, or `<name>.dll` with its import library `<name>.dll.lib`). Both come with `build/<name>.h`.
 - The header is plain C99 (`stdint.h`, `stdbool.h`, `stddef.h`), usable from C++ (`extern "C"` guards). It declares the exports, and the types they use under the name `<package>_<Type>`. The `#line` directives stay in the C code of the library: a debugger shows the `.sosu` files.
 - The runtime (`sosu_rt.c`) is compiled into the library. In a shared library, its symbols, and those of the generated code, are hidden: only the exports are visible.
-- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list next to it, since the host links them.
+- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list in `build/<name>.links` (`lib`, `path` and `framework` lines), since the host links them.
 - Mobile (§11.2) uses the same output: the Android activity loads a shared library, the Xcode project links a static one.
 
 Run-time errors:
 
 - In a program, a run-time error (overflow, index out of bounds, failed contract) stops it with the code 101. A library must not stop the process of its host: each export runs under a guard, as `sosuc test` already does for each test. After an error, the export returns a zero value, and `<package>_error()` gives the message, or NULL if the last call succeeded. The message is kept per thread.
-- After an error, what the failed call was building is left as it is, and its `defer`s did not run: the host should discard the objects that call used.
+- After an error, what the failed call was building is left as it is, and its `defer`s did not run: the host should discard the objects that call used. The message names the place in the `.sosu` file: `src/lib.sosu:55:14: requires failed: x % 2 == 0`.
+- The guard is `setjmp`; a run-time error jumps back to the export that was called, and from a callback of the host into another export, to the innermost one. A test of `sosuc test` runs under the same guard.
 
 Memory and threads:
 
-- What Sosu allocates lives in its arenas, and is freed by Sosu, never by the host. A library offers pairs of functions: `doc_open` creates an object that owns its arena, `doc_close` frees it. A `str` or a `T[]` returned to the host stays valid until the arena that holds it is freed.
+- What Sosu allocates lives in its arenas, and is freed by Sosu, never by the host. A library offers pairs of functions: `doc_open` creates an object that owns its arena, `doc_close` frees it. The object may lie in the arena it owns: `doc_open` creates the arena, the object in it (`arena.new(Doc, arena)`, its `init` taking the arena), and `doc_close` calls `d.arena.free()`. A `str` or a `T[]` returned to the host stays valid until the arena that holds it is freed.
 - Memory of the host passed to an export (a buffer, a `str`) is only read or written during the call: Sosu keeps no pointer to it afterwards (a rule that v0 does not check).
 - Sosu has no global variables: a library is reentrant, and two threads can call it at the same time on objects of their own (an arena belongs to one thread, §14.1).
 
@@ -559,6 +678,16 @@ Use from other languages (nothing to add to the compiler):
 | Java (older), Android | JNI, through a small C file | by hand |
 | Python | `ctypes` or `cffi` | `cffi` reads the header |
 | Rust, Go, Swift | `extern "C"`, cgo, a module map | `bindgen`, cgo, Swift's C importer |
+
+Decisions, and what differs from the design:
+
+- The C name of an export is its Sosu name, as written (E0365: two exports of the same name, a C keyword, `main`, a name starting with `sosu_`, a generic export).
+- Errors go through the guard and `<package>_error()`; the `defer`s of a failed call do not run in v0.
+- `enum`s without data cross to C (a struct holding the tag, and constants); options, results and enums with data do not.
+- A static library comes with the runtime as a library of its own, linked once by the host; a shared one holds it, hidden.
+- The message of the last error is kept per thread (`__declspec(thread)`, `__thread`, or C11 `_Thread_local`): the only part of the runtime outside C99.
+- `sosuc` generates no bindings for C#, Java or Python: the header and their own tools are enough.
+- `arena.free()` marks the arena freed before freeing its blocks, so that an object can own the arena it lies in.
 
 ## 10. User interface
 
@@ -1354,7 +1483,7 @@ parameters), not to types.
 program      = { import | decl } ;
 import       = "import" path ";" ;
 path         = IDENT { "." IDENT } ;
-decl         = [ "pub" ] ( struct | class | interface | enum | function ) | extern | test ;
+decl         = [ "pub" ] ( struct | class | interface | enum | function ) | extern | export | test ;
 
 struct       = "struct" IDENT "{" { member } "}" ;
 class        = "class" IDENT [ ":" path { "," path } ] "{" { member } "}" ;
@@ -1364,6 +1493,7 @@ interface    = "interface" IDENT "{" { signature } "}" ;
 enum         = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
 variant      = IDENT [ "(" [ type IDENT { "," type IDENT } ] ")" ] ;
 extern       = "extern" STRING "{" { signature } "}" ;
+export       = "export" STRING function ;          (* STRING: "C" (spec §9.2) *)
 test         = "test" STRING block ;
 
 function     = [ "unsafe" ] type IDENT "(" [ params ] ")" [ effects ] { contract } block ;
@@ -1431,7 +1561,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 7. Tooling: `sosuc fmt`, `sosuc test`, `sosuc run`, JSON diagnostics, contracts
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
 9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code
-10. Generics (monomorphized), `Vec` / `HashMap` containers
+10. Generics (monomorphized), `Vec` / `HashMap` containers: done (§5.4)
 11. `sosuc bindgen`, `sosuc package`, cross-compilation
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
 13. Research: `comptime`, effect polymorphism, regions, concurrency
@@ -1466,7 +1596,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 
 ### 14.2 Open questions
 
-- Effect polymorphism (higher-order functions): to be handled with generics in v1? (proposed: yes)
+- Effect polymorphism (higher-order functions): decided, with generics: effect parameters (§5.4).
 - Abstract classes: unnecessary, interfaces are enough? (proposed: yes)
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
@@ -1474,13 +1604,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 
 Libraries for other languages (§9.2):
 
-- C names of the exports: the Sosu name as written, or prefixed with the package automatically (`geometry_dot` from `dot`)? (proposed: as written, the author chooses; a collision with another library is a link error, as in C)
-- Errors in an export: a guard and `<package>_error()`, or an error code in every exported signature? (proposed: the guard; an export that wants to report its own errors returns them, as a C function would)
-- The guard leaves the `defer`s of the failed call unrun. Run them (unwinding the frames) or accept it in v0? (proposed: accept it; the host discards what the call used)
-- `enum`s without data at the boundary, as `uint32_t` constants in the header? And `T?`, `T!E`? (proposed: enums without data yes, with their constants; options and results no, in v0)
-- Several Sosu libraries in the same process: shared libraries hide their runtime, but two static ones would define it twice. (proposed: a static library comes with a separate `sosu_rt` library, linked once by the host)
-- The message of the last error is kept per thread, which needs C11 (`_Thread_local`) or a compiler extension (`__declspec(thread)` with MSVC), while the generated C is C99. (proposed: use them where available; this is the only part of the runtime outside C99)
-- Bindings for C# or Java generated by `sosuc` (`sosuc bindgen --to=csharp`)? (proposed: no; the header and the existing tools (`jextract`, ClangSharp, `cffi`) are enough, and keep the compiler free of any other language)
+- Decided, see the end of §9.2: the C names as written, the guard and `<package>_error()`, the `defer`s of a failed call not run, enums without data as constants, the runtime as a static library of its own, the message per thread, no bindings generated.
 
 Widgets of `ui` (§10.4):
 
@@ -1492,7 +1616,7 @@ Widgets of `ui` (§10.4):
 - Styles and themes with parameters (`style Size(f32 s) { font_size: s }`), and styles chosen by the state of a widget other than those of §10.7? (proposed: not in v0; an expression in `style:` covers the state of the program)
 - Formats of numbers and money: read from the locale of the system, or given explicitly? (proposed: explicit in v0, `decimal: ","`; the same program then shows the same thing everywhere, and tests do not depend on the machine)
 - Money: an integer of minor units (`i64` cents), or a decimal type of the language? (proposed: `i64` minor units in v0; a currency with 3 decimals gives `places: 3`)
-- `NumberField` without generics: one widget per type (`i64`, `f64`), or a text field and a conversion by the program? (proposed: one per type until generics, then a single generic one)
+- `NumberField` without generics: decided in §10.9, integers with decimals; generics do not change it (§5.4).
 - `Radio` and `Dropdown` compare values of an `enum`: the translator generates a `match`, or the language gains `==` on `enum`s without data? (proposed: `==` on `enum`s without data, useful everywhere; the translator uses it)
 - Text that grows: a `TextBuffer` that owns an arena is moved, not copied (§6). Acceptable for a field of a state class? (proposed: yes; the state is a class, handled through a pointer, so nothing has to be copied)
 - The layer above answers clicks from its rectangle at the previous frame: one frame late when a dropdown opens. (proposed: accept it; it is the usual price of immediate mode)

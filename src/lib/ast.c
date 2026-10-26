@@ -32,6 +32,36 @@ static void print_source(Printer *pr, size_t offset, size_t length) {
     fprintf(pr->out, "%.*s", (int)length, pr->file->text + offset);
 }
 
+static void print_type(Printer *pr, const TypeExpr *type);
+
+/* `<A, B>` after a generic name (spec §5.4). */
+static void print_type_args(Printer *pr, TypeExpr **args, size_t count) {
+    if (!count) return;
+    fputc('<', pr->out);
+    for (size_t i = 0; i < count; i++) {
+        if (i) fputs(", ", pr->out);
+        print_type(pr, args[i]);
+    }
+    fputc('>', pr->out);
+}
+
+/* `<T: Ordered + Hash, uses E>` after the name of a declaration. */
+static void print_type_params(Printer *pr, TypeParams params) {
+    if (!params.count) return;
+    fputc('<', pr->out);
+    for (size_t i = 0; i < params.count; i++) {
+        const TypeParam *param = &params.items[i];
+        if (i) fputs(", ", pr->out);
+        if (param->is_effect) fputs("uses ", pr->out);
+        print_name(pr, param->name);
+        for (size_t j = 0; j < param->constraint_count; j++) {
+            fputs(j ? " + " : ": ", pr->out);
+            print_path(pr, param->constraints[j]);
+        }
+    }
+    fputc('>', pr->out);
+}
+
 static void print_type(Printer *pr, const TypeExpr *type) {
     if (!type) {
         fputs("auto", pr->out);
@@ -40,6 +70,7 @@ static void print_type(Printer *pr, const TypeExpr *type) {
     switch (type->kind) {
     case TYPE_NAME:
         print_path(pr, type->as.name);
+        print_type_args(pr, type->args, type->arg_count);
         break;
     case TYPE_POINTER:
         print_type(pr, type->as.inner);
@@ -115,7 +146,10 @@ static void print_expr(Printer *pr, const Expr *expr, int indent) {
     case EXPR_STRING:
     case EXPR_CHAR: print_source(pr, expr->offset, expr->length); break;
     case EXPR_BOOL: fputs(expr->as.bool_value ? "true" : "false", out); break;
-    case EXPR_NAME: print_name(pr, expr->as.name); break;
+    case EXPR_NAME:
+        print_name(pr, expr->as.name);
+        print_type_args(pr, expr->type_args, expr->type_arg_count);
+        break;
     case EXPR_SELF: fputs("self", out); break;
     case EXPR_BASE: fputs("base", out); break;
     case EXPR_RESULT: fputs("result", out); break;
@@ -176,6 +210,7 @@ static void print_expr(Printer *pr, const Expr *expr, int indent) {
         print_expr(pr, expr->as.field.object, indent);
         fputc(' ', out);
         print_name(pr, expr->as.field.name);
+        print_type_args(pr, expr->type_args, expr->type_arg_count);
         fputc(')', out);
         break;
     case EXPR_STRUCT_LIT:
@@ -338,13 +373,15 @@ static void print_params(Printer *pr, const Param *params, size_t count) {
 static void print_fn(Printer *pr, const FnDecl *fn, int indent) {
     FILE *out = pr->out;
     fputs("(fn ", out);
-    if (fn->is_pub) fputs("pub ", out);
+    if (fn->is_export) fputs("export ", out);
+    else if (fn->is_pub) fputs("pub ", out);
     if (fn->is_unsafe) fputs("unsafe ", out);
     if (fn->method_kind == METHOD_VIRTUAL) fputs("virtual ", out);
     if (fn->method_kind == METHOD_OVERRIDE) fputs("override ", out);
     print_type(pr, fn->ret);
     fputc(' ', out);
     print_name(pr, fn->name);
+    print_type_params(pr, fn->type_params);
     fputc(' ', out);
     print_params(pr, fn->params, fn->param_count);
     if (fn->effects.count) {
@@ -382,6 +419,7 @@ static void print_decl(Printer *pr, const Decl *decl) {
         fputs(decl->kind == DECL_STRUCT ? "(struct " : decl->kind == DECL_CLASS ? "(class " : "(interface ", out);
         if (decl->is_pub) fputs("pub ", out);
         print_name(pr, decl->as.type.name);
+        print_type_params(pr, decl->type_params);
         if (decl->as.type.base_count) {
             fputs(" (:", out);
             for (size_t i = 0; i < decl->as.type.base_count; i++) {
@@ -415,6 +453,7 @@ static void print_decl(Printer *pr, const Decl *decl) {
         fputs("(enum ", out);
         if (decl->is_pub) fputs("pub ", out);
         print_name(pr, decl->as.enum_.name);
+        print_type_params(pr, decl->type_params);
         for (size_t i = 0; i < decl->as.enum_.variant_count; i++) {
             const Variant *variant = &decl->as.enum_.variants[i];
             newline(pr, 1);

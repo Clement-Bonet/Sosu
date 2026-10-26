@@ -206,10 +206,19 @@ static void append_type(Buffer *buffer, const Type *type) {
                 append_text(buffer, effect_name(bit));
                 first = false;
             }
+            if (type->as.fn.effects & EFFECT_PARAMS) append_text(buffer, first ? "E" : ", E"); /* an effect parameter */
         }
         break;
     default:
         append(buffer, type->name.text, type->name.length);
+        if (type->type_arg_count) {
+            append_text(buffer, "<");
+            for (size_t i = 0; i < type->type_arg_count; i++) {
+                if (i) append_text(buffer, ", ");
+                append_type(buffer, type->type_args[i]);
+            }
+            append_text(buffer, ">");
+        }
         break;
     }
 }

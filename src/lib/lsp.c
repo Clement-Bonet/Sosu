@@ -762,7 +762,9 @@ static void describe_fn(Target *t, const FnInfo *fn) {
 
 static void describe_method(Target *t, const MethodInfo *m) {
     write_signature(&t->text, &m->owner->unit->file, m->decl);
-    json_raw(&t->note, "method of `%.*s`", NAME_ARGS(m->owner->name));
+    char *owner = type_to_string(m->owner->type); /* `Pair<str, i32>` for an instance (spec §5.4) */
+    json_raw(&t->note, "method of `%s`", owner);
+    free(owner);
     set_target(t, &m->owner->unit->file, m->decl->name);
 }
 
@@ -770,7 +772,9 @@ static void describe_field(Target *t, const TypeInfo *owner, const FieldInfo *fi
     char *type = type_to_string(field->type);
     json_raw(&t->text, "%s %.*s", type, NAME_ARGS(field->name));
     free(type);
-    json_raw(&t->note, "field of `%.*s`", NAME_ARGS(owner->name));
+    char *name = type_to_string(owner->type);
+    json_raw(&t->note, "field of `%s`", name);
+    free(name);
     if (field->decl) set_target(t, &owner->unit->file, field->decl->name);
 }
 
@@ -792,6 +796,17 @@ static void describe_variant(Target *t, const TypeInfo *info, size_t index) {
 static void describe_type(Target *t, const TypeInfo *info) {
     write_header(&t->text, &info->unit->file, info->decl);
     set_target(t, &info->unit->file, decl_name(info->decl));
+}
+
+/* Under the signature of a generic function called: what its parameters are here (spec §5.4). */
+static void describe_type_values(Target *t, const FnInfo *fn, const Expr *e) {
+    if (!e->type_value_count) return;
+    json_raw(&t->note, "here: ");
+    for (size_t i = 0; i < e->type_value_count && i < fn->param_count; i++) {
+        char *type = type_to_string(e->type_values[i]);
+        json_raw(&t->note, "%s`%.*s` is `%s`", i ? ", " : "", NAME_ARGS(fn->params[i]->name), type);
+        free(type);
+    }
 }
 
 static void describe_module(Target *t, const Unit *module) {
@@ -853,6 +868,10 @@ static const TypeInfo *owner_of_field(const Analysis *a, const FieldInfo *field)
         const TypeInfo *info = a->sema.type_infos.items[i];
         if (info->field_count && field >= info->fields && field < info->fields + info->field_count) return info;
     }
+    for (size_t i = 0; i < a->sema.instances.count; i++) {
+        const TypeInfo *info = a->sema.instances.items[i];
+        if (info->field_count && field >= info->fields && field < info->fields + info->field_count) return info;
+    }
     return NULL;
 }
 
@@ -885,7 +904,10 @@ static void describe_expr(Target *t, const Analysis *a, const Unit *unit, const 
         return;
     }
     case RESOLVED_SELF_METHOD: case RESOLVED_METHOD: describe_method(t, e->target); return;
-    case RESOLVED_FN: describe_fn(t, e->target); return;
+    case RESOLVED_FN:
+        describe_fn(t, e->target);
+        describe_type_values(t, e->target, e);
+        return;
     case RESOLVED_VARIANT: describe_variant(t, e->target, e->target_index); return;
     default: break;
     }

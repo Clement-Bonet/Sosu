@@ -395,6 +395,77 @@ static void test_body_errors(void) {
     expect_codes("import std.random;\nvoid f() { random.Rng r = random.from_system(); }", "E0340");
 }
 
+/* Generics (spec §5.4): bodies checked once against their constraints, arguments inferred. */
+static void test_generics(void) {
+    const char *largest = "T largest<T: Ordered>(T[] items) {\n    mut T best = items[0];\n"
+                          "    for (T x in items) {\n        if (x > best) {\n            best = x;\n        }\n    }\n"
+                          "    return best;\n}\n";
+    char text[1024];
+    snprintf(text, sizeof text, "%svoid f(i32[] a, str[] b) { i32 x = largest(a); str y = largest(b); }", largest);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%svoid f(bool[] a) { bool x = largest(a); }", largest);
+    expect_codes(text, "E0362");
+    expect_help("T bigger<T>(T a, T b) { return a > b ? a : b; }", "E0334",
+                "a type parameter allows what its constraints say: add one, e.g. `<T: Ordered>` (spec §5.4)");
+    expect_codes("T twice<T: Number>(T x) { return x + x; }\nvoid f() { i64 a = twice(3 as i64); f64 b = twice(1.5); }", "");
+    expect_codes("T twice<T: Number>(T x) { return x + x; }\nvoid f() { i64 a = twice(3); }", "");
+    expect_codes("T one<T: Number>() { return 1; }", "E0331");
+    expect_codes("T one<T: Number>() { return 1 as T; }\nvoid f() { i32 a = one(); f64 b = one<f64>(); }", "");
+    expect_help("T one<T: Number>() { return 1 as T; }\nvoid f() { auto a = one(); }", "E0360",
+                "write the type arguments: `one<...>(...)` (spec §5.4)");
+    expect_codes("T neg<T: Number>(T x) { return -x; }", "E0334");
+    expect_codes("T rest<T: Integer>(T a, T b) { return a % b; }\nT bad<T: Number>(T a, T b) { return a % b; }", "E0334");
+    expect_codes("bool same<T: Equal>(T a, T b) { return a == b; }\nbool other<T>(T a, T b) { return a == b; }", "E0334");
+    expect_codes("ui64 key<K: Hash>(K k) { return hash(k); }\nstruct P { i32 x; }\nvoid f(P p) { ui64 a = hash(p); }",
+                 "E0334");
+    expect_codes("T id<T>(T x) { return x; }\nvoid f() { auto g = id; }", "E0360");
+    /* generic types */
+    const char *pair = "struct Pair<A, B> {\n    A first;\n    B second;\n}\n";
+    snprintf(text, sizeof text, "%svoid f() { Pair<str, i32> p = Pair<str, i32>{ first: \"a\", second: 1 };\n"
+                                "    Pair<str, i32> q = Pair{ first: p.first, second: p.second }; }", pair);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%svoid f(Pair p) { }", pair);
+    expect_help(text, "E0361", "write `Pair<A, B>`, with a type for each parameter");
+    snprintf(text, sizeof text, "%svoid f(Pair<i32> p) { }", pair);
+    expect_codes(text, "E0361");
+    snprintf(text, sizeof text, "%svoid f(Pair<Arena, i32> p) { }", pair);
+    expect_codes(text, "E0362");
+    expect_codes("struct P { }\nvoid f(P<i32> p) { }", "E0361");
+    expect_codes("class Node { }\nstruct Box<T> { T value; }\nvoid f(Box<Node> b) { }", "E0321");
+    expect_codes("class Node { }\nstruct Box<T> { T value; }\nvoid f(Box<Node*> b) { }", "");
+    expect_codes("enum Tree<T> { Leaf(T value), Node(Tree<T>* left, Tree<T>* right) }\n"
+                 "T first<T>(Tree<T>* t) { return match (*t) { Leaf(v) => v, Node(l, r) => first(l) }; }\n"
+                 "void f() { Tree<i32> t = Tree<i32>.Leaf(1); mut Tree<i32> u = Leaf(2); i32 x = first(&u); }",
+                 "");
+    expect_codes("struct Box<T> {\n    T value;\n    T get<U>() { return value; }\n}", "E0217");
+    expect_codes("interface Shows<T> { void show(T x); }", "E0217");
+    expect_codes("void f<T: Sortable>(T x) { }", "E0364");
+    /* interfaces as constraints, effects as parameters */
+    expect_codes("interface Named { str name(); }\nclass Dog : Named {\n    override str name() { return \"dog\"; }\n}\n"
+                 "str greet<T: Named>(T who) { return who.name(); }\nvoid f(Dog* d) { str a = greet(d); str b = greet(3); }",
+                 "E0362");
+    const char *each = "void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E {\n"
+                       "    for (T x in items) {\n        f(x);\n    }\n}\nvoid show(i32 x) uses io { }\nvoid quiet(i32 x) { }\n";
+    snprintf(text, sizeof text, "%svoid f(i32[] xs) uses io { each(xs, show); each(xs, quiet); }\n"
+                                "void g(i32[] xs) { each(xs, quiet); }", each);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%svoid g(i32[] xs) { each(xs, show); }", each);
+    expect_codes(text, "E0340");
+    expect_codes("void each<T, uses E>(T[] items, fn(T) -> void uses E f) { f(items[0]); }", "E0340");
+    /* exports (spec §9.2) */
+    expect_codes("struct V { f32 x; }\nenum M { A, B }\nclass C { }\n"
+                 "export \"C\" f32 lib_dot(V a, V b, M m, str s, i64[] xs, C* c, fn(i32) -> i32 f) { return a.x; }", "");
+    expect_codes("export \"C\" i32? lib_find() { return none; }", "E0366");
+    expect_codes("enum E { A(i32 x) }\nexport \"C\" void lib_take(E e) { }", "E0366");
+    expect_codes("export \"C\" void lib_take(Arena a) { }", "E0366");
+    expect_codes("export \"C\" void lib_take(i32[4] a) { }", "E0366");
+    expect_codes("export \"C\" void int() { }", "E0365");
+    expect_help("export \"C\" void sosu_open() { }", "E0365",
+                "a C keyword, `main` and the names starting with `sosu_` are taken; prefix it with the name of the library, "
+                "e.g. `test_sosu_open`");
+    expect_codes("export \"C\" T lib_id<T>(T x) { return x; }", "E0365");
+}
+
 static void test_packages(void) {
     expect_package("tests/packages/app", "");
     expect_package("tests/packages/geometry", "");
@@ -411,6 +482,7 @@ int main(void) {
     test_duplicates();
     test_valid_bodies();
     test_body_errors();
+    test_generics();
     test_packages();
     return test_summary("sema tests");
 }
