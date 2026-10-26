@@ -3,8 +3,9 @@
 // The tables of the file are read where they are, through checked reads: a damaged font
 // gives empty or wrong glyphs, never a read outside of its bytes. A glyph is drawn into a
 // coverage map (0 to 255 per pixel, antialiased) the first time it is needed at a size, and
-// `Font` keeps the images it drew. Not handled yet: hinting (the instructions of the font
-// are ignored), kerning, and CFF outlines (.otf files).
+// `Font` keeps the images it drew. Kerning comes from the pair adjustments of GPOS, and a
+// character missing in a font is taken from its fallback. Not handled yet: hinting (the
+// instructions of the font are ignored) and CFF outlines (.otf files).
 import std.io;
 
 pub enum FontError {
@@ -325,6 +326,140 @@ struct Tables {
     f32 ascent;
     f32 descent;  // negative: under the baseline
     f32 gap;
+    u64 gpos;  // the table of positions, for kerning (0: none)
+}
+
+// The size of a value record of GPOS, from its format: 2 bytes per field present.
+u64 value_size(u32 format) {
+    mut u64 n = 0;
+    for (u32 bit in 0..8) {
+        n += format >> bit & 1 == 1 ? 2 : 0;
+    }
+    return n;
+}
+
+// The XAdvance of a value record of `format` at `at`: what kerning changes (0 without it).
+i32 x_advance(u8[] data, u64 at, u32 format) {
+    if (format & 4 == 0) {
+        return 0;
+    }
+    u64 before = (format & 1) as u64 * 2 + (format >> 1 & 1) as u64 * 2;  // XPlacement, YPlacement
+    return i16_at(data, at + before);
+}
+
+// The index of `glyph` in a coverage table, or -1.
+i32 coverage_index(u8[] data, u64 at, u32 glyph) {
+    u32 format = u16_at(data, at);
+    u32 count = u16_at(data, at + 2);
+    if (format == 1) {  // glyphs, sorted
+        mut u32 low = 0;
+        mut u32 high = count;
+        while (low < high) {
+            u32 mid = (low + high) / 2;
+            u32 g = u16_at(data, at + 4 + 2 * mid as u64);
+            if (g == glyph) {
+                return mid as i32;
+            }
+            if (g < glyph) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return -1;
+    }
+    for (u32 i in 0..count) {  // ranges: start, end, index of the start
+        u64 r = at + 4 + 6 * i as u64;
+        u32 start = u16_at(data, r);
+        if (glyph >= start && glyph <= u16_at(data, r + 2)) {
+            return (u16_at(data, r + 4) + glyph - start) as i32;
+        }
+    }
+    return -1;
+}
+
+// The class of `glyph` in a class definition table (0 when it is in none).
+u32 class_of(u8[] data, u64 at, u32 glyph) {
+    u32 format = u16_at(data, at);
+    if (format == 1) {
+        u32 start = u16_at(data, at + 2);
+        u32 count = u16_at(data, at + 4);
+        return glyph >= start && glyph < start + count ? u16_at(data, at + 6 + 2 * (glyph - start) as u64) : 0;
+    }
+    u32 count = u16_at(data, at + 2);
+    for (u32 i in 0..count) {
+        u64 r = at + 4 + 6 * i as u64;
+        if (glyph >= u16_at(data, r) && glyph <= u16_at(data, r + 2)) {
+            return u16_at(data, r + 4);
+        }
+    }
+    return 0;
+}
+
+// The kerning of `left` then `right` in a pair adjustment subtable (GPOS lookup type 2) at `at`,
+// in units of the font; `found` tells whether the subtable had the pair.
+i32 pair_kerning(u8[] data, u64 at, u32 left, u32 right, bool* found) {
+    u32 format = u16_at(data, at);
+    i32 index = coverage_index(data, at + u16_at(data, at + 2) as u64, left);
+    if (index < 0) {
+        return 0;
+    }
+    u32 format1 = u16_at(data, at + 4);
+    u32 format2 = u16_at(data, at + 6);
+    u64 record = value_size(format1) + value_size(format2);
+    if (format == 1) {  // pairs of glyphs
+        u64 set = at + u16_at(data, at + 10 + 2 * index as u64) as u64;
+        u32 count = u16_at(data, set);
+        for (u32 i in 0..count) {
+            u64 pair = set + 2 + i as u64 * (2 + record);
+            if (u16_at(data, pair) == right) {
+                *found = true;
+                return x_advance(data, pair + 2, format1);
+            }
+        }
+        return 0;
+    }
+    if (format == 2) {  // classes of glyphs
+        u32 class1 = class_of(data, at + u16_at(data, at + 8) as u64, left);
+        u32 class2 = class_of(data, at + u16_at(data, at + 10) as u64, right);
+        u32 count1 = u16_at(data, at + 12);
+        u32 count2 = u16_at(data, at + 14);
+        if (class1 >= count1 || class2 >= count2) {
+            return 0;
+        }
+        *found = true;
+        return x_advance(data, at + 16 + (class1 * count2 + class2) as u64 * record, format1);
+    }
+    return 0;
+}
+
+// The kerning of `left` then `right` in the GPOS table at `gpos`: the first pair adjustment
+// lookup that has the pair, in units of the font.
+i32 gpos_kerning(u8[] data, u64 gpos, u32 left, u32 right) {
+    u64 lookups = gpos + u16_at(data, gpos + 8) as u64;
+    u32 count = u16_at(data, lookups);
+    for (u32 i in 0..count) {
+        u64 lookup = lookups + u16_at(data, lookups + 2 + 2 * i as u64) as u64;
+        u32 kind = u16_at(data, lookup);
+        u32 subtables = u16_at(data, lookup + 4);
+        for (u32 k in 0..subtables) {
+            mut u64 sub = lookup + u16_at(data, lookup + 6 + 2 * k as u64) as u64;
+            mut u32 sub_kind = kind;
+            if (kind == 9) {  // an extension: the type and the place of the real subtable
+                sub_kind = u16_at(data, sub + 2);
+                sub = sub + u32_at(data, sub + 4) as u64;
+            }
+            if (sub_kind != 2) {
+                continue;
+            }
+            mut bool found = false;
+            i32 value = pair_kerning(data, sub, left, right, &found);
+            if (found) {
+                return value;
+            }
+        }
+    }
+    return 0;
 }
 
 // A font, read from a .ttf file. `close()` frees the images of its glyphs.
@@ -335,6 +470,11 @@ pub class Font {
     mut Arena scratch;  // what drawing one glyph needs, emptied after it
     mut Slot[256] slots;
     mut u32 slots_used;
+    // The kerning of pairs of glyphs already looked up (spec §10.10): their key and value.
+    mut u64[512] kern_keys;
+    mut i32[512] kern_values;
+    // The font of the characters this one does not have (spec §10.10): none, or the next font.
+    pub mut Font*? fallback;
 
     void init(u8[] data, Tables tables) {
         self.data = data;
@@ -344,6 +484,9 @@ pub class Font {
         GlyphImage nothing = GlyphImage{ left: 0, top: 0, width: 0, height: 0, coverage: images.alloc_slice(u8, 0) };
         slots = [Slot{ used: false, glyph: 0, size: 0, image: nothing }; 256];
         slots_used = 0;
+        kern_keys = [0; 512];
+        kern_values = [0; 512];
+        fallback = none;
     }
 
     pub void close() {
@@ -376,16 +519,52 @@ pub class Font {
         return u16_at(data, t.hmtx + 4 * index as u64) as f32 * size / t.units;
     }
 
-    // The width of the longest line of `text`.
+    // The kerning between `left` and `right`, glyphs of this font: what the pen moves more (or
+    // less, negative) between them, from the GPOS table (spec §10.10).
+    pub f32 kerning(u32 left, u32 right, f32 size) {
+        if (t.gpos == 0 || left == 0 || right == 0) {
+            return 0.0;
+        }
+        u64 key = left as u64 << 32 | right as u64 | 1 << 63;
+        usize slot = ((left * 31 + right) % 512) as usize;
+        if (kern_keys[slot] != key) {
+            kern_keys[slot] = key;
+            kern_values[slot] = gpos_kerning(data, t.gpos, left, right);
+        }
+        return kern_values[slot] as f32 * size / t.units;
+    }
+
+    // The font that draws `c`: this one, or its fallback when it has it and this one does not.
+    pub Font* font_of(char c) {
+        if (glyph_of(c) != 0) {
+            return self;
+        }
+        return match (fallback) {
+            some(next) => next.glyph_of(c) != 0 ? next : self,
+            none => self,
+        };
+    }
+
+    // The width of the longest line of `text`, with its kerning and its fallback font.
     pub f32 measure(str text, f32 size) {
         mut f32 widest = 0.0;
         mut f32 line = 0.0;
+        mut u32 previous = 0;
+        mut Font* previous_font = self;
         for (char c in text.chars()) {
             if (c == '\n') {
                 line = 0.0;
+                previous = 0;
             } else {
-                line += advance(glyph_of(c), size);
+                Font* face = font_of(c);
+                u32 glyph = face.glyph_of(c);
+                if (face == previous_font) {
+                    line += face.kerning(previous, glyph, size);
+                }
+                line += face.advance(glyph, size);
                 widest = max(widest, line);
+                previous = glyph;
+                previous_font = face;
             }
         }
         return widest;
@@ -628,7 +807,7 @@ pub Font*!FontError parse(Arena* arena, u8[] data) {
     if (units < 16 || units > 16384 || metrics == 0 || charmap.format == 0) {
         return err(NotTrueType);
     }
-    Tables tables = Tables{ charmap: charmap.offset, charmap_format: charmap.format, glyf: glyf, loca: loca, hmtx: hmtx, long_loca: i16_at(data, head + 50) == 1, metrics: metrics, glyphs: u16_at(data, maxp + 4), units: units as f32, ascent: i16_at(data, hhea + 4) as f32, descent: i16_at(data, hhea + 6) as f32, gap: i16_at(data, hhea + 8) as f32 };
+    Tables tables = Tables{ charmap: charmap.offset, charmap_format: charmap.format, glyf: glyf, loca: loca, hmtx: hmtx, long_loca: i16_at(data, head + 50) == 1, metrics: metrics, glyphs: u16_at(data, maxp + 4), units: units as f32, ascent: i16_at(data, hhea + 4) as f32, descent: i16_at(data, hhea + 6) as f32, gap: i16_at(data, hhea + 8) as f32, gpos: find_table(data, "GPOS") };
     return ok(arena.new(Font, data, tables));
 }
 
@@ -722,4 +901,36 @@ test "what is not a TrueType font is refused" {
         err(e) => true,
     };
     assert(refused);
+}
+
+test "kerning from GPOS, and a fallback font for missing characters" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Font* face = match (load(&arena, noto())) {
+        ok(f) => f,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer face.close();
+    // "AV" and "To" are kerned closer in Noto Sans: their width is less than the sum of their letters
+    u32 a = face.glyph_of('A');
+    u32 v = face.glyph_of('V');
+    assert(face.kerning(a, v, 100.0) < 0.0);
+    assert(face.measure("AV", 100.0) < face.measure("A", 100.0) + face.measure("V", 100.0));
+    assert(face.kerning(face.glyph_of('o'), face.glyph_of('o'), 100.0) == 0.0);
+    // a fallback: a character missing in the first font is measured with the second
+    u32 missing = face.glyph_of('\u{4e2d}');
+    assert(missing == 0);
+    Font* other = match (load(&arena, noto())) {
+        ok(f) => f,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer other.close();
+    face.fallback = some(other);
+    assert(face.font_of('A') == face && face.font_of('\u{4e2d}') == face);  // neither has it
 }

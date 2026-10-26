@@ -1,4 +1,4 @@
-// The window of the example: three tabs, one per kind of container (spec §10.8). The tabs fill
+// The window of the example: tabs, one per kind of container (spec §10.8). The tabs fill
 // the window; the grid of the first one, its width.
 import containers.state;
 
@@ -17,6 +17,9 @@ window Containers(state.Demo* s) {
             }
             Tab("Tree") {
                 Files(s)
+            }
+            Tab("Long tree") {
+                LongTree(s)
             }
             Tab("&Inputs") {
                 Inputs(s)
@@ -128,6 +131,19 @@ component Files(state.Demo* s) {
     }
     Tree(selected: s.item, width: 360, height: Fill) {
         Folder(s, -1)
+    }
+}
+
+// A long tree (spec §10.10): 1 000 folders of 100 files, 101 000 rows when all are open; the
+// program gives its rows flat, and only those in view are described.
+component LongTree(state.Demo* s) {
+    Row(gap: 8) {
+        Button("Open all", on_click: s.open_big(true))
+        Button("Close all", on_click: s.open_big(false))
+        Text("{rows} rows", rows: s.big_rows_text())
+    }
+    Tree(count: s.big_rows, item: i, depth: s.big_depth(i), branch: s.big_branch(i), open: s.big_is_open(i), on_toggle: s.big_toggle(i), selected: s.big_item, width: 360, height: Fill) {
+        Text(s.big_name(i))
     }
 }
 

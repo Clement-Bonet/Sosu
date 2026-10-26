@@ -1,6 +1,6 @@
 // A workspace in the manner of VS Code: a title bar drawn by the program, holding its icon, its
 // menus, a search field, two dropdowns and buttons, over three panes that use every widget of `ui`: the files
-// (a tree), the details of the file chosen in two tabs (fields with formats, radios, a dropdown,
+// (a tree), the details of the file chosen in tabs (fields with formats, radios, a dropdown,
 // a group of checkboxes, buttons that are enabled or not) and the output (a list of lines), in a
 // grid that follows the size of the window.
 import workspace.state;
@@ -71,21 +71,21 @@ window Workspace(state.Workspace* w) {
                 Branch("Sources", open: w.open_sources) {
                     for (i32 i in 0..w.count, key: i) {
                         if (w.is(i, Source)) {
-                            Leaf(w.files[i].name.text(), on_click: w.choose(i))
+                            Leaf(template: FileItem(w, i), on_click: w.choose(i))
                         }
                     }
                 }
                 Branch("Images", open: w.open_images) {
                     for (i32 i in 0..w.count, key: i) {
                         if (w.is(i, Image)) {
-                            Leaf(w.files[i].name.text(), on_click: w.choose(i))
+                            Leaf(template: FileItem(w, i), on_click: w.choose(i))
                         }
                     }
                 }
                 Branch("Binaries", open: w.open_binaries) {
                     for (i32 i in 0..w.count, key: i) {
                         if (w.is(i, Binary)) {
-                            Leaf(w.files[i].name.text(), on_click: w.choose(i))
+                            Leaf(template: FileItem(w, i), on_click: w.choose(i))
                         }
                     }
                 }
@@ -124,6 +124,9 @@ component Details(state.Workspace* w) {
         Tab("Advanced") {
             Advanced(w)
         }
+        Tab("Selection") {
+            Selection(w)
+        }
         Tab("All files") {
             Table(count: w.count, item: i, selected: w.row, sort: w.order, width: Fill, height: 260, on_activate: w.choose_row) {
                 Column("Name", width: Fill, sortable: true) {
@@ -141,6 +144,29 @@ component Details(state.Workspace* w) {
     Row(gap: 8) {
         Button("Save", on_click: w.save, enabled: w.changed())
         Button("Revert", on_click: w.revert, enabled: w.changed())
+    }
+}
+
+// A file as an item of a list or a tree (spec §10.10): its icon, its name and its size; its look
+// follows its state (hover, chosen), and its texts take the color of the item.
+component FileItem(state.Workspace* w, i32 i) {
+    Item(gap: 8, padding: 2) {
+        Image(w.icon, size: 16)
+        Text(w.files[i].name.text())
+        Space(8)
+        Text(w.size_of(i), style: Muted)
+    }
+}
+
+// Several files chosen at once: Ctrl+click adds or removes one, Shift+click a range, Ctrl+A all.
+component Selection(state.Workspace* w) {
+    Text("{count} file chosen", plural: "{count} files chosen", count: w.picked_count())
+    List(count: w.count, item: i, selection: w.picked, width: Fill, height: 220) {
+        FileItem(w, i)
+    }
+    Row(gap: 8) {
+        Button("Remove them", on_click: w.remove_picked, enabled: w.picked_count() > 0)
+        Button("Clear", on_click: w.clear_picked, enabled: w.picked_count() > 0)
     }
 }
 
@@ -181,4 +207,9 @@ component Advanced(state.Workspace* w) {
         Checkbox("Read only", bind: w.details.read_only)
         Checkbox("Hidden", bind: w.details.hidden)
     }
+}
+
+// The size of a file, quieter than its name.
+style Muted {
+    color: #9399B2
 }

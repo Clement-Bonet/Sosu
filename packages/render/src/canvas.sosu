@@ -244,14 +244,23 @@ pub struct Canvas {
     pub void text_with(truetype.Font* face, f32 size, f32 x, f32 y, str text, Color color) {
         mut f32 pen = x;
         mut f32 baseline = y + face.ascent(size);
+        mut u32 previous = 0;  // the glyph before, for kerning (spec §10.10)
+        mut truetype.Font* previous_font = face;
         for (char c in text.chars()) {
             if (c == '\n') {
                 pen = x;
                 baseline += face.line_height(size);
+                previous = 0;
                 continue;
             }
-            u32 glyph = face.glyph_of(c);
-            truetype.GlyphImage* image = face.image(glyph, size);
+            truetype.Font* font = face.font_of(c);  // its fallback, for a character it lacks
+            u32 glyph = font.glyph_of(c);
+            if (font == previous_font) {
+                pen += font.kerning(previous, glyph, size);
+            }
+            previous = glyph;
+            previous_font = font;
+            truetype.GlyphImage* image = font.image(glyph, size);
             i32 left = (pen + 0.5) as i32 + image.left;
             i32 top = (baseline + 0.5) as i32 - image.top;
             for (mut i32 row = 0; row < image.height; row += 1) {
@@ -263,7 +272,7 @@ pub struct Canvas {
                     }
                 }
             }
-            pen += face.advance(glyph, size);
+            pen += font.advance(glyph, size);
         }
     }
 

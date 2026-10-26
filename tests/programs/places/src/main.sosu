@@ -1,0 +1,30 @@
+import std.io;
+
+// Writes into an array field whose index calls a function: the field itself changes.
+struct Box {
+    mut i32[4] items = [0; 4];
+}
+
+struct Shelf {
+    mut Box box = Box{ };
+}
+
+usize two() {
+    return 2;
+}
+
+i32 main() uses io {
+    mut Box b = Box{ };
+    b.items[two()] = 7;
+    b.items[min(3, 9)] = 8;
+    i32* p = &b.items[two() - 1];
+    *p = 5;
+    io.print("field: {} {} {}", b.items[2], b.items[3], b.items[1]);
+
+    mut Shelf s = Shelf{ };
+    s.box.items[two()] += 4;
+    Box* boxed = &s.box;
+    boxed.items[two() + 1] = 6;
+    io.print("nested: {} {}", s.box.items[2], s.box.items[3]);
+    return 0;
+}

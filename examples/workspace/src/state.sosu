@@ -119,10 +119,13 @@ pub class Workspace {
     // The table of all the files: its row chosen, and its order (spec §10.9).
     pub mut i32 row;
     pub mut widgets.Sort order;
+    // The files chosen together in the tab Selection, by Ctrl and Shift (spec §10.10).
+    pub mut widgets.Selection picked;
 
     void init(image.Image icon) {
         self.icon = icon;
         files = [File{ }; 16];
+        picked = widgets.selection();
         files[0] = file("main.sosu", "4", "21/10/2026", Source);
         files[1] = file("screen.ui.sosu", "2", "22/10/2026", Source);
         files[2] = file("state.sosu", "6", "22/10/2026", Source);
@@ -284,6 +287,35 @@ pub class Workspace {
         chosen = count;
         count += 1;
         log("Created ", name.text());
+    }
+
+    // The size of the file `i`, for its item.
+    pub str size_of(i32 i) {
+        return files[i as usize].size.text();
+    }
+
+    pub i32 picked_count() {
+        return picked.count();
+    }
+
+    pub void clear_picked() {
+        picked.clear();
+    }
+
+    // Removes the files chosen in the tab Selection, the last first.
+    pub void remove_picked() {
+        for (mut i32 i = count - 1; i >= 0; i -= 1) {
+            if (picked.contains(i)) {
+                log("Removed ", files[i as usize].name.text());
+                for (mut i32 j = i; j + 1 < count; j += 1) {
+                    files[j as usize] = files[(j + 1) as usize];
+                }
+                count -= 1;
+            }
+        }
+        picked.clear();
+        chosen = min(chosen, count - 1);
+        loaded = -2;
     }
 
     pub void remove() {

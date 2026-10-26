@@ -2,9 +2,9 @@
 // colors and sizes; a style, as a class of CSS, changes those of the nodes that name it.
 
 theme Dark {
-    accent: #89B4FA               // names of the theme: colors and numbers used below
+    accent: #89B4FA  // names of the theme: colors and numbers used below
     surface: #313244
-    color: #CDD6F4                // `color`, `font_size` and `accent` are for every widget too
+    color: #CDD6F4  // `color`, `font_size` and `accent` are for every widget too
     field: #181825
 
     Window { background: #1E1E2E }

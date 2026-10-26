@@ -82,6 +82,18 @@ struct TouchFinger {
     u32 window;
 }
 
+// SDL_DropEvent: a file dropped on the window, from the system.
+struct Drop {
+    u32 kind;
+    u32 reserved;
+    u64 timestamp;
+    u32 window;
+    f32 x;
+    f32 y;
+    u8* source;
+    u8* data;
+}
+
 // SDL_Rect.
 struct IntRect {
     i32 x;
@@ -271,6 +283,25 @@ pub i32[4] safe_area(Window* window) uses io {
 pub f32 display_scale(Window* window) uses io {
     unsafe {
         return SDL_GetWindowDisplayScale(window);
+    }
+}
+
+// The path of a file dropped on the window (SDL_EVENT_DROP_FILE), and where.
+pub str dropped_path(Arena* arena, Event* event) {
+    unsafe {
+        return copy_cstring(arena, (event as Drop*).data, 4095);
+    }
+}
+
+pub f32 drop_x(Event* event) {
+    unsafe {
+        return (event as Drop*).x;
+    }
+}
+
+pub f32 drop_y(Event* event) {
+    unsafe {
+        return (event as Drop*).y;
     }
 }
 

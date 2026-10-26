@@ -996,10 +996,22 @@ static char *gen_view(Fn *f, Expr *e) {
 static char *gen_index(Fn *f, Expr *e) {
     if (e->as.index.index->kind == EXPR_RANGE) return gen_view(f, e);
     Expr *operands[2] = { e->as.index.object, e->as.index.index };
-    char **values = gen_operands(f, operands, 2);
     const Type *type = operands[0]->type;
     bool through_pointer = type->tag == T_POINTER;
-    const Type *base = through_pointer ? type->as.inner : type;
+    char **values;
+    if (type->tag == T_ARRAY && is_place(operands[0]) && has_call(operands[1])) {
+        /* An array kept by its address, not copied: a write through `a.b[f()]` reaches `a`. */
+        values = sosu_alloc(3 * sizeof *values);
+        char *place = gen_expr(f, operands[0]);
+        values[0] = new_temp(f);
+        emit(f, "%s *%s = &%s;", value_type(f->g, type), values[0], place);
+        free(place);
+        values[1] = gen_expr(f, operands[1]);
+        through_pointer = true;
+    } else {
+        values = gen_operands(f, operands, 2);
+    }
+    const Type *base = type->tag == T_POINTER ? type->as.inner : type;
     const Type *index_type = operands[1]->type;
     const char *helper = index_type->as.integer.is_signed ? "sosu_index" : "sosu_uindex";
     const char *cast = index_type->as.integer.is_signed ? "int64_t" : "uint64_t";
