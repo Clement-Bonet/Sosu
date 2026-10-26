@@ -187,7 +187,8 @@ static bool write_file(const char *path, const char *text) {
 /* ---- Targets (spec §11.5) ---- */
 
 typedef enum {
-    TARGET_HOST, /* the desktop system sosuc runs on */
+    TARGET_HOST,    /* the desktop system sosuc runs on */
+    TARGET_DESKTOP, /* another desktop: another architecture, or another system (spec §11.6) */
     TARGET_ANDROID,
     TARGET_IOS,
 } TargetOs;
@@ -198,9 +199,22 @@ struct Target {
     const char *abi;    /* Android: the folder of jniLibs; iOS: the slice of an .xcframework */
     const char *triple; /* Android: the prefix of the clang of the NDK */
     bool simulator;
+    const char *system; /* a desktop: windows, linux, macos */
+    const char *arch;   /* a desktop: x64, arm64, universal (macOS: both) */
 };
 
-static const Target host_target = { TARGET_HOST, "host", "", "", false };
+static const Target host_target = { TARGET_HOST, "host", "", "", false, NULL, NULL };
+
+/* The desktops (spec §11.6); the triple is the one of clang, for another system. */
+static const Target desktop_targets[] = {
+    { TARGET_DESKTOP, "windows-x64", "", "x86_64-w64-windows-gnu", false, "windows", "x64" },
+    { TARGET_DESKTOP, "windows-arm64", "", "aarch64-w64-windows-gnu", false, "windows", "arm64" },
+    { TARGET_DESKTOP, "linux-x64", "", "x86_64-linux-gnu", false, "linux", "x64" },
+    { TARGET_DESKTOP, "linux-arm64", "", "aarch64-linux-gnu", false, "linux", "arm64" },
+    { TARGET_DESKTOP, "macos-x64", "", "x86_64-apple-macos11", false, "macos", "x64" },
+    { TARGET_DESKTOP, "macos-arm64", "", "arm64-apple-macos11", false, "macos", "arm64" },
+    { TARGET_DESKTOP, "macos-universal", "", "", false, "macos", "universal" },
+};
 
 static const Target mobile_targets[] = {
     { TARGET_ANDROID, "android-arm64", "arm64-v8a", "aarch64-linux-android", false },
@@ -213,25 +227,35 @@ static const Target mobile_targets[] = {
 /* The minimum version of Android: its API level, in the name of the clang of the NDK. */
 #define ANDROID_API 24
 
-#if defined(_WIN32)
-#define HOST_TARGET_PREFIX "windows-"
-#elif defined(__APPLE__)
-#define HOST_TARGET_PREFIX "macos-"
-#else
-#define HOST_TARGET_PREFIX "linux-"
-#endif
-
 /* The target named `name`, or NULL after reporting why there is none. */
+static const char *host_system(void);
+
 static const Target *find_target(const char *name) {
     for (size_t i = 0; i < sizeof mobile_targets / sizeof *mobile_targets; i++) {
         if (strcmp(mobile_targets[i].name, name) == 0) return &mobile_targets[i];
     }
-    if (strncmp(name, HOST_TARGET_PREFIX, strlen(HOST_TARGET_PREFIX)) == 0) return &host_target;
+    if (strcmp(name, host_system()) == 0) return &host_target;
+    for (size_t i = 0; i < sizeof desktop_targets / sizeof *desktop_targets; i++) {
+        if (strcmp(desktop_targets[i].name, name) == 0) return &desktop_targets[i];
+    }
     fprintf(stderr,
-            "sosuc: unknown target `%s`: the targets are android-arm64, android-x64, ios-arm64, ios-sim, and the system "
-            "of this machine (%s...); cross-compiling to another desktop is not supported yet (spec 11.5)\n",
-            name, HOST_TARGET_PREFIX);
+            "sosuc: unknown target `%s`: the targets are windows-x64, windows-arm64, linux-x64, linux-arm64, macos-x64, "
+            "macos-arm64, macos-universal, android-arm64, android-x64, ios-arm64 and ios-sim (spec 11.1)\n",
+            name);
     return NULL;
+}
+
+/* The system of a desktop target (`windows`...), and its architecture (`x64`...). */
+static const char *target_system(const Target *target) {
+    if (target->system) return target->system;
+    const char *host = host_system();
+    return strncmp(host, "windows", 7) == 0 ? "windows" : strncmp(host, "macos", 5) == 0 ? "macos" : "linux";
+}
+
+static const char *target_arch(const Target *target) {
+    if (target->arch) return target->arch;
+    const char *dash = strchr(host_system(), '-');
+    return dash ? dash + 1 : "x64";
 }
 
 /* The folder of the Android NDK: ANDROID_NDK_HOME, ANDROID_NDK_ROOT, or the newest version in the
@@ -303,14 +327,6 @@ static char *android_clang(const Target *target) {
 
 /* ---- Linking (the [link] sections of sosu.toml) ---- */
 
-#if defined(_WIN32)
-#define HOST_LINK LINK_WINDOWS
-#elif defined(__APPLE__)
-#define HOST_LINK LINK_MACOS
-#else
-#define HOST_LINK LINK_LINUX
-#endif
-
 typedef struct {
     StringList libs;
     StringList paths; /* relative to the current folder */
@@ -337,26 +353,50 @@ static char *package_path(const Package *package, const char *relative) {
     return result;
 }
 
-/* A path of a [link] section, `{abi}` replaced by the folder of the architecture of the target
-   (`arm64-v8a`...: `paths = ["vendor/SDL3-android/lib/{abi}"]`, spec §11.5). */
+/* A path of a [link] section, `{abi}` replaced by the folder of the architecture of a phone
+   (`arm64-v8a`...: `paths = ["vendor/SDL3-android/lib/{abi}"]`, spec §11.5), and `{arch}` by the
+   architecture of a desktop (`x64`, `arm64`: `vendor/SDL3/lib/{arch}`, spec §11.6). */
 static char *link_path(const Package *package, const char *relative, const Target *target) {
-    const char *at = strstr(relative, "{abi}");
-    if (!at) return package_path(package, relative);
-    char *replaced = sosu_format("%.*s%s%s", (int)(at - relative), relative, target->abi, at + 5);
-    char *result = package_path(package, replaced);
-    free(replaced);
+    char *text = sosu_strdup(relative);
+    const char *words[] = { "{abi}", "{arch}" };
+    const char *values[] = { target->abi, target->os == TARGET_HOST || target->os == TARGET_DESKTOP ? target_arch(target) : "" };
+    for (size_t i = 0; i < 2; i++) {
+        const char *at = strstr(text, words[i]);
+        if (!at) continue;
+        char *replaced = sosu_format("%.*s%s%s", (int)(at - text), text, values[i], at + strlen(words[i]));
+        free(text);
+        text = replaced;
+    }
+    char *result = package_path(package, text);
+    free(text);
     return result;
+}
+
+/* The [link] section of a desktop system, and of one of its architectures (-1: none). */
+static int link_section_of(const char *system, const char *arch, bool with_arch) {
+    for (int i = LINK_WINDOWS; i < LINK_SECTION_COUNT; i++) {
+        const char *name = link_section_names[i];
+        size_t n = strlen(system);
+        if (strncmp(name, system, n) != 0) continue;
+        if (!with_arch && name[n] == 0) return i;
+        if (with_arch && name[n] == '-' && strcmp(name + n + 1, arch) == 0) return i;
+    }
+    return -1;
 }
 
 /* [link] and [link.<target>] of every package (the host, or `android`, `ios`): a dependency's
    libraries reach the program. */
 static void collect_links(const Program *program, Links *links, const Target *target) {
     memset(links, 0, sizeof *links);
-    int own = target->os == TARGET_ANDROID ? LINK_ANDROID : target->os == TARGET_IOS ? LINK_IOS : HOST_LINK;
-    int sections[] = { LINK_ALL, own };
+    bool desktop = target->os == TARGET_HOST || target->os == TARGET_DESKTOP;
+    int own = target->os == TARGET_ANDROID ? LINK_ANDROID : target->os == TARGET_IOS ? LINK_IOS
+            : link_section_of(target_system(target), "", false);
+    int arch = desktop ? link_section_of(target_system(target), target_arch(target), true) : -1;
+    int sections[] = { LINK_ALL, own, arch };
     for (size_t i = 0; i < program->packages.count; i++) {
         const Package *package = program->packages.items[i];
-        for (size_t s = 0; s < 2; s++) {
+        for (size_t s = 0; s < 3; s++) {
+            if (sections[s] < 0) continue;
             const LinkSection *link = &package->manifest.link[sections[s]];
             for (size_t j = 0; j < link->libs.count; j++) add_unique(&links->libs, sosu_strdup(link->libs.items[j]));
             for (size_t j = 0; j < link->paths.count; j++) {
@@ -442,36 +482,83 @@ static bool copy_files(const Links *links, const char *build_dir) {
 #ifdef _WIN32
 /* A .bat script that runs `commands` with MSVC, found like build.bat does when cl.exe is not
    already on the PATH. */
-static char *msvc_script(const char *commands) {
+static char *msvc_script_for(const char *commands, const char *arch) {
     return sosu_format(
         "@echo off\r\n"
-        "where cl >nul 2>nul && goto :have_cl\r\n"
+        "%s"
         "set \"VSWHERE=%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\\vswhere.exe\"\r\n"
         "if not exist \"%%VSWHERE%%\" goto :no_cl\r\n"
         "for /f \"usebackq tokens=*\" %%%%i in (`\"%%VSWHERE%%\" -latest -products * -requires "
         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set \"VSDIR=%%%%i\"\r\n"
         "if not defined VSDIR goto :no_cl\r\n"
         "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
-        "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\vcvars64.bat\" >nul || goto :no_cl\r\n"
+        "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\%s\" %s >nul || goto :no_cl\r\n"
         ":have_cl\r\n"
         "%s"
         "exit /b 0\r\n"
         ":no_cl\r\n"
-        "echo sosuc: no C compiler found: install Visual Studio with the C++ tools, or set SOSU_CC 1>&2\r\n"
+        "echo sosuc: no C compiler found: install Visual Studio with the C++ tools%s, or set SOSU_CC 1>&2\r\n"
         "exit /b 2\r\n",
-        commands);
+        arch ? "" : "where cl >nul 2>nul && goto :have_cl\r\n", arch ? "vcvarsall.bat" : "vcvars64.bat", arch ? arch : "",
+        commands, arch ? " of the architecture of the target (ARM64 or x64)" : "");
 }
+
+static char *msvc_script(const char *commands) { return msvc_script_for(commands, NULL); }
 #endif
+
+/* The C compiler of a desktop target, and the options that choose its target: false, after
+   saying what is missing (spec §11.6). Not used for MSVC, which `compile_c` runs itself. */
+static bool desktop_compiler(const Target *target, char **cc, char **flags) {
+    const char *given = getenv("SOSU_CC");
+    bool has_cc = given && given[0];
+    *flags = sosu_strdup("");
+    const char *system = target_system(target);
+    const char *arch = target_arch(target);
+    const char *host = target_system(&host_target);
+    if (target->os == TARGET_HOST || (strcmp(system, host) == 0 && strcmp(arch, target_arch(&host_target)) == 0)) {
+        *cc = sosu_strdup(has_cc ? given : "cc");
+        return true;
+    }
+    if (strcmp(system, host) == 0 && strcmp(system, "macos") == 0) {
+        *cc = sosu_strdup(has_cc ? given : "clang");
+        free(*flags);
+        *flags = sosu_strdup(strcmp(arch, "x64") == 0 ? " -arch x86_64" : strcmp(arch, "arm64") == 0 ? " -arch arm64"
+                                                                        : " -arch arm64 -arch x86_64");
+        return true;
+    }
+    if (strcmp(system, host) == 0 && strcmp(system, "linux") == 0) {
+        *cc = sosu_strdup(has_cc ? given : strcmp(arch, "arm64") == 0 ? "aarch64-linux-gnu-gcc" : "x86_64-linux-gnu-gcc");
+        return true;
+    }
+    if (strcmp(system, host) == 0 && has_cc) { /* Windows with MinGW */
+        *cc = sosu_strdup(given);
+        return true;
+    }
+    const char *sysroot = getenv("SOSU_SYSROOT");
+    if (!target->triple[0] || !sysroot || !sysroot[0]) {
+        fprintf(stderr,
+                "sosuc: building for %s on %s needs clang and the files of %s (its headers and libraries): give their "
+                "folder in SOSU_SYSROOT, and clang in SOSU_CC if it is not `clang` (spec 11.6)\n",
+                target->name, host_system(), system);
+        *cc = NULL;
+        return false;
+    }
+    *cc = sosu_strdup(has_cc ? given : "clang");
+    free(*flags);
+    *flags = sosu_format(" --target=%s --sysroot=\"%s\" -fuse-ld=lld", target->triple, sysroot);
+    return true;
+}
 
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
 static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize,
-                      const Links *links) {
+                      const Links *links, const Target *target) {
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
+    bool for_windows = strcmp(target_system(target), "windows") == 0;
     char *command;
 #ifdef _WIN32
-    if (!cc || !cc[0]) {
+    if ((!cc || !cc[0]) && for_windows) {
         /* MSVC, found like build.bat does when cl.exe is not already on the PATH */
         char *bat = path_join(build_dir, "compile.bat");
         char *dir = shell_path(build_dir);
@@ -490,7 +577,10 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n",
             optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, resource, link_args, dir, dir);
         free(resource);
-        char *script = msvc_script(commands);
+        /* another architecture: the tools of MSVC that build for it, from this one */
+        bool arm64 = strcmp(target_arch(target), "arm64") == 0;
+        bool other = strcmp(target_arch(target), target_arch(&host_target)) != 0;
+        char *script = msvc_script_for(commands, !other ? NULL : arm64 ? "x64_arm64" : "arm64_x64");
         free(commands);
         bool written = write_file(bat, script);
         char *native_bat = shell_path(bat);
@@ -514,15 +604,22 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
 #endif
     {
         (void)build_dir;
+        char *compiler, *flags;
+        if (!desktop_compiler(target, &compiler, &flags)) {
+            free(flags);
+            free(runtime);
+            free(runtime_c);
+            return false;
+        }
         char *link_args = link_arguments(links, false);
-#ifdef _WIN32
-        if (optimize && links->window) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
-#endif
+        if (optimize && links->window && for_windows) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
         char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
-        command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s -o \"%s\"%s", cc && cc[0] ? cc : "cc",
+        command = sosu_format("\"%s\"%s -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s -o \"%s\"%s", compiler, flags,
                               optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, resource, exe, link_args);
         free(resource);
         free(link_args);
+        free(flags);
+        free(compiler);
     }
     int status = shell_run(command);
     free(command);
@@ -1646,24 +1743,25 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
     int status = program.fatal ? 2 : 1;
     if (ok) {
         const Package *root = program.packages.items[0];
-        char *build_dir = path_join(root->root, "build");
+        char *base_dir = path_join(root->root, "build");
+        /* another desktop: build/<target>/, beside the program of this one (spec §11.6) */
+        char *build_dir = options->target->os == TARGET_DESKTOP ? path_join(base_dir, options->target->name)
+                                                                : sosu_strdup(base_dir);
+        free(base_dir);
         shell_make_dir(build_dir);
 
         char *name = sosu_format(mode == MODE_TEST ? "%s_tests" : "%s", root->name);
         char *file = sosu_format("%s.c", name);
         char *c_file = path_join(build_dir, file);
-#ifdef _WIN32
-        char *exe_name = sosu_format("%s.exe", name);
-#else
-        char *exe_name = sosu_strdup(name);
-#endif
+        char *exe_name = strcmp(target_system(options->target), "windows") == 0 ? sosu_format("%s.exe", name)
+                                                                                : sosu_strdup(name);
         char *exe = path_join(build_dir, exe_name);
         Links links;
         collect_links(&program, &links, options->target);
         if (!write_file(c_file, source)) {
             fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
             status = 2;
-        } else if (!compile_c(build_dir, c_file, exe, lib, options->release, &links)) {
+        } else if (!compile_c(build_dir, c_file, exe, lib, options->release, &links, options->target)) {
             fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
             status = 2;
         } else if (!copy_files(&links, build_dir)) {
@@ -1830,50 +1928,45 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
         status = 2;
         const Package *root = program.packages.items[0];
         const AppSection *app = &root->manifest.app;
-        const char *system = host_system();
+        /* the layout, the icon and the archive are those of the system of the target */
+        const char *target_name = options.target->os == TARGET_HOST ? host_system() : options.target->name;
+        const char *system = target_system(options.target);
+        bool windows = strcmp(system, "windows") == 0;
+        bool macos = strcmp(system, "macos") == 0;
         char *build_dir = path_join(root->root, "build");
+        if (options.target->os == TARGET_DESKTOP) {
+            char *own = path_join(build_dir, options.target->name);
+            free(build_dir);
+            build_dir = own;
+        }
         char *packages = path_join(build_dir, "package");
         shell_make_dir(packages);
         char *file = sosu_format("%s.c", root->name);
         char *c_file = path_join(build_dir, file);
         const char *title = app->name ? app->name : root->name;
-        (void)title; /* the name of a .app or of a .desktop entry */
-#ifdef __APPLE__
-        /* <Name>.app: the program in Contents/MacOS, its libraries in Contents/Frameworks, the
-           assets in Contents/Resources, which SDL_GetBasePath gives */
-        char *folder_name = sosu_format("%s.app", title);
+        /* macOS: <Name>.app, the program in Contents/MacOS, its libraries in Contents/Frameworks,
+           the assets in Contents/Resources, which SDL_GetBasePath gives */
+        char *folder_name = macos ? sosu_format("%s.app", title) : sosu_strdup(root->name);
         char *folder = path_join(packages, folder_name);
-        char *bin_dir = path_join(folder, "Contents/MacOS");
-        char *files_dir = path_join(folder, "Contents/Frameworks");
-        char *assets_dir = path_join(folder, "Contents/Resources");
-#else
-        char *folder_name = sosu_strdup(root->name);
-        char *folder = path_join(packages, folder_name);
-        char *bin_dir = sosu_strdup(folder);
-        char *files_dir = sosu_strdup(folder);
-        char *assets_dir = sosu_strdup(folder);
-#endif
+        char *bin_dir = macos ? path_join(folder, "Contents/MacOS") : sosu_strdup(folder);
+        char *files_dir = macos ? path_join(folder, "Contents/Frameworks") : sosu_strdup(folder);
+        char *assets_dir = macos ? path_join(folder, "Contents/Resources") : sosu_strdup(folder);
         shell_remove_dir(folder);
         shell_make_dir(bin_dir);
         shell_make_dir(files_dir);
         shell_make_dir(assets_dir);
-#ifdef _WIN32
-        char *exe_name = sosu_format("%s.exe", root->name);
-#else
-        char *exe_name = sosu_strdup(root->name);
-#endif
+        char *exe_name = windows ? sosu_format("%s.exe", root->name) : sosu_strdup(root->name);
         char *exe = path_join(bin_dir, exe_name);
         Links links;
         collect_links(&program, &links, options.target);
-        links.resource = windows_icon(root, build_dir);
+        if (windows && options.target->os == TARGET_HOST) links.resource = windows_icon(root, build_dir);
         bool built = write_file(c_file, source);
         if (!built) fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
-        if (built && !compile_c(build_dir, c_file, exe, lib, true, &links)) {
+        if (built && !compile_c(build_dir, c_file, exe, lib, true, &links, options.target)) {
             fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
             built = false;
         }
-#ifdef _WIN32
-        if (built) { /* what MSVC writes for the debugger stays out of the package */
+        if (built && windows) { /* what MSVC writes for the debugger stays out of the package */
             const char *extras[] = { ".ilk", ".pdb" };
             for (size_t i = 0; i < 2; i++) {
                 char *extra = sosu_format("%s/%s%s", bin_dir, root->name, extras[i]);
@@ -1881,20 +1974,16 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
                 free(extra);
             }
         }
-#endif
         built = built && copy_files(&links, files_dir) && copy_app_assets(root, assets_dir);
-        if (built && app->icon) {
+        if (built && app->icon && !windows) { /* Windows: in the program */
             char *png = package_path(root, app->icon);
             const char *slash = strrchr(png, '/');
             char *icon_copy = path_join(assets_dir, slash ? slash + 1 : png);
-#ifndef _WIN32
             built = copy_file(png, icon_copy);
-#endif
             free(icon_copy);
             free(png);
         }
-#if !defined(_WIN32) && !defined(__APPLE__)
-        if (built) { /* a .desktop file, for the menus of the system */
+        if (built && !windows && !macos) { /* a .desktop file, for the menus of the system */
             char *icon_line = sosu_strdup("");
             if (app->icon) {
                 const char *slash = strrchr(app->icon, '/');
@@ -1910,9 +1999,7 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
             free(entry);
             free(icon_line);
         }
-#endif
-#ifdef __APPLE__
-        if (built) {
+        if (built && macos) {
             char *id = app->id ? sosu_strdup(app->id) : sosu_format("org.sosu.%s", root->name);
             const char *version = app->version ? app->version : root->manifest.version ? root->manifest.version : "1.0";
             char *plist = sosu_format(
@@ -1930,33 +2017,35 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
                 id, title, root->name, version, version);
             char *plist_file = path_join(folder, "Contents/Info.plist");
             built = write_file(plist_file, plist);
+#ifdef __APPLE__
             /* the program finds the libraries of Frameworks */
             char *rpath = sosu_format("install_name_tool -add_rpath @executable_path/../Frameworks \"%s\" 2>/dev/null; true", exe);
             shell_run(rpath);
             free(rpath);
+#endif
             free(plist_file);
             free(plist);
             free(id);
         }
-#endif
-        /* the archive: .zip on Windows and macOS, .tar.gz on Linux */
+        /* the archive: .zip for Windows and macOS, .tar.gz for Linux, made with the tools of this machine */
         char *archive = NULL;
         if (built) {
+            bool zip = windows || macos;
+            archive = sosu_format("%s-%s.%s", root->name, target_name, zip ? "zip" : "tar.gz");
+            char *native = shell_path(packages);
 #if defined(_WIN32)
-            archive = sosu_format("%s-%s.zip", root->name, system);
-            char *native = shell_path(packages);
-            char *command = sosu_format("cd /d \"%s\" && (del /q \"%s\" 2>nul & tar -a -c -f \"%s\" \"%s\")", native, archive,
-                                        archive, folder_name);
+            char *command = sosu_format("cd /d \"%s\" && (del /q \"%s\" 2>nul & tar %s \"%s\" \"%s\")", native, archive,
+                                        zip ? "-a -c -f" : "-czf", archive, folder_name);
 #elif defined(__APPLE__)
-            archive = sosu_format("%s-%s.zip", root->name, system);
-            char *native = shell_path(packages);
-            char *command = sosu_format("cd \"%s\" && rm -f \"%s\" && ditto -c -k --keepParent \"%s\" \"%s\"", native, archive,
-                                        folder_name, archive);
+            char *command = zip ? sosu_format("cd \"%s\" && rm -f \"%s\" && ditto -c -k --keepParent \"%s\" \"%s\"", native,
+                                              archive, folder_name, archive)
+                                : sosu_format("cd \"%s\" && rm -f \"%s\" && tar -czf \"%s\" \"%s\"", native, archive, archive,
+                                              folder_name);
 #else
-            archive = sosu_format("%s-%s.tar.gz", root->name, system);
-            char *native = shell_path(packages);
-            char *command = sosu_format("cd \"%s\" && rm -f \"%s\" && tar -czf \"%s\" \"%s\"", native, archive, archive,
-                                        folder_name);
+            char *command = zip ? sosu_format("cd \"%s\" && rm -f \"%s\" && zip -qr \"%s\" \"%s\"", native, archive, archive,
+                                              folder_name)
+                                : sosu_format("cd \"%s\" && rm -f \"%s\" && tar -czf \"%s\" \"%s\"", native, archive, archive,
+                                              folder_name);
 #endif
             built = shell_run(command) == 0;
             if (!built) fprintf(stderr, "sosuc: cannot make the archive `%s`\n", archive);
@@ -2235,7 +2324,17 @@ int main(int argc, char **argv) {
         if (options.target->os == TARGET_IOS) return command_package_ios(path ? path : ".", argv[0], format, &options);
         return command_package_desktop(path ? path : ".", argv[0], format, &options);
     }
-    if (options.target->os != TARGET_HOST) {
+    if (options.target->os == TARGET_DESKTOP && options.lib) {
+        fprintf(stderr, "sosuc: a library is built for this machine only, for now (spec 11.6)\n");
+        return 2;
+    }
+    if (options.target->os == TARGET_DESKTOP && strcmp(command, "build") != 0) {
+        fprintf(stderr, "sosuc: a program for %s is built here, not run: `sosuc build --target %s` or `sosuc package "
+                        "--target %s` (spec 11.6)\n",
+                options.target->name, options.target->name, options.target->name);
+        return 2;
+    }
+    if (options.target->os == TARGET_ANDROID || options.target->os == TARGET_IOS) {
         if (strcmp(command, "build") != 0 || options.lib) {
             fprintf(stderr, "sosuc: `--target %s` goes with `sosuc build` (a program for a phone, spec 11.5)\n",
                     options.target->name);

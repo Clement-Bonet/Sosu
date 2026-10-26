@@ -12,7 +12,9 @@ typedef enum {
     SECTION_APP, /* [app]: what a phone shows of the program (spec §11.5) */
 } Section;
 
-const char *const link_section_names[LINK_SECTION_COUNT] = { "", "windows", "linux", "macos", "android", "ios" };
+const char *const link_section_names[LINK_SECTION_COUNT] = { "", "windows", "linux", "macos", "android", "ios",
+                                                             "windows-x64", "windows-arm64", "linux-x64", "linux-arm64",
+                                                             "macos-x64", "macos-arm64" };
 
 typedef struct {
     const SourceFile *file;
@@ -262,7 +264,7 @@ static void parse_header(Toml *t) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown section [%.*s]",
                                  (int)key_length, t->s + key_start);
         diag_help(d, "sosu.toml contains [package], [dependencies], [app], [link] and [link.<target>] "
-                     "(windows, linux, macos, android, ios)");
+                     "(windows, linux, macos, android, ios; windows-arm64, linux-x64...)");
         return;
     }
     int index = section == SECTION_LINK ? 3 + link : section == SECTION_APP ? 15 : (int)section; /* link sections after the others */
