@@ -1820,6 +1820,7 @@ static bool copy_app_assets(const Package *root, const char *dest) {
     return true;
 }
 
+#ifdef _WIN32
 /* An icon file (.ico) holding the PNG `png`: Windows reads PNG icons since Vista. */
 static bool write_ico(const char *png, const char *ico) {
     SourceFile image;
@@ -1846,6 +1847,7 @@ static bool write_ico(const char *png, const char *ico) {
     source_free(&image);
     return ok;
 }
+#endif
 
 /* The icon of [app] as a resource of the program, on Windows: a .res (MSVC) or a .o (MinGW),
    or NULL if there is none or the tools are missing (reported). */

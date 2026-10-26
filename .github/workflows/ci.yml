@@ -25,44 +25,80 @@ jobs:
       SOSU_CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v7
-      - name: Build and test
-        run: make test
       # Sosu declares the SDL functions itself and needs no header: the library is enough
       # (libsdl3-dev pulls in some 170 packages, slow when the mirror is). The link libSDL3.so,
-      # which -lSDL3 looks for, comes with libsdl3-dev: it is made by hand.
-      - name: Install SDL3
+      # which -lSDL3 looks for, comes with libsdl3-dev: it is made by hand. The tests package a
+      # program of `platform` (spec 11.6): SDL comes first. The C compiler for ARM64 builds a
+      # program for linux-arm64.
+      - name: Install SDL3, and the C compiler for ARM64
         timeout-minutes: 8  # a stalled apt mirror fails the job instead of hanging it
         run: |
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           sudo apt-get $APT update
-          sudo apt-get $APT install -y --no-install-recommends libsdl3-0
+          sudo apt-get $APT install -y --no-install-recommends libsdl3-0 gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           sudo ln -sf "$(ls /usr/lib/x86_64-linux-gnu/libSDL3.so.0)" /usr/local/lib/libSDL3.so
           sudo ldconfig
+      - name: Build and test
+        run: make test
       # The dummy video driver needs no screen: the window opens, draws a frame and closes itself.
       - name: Window test (platform)
         timeout-minutes: 3
         env:
           SDL_VIDEO_DRIVER: dummy
         run: ./build/sosuc run tests/window
+      # Cross-compilation (spec 11.6): another architecture of the same system.
+      - name: A program for linux-arm64
+        if: matrix.cc == 'gcc'
+        env:
+          SOSU_CC: ""
+        run: |
+          ./build/sosuc build --target linux-arm64 tests/programs/basics
+          file tests/programs/basics/build/linux-arm64/basics | grep -q "ARM aarch64"
+      - name: Archive of examples/workspace
+        if: matrix.cc == 'gcc'
+        run: ./build/sosuc package examples/workspace
+      - uses: actions/upload-artifact@v4
+        if: matrix.cc == 'gcc'
+        with:
+          name: workspace-linux-x64
+          path: examples/workspace/build/package/workspace-linux-x64.tar.gz
 
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Build and test
-        shell: cmd
-        run: build.bat test
+      # The tests package a program of `platform` (spec 11.6): SDL comes first.
       - name: Download SDL3
         timeout-minutes: 5
         shell: pwsh
         run: ./packages/platform/fetch-sdl3.ps1
+      - name: Build and test
+        shell: cmd
+        run: build.bat test
       - name: Window test (platform)
         timeout-minutes: 3
         shell: cmd
         env:
           SDL_VIDEO_DRIVER: dummy
         run: build\sosuc.exe run tests\window
+      # Cross-compilation (spec 11.6): the tools of MSVC for ARM64, from x64.
+      - name: A program for windows-arm64
+        shell: pwsh
+        run: |
+          ./build/sosuc.exe build --target windows-arm64 tests/programs/basics
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bytes = [System.IO.File]::ReadAllBytes("tests/programs/basics/build/windows-arm64/basics.exe")
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          if ($machine -ne 0xAA64) { Write-Error "not an ARM64 program: machine $machine"; exit 1 }
+      - name: Archive of examples/workspace
+        shell: cmd
+        run: build\sosuc.exe package examples\workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-windows-x64
+          path: examples/workspace/build/package/workspace-windows-x64.zip
 
   macos:
     name: macOS (clang)
@@ -72,19 +108,31 @@ jobs:
       SOSU_CC: clang
     steps:
       - uses: actions/checkout@v7
-      - name: Build and test
-        run: make test
+      # The tests package a program of `platform` (spec 11.6): SDL comes first. Homebrew keeps
+      # its libraries out of the default paths of the linker: LIBRARY_PATH gives it.
       - name: Install SDL3
         timeout-minutes: 8
-        run: brew install sdl3
-      # Homebrew keeps its libraries out of the default paths of the linker: LIBRARY_PATH gives it.
+        run: |
+          brew install sdl3
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
+      - name: Build and test
+        run: make test
       - name: Window test (platform)
         timeout-minutes: 3
         env:
           SDL_VIDEO_DRIVER: dummy
+        run: ./build/sosuc run tests/window
+      # Cross-compilation (spec 11.6): both architectures in one program.
+      - name: A program for macos-universal
         run: |
-          export LIBRARY_PATH="$(brew --prefix)/lib"
-          ./build/sosuc run tests/window
+          ./build/sosuc build --target macos-universal tests/programs/basics
+          lipo -info tests/programs/basics/build/macos-universal/basics | grep -q "x86_64 arm64"
+      - name: Archive of examples/workspace
+        run: ./build/sosuc package examples/workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-macos
+          path: examples/workspace/build/package/workspace-macos-*.zip
       # iOS (spec 11.5): the application of examples/window for the simulator, linked with the
       # SDL3.xcframework of the disk image of SDL. Running it in the simulator is done by hand.
       - name: iOS simulator application (examples/window)
