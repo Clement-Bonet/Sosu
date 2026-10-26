@@ -217,11 +217,11 @@ static const Target desktop_targets[] = {
 };
 
 static const Target mobile_targets[] = {
-    { TARGET_ANDROID, "android-arm64", "arm64-v8a", "aarch64-linux-android", false },
-    { TARGET_ANDROID, "android-x64", "x86_64", "x86_64-linux-android", false },
-    { TARGET_ANDROID, "android", "", "", false }, /* sosuc package: every ABI */
-    { TARGET_IOS, "ios-arm64", "ios-arm64", "arm64-apple-ios", false },
-    { TARGET_IOS, "ios-sim", "ios-arm64_x86_64-simulator", "arm64-apple-ios-simulator", true },
+    { TARGET_ANDROID, "android-arm64", "arm64-v8a", "aarch64-linux-android", false, NULL, NULL },
+    { TARGET_ANDROID, "android-x64", "x86_64", "x86_64-linux-android", false, NULL, NULL },
+    { TARGET_ANDROID, "android", "", "", false, NULL, NULL }, /* sosuc package: every ABI */
+    { TARGET_IOS, "ios-arm64", "ios-arm64", "arm64-apple-ios", false, NULL, NULL },
+    { TARGET_IOS, "ios-sim", "ios-arm64_x86_64-simulator", "arm64-apple-ios-simulator", true, NULL, NULL },
 };
 
 /* The minimum version of Android: its API level, in the name of the clang of the NDK. */
@@ -604,6 +604,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
 #endif
     {
         (void)build_dir;
+        (void)cc; /* SOSU_CC: read by desktop_compiler */
         char *compiler, *flags;
         if (!desktop_compiler(target, &compiler, &flags)) {
             free(flags);
