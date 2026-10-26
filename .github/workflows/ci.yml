@@ -28,14 +28,13 @@ jobs:
       # Sosu declares the SDL functions itself and needs no header: the library is enough
       # (libsdl3-dev pulls in some 170 packages, slow when the mirror is). The link libSDL3.so,
       # which -lSDL3 looks for, comes with libsdl3-dev: it is made by hand. The tests package a
-      # program of `platform` (spec 11.6): SDL comes first. The C compiler for ARM64 builds a
-      # program for linux-arm64.
-      - name: Install SDL3, and the C compiler for ARM64
-        timeout-minutes: 10  # a stalled apt mirror fails the job instead of hanging it
+      # program of `platform` (spec 11.6): SDL comes first.
+      - name: Install SDL3
+        timeout-minutes: 8  # a stalled apt mirror fails the job instead of hanging it
         run: |
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           sudo apt-get $APT update
-          sudo apt-get $APT install -y --no-install-recommends libsdl3-0 gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get $APT install -y --no-install-recommends libsdl3-0
           sudo ln -sf "$(ls /usr/lib/x86_64-linux-gnu/libSDL3.so.0)" /usr/local/lib/libSDL3.so
           sudo ldconfig
       - name: Build and test
@@ -47,6 +46,13 @@ jobs:
           SDL_VIDEO_DRIVER: dummy
         run: ./build/sosuc run tests/window
       # Cross-compilation (spec 11.6): another architecture of the same system.
+      # The C compiler for ARM64 (58 MB, slow when the mirror is): in the gcc job only, which uses it.
+      - name: Install the C compiler for ARM64
+        if: matrix.cc == 'gcc'
+        timeout-minutes: 15
+        run: |
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: A program for linux-arm64
         if: matrix.cc == 'gcc'
         env:
