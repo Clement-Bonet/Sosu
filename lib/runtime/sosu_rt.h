@@ -70,6 +70,10 @@ void sosu_print_char(uint32_t value);
 void sosu_print_end(void);
 
 bool sosu_str_eq(sosu_str a, sosu_str b);
+int sosu_str_cmp(sosu_str a, sosu_str b);
+uint64_t sosu_hash_u64(uint64_t x);
+uint64_t sosu_hash_f64(double x);
+uint64_t sosu_hash_str(sosu_str text);
 /* Decodes the code point at *pos (valid UTF-8) and moves *pos after it: `s.chars()`. */
 uint32_t sosu_next_char(sosu_str text, size_t *pos);
 

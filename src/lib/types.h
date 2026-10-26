@@ -27,6 +27,7 @@ typedef enum {
     T_CLASS,
     T_INTERFACE,
     T_ENUM,
+    T_PARAM, /* a type parameter `T` of a generic declaration (spec §5.4) */
 } TypeTag;
 
 /* Effects (spec §7.4), as bits of a mask. */
@@ -37,12 +38,28 @@ enum {
     EFFECT_THREADS = 8,
 };
 
+/* The effect parameters of a generic function (`uses E`), as the bits above the predefined
+   effects: the first one is EFFECT_PARAM, the next EFFECT_PARAM << 1... */
+#define EFFECT_PARAM 0x100u
+#define EFFECT_PARAMS 0xFF00u
+
+/* The constraints of a type parameter (spec §5.4), expanded: `Number` includes `Ordered`... */
+enum {
+    CONSTRAINT_EQUAL = 1,
+    CONSTRAINT_ORDERED = 2,
+    CONSTRAINT_NUMBER = 4,
+    CONSTRAINT_INTEGER = 8,
+    CONSTRAINT_HASH = 16,
+};
+
 typedef struct TypeInfo TypeInfo;
 typedef struct Type Type;
 
 struct Type {
     TypeTag tag;
     Name name; /* built-in and nominal types */
+    Type **type_args; /* an instance of a generic type: its arguments (`Pair<str, i32>`) */
+    size_t type_arg_count;
     union {
         struct { uint8_t bits; bool is_signed; } integer; /* isize / usize: 64 bits */
         struct { uint8_t bits; bool is_unsigned; } floating; /* uf32 / uf64: never negative */
@@ -51,6 +68,7 @@ struct Type {
         struct { Type *value; Type *error; } result;
         struct { Type **params; size_t param_count; Type *ret; unsigned effects; } fn;
         TypeInfo *info; /* STRUCT, CLASS, INTERFACE, ENUM */
+        struct { uint32_t index; uint32_t constraints; TypeInfo *bound; } param; /* PARAM; bound: an interface */
     } as;
 };
 

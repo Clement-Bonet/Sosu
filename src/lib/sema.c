@@ -15,6 +15,7 @@
 
 static Diagnostic *error_at(Sema *s, const Unit *unit, const char *code, size_t offset, size_t length,
                             const char *fmt, ...) {
+    if (s->quiet) return NULL; /* diag_help accepts NULL */
     va_list args;
     va_start(args, fmt);
     Diagnostic *diag = diag_verror(&s->program->diags, code, &unit->file, offset, length, fmt, args);
@@ -232,12 +233,19 @@ static void report_not_a_type(Sema *s, Unit *unit, const Symbol *sym, Name name)
     }
 }
 
+static Type *apply_type_args(Sema *s, Unit *unit, const TypeExpr *te, Type *type);
+
 /* `Type` or `module.Type`. */
 static Type *resolve_named(Sema *s, Unit *unit, Path path, size_t offset, size_t length) {
     if (path.count == 0) return s->types.error;
     Scope *scope = scope_of(s, unit);
     Name first = path.items[0];
 
+    if (path.count == 1 && s->env) {
+        for (size_t i = 0; i < s->env->count; i++) {
+            if (name_eq(s->env->names[i], first)) return s->env->types[i];
+        }
+    }
     if (path.count == 1) {
         Type *builtin = type_builtin(&s->types, first.text, first.length);
         if (builtin) return builtin;
@@ -301,6 +309,13 @@ static unsigned resolve_effects(Sema *s, Unit *unit, Path effects) {
     unsigned mask = 0;
     for (size_t i = 0; i < effects.count; i++) {
         Name name = effects.items[i];
+        bool is_param = false;
+        for (size_t j = 0; s->env && j < s->env->effect_count; j++) {
+            if (!name_eq(s->env->effect_names[j], name)) continue;
+            mask |= s->env->effects[j];
+            is_param = true;
+        }
+        if (is_param) continue;
         unsigned bit = effect_from_name(name.text, name.length);
         if (!bit) {
             Diagnostic *d = error_at(s, unit, "E0320", name.offset, name.length, "unknown effect `%.*s`", NAME_ARGS(name));
@@ -315,6 +330,7 @@ static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition 
     switch (te->kind) {
     case TYPE_NAME: {
         Type *type = resolve_named(s, unit, te->as.name, te->offset, te->length);
+        type = apply_type_args(s, unit, te, type);
         if (type->tag == T_VOID && position != POSITION_RETURN) {
             Diagnostic *d = error_at(s, unit, "E0306", te->offset, te->length, "`void` can only be a return type");
             diag_help(d, "a function that returns nothing is declared `void f()`; for an absent value, use `T?`");
@@ -495,6 +511,15 @@ static void resolve_fields_and_methods(Sema *s, TypeInfo *info) {
     for (size_t i = 0; i < decl->as.type.method_count; i++) {
         const FnDecl *fn = &decl->as.type.methods[i];
         check_unique(s, unit, names.items, names.count, fn->name, "the member");
+        if (fn->type_params.count) {
+            Diagnostic *d = error_at(s, unit, "E0217", fn->name.offset, fn->name.length,
+                                     "a method has no type parameters of its own in this step");
+            diag_help(d, "give the parameters to the type: `struct %.*s<T>` (spec §5.4)", NAME_ARGS(info->name));
+        }
+        if ((info->param_count || info->generic) && fn->method_kind != METHOD_PLAIN) {
+            error_at(s, unit, "E0217", fn->name.offset, fn->name.length,
+                     "a method of a generic class is not virtual in this step");
+        }
         SOSU_VEC_PUSH(&names, fn->name);
         MethodInfo mi = {0};
         mi.decl = fn;
@@ -736,6 +761,397 @@ bool type_owns_resource(const Type *type) {
     }
 }
 
+/* ---- Generics (spec §5.4) ---- */
+
+static const struct {
+    const char *name;
+    uint32_t bits;
+} constraint_names[] = {
+    { "Equal", CONSTRAINT_EQUAL },
+    { "Ordered", CONSTRAINT_EQUAL | CONSTRAINT_ORDERED },
+    { "Number", CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_NUMBER },
+    { "Integer", CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_NUMBER | CONSTRAINT_INTEGER },
+    { "Hash", CONSTRAINT_EQUAL | CONSTRAINT_HASH },
+};
+
+/* The built-in constraints a type satisfies. */
+static uint32_t constraints_of(const Type *type) {
+    uint32_t all = CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_NUMBER | CONSTRAINT_INTEGER | CONSTRAINT_HASH;
+    switch (type->tag) {
+    case T_ERROR: return all;
+    case T_INT: return all;
+    case T_FLOAT: return all & ~(uint32_t)CONSTRAINT_INTEGER;
+    case T_CHAR: case T_STR: return CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_HASH;
+    case T_BOOL: case T_POINTER: return CONSTRAINT_EQUAL | CONSTRAINT_HASH;
+    case T_ENUM:
+        for (size_t i = 0; i < type->as.info->variant_count; i++) {
+            if (type->as.info->variants[i].field_count > 0) return 0;
+        }
+        return CONSTRAINT_EQUAL | CONSTRAINT_HASH;
+    case T_PARAM: return type->as.param.constraints;
+    default: return 0;
+    }
+}
+
+static bool implements(const TypeInfo *cls, const TypeInfo *interface) {
+    for (const TypeInfo *t = cls; t; t = t->parent) {
+        for (size_t i = 0; i < t->interface_count; i++) {
+            if (t->interfaces[i] == interface) return true;
+        }
+    }
+    return false;
+}
+
+bool type_is_open(const Type *type) {
+    switch (type->tag) {
+    case T_PARAM: return true;
+    case T_POINTER: case T_OPTION: case T_SLICE: return type_is_open(type->as.inner);
+    case T_ARRAY: return type_is_open(type->as.array.element);
+    case T_RESULT: return type_is_open(type->as.result.value) || type_is_open(type->as.result.error);
+    case T_FN:
+        for (size_t i = 0; i < type->as.fn.param_count; i++) {
+            if (type_is_open(type->as.fn.params[i])) return true;
+        }
+        return type_is_open(type->as.fn.ret);
+    case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM:
+        return type->as.info->open || (type->as.info->param_count > 0 && !type->as.info->generic);
+    default: return false;
+    }
+}
+
+/* True if `type` changes under a substitution: it holds a parameter, or an effect parameter. */
+static bool needs_subst(const Type *type) {
+    switch (type->tag) {
+    case T_POINTER: case T_OPTION: case T_SLICE: return needs_subst(type->as.inner);
+    case T_ARRAY: return needs_subst(type->as.array.element);
+    case T_RESULT: return needs_subst(type->as.result.value) || needs_subst(type->as.result.error);
+    case T_FN:
+        if (type->as.fn.effects & EFFECT_PARAMS) return true;
+        for (size_t i = 0; i < type->as.fn.param_count; i++) {
+            if (needs_subst(type->as.fn.params[i])) return true;
+        }
+        return needs_subst(type->as.fn.ret);
+    default: return type_is_open(type);
+    }
+}
+
+Type *sema_subst(Sema *s, Type *type, Type **from, Type **to, size_t count, const unsigned *effects, size_t effect_count) {
+    if (!needs_subst(type)) return type;
+    switch (type->tag) {
+    case T_PARAM:
+        for (size_t i = 0; i < count; i++) {
+            if (from[i] == type && to[i]) return to[i];
+        }
+        return type;
+    case T_POINTER: return type_pointer(&s->types, sema_subst(s, type->as.inner, from, to, count, effects, effect_count));
+    case T_OPTION: return type_option(&s->types, sema_subst(s, type->as.inner, from, to, count, effects, effect_count));
+    case T_SLICE: return type_slice(&s->types, sema_subst(s, type->as.inner, from, to, count, effects, effect_count));
+    case T_ARRAY:
+        return type_array(&s->types, sema_subst(s, type->as.array.element, from, to, count, effects, effect_count),
+                          type->as.array.size);
+    case T_RESULT:
+        return type_result(&s->types, sema_subst(s, type->as.result.value, from, to, count, effects, effect_count),
+                           sema_subst(s, type->as.result.error, from, to, count, effects, effect_count));
+    case T_FN: {
+        VEC(Type *) params = {0};
+        for (size_t i = 0; i < type->as.fn.param_count; i++) {
+            Type *param = sema_subst(s, type->as.fn.params[i], from, to, count, effects, effect_count);
+            SOSU_VEC_PUSH(&params, param);
+        }
+        Type *ret = sema_subst(s, type->as.fn.ret, from, to, count, effects, effect_count);
+        unsigned mask = type->as.fn.effects;
+        if (effects) {
+            unsigned own = mask & ~EFFECT_PARAMS;
+            for (size_t i = 0; i < effect_count; i++) {
+                if (mask & (EFFECT_PARAM << i)) own |= effects[i];
+            }
+            mask = own;
+        }
+        Type *result = type_fn(&s->types, params.items, params.count, ret, mask);
+        free(params.items);
+        return result;
+    }
+    case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM: {
+        TypeInfo *info = type->as.info;
+        TypeInfo *generic = info->generic ? info->generic : info;
+        if (generic->param_count == 0) return type;
+        Type **source = info->generic ? type->type_args : generic->params;
+        Type **args = arena_alloc(&s->arena, generic->param_count * sizeof *args);
+        for (size_t i = 0; i < generic->param_count; i++) {
+            args[i] = sema_subst(s, source[i], from, to, count, effects, effect_count);
+        }
+        return sema_instance(s, generic, args)->type;
+    }
+    default:
+        return type;
+    }
+}
+
+/* What the names of the parameters of `generic` stand for: `args`. */
+const TypeEnv *sema_info_env(Sema *s, TypeInfo *generic, Type **args) {
+    TypeEnv *env = arena_alloc(&s->arena, sizeof *env);
+    env->count = generic->param_count;
+    env->names = arena_alloc(&s->arena, (env->count + 1) * sizeof *env->names);
+    for (size_t i = 0; i < env->count; i++) env->names[i] = generic->params[i]->name;
+    env->types = args;
+    return env;
+}
+
+/* The same for a function, whose effect parameters stand for `effects` (NULL: for themselves). */
+const TypeEnv *sema_fn_env(Sema *s, FnInfo *fn, Type **args, const unsigned *effects) {
+    TypeEnv *env = arena_alloc(&s->arena, sizeof *env);
+    env->count = fn->param_count;
+    env->names = arena_alloc(&s->arena, (env->count + 1) * sizeof *env->names);
+    for (size_t i = 0; i < env->count; i++) env->names[i] = fn->params[i]->name;
+    env->types = args;
+    env->effect_count = fn->effect_param_count;
+    env->effect_names = fn->effect_params;
+    env->effects = arena_alloc(&s->arena, (env->effect_count + 1) * sizeof *env->effects);
+    for (size_t i = 0; i < env->effect_count; i++) env->effects[i] = effects ? effects[i] : EFFECT_PARAM << i;
+    return env;
+}
+
+static void resolve_fields_and_methods(Sema *s, TypeInfo *info);
+static void resolve_variants(Sema *s, TypeInfo *info);
+
+TypeInfo *sema_instance(Sema *s, TypeInfo *generic, Type **args) {
+    if (generic->generic) generic = generic->generic;
+    bool identity = true;
+    for (size_t i = 0; i < generic->param_count; i++) identity &= args[i] == generic->params[i];
+    if (identity) return generic;
+    for (size_t i = 0; i < generic->instances.count; i++) {
+        TypeInfo *existing = generic->instances.items[i];
+        bool same = true;
+        for (size_t j = 0; j < generic->param_count; j++) same &= existing->type->type_args[j] == args[j];
+        if (same) return existing;
+    }
+    TypeInfo *info = arena_alloc(&s->arena, sizeof *info);
+    info->decl = generic->decl;
+    info->unit = generic->unit;
+    info->name = generic->name;
+    info->generic = generic;
+    Type *type = arena_alloc(&s->arena, sizeof *type);
+    type->tag = generic->type->tag;
+    type->name = generic->name;
+    type->as.info = info;
+    type->type_args = arena_copy(&s->arena, args, generic->param_count * sizeof *args);
+    type->type_arg_count = generic->param_count;
+    info->type = type;
+    for (size_t i = 0; i < generic->param_count; i++) info->open |= type_is_open(args[i]);
+    SOSU_VEC_PUSH(&generic->instances, info);
+    SOSU_VEC_PUSH(&s->instances, info);
+
+    /* its members, from the declaration, with the arguments in place of the parameters */
+    const TypeEnv *saved = s->env;
+    bool quiet = s->quiet;
+    s->env = sema_info_env(s, generic, type->type_args);
+    s->quiet = true;
+    if (info->decl->kind == DECL_ENUM) resolve_variants(s, info);
+    else resolve_fields_and_methods(s, info);
+    s->env = saved;
+    s->quiet = quiet;
+    info->mark = 2;
+    return info;
+}
+
+/* The built-in constraint of `param` that `arg` lacks, or NULL. */
+static const char *missing_constraint(const Type *arg, const Type *param) {
+    uint32_t missing = param->as.param.constraints & ~constraints_of(arg);
+    if (missing & CONSTRAINT_HASH) return "Hash";
+    if (missing & CONSTRAINT_INTEGER) return "Integer";
+    if (missing & CONSTRAINT_NUMBER) return "Number";
+    if (missing & CONSTRAINT_ORDERED) return "Ordered";
+    if (missing & CONSTRAINT_EQUAL) return "Equal";
+    return NULL;
+}
+
+bool sema_check_type_arg(Sema *s, const Unit *unit, size_t offset, size_t length, Type *arg, const Type *param,
+                         Name owner) {
+    if (arg->tag == T_ERROR) return false;
+    char *text = type_to_string(arg);
+    bool ok = true;
+    if (type_owns_resource(arg)) {
+        Diagnostic *d = error_at(s, unit, "E0362", offset, length, "`%s` owns a resource: it cannot be a type argument",
+                                 text);
+        diag_help(d, "in this step, a generic holds plain values and pointers: give it a `%s*`", text);
+        ok = false;
+    } else if (arg->tag == T_VOID) {
+        error_at(s, unit, "E0362", offset, length, "`void` cannot be a type argument");
+        ok = false;
+    } else {
+        const char *missing = missing_constraint(arg, param);
+        const TypeInfo *bound = param->as.param.bound;
+        if (missing) {
+            Diagnostic *d = error_at(s, unit, "E0362", offset, length,
+                                     "`%s` does not satisfy `%s`, a constraint of `%.*s` in `%.*s`", text, missing,
+                                     NAME_ARGS(param->name), NAME_ARGS(owner));
+            diag_help(d, "the types that satisfy each constraint are listed in spec §5.4");
+            ok = false;
+        } else if (bound) {
+            bool fits = arg->tag == T_POINTER && arg->as.inner->tag == T_CLASS && implements(arg->as.inner->as.info, bound);
+            fits |= arg->tag == T_POINTER && arg->as.inner->tag == T_INTERFACE && arg->as.inner->as.info == bound;
+            fits |= arg->tag == T_PARAM && arg->as.param.bound == bound;
+            if (!fits) {
+                Diagnostic *d = error_at(s, unit, "E0362", offset, length,
+                                         "`%s` does not implement `%.*s`, a constraint of `%.*s` in `%.*s`", text,
+                                         NAME_ARGS(bound->name), NAME_ARGS(param->name), NAME_ARGS(owner));
+                diag_help(d, "give a pointer to a class that implements `%.*s`", NAME_ARGS(bound->name));
+                ok = false;
+            }
+        }
+    }
+    free(text);
+    return ok;
+}
+
+/* `Name<A, B>` in a type: the instance of a generic for its arguments. */
+static Type *apply_type_args(Sema *s, Unit *unit, const TypeExpr *te, Type *type) {
+    bool nominal = type->tag == T_STRUCT || type->tag == T_CLASS || type->tag == T_INTERFACE || type->tag == T_ENUM;
+    TypeInfo *info = nominal ? type->as.info : NULL;
+    bool generic = info && info->param_count > 0 && !info->generic && type == info->type;
+    if (!generic) {
+        if (te->arg_count && type->tag != T_ERROR) {
+            char *text = type_to_string(type);
+            error_at(s, unit, "E0361", te->offset, te->length, "`%s` is not generic: it takes no type arguments", text);
+            free(text);
+            return s->types.error;
+        }
+        return type;
+    }
+    if (te->arg_count != info->param_count) {
+        Diagnostic *d;
+        if (te->arg_count == 0) {
+            d = error_at(s, unit, "E0361", te->offset, te->length, "`%.*s` is generic: give its type arguments",
+                         NAME_ARGS(info->name));
+        } else {
+            d = error_at(s, unit, "E0361", te->offset, te->length, "`%.*s` takes %zu type argument%s, but %zu %s given",
+                         NAME_ARGS(info->name), info->param_count, info->param_count == 1 ? "" : "s", te->arg_count,
+                         te->arg_count == 1 ? "was" : "were");
+        }
+        char *text = type_to_string(info->type);
+        diag_help(d, "write `%s`, with a type for each parameter", text);
+        free(text);
+        return s->types.error;
+    }
+    Type **args = arena_alloc(&s->arena, info->param_count * sizeof *args);
+    bool ok = true;
+    for (size_t i = 0; i < info->param_count; i++) {
+        const TypeExpr *arg = te->args[i];
+        args[i] = resolve_type(s, unit, arg, POSITION_VALUE);
+        ok &= sema_check_type_arg(s, unit, arg->offset, arg->length, args[i], info->params[i], info->name);
+    }
+    return ok ? sema_instance(s, info, args)->type : s->types.error;
+}
+
+/* The type parameters of a declaration, as T_PARAM types; its effect parameters too, if
+   `effects` is given (functions only). */
+static void resolve_type_params(Sema *s, Unit *unit, TypeParams params, Type ***out, size_t *count, Name **effects,
+                                size_t *effect_count) {
+    VEC(Type *) types = {0};
+    VEC(Name) names = {0};
+    VEC(Name) effect_names = {0};
+    for (size_t i = 0; i < params.count; i++) {
+        const TypeParam *param = &params.items[i];
+        Name name = param->name;
+        check_unique(s, unit, names.items, names.count, name, "the parameter");
+        SOSU_VEC_PUSH(&names, name);
+        if (type_builtin(&s->types, name.text, name.length)) {
+            error_at(s, unit, "E0301", name.offset, name.length, "`%.*s` is a built-in type and cannot be a parameter",
+                     NAME_ARGS(name));
+        }
+        if (param->is_effect) {
+            if (!effects) {
+                Diagnostic *d = error_at(s, unit, "E0217", name.offset, name.length,
+                                         "only a function takes an effect parameter");
+                diag_help(d, "give `uses %.*s` to the functions that need it (spec §5.4)", NAME_ARGS(name));
+            } else if (effect_from_name(name.text, name.length)) {
+                error_at(s, unit, "E0217", name.offset, name.length,
+                         "`%.*s` is an effect: an effect parameter needs another name", NAME_ARGS(name));
+            } else if (effect_names.count >= 8) {
+                error_at(s, unit, "E0217", name.offset, name.length, "a function takes 8 effect parameters at most");
+            } else {
+                SOSU_VEC_PUSH(&effect_names, name);
+            }
+            continue;
+        }
+        Type *type = arena_alloc(&s->arena, sizeof *type);
+        type->tag = T_PARAM;
+        type->name = name;
+        type->as.param.index = (uint32_t)types.count;
+        for (size_t j = 0; j < param->constraint_count; j++) {
+            Path path = param->constraints[j];
+            Name first = path.items[0];
+            bool built_in = false;
+            for (size_t k = 0; path.count == 1 && k < sizeof constraint_names / sizeof *constraint_names; k++) {
+                if (strlen(constraint_names[k].name) != first.length ||
+                    memcmp(constraint_names[k].name, first.text, first.length) != 0) {
+                    continue;
+                }
+                type->as.param.constraints |= constraint_names[k].bits;
+                built_in = true;
+            }
+            if (built_in) continue;
+            size_t offset, length;
+            path_span(path, &offset, &length);
+            Symbol *sym = path.count == 1 ? scope_find(scope_of(s, unit), first) : NULL;
+            Type *found = path.count == 2 || (sym && sym->kind == SYM_TYPE) ? resolve_named(s, unit, path, offset, length)
+                                                                            : NULL;
+            if (found && found->tag == T_INTERFACE) {
+                if (type->as.param.bound) {
+                    error_at(s, unit, "E0364", offset, length, "`%.*s` takes one interface at most", NAME_ARGS(name));
+                } else {
+                    type->as.param.bound = found->as.info;
+                }
+            } else if (!found || found->tag != T_ERROR) {
+                Diagnostic *d = error_at(s, unit, "E0364", offset, length, "`%.*s` is not a constraint", (int)length,
+                                         unit->file.text + offset);
+                diag_help(d, "the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash`, and interfaces");
+            }
+        }
+        SOSU_VEC_PUSH(&types, type);
+    }
+    *count = types.count;
+    *out = FINISH(s, types);
+    if (effects) {
+        *effect_count = effect_names.count;
+        *effects = FINISH(s, effect_names);
+    }
+    free(names.items);
+    if (!effects) free(effect_names.items);
+}
+
+/* The parameters of the generic declarations, before anything refers to them. */
+static void resolve_generics(Sema *s) {
+    for (size_t i = 0; i < s->type_infos.count; i++) {
+        TypeInfo *info = s->type_infos.items[i];
+        const Decl *decl = info->decl;
+        if (decl->type_params.count == 0) continue;
+        resolve_type_params(s, info->unit, decl->type_params, &info->params, &info->param_count, NULL, NULL);
+        info->type->type_args = info->params;
+        info->type->type_arg_count = info->param_count;
+        if (decl->kind == DECL_INTERFACE) {
+            Diagnostic *d = error_at(s, info->unit, "E0217", info->name.offset, info->name.length,
+                                     "an interface is not generic in this step");
+            diag_help(d, "give the parameters to the functions or the classes that use it (spec §5.4)");
+        } else if (decl->kind == DECL_CLASS && decl->as.type.base_count) {
+            Diagnostic *d = error_at(s, info->unit, "E0217", info->name.offset, info->name.length,
+                                     "a generic class has no parent class and no interface in this step");
+            diag_help(d, "keep the generic class on its own (spec §5.4)");
+        }
+    }
+    for (size_t i = 0; i < s->fns.count; i++) {
+        FnInfo *fn = s->fns.items[i];
+        if (fn->decl->type_params.count == 0) continue;
+        if (fn->is_extern) {
+            error_at(s, fn->unit, "E0217", fn->decl->name.offset, fn->decl->name.length, "a C function cannot be generic");
+            continue;
+        }
+        resolve_type_params(s, fn->unit, fn->decl->type_params, &fn->params, &fn->param_count, &fn->effect_params,
+                            &fn->effect_param_count);
+    }
+}
+
+uint32_t sema_constraints_of(const Type *type) { return constraints_of(type); }
 /* ---- Entry point ---- */
 
 bool sema_check(Sema *s, Program *program) {
@@ -750,21 +1166,26 @@ bool sema_check(Sema *s, Program *program) {
         if (strcmp(program->units.items[i]->module, "core.prelude") == 0) s->prelude = program->units.items[i];
         collect(s, program->units.items[i]);
     }
+    resolve_generics(s);
 
     for (size_t i = 0; i < s->type_infos.count; i++) {
         TypeInfo *info = s->type_infos.items[i];
-        if (info->decl->kind == DECL_CLASS) resolve_bases(s, info);
+        if (info->decl->kind == DECL_CLASS && info->param_count == 0) resolve_bases(s, info);
     }
     break_inheritance_cycles(s);
 
     for (size_t i = 0; i < s->type_infos.count; i++) {
         TypeInfo *info = s->type_infos.items[i];
+        s->env = info->param_count ? sema_info_env(s, info, info->params) : NULL;
         if (info->decl->kind == DECL_ENUM) resolve_variants(s, info);
         else resolve_fields_and_methods(s, info);
+        s->env = NULL;
     }
     for (size_t i = 0; i < s->fns.count; i++) {
         FnInfo *fn = s->fns.items[i];
+        s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;
         fn->type = function_type(s, fn->unit, fn->decl);
+        s->env = NULL;
     }
 
     for (size_t i = 0; i < s->type_infos.count; i++) {
@@ -782,6 +1203,7 @@ bool sema_check(Sema *s, Program *program) {
 
 Diagnostic *sema_verror(Sema *s, const Unit *unit, const char *code, size_t offset, size_t length,
                         const char *fmt, va_list args) {
+    if (s->quiet) return NULL;
     return diag_verror(&s->program->diags, code, &unit->file, offset, length, fmt, args);
 }
 
