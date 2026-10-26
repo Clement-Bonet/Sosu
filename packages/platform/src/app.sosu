@@ -464,8 +464,7 @@ pub i32 run(Config config, Handler* handler) uses io {
     // a phone: its system bars and its notch, and the density of its screen, from the start
     i32[4] area = sdl.safe_area(window);
     if (running && (area[0] != 0 || area[1] != 0 || area[2] != given.x || area[3] != given.y)) {
-        running = handler.on_event(SafeAreaChanged(area[0] as f32, area[1] as f32, (given.x - area[0] - area[2]) as f32,
-                                                   (given.y - area[1] - area[3]) as f32));
+        running = handler.on_event(SafeAreaChanged(area[0] as f32, area[1] as f32, (given.x - area[0] - area[2]) as f32, (given.y - area[1] - area[3]) as f32));
     }
     f32 density = sdl.display_scale(window);
     if (running && density != 1.0 && density > 0.0) {
