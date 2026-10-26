@@ -22,6 +22,14 @@ static Diagnostic *error_at(Sema *s, const Unit *unit, const char *code, size_t 
     return diag;
 }
 
+/* The former names of the unsigned integers (spec §4): `u8` is now `ui8`. */
+static bool is_former_unsigned(Name name) {
+    return name.length >= 2 && name.length <= 3 && name.text[0] == 'u' &&
+           ((name.length == 2 && name.text[1] == '8') ||
+            (name.length == 3 && (memcmp(name.text + 1, "16", 2) == 0 || memcmp(name.text + 1, "32", 2) == 0 ||
+                                  memcmp(name.text + 1, "64", 2) == 0)));
+}
+
 static bool name_eq(Name a, Name b) {
     return a.length == b.length && memcmp(a.text, b.text, a.length) == 0;
 }
@@ -244,6 +252,11 @@ static Type *resolve_named(Sema *s, Unit *unit, Path path, size_t offset, size_t
             return s->types.error;
         }
         Diagnostic *d = error_at(s, unit, "E0303", first.offset, first.length, "unknown type `%.*s`", NAME_ARGS(first));
+        if (is_former_unsigned(first)) {
+            diag_help(d, "`%.*s` is now `ui%.*s`: the unsigned integers are `ui8`, `ui16`, `ui32` and `ui64`",
+                      NAME_ARGS(first), (int)first.length - 1, first.text + 1);
+            return s->types.error;
+        }
         Name suggestion;
         if (suggest_type(s, scope, first, false, true, &suggestion)) diag_help(d, "did you mean `%.*s`?", NAME_ARGS(suggestion));
         return s->types.error;

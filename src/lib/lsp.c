@@ -1202,8 +1202,8 @@ static void add_locals_of(Items *items, const SourceFile *file, const Stmt *s, s
 }
 
 static const char *const builtin_types[] = {
-    "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize",
-    "f32", "f64", "bool", "char", "str", "void", "Arena",
+    "i8", "i16", "i32", "i64", "isize", "ui8", "ui16", "ui32", "ui64", "usize",
+    "f32", "f64", "uf32", "uf64", "bool", "char", "str", "void", "Arena",
 };
 
 static const char *const keywords[] = {

@@ -50,7 +50,7 @@ i32!ParseError digit(str s) {
     if (s.len == 0) {
         return err(Empty);
     }
-    u8 c = s.bytes[0];
+    ui8 c = s.bytes[0];
     if (c < 48 || c > 57) {
         return err(NotADigit);
     }
@@ -82,7 +82,7 @@ void count_down(i32 n) uses io {
     }
 }
 
-i32? find(u8[] bytes, u8 target) {
+i32? find(ui8[] bytes, ui8 target) {
     for (mut usize i = 0; i < bytes.len; i += 1) {
         if (bytes[i] == target) {
             return some(i as i32);
@@ -155,7 +155,7 @@ i32 main() uses io {
         io.print("i = {}", i);
     }
 
-    u8 mask = (0xF0 >> 4) as u8;
+    ui8 mask = (0xF0 >> 4) as ui8;
     io.print("{} {} {} {}", mask, -7 / 2, 'é', true && !false);
     i64 big = 3000000000;
     io.print("big = {}", big * 2);

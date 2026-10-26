@@ -63,3 +63,25 @@ jobs:
         env:
           SDL_VIDEO_DRIVER: dummy
         run: build\sosuc.exe run tests\window
+
+  macos:
+    name: macOS (clang)
+    runs-on: macos-latest
+    env:
+      CC: clang
+      SOSU_CC: clang
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test
+        run: make test
+      - name: Install SDL3
+        timeout-minutes: 8
+        run: brew install sdl3
+      # Homebrew keeps its libraries out of the default paths of the linker: LIBRARY_PATH gives it.
+      - name: Window test (platform)
+        timeout-minutes: 3
+        env:
+          SDL_VIDEO_DRIVER: dummy
+        run: |
+          export LIBRARY_PATH="$(brew --prefix)/lib"
+          ./build/sosuc run tests/window

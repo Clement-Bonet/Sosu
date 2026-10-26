@@ -437,7 +437,7 @@ static bool starts_operand(TokenKind kind) {
 }
 
 /* After `as`, `*` and `?` are type suffixes unless an operand follows:
-   `x as i32 * 2` multiplies, `p as u8*;` converts to a pointer. */
+   `x as i32 * 2` multiplies, `p as ui8*;` converts to a pointer. */
 static bool suffix_is_operator(const Parser *p) {
     size_t ahead = 1;
     while (kind_at(p, ahead) == TOK_STAR) ahead++;
@@ -1409,8 +1409,8 @@ static const UiNodeKind ui_nodes[] = {
     { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
     { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
-    { "List", 0, false, { "width", "height", "selected", "count", "item", "focus", "style", NULL }, true },
-    { "Table", 0, false, { "count", "item", "width", "height", "selected", "sort", "on_activate", "focus", "style", NULL }, true },
+    { "List", 0, false, { "width", "height", "selected", "selection", "count", "item", "on_drop", "focus", "style", NULL }, true },
+    { "Table", 0, false, { "count", "item", "width", "height", "selected", "selection", "sort", "on_activate", "focus", "style", NULL }, true },
     { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
     { "Text", 1, false, { "plural", "count", "context", "style", NULL }, false },
     { "Title", 1, false, { "plural", "count", "context", "style", NULL }, false },
@@ -1433,9 +1433,10 @@ static const UiNodeKind ui_nodes[] = {
     { "Group", 1, true, { "gap", "padding", "collapsible", "open", "style", NULL }, true },
     { "Tabs", 0, false, { "bind", "placement", "focus", "style", NULL }, true },
     { "Tab", 1, false, { "closable", "on_close", "enabled", "plural", "count", "context", NULL }, true },
-    { "Tree", 0, false, { "selected", "width", "height", "focus", "style", NULL }, true },
-    { "Branch", 1, false, { "open", "icon", "plural", "count", "context", NULL }, true },
-    { "Leaf", 1, false, { "on_click", "icon", "plural", "count", "context", NULL }, false },
+    { "Tree", 0, false, { "selected", "width", "height", "count", "item", "depth", "branch", "open", "on_toggle", "focus", "style", NULL }, true },
+    { "Branch", 1, true, { "open", "icon", "template", "plural", "count", "context", NULL }, true },
+    { "Leaf", 1, true, { "on_click", "icon", "template", "plural", "count", "context", NULL }, false },
+    { "Item", 0, false, { "gap", "padding", "vertical", "enabled", "style", NULL }, true },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
     { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
@@ -1448,7 +1449,7 @@ static const UiNodeKind ui_nodes[] = {
     "`Dropdown`, `MenuBar`, `Menu` and `ContextMenu` contain other nodes"
 
 /* The widgets that have an identity (spec §10.6): `f.at(site)` comes before them. */
-static const char *const ui_identified[] = { "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Table", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
+static const char *const ui_identified[] = { "Item", "Button", "TextField", "TextArea", "NumberField", "MoneyField", "Slider", "DateField", "Dialog", "Table", "Checkbox", "Radio", "List", "Group", "Tabs", "Tree", "Branch", "Leaf",
                                              "Scroll", "Dropdown", "Menu", "ContextMenu" };
 
 static void ui_parse_children(Parser *p, StmtVec *out);
@@ -2165,8 +2166,30 @@ static void ui_grid_sizes(Parser *p, StmtVec *out, Expr *sizes, const char *meth
     }
 }
 
+/* `template: FileItem(f)` (spec §10.10): the component `FileItem` called with the frame, as a
+   node, in a scope of its own: `ui_frame.push_id(site); FileItem(ui_frame, f); ui_frame.pop_id();`. */
+static void ui_template(Parser *p, StmtVec *out, Expr *call) {
+    if (call->kind != EXPR_CALL) {
+        Diagnostic *d = error_at(p, "E0215", call->offset, call->length, "a template is a component and its values");
+        diag_help(d, "`template: FileItem(f)`, where `component FileItem(state.File* f) { Item { ... } }`");
+        p->panic = false;
+        return;
+    }
+    Expr *frame = ui_expr(p, EXPR_NAME, call->offset, call->length);
+    frame->as.name = ui_name("ui_frame", call->offset);
+    size_t count = call->as.call.arg_count + 1;
+    Expr **args = arena_alloc(p->arena, count * sizeof *args);
+    args[0] = frame;
+    for (size_t i = 1; i < count; i++) args[i] = call->as.call.args[i - 1];
+    call->as.call.args = args;
+    call->as.call.arg_count = count;
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, call->offset, call->length, "push_id", ui_int(p, call->offset, call->offset)));
+    SOSU_VEC_PUSH(out, ui_stmt(p, call));
+    SOSU_VEC_PUSH(out, ui_frame_stmt(p, call->offset, call->length, "pop_id", NULL));
+}
+
 /* The items in view of a long list or a table: `for (i32 item in ui_frame.first_shown()..
-   ui_frame.last_shown()) { ui_frame.push_id(item as u64); the items; ui_frame.pop_id(); }`. */
+   ui_frame.last_shown()) { ui_frame.push_id(item as ui64); the items; ui_frame.pop_id(); }`. */
 static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, size_t start, size_t length) {
     if (!item || item->kind != EXPR_NAME) {
         Diagnostic *d = error_at(p, "E0215", item ? item->offset : start, item ? item->length : length,
@@ -2184,7 +2207,7 @@ static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, s
     use->as.name = item->as.name;
     Expr *key = ui_expr(p, EXPR_CAST, item->offset, item->length);
     key->as.cast.value = use;
-    key->as.cast.type = ui_type(p, item->offset, NULL, "u64");
+    key->as.cast.type = ui_type(p, item->offset, NULL, "ui64");
     StmtVec body = {0};
     SOSU_VEC_PUSH(&body, ui_frame_stmt(p, item->offset, item->length, "push_id", key));
     for (size_t i = 0; i < items->count; i++) SOSU_VEC_PUSH(&body, items->items[i]);
@@ -2347,6 +2370,10 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             if (kind->children && check(p, TOK_LBRACE)) ui_parse_children(p, out);
         } else if (name_text_is(node, "List")) {
             /* f.list(width, height, some(&selected) or none), the items, f.end_list() */
+            Expr *several = ui_prop(&args, "selection");  /* several choices: f.multiple(&selection) first */
+            if (several) SOSU_VEC_PUSH(out, ui_frame_stmt(p, several->offset, several->length, "multiple", ui_address(p, several)));
+            Expr *on_drop = ui_prop(&args, "on_drop");  /* items dragged: f.reorderable() first */
+            if (on_drop) SOSU_VEC_PUSH(out, ui_frame_stmt(p, on_drop->offset, on_drop->length, "reorderable", NULL));
             Expr *selected = ui_prop(&args, "selected");
             Expr *choice;
             if (selected) {
@@ -2374,11 +2401,22 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
                 ui_parse_children(p, out);
             }
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_list", NULL, 0)));
+            if (on_drop) {  /* if (f.dropped()) { on_drop(f.drop_from(), f.drop_to()); } */
+                Expr *call = ui_expr(p, EXPR_CALL, on_drop->offset, on_drop->length);
+                call->as.call.callee = on_drop;
+                call->as.call.arg_count = 2;
+                call->as.call.args = arena_alloc(p->arena, 2 * sizeof(Expr *));
+                call->as.call.args[0] = ui_frame_call(p, on_drop->offset, on_drop->length, "drop_from", NULL, 0);
+                call->as.call.args[1] = ui_frame_call(p, on_drop->offset, on_drop->length, "drop_to", NULL, 0);
+                SOSU_VEC_PUSH(out, ui_when(p, ui_frame_call(p, start, length, "dropped", NULL, 0), call));
+            }
         } else if (name_text_is(node, "Table")) {
             /* f.table(count, width, height, selected, sort), f.table_column(...) for each column,
                f.table_rows(), the rows in view (a cell per column), if (f.end_table()) { on_activate } */
             Expr *selected = ui_prop(&args, "selected");
             Expr *sort = ui_prop(&args, "sort");
+            Expr *several = ui_prop(&args, "selection");
+            if (several) SOSU_VEC_PUSH(out, ui_frame_stmt(p, several->offset, several->length, "multiple", ui_address(p, several)));
             Expr *none_selected = ui_expr(p, EXPR_NAME, start, length);
             none_selected->as.name = ui_name("none", start);
             Expr *none_sort = ui_expr(p, EXPR_NAME, start, length);
@@ -2585,10 +2623,33 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             if (selected) choice = ui_some(p, ui_address(p, selected));
             Expr *tree_args[3] = { ui_extent(p, ui_prop(&args, "width"), start, 300, true),
                                    ui_extent(p, ui_prop(&args, "height"), start, 200, false), choice };
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree", tree_args, 3)));
-            p->ui_in_tree = true;
-            ui_parse_children(p, out);
-            p->ui_in_tree = false;
+            Expr *count = ui_prop(&args, "count");
+            if (count) {  /* a long tree: f.tree_of(count, ...), each row in view after f.tree_row(depth, branch, open) */
+                Expr *long_args[4] = { count, tree_args[0], tree_args[1], choice };
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree_of", long_args, 4)));
+                Expr *depth = ui_prop(&args, "depth");
+                Expr *branch = ui_prop(&args, "branch");
+                Expr *open = ui_prop(&args, "open");
+                if (!branch) {
+                    branch = ui_expr(p, EXPR_BOOL, start, length);
+                    branch->as.bool_value = false;
+                }
+                if (!open) {
+                    open = ui_expr(p, EXPR_BOOL, start, length);
+                    open->as.bool_value = false;
+                }
+                Expr *row_args[3] = { depth ? depth : ui_int(p, start, 0), branch, open };
+                StmtVec row = {0};
+                SOSU_VEC_PUSH(&row, ui_when(p, ui_frame_call(p, start, length, "tree_row", row_args, 3), ui_prop(&args, "on_toggle")));
+                ui_parse_children(p, &row);  /* the widgets of a row */
+                SOSU_VEC_PUSH(&row, ui_stmt(p, ui_frame_call(p, start, length, "end_tree_row", NULL, 0)));
+                ui_shown_loop(p, out, ui_prop(&args, "item"), &row, start, length);
+            } else {
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "tree", tree_args, 3)));
+                p->ui_in_tree = true;
+                ui_parse_children(p, out);
+                p->ui_in_tree = false;
+            }
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_tree", NULL, 0)));
         } else if (name_text_is(node, "Branch")) {
             /* if (f.branch(text, some(&open) or none)) { the branches and leaves; f.end_branch(); } */
@@ -2596,6 +2657,14 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *state = ui_expr(p, EXPR_NAME, start, length);
             state->as.name = ui_name("none", start);
             if (open) state = ui_some(p, ui_address(p, open));
+            Expr *template = ui_prop(&args, "template");
+            if (template) {  /* f.branch_open(open), its template, if (f.branch_close()) { children; f.end_branch(); } */
+                SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "branch_open", state));
+                ui_template(p, out, template);
+            } else if (!value) {
+                error_at(p, "E0215", node.offset, node.length, "a `Branch` has a text or a `template:`");
+                p->panic = false;
+            }
             Expr *icon = ui_prop(&args, "icon");
             Expr *branch_args[3] = { value, state, icon ? ui_some(p, icon) : NULL };
             StmtVec inner = {0};
@@ -2606,14 +2675,46 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             SOSU_VEC_PUSH(&inner, ui_stmt(p, ui_frame_call(p, start, length, "end_branch", NULL, 0)));
             Stmt *when = new_stmt(p, STMT_IF, start);
             when->length = length;
-            when->as.if_.cond = ui_frame_call(p, start, length, icon ? "branch_with" : "branch", branch_args, icon ? 3 : 2);
+            when->as.if_.cond = template ? ui_frame_call(p, start, length, "branch_close", NULL, 0)
+                                         : ui_frame_call(p, start, length, icon ? "branch_with" : "branch", branch_args, icon ? 3 : 2);
             when->as.if_.then_block = ui_block(p, &inner, body_start, span_from(p, body_start));
             SOSU_VEC_PUSH(out, when);
         } else if (name_text_is(node, "Leaf")) {
+            Expr *template = ui_prop(&args, "template");
             Expr *icon = ui_prop(&args, "icon");
             Expr *leaf_args[2] = { value, icon ? ui_some(p, icon) : NULL };
-            Expr *leaf = ui_frame_call(p, start, length, icon ? "leaf_with" : "leaf", leaf_args, icon ? 2 : 1);
-            SOSU_VEC_PUSH(out, ui_when(p, leaf, ui_prop(&args, "on_click")));
+            Expr *leaf = NULL;
+            if (template) {  /* f.leaf_open(), its template, if (f.leaf_close()) { on_click } */
+                SOSU_VEC_PUSH(out, ui_frame_stmt(p, start, length, "leaf_open", NULL));
+                ui_template(p, out, template);
+                leaf = ui_frame_call(p, start, length, "leaf_close", NULL, 0);
+            } else if (value) {
+                leaf = ui_frame_call(p, start, length, icon ? "leaf_with" : "leaf", leaf_args, icon ? 2 : 1);
+            } else {
+                error_at(p, "E0215", node.offset, node.length, "a `Leaf` has a text or a `template:`");
+                p->panic = false;
+            }
+            if (leaf) SOSU_VEC_PUSH(out, ui_when(p, leaf, ui_prop(&args, "on_click")));
+        } else if (name_text_is(node, "Item")) {
+            /* f.item(horizontal, gap, padding, enabled), the widgets, f.end_item() */
+            Expr *vertical = ui_prop(&args, "vertical");
+            Expr *horizontal = ui_expr(p, EXPR_UNARY, start, length);
+            horizontal->as.unary.op = TOK_BANG;
+            horizontal->as.unary.operand = vertical;
+            if (!vertical) {
+                horizontal = ui_expr(p, EXPR_BOOL, start, length);
+                horizontal->as.bool_value = true;
+            }
+            Expr *enabled = ui_prop(&args, "enabled");
+            if (!enabled) {
+                enabled = ui_expr(p, EXPR_BOOL, start, length);
+                enabled->as.bool_value = true;
+            }
+            Expr *item_args[4] = { horizontal, ui_layout_size(p, ui_prop(&args, "gap"), start),
+                                   ui_layout_size(p, ui_prop(&args, "padding"), start), enabled };
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "item", item_args, 4)));
+            ui_parse_children(p, out);
+            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end_item", NULL, 0)));
         } else if (name_text_is(node, "Tabs")) {
             /* f.tabs(some(&page) or none), the tabs, f.end_tabs() */
             Expr *bound = ui_prop(&args, "bind");
@@ -2744,7 +2845,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
     }
     if (check(p, TOK_KW_FOR)) {
         /* f.push_id(site), then the loop, each iteration in a scope: f.push_item() (its number) or
-           f.push_id(key as u64), its nodes, f.pop_id(); then f.pop_id() (spec §10.6) */
+           f.push_id(key as ui64), its nodes, f.pop_id(); then f.pop_id() (spec §10.6) */
         size_t start = advance(p)->offset;
         Stmt *stmt = new_stmt(p, STMT_FOR_IN, start);
         expect(p, TOK_LPAREN);
@@ -2767,7 +2868,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
         if (key) {
             Expr *cast = ui_expr(p, EXPR_CAST, key->offset, key->length);
             cast->as.cast.value = key;
-            cast->as.cast.type = ui_type(p, key->offset, NULL, "u64");
+            cast->as.cast.type = ui_type(p, key->offset, NULL, "ui64");
             SOSU_VEC_PUSH(&items, ui_frame_stmt(p, key->offset, key->length, "push_id", cast));
         } else {
             SOSU_VEC_PUSH(&items, ui_frame_stmt(p, start, length, "push_item", NULL));
@@ -2971,12 +3072,12 @@ static const char *const ui_theme_selectors[][2] = {
     { "TitleBar", "title_bar" }, { "MenuBar", "menu_bar" }, { "Menu", "menu" }, { "Image", "image" },
     { "Grid", "grid" }, { "Group", "group" }, { "Tabs", "tabs" }, { "Tree", "tree" },
     { "Slider", "slider" }, { "Progress", "progress" }, { "Tooltip", "tooltip" }, { "Dialog", "dialog" },
-    { "DateField", "date" }, { "Table", "table" },
+    { "DateField", "date" }, { "Table", "table" }, { "Item", "item" },
 };
 #define UI_SELECTORS (sizeof ui_theme_selectors / sizeof *ui_theme_selectors)
 #define UI_SELECTOR_NAMES \
     "Window, Text, Title, Button, TextField, Checkbox, Radio, Dropdown, List, Scroll, Column, Row, TitleBar, MenuBar, Menu, " \
-    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip, Dialog, DateField, Table"
+    "Image, Grid, Group, Tabs, Tree, Slider, Progress, Tooltip, Dialog, DateField, Table, Item"
 
 /* The properties a theme gives every widget, in `all`: those that are inherited. */
 static const char *const ui_theme_all[] = { "color", "font_size", "accent" };

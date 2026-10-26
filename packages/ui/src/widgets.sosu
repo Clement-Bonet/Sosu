@@ -12,7 +12,7 @@ import render.truetype;
 
 // Text typed or edited: at most 256 bytes of UTF-8.
 pub struct TextBuffer {
-    mut u8[256] bytes = [0; 256];
+    mut ui8[256] bytes = [0; 256];
     mut usize len = 0;
 
     pub str text() {
@@ -32,7 +32,7 @@ pub struct TextBuffer {
         if (len + text.len > 256) {
             return;
         }
-        for (u8 b in text.bytes) {
+        for (ui8 b in text.bytes) {
             bytes[len] = b;
             len += 1;
         }
@@ -140,7 +140,7 @@ pub struct TextBuffer {
 // `long_text()`, and free it with `free()`.
 pub struct LongText {
     mut Arena arena;
-    mut u8[] bytes;
+    mut ui8[] bytes;
     mut usize len = 0;
 
     pub str text() {
@@ -202,7 +202,7 @@ pub struct LongText {
             while (room < len + text.len) {
                 room *= 2;
             }
-            mut u8[] grown = arena.alloc_slice(u8, room);
+            mut ui8[] grown = arena.alloc_slice(ui8, room);
             for (usize i in 0..len) {
                 grown[i] = bytes[i];
             }
@@ -235,10 +235,110 @@ pub struct LongText {
     }
 }
 
+// The items chosen in a list or a table that allows several (spec §10.10): a set of indices, in an
+// arena of its own (moved, never copied); `anchor` is where Shift extends from, `cursor` the item
+// of the keyboard. Make one with `selection()`, free it with `free()`.
+pub struct Selection {
+    mut Arena arena;
+    mut ui64[] words;
+    pub mut i32 anchor = -1;
+    pub mut i32 cursor = 0;
+
+    pub bool contains(i32 index) {
+        if (index < 0) {
+            return false;
+        }
+        usize word = (index / 64) as usize;
+        return word < words.len && words[word] >> (index % 64) as ui64 & 1 == 1;
+    }
+
+    pub void add(i32 index) {
+        if (index < 0) {
+            return;
+        }
+        usize word = (index / 64) as usize;
+        if (word >= words.len) {  // more words, twice as many each time
+            mut usize room = max(words.len * 2, 4);
+            while (room <= word) {
+                room *= 2;
+            }
+            mut ui64[] grown = arena.alloc_slice(ui64, room);
+            for (usize i in 0..words.len) {
+                grown[i] = words[i];
+            }
+            words = grown;
+        }
+        words[word] = words[word] | 1 << (index % 64) as ui64;
+    }
+
+    pub void remove(i32 index) {
+        usize word = (index / 64) as usize;
+        if (index >= 0 && word < words.len) {
+            words[word] = words[word] & ~(1 << (index % 64) as ui64);
+        }
+    }
+
+    pub void toggle(i32 index) {
+        if (contains(index)) {
+            remove(index);
+        } else {
+            add(index);
+        }
+    }
+
+    pub void clear() {
+        for (usize i in 0..words.len) {
+            words[i] = 0;
+        }
+    }
+
+    // The items from `from` to `to`, both included, in either order.
+    pub void add_range(i32 from, i32 to) {
+        for (i32 i in min(from, to)..max(from, to) + 1) {
+            add(i);
+        }
+    }
+
+    pub i32 count() {
+        mut i32 n = 0;
+        for (usize i in 0..words.len) {
+            mut ui64 w = words[i];
+            while (w != 0) {
+                w = w & w - 1;
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    // The first item chosen from `from` on, or -1: `for` the items chosen, from 0.
+    pub i32 next(i32 from) {
+        mut i32 i = max(from, 0);
+        while ((i / 64) as usize < words.len) {
+            if (contains(i)) {
+                return i;
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    pub void free() {
+        arena.free();
+    }
+}
+
+// An empty `Selection`.
+pub Selection selection() {
+    mut Arena arena = Arena.new(1 * KB);
+    ui64[] words = arena.alloc_slice(ui64, 4);
+    return Selection{ arena: arena, words: words };
+}
+
 // An empty `LongText`.
 pub LongText long_text() {
     mut Arena arena = Arena.new(4 * KB);
-    u8[] bytes = arena.alloc_slice(u8, 256);
+    ui8[] bytes = arena.alloc_slice(ui8, 256);
     return LongText{ arena: arena, bytes: bytes };
 }
 
@@ -338,7 +438,7 @@ Target long_target(LongText* text) {
 
 // A byte of a word, for Ctrl+Left and Ctrl+Right and the double click: letters, digits, `_`, and
 // every character beyond ASCII.
-bool word_byte(u8 b) {
+bool word_byte(ui8 b) {
     return b >= 48 && b <= 57 || b >= 65 && b <= 90 || b >= 97 && b <= 122 || b == 95 || b >= 0x80;
 }
 
@@ -384,45 +484,45 @@ f32 abs_f32(f32 v) {
 }
 
 // The key codes of SDL that text fields use (`platform.app` gives them as they are).
-u32 key_backspace() {
+ui32 key_backspace() {
     return 8;
 }
 
-u32 key_enter() {
+ui32 key_enter() {
     return 13;
 }
 
-u32 key_delete() {
+ui32 key_delete() {
     return 127;
 }
 
-u32 key_right() {
+ui32 key_right() {
     return 0x4000004F;
 }
 
-u32 key_left() {
+ui32 key_left() {
     return 0x40000050;
 }
 
-u32 key_up() {
+ui32 key_up() {
     return 0x40000052;
 }
 
-u32 key_down() {
+ui32 key_down() {
     return 0x40000051;
 }
 
-u32 key_home() {
+ui32 key_home() {
     return 0x4000004A;
 }
 
-u32 key_end() {
+ui32 key_end() {
     return 0x4000004D;
 }
 
 // Something typed for the text field that has the keyboard: text, or a key.
 struct Edit {
-    mut u32 key = 0;  // 0: the text `from` to `to` of `Ui.typed`
+    mut ui32 key = 0;  // 0: the text `from` to `to` of `Ui.typed`
     mut usize from = 0;
     mut usize to = 0;
     mut bool shift = false;
@@ -430,39 +530,39 @@ struct Edit {
     mut bool alt = false;
 }
 
-u32 key_tab() {
+ui32 key_tab() {
     return 9;
 }
 
-u32 key_space() {
+ui32 key_space() {
     return 32;
 }
 
-u32 key_escape() {
+ui32 key_escape() {
     return 27;
 }
 
-u32 key_page_up() {
+ui32 key_page_up() {
     return 0x4000004B;
 }
 
-u32 key_page_down() {
+ui32 key_page_down() {
     return 0x4000004E;
 }
 
-u32 key_f10() {
+ui32 key_f10() {
     return 0x40000043;
 }
 
-u32 key_menu() {  // the Menu key (SDLK_APPLICATION)
+ui32 key_menu() {  // the Menu key (SDLK_APPLICATION)
     return 0x40000065;
 }
 
 // The identity of a widget: the hash of its path, 64 bits (FNV-1a over the bytes of each part).
-u64 mix(u64 h, u64 part) {
-    mut u64 x = h;
+ui64 mix(ui64 h, ui64 part) {
+    mut ui64 x = h;
     for (usize i in 0..8) {
-        x = x ^ part >> (8 * i) as u64 & 0xFF;
+        x = x ^ part >> (8 * i) as ui64 & 0xFF;
         x = wrapping_mul(x, 0x100000001B3);
     }
     return x;
@@ -470,7 +570,7 @@ u64 mix(u64 h, u64 part) {
 
 // What lasts between frames for a widget that needs it (a `Scroll`, a list), by identity.
 struct WidgetState {
-    mut u64 id = 0;  // 0: a free entry
+    mut ui64 id = 0;  // 0: a free entry
     mut bool seen = false;  // used during this frame: entries not used are freed at its end
     mut f32 scroll_x = 0.0;  // how far its content is scrolled
     mut f32 scroll_y = 0.0;
@@ -505,14 +605,14 @@ pub struct Ui {
     // Between frames, by identity (spec §10.6; 0: none): the widget pressed and not yet
     // released, the widget that has the keyboard; whether Tab just gave it the keyboard (it
     // comes into view); the state of the widgets that keep one; the identities used twice.
-    mut u64 active = 0;
-    mut u64 focus = 0;
+    mut ui64 active = 0;
+    mut ui64 focus = 0;
     mut bool reveal = false;
     mut WidgetState[64] states = [WidgetState{ }; 64];
-    pub mut u32 duplicates = 0;
+    pub mut ui32 duplicates = 0;
     // The grids (spec §10.8), 8 at most: their identities, whether each was seen in this frame,
     // and the size of the content of each column (16) and row (64) at the last frame.
-    mut u64[8] grid_ids = [0; 8];
+    mut ui64[8] grid_ids = [0; 8];
     mut bool[8] grid_seen = [false; 8];
     mut f32[128] grid_widths = [0.0; 128];
     mut f32[512] grid_heights = [0.0; 512];
@@ -530,6 +630,7 @@ pub struct Ui {
     mut f32 wheel = 0.0;
     mut f32 wheel_x = 0.0;
     mut bool shift_held = false;
+    mut bool ctrl_held = false;  // Ctrl (Cmd on macOS) held: a click adds to a selection
     mut f32 drag_offset = 0.0;
     // Alt held, and no other key since: released alone, it is F10 (the menus).
     mut bool alt_down = false;
@@ -538,17 +639,25 @@ pub struct Ui {
     // The dropdown open (0: none), and the rectangle of its list at the last frame: the
     // layer above, which takes the mouse before the widgets under it. With the keyboard: the
     // option highlighted in the open list, and an option to choose at the next frame.
-    mut u64 open = 0;
+    mut ui64 open = 0;
     mut canvas.Rect layer = nowhere();
+    mut f32 drop_scroll = 0.0;  // how far the open list of a dropdown is scrolled (spec §10.10)
+    mut bool drop_reveal = false;  // the keyboard moved its highlight: it comes into view
+    // An item dragged in a list that can be reordered (spec §10.10): the list, the item, where the press
+    // was, and whether it moved enough to be a drag.
+    mut ui64 drag_list = 0;
+    mut i32 drag_from = -1;
+    mut f32 drag_start_y = 0.0;
+    mut bool item_dragged = false;
     mut i32 highlight = -1;
-    mut u64 pick_dropdown = 0;
+    mut ui64 pick_dropdown = 0;
     mut i32 pick_option = -1;
 
     // The menus open: at each level, its widget number (-1: none), the first a menu opened by
     // its title (`menu_in_bar`) or a context menu, the others its submenus; where the context
     // menu opened; the size of each menu open at the last frame, and its rectangle, above the
     // rest as the list of a dropdown is.
-    mut u64[4] menus = [0; 4];
+    mut ui64[4] menus = [0; 4];
     mut bool menu_in_bar = false;
     // The menus with the keyboard: the keyboard on the bar (F10, Alt), its title highlighted,
     // the entry highlighted at each level (-1: none, -2: the first one, at the next frame), and
@@ -556,7 +665,7 @@ pub struct Ui {
     mut bool bar_keys = false;
     mut i32 bar_index = 0;
     mut i32[4] menu_cursor = [-1; 4];
-    mut u64 pick_menu = 0;
+    mut ui64 pick_menu = 0;
     mut i32 pick_entry = -1;
     mut f32 context_x = 0.0;
     mut f32 context_y = 0.0;
@@ -586,24 +695,30 @@ pub struct Ui {
     pub mut catalog.Catalog*? catalog = none;
     // The colors and sizes of the widgets (spec §10.7); none: `default_theme()`.
     pub mut Theme? theme = none;
+    // The theme for this frame, copied once in `begin`: `look` reads it through a pointer.
+    mut Theme frame_theme = Theme{ };
+    mut bool themed = false;
+    // The size of a pixel of `ui` in pixels of the screen (spec §10.10, `platform.app.ScaleChanged`):
+    // the sizes of the theme and the fonts are multiplied by it.
+    pub mut f32 scale = 1.0;
 
     // The time (spec §10.9), given by the program before each frame: milliseconds of a monotonic
     // clock. Without it, what needs time (double clicks, tooltips...) does not happen.
-    mut u64 now = 0;
+    mut ui64 now = 0;
     mut bool has_clock = false;
     // The presses of the left button in a row, near each other in place and time: 2 is a double
     // click, 3 a triple one.
-    mut u32 presses = 0;
-    mut u64 press_time = 0;
+    mut ui32 presses = 0;
+    mut ui64 press_time = 0;
     mut f32 press_x = 0.0;
     mut f32 press_y = 0.0;
     // Undo and redo in the text field that has the keyboard: its identity, its changes (those
     // before `change_at` are done, the others undone), and their texts.
-    mut u64 history_of = 0;
+    mut ui64 history_of = 0;
     mut Change[64] changes = [Change{ }; 64];
     mut usize change_count = 0;
     mut usize change_at = 0;
-    mut u8[4096] history = [0; 4096];
+    mut ui8[4096] history = [0; 4096];
     mut usize history_used = 0;
     // What an input method is composing (spec §10.9), shown at the cursor of the field that has
     // the keyboard; and where that cursor was at the last frame, for the window of candidates.
@@ -613,12 +728,12 @@ pub struct Ui {
     mut i64 finger = -1;
     mut f32 finger_x = 0.0;
     mut f32 finger_y = 0.0;
-    mut u64 finger_time = 0;
+    mut ui64 finger_time = 0;
     mut bool dragging = false;
     mut bool long_press = false;
     mut f32 speed_x = 0.0;
     mut f32 speed_y = 0.0;
-    mut u64 last_clock = 0;
+    mut ui64 last_clock = 0;
     mut f32 safe_left = 0.0;
     mut f32 safe_top = 0.0;
     mut f32 safe_right = 0.0;
@@ -628,22 +743,22 @@ pub struct Ui {
 
     // The number field that has the keyboard, and its text being typed (spec §10.9).
     // The widget under the mouse for its tooltip, and since when (the time of `clock`).
-    mut u64 tip_key = 0;
-    mut u64 tip_since = 0;
+    mut ui64 tip_key = 0;
+    mut ui64 tip_since = 0;
     // A dialog was open at the last frame (spec §10.9): only its widgets see the mouse.
     mut bool modal = false;
     // The date field that has the keyboard, its text being typed, and the month its calendar shows
     // (and the day the keyboard is on).
-    mut u64 date_of = 0;
+    mut ui64 date_of = 0;
     mut TextBuffer date_text = TextBuffer{ };
     mut i32 cal_year = 2000;
     mut i32 cal_month = 1;
     mut i32 cal_day = 1;
-    mut u64 number_of = 0;
+    mut ui64 number_of = 0;
     mut TextBuffer number_text = TextBuffer{ };
 
-    pub void clock(u64 ms) {
-        u64 elapsed = has_clock && ms > now ? ms - now : 0;
+    pub void clock(ui64 ms) {
+        ui64 elapsed = has_clock && ms > now ? ms - now : 0;
         now = ms;
         has_clock = true;
         // a finger held without moving: the right button, once
@@ -693,7 +808,7 @@ pub struct Ui {
                 if (dragging) {
                     wheel += dy / 40.0;
                     wheel_x -= dx / 40.0;
-                    u64 elapsed = max(now - last_clock, 1);
+                    ui64 elapsed = max(now - last_clock, 1);
                     speed_x = dx / elapsed as f32;
                     speed_y = dy / elapsed as f32;
                     last_clock = now;
@@ -789,7 +904,7 @@ pub struct Ui {
 
     // The entry of `states` of the widget `id`: its own, or a new one (a free entry, or one
     // not used during this frame).
-    usize state_slot(u64 id) {
+    usize state_slot(ui64 id) {
         for (usize i in 0..64) {
             if (states[i].id == id) {
                 states[i].seen = true;
@@ -807,7 +922,7 @@ pub struct Ui {
         return slot;
     }
 
-    bool has_state(u64 id) {
+    bool has_state(ui64 id) {
         for (usize i in 0..64) {
             if (states[i].id == id) {
                 return true;
@@ -853,8 +968,9 @@ pub struct Ui {
     // Text fields use Left, Right, Home, End (Shift to select), Backspace, Delete, Enter, and
     // Ctrl+A, Ctrl+C and Ctrl+X.
     // Alt pressed and released alone is F10 (the menus); its release is needed for that.
-    pub void key(u32 code, bool is_down, bool shift, bool ctrl) {
+    pub void key(ui32 code, bool is_down, bool shift, bool ctrl) {
         shift_held = shift;
+        ctrl_held = ctrl;
         if (code == 0x400000E2 || code == 0x400000E6) {  // left and right Alt
             if (is_down && !alt_down) {
                 alt_down = true;
@@ -876,7 +992,7 @@ pub struct Ui {
     }
 
     // Whether `code` was pressed in this frame, with these modifiers.
-    bool pressed_key(u32 code, bool shift, bool ctrl) {
+    bool pressed_key(ui32 code, bool shift, bool ctrl) {
         for (usize i in 0..edit_count) {
             if (edits[i].key == code && edits[i].shift == shift && edits[i].ctrl == ctrl) {
                 return true;
@@ -973,11 +1089,11 @@ pub enum Accept {
 
 // The letter that `&` marks in `text` (spec §10.9), lower case: `"&Save"` gives `s`; `&&` is an `&`.
 // 0 when there is none.
-u8 mnemonic_of(str text) {
+ui8 mnemonic_of(str text) {
     mut usize i = 0;
     while (i + 1 < text.len) {
         if (text.bytes[i] == 38) {
-            u8 c = text.bytes[i + 1];
+            ui8 c = text.bytes[i + 1];
             if (c != 38) {
                 return c >= 65 && c <= 90 ? c + 32 : c;
             }
@@ -1030,7 +1146,7 @@ pub str default_date_format() {
 TextBuffer mask_of(str format) {
     mut TextBuffer m = TextBuffer{ };
     for (usize i in 0..format.len) {
-        u8 c = format.bytes[i];
+        ui8 c = format.bytes[i];
         m.append(c == 100 || c == 109 || c == 121 ? "9" : text_of(format.bytes[i..i + 1]));
     }
     return m;
@@ -1041,7 +1157,7 @@ TextBuffer format_date(Date d, str format) {
     mut TextBuffer out = TextBuffer{ };
     mut usize i = 0;
     while (i < format.len) {
-        u8 c = format.bytes[i];
+        ui8 c = format.bytes[i];
         mut usize run = 1;
         while (i + run < format.len && format.bytes[i + run] == c) {
             run += 1;
@@ -1050,10 +1166,10 @@ TextBuffer format_date(Date d, str format) {
         if (value < 0) {
             out.append(text_of(format.bytes[i..i + run]));
         } else {
-            mut u8[4] digits = [48; 4];
+            mut ui8[4] digits = [48; 4];
             mut i32 v = value;
             for (usize k in 0..run) {
-                digits[run - 1 - k] = (48 + v % 10) as u8;
+                digits[run - 1 - k] = (48 + v % 10) as ui8;
                 v /= 10;
             }
             out.append(text_of(digits[0..run]));
@@ -1070,11 +1186,11 @@ Date? parse_date(str text, str format) {
     }
     mut Date d = Date{ year: 0, month: 0, day: 0 };
     for (usize i in 0..format.len) {
-        u8 c = format.bytes[i];
+        ui8 c = format.bytes[i];
         if (c != 100 && c != 109 && c != 121) {
             continue;
         }
-        u8 t = text.bytes[i];
+        ui8 t = text.bytes[i];
         if (t < 48 || t > 57) {
             return none;
         }
@@ -1105,12 +1221,12 @@ pub struct Number {
 
 // `value` written as `n` says: with its groups and its symbol when `decorated`.
 pub TextBuffer format_number(i64 value, Number n, bool decorated) {
-    mut u8[24] digits = [0; 24];
+    mut ui8[24] digits = [0; 24];
     mut usize count = 0;
-    mut u64 rest = value < 0 ? (0 - (value + 1)) as u64 + 1 : value as u64;
+    mut ui64 rest = value < 0 ? (0 - (value + 1)) as ui64 + 1 : value as ui64;
     usize places = max(n.decimals, 0) as usize;
     while (count == 0 || rest > 0 || count <= places) {
-        digits[count] = (48 + rest % 10) as u8;
+        digits[count] = (48 + rest % 10) as ui8;
         rest /= 10;
         count += 1;
     }
@@ -1151,7 +1267,7 @@ i64? parse_number(str text, Number n) {
     mut bool separated = false;
     mut usize after = 0;
     for (usize i in 0..text.len) {
-        u8 c = text.bytes[i];
+        ui8 c = text.bytes[i];
         if (c == 45 && i == 0) {
             negative = true;
         } else if ((c == 46 || c == 44) && !separated && places > 0) {
@@ -1245,7 +1361,7 @@ pub struct Format {
     pub str placeholder = "";
 }
 
-str text_of(u8[] bytes) {
+str text_of(ui8[] bytes) {
     return match (str.from_bytes(bytes)) {
         ok(valid) => valid,
         err(e) => "",
@@ -1269,26 +1385,26 @@ usize chars_in(str text) {
     return count;
 }
 
-bool is_digit(u8 b) {
+bool is_digit(ui8 b) {
     return b >= 48 && b <= 57;
 }
 
 // A letter: ASCII, or any character beyond it (é, ß, ж...).
-bool is_letter(u8 b) {
+bool is_letter(ui8 b) {
     return b >= 65 && b <= 90 || b >= 97 && b <= 122 || b >= 0xC0;
 }
 
-bool is_slot(u8 m) {
+bool is_slot(ui8 m) {
     return m == 57 || m == 65 || m == 42;  // 9, A, *
 }
 
 // Whether a character starting with byte `first` can go in the slot `m` of a mask.
-bool fits_slot(u8 m, u8 first) {
+bool fits_slot(ui8 m, ui8 first) {
     return m == 42 || m == 57 && is_digit(first) || m == 65 && is_letter(first);
 }
 
 // Whether a character starting with byte `first` can go at `at` in `text`.
-bool accepts(Accept accept, u8 first, str text, usize at) {
+bool accepts(Accept accept, ui8 first, str text, usize at) {
     bool minus = first == 45 && at == 0 && !has_byte(text, 45);
     bool separator = (first == 46 || first == 44) && !has_byte(text, 46) && !has_byte(text, 44);
     return match (accept) {
@@ -1299,13 +1415,18 @@ bool accepts(Accept accept, u8 first, str text, usize at) {
     };
 }
 
-bool has_byte(str text, u8 b) {
-    for (u8 c in text.bytes) {
+bool has_byte(str text, ui8 b) {
+    for (ui8 c in text.bytes) {
         if (c == b) {
             return true;
         }
     }
     return false;
+}
+
+// `c` in lower case, for an ASCII letter.
+ui8 lower(ui8 c) {
+    return c >= 65 && c <= 90 ? c + 32 : c;
 }
 
 // The colors of the widgets.
@@ -1336,7 +1457,7 @@ canvas.Color well() {
 // ---- Themes and styles (spec §10.7) ----
 
 // A color from its components: `#RRGGBB` and `#RRGGBBAA` in .ui.sosu files.
-pub canvas.Color rgb(u8 r, u8 g, u8 b, u8 a) {
+pub canvas.Color rgb(ui8 r, ui8 g, ui8 b, ui8 a) {
     return canvas.Color{ r: r, g: g, b: b, a: a };
 }
 
@@ -1399,6 +1520,7 @@ pub struct Theme {
     pub Style dialog = Style{ };  // its window; the part `placeholder` is its title
     pub Style date = Style{ };  // the calendar of a date field; `checked`: the day chosen
     pub Style table = Style{ };  // its rows; the part `bar`: its header and its scroll bar
+    pub Style item = Style{ };  // an item of a list, a tree or a table: `hover`, `checked`, `focus`, `disabled`
 }
 
 // The kinds of widgets, the selectors of a theme.
@@ -1429,30 +1551,31 @@ enum Kind {
     Dialog,
     Calendar,
     Table,
+    Item,
 }
 
 // The states of a widget, which can be combined.
-u32 state_hover() {
+ui32 state_hover() {
     return 1;
 }
 
-u32 state_pressed() {
+ui32 state_pressed() {
     return 2;
 }
 
-u32 state_focus() {
+ui32 state_focus() {
     return 4;
 }
 
-u32 state_disabled() {
+ui32 state_disabled() {
     return 8;
 }
 
-u32 state_checked() {
+ui32 state_checked() {
     return 16;
 }
 
-u32 state_open() {
+ui32 state_open() {
     return 32;
 }
 
@@ -1482,11 +1605,11 @@ pub Style merge(Style weak, Style strong) {
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date), table: merge(weak.table, strong.table) };
+    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date), table: merge(weak.table, strong.table), item: merge(weak.item, strong.item) };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
-Props in_states(Style s, u32 states) {
+Props in_states(Style s, ui32 states) {
     mut Props p = s.normal;
     if (states & state_hover() != 0) {
         p = merge_props(p, s.hover);
@@ -1509,7 +1632,7 @@ Props in_states(Style s, u32 states) {
     return p;
 }
 
-Style style_of(Theme t, Kind kind) {
+Style style_of(Theme* t, Kind kind) {
     return match (kind) {
         Window => t.window,
         Text => t.text,
@@ -1537,6 +1660,7 @@ Style style_of(Theme t, Kind kind) {
         Dialog => t.dialog,
         Calendar => t.date,
         Table => t.table,
+        Item => t.item,
     };
 }
 
@@ -1588,7 +1712,7 @@ pub Theme default_theme() {
 
 // The look of a widget of `kind` in `states` when no rule says otherwise: the weakest level
 // of the cascade.
-Look default_look(Kind kind, u32 states) {
+Look default_look(Kind kind, ui32 states) {
     bool hot = states & state_hover() != 0;
     bool down = states & state_pressed() != 0;
     bool focus = states & state_focus() != 0;
@@ -1677,6 +1801,11 @@ Look default_look(Kind kind, u32 states) {
             border_width = 1.0;
             padding = 16.0;
         },
+        Item => {  // the item chosen in the color of the selection, the item under the mouse lighter
+            bool chosen = states & state_checked() != 0;
+            background = chosen ? rgb(137, 180, 250, 90) : hot ? rgb(205, 214, 244, 18) : clear();
+            color = off ? face(false, false) : ink();
+        },
         Table => {
             background = well();
             border = focus ? accent() : face(false, false);
@@ -1723,7 +1852,7 @@ pub struct Window {
 // A menu being described, open or not: its place, and its entries, drawn by `finish()` when
 // it is open.
 struct Popup {
-    mut u64 id = 0;
+    mut ui64 id = 0;
     mut bool open = false;
     mut usize level = 0;
     mut f32 x = 0.0;
@@ -1734,15 +1863,15 @@ struct Popup {
     mut usize count = 0;
     mut str[24] labels = [""; 24];
     mut str[24] keys = [""; 24];  // the shortcuts
-    mut u8[24] kinds = [0; 24];  // 0: an item, 1: a separator, 2: a submenu
+    mut ui8[24] kinds = [0; 24];  // 0: an item, 1: a separator, 2: a submenu
     mut bool[24] enabled = [true; 24];
-    mut u64[24] submenus = [0; 24];  // the identity of a submenu
+    mut ui64[24] submenus = [0; 24];  // the identity of a submenu
 }
 
 // The key code of a shortcut such as "Ctrl+S", "Ctrl+Shift+Z", "F5" or "Delete", and its
 // modifiers; the code 0 when it is not understood.
 struct Shortcut {
-    mut u32 code = 0;
+    mut ui32 code = 0;
     mut bool ctrl = false;
     mut bool shift = false;
 }
@@ -1752,8 +1881,8 @@ bool same_text(str a, str b) {
         return false;
     }
     for (usize i in 0..a.len) {
-        u8 x = a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
-        u8 y = b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
+        ui8 x = a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
+        ui8 y = b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
         if (x != y) {
             return false;
         }
@@ -1775,18 +1904,18 @@ bool same_bytes(str text, usize at, str name) {
 }
 
 // The key of a shortcut: a character (a letter, without case), F1 to F12, or a named key.
-u32 key_named(str name) {
+ui32 key_named(str name) {
     if (name.len == 1) {
-        u8 c = name.bytes[0];
-        return (c >= 65 && c <= 90 ? c + 32 : c) as u32;
+        ui8 c = name.bytes[0];
+        return (c >= 65 && c <= 90 ? c + 32 : c) as ui32;
     }
     if (name.len >= 2 && name.len <= 3 && (name.bytes[0] == 70 || name.bytes[0] == 102)) {  // F1 to F12
-        mut u32 n = 0;
+        mut ui32 n = 0;
         for (usize i in 1..name.len) {
             if (!is_digit(name.bytes[i])) {
                 return 0;
             }
-            n = n * 10 + (name.bytes[i] - 48) as u32;
+            n = n * 10 + (name.bytes[i] - 48) as ui32;
         }
         return n >= 1 && n <= 12 ? 0x4000003A + n - 1 : 0;
     }
@@ -1844,19 +1973,21 @@ struct Layout {
     // rectangle, the width of its vertical bar; in a list, the next item and the item chosen,
     // if the list has a choice.
     mut i32 area = -1;
-    mut u64 area_id = 0;
+    mut ui64 area_id = 0;
     mut bool is_list = false;
     mut canvas.Rect frame = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
     mut f32 bar_w = 0.0;
     mut f32 bar_h = 0.0;
     mut i32 item = 0;
     mut i32*? selected = none;
+    mut Selection*? multi = none;  // a list of several choices (spec §10.10)
+    mut bool reorder = false;  // its items can be dragged to another place (spec §10.10)
     // What its widgets inherit (spec §10.7), and, when it is painted (a background, a border),
     // its identity, which keeps its size from the last frame, and its look.
     mut canvas.Color? color = none;
     mut f32? font_size = none;
     mut canvas.Color? accent = none;
-    mut u64 painted = 0;
+    mut ui64 painted = 0;
     mut Look look = default_look(Column, 0);
     // The room its widgets have, from `left` and `top` (spec §10.8): what `Fill` fills; 0 when
     // it is not known (in a row, the height).
@@ -1878,7 +2009,7 @@ struct Layout {
 // chosen, the tabs so far and where the next one goes in its row, the row and how far it is
 // scrolled, whether the last tab was closed, and the keyboard marks before its content.
 struct TabsBuild {
-    mut u64 id = 0;
+    mut ui64 id = 0;
     mut usize slot = 0;
     mut i32*? bound = none;
     mut i32 chosen = 0;
@@ -1902,11 +2033,21 @@ pub struct Sort {
     pub mut bool descending = false;
 }
 
+// An `Item` being described (spec §10.10): its identity and entry of `Ui.states` (its size at the last
+// frame), whether a press went to a widget inside it, whether it can be chosen, whether it is in a list.
+struct ItemBuild {
+    mut ui64 id = 0;
+    mut usize slot = 0;
+    mut ui64 active_before = 0;
+    mut bool enabled = true;
+    mut bool in_list = false;
+}
+
 // The table being described: its rectangle, rows, columns (titles, sizes, alignments), their places
 // once laid out, the widths its cells measured in this frame, the next cell, and whether a row
 // was activated (Enter, a double click).
 struct TableBuild {
-    mut u64 id = 0;
+    mut ui64 id = 0;
     mut canvas.Rect rect = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
     mut i32 count = 0;
     mut i32*? selected = none;
@@ -1923,7 +2064,7 @@ struct TableBuild {
     mut usize cell = 0;
     mut bool cell_open = false;
     mut f32 row_y = 0.0;
-    mut u64 area_id = 0;
+    mut ui64 area_id = 0;
     mut bool activated = false;
 }
 
@@ -1962,21 +2103,21 @@ pub struct Frame {
     // The identities (spec §10.6): the hash of each scope open, the root first; in each, the
     // widgets without a place so far and the iterations of its loop; the place given to the
     // next widget (`at`); scopes past the 16th, ignored; the identities used in this frame.
-    mut u64[16] scopes = [0xCBF29CE484222325; 16];
-    mut u32[16] calls = [0; 16];
-    mut u64[16] iterations = [0; 16];
-    mut u32[16] containers = [0; 16];  // the columns and rows painted so far, in each scope
+    mut ui64[16] scopes = [0xCBF29CE484222325; 16];
+    mut ui32[16] calls = [0; 16];
+    mut ui64[16] iterations = [0; 16];
+    mut ui32[16] containers = [0; 16];  // the columns and rows painted so far, in each scope
     mut usize scope = 0;
     mut usize scopes_lost = 0;
-    mut u32 site = 0;
+    mut ui32 site = 0;
     mut bool has_site = false;
-    mut u64[256] used = [0; 256];
+    mut ui64[256] used = [0; 256];
     mut usize used_count = 0;
     mut bool focus_wanted = false;  // `focus_here()`: the next widget takes the keyboard
-    mut u64 last_id = 0;  // of the last widget, or of the last list or `Scroll`
-    mut u64 placed_id = 0;  // the identity taken for the widget about to be placed
+    mut ui64 last_id = 0;  // of the last widget, or of the last list or `Scroll`
+    mut ui64 placed_id = 0;  // the identity taken for the widget about to be placed
     // The widgets that take the keyboard, in the order of Tab.
-    mut u64[256] order = [0; 256];
+    mut ui64[256] order = [0; 256];
     mut usize order_count = 0;
     mut bool focus_taken = false;  // a widget took the focus in this frame
     // The styles given to the next node (`style`), and those of the node being described.
@@ -1985,7 +2126,7 @@ pub struct Frame {
     mut Style[4] node_styles = [Style{ }; 4];
     mut usize node_style_count = 0;
     // The texts made in this frame (translations with values, numbers), until its end.
-    mut u8[8192] pool = [0; 8192];
+    mut ui8[8192] pool = [0; 8192];
     mut usize pool_used = 0;
     f32 height = 32.0;  // of a line of widgets
     // The title bar being placed: the depth of its row (0: none), its rectangle, and the
@@ -1996,9 +2137,9 @@ pub struct Frame {
     mut usize bar_widget_count = 0;
     // The dropdown being described (-1: none) and its box; the list of the open one, drawn by
     // `finish()` above the rest: its owner, its rectangle, its options and the one chosen.
-    mut u64 dropdown_id = 0;
+    mut ui64 dropdown_id = 0;
     mut canvas.Rect box = nowhere();
-    mut u64 layer_owner = 0;
+    mut ui64 layer_owner = 0;
     // The options of the dropdown being described so far, the one chosen, an option chosen
     // with Enter, and a move of the choice with Up or Down, applied at the next frame.
     mut i32 option_index = 0;
@@ -2008,7 +2149,7 @@ pub struct Frame {
     mut str dropdown_hint = "";  // its placeholder
     mut Look drop_look = default_look(Dropdown, 0);  // its look
     mut canvas.Rect layer = nowhere();
-    mut str[16] options = [""; 16];
+    mut str[64] options = [""; 64];
     mut usize option_count = 0;
     mut i32 option_chosen = -1;
     mut bool dropdown_pressed = false;  // a press went to a dropdown or to one of its options
@@ -2020,7 +2161,7 @@ pub struct Frame {
     mut usize shown_count = 0;
     mut bool menu_pressed = false;
     mut bool right_taken = false;
-    mut u64 keys_taken = 0;  // the edits a shortcut used: one item per key pressed
+    mut ui64 keys_taken = 0;  // the edits a shortcut used: one item per key pressed
     mut bool editing = false;  // a text field has the keyboard
     mut str tip = "";  // the tooltip to draw at the end of the frame
     // The dialog being described: its widgets are those of `order` from `dialog_from`, its size is
@@ -2033,20 +2174,34 @@ pub struct Frame {
     mut usize dialog_slot = 0;
     mut bool finishing = false;
     // The date field whose calendar is open (0: none), its date, and on which day weeks start.
-    mut u64 cal_owner = 0;
+    mut ui64 cal_owner = 0;
     mut Date*? cal_date = none;
     mut bool cal_monday = true;
     mut bool no_edit = false;
     mut TableBuild table_build = TableBuild{ };  // the table being described (one at a time)
+    // The items being described, the outermost first; while one is placed, its list neither paints it
+    // (it painted itself) nor, when a widget inside it took the press, chooses it.
+    mut ItemBuild[4] item_builds = [ItemBuild{ }; 4];
+    mut usize item_count = 0;
+    mut bool item_painted = false;
+    mut bool item_not_chosen = false;
+    mut Selection*? next_multi = none;  // `multiple`: for the next list or table
+    // `reorderable`: for the next list; where an item dragged would go, and what was dropped.
+    mut bool next_reorder = false;
+    mut i32 drag_target = -1;
+    mut f32 drag_line_y = 0.0;
+    mut bool drop_done = false;
+    mut i32 dropped_from = 0;
+    mut i32 dropped_to = 0;
     mut i32 shown_first = 0;  // a long list: the items in view, `shown_first` to `shown_last` excluded
     mut i32 shown_last = 0;
-    mut u32 letters_taken = 0;  // the letters of Alt+letter that a widget took in this frame
+    mut ui32 letters_taken = 0;  // the letters of Alt+letter that a widget took in this frame
     mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
     // The titles of the bar of menus being described (`menu_bar`): its layout, their identities.
     mut usize menu_bar_depth = 0;
-    mut u64[16] bar_titles = [0; 16];
+    mut ui64[16] bar_titles = [0; 16];
     mut usize bar_title_count = 0;
     // The grids being described, the outermost first (spec §10.8).
     mut GridBuild[4] grids = [GridBuild{ }; 4];
@@ -2062,6 +2217,11 @@ pub struct Frame {
     mut usize tree_level = 0;
     mut i32[16] tree_parents = [-1; 16];
     mut bool tree_keys_used = false;  // the keys of this frame acted on an item already
+    // The line of widgets of a branch or a leaf being described (`branch_open`, `leaf_open`).
+    mut ui64 tree_line_id = 0;
+    mut i32 tree_line_index = 0;
+    mut bool tree_line_branch_open = false;
+    mut ui64 tree_line_active = 0;
 
     // The widgets that follow go under each other, `gap` pixels apart, inside `padding`,
     // until `end()`; the column then takes its place in the layout that holds it.
@@ -2083,8 +2243,7 @@ pub struct Frame {
         depth -= 1;
         canvas.Rect r = place(done.right - done.left + 2.0 * done.padding, done.bottom - done.top + 2.0 * done.padding);
         if (done.painted != 0) {  // its size, for its background at the next frame; its border
-            usize slot = ui.state_slot(done.painted);  // a variable: see the bug noted in `menu`
-            WidgetState* s = &ui.states[slot];
+            WidgetState* s = &ui.states[ui.state_slot(done.painted)];
             s.content_w = r.w;
             s.content_h = r.h;
             if (done.look.border.a > 0 && done.look.border_width > 0.0) {
@@ -2102,7 +2261,7 @@ pub struct Frame {
         Look l = look(kind, 0);
         Props p = explicit_props(kind, 0);
         Layout parent = layouts[depth];
-        mut u64 painted = 0;
+        mut ui64 painted = 0;
         if (l.background.a > 0 || l.border.a > 0 && l.border_width > 0.0) {
             painted = container_id();
             WidgetState s = ui.states[ui.state_slot(painted)];
@@ -2179,7 +2338,7 @@ pub struct Frame {
     // A button that can be disabled: dimmed, and never clicked.
     // With the keyboard, Space or Enter clicks it.
     pub bool button_enabled(str text, bool enabled) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look first = look(Button, enabled ? 0 : state_disabled());
         canvas.Rect size = measure_label(text, first.font_size);
@@ -2193,7 +2352,7 @@ pub struct Frame {
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, true) || alt_letter(text);
         bool hot = over(r);
-        u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0);
+        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0);
         Look l = look(Button, states);
         paint(r, l);
         write_label(r.x + l.padding, r.y, r.h, text, l.color, l.font_size);
@@ -2206,7 +2365,7 @@ pub struct Frame {
     // A box that `value` checks or not; returns true when it changes it (Space, with the
     // keyboard).
     pub bool checkbox(str text, bool* value) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look first = look(Checkbox, 0);
         canvas.Rect size = measure_label(text, first.font_size);
@@ -2218,7 +2377,7 @@ pub struct Frame {
             *value = !(*value);
         }
         bool hot = over(r);
-        u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (*value ? state_checked() : 0);
+        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (*value ? state_checked() : 0);
         Look l = look(Checkbox, states);
         canvas.Rect box = canvas.Rect{ x: r.x + 2.0, y: r.y + (r.h - 20.0) / 2.0, w: 20.0, h: 20.0 };
         paint(box, l);
@@ -2240,7 +2399,7 @@ pub struct Frame {
     // A round button of a group, of which one is chosen: drawn chosen when `chosen`; returns
     // true when it is clicked (the program then chooses it, see `Radio` in .ui.sosu files).
     pub bool radio(str text, bool chosen) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look first = look(Radio, 0);
         canvas.Rect size = measure_label(text, first.font_size);
@@ -2249,7 +2408,7 @@ pub struct Frame {
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, false) || alt_letter(text);
         bool hot = over(r);
-        u32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (chosen ? state_checked() : 0);
+        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (chosen ? state_checked() : 0);
         Look l = look(Radio, states);
         if (ui.focus == id) {
             ring(r, l.accent);
@@ -2284,7 +2443,7 @@ pub struct Frame {
         return field_id(take_id(), text, width, format);
     }
 
-    bool field_id(u64 id, Target text, f32 width, Format format) {
+    bool field_id(ui64 id, Target text, f32 width, Format format) {
         take_styles();
         Look first = look(TextField, 0);
         f32 size = first.font_size;
@@ -2403,7 +2562,7 @@ pub struct Frame {
 
     // Applies the edits of the frame to the text field `id` that has the keyboard, in order.
     // Returns true if Enter was pressed (Ctrl+Enter, with `lines`, where Enter breaks a line).
-    bool edit(u64 id, Target text, Format format, bool lines) {
+    bool edit(ui64 id, Target text, Format format, bool lines) {
         if (ui.history_of != id) {  // another field: the history of the last one is forgotten
             ui.history_of = id;
             ui.change_count = 0;
@@ -2590,7 +2749,7 @@ pub struct Frame {
     // Down, the wheel when it has the keyboard, and its two buttons add or take `step`. Returns
     // true when the value changed.
     pub bool number_field(i64* value, f32 width, Number n) {
-        u64 id = take_id();
+        ui64 id = take_id();
         mut bool focused = ui.focus == id;
         if (focused && ui.number_of != id) {  // it just took the keyboard: the value, to edit
             ui.number_of = id;
@@ -2599,7 +2758,7 @@ pub struct Frame {
         mut i64 next = *value;
         if (focused) {
             for (usize i in 0..ui.edit_count) {
-                u32 key = ui.edits[i].key;
+                ui32 key = ui.edits[i].key;
                 if (key == key_up() || key == key_down()) {
                     next = clamp_number(next + (key == key_up() ? n.step : -n.step), n);
                 }
@@ -2676,7 +2835,7 @@ pub struct Frame {
     str shown_text(str text, usize* at) {
         *at = text.len;
         mut bool marked = false;
-        for (u8 b in text.bytes) {
+        for (ui8 b in text.bytes) {
             marked = marked || b == 38;
         }
         if (!marked) {
@@ -2685,7 +2844,7 @@ pub struct Frame {
         usize start = pool_used;
         mut usize i = 0;
         while (i < text.len && pool_used < 8192) {
-            u8 b = text.bytes[i];
+            ui8 b = text.bytes[i];
             if (b == 38 && i + 1 < text.len) {
                 i += 1;
                 if (text.bytes[i] != 38 && *at == text.len) {
@@ -2722,22 +2881,86 @@ pub struct Frame {
     // Whether Alt and the letter of `text` were pressed: the first widget with that letter, in the
     // order of the frame, takes it.
     bool alt_letter(str text) {
-        u8 letter = mnemonic_of(text);
+        ui8 letter = mnemonic_of(text);
         if (letter < 97 || letter > 122) {
             return false;
         }
-        u32 bit = 1 << (letter - 97) as u32;
+        ui32 bit = 1 << (letter - 97) as ui32;
         if (letters_taken & bit != 0) {
             return false;
         }
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
-            if (e.alt && !e.ctrl && e.key == letter as u32) {
+            if (e.alt && !e.ctrl && e.key == letter as ui32) {
                 letters_taken = letters_taken | bit;
                 return true;
             }
         }
         return false;
+    }
+
+    // ---- Items (spec §10.10) ----
+
+    // An item made of the widgets that follow, until `end_item()`, laid out in a row (`horizontal`)
+    // or a column: one item of the list, tree or table that holds it. It is painted in its states
+    // (`hover`, `checked` when it is chosen, `focus` when chosen while its list has the keyboard,
+    // `disabled` when it cannot be chosen) by the selector `Item` of the theme and its styles, and
+    // its widgets inherit its color. A press on a widget inside it does not choose it. A negative
+    // `gap` or `padding`: that of the theme.
+    pub void item(bool horizontal, f32 gap, f32 padding, bool enabled) {
+        ensure_cell();
+        ui64 id = take_id();
+        take_styles();
+        Layout parent = layouts[depth];
+        bool in_list = parent.area >= 0 && parent.is_list;
+        usize slot = ui.state_slot(id);
+        WidgetState kept = ui.states[slot];
+        // where it is: its row in a list, else its size at the last frame
+        canvas.Rect r = canvas.Rect{ x: in_list ? parent.frame.x : parent.x, y: parent.y, w: in_list ? parent.frame.w - parent.bar_w : kept.content_w, h: kept.content_h };
+        bool chosen = in_list && (match (parent.selected) {
+            some(index) => *index == parent.item,
+            none => false,
+        } || match (parent.multi) {
+            some(set) => set.contains(parent.item),
+            none => false,
+        });
+        ui32 states = (kept.content_h > 0.0 && over(r) && enabled ? state_hover() : 0) | (chosen ? state_checked() : 0) | (chosen && ui.focus == parent.area_id ? state_focus() : 0) | (enabled ? 0 : state_disabled());
+        Look l = look(Item, states);
+        Props p = explicit_props(Item, states);
+        if (kept.content_h > 0.0) {
+            paint(r, l);
+        }
+        if (item_count == 4 || depth == 15) {
+            return;
+        }
+        item_builds[item_count] = ItemBuild{ id: id, slot: slot, active_before: ui.active, enabled: enabled, in_list: in_list };
+        item_count += 1;
+        open(horizontal, gap >= 0.0 ? gap : l.gap, padding >= 0.0 ? padding : l.padding);
+        layouts[depth].color = or_color(p.color, parent.color);
+        layouts[depth].font_size = or_f32(p.font_size, parent.font_size);
+        layouts[depth].accent = or_color(p.accent, parent.accent);
+    }
+
+    // The end of an item: it takes its place, and is chosen when it was pressed outside its widgets.
+    pub void end_item() {
+        if (item_count == 0) {
+            return;
+        }
+        item_count -= 1;
+        ItemBuild b = item_builds[item_count];
+        Layout done = layouts[depth];
+        depth -= 1;
+        f32 w = done.right - done.left + 2.0 * done.padding;
+        f32 h = done.bottom - done.top + 2.0 * done.padding;
+        bool inner = ui.pressed && ui.active != b.active_before && ui.active != 0;  // a button inside took it
+        item_painted = true;
+        item_not_chosen = inner || !b.enabled;
+        canvas.Rect r = place(w, h);
+        item_painted = false;
+        item_not_chosen = false;
+        WidgetState* s = &ui.states[b.slot];
+        s.content_w = r.w;
+        s.content_h = r.h;
     }
 
     // ---- Sliders, progress, tooltips (spec §10.9) ----
@@ -2746,7 +2969,7 @@ pub struct Frame {
     // on its track moves it there; Left and Right, Page Up and Page Down (a tenth), Home and End
     // with the keyboard. Returns true when the value changed.
     pub bool slider(i64* value, f32 width, i64 low, i64 high, i64 step) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look first = look(Slider, 0);
         canvas.Rect r = place(width, first.height);
@@ -2766,7 +2989,7 @@ pub struct Frame {
         if (ui.focus == id) {
             i64 page = max(range / 10, step);
             for (usize i in 0..ui.edit_count) {
-                u32 key = ui.edits[i].key;
+                ui32 key = ui.edits[i].key;
                 if (key == key_left() || key == key_right()) {
                     next += key == key_left() ? -step : step;
                 } else if (key == key_page_up() || key == key_page_down()) {
@@ -2826,7 +3049,7 @@ pub struct Frame {
     // mouse, above everything (drawn by `finish()`).
     pub void tooltip(str text) {
         canvas.Rect r = last;
-        u64 key = last_id != 0 ? last_id : mix(r.x as u64 * 65536 + r.y as u64, 0x7007);
+        ui64 key = last_id != 0 ? last_id : mix(r.x as ui64 * 65536 + r.y as ui64, 0x7007);
         if (!over(r)) {
             if (ui.tip_key == key) {
                 ui.tip_key = 0;
@@ -2867,13 +3090,13 @@ pub struct Frame {
     // Page Up and Page Down the month. Weeks start on Monday with `monday_first`. A date typed
     // that is not valid leaves the value as it was. Returns true when the date changed.
     pub bool date_field(Date* date, f32 width, str format, bool monday_first) {
-        u64 id = take_id();
+        ui64 id = take_id();
         bool open = ui.open == id;
         mut bool changed = false;
         mut Date next = *date;
         if (open && ui.focus == id) {  // the keys of the calendar
             for (usize i in 0..ui.edit_count) {
-                u32 key = ui.edits[i].key;
+                ui32 key = ui.edits[i].key;
                 mut i32 move = 0;
                 if (key == key_left() || key == key_right()) {
                     move = key == key_left() ? -1 : 1;
@@ -3054,7 +3277,7 @@ pub struct Frame {
     // keys (from the next frame). Escape, or its cross, sets `open` to false. Describe it after the
     // rest of the window (a .ui.sosu file does it), so that it is drawn above.
     pub bool dialog(str title, f32 width, bool* open) {
-        u64 id = take_id();
+        ui64 id = take_id();
         if (!(*open)) {
             return false;
         }
@@ -3109,8 +3332,7 @@ pub struct Frame {
         if (depth > 0) {
             depth -= 1;
         }
-        usize slot = dialog_slot;  // a variable: see the bug noted in `menu`
-        WidgetState* s = &ui.states[slot];
+        WidgetState* s = &ui.states[dialog_slot];
         s.content_h = done.bottom - done.top;
         in_dialog = false;
         dialog_open = true;
@@ -3125,7 +3347,7 @@ pub struct Frame {
     // and Ctrl+End to those of the text. The area scrolls to keep the cursor in view.
     pub bool text_area(LongText* text, f32 width, i32 rows, Area options) {
         Target t = long_target(text);
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look first = look(TextField, 0);
         f32 size = first.font_size;
@@ -3198,7 +3420,18 @@ pub struct Frame {
                     f32 xb = measure_px(t.slice(line.start, b), size).w + (high > line.end && !line.last ? 6.0 : 0.0);
                     surface.fill(canvas.Rect{ x: inner.x + xa, y: y, w: xb - xa, h: line_h }, l.selection);
                 }
-                write_px(inner.x, y, line_h, t.slice(line.start, line.end), l.color, size);
+                bool composing = focused && ui.composing.len > 0 && in_line(line, ui.cursor);
+                if (composing) {  // the composition of an input method, underlined, at the cursor
+                    str composed = ui.composing.text();
+                    f32 at = inner.x + measure_px(t.slice(line.start, ui.cursor), size).w;
+                    f32 composed_w = measure_px(composed, size).w;
+                    write_px(inner.x, y, line_h, t.slice(line.start, ui.cursor), l.color, size);
+                    write_px(at, y, line_h, composed, l.color, size);
+                    surface.fill(canvas.Rect{ x: at, y: y + line_h - 3.0, w: composed_w, h: 1.0 }, l.color);
+                    write_px(at + composed_w, y, line_h, t.slice(ui.cursor, line.end), l.color, size);
+                } else {
+                    write_px(inner.x, y, line_h, t.slice(line.start, line.end), l.color, size);
+                }
                 if (focused && in_line(line, ui.cursor)) {
                     f32 cx = measure_px(t.slice(line.start, ui.cursor), size).w;
                     surface.fill(canvas.Rect{ x: inner.x + cx, y: y + 2.0, w: 2.0, h: line_h - 4.0 }, l.accent);
@@ -3386,7 +3619,7 @@ pub struct Frame {
         canvas.Color white = canvas.Color{ r: 255, g: 255, b: 255 };
         ui.bar_buttons = canvas.Rect{ x: bar.x + bar.w - 3.0 * w, y: bar.y, w: 3.0 * w, h: bar.h };
         for (i32 i in 0..3) {
-            u64 id = take_id();
+            ui64 id = take_id();
             canvas.Rect r = canvas.Rect{ x: ui.bar_buttons.x + i as f32 * w, y: bar.y, w: w, h: bar.h };
             bool clicked = click(id, r);
             bool hot = over(r);
@@ -3440,7 +3673,7 @@ pub struct Frame {
 
     // The same, showing `placeholder`, dimmed, while no option is chosen.
     pub void dropdown_with(f32 width, str placeholder) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, look(Dropdown, 0).height);
         interactive(r);
@@ -3462,6 +3695,7 @@ pub struct Frame {
                         ui.open = 0;
                     } else if (e.key == key_up() || e.key == key_down()) {
                         ui.highlight = max(ui.highlight + (e.key == key_up() ? -1 : 1), 0);
+                        ui.drop_reveal = true;
                     } else if (e.key == key_enter() || e.key == key_space()) {
                         option_enter = ui.highlight;
                         ui.open = 0;
@@ -3477,13 +3711,15 @@ pub struct Frame {
         dropdown_id = id;
         box = r;
         dropdown_hint = placeholder;
+        option_count = 0;
+        option_chosen = -1;
         if (ui.open == id) {
             layer_owner = id;
             layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
-            option_count = 0;
-            option_chosen = -1;
+        } else {
+            ui.drop_scroll = 0.0;
         }
-        u32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0) | (ui.open == id ? state_open() : 0);
+        ui32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0) | (ui.open == id ? state_open() : 0);
         drop_look = look(Dropdown, states);
         paint(r, drop_look);
         i32 cx = (r.x + r.w - 16.0) as i32;  // a chevron, pointing down
@@ -3514,19 +3750,24 @@ pub struct Frame {
             ui.pick_dropdown = 0;  // Up or Down, the list closed, at the last frame
             return true;
         }
-        if (layer_owner != dropdown_id || option_count >= 16) {
+        if (option_count >= 64) {
             return false;
         }
-        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h, w: layer.w, h: height };
-        options[option_count] = text;
+        options[option_count] = text;  // kept also when it is closed: letters typed find it
         if (chosen) {
             option_chosen = option_count as i32;
         }
         option_count += 1;
+        if (layer_owner != dropdown_id) {
+            return false;
+        }
+        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h - ui.drop_scroll, w: layer.w, h: height };
         layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: layer.h + height };
-        if (ui.open == dropdown_id && ui.pressed && contains(r, ui.mouse_x, ui.mouse_y)) {
+        if (ui.open == dropdown_id && ui.pressed && contains(r, ui.mouse_x, ui.mouse_y) && contains(ui.layer, ui.mouse_x, ui.mouse_y)) {
             ui.open = 0;
             dropdown_pressed = true;
+            ui.focus = dropdown_id;  // the dropdown keeps the keyboard
+            focus_taken = true;
             return true;
         }
         return false;
@@ -3541,6 +3782,44 @@ pub struct Frame {
         if (dropdown_id != 0 && option_index > 0) {
             if (ui.open == dropdown_id) {  // the highlight: on the option chosen at first
                 ui.highlight = ui.highlight < 0 ? max(option_current, 0) : min(ui.highlight, option_index - 1);
+            }
+            // a letter typed: the next option that starts with it
+            for (usize i in 0..ui.edit_count) {
+                Edit e = ui.edits[i];
+                if (e.key != 0 || e.to <= e.from || ui.focus != dropdown_id && ui.open != dropdown_id) {
+                    continue;
+                }
+                ui8 letter = lower(ui.typed.bytes[e.from]);
+                i32 from = ui.open == dropdown_id ? ui.highlight : option_current;
+                for (i32 k in 1..option_count as i32 + 1) {
+                    i32 at = (from + k) % option_count as i32;
+                    str name = options[at as usize];
+                    if (name.len > 0 && lower(name.bytes[0]) == letter) {
+                        if (ui.open == dropdown_id) {
+                            ui.highlight = at;
+                            ui.drop_reveal = true;
+                        } else {
+                            ui.pick_dropdown = dropdown_id;
+                            ui.pick_option = at;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (ui.open == dropdown_id) {  // the list: no lower than the window, and scrolled
+                f32 full = layer.h;
+                f32 room = max(surface.height as f32 - layer.y - 8.0, height * 3.0);
+                layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: min(full, room) };
+                if (contains(ui.layer, ui.mouse_x, ui.mouse_y) && ui.wheel != 0.0) {
+                    ui.drop_scroll -= ui.wheel * height * 3.0;
+                    ui.wheel = 0.0;
+                }
+                if (ui.drop_reveal) {  // the option of the keyboard, in view
+                    f32 lit = ui.highlight as f32 * height;
+                    ui.drop_scroll = max(min(ui.drop_scroll, lit), lit + height - layer.h);
+                    ui.drop_reveal = false;
+                }
+                ui.drop_scroll = max(min(ui.drop_scroll, full - layer.h), 0.0);
             }
             if (option_move != 0) {  // the choice moved, closed: chosen at the next frame
                 ui.pick_dropdown = dropdown_id;
@@ -3571,7 +3850,7 @@ pub struct Frame {
     // that one instead. In a menu, it is an entry that opens the submenu beside it, when the
     // mouse is over it. Menus go 4 levels deep; deeper ones are ignored.
     pub void menu(str title) {
-        u64 id = take_id();
+        ui64 id = take_id();
         if (menu_level >= 4) {
             menu_level += 1;
             return;
@@ -3621,9 +3900,7 @@ pub struct Frame {
         // in a menu: the entry that opens it
         canvas.Rect entry = add_entry(title, "", 2, true);
         Popup* parent = &menu_popups[menu_level - 1];
-        usize entry_index = min(parent.count, 24) - 1;  // a variable: `parent.submenus[min(...)] = id` would write
-        // into a copy of the array (a bug of the C generator of sosuc, when the index needs temporaries)
-        parent.submenus[entry_index] = id;
+        parent.submenus[min(parent.count, 24) - 1] = id;
         bool parent_open = menu_popups[menu_level - 1].open;
         if (parent_open && contains(entry, ui.mouse_x, ui.mouse_y) && (ui.moved || ui.pressed)) {
             if (ui.menus[menu_level] != id) {
@@ -3653,8 +3930,8 @@ pub struct Frame {
     // under the mouse; when context menus are nested (one for an item, one for its list), the
     // first one described opens.
     pub void context_menu() {
-        u64 target = last_id;  // the widget it is for, before its own identity replaces it
-        u64 id = take_id();
+        ui64 target = last_id;  // the widget it is for, before its own identity replaces it
+        ui64 id = take_id();
         if (menu_level > 0) {
             menu_level += 1;  // not in a menu: its items are ignored
             return;
@@ -3730,7 +4007,7 @@ pub struct Frame {
         }
         for (usize i in 0..ui.edit_count) {
             Edit e = ui.edits[i];
-            u64 bit = 1 << i as u64;
+            ui64 bit = 1 << i as ui64;
             if (e.key == s.code && e.ctrl == s.ctrl && e.shift == s.shift && keys_taken & bit == 0) {
                 keys_taken = keys_taken | bit;
                 ui.close_menus(0);
@@ -3748,7 +4025,7 @@ pub struct Frame {
     }
 
     // Opens the description of a menu, at (x, y) when it is open, kept on the surface.
-    void start_popup(u64 id, bool open, f32 x, f32 y) {
+    void start_popup(ui64 id, bool open, f32 x, f32 y) {
         usize level = menu_level;
         f32 w = max(ui.menu_w[level], 160.0);
         f32 left = max(min(x, surface.width as f32 - w), 0.0);
@@ -3759,7 +4036,7 @@ pub struct Frame {
 
     // An entry of the menu being described; its rectangle. The mouse over an item closes the
     // submenus open beside.
-    canvas.Rect add_entry(str label, str key, u8 kind, bool enabled) {
+    canvas.Rect add_entry(str label, str key, ui8 kind, bool enabled) {
         Popup* p = &menu_popups[menu_level - 1];
         f32 h = kind == 1 ? 9.0 : 28.0;
         canvas.Rect r = canvas.Rect{ x: p.x, y: p.y + 4.0 + p.h, w: p.w, h: h };
@@ -3924,7 +4201,7 @@ pub struct Frame {
                 ui.pick_entry = cursor;
             } else if (!e.alt && e.key >= 97 && e.key <= 122) {  // the letter of an entry: it is chosen
                 for (usize j in 0..p.count) {
-                    if (p.enabled[j] && p.kinds[j] != 1 && mnemonic_of(p.labels[j]) as u32 == e.key) {
+                    if (p.enabled[j] && p.kinds[j] != 1 && mnemonic_of(p.labels[j]) as ui32 == e.key) {
                         if (p.kinds[j] == 2 && level + 1 < 4) {
                             ui.close_menus(level + 1);
                             ui.menus[level + 1] = p.submenus[j];
@@ -3967,8 +4244,12 @@ pub struct Frame {
     void draw_layer() {
         Look m = look(Menu, 0);
         surface.fill_rounded(layer, m.radius, face(false, false));
+        surface.push_clip(layer);
         for (usize i in 0..option_count) {
-            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height, w: layer.w, h: height };
+            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height - ui.drop_scroll, w: layer.w, h: height };
+            if (r.y + r.h < layer.y || r.y > layer.y + layer.h) {
+                continue;
+            }
             if (i as i32 == option_chosen) {
                 surface.fill(r, m.selection);
             }
@@ -3978,6 +4259,13 @@ pub struct Frame {
                 surface.fill(r, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
             }
             write_px(r.x + 8.0, r.y, height, options[i], m.color, m.font_size);
+        }
+        surface.pop_clip();
+        f32 full = option_count as f32 * height;
+        if (full > layer.h) {  // a bar: where the list is
+            f32 thumb = max(layer.h * layer.h / full, 16.0);
+            f32 y = layer.y + (layer.h - thumb) * ui.drop_scroll / (full - layer.h);
+            surface.fill(canvas.Rect{ x: layer.x + layer.w - 7.0, y: y + 2.0, w: 4.0, h: thumb - 4.0 }, m.accent);
         }
         surface.stroke_rounded(layer, m.radius, m.accent, 2.0);
     }
@@ -4076,13 +4364,10 @@ pub struct Frame {
     }
 
     // What the theme and the styles of the node say about it, in `states`; and its parts.
-    Props explicit_props(Kind kind, u32 states) {
+    Props explicit_props(Kind kind, ui32 states) {
         mut Props p = Props{ };
-        match (ui.theme) {
-            some(t) => {
-                p = in_states(style_of(t, kind), states);
-            },
-            none => { },
+        if (ui.themed) {
+            p = in_states(style_of(&ui.frame_theme, kind), states);
         }
         for (usize i in 0..node_style_count) {
             p = merge_props(p, in_states(node_styles[i], states));
@@ -4090,14 +4375,11 @@ pub struct Frame {
         return p;
     }
 
-    Props part(Kind kind, u32 which) {
+    Props part(Kind kind, ui32 which) {
         mut Props p = Props{ };
-        match (ui.theme) {
-            some(t) => {
-                Style s = style_of(t, kind);
-                p = which == 0 ? s.placeholder : which == 1 ? s.selection : s.bar;
-            },
-            none => { },
+        if (ui.themed) {
+            Style s = style_of(&ui.frame_theme, kind);
+            p = which == 0 ? s.placeholder : which == 1 ? s.selection : s.bar;
         }
         for (usize i in 0..node_style_count) {
             Style s = node_styles[i];
@@ -4108,22 +4390,22 @@ pub struct Frame {
 
     // The look of the node being described: the cascade, from the defaults of `ui` to the
     // styles of the node; `color`, `font_size` and `accent` inherited from the layout holding it.
-    Look look(Kind kind, u32 states) {
+    Look look(Kind kind, ui32 states) {
         Look d = default_look(kind, states);
         Props p = explicit_props(kind, states);
-        mut Props all = Props{ };
-        match (ui.theme) {
-            some(t) => {
-                all = t.all;
-            },
-            none => { },
-        }
+        Props all = ui.themed ? ui.frame_theme.all : Props{ };
         Layout l = layouts[depth];
         // a disabled button and a title keep their own default unless a rule says otherwise
         bool own_color = states & state_disabled() != 0;
         canvas.Color inherited = color_or(l.color, color_or(all.color, d.color));
         f32 size = kind == Title ? d.font_size : f32_or(l.font_size, f32_or(all.font_size, d.font_size));
-        return Look{ color: color_or(p.color, own_color ? d.color : inherited), background: color_or(p.background, d.background), border: color_or(p.border, d.border), border_width: f32_or(p.border_width, d.border_width), radius: f32_or(p.radius, d.radius), padding: f32_or(p.padding, d.padding), gap: f32_or(p.gap, d.gap), height: f32_or(p.height, d.height), font_size: f32_or(p.font_size, size), accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))), hint: color_or(part(kind, 0).color, d.hint), selection: color_or(part(kind, 1).background, d.selection), bar: color_or(part(kind, 2).background, d.bar) };
+        Look unscaled = Look{ color: color_or(p.color, own_color ? d.color : inherited), background: color_or(p.background, d.background), border: color_or(p.border, d.border), border_width: f32_or(p.border_width, d.border_width), radius: f32_or(p.radius, d.radius), padding: f32_or(p.padding, d.padding), gap: f32_or(p.gap, d.gap), height: f32_or(p.height, d.height), font_size: f32_or(p.font_size, size), accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))), hint: color_or(part(kind, 0).color, d.hint), selection: color_or(part(kind, 1).background, d.selection), bar: color_or(part(kind, 2).background, d.bar) };
+        if (ui.scale == 1.0) {
+            return unscaled;
+        }
+        Look u = unscaled;
+        f32 k = ui.scale;  // a dense screen (spec §10.10): every size of the theme, larger
+        return Look{ color: u.color, background: u.background, border: u.border, border_width: u.border_width * k, radius: u.radius * k, padding: u.padding * k, gap: u.gap * k, height: u.height * k, font_size: u.font_size * k, accent: u.accent, hint: u.hint, selection: u.selection, bar: u.bar };
     }
 
     // The background and the border of `r`, as `l` says.
@@ -4158,8 +4440,8 @@ pub struct Frame {
     }
 
     // The identity of a painted column or row: its place among those of its scope.
-    u64 container_id() {
-        u64 id = mix(scopes[scope], 0xC0000000 | containers[scope] as u64);
+    ui64 container_id() {
+        ui64 id = mix(scopes[scope], 0xC0000000 | containers[scope] as ui64);
         containers[scope] += 1;
         return id;
     }
@@ -4217,11 +4499,11 @@ pub struct Frame {
 
     // `n` in decimal digits, until the end of the frame.
     pub str decimal(i64 n) {
-        mut u8[20] digits = [0; 20];
+        mut ui8[20] digits = [0; 20];
         mut usize count = 0;
-        mut u64 rest = n < 0 ? (0 - (n + 1)) as u64 + 1 : n as u64;
+        mut ui64 rest = n < 0 ? (0 - (n + 1)) as ui64 + 1 : n as ui64;
         while (count == 0 || rest > 0) {
-            digits[count] = (48 + rest % 10) as u8;
+            digits[count] = (48 + rest % 10) as ui8;
             rest /= 10;
             count += 1;
         }
@@ -4253,7 +4535,7 @@ pub struct Frame {
                             pool_used = start;
                             return text;
                         }
-                        for (u8 b in values[k].bytes) {
+                        for (ui8 b in values[k].bytes) {
                             pool[pool_used] = b;
                             pool_used += 1;
                         }
@@ -4280,14 +4562,14 @@ pub struct Frame {
 
     // The next widget's place in its scope: the offset of its node in a .ui.sosu file. Without
     // it, a widget's place is the number of its call in its scope.
-    pub void at(u32 place) {
+    pub void at(ui32 place) {
         site = place;
         has_site = true;
     }
 
     // The widgets that follow, until `pop_id()`, are in a scope named `key`: a component used
     // as a node, an item of a loop (`for ..., key: k`).
-    pub void push_id(u64 key) {
+    pub void push_id(ui64 key) {
         if (scope == 15) {
             scopes_lost += 1;
             return;
@@ -4301,7 +4583,7 @@ pub struct Frame {
 
     // A scope for the next iteration of the loop whose scope is open: its number.
     pub void push_item() {
-        u64 index = iterations[scope];
+        ui64 index = iterations[scope];
         iterations[scope] += 1;
         push_id(index);
     }
@@ -4320,17 +4602,17 @@ pub struct Frame {
     }
 
     // The identity of the next widget.
-    u64 take_id() {
-        u64 part = has_site ? 1 << 32 | site as u64 : calls[scope] as u64;
+    ui64 take_id() {
+        ui64 part = has_site ? 1 << 32 | site as ui64 : calls[scope] as ui64;
         if (!has_site) {
             calls[scope] += 1;
         }
         has_site = false;
-        mut u64 id = mix(scopes[scope], part);
+        mut ui64 id = mix(scopes[scope], part);
         for (usize i in 0..used_count) {
             if (used[i] == id) {  // used twice: the second gets the number of its call
                 ui.duplicates += 1;
-                id = mix(id, 0xFFFF0000 | calls[scope] as u64);
+                id = mix(id, 0xFFFF0000 | calls[scope] as ui64);
                 calls[scope] += 1;
                 break;
             }
@@ -4358,7 +4640,7 @@ pub struct Frame {
 
     // A widget that takes the keyboard: in the order of Tab; when Tab gave it the keyboard,
     // brought into view in the `Scroll` areas around it; a press on it gives it the keyboard.
-    void focusable(u64 id, canvas.Rect r) {
+    void focusable(ui64 id, canvas.Rect r) {
         if (order_count < 256) {
             order[order_count] = id;
             order_count += 1;
@@ -4398,7 +4680,7 @@ pub struct Frame {
     }
 
     // Space (and Enter, with `enter`) pressed while `id` has the keyboard.
-    bool activated(u64 id, bool enter) {
+    bool activated(ui64 id, bool enter) {
         if (ui.focus != id) {
             return false;
         }
@@ -4500,7 +4782,7 @@ pub struct Frame {
 
     bool group_open(str title, f32 gap, f32 padding, bool folding, bool*? bound) {
         ensure_cell();
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look l = look(Group, 0);
         Layout parent = layouts[depth];
@@ -4587,8 +4869,7 @@ pub struct Frame {
         f32 w = max(done.right - done.left, done.title_w + 20.0 - 2.0 * done.padding) + 2.0 * done.padding;
         f32 h = done.folded ? done.title_h : done.bottom - done.top + 2.0 * done.padding + done.title_h / 2.0;
         canvas.Rect r = place(w, h);
-        usize slot = ui.state_slot(done.painted);
-        WidgetState* s = &ui.states[slot];
+        WidgetState* s = &ui.states[ui.state_slot(done.painted)];
         s.content_w = r.w;
         s.content_h = r.h;
         Look l = done.look;
@@ -4625,7 +4906,7 @@ pub struct Frame {
             _ => false,
         };
         ensure_cell();
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         Look l = look(Tabs, 0);
         Layout parent = layouts[depth];
@@ -4678,7 +4959,7 @@ pub struct Frame {
             for (i32 k in 0..2) {
                 canvas.Rect a = canvas.Rect{ x: row.x + view_w + k as f32 * 24.0, y: row.y, w: 24.0, h: row_h };
                 interactive(a);
-                if (click(mix(id, 0xA0 | k as u64), a)) {
+                if (click(mix(id, 0xA0 | k as ui64), a)) {
                     s.scroll_x += k == 0 ? -120.0 : 120.0;
                 }
                 canvas.Color mark = over(a) ? l.accent : l.color;
@@ -4724,7 +5005,7 @@ pub struct Frame {
         TabsBuild b = tab_builds[t];
         i32 index = b.count;
         tab_builds[t].count += 1;
-        u64 id = mix(b.id, 0x7AB00000 | index as u64);
+        ui64 id = mix(b.id, 0x7AB00000 | index as ui64);
         Look first = look(Tabs, 0);
         canvas.Rect size = measure_label(title, first.font_size);
         f32 cross = closable ? 22.0 : 0.0;
@@ -4751,7 +5032,7 @@ pub struct Frame {
             closed = closable;
         }
         tab_builds[t].closed = closed;
-        u32 states = (hot ? state_hover() : 0) | (chosen ? state_checked() : 0) | (enabled ? 0 : state_disabled());
+        ui32 states = (hot ? state_hover() : 0) | (chosen ? state_checked() : 0) | (enabled ? 0 : state_disabled());
         Look l = look(Tabs, states);
         paint(r, l);
         write_label(r.x + l.padding, r.y, r.h, title, l.color, l.font_size);
@@ -4828,7 +5109,7 @@ pub struct Frame {
     // after `cell` (or in the next free cell), until `end_grid()`. A negative `gap` or `padding`:
     // that of the theme and of the styles.
     pub void grid(f32 gap, f32 padding) {
-        u64 id = take_id();
+        ui64 id = take_id();
         usize before = depth;
         open_styled(Grid, false, gap, padding);  // painted as a column, with its styles
         if (depth == before || grid_count == 4) {
@@ -4841,7 +5122,7 @@ pub struct Frame {
     }
 
     // The entry of `Ui.grid_ids` of the grid or the table `id`: its own, or a new one.
-    usize grid_memory(u64 id) {
+    usize grid_memory(ui64 id) {
         mut usize memory = 7;
         mut bool found = false;
         for (usize i in 0..8) {
@@ -5165,21 +5446,68 @@ pub struct Frame {
         }
         canvas.Rect row = canvas.Rect{ x: l.frame.x, y: r.y, w: l.frame.w - l.bar_w, h: r.h };
         bool inside = over(row) && over(l.frame);
+        if (l.reorder) {  // an item pressed may be dragged; where it would go
+            if (ui.pressed && inside && !item_not_chosen) {
+                ui.drag_list = l.area_id;
+                ui.drag_from = index;
+                ui.drag_start_y = ui.mouse_y;
+                ui.item_dragged = false;
+            }
+            if (ui.item_dragged && ui.drag_list == l.area_id && ui.mouse_y >= row.y && ui.mouse_y < row.y + row.h) {
+                bool after = ui.mouse_y >= row.y + row.h / 2.0;
+                drag_target = after ? index + 1 : index;
+                drag_line_y = after ? row.y + row.h : row.y;
+            }
+        }
+        match (l.multi) {  // several choices: Ctrl adds or removes, Shift extends from the anchor
+            some(set) => {
+                if (ui.pressed && inside && !item_not_chosen) {
+                    if (ui.ctrl_held) {
+                        set.toggle(index);
+                        set.anchor = index;
+                    } else if (ui.shift_held && set.anchor >= 0) {
+                        set.clear();
+                        set.add_range(set.anchor, index);
+                    } else {
+                        set.clear();
+                        set.add(index);
+                        set.anchor = index;
+                    }
+                    set.cursor = index;
+                }
+                if (set.contains(index) && !item_painted) {
+                    surface.fill(row, l.look.selection);
+                } else if (inside && !item_painted) {
+                    surface.fill(row, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
+                }
+                WidgetState* s = &ui.states[l.area as usize];
+                if (s.reveal && set.cursor == index) {
+                    f32 top = r.y - l.frame.y + s.scroll_y;
+                    s.scroll_y = min(s.scroll_y, top);
+                    s.scroll_y = max(s.scroll_y, top + r.h - l.frame.h);
+                    s.reveal = false;
+                }
+                return;
+            },
+            none => { },
+        }
         match (l.selected) {
             some(chosen) => {
-                if (ui.pressed && inside) {
+                if (ui.pressed && inside && !item_not_chosen) {
                     *chosen = index;
                 }
                 WidgetState* s = &ui.states[l.area as usize];
                 if (*chosen == index) {
-                    surface.fill(row, l.look.selection);
+                    if (!item_painted) {
+                        surface.fill(row, l.look.selection);
+                    }
                     if (s.reveal) {  // the item chosen with a key comes into view
                         f32 top = r.y - l.frame.y + s.scroll_y;
                         s.scroll_y = min(s.scroll_y, top);
                         s.scroll_y = max(s.scroll_y, top + r.h - l.frame.h);
                         s.reveal = false;
                     }
-                } else if (inside) {
+                } else if (inside && !item_painted) {
                     surface.fill(row, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
                 }
             },
@@ -5216,11 +5544,85 @@ pub struct Frame {
     // described, those from `first_shown()` to `last_shown()` excluded, each as high as the first
     // one; then `end_list()`.
     pub void list_of(i32 count, f32 width, f32 height_of, i32*? selected) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
         interactive(r);
         open_area(id, List, r, true, selected, max(count, 0));
+    }
+
+    // The next list or table allows several choices, kept in `chosen` (spec §10.10): Ctrl and a click
+    // add or remove an item, Shift and a click extend from the anchor, Up and Down (with Shift:
+    // extending), Ctrl+A for all, Space to add or remove the item of the keyboard.
+    pub void multiple(Selection* chosen) {
+        next_multi = some(chosen);
+    }
+
+    // The keys of a list of several choices; true when `e` was one of them.
+    bool multi_keys(Selection*? multi, Edit e, WidgetState* s, f32 view_h) {
+        return match (multi) {
+            some(set) => multi_key(set, e, s, view_h),
+            none => false,
+        };
+    }
+
+    bool multi_key(Selection* set, Edit e, WidgetState* s, f32 view_h) {
+        i32 last_item = max(s.items - 1, 0);
+        i32 page = max((view_h / height) as i32 - 1, 1);
+        mut i32 next = set.cursor;
+        mut bool moved = true;
+        if (e.key == key_up() || e.key == key_down()) {
+            next += e.key == key_up() ? -1 : 1;
+        } else if (e.key == key_page_up() || e.key == key_page_down()) {
+            next += e.key == key_page_up() ? -page : page;
+        } else if (e.key == key_home() || e.key == key_end()) {
+            next = e.key == key_home() ? 0 : last_item;
+        } else if (e.ctrl && e.key == 97) {  // Ctrl+A: all
+            set.add_range(0, last_item);
+            return true;
+        } else if (e.key == key_space()) {
+            set.toggle(set.cursor);
+            set.anchor = set.cursor;
+            return true;
+        } else {
+            moved = false;
+        }
+        if (!moved) {
+            return false;
+        }
+        next = min(max(next, 0), last_item);
+        if (e.shift && set.anchor >= 0) {
+            set.clear();
+            set.add_range(set.anchor, next);
+        } else {
+            set.clear();
+            set.add(next);
+            set.anchor = next;
+        }
+        set.cursor = next;
+        s.reveal = true;
+        return true;
+    }
+
+    // The items of the next list can be dragged to another place (spec §10.10): after `end_list()`,
+    // `dropped()` says whether one was dropped, `drop_from()` where it was and `drop_to()` where it
+    // goes; the program moves it.
+    pub void reorderable() {
+        next_reorder = true;
+    }
+
+    pub bool dropped() {
+        bool done = drop_done;
+        drop_done = false;
+        return done;
+    }
+
+    pub i32 drop_from() {
+        return dropped_from;
+    }
+
+    pub i32 drop_to() {
+        return dropped_to;
     }
 
     // ---- Tables (spec §10.9) ----
@@ -5232,7 +5634,7 @@ pub struct Frame {
     // of a sortable column (again: descending); the border between two titles can be dragged.
     pub void table(i32 count, f32 width, f32 height_of, i32*? selected, Sort*? sort) {
         ensure_cell();
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
         interactive(r);
@@ -5255,7 +5657,7 @@ pub struct Frame {
     // Lays out the columns, draws the header, and opens the rows.
     pub void table_rows() {
         TableBuild b = table_build;
-        u64 id = b.id;
+        ui64 id = b.id;
         canvas.Rect r = b.rect;
         Look l = look(Table, 0);
         f32 header_h = l.height;
@@ -5305,7 +5707,7 @@ pub struct Frame {
         for (usize i in 0..b.columns) {
             canvas.Rect grip = canvas.Rect{ x: table_build.col_x[i] + widths[i] - 3.0, y: r.y, w: 6.0, h: header_h };
             if (ui.pressed && over(grip)) {
-                ui.active = mix(id, 0x600 | i as u64);
+                ui.active = mix(id, 0x600 | i as ui64);
                 ui.drag_offset = ui.mouse_x - (table_build.col_x[i] + widths[i]);
                 gripped = true;
             }
@@ -5314,8 +5716,8 @@ pub struct Frame {
         surface.fill(header, color_or(bar.background, face(false, false)));
         for (usize i in 0..b.columns) {
             canvas.Rect title = canvas.Rect{ x: table_build.col_x[i], y: r.y, w: widths[i], h: header_h };
-            u64 grip_id = mix(id, 0x600 | i as u64);
-            if (!gripped && b.sortable[i] && click(mix(id, 0x500 | i as u64), canvas.Rect{ x: title.x, y: title.y, w: title.w - 3.0, h: title.h })) {
+            ui64 grip_id = mix(id, 0x600 | i as ui64);
+            if (!gripped && b.sortable[i] && click(mix(id, 0x500 | i as ui64), canvas.Rect{ x: title.x, y: title.y, w: title.w - 3.0, h: title.h })) {
                 match (b.sort) {
                     some(order) => {
                         order.descending = order.column == i as i32 ? !order.descending : false;
@@ -5345,7 +5747,7 @@ pub struct Frame {
             surface.fill(canvas.Rect{ x: title.x + title.w - 1.0, y: title.y + 6.0, w: 1.0, h: title.h - 12.0 }, l.border);
         }
         // the rows: a long list under the header
-        u64 area = mix(id, 0xA11);
+        ui64 area = mix(id, 0xA11);
         table_build.area_id = area;
         open_area(area, Table, canvas.Rect{ x: r.x, y: r.y + header_h, w: r.w, h: max(r.h - header_h, 0.0) }, true, b.selected, b.count);
     }
@@ -5444,7 +5846,7 @@ pub struct Frame {
 
     // The same, with `icon` before its text (16 pixels high).
     pub bool branch_with(str text, bool*? open, image.Image? icon) {
-        u64 id = take_id();
+        ui64 id = take_id();
         usize slot = ui.state_slot(id);
         WidgetState* s = &ui.states[slot];
         mut bool is_open = match (open) {
@@ -5457,7 +5859,7 @@ pub struct Frame {
         mut bool change = click(id, toggle);
         if (tree_keys(index)) {
             for (usize i in 0..ui.edit_count) {
-                u32 key = ui.edits[i].key;
+                ui32 key = ui.edits[i].key;
                 if (key == key_right()) {
                     if (!is_open) {
                         change = true;
@@ -5507,13 +5909,13 @@ pub struct Frame {
 
     // The same, with `icon` before its text (16 pixels high).
     pub bool leaf_with(str text, image.Image? icon) {
-        u64 id = take_id();
+        ui64 id = take_id();
         i32 index = layouts[depth].item;
         canvas.Rect r = tree_item(text, false, false, icon);
         mut bool clicked = click(id, r);
         if (tree_keys(index)) {
             for (usize i in 0..ui.edit_count) {
-                u32 key = ui.edits[i].key;
+                ui32 key = ui.edits[i].key;
                 if (key == key_enter()) {
                     clicked = true;
                 } else if (key == key_left()) {
@@ -5522,6 +5924,168 @@ pub struct Frame {
             }
         }
         return clicked;
+    }
+
+    // A long tree (spec §10.10): `count` rows, a tree the program flattened into the rows it shows;
+    // only those in view are described, `first_shown()` to `last_shown()`, each after `tree_row`,
+    // then `end_tree()`.
+    pub void tree_of(i32 count, f32 width, f32 height_of, i32*? selected) {
+        list_of(count, width, height_of, selected);
+        if (layouts[depth].is_list) {
+            layouts[depth].tree = true;
+        }
+        tree_level = 0;
+    }
+
+    // A row of a long tree, `depth` deep, with a triangle when it is a branch (open or not): its
+    // widgets follow, until `end_tree_row()`. Returns true when the program should open or close
+    // it: a click on its triangle, Right on a closed branch or Left on an open one, Enter.
+    pub bool tree_row(i32 row_depth, bool is_branch, bool is_open) {
+        ui64 id = take_id();
+        i32 index = layouts[depth].item;
+        Layout l = layouts[depth];
+        f32 indent = max(row_depth, 0) as f32 * 16.0;
+        canvas.Rect toggle = canvas.Rect{ x: l.x + indent, y: l.y, w: 20.0, h: height };
+        mut bool change = is_branch && click(id, toggle);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                ui32 key = ui.edits[i].key;
+                if (is_branch && (key == key_right() && !is_open || key == key_left() && is_open || key == key_enter())) {
+                    change = true;
+                } else if (key == key_right() && is_open) {
+                    tree_choose(index + 1);  // its first child
+                }
+            }
+        }
+        usize level = tree_level;
+        tree_level = max(row_depth, 0) as usize;
+        tree_line_open(is_branch, is_open, id, index);
+        tree_level = level;
+        return change;
+    }
+
+    pub void end_tree_row() {
+        tree_line_close();
+    }
+
+    // A branch whose line is made of widgets (spec §10.10, `template:`): they follow, until
+    // `branch_close()`, which returns whether it is open (its children then follow, then
+    // `end_branch()`). Its triangle and its keys are those of `branch`.
+    pub void branch_open(bool*? open) {
+        ui64 id = take_id();
+        usize slot = ui.state_slot(id);
+        WidgetState* s = &ui.states[slot];
+        mut bool is_open = match (open) {
+            some(flag) => *flag,
+            none => s.expanded,
+        };
+        i32 index = layouts[depth].item;
+        f32 indent = tree_level as f32 * 16.0;
+        Layout l = layouts[depth];
+        canvas.Rect toggle = canvas.Rect{ x: l.x + indent, y: l.y, w: 20.0, h: height };
+        mut bool change = click(id, toggle);
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                ui32 key = ui.edits[i].key;
+                if (key == key_right() || key == key_left() || key == key_enter()) {
+                    if (key == key_right() && is_open) {
+                        tree_choose(index + 1);
+                    } else if (key == key_left() && !is_open) {
+                        tree_to_parent();
+                    } else {
+                        change = true;
+                    }
+                }
+            }
+        }
+        if (change) {
+            is_open = !is_open;
+            s.expanded = is_open;
+            match (open) {
+                some(flag) => {
+                    *flag = is_open;
+                },
+                none => { },
+            }
+        }
+        tree_line_open(true, is_open, id, index);
+    }
+
+    pub bool branch_close() {
+        bool is_open = tree_line_close();
+        if (is_open && tree_level < 16) {
+            tree_parents[tree_level] = tree_line_index;
+            tree_level += 1;
+        }
+        return is_open;
+    }
+
+    // A leaf whose line is made of widgets: they follow, until `leaf_close()`, true when it is
+    // clicked (outside its widgets) or when Enter is pressed while it is chosen.
+    pub void leaf_open() {
+        ui64 id = take_id();
+        tree_line_open(false, false, id, layouts[depth].item);
+    }
+
+    pub bool leaf_close() {
+        ui64 id = tree_line_id;
+        i32 index = tree_line_index;
+        tree_line_close();
+        mut bool clicked = ui.released && ui.active == mix(id, 1) && over(last);
+        if (ui.pressed && over(last) && !item_not_chosen) {
+            ui.active = mix(id, 1);
+        }
+        if (tree_keys(index)) {
+            for (usize i in 0..ui.edit_count) {
+                if (ui.edits[i].key == key_enter()) {
+                    clicked = true;
+                } else if (ui.edits[i].key == key_left()) {
+                    tree_to_parent();
+                }
+            }
+        }
+        return clicked;
+    }
+
+    // The line of a branch or a leaf of widgets: its triangle, then a row for its widgets.
+    void tree_line_open(bool is_branch, bool is_open, ui64 id, i32 index) {
+        take_styles();
+        Look l = look(Tree, 0);
+        Layout list = layouts[depth];
+        f32 indent = tree_level as f32 * 16.0;
+        if (is_branch) {
+            i32 cx = (list.x + indent + 8.0) as i32;
+            i32 cy = (list.y + height / 2.0) as i32;
+            if (is_open) {
+                surface.line(cx - 4, cy - 2, cx, cy + 2, l.color);
+                surface.line(cx, cy + 2, cx + 4, cy - 2, l.color);
+            } else {
+                surface.line(cx - 2, cy - 4, cx + 2, cy, l.color);
+                surface.line(cx + 2, cy, cx - 2, cy + 4, l.color);
+            }
+        }
+        tree_line_id = id;
+        tree_line_index = index;
+        tree_line_branch_open = is_open;
+        tree_line_active = ui.active;
+        if (depth == 15) {
+            return;
+        }
+        f32 x = list.x + indent + 22.0;
+        depth += 1;
+        layouts[depth] = Layout{ horizontal: true, x: x, y: list.y, left: x, top: list.y, right: x, bottom: list.y, gap: 8.0, color: list.color, font_size: list.font_size, accent: list.accent };
+    }
+
+    // Places the line in the tree, as one item; returns whether its branch is open.
+    bool tree_line_close() {
+        Layout done = layouts[depth];
+        depth -= 1;
+        Layout list = layouts[depth];
+        bool inner = ui.pressed && ui.active != tree_line_active && ui.active != 0;
+        item_not_chosen = inner;
+        place(done.right - list.x, max(done.bottom - done.top, height));
+        item_not_chosen = false;
+        return tree_line_branch_open;
     }
 
     // An item of the tree: its row, indented, a triangle for a branch, its icon and its text.
@@ -5595,7 +6159,7 @@ pub struct Frame {
     }
 
     void begin_area(Kind kind, f32 width, f32 height_of, bool is_list, i32*? selected) {
-        u64 id = take_id();
+        ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
         interactive(r);
@@ -5605,7 +6169,11 @@ pub struct Frame {
     // The area `r` of a `Scroll`, a list or a table: with `count` >= 0, a long list of that many items
     // as high as the first one, of which only those in view are described (`first_shown` to
     // `last_shown`).
-    void open_area(u64 id, Kind kind, canvas.Rect r, bool is_list, i32*? selected, i32 count) {
+    void open_area(ui64 id, Kind kind, canvas.Rect r, bool is_list, i32*? selected, i32 count) {
+        Selection*? multi = next_multi;  // `multiple`: several items can be chosen
+        next_multi = none;
+        bool reorder = next_reorder;
+        next_reorder = false;
         usize slot = ui.state_slot(id);
         WidgetState* s = &ui.states[slot];
         bool long_list = count >= 0;
@@ -5625,7 +6193,10 @@ pub struct Frame {
         }
         if (ui.focus == id) {
             for (usize i in 0..ui.edit_count) {
-                u32 key = ui.edits[i].key;
+                ui32 key = ui.edits[i].key;
+                if (is_list && multi_keys(multi, ui.edits[i], s, view_h)) {
+                    continue;
+                }
                 if (is_list) {
                     match (selected) {
                         some(chosen) => {
@@ -5675,7 +6246,7 @@ pub struct Frame {
         f32 left = r.x + 8.0 - s.scroll_x;
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, look: area_look, room_w: max(view_w - 16.0, 0.0) };
+        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, multi: multi, reorder: reorder, look: area_look, room_w: max(view_w - 16.0, 0.0) };
         shown_first = 0;
         shown_last = 0;
         if (long_list) {  // the items in view: the first ones are skipped, where they would be
@@ -5684,6 +6255,17 @@ pub struct Frame {
                 some(chosen) => {
                     if (kept.reveal) {
                         f32 at = *chosen as f32 * item_h;
+                        kept.scroll_y = max(min(kept.scroll_y, at), at + item_h - view_h);
+                        kept.scroll_y = max(min(kept.scroll_y, kept.content_h - view_h), 0.0);
+                        kept.reveal = false;
+                    }
+                },
+                none => { },
+            }
+            match (multi) {  // the item of the keyboard, when several can be chosen
+                some(set) => {
+                    if (kept.reveal) {
+                        f32 at = set.cursor as f32 * item_h;
                         kept.scroll_y = max(min(kept.scroll_y, at), at + item_h - view_h);
                         kept.scroll_y = max(min(kept.scroll_y, kept.content_h - view_h), 0.0);
                         kept.reveal = false;
@@ -5706,6 +6288,27 @@ pub struct Frame {
         if (done.area < 0 || done.is_list != is_list) {
             return;  // not in such an area
         }
+        if (done.reorder && ui.drag_list == done.area_id) {  // an item dragged: its line, then its drop
+            if (ui.down && !ui.item_dragged && abs_f32(ui.mouse_y - ui.drag_start_y) > 6.0) {
+                ui.item_dragged = true;
+            }
+            if (ui.item_dragged && drag_target >= 0) {
+                surface.fill(canvas.Rect{ x: done.frame.x + 4.0, y: drag_line_y - 1.0, w: done.frame.w - done.bar_w - 8.0, h: 2.0 }, done.look.accent);
+            }
+            if (ui.released) {
+                if (ui.item_dragged && drag_target >= 0) {
+                    i32 to = drag_target > ui.drag_from ? drag_target - 1 : drag_target;
+                    if (to != ui.drag_from) {
+                        drop_done = true;
+                        dropped_from = ui.drag_from;
+                        dropped_to = to;
+                    }
+                }
+                ui.drag_list = 0;
+                ui.item_dragged = false;
+            }
+        }
+        drag_target = -1;
         depth -= 1;
         WidgetState* s = &ui.states[done.area as usize];
         f32 pad = is_list ? 0.0 : 8.0;
@@ -5758,7 +6361,7 @@ pub struct Frame {
 
     // A scroll bar along `track`: where the content is scrolled (`at`, of `content` of which
     // `view` shows), after its thumb was dragged, or the bar clicked beside it (a page).
-    f32 drag_bar(u64 id, canvas.Rect track, f32 at, f32 content, f32 view, bool vertical) {
+    f32 drag_bar(ui64 id, canvas.Rect track, f32 at, f32 content, f32 view, bool vertical) {
         f32 length = vertical ? track.h : track.w;
         f32 origin = vertical ? track.y : track.x;
         f32 thumb = max(length * view / content, 16.0);
@@ -5787,7 +6390,7 @@ pub struct Frame {
     }
 
     // Pressed then released over `r`, the press and the release maybe in the same frame.
-    bool click(u64 id, canvas.Rect r) {
+    bool click(ui64 id, canvas.Rect r) {
         if (ui.pressed && over(r)) {
             ui.active = id;
         }
@@ -5797,7 +6400,7 @@ pub struct Frame {
 
 // The widgets of a frame, from (x, y) downwards. End it with `finish()`.
 pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
-    mut Frame f = Frame{ ui: ui, surface: surface };
+    mut Frame f = Frame{ ui: ui, surface: surface, height: 32.0 * ui.scale };
     // inside the safe area (spec §10.9): notches and system bars leave margins
     f32 left = x + ui.safe_left;
     f32 top = y + ui.safe_top;
@@ -5805,6 +6408,8 @@ pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
     // the background of the window, when the theme gives one (spec §10.7)
     match (ui.theme) {
         some(t) => {
+            ui.frame_theme = t;
+            ui.themed = true;
             match (in_states(t.window, 0).background) {
                 some(c) => {
                     surface.clear(c);
@@ -5812,7 +6417,9 @@ pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
                 none => { },
             }
         },
-        none => { },
+        none => {
+            ui.themed = false;
+        },
     }
     return f;
 }
@@ -5886,7 +6493,7 @@ test "a text field takes the keyboard when clicked" {
     assert(f.text_field(&name, 200.0));  // Enter
     f.finish();
     assert(name.len == 2 && ui.focus != 0);
-    u64 field = ui.focus;
+    ui64 field = ui.focus;
 
     // a click on another widget gives it the keyboard; the checkbox is the second widget
     ui.mouse_move(20.0, 50.0);
@@ -5967,7 +6574,7 @@ test "the widgets use the font of ui" {
     canvas.Rect proportional = f.measure("iiii", 2);
     assert(proportional.w < bitmap.w / 2.0);
     f.label("Hello");
-    mut u32 drawn = 0;
+    mut ui32 drawn = 0;
     for (mut i32 y = 0; y < 32; y += 1) {
         for (mut i32 x = 0; x < 60; x += 1) {
             drawn += surface.at(x, y) != 0 ? 1 : 0;
@@ -5985,7 +6592,7 @@ bool field_frame(Ui* ui, canvas.Canvas* surface, TextBuffer* text, Format format
     return entered;
 }
 
-void press(Ui* ui, u32 key, bool shift, bool ctrl) {
+void press(Ui* ui, ui32 key, bool shift, bool ctrl) {
     ui.key(key, true, shift, ctrl);
     ui.key(key, false, shift, ctrl);  // released keys are ignored
 }
@@ -6277,7 +6884,7 @@ test "an image is placed as a widget, centered in a row" {
     defer arena.free();
     mut canvas.Canvas surface = canvas.create(&arena, 200, 100);
     mut Ui ui = Ui{ };
-    mut u32[] pixels = arena.alloc_slice(u32, 8);
+    mut ui32[] pixels = arena.alloc_slice(ui32, 8);
     for (usize i in 0..8) {
         pixels[i] = 0xFFFF0000;
     }
@@ -6447,7 +7054,7 @@ test "context menus open under the mouse, the innermost first" {
 
 // A button that may appear before a text field, both with their place, as the translator
 // gives them; then the fields of a loop, named by `keys`.
-void identity_frame(Ui* ui, canvas.Canvas* surface, bool extra, TextBuffer* text, u64[] keys, TextBuffer[] items) {
+void identity_frame(Ui* ui, canvas.Canvas* surface, bool extra, TextBuffer* text, ui64[] keys, TextBuffer[] items) {
     mut Frame f = begin(ui, surface, 0.0, 0.0);
     if (extra) {
         f.at(10);
@@ -6473,7 +7080,7 @@ test "identities survive an if and an insertion in a loop" {
     mut Ui ui = Ui{ };
     mut TextBuffer text = TextBuffer{ };
     mut TextBuffer[3] items = [TextBuffer{ }; 3];
-    mut u64[3] keys = [7, 8, 9];
+    mut ui64[3] keys = [7, 8, 9];
     click_at(&ui, 20.0, 10.0);  // the field, at y 0 to 32
     identity_frame(&ui, &surface, false, &text, keys[0..2], items[0..2]);
     ui.type_text("a");
@@ -6528,7 +7135,7 @@ test "Tab and Shift+Tab, Space and Enter" {
     tab_frame(&ui, &surface, &text, &box);
     ui.key(key_tab(), true, false, false);  // nothing has the keyboard: the first widget
     tab_frame(&ui, &surface, &text, &box);
-    u64 field = ui.focus;
+    ui64 field = ui.focus;
     ui.type_text("!");  // all its text was selected: replaced
     tab_frame(&ui, &surface, &text, &box);
     assert(field != 0 && text.text().len == 1);
@@ -6818,7 +7425,7 @@ test "texts translated, with values and plurals" {
 
 // Whether a pixel of `r` on `surface` is `color`.
 bool has_pixel(canvas.Canvas* surface, canvas.Rect r, canvas.Color color) {
-    u32 wanted = canvas.pack(color);
+    ui32 wanted = canvas.pack(color);
     for (i32 y in r.y as i32..(r.y + r.h) as i32) {
         for (i32 x in r.x as i32..(r.x + r.w) as i32) {
             if (surface.at(x, y) == wanted) {
@@ -7836,4 +8443,271 @@ test "touch: a tap clicks, a long press opens the context menu, a drag scrolls w
     f.label("top");
     assert(f.last.x == 10.0 && f.last.y == 30.0);
     f.finish();
+}
+
+// A list of 3 items, each a label and a button, for the test below: the button clicked (its
+// index, -1: none), and the color of the label of the first item.
+i32 items_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, canvas.Color* first_color) {
+    mut i32 clicked = -1;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.list(300.0, 200.0, some(chosen));
+    for (i32 i in 0..3) {
+        f.push_item();
+        f.style(Style{ checked: Props{ color: some(rgb(255, 0, 0, 255)) } });  // chosen: red text
+        f.item(true, 8.0, 4.0, true);
+        if (i == 0) {
+            *first_color = f.look(Text, 0).color;
+        }
+        f.label("file");
+        if (f.button("Open")) {
+            clicked = i;
+        }
+        f.end_item();
+        f.pop_id();
+    }
+    f.end_list();
+    f.finish();
+    return clicked;
+}
+
+test "item templates: several widgets, one item; its button is not a choice; its states" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 320, 220);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = -1;
+    mut canvas.Color color = clear();
+    ui.mouse_move(319.0, 219.0);
+    items_frame(&ui, &surface, &chosen, &color);
+    items_frame(&ui, &surface, &chosen, &color);  // their sizes known
+    // a click on the label of the second item (each 32 + 8 high): chosen
+    ui.mouse_move(20.0, 40.0 + 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(items_frame(&ui, &surface, &chosen, &color) == -1 && chosen == 1);
+    // a click on the button of the third: clicked, not chosen
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f32 label_w = f.measure_px("file", 18.0).w;
+    f.finish();
+    ui.mouse_move(8.0 + 4.0 + label_w + 8.0 + 10.0, 80.0 + 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    assert(items_frame(&ui, &surface, &chosen, &color) == 2 && chosen == 1);
+    // the first item chosen: its text takes the color of its style in the state `checked`
+    chosen = 0;
+    items_frame(&ui, &surface, &chosen, &color);
+    assert(color.r == 255 && color.g == 0);
+}
+
+// A list of 10 items, several of which can be chosen, for the test below.
+void many_frame(Ui* ui, canvas.Canvas* surface, Selection* chosen) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.multiple(chosen);
+    f.list_of(10, 200.0, 400.0, none);
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        f.label("item");
+        f.pop_id();
+    }
+    f.end_list();
+    f.finish();
+}
+
+test "several choices: a click, Ctrl and a click, Shift and a click, the keys, Ctrl+A, Space" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 220, 420);
+    mut Ui ui = Ui{ };
+    mut Selection chosen = selection();
+    defer chosen.free();
+    ui.mouse_move(10.0, 32.0 + 10.0);  // the item 1
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 1 && chosen.contains(1));
+    ui.key(0x400000E0, true, false, true);  // Ctrl held; a click on the item 3 adds it
+    ui.mouse_move(10.0, 3.0 * 32.0 + 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 2 && chosen.contains(3));
+    ui.key(0x400000E0, false, false, false);
+    ui.key(0x400000E1, true, true, false);  // Shift held; a click on the item 5: from 3 to 5
+    ui.mouse_move(10.0, 5.0 * 32.0 + 10.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 3 && chosen.contains(4) && !chosen.contains(1));
+    ui.key(0x400000E1, false, false, false);
+    // the keys: Shift+Down extends, Ctrl+A chooses all, Space removes the item of the keyboard
+    ui.key(key_down(), true, true, false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.contains(6) && chosen.contains(3));
+    ui.key(97, true, false, true);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 10);
+    ui.key(key_space(), true, false, false);
+    many_frame(&ui, &surface, &chosen);
+    assert(chosen.count() == 9 && !chosen.contains(6));
+    assert(chosen.next(0) == 0 && chosen.next(6) == 7);
+}
+
+// A long tree of 100 000 rows, every tenth a branch, the rows after an open branch one deeper,
+// for the test below: the rows described, and the row toggled (-1: none).
+i32 long_tree_frame(Ui* ui, canvas.Canvas* surface, i32* chosen, i32* toggled) {
+    mut i32 described = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.tree_of(100000, 300.0, 200.0, some(chosen));
+    for (i32 i in f.first_shown()..f.last_shown()) {
+        f.push_item();
+        if (f.tree_row(i % 10 == 0 ? 0 : 1, i % 10 == 0, true)) {
+            *toggled = i;
+        }
+        f.label("row");
+        f.end_tree_row();
+        f.pop_id();
+        described += 1;
+    }
+    f.end_tree();
+    f.finish();
+    return described;
+}
+
+test "a long tree: only the rows in view, their depth, a triangle that asks to toggle" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 320, 220);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    mut i32 toggled = -1;
+    ui.mouse_move(319.0, 219.0);
+    assert(long_tree_frame(&ui, &surface, &chosen, &toggled) <= 9);
+    // a click on the triangle of the row 0 (a branch): the program is asked to close it
+    ui.mouse_move(8.0 + 8.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(toggled == 0);
+    // End: the last row, in view
+    ui.key(key_end(), true, false, false);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(chosen == 99999);
+    // Up nine times: the branch 99990, which comes into view; Left on it: it is closed
+    for (i32 k in 0..9) {
+        ui.key(key_up(), true, false, false);
+    }
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(chosen == 99990);
+    toggled = -1;
+    ui.key(key_left(), true, false, false);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    long_tree_frame(&ui, &surface, &chosen, &toggled);
+    assert(toggled == 99990);
+}
+
+// A dropdown of 50 options named "a0".."e9" (the letter changes every 10), for the test below.
+i32 long_dropdown_frame(Ui* ui, canvas.Canvas* surface, i32* chosen) {
+    mut str[5] letters = ["a", "b", "c", "d", "e"];
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.dropdown(150.0);
+    for (i32 i in 0..50) {
+        str name = f.with2("{l}{d}", "l", letters[(i / 10) as usize], "d", f.decimal((i % 10) as i64));
+        if (f.option(name, *chosen == i) && *chosen != i) {
+            *chosen = i;
+        }
+    }
+    f.end_dropdown();
+    f.finish();
+    return *chosen;
+}
+
+test "a dropdown of 50 options: its list fits the window and scrolls; a letter goes to an option" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 300);
+    mut Ui ui = Ui{ };
+    mut i32 chosen = 0;
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_dropdown_frame(&ui, &surface, &chosen);  // open
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(ui.open != 0 && ui.layer.h <= 300.0 - 32.0 - 8.0);
+    // d: the first option that starts with it, in view
+    ui.type_text("d");
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(ui.highlight == 30 && ui.drop_scroll > 0.0);
+    // the wheel: further down; a click on the first option shown is the option under the mouse
+    ui.mouse_move(20.0, 100.0);
+    ui.scroll_wheel(-1.0);
+    long_dropdown_frame(&ui, &surface, &chosen);
+    f32 scroll = ui.drop_scroll;
+    f32 offset = 100.0 - 32.0;
+    i32 under = ((offset + scroll) / 32.0) as i32;
+    ui.mouse_button(true);
+    ui.mouse_button(false);
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(chosen == under && ui.open == 0);
+    // closed, with the keyboard: a letter chooses the next option that starts with it
+    ui.type_text("b");
+    long_dropdown_frame(&ui, &surface, &chosen);
+    long_dropdown_frame(&ui, &surface, &chosen);
+    assert(chosen == 10);
+}
+
+test "the scale of a dense screen: the sizes of the theme and the fonts are larger" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.button("OK");
+    canvas.Rect one = f.last;
+    f.finish();
+    ui.scale = 2.0;
+    f = begin(&ui, &surface, 0.0, 0.0);
+    f.button("OK");
+    canvas.Rect two = f.last;
+    f.finish();
+    assert(two.h == 2.0 * one.h && two.w > 1.8 * one.w);
+}
+
+// A list of 5 items that can be reordered, for the test below: the move dropped, or -1.
+i32 reorder_frame(Ui* ui, canvas.Canvas* surface) {
+    mut i32 moved = -1;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.reorderable();
+    f.list(200.0, 200.0, none);
+    for (i32 i in 0..5) {
+        f.push_item();
+        f.label("item");
+        f.pop_id();
+    }
+    f.end_list();
+    if (f.dropped()) {
+        moved = f.drop_from() * 10 + f.drop_to();
+    }
+    f.finish();
+    return moved;
+}
+
+test "drag and drop: an item of a list dragged below another" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 220, 220);
+    mut Ui ui = Ui{ };
+    ui.mouse_move(20.0, 10.0);  // the item 0, pressed
+    ui.mouse_button(true);
+    reorder_frame(&ui, &surface);
+    ui.mouse_move(20.0, 3.0 * 32.0 + 24.0);  // the lower half of the item 3
+    assert(reorder_frame(&ui, &surface) == -1);
+    reorder_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(reorder_frame(&ui, &surface) == 3);  // from 0 to 3: after the item 3, which moves up
+    // a press and a release without moving: no drop
+    ui.mouse_button(true);
+    reorder_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(reorder_frame(&ui, &surface) == -1);
 }

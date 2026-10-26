@@ -42,7 +42,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 - Integers: decimal, hexadecimal (`0x`, lowercase prefix) or binary (`0b`), at most 2^64 - 1. A decimal literal cannot start with `0` (`007` is an error): C reads it as octal, Sosu has no octal literals.
 - Floats: digits, a dot and digits (`3.14`), and an optional exponent (`1e5`, `2.5e-3`, lowercase `e`). A digit is required after the dot, so `0..n` is a range and `3.abs()` a method call.
-- No type suffix: `300u8` is an error, the conversion is written `300 as u8`.
+- No type suffix: `300ui8` is an error, the conversion is written `300 as ui8`.
 - Strings stay on one line. Escapes, in strings and characters: `\n \t \r \0 \\ \' \"`, `\xNN` (ASCII only, `\x00` to `\x7F`, so that a `str` stays valid UTF-8) and `\u{N}` (1 to 6 hexadecimal digits, a Unicode scalar value).
 - A character literal holds exactly one code point.
 - `++`, `--` and `::` are recognized only to report an error that gives the Sosu form (§5.1).
@@ -51,8 +51,8 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 | Category | Types |
 |---|---|
-| Integers | `i8 i16 i32 i64 u8 u16 u32 u64 isize usize` |
-| Floats | `f32 f64` |
+| Integers | `i8 i16 i32 i64 ui8 ui16 ui32 ui64 isize usize` |
+| Floats | `f32 f64`, and the unsigned floats `uf32 uf64` |
 | Others | `bool char void` |
 | String | `str` (valid UTF-8, pointer + length, not owned) |
 | Pointer | `T*` (never null; possibly absent pointer: `T*?`) |
@@ -63,13 +63,16 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 Conversions: always explicit with `as` (`x as f32`).
 
+- The unsigned integers are `ui8`, `ui16`, `ui32` and `ui64` (and `usize`, a size). The former names `u8`, `u16`, `u32` and `u64` are errors that give the new one.
+- `uf32` and `uf64` are floats that are never negative (a size, a distance, a duration): `float` and `double` in C, types of their own beside `f32` and `f64`, with `as` between them. A negative result or conversion (and NaN) is checked as an integer overflow: in debug, it stops the program (code 101); in release, it is not checked. `-x` on an unsigned float is an error, so a negative literal is refused while compiling.
+
 ### 4.1 Text and UTF-8
 
 - A `str` always holds valid UTF-8, without a null terminator; its length is in bytes.
 - `char` is a Unicode code point (32 bits).
 - Iteration: `for (char c in s.chars())`; byte access: `s.bytes[i]`.
-- Building a `str` from arbitrary bytes can fail: `str.from_bytes(u8[]) -> str!Utf8Error`.
-- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(u8*)` is `unsafe`). `to_cstr` takes an `Arena` or an `Arena*` and returns a `u8*` ending with a NUL byte. `Utf8Error` (one variant, `Invalid`) is declared in `core.prelude`. `str.from_cstr` is not implemented yet.
+- Building a `str` from arbitrary bytes can fail: `str.from_bytes(ui8[]) -> str!Utf8Error`.
+- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(ui8*)` is `unsafe`). `to_cstr` takes an `Arena` or an `Arena*` and returns a `ui8*` ending with a NUL byte. `Utf8Error` (one variant, `Invalid`) is declared in `core.prelude`. `str.from_cstr` is not implemented yet.
 
 ## 5. Declarations and syntax
 
@@ -103,7 +106,7 @@ i32 main() uses io {
 
 Parsing note: a statement starting with `Ident Ident` is a declaration, otherwise an expression
 (enough as long as there are no generics). More precisely, a statement is a declaration when it
-starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `u8[4] buf`, `i32!E r`).
+starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `ui8[4] buf`, `i32!E r`).
 
 Every variable receives its value where it is declared: `i32 x;` is an error. There are no global
 variables in v0.
@@ -162,7 +165,7 @@ Precedence (tightest first):
 Details:
 
 - `as` applies to the result of the unary operators: `-x as f32` is `(-x) as f32`.
-- After `as`, `*` and `?` belong to the type unless an operand follows: `p as u8*` converts to a pointer, `x as i32 * 2` multiplies, `x as bool ? a : b` is a conditional.
+- After `as`, `*` and `?` belong to the type unless an operand follows: `p as ui8*` converts to a pointer, `x as i32 * 2` multiplies, `x as bool ? a : b` is a conditional.
 - A struct literal is written `Point{ x: 1.0, y: 2.0 }` (trailing comma allowed). It cannot appear in `requires` / `ensures`, where the brace opens the function body.
 - Function types: `fn(i32, i32) -> i32 uses io`; the arrow and the return type are mandatory (`-> void`). In a function type, the `uses` list only continues after a comma with a predefined effect (§7.4), so that the comma is not confused with a parameter separator.
 
@@ -213,7 +216,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet). They are part of the compiler, since they work for several types and Sosu v0 has no generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
-- **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
+- **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: ui8`, `1` is a `ui8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
 - **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
 - **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned. A view `x[a..b]` shares the elements of `x` without copying them (checked: `a <= b <= x.len`); taking one of an array is like taking its address, so the array must be `mut`.
 - **Taking an address** `&x` follows the same rules, since the pointer allows writing: `x` must be `mut` (and a field must be `mut`). Pointers that only allow reading may come later.
@@ -223,10 +226,10 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Statements**: an expression statement must be a call or a `match`; `x == 1;` is an error. The value of a call returning `T!E` must be used (with `try`, `match`, or a variable).
 - **Functions** that return a value must end every path with `return`.
 - **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`.
-- **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `u8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as u8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
+- **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `ui8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as ui8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
 - **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`. It ends the line. A float always prints with a dot (`25.0`).
 - **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`.
-- **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as u8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
+- **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as ui8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
 - **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only.
 
 ## 6. Memory
@@ -369,7 +372,7 @@ error[E0312]: non-exhaustive match
 - `sosuc fmt`: a single style, no configuration option. It prints the file from its syntax tree, so a file must parse to be formatted, and puts every comment back where it was. The style:
   - 4 spaces of indentation; `{` at the end of the line, `}` on its own line; a non-empty block always spans several lines, an empty one is `{ }`;
   - one statement per line; spaces around binary operators and after commas, none inside parentheses or brackets; struct literals on one line: `Point{ x: 1.0, y: 2.0 }`;
-  - parentheses only where the precedence needs them (`(a + b) * c`, `-(x as f32)`, `(p as u8*) + 1`);
+  - parentheses only where the precedence needs them (`(a + b) * c`, `-(x as f32)`, `(p as ui8*) + 1`);
   - at most one blank line, where the source has one; none after `{`;
   - a comment on its own line stays on its own line; a comment after code stays at the end of the line, after two spaces;
   - a function with contracts puts each `requires` / `ensures` on its own line and `{` alone below them;
@@ -381,14 +384,14 @@ error[E0312]: non-exhaustive match
 
 - `unsafe { ... }` is the only place where pointer arithmetic, raw pointer conversions (`p as T*`) or unwrapped calls to C are allowed. A function marked `unsafe` can only be called from an `unsafe` block.
 - Outside `unsafe`, a `T*` always points to a valid value.
-- In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, contracts.
-- In release, bounds stay checked by default (`--checks=off` disables them); contracts and overflows are not.
+- In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, unsigned floats never negative, contracts.
+- In release, bounds stay checked by default (`--checks=off` disables them); contracts, overflows and unsigned floats are not.
 - Options of `sosuc build`, `run` and `test`: `--release` (optimized C, modulo arithmetic, no contracts), `--checks=on|off` (indexes), `--contracts=check|off` (`requires` / `ensures`). Division by zero always stops the program, as do `assert` failures.
 
 ```sosu
 unsafe {
-    u8* p = base as u8*;
-    u8 first = *(p + 4);
+    ui8* p = base as ui8*;
+    ui8 first = *(p + 4);
 }
 ```
 
@@ -410,7 +413,7 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 
 `core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` two small functions where C differs between systems (`errno`, file sizes). Available so far:
 
-- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> u8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
+- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> ui8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
 - `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`.
 - `std.random`: `random.Rng`, a generator holding its state (SplitMix64; not for cryptography): `next()` (64 bits), `below(bound)`, `between(low, high)`, `unit()` (a float in [0, 1)). `random.seeded(seed)` gives the same numbers for the same seed, without effect; `random.from_system()` seeds it differently on each run, with the effect `random`.
 - `core.prelude`: `Utf8Error` (§5.3).
@@ -458,7 +461,7 @@ shared = { path = "../shared" }
 
 ```sosu
 extern "C" {
-    i32 puts(u8* s);
+    i32 puts(ui8* s);
 }
 ```
 
@@ -714,7 +717,7 @@ Translation in v0:
 | `Scroll(width: w, height: h) { ... }` | `f.scroll(w, h)`, the nodes, `f.end_scroll()`; `width` and `height` are required |
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
-- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
+- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as ui64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
 - `theme` and `style` blocks, and `style:` on a node: see §10.7. `Grid` and the places of its nodes (`row:`, `col:`, `span:`, `align:`), `Group`, `Tabs` and `Tree`: see §10.8. `bind:` goes on `TextField`, `TextArea`, `NumberField`, `MoneyField`, `Checkbox`, `Radio`, `Dropdown`, `Slider` and `DateField` (elsewhere: error E0215). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
@@ -780,16 +783,17 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `Table` | available | columns of sizes, sorting, borders dragged, rows chosen, only those in view (§10.9) |
 | `TextArea` (several lines) | available | bound to a `LongText`: lines, wrapping, Up and Down, undo, scrolling (§10.9) |
 | `Radio` | available | `Radio("Small", bind: size, value: Small)`: the translator generates the comparison and the assignment for the `enum` (`==` on enums without data), so the widget itself needs no generics |
-| `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. With `count:` and `item:`, a long list: only the items in view are described (§10.9). Not yet: a selection of several items |
+| `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. With `count:` and `item:`, a long list: only the items in view are described (§10.9). Several items chosen with `selection:`, items of several widgets with `Item`, reordered by dragging with `on_drop:` (§10.10) |
 | `Scroll` | available | `Scroll(width: 300, height: 200) { ... }`: any content, scrolled by the wheel (the innermost area first), its bars and the keyboard (§10.6) |
-| `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. With the keyboard: Space, Enter or Alt+Down opens it, Up and Down choose (§10.6). Not yet: scrolling a long list (16 options at most) |
+| `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. With the keyboard: Space, Enter or Alt+Down opens it, Up and Down choose (§10.6). 64 options at most; a long list scrolls, and a letter typed goes to an option (§10.10) |
 | `MenuBar`, `Menu`, `MenuItem`, `Separator` | available | menus drawn by `ui`, in a title bar as in VS Code, or anywhere; submenus; shortcuts |
 | `ContextMenu` | available | the menu of the widget placed before it, opened by the right button |
 | `TitleBar` | available | a title bar drawn by the program, with widgets in it (§10.5) |
 | `Grid` | available | columns and rows in pixels, `Auto` or `Fill`; cells, spans, alignment (§10.8) |
 | `Group` | available | a frame with a title on its border; it can fold (§10.8) |
 | `Tabs`, `Tab` | available | the content of the tab chosen only; closable tabs, Ctrl+Tab (§10.8) |
-| `Tree`, `Branch`, `Leaf` | available | a list of indented items; branches open and close with the mouse and the keyboard (§10.8) |
+| `Tree`, `Branch`, `Leaf` | available | a list of indented items; branches open and close with the mouse and the keyboard (§10.8); lines drawn by a template, and long trees given flat (§10.10) |
+| `Item` | available | an item of a list, tree or table made of several widgets, painted in its states (§10.10) |
 
 Foundations, to build first, since most planned widgets rely on them:
 
@@ -870,8 +874,8 @@ The first of the batches that complete `ui` (grid, frames, tabs, tree, table, te
 Today a widget is the number of its call in the frame. A widget that appears (`if`) or an item added to a list (`for`) shifts the numbers of those after it: the field that has the keyboard, the button held or the list scrolled becomes another one. The grid, the tabs and the tree make widgets appear and disappear all the time, so this comes first.
 
 - An identity is a 64-bit hash (FNV-1a) of a path: the scopes open around the widget, then the widget itself. `Ui` keeps identities (`active`, `focus`, the dropdown open, the menus open), never numbers; 0 is none.
-- `f.at(site)` gives the widget that follows its place, a `u32`; without it, the place is the number of the call in its scope, as today, so code written by hand keeps working.
-- `f.push_id(key)` ... `f.pop_id()` open a scope, `key` a `u64`.
+- `f.at(site)` gives the widget that follows its place, a `ui32`; without it, the place is the number of the call in its scope, as today, so code written by hand keeps working.
+- `f.push_id(key)` ... `f.pop_id()` open a scope, `key` a `ui64`.
 - The translator of `.ui.sosu` files writes them:
   - each node gets `f.at(site)`, `site` being its offset in the file: a widget keeps its identity whatever appears before it;
   - the body of a `for` is a scope per iteration, its key the index of the loop, or the value of `key:` when the loop gives one: `for (Task* t in state.tasks, key: t.id) { ... }`, so that an item keeps its focus when another is inserted before it;
@@ -1200,6 +1204,101 @@ Open questions:
 - A tab character in a `TextArea`: never in v0 (Tab moves the keyboard, as in a browser), or typed when the area has `tabs: true`? (decided: `tabs: true`, off by default; it types four spaces)
 - `NumberField` with an `f64` once there are generics, or integers with decimals for good? (decided: integers; a float field can come later, for measurements)
 - The time given by the program (`ui.clock`) or read by `ui` with the effect `time`? (decided: given; `ui` stays without effects, and its tests choose the time)
+
+### 10.10 Item templates, and the last points of the interface
+
+Status: available. One branch, in batches: item templates, the selection of several items, long trees, the last limits of widgets, fonts, the formatter of `.ui.sosu` files, macOS in the CI, then two points under the interface (a bug of the C generator, the cost of themes). What differs from the design is said at the end.
+
+#### Item templates
+
+In XAML, an `ItemTemplate` (a `DataTemplate`) says how each item of a list is drawn, apart from the list and its data. In a `.ui.sosu` file, the body of a list already describes each item, and a component is already a template that can be reused; what is missing is an item made of several widgets that is still one item, and a look that follows its state.
+
+```sosu
+// a template: a component that describes one item
+component FileItem(state.File* f) {
+    Item(gap: 10, padding: 6, style: theme.FileItem) {
+        Image(f.icon, size: 32)
+        Column(gap: 2) {
+            Text(f.name.text())
+            Text(f.size_text(), style: theme.Muted)
+        }
+        Button("Open", on_click: f.open)
+    }
+}
+
+window Files(state.Files* s) {
+    List(count: s.count, item: i, selected: s.chosen, height: Fill) {
+        FileItem(s.files[i])
+    }
+}
+
+// theme.ui.sosu: the look of the items, in their states
+style FileItem {
+    radius: 6
+    hover { background: #313244 }
+    checked { background: #45475A, color: #FFFFFF }   // the item chosen
+    focus { border: #89B4FA, border_width: 1 }        // the item chosen, while the list has the keyboard
+}
+```
+
+- `Item { ... }`: one item of the list, tree or table that holds it, made of the widgets inside it, laid out in a row (`vertical: true`: a column), with `gap:` and `padding:`. Without `Item`, each widget placed in a list is an item, as today.
+- Its states: `hover` (the mouse is over it), `checked` (it is the item chosen, or one of the items chosen), `focus` (chosen while the list has the keyboard), `disabled` (`enabled: false`: it cannot be chosen). Its look comes from the selector `Item` of the theme, its styles, and these states; `color`, `font_size` and `accent` are inherited by the widgets inside it, so that a chosen item can change the color of its texts.
+- The widgets inside an item still work: a button in an item is clicked, not the item; a click elsewhere on the item chooses it.
+- A template is a component: `FileItem(s.files[i])` in a `List`, `Leaf(template: FileItem(f))`... It can take the index (`FileItem(s.files[i], i)`) and test the state of the program (`if (s.chosen == i) { ... }`), as any component.
+- In a long list, every item is as high as the first one (§10.9); in a list of `for`, items may differ in height.
+- In a tree: `Leaf(template: FileItem(f), on_click: ...)` and `Branch(template: FolderItem(d), open: ...) { children }` draw their line with a component instead of a text (the text, then, is optional); the triangle of a branch stays before it. A `Column` of a `Table` already holds widgets for its cells.
+- What it becomes: `f.item(horizontal, gap, padding, enabled)`, the widgets, `f.end_item()`: one place of the list, its background painted in the states of its item, from its size at the last frame. In a tree, `f.leaf_open()` ... `f.leaf_close()` and `f.branch_open(open)` ... `f.branch_close()` around the template, under its own identity.
+
+#### The selection of several items
+
+- `List(selection: s.chosen_set)`, `Table(selection: ...)`: `widgets.Selection`, a set of indices of the program, made by `widgets.selection()` (a set of bits in its own arena, which grows; `free()` releases it): `contains`, `add`, `remove`, `toggle`, `clear`, `add_range`, `count`, `next(from)` (the next index chosen, or -1), and `anchor` and `cursor`. Ctrl+click adds or removes an item, Shift+click and Shift+arrows extend from the anchor, Ctrl+A chooses all, Space toggles the item of the keyboard. `selected:` (one index) stays for lists of one choice. What it becomes: `f.multiple(&set)` before the list.
+
+#### Long trees
+
+- `Tree(count: s.count, item: i, depth: s.depth(i), branch: s.has_children(i), open: s.open(i))`: a tree described as a flat list of its visible rows (the program flattens it), so that only the rows in view are described, as a long list. Toggling a branch (a click on its triangle, Right and Left on its line) calls `on_toggle: s.toggle(i)`; the program flattens its rows again. The nested form (`Branch { ... }`) stays for trees of few items. What it becomes: `f.tree_of(count, width, height, selected)`, then for each row in view `f.tree_row(depth, branch, open)` (true when the row asks to be toggled), its widgets, `f.end_tree_row()`.
+
+#### The last limits of widgets
+
+- `Dropdown`: more than 16 options, and a list that scrolls (the wheel, Up and Down, a bar) when it is longer than the room under it; typing letters goes to the first option that starts with them.
+- The display scale: `ui.scale` (1 by default), which the program sets from `ScaleChanged`: every size of the look (heights, paddings, gaps, radii, borders, fonts) and the height of the rows are multiplied by it; the program no longer scales its theme itself. The widths and heights the program gives its widgets are its own.
+- Input methods in a `TextArea`: the composition drawn at its cursor, as in a field.
+- Drag and drop between items: `List(on_drop: s.move)` reorders the items of a list: `s.move(from, to)` is called when an item is dropped, `to` the place it goes to; an item dragged shows a line where it would go. What it becomes: `f.reorderable()` before the list, then `if (f.dropped()) { s.move(f.drop_from(), f.drop_to()) }` after it. Drop of files from the system (`SDL_EVENT_DROP_FILE`): the event `FileDropped(str path, f32 x, f32 y)`, one per file, for the program.
+
+#### Fonts
+
+- Kerning: the pair adjustments of the `GPOS` table (lookups of type 2, both formats; the fonts given with Sosu have no `kern` table), applied between letters when they are measured and drawn, and kept in a small cache of the font.
+- Fallback: `font.fallback`, another font (which may have its own): a character missing in a font is drawn with the first of its fallbacks that has it (a Latin font, then a font of symbols or of another script).
+- CFF outlines (`.otf`) and hinting stay for later: the fonts given with Sosu are TrueType, and a scale of 18 pixels does not need hinting to stay readable.
+
+#### The formatter of `.ui.sosu` files
+
+- `sosuc fmt` formats `.ui.sosu` files too, from their tokens (a `.ui.sosu` file is translated while it is read, so it has no syntax tree to print): the lines of the file kept, each indented by the brackets open before it, the spaces around and between tokens by one rule, one blank line at most, comments kept. Formatting twice changes nothing. The language server formats them as `.sosu` files.
+
+#### macOS in the CI
+
+- A third job, `macOS (clang)`, on `macos-latest`: SDL3 from Homebrew, `make test`, and the window test with the dummy video driver.
+
+#### Under the interface
+
+- The bug of the C generator: `a.b[i] = v` (and `&a.b[i]`) wrote into a copy of `a.b` when the index needs temporaries (a call, `min(...)`): the access becomes a pointer to the array, then the element. The workarounds of `ui` (an index in a variable) are removed, and `tests/programs` checks writes through fields and calls.
+- Themes copied: the look of a widget no longer copies the `Theme` of `ui` (17 KB) several times: `begin` copies it once per frame into `ui`, and `look` reads that copy through a pointer.
+
+#### Tests
+
+- `ui`: an item of several widgets chosen by a click, its button clicked without choosing it, its look in its states, the color of its texts inherited; a selection with Ctrl and Shift; a long tree of 100 000 rows; a dropdown of 50 options scrolled and typed into; the scale; a composition in a text area; an item dragged; kerning and a fallback font measured.
+- The translator: `Item`, templates in `Leaf` and `Branch`, `selection:`, the flat `Tree`, `on_drop:`; `sosuc fmt` on `.ui.sosu` files (and that formatting twice changes nothing).
+- `tests/programs/places`: writes through fields and calls (the bug of the generator).
+- `examples/workspace`: its files drawn by a template (icon, name, size) in the tree and in a list where several are chosen; `examples/containers`: a long tree of 1 000 folders of 100 files.
+
+#### What differs from the design
+
+- `Item`, not `ListItem`: the same node in lists, trees and tables. The selection is a store of the program, bound with `selection:`, as `selected:`.
+- Templates in a tree are given by `template:` (`Leaf(template: FileItem(f))`), not by a body of `Leaf`: the body of a `Branch` is already its children.
+- `Option { ... }` with widgets in a `Dropdown` stays for later: an option is a text.
+- `Space(Fill)` does not exist: an item lays out its widgets one after the other.
+- One fallback font per font (`font.fallback`), not a list in `ui`; kerning from `GPOS`, not `kern`.
+- `FileDropped`, one event per file, with where it was dropped, not `FilesDropped` with a slice of paths.
+- In a flat tree, Left on a row that is not an open branch does not go to its parent: `ui` does not know the parents of the rows.
 
 ## 11. Targets and compilation
 

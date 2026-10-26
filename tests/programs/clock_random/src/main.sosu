@@ -24,12 +24,12 @@ i32 main() uses io, time, random {
         }
     }
     io.print("values outside their range: {}", outside);
-    io.print("wrapping: {} {}", wrapping_add(250 as u8, 10 as u8), wrapping_mul(-128 as i8, -1 as i8));
+    io.print("wrapping: {} {}", wrapping_add(250 as ui8, 10 as ui8), wrapping_mul(-128 as i8, -1 as i8));
 
     mut random.Rng system = random.from_system();
     io.print("system seed: {}", system.below(10) < 10);
 
-    u64 start = time.monotonic_ns();
+    ui64 start = time.monotonic_ns();
     time.sleep_ms(20);
     io.print("slept at least 20 ms: {}", time.monotonic_ns() - start >= 20000000);
     io.print("after 2023: {}", time.unix_seconds() > 1700000000);

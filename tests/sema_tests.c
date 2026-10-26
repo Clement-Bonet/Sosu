@@ -67,7 +67,7 @@ static void test_valid(void) {
                  "enum ParseError { Empty, NotANumber(str text) }\n"
                  "i32!ParseError parse(str s) { return ok(0); }\n"
                  "i32? find(i32[] items, i32 target) { return none; }\n"
-                 "void apply(fn(i32) -> i32 uses io f, u8[4] bytes, Point*? p) { }\n"
+                 "void apply(fn(i32) -> i32 uses io f, ui8[4] bytes, Point*? p) { }\n"
                  "struct Node { i32 value; Node* next; }\n",
                  "");
     expect_codes("struct Render { }\n"
@@ -95,6 +95,14 @@ static void test_names(void) {
     expect_help("struct A { i33 x; }", "E0303", "did you mean `i32`?");
     expect_help("struct Point { }\nstruct A { Pont p; }", "E0303", "did you mean `Point`?");
     expect_codes("struct A { a.B x; }", "E0303");
+    expect_help("struct A { u8 x; }", "E0303", "`u8` is now `ui8`: the unsigned integers are `ui8`, `ui16`, `ui32` and `ui64`");
+    expect_help("void f() { ui32 x = 1 as u64; }", "E0303", "`u64` is now `ui64`: the unsigned integers are `ui8`, `ui16`, `ui32` and `ui64`");
+    /* uf32 and uf64: floats never negative, apart from f32 and f64 (spec §4) */
+    expect_codes("void f() { uf32 a = 1.5; uf64 b = 2.0e3; uf32 c = a * 2.0 + a; f32 d = c as f32; }", "");
+    expect_help("void f() { uf32 a = -1.0; }", "E0334", "an unsigned float is never negative: convert it first, `x as f64`");
+    expect_codes("void f(uf64 a) { uf64 b = -a; }", "E0334");
+    expect_help("void f(f32 a) { uf32 b = a; }", "E0331", "conversions are explicit: write `... as uf32`");
+    expect_codes("void f(uf32 a) { f32 b = a; }", "E0331");
     expect_codes("import std.io;\nstruct A { io.File f; }", "E0303");
     expect_codes("import std.io;\nstruct A { std.io.File f; }", "E0303");
     expect_codes("void f() { }\nstruct A { f x; }", "E0304");
@@ -194,12 +202,12 @@ static void test_valid_bodies(void) {
                  "struct Point { mut f32 x; f32 y; f32 length_squared() { return x * x + y * y; } }\n"
                  "void nudge(Point* p) { p.x = p.x + 1.0; }\n"
                  "void literals() uses io {\n"
-                 "    u8 small = 255;\n"
+                 "    ui8 small = 255;\n"
                  "    i64 big = 3000000000;\n"
                  "    i8 negative = -128;\n"
                  "    auto inferred = 3;\n"
                  "    f32 f = 2.5;\n"
-                 "    u32 mask = (0xFF & 0b1010) << 2;\n"
+                 "    ui32 mask = (0xFF & 0b1010) << 2;\n"
                  "    char c = 'a';\n"
                  "    i32 code = c as i32;\n"
                  "    bool flag = !(small > 3) || big == 0;\n"
@@ -209,7 +217,7 @@ static void test_valid_bodies(void) {
                  "    p.x = 1.0;\n"
                  "    io.print(\"{} {} {}\", p.length_squared(), flag, ratio);\n"
                  "}\n"
-                 "void raw(i32* p) { unsafe { u8* q = p as u8*; u8 first = *(q + 4); } }\n",
+                 "void raw(i32* p) { unsafe { ui8* q = p as ui8*; ui8 first = *(q + 4); } }\n",
                  "");
     expect_codes("import std.io;\n"
                  "class Widget {\n"
@@ -236,7 +244,7 @@ static void test_body_errors(void) {
     expect_codes("void f() { i32 x = true; }", "E0331");
     expect_help("void f() { i64 a = 1; i32 b = a; }", "E0331", "conversions are explicit: write `... as i32`");
     expect_codes("void f() { f32 x = 3; }", "E0331");
-    expect_codes("void f() { u8 x = 256; }", "E0332");
+    expect_codes("void f() { ui8 x = 256; }", "E0332");
     expect_codes("void f() { i8 x = -129; }", "E0332");
     expect_codes("void f() { auto x = 3000000000; }", "E0332");
     expect_codes("struct P { }\nvoid f() { auto x = P; }", "E0333");
@@ -254,9 +262,9 @@ static void test_body_errors(void) {
     expect_codes("import std.io;\nvoid f() { io.print(\"hi\"); }", "E0340");
     expect_help("void g() uses time { }\nvoid f() { g(); }", "E0340", "add `uses time` to the signature of `f` (spec §7.4)");
     expect_codes("unsafe void g() { }\nvoid f() { g(); }", "E0341");
-    expect_codes("extern \"C\" { i32 puts(u8* s); }\nvoid f(u8* s) { puts(s); }", "E0341");
-    expect_codes("void f(u8* p) { u8* q = p + 1; }", "E0341");
-    expect_codes("void f(i32* p) { u8* q = p as u8*; }", "E0341");
+    expect_codes("extern \"C\" { i32 puts(ui8* s); }\nvoid f(ui8* s) { puts(s); }", "E0341");
+    expect_codes("void f(ui8* p) { ui8* q = p + 1; }", "E0341");
+    expect_codes("void f(i32* p) { ui8* q = p as ui8*; }", "E0341");
     expect_codes("void f() { auto x = none; }", "E0342");
     expect_codes("void f() { auto r = ok(1); }", "E0342");
     expect_codes("enum E { A, B }\nvoid g() { }\nvoid f(E e) { match (e) { A => g(), C => g(), _ => g() } }", "E0343");
@@ -286,7 +294,7 @@ static void test_body_errors(void) {
     expect_codes("i32 f() { while (true) { } }", "");
     expect_codes("void f(str s) { auto c = s.chars(); }", "E0352");
     expect_codes("void f(str s) { for (char c in s.chars()) { } }", "");
-    expect_codes("void f(str s) { for (u8 c in s.chars()) { } }", "E0331");
+    expect_codes("void f(str s) { for (ui8 c in s.chars()) { } }", "E0331");
     expect_codes("void f(i32 x) { i32 x = 2; }", "E0347");
     expect_codes("void f() { i32 a = 1; { i32 a = 2; } }", "E0347");
     expect_codes("void f() { i32 a = 1; } void g() { i32 a = 2; }", "");
@@ -325,19 +333,19 @@ static void test_body_errors(void) {
     expect_codes("void f() { auto x = MB(); }", "E0338");
 
     /* text (spec §4.1) and the prelude */
-    expect_codes("void f(Arena* a, u8[] data) {\n"
-                 "    u8* c = \"abc\".to_cstr(a);\n"
+    expect_codes("void f(Arena* a, ui8[] data) {\n"
+                 "    ui8* c = \"abc\".to_cstr(a);\n"
                  "    str!Utf8Error text = str.from_bytes(data);\n"
-                 "    u8[] buffer = a.alloc_slice(u8, 16);\n"
+                 "    ui8[] buffer = a.alloc_slice(ui8, 16);\n"
                  "}\n",
                  "");
-    expect_codes("void f(u8[] data) { auto c = \"abc\".to_cstr(data); }", "E0336");
+    expect_codes("void f(ui8[] data) { auto c = \"abc\".to_cstr(data); }", "E0336");
     expect_codes("void f() { auto t = str.from_bytes(\"abc\"); }", "E0331");
-    expect_codes("void f(Arena* a) { auto s = a.alloc_slice(u8); }", "E0336");
+    expect_codes("void f(Arena* a) { auto s = a.alloc_slice(ui8); }", "E0336");
     expect_codes("enum Utf8Error { Mine }\nUtf8Error f() { return Mine; }", "");
 
     /* array literals */
-    expect_codes("void f() { i32[3] a = [1, 2, 3]; u8[64] b = [0; 64]; auto c = [1.5, 2.5]; f64 x = c[1]; }", "");
+    expect_codes("void f() { i32[3] a = [1, 2, 3]; ui8[64] b = [0; 64]; auto c = [1.5, 2.5]; f64 x = c[1]; }", "");
     expect_codes("void f() { auto grid = [[1, 2], [3, 4]]; i32 x = grid[1][0]; }", "");
     expect_codes("void f() { i32[3] a = [1, 2]; }", "E0355");
     expect_codes("void f() { auto a = []; }", "E0308");
@@ -358,10 +366,10 @@ static void test_body_errors(void) {
 
     /* views x[a..b] */
     expect_codes("void f() { mut i32[3] a = [1, 2, 3]; i32[] v = a[0..2]; i32[] w = v[1..2]; }", "");
-    expect_codes("void f(i32[3]* p, u8[] s) { i32[] v = p[1..3]; u8[] t = s[0..s.len]; }", "");
+    expect_codes("void f(i32[3]* p, ui8[] s) { i32[] v = p[1..3]; ui8[] t = s[0..s.len]; }", "");
     expect_codes("void f() { i32[3] a = [1, 2, 3]; i32[] v = a[0..2]; }", "E0335");  /* `a` is not mut */
     expect_codes("void f(i32[] s) { s[0..1] = s; }", "E0335");
-    expect_codes("void f(str s) { u8[] b = s[0..1]; }", "E0334");
+    expect_codes("void f(str s) { ui8[] b = s[0..1]; }", "E0334");
     expect_codes("void f(i32[] s, i32 n) { i32[] v = s[0..n]; }", "E0331");
     expect_codes("void f(i32[] s) { i32[] v = s[0..=1]; }", "E0352");
 
@@ -379,11 +387,11 @@ static void test_body_errors(void) {
                 "a value without an `Arena` is copied by value: use it directly (spec §6)");
 
     /* wrapping operations (spec §5.1), std.time and std.random effects */
-    expect_codes("u64 f(u64 a) { return wrapping_mul(wrapping_add(a, 1), 3); }", "");
+    expect_codes("ui64 f(ui64 a) { return wrapping_mul(wrapping_add(a, 1), 3); }", "");
     expect_codes("f64 f(f64 a) { return wrapping_add(a, 1.0); }", "E0334");
-    expect_codes("void f(u8 a, u16 b) { auto c = wrapping_sub(a, b); }", "E0334");
+    expect_codes("void f(ui8 a, ui16 b) { auto c = wrapping_sub(a, b); }", "E0334");
     expect_codes("import std.time;\nvoid f() { time.sleep_ms(10); }", "E0340");
-    expect_codes("import std.random;\nu64 f() { random.Rng r = random.seeded(1); return r.next(); }", "");
+    expect_codes("import std.random;\nui64 f() { random.Rng r = random.seeded(1); return r.next(); }", "");
     expect_codes("import std.random;\nvoid f() { random.Rng r = random.from_system(); }", "E0340");
 }
 

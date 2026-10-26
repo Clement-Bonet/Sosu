@@ -13,7 +13,7 @@ i32 main() uses io {
     i32[4] a = [1, 2, 3, 4];
     io.print("sum = {}", sum(a));
 
-    mut u8[8] zeros = [0; 8];
+    mut ui8[8] zeros = [0; 8];
     zeros[3] = 7;
     io.print("{} {} {}", zeros[0], zeros[3], zeros.len);
 

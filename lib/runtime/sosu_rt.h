@@ -179,10 +179,20 @@ SOSU_SIGNED(i16, int16_t, INT16_MIN, INT16_MAX, 16)
 SOSU_SIGNED(i32, int32_t, INT32_MIN, INT32_MAX, 32)
 SOSU_SIGNED(i64, int64_t, INT64_MIN, INT64_MAX, 64)
 SOSU_SIGNED(isize, int64_t, INT64_MIN, INT64_MAX, 64)
-SOSU_UNSIGNED(u8, uint8_t, UINT8_MAX, 8)
-SOSU_UNSIGNED(u16, uint16_t, UINT16_MAX, 16)
-SOSU_UNSIGNED(u32, uint32_t, UINT32_MAX, 32)
-SOSU_UNSIGNED(u64, uint64_t, UINT64_MAX, 64)
+SOSU_UNSIGNED(ui8, uint8_t, UINT8_MAX, 8)
+SOSU_UNSIGNED(ui16, uint16_t, UINT16_MAX, 16)
+SOSU_UNSIGNED(ui32, uint32_t, UINT32_MAX, 32)
+SOSU_UNSIGNED(ui64, uint64_t, UINT64_MAX, 64)
 SOSU_UNSIGNED(usize, uint64_t, UINT64_MAX, 64)
+
+/* uf32 and uf64 are never negative: checked where overflows are (debug). NaN fails too. */
+static inline float sosu_check_uf32(float x, const char *loc) {
+    if (!(x >= 0.0f)) sosu_fail(loc, "negative value for an unsigned float");
+    return x;
+}
+static inline double sosu_check_uf64(double x, const char *loc) {
+    if (!(x >= 0.0)) sosu_fail(loc, "negative value for an unsigned float");
+    return x;
+}
 
 #endif

@@ -48,9 +48,16 @@ pub class Demo {
     pub mut i32 confirmed;
     mut widgets.TextBuffer shown;  // the last number written as text
     // The icons of the tree, drawn here: a folder and a file, 16 pixels.
+    // The long tree (spec §10.10): 1 000 folders of 100 files, flattened by the program into its
+    // visible rows; `big_start` is the row of each folder.
+    pub mut bool[1000] big_open;
+    mut i32[1000] big_start;
+    pub mut i32 big_rows;
+    pub mut i32 big_item;
+    mut widgets.TextBuffer big_label;
     pub image.Image folder_icon;
     pub image.Image file_icon;
-    mut u8[12] digits;
+    mut ui8[12] digits;
 
     void init(Arena* arena) {
         page = 0;
@@ -67,6 +74,11 @@ pub class Demo {
         dark = true;
         sounds = false;
         updates = true;
+        big_open = [false; 1000];
+        big_start = [0; 1000];
+        big_item = -1;
+        big_label = widgets.TextBuffer{ };
+        flatten();
         entries = [Entry{ }; 12];
         count = 0;
         item = 0;
@@ -95,14 +107,14 @@ pub class Demo {
 
     // A folder (yellow, with a tab) or a file (a white page, its corner folded), 16 by 16 pixels.
     image.Image icon(Arena* arena, bool folder) {
-        mut u32[] pixels = arena.alloc_slice(u32, 256);
+        mut ui32[] pixels = arena.alloc_slice(ui32, 256);
         for (i32 y in 0..16) {
             for (i32 x in 0..16) {
-                mut u32 c = 0;  // transparent
+                mut ui32 c = 0;  // transparent
                 if (folder) {
                     bool tab = y >= 2 && y < 4 && x >= 1 && x < 7;
                     bool body = y >= 4 && y < 14 && x >= 1 && x < 15;
-                    c = tab || body ? (y == 4 ? 0xFFE0A030 : 0xFFF9C74F) : 0;
+                    c = tab || body ? y == 4 ? 0xFFE0A030 : 0xFFF9C74F : 0;
                 } else {
                     bool page = y >= 1 && y < 15 && x >= 3 && x < 13 && !(x >= 9 && y < 1 + x - 8);
                     bool line = page && x >= 5 && x < 11 && y >= 6 && y % 3 == 0;
@@ -151,6 +163,72 @@ pub class Demo {
         }
     }
 
+    // The rows of the long tree: each folder, then its files when it is open.
+    void flatten() {
+        mut i32 row = 0;
+        for (usize i in 0..1000) {
+            big_start[i] = row;
+            row += big_open[i] ? 101 : 1;
+        }
+        big_rows = row;
+    }
+
+    // The folder of the row `row`: the last one starting at or before it.
+    usize folder_at(i32 row) {
+        mut usize low = 0;
+        mut usize high = 1000;
+        while (high - low > 1) {
+            usize middle = (low + high) / 2;
+            if (big_start[middle] <= row) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        return low;
+    }
+
+    pub bool big_branch(i32 row) {
+        return big_start[folder_at(row)] == row;
+    }
+
+    pub i32 big_depth(i32 row) {
+        return big_branch(row) ? 0 : 1;
+    }
+
+    pub bool big_is_open(i32 row) {
+        return big_branch(row) && big_open[folder_at(row)];
+    }
+
+    pub void big_toggle(i32 row) {
+        usize folder = folder_at(row);
+        big_open[folder] = !big_open[folder];
+        flatten();
+    }
+
+    pub void open_big(bool open) {
+        big_open = [open; 1000];
+        flatten();
+        big_item = -1;
+    }
+
+    // "Folder 12", or "File 12.34" for the 34th file of the folder 12.
+    pub str big_name(i32 row) {
+        usize folder = folder_at(row);
+        big_label.set(big_branch(row) ? "Folder " : "File ");
+        big_label.append(widgets.format_number(folder as i64, widgets.Number{ }, true).text());
+        if (!big_branch(row)) {
+            big_label.append(".");
+            big_label.append(widgets.format_number((row - big_start[folder]) as i64, widgets.Number{ }, true).text());
+        }
+        return big_label.text();
+    }
+
+    pub str big_rows_text() {
+        shown = widgets.format_number(big_rows as i64, widgets.Number{ group: " " }, true);
+        return shown.text();
+    }
+
     // The total of the order, in cents.
     pub i64 total() {
         return quantity * price;
@@ -190,7 +268,7 @@ pub class Demo {
         mut i32 n = sent;
         while (true) {
             at -= 1;
-            digits[at] = (48 + n % 10) as u8;
+            digits[at] = (48 + n % 10) as ui8;
             n /= 10;
             if (n == 0 || at == 0) {
                 break;

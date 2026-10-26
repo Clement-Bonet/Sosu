@@ -572,12 +572,12 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         return strcmp(name, "none") == 0 && expected ? expected : error_type(b);
     }
     if (strcmp(name, "str.from_bytes") == 0) {
-        /* str.from_bytes(u8[]) -> str!Utf8Error (spec §4.1) */
+        /* str.from_bytes(ui8[]) -> str!Utf8Error (spec §4.1) */
         if (count != 1) {
             error_expr(b, "E0336", callee, "`str.from_bytes` takes the bytes to check, e.g. `str.from_bytes(data)`");
             check_args_loosely(b, e);
         } else {
-            check_expect(b, args[0], type_slice(&b->s->types, builtin(b, "u8")));
+            check_expect(b, args[0], type_slice(&b->s->types, builtin(b, "ui8")));
         }
         Type *error = prelude_type(b, "Utf8Error", callee);
         return is_error(error) ? error : type_result(&b->s->types, builtin(b, "str"), error);
@@ -827,7 +827,7 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
     if (is_slice) {
         if (count != 2) {
             error_expr(b, "E0336", callee, "`alloc_slice` takes the type and the number of elements, e.g. "
-                                           "`arena.alloc_slice(u8, 64)`");
+                                           "`arena.alloc_slice(ui8, 64)`");
             for (size_t i = 1; i < count; i++) check_expr(b, args[i], NULL);
         } else {
             check_expect(b, args[1], builtin(b, "usize"));
@@ -899,7 +899,7 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
             diag_help(d, "write `text.to_cstr(arena)` (spec §4.1)");
             if (!arena) check_args_loosely(b, e);
         }
-        return type_pointer(&b->s->types, builtin(b, "u8"));
+        return type_pointer(&b->s->types, builtin(b, "ui8"));
     }
     if (base->tag == T_STR && name_is(name, "chars")) {
         Diagnostic *d = error_expr(b, "E0352", e, "`chars()` can only be used in a `for` loop");
@@ -1152,8 +1152,11 @@ static Type *check_unary(Body *b, Expr *e, Type *expected) {
             return type;
         }
         type = check_expr(b, operand, expected);
-        if (!is_error(type) && !(type->tag == T_FLOAT || (type->tag == T_INT && type->as.integer.is_signed))) {
-            error_expr(b, "E0334", e, "`-` needs a signed integer or a float, found `%s`", tn(&n, type));
+        bool is_signed = type->tag == T_FLOAT ? !type->as.floating.is_unsigned
+                                              : type->tag == T_INT && type->as.integer.is_signed;
+        if (!is_error(type) && !is_signed) {
+            Diagnostic *d = error_expr(b, "E0334", e, "`-` needs a signed integer or a signed float, found `%s`", tn(&n, type));
+            if (type->tag == T_FLOAT) diag_help(d, "an unsigned float is never negative: convert it first, `x as f64`");
         }
         break;
     case TOK_BANG:
@@ -1222,7 +1225,7 @@ static Type *check_field(Body *b, Expr *e, Type *expected) {
     if ((base->tag == T_ARRAY || base->tag == T_SLICE || base->tag == T_STR) && name_is(name, "len")) {
         return builtin(b, "usize");
     }
-    if (base->tag == T_STR && name_is(name, "bytes")) return type_slice(&b->s->types, builtin(b, "u8"));
+    if (base->tag == T_STR && name_is(name, "bytes")) return type_slice(&b->s->types, builtin(b, "ui8"));
     TypeNames n = {0};
     error_at(b, "E0337", name.offset, name.length, "`%s` has no field `%.*s`", tn(&n, base), NAME_ARGS(name));
     release_names(&n);

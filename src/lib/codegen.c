@@ -139,7 +139,7 @@ static char *method_c_name(Gen *g, const MethodInfo *method) {
 static const char *int_c_type(const Type *type) {
     static const char *const names[][2] = {
         { "i8", "int8_t" }, { "i16", "int16_t" }, { "i32", "int32_t" }, { "i64", "int64_t" }, { "isize", "int64_t" },
-        { "u8", "uint8_t" }, { "u16", "uint16_t" }, { "u32", "uint32_t" }, { "u64", "uint64_t" }, { "usize", "uint64_t" },
+        { "ui8", "uint8_t" }, { "ui16", "uint16_t" }, { "ui32", "uint32_t" }, { "ui64", "uint64_t" }, { "usize", "uint64_t" },
     };
     for (size_t i = 0; i < sizeof names / sizeof *names; i++) {
         if (name_is(type->name, names[i][0])) return names[i][1];
@@ -231,7 +231,7 @@ static const char *c_type(Gen *g, const Type *type) {
     case T_STR: return "sosu_str";
     case T_ARENA: return "sosu_arena";
     case T_INT: return int_c_type(type);
-    case T_FLOAT: return type->as.float_bits == 32 ? "float" : "double";
+    case T_FLOAT: return type->as.floating.bits == 32 ? "float" : "double";
     case T_POINTER: {
         TypeEntry *entry = find_type(g, type);
         if (entry) return entry->name;
@@ -785,6 +785,17 @@ static bool is_wrapping(TokenKind op) {
            op == TOK_STAR_EQ;
 }
 
+static bool is_unsigned_float(const Type *type) { return type->tag == T_FLOAT && type->as.floating.is_unsigned; }
+
+/* `value` of an unsigned float, checked in debug: negative (or NaN), it stops the program. */
+static char *never_negative(Fn *f, const Type *type, char *value, size_t offset) {
+    char *where = loc(f, offset);
+    char *result = sosu_format("sosu_check_%.*s(%s, %s)", NAME_ARGS(type->name), value, where);
+    free(where);
+    free(value);
+    return result;
+}
+
 static char *arithmetic(Fn *f, TokenKind op, const Type *type, const char *a, const char *b, size_t offset) {
     const char *helper = op_helper(op);
     if (type->tag == T_INT && is_wrapping(op) && !f->g->options.overflow_checks) {
@@ -803,6 +814,9 @@ static char *arithmetic(Fn *f, TokenKind op, const Type *type, const char *a, co
         return result;
     }
     if (type->tag == T_INT) return sosu_format("((%s)(%s %s %s))", c_type(f->g, type), a, c_operator(op), b);
+    if (is_unsigned_float(type) && f->g->options.overflow_checks) {
+        return never_negative(f, type, sosu_format("(%s %s %s)", a, c_operator(op), b), offset);
+    }
     return sosu_format("(%s %s %s)", a, c_operator(op), b);
 }
 
@@ -939,6 +953,8 @@ static char *gen_cast(Fn *f, Expr *e) {
         free(where);
     } else if ((from->tag == T_POINTER && to->tag == T_INT) || (from->tag == T_INT && to->tag == T_POINTER)) {
         result = sosu_format("((%s)(uintptr_t)%s)", c_type(f->g, to), value);
+    } else if (is_unsigned_float(to) && f->g->options.overflow_checks) {
+        result = never_negative(f, to, sosu_format("((%s)%s)", c_type(f->g, to), value), e->offset);
     } else {
         result = sosu_format("((%s)%s)", c_type(f->g, to), value);
     }
@@ -996,10 +1012,22 @@ static char *gen_view(Fn *f, Expr *e) {
 static char *gen_index(Fn *f, Expr *e) {
     if (e->as.index.index->kind == EXPR_RANGE) return gen_view(f, e);
     Expr *operands[2] = { e->as.index.object, e->as.index.index };
-    char **values = gen_operands(f, operands, 2);
     const Type *type = operands[0]->type;
     bool through_pointer = type->tag == T_POINTER;
-    const Type *base = through_pointer ? type->as.inner : type;
+    char **values;
+    if (type->tag == T_ARRAY && is_place(operands[0]) && has_call(operands[1])) {
+        /* An array kept by its address, not copied: a write through `a.b[f()]` reaches `a`. */
+        values = sosu_alloc(3 * sizeof *values);
+        char *place = gen_expr(f, operands[0]);
+        values[0] = new_temp(f);
+        emit(f, "%s *%s = &%s;", value_type(f->g, type), values[0], place);
+        free(place);
+        values[1] = gen_expr(f, operands[1]);
+        through_pointer = true;
+    } else {
+        values = gen_operands(f, operands, 2);
+    }
+    const Type *base = type->tag == T_POINTER ? type->as.inner : type;
     const Type *index_type = operands[1]->type;
     const char *helper = index_type->as.integer.is_signed ? "sosu_index" : "sosu_uindex";
     const char *cast = index_type->as.integer.is_signed ? "int64_t" : "uint64_t";
