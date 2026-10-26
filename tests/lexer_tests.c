@@ -80,7 +80,7 @@ static void test_numbers(void) {
     CHECK(lx.tokens.items[0].int_value == 42, "42");
     CHECK(lx.tokens.items[1].int_value == 255, "0xFF");
     CHECK(lx.tokens.items[2].int_value == 10, "0b1010");
-    CHECK(lx.tokens.items[3].int_value == UINT64_MAX, "u64 max");
+    CHECK(lx.tokens.items[3].int_value == UINT64_MAX, "ui64 max");
     lexed_free(&lx);
 }
 

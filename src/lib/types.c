@@ -39,13 +39,19 @@ void types_init(TypeTable *table) {
     add_integer(table, "i32", 32, true);
     add_integer(table, "i64", 64, true);
     add_integer(table, "isize", 64, true);
-    add_integer(table, "u8", 8, false);
-    add_integer(table, "u16", 16, false);
-    add_integer(table, "u32", 32, false);
-    add_integer(table, "u64", 64, false);
+    add_integer(table, "ui8", 8, false);
+    add_integer(table, "ui16", 16, false);
+    add_integer(table, "ui32", 32, false);
+    add_integer(table, "ui64", 64, false);
     add_integer(table, "usize", 64, false);
-    add_builtin(table, T_FLOAT, "f32")->as.float_bits = 32;
-    add_builtin(table, T_FLOAT, "f64")->as.float_bits = 64;
+    add_builtin(table, T_FLOAT, "f32")->as.floating.bits = 32;
+    add_builtin(table, T_FLOAT, "f64")->as.floating.bits = 64;
+    Type *uf32 = add_builtin(table, T_FLOAT, "uf32");
+    uf32->as.floating.bits = 32;
+    uf32->as.floating.is_unsigned = true;
+    Type *uf64 = add_builtin(table, T_FLOAT, "uf64");
+    uf64->as.floating.bits = 64;
+    uf64->as.floating.is_unsigned = true;
 }
 
 void types_free(TypeTable *table) {

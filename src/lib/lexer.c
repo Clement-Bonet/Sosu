@@ -33,7 +33,8 @@ static const Spelling punctuation[] = {
 };
 
 static const char *const numeric_types[] = {
-    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64",
+    "i8", "i16", "i32", "i64", "ui8", "ui16", "ui32", "ui64", "isize", "usize", "f32", "f64", "uf32", "uf64",
+    "u8", "u16", "u32", "u64", /* the former names, still a suffix glued to a number */
 };
 
 #define COUNT_OF(array) (sizeof(array) / sizeof((array)[0]))
@@ -193,7 +194,7 @@ static void finish_integer(Lexer *lx, size_t start, uint64_t value, bool overflo
         invalid = true;
     } else if (overflow) {
         Diagnostic *d = diag_error(lx->diags, "E0109", lx->file, start, lx->pos - start, "integer literal is too large");
-        diag_help(d, "the largest integer literal is 18446744073709551615 (the maximum of `u64`)");
+        diag_help(d, "the largest integer literal is 18446744073709551615 (the maximum of `ui64`)");
         invalid = true;
     }
     Token *token = emit(lx, invalid ? TOK_ERROR : TOK_INT, start);

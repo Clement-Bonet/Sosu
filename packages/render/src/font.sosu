@@ -15,15 +15,15 @@ pub i32 line_height() {
 
 // The glyph of `c`: byte `n` is row `n` from the top, and bit `k` of a row the pixel `k`
 // from the left.
-pub u64 glyph(char c) {
-    u32 code = c as u32;
+pub ui64 glyph(char c) {
+    ui32 code = c as ui32;
     if (code >= 0xC0 && code <= 0x17F) {
         return accented(code);
     }
     if (code < 0x20 || code > 0x7E) {
         return 0x007E424242427E00;  // a box
     }
-    u64[95] glyphs = [
+    ui64[95] glyphs = [
         0x0000000000000000,  // space
         0x00180018183C3C18,  // !
         0x0000000000003636,  // "
@@ -125,8 +125,8 @@ pub u64 glyph(char c) {
 
 // The glyph of a letter of U+00C0 to U+017F: its base letter (a capital one row lower when its
 // mark is above it) and its mark, or a glyph of its own; a box when it has neither.
-u64 accented(u32 code) {
-    u8[192] bases = [
+ui64 accented(ui32 code) {
+    ui8[192] bases = [
         65,
         65,
         65,
@@ -320,7 +320,7 @@ u64 accented(u32 code) {
         122,
         0,
     ];
-    u8[192] marks = [
+    ui8[192] marks = [
         1,
         2,
         3,
@@ -515,10 +515,10 @@ u64 accented(u32 code) {
         0,
     ];
     usize index = (code - 0xC0) as usize;
-    u8 letter_of = bases[index];
-    u8 mark = marks[index];
+    ui8 letter_of = bases[index];
+    ui8 mark = marks[index];
     if (mark == 16) {  // a letter of its own: Æ Þ ß æ ð þ ı Œ œ
-        mut u64[9] own = [0; 9];
+        mut ui64[9] own = [0; 9];
         own[0] = 0x007616163F16167C;  // Æ
         own[1] = 0x0003031F33331F03;  // Þ
         own[2] = 0x031B33331B331E00;  // ß
@@ -533,7 +533,7 @@ u64 accented(u32 code) {
     if (letter_of == 0) {
         return 0x007E424242427E00;  // a box
     }
-    mut u64 letter = glyph(letter_of as char);
+    mut ui64 letter = glyph(letter_of as char);
     bool capital = letter_of >= 65 && letter_of <= 90;
     bool below = mark == 7 || mark == 12;  // cedilla, ogonek
     bool above = mark != 0 && !below && mark < 14;
@@ -544,7 +544,7 @@ u64 accented(u32 code) {
         letter = letter << 8;  // a row lower: the mark goes in the top row
     }
     // the marks above: a lower case letter has two free rows, a capital one
-    mut u64[14] high = [0; 14];
+    mut ui64[14] high = [0; 14];
     high[1] = 0x0804;  // grave
     high[2] = 0x0810;  // acute
     high[3] = 0x1408;  // circumflex
@@ -556,7 +556,7 @@ u64 accented(u32 code) {
     high[10] = 0x1C22;  // breve
     high[11] = 0x0C00;  // dot
     high[13] = 0x2412;  // double acute
-    mut u64[14] top = [0; 14];
+    mut ui64[14] top = [0; 14];
     top[1] = 0x0C;
     top[2] = 0x18;
     top[3] = 0x1C;

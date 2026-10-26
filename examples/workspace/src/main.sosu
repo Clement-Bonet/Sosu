@@ -25,25 +25,25 @@ import workspace.screen;
 import workspace.state;
 
 extern "C" {
-    u8* getenv(u8* name);
+    ui8* getenv(ui8* name);
 }
 
 // Whether the environment variable `name` is set.
 bool has_env(Arena* arena, str name) {
-    u8* c_name = name.to_cstr(arena);
+    ui8* c_name = name.to_cstr(arena);
     unsafe {
-        return getenv(c_name) as u64 != 0;
+        return getenv(c_name) as ui64 != 0;
     }
 }
 
 // The value of the environment variable `name` (64 bytes at most), or "".
 str env(Arena* arena, str name) {
-    u8* c_name = name.to_cstr(arena);
-    mut u8[64] bytes = [0; 64];
+    ui8* c_name = name.to_cstr(arena);
+    mut ui8[64] bytes = [0; 64];
     mut usize length = 0;
     unsafe {
-        u8* value = getenv(c_name);
-        if (value as u64 == 0) {
+        ui8* value = getenv(c_name);
+        if (value as ui64 == 0) {
             return "";
         }
         while (length < 64 && *(value + length) != 0) {
@@ -51,7 +51,7 @@ str env(Arena* arena, str name) {
             length += 1;
         }
     }
-    mut u8[] copy = arena.alloc_slice(u8, length);
+    mut ui8[] copy = arena.alloc_slice(ui8, length);
     for (usize i in 0..length) {
         copy[i] = bytes[i];
     }
@@ -216,7 +216,7 @@ i32 main() uses io {
     defer arena.free();
     widgets.Window window = screen.WorkspaceConfig();
     // the icon of the window, a PNG file with transparency: for the system, and in the bar
-    mut image.Image icon = image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(u32, 0) };
+    mut image.Image icon = image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) };
     match (image.load(&arena, window.icon)) {
         ok(found) => {
             icon = found;

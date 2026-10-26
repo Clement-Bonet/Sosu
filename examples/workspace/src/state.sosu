@@ -41,7 +41,7 @@ pub struct File {
 // The digits of `text` as a number.
 i64 number(str text) {
     mut i64 n = 0;
-    for (u8 b in text.bytes) {
+    for (ui8 b in text.bytes) {
         if (b >= 48 && b <= 57) {
             n = n * 10 + (b - 48) as i64;
         }

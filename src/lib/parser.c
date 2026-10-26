@@ -437,7 +437,7 @@ static bool starts_operand(TokenKind kind) {
 }
 
 /* After `as`, `*` and `?` are type suffixes unless an operand follows:
-   `x as i32 * 2` multiplies, `p as u8*;` converts to a pointer. */
+   `x as i32 * 2` multiplies, `p as ui8*;` converts to a pointer. */
 static bool suffix_is_operator(const Parser *p) {
     size_t ahead = 1;
     while (kind_at(p, ahead) == TOK_STAR) ahead++;
@@ -2189,7 +2189,7 @@ static void ui_template(Parser *p, StmtVec *out, Expr *call) {
 }
 
 /* The items in view of a long list or a table: `for (i32 item in ui_frame.first_shown()..
-   ui_frame.last_shown()) { ui_frame.push_id(item as u64); the items; ui_frame.pop_id(); }`. */
+   ui_frame.last_shown()) { ui_frame.push_id(item as ui64); the items; ui_frame.pop_id(); }`. */
 static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, size_t start, size_t length) {
     if (!item || item->kind != EXPR_NAME) {
         Diagnostic *d = error_at(p, "E0215", item ? item->offset : start, item ? item->length : length,
@@ -2207,7 +2207,7 @@ static void ui_shown_loop(Parser *p, StmtVec *out, Expr *item, StmtVec *items, s
     use->as.name = item->as.name;
     Expr *key = ui_expr(p, EXPR_CAST, item->offset, item->length);
     key->as.cast.value = use;
-    key->as.cast.type = ui_type(p, item->offset, NULL, "u64");
+    key->as.cast.type = ui_type(p, item->offset, NULL, "ui64");
     StmtVec body = {0};
     SOSU_VEC_PUSH(&body, ui_frame_stmt(p, item->offset, item->length, "push_id", key));
     for (size_t i = 0; i < items->count; i++) SOSU_VEC_PUSH(&body, items->items[i]);
@@ -2845,7 +2845,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
     }
     if (check(p, TOK_KW_FOR)) {
         /* f.push_id(site), then the loop, each iteration in a scope: f.push_item() (its number) or
-           f.push_id(key as u64), its nodes, f.pop_id(); then f.pop_id() (spec §10.6) */
+           f.push_id(key as ui64), its nodes, f.pop_id(); then f.pop_id() (spec §10.6) */
         size_t start = advance(p)->offset;
         Stmt *stmt = new_stmt(p, STMT_FOR_IN, start);
         expect(p, TOK_LPAREN);
@@ -2868,7 +2868,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
         if (key) {
             Expr *cast = ui_expr(p, EXPR_CAST, key->offset, key->length);
             cast->as.cast.value = key;
-            cast->as.cast.type = ui_type(p, key->offset, NULL, "u64");
+            cast->as.cast.type = ui_type(p, key->offset, NULL, "ui64");
             SOSU_VEC_PUSH(&items, ui_frame_stmt(p, key->offset, key->length, "push_id", cast));
         } else {
             SOSU_VEC_PUSH(&items, ui_frame_stmt(p, start, length, "push_item", NULL));

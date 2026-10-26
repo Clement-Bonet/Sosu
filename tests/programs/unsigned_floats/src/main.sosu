@@ -1,0 +1,17 @@
+// An unsigned float never goes below zero (spec §4): in debug, a negative result stops the
+// program with the code 101, as an integer overflow; with `--release`, it is not checked.
+import std.io;
+
+uf32 left(uf32 width, uf32 used) {
+    return width - used;
+}
+
+i32 main() uses io {
+    uf64 area = 2.5 * 4.0;
+    uf32 half = abs(-3.0 as f32) as uf32 / 2.0;
+    io.print("area {} half {}", area, half);
+    io.print("left {}", left(10.0, 4.0));
+    uf32 below = left(4.0, 10.0);
+    io.print("below {}", below);
+    return 0;
+}

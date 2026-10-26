@@ -28,7 +28,7 @@ i32 main() uses io {
         err(e) => io.print("missing file: {}", describe(e)),
     }
 
-    u8[] bytes = arena.alloc_slice(u8, 2);
+    ui8[] bytes = arena.alloc_slice(ui8, 2);
     bytes[0] = 79;  // 'O'
     bytes[1] = 75;  // 'K'
     match (str.from_bytes(bytes)) {
@@ -41,7 +41,7 @@ i32 main() uses io {
         err(e) => io.print("from_bytes: invalid UTF-8"),
     }
 
-    u8* c = "abc".to_cstr(&arena);
+    ui8* c = "abc".to_cstr(&arena);
     unsafe {
         io.print("to_cstr: {} {} {} then {}", *c, *(c + 1), *(c + 2), *(c + 3));
     }

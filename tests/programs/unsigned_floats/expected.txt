@@ -1,0 +1,2 @@
+area 10.0 half 1.5
+left 6.0

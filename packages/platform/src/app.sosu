@@ -42,7 +42,7 @@ pub enum Event {
     Resized(i32 width, i32 height),
     // SDL key codes: 27 is Escape, 0x4000004F to 0x40000052 the arrows, `a` to `z` 97 to 122.
     // A key held down repeats its `down` event.
-    Key(u32 code, bool down, Mods mods),
+    Key(ui32 code, bool down, Mods mods),
     MouseMove(f32 x, f32 y),
     Click(f32 x, f32 y, Button button),  // a button pressed
     Release(f32 x, f32 y, Button button),  // a button released
@@ -80,7 +80,7 @@ pub enum TouchPhase {
 
 // The events that need the window: fingers (their place is from 0 to 1), the safe area and the scale.
 Event? device_event(sdl.Window* window, sdl.Event* event, i32 w, i32 h) uses io {
-    u32 kind = event.kind;
+    ui32 kind = event.kind;
     if (kind >= 0x700 && kind <= 0x703) {  // SDL_EVENT_FINGER_DOWN, _UP, _MOTION, _CANCELED
         TouchPhase phase = kind == 0x700 ? Down : kind == 0x701 ? Up : kind == 0x702 ? Move : Cancel;
         return some(Touch(sdl.finger_of(event), sdl.finger_x(event, w), sdl.finger_y(event, h), phase));
@@ -114,13 +114,13 @@ pub interface Handler {
     void on_frame(canvas.Canvas* surface) uses io;
 }
 
-Button button_of(u8 index) {
+Button button_of(ui8 index) {
     return index == 1 ? Left : index == 2 ? Middle : index == 3 ? Right : Other;
 }
 
 // The event the program receives, if it is one `platform` handles. Text goes to `frame`.
 Event? translate(sdl.Event* event, Arena* frame) uses io {
-    u32 kind = event.kind;
+    ui32 kind = event.kind;
     if (kind == 0x100) {  // SDL_EVENT_QUIT
         return some(Quit);
     }
@@ -138,7 +138,7 @@ Event? translate(sdl.Event* event, Arena* frame) uses io {
     }
     if (kind == 0x300 || kind == 0x301) {  // SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP
         sdl.Keyboard* key = sdl.as_keyboard(event);
-        u32 m = key.mods as u32;
+        ui32 m = key.mods as ui32;
         Mods mods = Mods{ shift: m & 0x3 != 0, ctrl: m & 0xC0 != 0, alt: m & 0x300 != 0, command: m & 0xC00 != 0 };
         return some(Key(key.key, kind == 0x300, mods));
     }
@@ -207,7 +207,7 @@ pub void minimize() uses io {
 }
 
 // Milliseconds of a clock that only goes forward: give them to `ui.clock` before each frame.
-pub u64 now_ms() uses io {
+pub ui64 now_ms() uses io {
     return sdl.ticks();
 }
 
@@ -234,7 +234,7 @@ struct HitTarget {
 
 // The hit test of a window whose title bar the program draws: a border resizes it (6 pixels,
 // none when it is maximized), the drag area of the program moves it, the rest is the program's.
-i32 hit_test(sdl.Window* window, sdl.Point* point, u8* data) uses io {
+i32 hit_test(sdl.Window* window, sdl.Point* point, ui8* data) uses io {
     mut TitleBar*? bar = none;
     unsafe {
         bar = (data as HitTarget*).bar;
@@ -339,7 +339,7 @@ struct ExposeTarget {
 // `run` until the mouse is released: SDL then asks for frames with SDL_EVENT_WINDOW_EXPOSED
 // (data1 is 1 during a live resize), drawn here at the new size, or the new part of the
 // window would stay black.
-bool on_expose(u8* data, sdl.Event* event) uses io {
+bool on_expose(ui8* data, sdl.Event* event) uses io {
     if (event.kind != 0x204 || event.word5 != 1) {
         return true;  // the event goes to the queue, as usual
     }
@@ -399,7 +399,7 @@ pub i32 run(Config config, Handler* handler) uses io {
             HitTarget* target = arena.alloc(HitTarget);
             target.bar = some(bar);
             unsafe {
-                custom = sdl.set_hit_test(window, hit_test, target as u8*);
+                custom = sdl.set_hit_test(window, hit_test, target as ui8*);
             }
             if (!custom) {
                 sdl.set_decorated(window, true);
@@ -428,7 +428,7 @@ pub i32 run(Config config, Handler* handler) uses io {
     expose.screen = some(screen);
     expose.window = some(window);
     unsafe {
-        sdl.add_event_watch(on_expose, expose as u8*);
+        sdl.add_event_watch(on_expose, expose as ui8*);
     }
     defer remove_watch(expose);
 
@@ -500,6 +500,6 @@ pub i32 run(Config config, Handler* handler) uses io {
 
 void remove_watch(ExposeTarget* expose) uses io {
     unsafe {
-        sdl.remove_event_watch(on_expose, expose as u8*);
+        sdl.remove_event_watch(on_expose, expose as ui8*);
     }
 }
