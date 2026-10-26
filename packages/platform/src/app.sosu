@@ -521,6 +521,18 @@ pub i32 run(Config config, Handler* handler) uses io {
             sdl.delay(100);
             continue;
         }
+        // a size SDL gave without SDL_EVENT_WINDOW_RESIZED (Android sets the whole screen after
+        // the window is created): the pixels follow it, or they would be stretched and the
+        // events would not fall where they are drawn
+        sdl.Point now = sdl.window_size(window);
+        if (now.x != screen.surface.width || now.y != screen.surface.height) {
+            if (!screen.resize(now.x, now.y)) {
+                return 1;
+            }
+            if (!handler.on_event(Resized(now.x, now.y))) {
+                break;
+            }
+        }
         screen.draw();
         sdl.delay(16);
     }
