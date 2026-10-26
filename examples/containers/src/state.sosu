@@ -1,6 +1,7 @@
 // The state of the example: the tab shown, a form, the options of the groups, and a tree of
 // folders and files. Its interface is in screen.ui.sosu.
 import render.image;
+import std.vec;
 import ui.widgets;
 
 pub enum Country {
@@ -34,8 +35,7 @@ pub class Demo {
     pub mut bool sounds;
     pub mut bool updates;
     // The tree: its entries, a folder after the files it holds, the item chosen, the file opened.
-    pub mut Entry[12] entries;
-    pub mut i32 count;
+    pub mut vec.Vec<Entry>* entries;  // as many as there are, in the arena of the example (spec §5.4)
     pub mut i32 item;
     pub mut i32 opened;
     // The inputs: a quantity, a price in cents, a due date, a volume, a memo, a dialog to confirm.
@@ -79,8 +79,7 @@ pub class Demo {
         big_item = -1;
         big_label = widgets.TextBuffer{ };
         flatten();
-        entries = [Entry{ }; 12];
-        count = 0;
+        entries = vec.new(arena);
         item = 0;
         opened = -1;
         quantity = 3;
@@ -127,23 +126,28 @@ pub class Demo {
     }
 
     i32 add(str name, i32 parent, bool folder) {
-        usize at = count as usize;
-        entries[at].name.set(name);
-        entries[at].parent = parent;
-        entries[at].folder = folder;
-        entries[at].open = parent < 0;
-        count += 1;
-        return at as i32;
+        mut Entry entry = Entry{ parent: parent, folder: folder, open: parent < 0 };
+        entry.name.set(name);
+        entries.push(entry);
+        return count() - 1;
+    }
+
+    pub i32 count() {
+        return entries.len() as i32;
+    }
+
+    pub Entry* entry(i32 i) {
+        return entries.at(i as usize);
     }
 
     // Whether the entry `i` is held by `parent` (-1: at the top), and is a folder or a file.
     pub bool in_folder(i32 i, i32 parent, bool folder) {
-        Entry e = entries[i as usize];
+        Entry* e = entry(i);
         return e.parent == parent && e.folder == folder;
     }
 
     pub str name(i32 i) {
-        return entries[i as usize].name.text();
+        return entry(i).name.text();
     }
 
     pub void open_file(i32 i) {
@@ -156,9 +160,10 @@ pub class Demo {
 
     // Opens or closes every folder.
     pub void open_all(bool open) {
-        for (usize i in 0..count as usize) {
-            if (entries[i].folder) {
-                entries[i].open = open;
+        for (usize i in 0..entries.len()) {
+            Entry* e = entries.at(i);
+            if (e.folder) {
+                e.open = open;
             }
         }
     }
