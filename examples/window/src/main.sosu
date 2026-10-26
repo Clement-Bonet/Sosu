@@ -11,12 +11,14 @@ class Demo : app.Handler {
     mut f32 y;
     mut f32 mouse_x;
     mut f32 mouse_y;
+    mut f32 top;  // below the bars of the system, on a phone
 
     void init() {
         x = 220.0;
         y = 140.0;
         mouse_x = 0.0;
         mouse_y = 0.0;
+        top = 0.0;
     }
 
     override bool on_event(app.Event e) uses io {
@@ -41,6 +43,9 @@ class Demo : app.Handler {
                 x = cx - 180.0;
                 y = cy - 110.0;
             },
+            SafeAreaChanged(left, area_top, right, bottom) => {
+                top = area_top;
+            },
             _ => { },
         }
         return true;
@@ -57,7 +62,7 @@ class Demo : app.Handler {
         canvas.Rect size = canvas.text_size(title, 4);
         canvas.Color dark = canvas.Color{ r: 30, g: 30, b: 46 };
         surface.text(x + (360.0 - size.w) / 2.0, y + (220.0 - size.h) / 2.0, title, dark, 4);
-        surface.text(16.0, 16.0, "Arrows: move\nClick: place\nEscape: quit", canvas.Color{ r: 205, g: 214, b: 244 }, 2);
+        surface.text(16.0, top + 16.0, "Arrows: move\nClick: place\nEscape: quit", canvas.Color{ r: 205, g: 214, b: 244 }, 2);
     }
 }
 
