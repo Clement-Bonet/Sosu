@@ -1,0 +1,36 @@
+// A module written by `sosuc bindgen` (spec §11.6), used as Sosu: src/clib.sosu comes from
+// c/clib.h, functions of the C library declared again there.
+import std.io;
+import bindgen.clib;
+
+// qsort calls it back, from C
+i32 compare(ui8* a, ui8* b) uses io {
+    unsafe {
+        return *(a as i32*) - *(b as i32*);
+    }
+}
+
+i32 main() uses io {
+    io.print("{} {} {} {}", clib.CLIB_VERSION, clib.CLIB_FLAGS, clib.CLIB_NAME, clib.CLIB_RATIO);
+    io.print("{} {} {} {}", clib.CLIB_BIG, clib.CLIB_NEGATIVE, clib.CLIB_SIZE, clib.CLIB_MODE_LAST);
+    mut ui8[clib.CLIB_VERSION] word = [104, 105, 0];
+    mut i32[5] values = [5, -3, 9, 0, 2];
+    mut usize length = 0;
+    mut i32 absolute = 0;
+    mut f64 floored = 0.0;
+    unsafe {
+        length = clib.strlen(&word as ui8*);
+        absolute = clib.abs(-42);
+        floored = clib.floor(2.75);
+        clib.qsort(&values as ui8*, 5, 4, compare);
+        clib.memset(&word as ui8*, 0, 2);
+    }
+    io.print("{} {} {} {}", length, absolute, floored, word[0]);
+    io.print("{} {} {} {} {}", values[0], values[1], values[2], values[3], values[4]);
+    clib.clib_point p = clib.clib_point{ x: 3, y: 4 };
+    unsafe {
+        clib.clib_sorter s = clib.clib_sorter{ compare: compare, data: &word as ui8*, size: 4, done: false };
+        io.print("{} {} {}", p.x * p.y, s.size, s.done);
+    }
+    return 0;
+}

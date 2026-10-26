@@ -466,6 +466,29 @@ static void test_generics(void) {
     expect_codes("export \"C\" T lib_id<T>(T x) { return x; }", "E0365");
 }
 
+/* Constants of a module (spec §11.6). */
+static void test_constants(void) {
+    expect_codes("pub ui32 A = 0x20 | B;\nui32 B = 1 << 4;\ni8 LOW = -128;\nstr S = \"x\";\nf32 F = 1.5;\nbool ON = !false;\n"
+                 "char C = 'a';\nusize N = 2 * KB;\nstruct P { ui8[N] bytes; }\nvoid f() { ui32 x = A + B; str s = S; }", "");
+    expect_codes("i32 A = B;\ni32 B = A;", "E0367");
+    expect_codes("ui8 A = 200 + 100;", "E0367");
+    expect_codes("i8 A = -129;", "E0332");
+    expect_codes("i32 A = 1 / 0;", "E0367");
+    expect_codes("i32 A = f();\ni32 f() { return 1; }", "E0367");
+    expect_help("i32 A = f();\ni32 f() { return 1; }", "E0367",
+                "use literals, operators, `as` and other constants; a value computed at run time is returned by a function");
+    expect_codes("i32[2] A = [1, 2];", "E0368");
+    expect_codes("i32 A = 1;\nvoid f() { A = 2; }", "E0335");
+    expect_codes("i32 A = 1;\nvoid f() { i32 x = A(); }", "E0338");
+    expect_codes("i32 A = 1;\nvoid f() { i32* p = &A; }", "E0335");
+    expect_codes("str A = \"a\";\nstruct P { ui8[A] bytes; }", "E0308");
+    expect_codes("i32 A = 0;\nstruct P { ui8[A] bytes; }", "E0308");
+    expect_codes("struct P { ui8[B] bytes; }", "E0308");
+    expect_codes("i32 A = 1;\nstruct A { }", "E0301");
+    expect_codes("i32 A = 1;\nvoid f(A x) { }", "E0304");
+    expect_codes("ui32 A = 1;\ni32 B = A;", "E0331");
+}
+
 static void test_packages(void) {
     expect_package("tests/packages/app", "");
     expect_package("tests/packages/geometry", "");
@@ -483,6 +506,7 @@ int main(void) {
     test_valid_bodies();
     test_body_errors();
     test_generics();
+    test_constants();
     test_packages();
     return test_summary("sema tests");
 }

@@ -1,0 +1,24 @@
+import std.io;
+import platform.app;
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    ui8[]? found = app.read_asset(&arena, "tests/programs/packaged/data/message.txt");
+    match (found) {
+        some(bytes) => {
+            match (str.from_bytes(bytes)) {
+                ok(text) => {
+                    io.print("{}", text);
+                },
+                err(e) => {
+                    io.print("not UTF-8");
+                },
+            }
+        },
+        none => {
+            io.print("not found");
+        },
+    }
+    return 0;
+}

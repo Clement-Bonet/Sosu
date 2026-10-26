@@ -9,8 +9,8 @@ libs = ["SDL3"]
 subsystem = "window"  # its programs open windows: no console behind them in release, on Windows
 
 [link.windows]
-paths = ["vendor/SDL3/lib/x64"]
-copy = ["vendor/SDL3/lib/x64/SDL3.dll"]
+paths = ["vendor/SDL3/lib/{arch}"]  # x64 or arm64 (spec §11.6)
+copy = ["vendor/SDL3/lib/{arch}/SDL3.dll"]
 
 # Android (spec §11.5): run fetch-sdl3-android.ps1 once; `{abi}` is the folder of the target
 [link.android]

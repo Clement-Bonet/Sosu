@@ -33,6 +33,12 @@ enum {
     LINK_MACOS,
     LINK_ANDROID,
     LINK_IOS,
+    LINK_WINDOWS_X64, /* a section of one architecture adds to that of its system (spec §11.6) */
+    LINK_WINDOWS_ARM64,
+    LINK_LINUX_X64,
+    LINK_LINUX_ARM64,
+    LINK_MACOS_X64,
+    LINK_MACOS_ARM64,
     LINK_SECTION_COUNT,
 };
 
