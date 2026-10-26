@@ -578,6 +578,7 @@ static char *temporary_dir(const char *name) {
 typedef struct {
     const char *header;
     StringList includes; /* -I, absolute */
+    StringList include_args; /* -I, as given: for the comment of the module */
     StringList defines;  /* -D */
     StringList prefixes;
     const char *output;
@@ -665,6 +666,7 @@ static int command_bindgen(int argc, char **argv) {
         }
         if (arg[1] == 'I' && arg[0] == '-') {
             SOSU_VEC_PUSH(&o.includes, absolute_path(value));
+            SOSU_VEC_PUSH(&o.include_args, sosu_strdup(value));
         } else if (arg[1] == 'D' && arg[0] == '-') {
             SOSU_VEC_PUSH(&o.defines, sosu_strdup(value));
         } else if (arg[1] == 'o' && arg[0] == '-') {
@@ -743,7 +745,7 @@ static int command_bindgen(int argc, char **argv) {
         fprintf(stderr, "sosuc: the C compiler cannot preprocess `%s`\n", o.header);
     } else if (source_load(&text, wrapper_i)) {
         char *command = sosu_format("sosuc bindgen %s", o.header);
-        for (size_t i = 0; i < o.includes.count; i++) append(&command, " -I %s", o.includes.items[i]);
+        for (size_t i = 0; i < o.include_args.count; i++) append(&command, " -I %s", o.include_args.items[i]);
         for (size_t i = 0; i < o.defines.count; i++) append(&command, " -D %s", o.defines.items[i]);
         for (size_t i = 0; i < o.prefixes.count; i++) append(&command, " --prefix %s", o.prefixes.items[i]);
         if (o.output) append(&command, " -o %s", o.output);
@@ -815,6 +817,8 @@ static int command_bindgen(int argc, char **argv) {
     free(header);
     for (size_t i = 0; i < o.includes.count; i++) free(o.includes.items[i]);
     free(o.includes.items);
+    for (size_t i = 0; i < o.include_args.count; i++) free(o.include_args.items[i]);
+    free(o.include_args.items);
     for (size_t i = 0; i < o.defines.count; i++) free(o.defines.items[i]);
     free(o.defines.items);
     for (size_t i = 0; i < o.prefixes.count; i++) free(o.prefixes.items[i]);
