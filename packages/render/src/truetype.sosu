@@ -3,8 +3,9 @@
 // The tables of the file are read where they are, through checked reads: a damaged font
 // gives empty or wrong glyphs, never a read outside of its bytes. A glyph is drawn into a
 // coverage map (0 to 255 per pixel, antialiased) the first time it is needed at a size, and
-// `Font` keeps the images it drew. Not handled yet: hinting (the instructions of the font
-// are ignored), kerning, and CFF outlines (.otf files).
+// `Font` keeps the images it drew. Kerning comes from the pair adjustments of GPOS, and a
+// character missing in a font is taken from its fallback. Not handled yet: hinting (the
+// instructions of the font are ignored) and CFF outlines (.otf files).
 import std.io;
 
 pub enum FontError {
