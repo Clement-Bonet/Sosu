@@ -1,0 +1,107 @@
+// std.vec: a list of values that grows, in the arena given at its creation (spec §5.4). When it
+// is full, its elements move to a place twice as large; the old place stays in the arena until
+// the arena is freed, as everything allocated there.
+
+pub class Vec<T> {
+    mut T[] data;
+    mut usize count;
+    Arena* arena;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        unsafe {
+            data = arena.alloc_slice(T, 0);  // given before it holds values: read up to `count` only
+        }
+        count = 0;
+    }
+
+    // Room for `wanted` elements.
+    void reserve(usize wanted) {
+        if (wanted <= data.len) {
+            return;
+        }
+        mut usize room = max(data.len * 2, 4);
+        while (room < wanted) {
+            room *= 2;
+        }
+        mut T[] grown = data;
+        unsafe {
+            grown = arena.alloc_slice(T, room);
+        }
+        for (usize i in 0..count) {
+            grown[i] = data[i];
+        }
+        data = grown;
+    }
+
+    pub void push(T value) {
+        reserve(count + 1);
+        data[count] = value;
+        count += 1;
+    }
+
+    // The last element, taken away; none if the list is empty.
+    pub T? pop() {
+        if (count == 0) {
+            return none;
+        }
+        count -= 1;
+        return some(data[count]);
+    }
+
+    // The element `i`, or none out of range.
+    pub T? get(usize i) {
+        if (i >= count) {
+            return none;
+        }
+        return some(data[i]);
+    }
+
+    // The place of the element `i`; out of range, the program stops.
+    pub T* at(usize i) {
+        return &items()[i];
+    }
+
+    pub void set(usize i, T value) {
+        items()[i] = value;
+    }
+
+    // Puts `value` before the element `i` (`i == len()`: at the end).
+    pub void insert(usize i, T value) {
+        assert(i <= count);
+        reserve(count + 1);
+        for (mut usize j = count; j > i; j -= 1) {
+            data[j] = data[j - 1];
+        }
+        data[i] = value;
+        count += 1;
+    }
+
+    // Takes the element `i` away, and gives it.
+    pub T remove(usize i) {
+        T value = items()[i];
+        for (usize j in i..count - 1) {
+            data[j] = data[j + 1];
+        }
+        count -= 1;
+        return value;
+    }
+
+    pub usize len() {
+        return count;
+    }
+
+    pub void clear() {
+        count = 0;
+    }
+
+    // A view of its elements, for `for (T x in v.items())`; valid until the next `push`.
+    pub T[] items() {
+        return data[0..count];
+    }
+}
+
+// An empty list, in `arena`.
+pub Vec<T>* new<T>(Arena* arena) {
+    return arena.new(Vec<T>, arena);
+}

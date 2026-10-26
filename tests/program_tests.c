@@ -30,6 +30,7 @@ static const Case cases[] = {
     { "run", "languages", "expected.txt", 0 },
     { "run", "places", "expected.txt", 0 },
     { "run", "generics", "expected.txt", 0 },
+    { "run", "collections", "expected.txt", 0 },
     { "run", "unsigned_floats", "expected.txt", 101 },
     { "run --release", "overflow", "expected_release.txt", 0 },
     { "run --release", "unsigned_floats", "expected_release.txt", 0 },

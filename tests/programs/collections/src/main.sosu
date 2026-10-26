@@ -1,0 +1,95 @@
+// std.vec and std.map (spec §5.4): numbers, texts and pointers, and 100 000 elements.
+import std.io;
+import std.map;
+import std.vec;
+
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+
+    vec.Vec<i32>* numbers = vec.new(&arena);
+    for (i32 i in 0..10) {
+        numbers.push(i * i);
+    }
+    numbers.insert(0, -1);
+    i32 removed = numbers.remove(3);
+    numbers.set(1, 100);
+    *numbers.at(2) += 1;
+    mut i32 total = 0;
+    for (i32 n in numbers.items()) {
+        total += n;
+    }
+    io.print("vec: {} {} {} {}", numbers.len(), removed, total, match (numbers.pop()) {
+        some(n) => n,
+        none => 0,
+    });
+    io.print("get: {} {}", match (numbers.get(1)) {
+        some(n) => n,
+        none => -1,
+    }, match (numbers.get(99)) {
+        some(n) => n,
+        none => -1,
+    });
+
+    vec.Vec<str>* names = vec.new<str>(&arena);
+    names.push("ada");
+    names.push("bob");
+    io.print("names: {} {}", names.len(), *names.at(1));
+
+    Point* origin = arena.new(Point);
+    vec.Vec<Point*>* points = vec.new(&arena);
+    points.push(origin);
+    Point* first = *points.at(0);
+    io.print("points: {} {}", points.len(), first.x);
+
+    map.HashMap<str, i32>* ages = map.new(&arena);
+    ages.put("ada", 36);
+    ages.put("bob", 41);
+    ages.put("ada", 37);
+    io.print("map: {} {} {} {}", ages.len(), ages.has("bob"), ages.has("eve"), match (ages.get("ada")) {
+        some(a) => a,
+        none => 0,
+    });
+    match (ages.at("bob")) {
+        some(age) => {
+            *age += 1;
+        },
+        none => { },
+    }
+    io.print("removed: {} {}", match (ages.remove("ada")) {
+        some(a) => a,
+        none => 0,
+    }, ages.len());
+    mut i32 sum = 0;
+    for (i32 a in ages.values(&arena)) {
+        sum += a;
+    }
+    io.print("values: {}", sum);
+
+    // 100 000 elements, in a list and in a map
+    mut Arena big = Arena.new(1 * MB);
+    defer big.free();
+    vec.Vec<i64>* many = vec.new(&big);
+    map.HashMap<i64, i64>* squares = map.new(&big);
+    for (i64 i in 0..100000) {
+        many.push(i);
+        squares.put(i, i * i);
+    }
+    for (i64 i in 0..50000) {
+        squares.remove(i * 2);
+    }
+    mut i64 found = 0;
+    for (i64 i in 0..100000) {
+        found += squares.has(i) ? 1 : 0;
+    }
+    io.print("big: {} {} {} {}", many.len(), squares.len(), found, match (squares.get(99999)) {
+        some(s) => s,
+        none => 0,
+    });
+    return 0;
+}

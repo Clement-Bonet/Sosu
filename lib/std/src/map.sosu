@@ -1,0 +1,162 @@
+// std.map: values found by their key, in the arena given at its creation (spec §5.4). Open
+// addressing with linear probing: a key is placed at its hash, or after it at the first free
+// slot. When three quarters of the slots are used, they move to twice as many.
+
+pub class HashMap<K: Hash, V> {
+    mut K[] slot_keys;
+    mut V[] slot_values;
+    mut bool[] used;
+    mut usize count;
+    Arena* arena;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        count = 0;
+        make_slots(8);
+    }
+
+    // `room` free slots (a power of two).
+    void make_slots(usize room) {
+        unsafe {
+            slot_keys = arena.alloc_slice(K, room);  // given before they hold values: read where `used` only
+            slot_values = arena.alloc_slice(V, room);
+        }
+        used = arena.alloc_slice(bool, room);
+    }
+
+    // The slot of `key`, or the free slot where it would go.
+    usize slot(K key) {
+        usize mask = used.len - 1;
+        mut usize i = (hash(key) & mask as ui64) as usize;
+        while (used[i] && slot_keys[i] != key) {
+            i = i + 1 & mask;
+        }
+        return i;
+    }
+
+    void grow() {
+        K[] keys = slot_keys;
+        V[] values = slot_values;
+        bool[] was = used;
+        make_slots(was.len * 2);
+        for (usize i in 0..was.len) {
+            if (was[i]) {
+                usize j = slot(keys[i]);
+                used[j] = true;
+                slot_keys[j] = keys[i];
+                slot_values[j] = values[i];
+            }
+        }
+    }
+
+    // Gives `key` the value `value`, in place of the one it had.
+    pub void put(K key, V value) {
+        if ((count + 1) * 4 > used.len * 3) {
+            grow();
+        }
+        usize i = slot(key);
+        if (!used[i]) {
+            used[i] = true;
+            slot_keys[i] = key;
+            count += 1;
+        }
+        slot_values[i] = value;
+    }
+
+    pub V? get(K key) {
+        usize i = slot(key);
+        if (!used[i]) {
+            return none;
+        }
+        return some(slot_values[i]);
+    }
+
+    // The place of the value of `key`, to change it there; none if it has none.
+    pub V*? at(K key) {
+        usize i = slot(key);
+        if (!used[i]) {
+            return none;
+        }
+        return some(&slot_values[i]);
+    }
+
+    pub bool has(K key) {
+        return used[slot(key)];
+    }
+
+    // Takes `key` away, and gives its value. The keys placed after it move back, so that
+    // each stays reachable from its hash.
+    pub V? remove(K key) {
+        mut usize i = slot(key);
+        if (!used[i]) {
+            return none;
+        }
+        V value = slot_values[i];
+        used[i] = false;
+        count -= 1;
+        usize mask = used.len - 1;
+        mut usize j = i + 1 & mask;
+        while (used[j]) {
+            usize home = (hash(slot_keys[j]) & mask as ui64) as usize;
+            // the key at `j` moves to the hole at `i` unless its home is between them
+            bool stays = i <= j ? home > i && home <= j : home > i || home <= j;
+            if (!stays) {
+                used[i] = true;
+                slot_keys[i] = slot_keys[j];
+                slot_values[i] = slot_values[j];
+                used[j] = false;
+                i = j;
+            }
+            j = j + 1 & mask;
+        }
+        return some(value);
+    }
+
+    pub usize len() {
+        return count;
+    }
+
+    pub void clear() {
+        for (usize i in 0..used.len) {
+            used[i] = false;
+        }
+        count = 0;
+    }
+
+    // Its keys, in no particular order: a copy in `into`.
+    pub K[] keys(Arena* into) {
+        mut K[] all = slot_keys;
+        unsafe {
+            all = into.alloc_slice(K, count);
+        }
+        mut usize n = 0;
+        for (usize i in 0..used.len) {
+            if (used[i]) {
+                all[n] = slot_keys[i];
+                n += 1;
+            }
+        }
+        return all;
+    }
+
+    // Its values, in the order of `keys`: a copy in `into`.
+    pub V[] values(Arena* into) {
+        mut V[] all = slot_values;
+        unsafe {
+            all = into.alloc_slice(V, count);
+        }
+        mut usize n = 0;
+        for (usize i in 0..used.len) {
+            if (used[i]) {
+                all[n] = slot_values[i];
+                n += 1;
+            }
+        }
+        return all;
+    }
+}
+
+// An empty map, in `arena`.
+pub HashMap<K, V>* new<K: Hash, V>(Arena* arena) {
+    return arena.new(HashMap<K, V>, arena);
+}
