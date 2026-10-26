@@ -2240,8 +2240,7 @@ pub struct Frame {
         depth -= 1;
         canvas.Rect r = place(done.right - done.left + 2.0 * done.padding, done.bottom - done.top + 2.0 * done.padding);
         if (done.painted != 0) {  // its size, for its background at the next frame; its border
-            usize slot = ui.state_slot(done.painted);  // a variable: see the bug noted in `menu`
-            WidgetState* s = &ui.states[slot];
+            WidgetState* s = &ui.states[ui.state_slot(done.painted)];
             s.content_w = r.w;
             s.content_h = r.h;
             if (done.look.border.a > 0 && done.look.border_width > 0.0) {
@@ -2956,8 +2955,7 @@ pub struct Frame {
         canvas.Rect r = place(w, h);
         item_painted = false;
         item_not_chosen = false;
-        usize slot = b.slot;  // a variable: see the bug noted in `menu`
-        WidgetState* s = &ui.states[slot];
+        WidgetState* s = &ui.states[b.slot];
         s.content_w = r.w;
         s.content_h = r.h;
     }
@@ -3331,8 +3329,7 @@ pub struct Frame {
         if (depth > 0) {
             depth -= 1;
         }
-        usize slot = dialog_slot;  // a variable: see the bug noted in `menu`
-        WidgetState* s = &ui.states[slot];
+        WidgetState* s = &ui.states[dialog_slot];
         s.content_h = done.bottom - done.top;
         in_dialog = false;
         dialog_open = true;
@@ -3900,9 +3897,7 @@ pub struct Frame {
         // in a menu: the entry that opens it
         canvas.Rect entry = add_entry(title, "", 2, true);
         Popup* parent = &menu_popups[menu_level - 1];
-        usize entry_index = min(parent.count, 24) - 1;  // a variable: `parent.submenus[min(...)] = id` would write
-        // into a copy of the array (a bug of the C generator of sosuc, when the index needs temporaries)
-        parent.submenus[entry_index] = id;
+        parent.submenus[min(parent.count, 24) - 1] = id;
         bool parent_open = menu_popups[menu_level - 1].open;
         if (parent_open && contains(entry, ui.mouse_x, ui.mouse_y) && (ui.moved || ui.pressed)) {
             if (ui.menus[menu_level] != id) {
@@ -4883,8 +4878,7 @@ pub struct Frame {
         f32 w = max(done.right - done.left, done.title_w + 20.0 - 2.0 * done.padding) + 2.0 * done.padding;
         f32 h = done.folded ? done.title_h : done.bottom - done.top + 2.0 * done.padding + done.title_h / 2.0;
         canvas.Rect r = place(w, h);
-        usize slot = ui.state_slot(done.painted);
-        WidgetState* s = &ui.states[slot];
+        WidgetState* s = &ui.states[ui.state_slot(done.painted)];
         s.content_w = r.w;
         s.content_h = r.h;
         Look l = done.look;
