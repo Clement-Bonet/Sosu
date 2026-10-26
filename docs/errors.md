@@ -45,6 +45,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0215 | invalid node or property in a `.ui.sosu` file | `Button("OK", on_tap: f)`, `TextField()` without `bind:`, `Text("a") { }`, a property after the nodes, a `TitleBar` that is not the first node of a window, an `Option` outside a `Dropdown`, a `MenuItem` outside a menu, `row:` outside a `Grid`, a cell given twice, a `Tab` outside `Tabs`, a `Leaf` outside a `Tree`, a `Dialog` inside another node or without `open:`, `List(count:)` without `item:`, a style property or state that does not exist, a theme that starts from no theme |
 | E0216 | not supported yet in a `.ui.sosu` file | not given any more: `style`, `theme`, `align:` and the grids it was given for are supported (spec §10.7, §10.8) |
 | E0217 | generic declaration not supported yet | a method with type parameters of its own, a generic interface, a generic class with a parent class, an interface or a `virtual` method, an effect parameter outside a function, a generic C function (spec §5.4) |
+| E0218 | invalid `export` | `export "Rust" ...`, `export "C"` before something that is not a function (spec §9.2) |
 
 ## Semantic analysis
 
@@ -102,6 +103,8 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0361 | wrong type arguments | `Pair p` for a `Pair<A, B>`, `Pair<i32>`, `Point<i32>` for a type that is not generic |
 | E0362 | a type argument does not fit its parameter | `largest(flags)` with `bool` for `<T: Ordered>`, `Vec<Arena>` (a resource), `greet(3)` for `<T: Named>` |
 | E0364 | unknown constraint | `<T: Sortable>`; the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash` and interfaces |
+| E0365 | invalid C name of an export | two exports named `lib_open`, `export "C" void int()`, a name starting with `sosu_`, a generic export (spec §9.2) |
+| E0366 | a type that cannot cross to C in an export | `i32?`, `T!E`, an enum with data, `Arena` by value, an interface, an array by value (spec §9.2) |
 
 ## Code generation
 

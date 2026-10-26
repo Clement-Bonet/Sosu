@@ -610,9 +610,9 @@ frameworks = ["Cocoa"]
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
 
-### 9.2 Using Sosu from other languages (planned)
+### 9.2 Using Sosu from other languages
 
-Status: design, not implemented yet. The grammar of §12 will gain `export` when it is.
+Status: available: `export "C"`, `sosuc build --lib` and `--lib=shared`, the header and the guard, tested by a C host (`tests/programs/library`). Mobile (§11.2) comes next, from the same output. What differs from the design is said at the end.
 
 A library written in Sosu is offered to other languages through the C ABI, which they all know how to call: C and C++ directly, C# with P/Invoke, Java with the FFM API (or JNI), Python with `ctypes` or `cffi`, Rust, Go, Swift. `sosuc` produces a C library and its header; each language uses its own tools on them. The compiler contains nothing specific to C#, Java or any other language.
 
@@ -639,30 +639,32 @@ Exported functions:
 - `export "C"` marks a function of the top level that the library offers. Its C name is its Sosu name, unchanged: the author chooses it, usually prefixed with the name of the library, since C has a single namespace. Two exports with the same name are an error; a C keyword or a name starting with `sosu_` is refused.
 - Methods are not exported: a function takes the object instead (`export "C" void doc_close(Doc* d)`).
 - Types allowed in the signature of an export, whose C form the header gives:
-  - integers, floats and `bool` (`int32_t`, `float`, `bool`...), `char` (`uint32_t`, a Unicode scalar value);
+  - integers, floats and `bool` (`int32_t`, `float`, `bool`...; `usize` is `uint64_t`), `char` (`uint32_t`, a Unicode scalar value);
   - `struct`s whose fields are all allowed (C layout, §9), and pointers to the allowed types;
-  - `str` (`sosu_str`: `const uint8_t *ptr; size_t len;`, UTF-8, not terminated by a NUL) and `T[]` (`ptr` and `len`);
+  - `str` (`sosu_str`: `const uint8_t *ptr; size_t len;`, UTF-8, not terminated by a NUL) and `T[]` (`sosu_slice_<T>`: `T *ptr; size_t len;`, e.g. `sosu_slice_int64_t`); both are defined under a guard, so that the headers of two libraries can be included together;
   - a pointer to a class, as an opaque pointer (`typedef struct geometry_Shape geometry_Shape;`): the host only passes it back to exported functions;
-  - function types made of allowed types, for callbacks into the host.
-- Not allowed in v0: `T?`, `T!E`, `enum`s (with or without data), `Arena` by value, interfaces. An export translates them (a `bool` result and an out pointer, an error code...).
+  - function types made of allowed types, for callbacks into the host. The header names them `<package>_fn1`, `<package>_fn2`...
+- `enum`s without data, as `typedef struct <package>_<Enum> { uint32_t tag; } <package>_<Enum>;` and the constants of their variants (`geometry_Mode_Add = 0`...), in the order of the declaration.
+- Not allowed in v0 (E0366): `T?`, `T!E`, `enum`s with data, `Arena` by value, interfaces, an array by value (a view `T[]` is passed instead; arrays stay allowed in the fields of a struct), generics and their instances. An export translates them (a `bool` result and an out pointer, an error code...).
 - Effects and contracts are kept: an export can have any `uses` clause (the host is outside the effect system, as C is), and its `requires` are checked on entry, like any call from the host.
 
 Building:
 
-- `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/<name>.a`, or `.lib` with MSVC); `--lib=shared` into a shared one (`.so`, `.dll` with its import library, `.dylib`). Both come with `build/<name>.h`.
+- `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/lib<name>.a`, or `build/<name>.lib` with MSVC), and the runtime into a library of its own (`build/libsosu_rt.a`, `build/sosu_rt.lib`) that the host links once, however many Sosu libraries it uses; `--lib=shared` into a shared one with the runtime inside (`lib<name>.so`, `lib<name>.dylib`, or `<name>.dll` with its import library `<name>.dll.lib`). Both come with `build/<name>.h`.
 - The header is plain C99 (`stdint.h`, `stdbool.h`, `stddef.h`), usable from C++ (`extern "C"` guards). It declares the exports, and the types they use under the name `<package>_<Type>`. The `#line` directives stay in the C code of the library: a debugger shows the `.sosu` files.
 - The runtime (`sosu_rt.c`) is compiled into the library. In a shared library, its symbols, and those of the generated code, are hidden: only the exports are visible.
-- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list next to it, since the host links them.
+- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list in `build/<name>.links` (`lib`, `path` and `framework` lines), since the host links them.
 - Mobile (§11.2) uses the same output: the Android activity loads a shared library, the Xcode project links a static one.
 
 Run-time errors:
 
 - In a program, a run-time error (overflow, index out of bounds, failed contract) stops it with the code 101. A library must not stop the process of its host: each export runs under a guard, as `sosuc test` already does for each test. After an error, the export returns a zero value, and `<package>_error()` gives the message, or NULL if the last call succeeded. The message is kept per thread.
-- After an error, what the failed call was building is left as it is, and its `defer`s did not run: the host should discard the objects that call used.
+- After an error, what the failed call was building is left as it is, and its `defer`s did not run: the host should discard the objects that call used. The message names the place in the `.sosu` file: `src/lib.sosu:55:14: requires failed: x % 2 == 0`.
+- The guard is `setjmp`; a run-time error jumps back to the export that was called, and from a callback of the host into another export, to the innermost one. A test of `sosuc test` runs under the same guard.
 
 Memory and threads:
 
-- What Sosu allocates lives in its arenas, and is freed by Sosu, never by the host. A library offers pairs of functions: `doc_open` creates an object that owns its arena, `doc_close` frees it. A `str` or a `T[]` returned to the host stays valid until the arena that holds it is freed.
+- What Sosu allocates lives in its arenas, and is freed by Sosu, never by the host. A library offers pairs of functions: `doc_open` creates an object that owns its arena, `doc_close` frees it. The object may lie in the arena it owns: `doc_open` creates the arena, the object in it (`arena.new(Doc, arena)`, its `init` taking the arena), and `doc_close` calls `d.arena.free()`. A `str` or a `T[]` returned to the host stays valid until the arena that holds it is freed.
 - Memory of the host passed to an export (a buffer, a `str`) is only read or written during the call: Sosu keeps no pointer to it afterwards (a rule that v0 does not check).
 - Sosu has no global variables: a library is reentrant, and two threads can call it at the same time on objects of their own (an arena belongs to one thread, §14.1).
 
@@ -676,6 +678,16 @@ Use from other languages (nothing to add to the compiler):
 | Java (older), Android | JNI, through a small C file | by hand |
 | Python | `ctypes` or `cffi` | `cffi` reads the header |
 | Rust, Go, Swift | `extern "C"`, cgo, a module map | `bindgen`, cgo, Swift's C importer |
+
+Decisions, and what differs from the design:
+
+- The C name of an export is its Sosu name, as written (E0365: two exports of the same name, a C keyword, `main`, a name starting with `sosu_`, a generic export).
+- Errors go through the guard and `<package>_error()`; the `defer`s of a failed call do not run in v0.
+- `enum`s without data cross to C (a struct holding the tag, and constants); options, results and enums with data do not.
+- A static library comes with the runtime as a library of its own, linked once by the host; a shared one holds it, hidden.
+- The message of the last error is kept per thread (`__declspec(thread)`, `__thread`, or C11 `_Thread_local`): the only part of the runtime outside C99.
+- `sosuc` generates no bindings for C#, Java or Python: the header and their own tools are enough.
+- `arena.free()` marks the arena freed before freeing its blocks, so that an object can own the arena it lies in.
 
 ## 10. User interface
 
@@ -1471,7 +1483,7 @@ parameters), not to types.
 program      = { import | decl } ;
 import       = "import" path ";" ;
 path         = IDENT { "." IDENT } ;
-decl         = [ "pub" ] ( struct | class | interface | enum | function ) | extern | test ;
+decl         = [ "pub" ] ( struct | class | interface | enum | function ) | extern | export | test ;
 
 struct       = "struct" IDENT "{" { member } "}" ;
 class        = "class" IDENT [ ":" path { "," path } ] "{" { member } "}" ;
@@ -1481,6 +1493,7 @@ interface    = "interface" IDENT "{" { signature } "}" ;
 enum         = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
 variant      = IDENT [ "(" [ type IDENT { "," type IDENT } ] ")" ] ;
 extern       = "extern" STRING "{" { signature } "}" ;
+export       = "export" STRING function ;          (* STRING: "C" (spec §9.2) *)
 test         = "test" STRING block ;
 
 function     = [ "unsafe" ] type IDENT "(" [ params ] ")" [ effects ] { contract } block ;
@@ -1591,13 +1604,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 
 Libraries for other languages (§9.2):
 
-- C names of the exports: the Sosu name as written, or prefixed with the package automatically (`geometry_dot` from `dot`)? (proposed: as written, the author chooses; a collision with another library is a link error, as in C)
-- Errors in an export: a guard and `<package>_error()`, or an error code in every exported signature? (proposed: the guard; an export that wants to report its own errors returns them, as a C function would)
-- The guard leaves the `defer`s of the failed call unrun. Run them (unwinding the frames) or accept it in v0? (proposed: accept it; the host discards what the call used)
-- `enum`s without data at the boundary, as `uint32_t` constants in the header? And `T?`, `T!E`? (proposed: enums without data yes, with their constants; options and results no, in v0)
-- Several Sosu libraries in the same process: shared libraries hide their runtime, but two static ones would define it twice. (proposed: a static library comes with a separate `sosu_rt` library, linked once by the host)
-- The message of the last error is kept per thread, which needs C11 (`_Thread_local`) or a compiler extension (`__declspec(thread)` with MSVC), while the generated C is C99. (proposed: use them where available; this is the only part of the runtime outside C99)
-- Bindings for C# or Java generated by `sosuc` (`sosuc bindgen --to=csharp`)? (proposed: no; the header and the existing tools (`jextract`, ClangSharp, `cffi`) are enough, and keep the compiler free of any other language)
+- Decided, see the end of §9.2: the C names as written, the guard and `<package>_error()`, the `defer`s of a failed call not run, enums without data as constants, the runtime as a static library of its own, the message per thread, no bindings generated.
 
 Widgets of `ui` (§10.4):
 

@@ -1,0 +1,9 @@
+dot 11.0, scale 3.0 6.0
+bytes 6
+combine 9 24
+apply 20
+at 3, error: none
+at 0, error: index out of bounds
+half 0, error: requires
+half 4, error: none
+counter 42

@@ -229,6 +229,7 @@ typedef enum {
 typedef struct {
     bool is_pub;
     bool is_unsafe;
+    bool is_export; /* `export "C"`: offered to other languages under its own name (spec §9.2) */
     MethodKind method_kind;
     TypeExpr *ret;
     Name name;

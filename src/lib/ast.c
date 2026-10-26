@@ -373,7 +373,8 @@ static void print_params(Printer *pr, const Param *params, size_t count) {
 static void print_fn(Printer *pr, const FnDecl *fn, int indent) {
     FILE *out = pr->out;
     fputs("(fn ", out);
-    if (fn->is_pub) fputs("pub ", out);
+    if (fn->is_export) fputs("export ", out);
+    else if (fn->is_pub) fputs("pub ", out);
     if (fn->is_unsafe) fputs("unsafe ", out);
     if (fn->method_kind == METHOD_VIRTUAL) fputs("virtual ", out);
     if (fn->method_kind == METHOD_OVERRIDE) fputs("override ", out);

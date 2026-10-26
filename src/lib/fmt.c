@@ -610,7 +610,8 @@ static void fmt_params(Fmt *f, const Param *params, size_t count) {
 
 static void fmt_function(Fmt *f, const FnDecl *fn) {
     start_line(f);
-    if (fn->is_pub) put(f, "pub ");
+    if (fn->is_export) put(f, "export \"C\" ");
+    else if (fn->is_pub) put(f, "pub ");
     if (fn->method_kind == METHOD_VIRTUAL) put(f, "virtual ");
     if (fn->method_kind == METHOD_OVERRIDE) put(f, "override ");
     if (fn->is_unsafe) put(f, "unsafe ");

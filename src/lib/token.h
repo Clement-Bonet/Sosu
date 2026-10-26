@@ -8,6 +8,7 @@
 #define SOSU_KEYWORDS(X)                                                          \
     X(KW_STRUCT, "struct") X(KW_CLASS, "class") X(KW_INTERFACE, "interface")       \
     X(KW_ENUM, "enum") X(KW_IMPORT, "import") X(KW_EXTERN, "extern")               \
+    X(KW_EXPORT, "export")                                                         \
     X(KW_PUB, "pub") X(KW_RETURN, "return") X(KW_IF, "if") X(KW_ELSE, "else")      \
     X(KW_WHILE, "while") X(KW_FOR, "for") X(KW_IN, "in") X(KW_BREAK, "break")      \
     X(KW_CONTINUE, "continue") X(KW_DEFER, "defer") X(KW_MUT, "mut")               \

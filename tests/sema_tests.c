@@ -452,6 +452,18 @@ static void test_generics(void) {
     snprintf(text, sizeof text, "%svoid g(i32[] xs) { each(xs, show); }", each);
     expect_codes(text, "E0340");
     expect_codes("void each<T, uses E>(T[] items, fn(T) -> void uses E f) { f(items[0]); }", "E0340");
+    /* exports (spec §9.2) */
+    expect_codes("struct V { f32 x; }\nenum M { A, B }\nclass C { }\n"
+                 "export \"C\" f32 lib_dot(V a, V b, M m, str s, i64[] xs, C* c, fn(i32) -> i32 f) { return a.x; }", "");
+    expect_codes("export \"C\" i32? lib_find() { return none; }", "E0366");
+    expect_codes("enum E { A(i32 x) }\nexport \"C\" void lib_take(E e) { }", "E0366");
+    expect_codes("export \"C\" void lib_take(Arena a) { }", "E0366");
+    expect_codes("export \"C\" void lib_take(i32[4] a) { }", "E0366");
+    expect_codes("export \"C\" void int() { }", "E0365");
+    expect_help("export \"C\" void sosu_open() { }", "E0365",
+                "a C keyword, `main` and the names starting with `sosu_` are taken; prefix it with the name of the library, "
+                "e.g. `test_sosu_open`");
+    expect_codes("export \"C\" T lib_id<T>(T x) { return x; }", "E0365");
 }
 
 static void test_packages(void) {

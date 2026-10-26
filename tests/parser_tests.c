@@ -126,6 +126,10 @@ static void test_generics(void) {
     expect_module("void f() {\n    Vec<Vec<i32>*>* v = make();\n    Map<str, Vec<i32>> m = make();\n}\n",
                   "(fn void f ()\n  (block\n    (var Vec<Vec<i32>*>* v (call make))\n    (var Map<str, Vec<i32>> m (call make))))\n");
     expect_module("class Vec<T> {\n    T[] items;\n}\n", "(class Vec<T>\n  (field T[] items))\n");
+    expect_module("export \"C\" f32 lib_dot(f32 a) {\n    return a;\n}\n",
+                  "(fn export f32 lib_dot ((f32 a))\n  (block\n    (return a)))\n");
+    expect_error("export \"Rust\" void f() { }", "E0218", 1, 8, 1);
+    expect_error("export \"C\" struct S { }", "E0218", 1, 12, 1);
 }
 
 static void test_postfix(void) {
