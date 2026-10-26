@@ -31,6 +31,8 @@ static void usage(FILE *out) {
           "  build   compile a package into build/<name> (through C)\n"
           "  run     compile and run a package\n"
           "  test    compile and run the test blocks of a package\n"
+          "  package build a phone application: --target android (an APK) or ios-sim / ios (an Xcode\n"
+          "          project, on a Mac) (spec 11.5)\n"
           "  fmt     format files or packages in place (--check: only report)\n"
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
           "  i18n extract [package] [-o messages.locale.default.sosu]\n"
@@ -158,9 +160,12 @@ typedef enum {
     MODE_TEST,
 } BuildMode;
 
+typedef struct Target Target; /* spec §11.5, below */
+
 typedef struct {
     bool release; /* optimized C, no overflow checks or contracts by default */
     int lib;      /* --lib: 1 a static library, 2 a shared one (spec §9.2); 0 a program */
+    const Target *target; /* --target: a phone, or this desktop */
     CodegenOptions checks;
 } BuildOptions;
 
@@ -169,6 +174,123 @@ static bool write_file(const char *path, const char *text) {
     if (!file) return false;
     bool ok = fputs(text, file) >= 0;
     return fclose(file) == 0 && ok;
+}
+
+/* ---- Targets (spec §11.5) ---- */
+
+typedef enum {
+    TARGET_HOST, /* the desktop system sosuc runs on */
+    TARGET_ANDROID,
+    TARGET_IOS,
+} TargetOs;
+
+struct Target {
+    TargetOs os;
+    const char *name;   /* as given to --target */
+    const char *abi;    /* Android: the folder of jniLibs; iOS: the slice of an .xcframework */
+    const char *triple; /* Android: the prefix of the clang of the NDK */
+    bool simulator;
+};
+
+static const Target host_target = { TARGET_HOST, "host", "", "", false };
+
+static const Target mobile_targets[] = {
+    { TARGET_ANDROID, "android-arm64", "arm64-v8a", "aarch64-linux-android", false },
+    { TARGET_ANDROID, "android-x64", "x86_64", "x86_64-linux-android", false },
+    { TARGET_ANDROID, "android", "", "", false }, /* sosuc package: every ABI */
+    { TARGET_IOS, "ios-arm64", "ios-arm64", "arm64-apple-ios", false },
+    { TARGET_IOS, "ios-sim", "ios-arm64_x86_64-simulator", "arm64-apple-ios-simulator", true },
+};
+
+/* The minimum version of Android: its API level, in the name of the clang of the NDK. */
+#define ANDROID_API 24
+
+#if defined(_WIN32)
+#define HOST_TARGET_PREFIX "windows-"
+#elif defined(__APPLE__)
+#define HOST_TARGET_PREFIX "macos-"
+#else
+#define HOST_TARGET_PREFIX "linux-"
+#endif
+
+/* The target named `name`, or NULL after reporting why there is none. */
+static const Target *find_target(const char *name) {
+    for (size_t i = 0; i < sizeof mobile_targets / sizeof *mobile_targets; i++) {
+        if (strcmp(mobile_targets[i].name, name) == 0) return &mobile_targets[i];
+    }
+    if (strncmp(name, HOST_TARGET_PREFIX, strlen(HOST_TARGET_PREFIX)) == 0) return &host_target;
+    fprintf(stderr,
+            "sosuc: unknown target `%s`: the targets are android-arm64, android-x64, ios-arm64, ios-sim, and the system "
+            "of this machine (%s...); cross-compiling to another desktop is not supported yet (spec 11.5)\n",
+            name, HOST_TARGET_PREFIX);
+    return NULL;
+}
+
+/* The folder of the Android NDK: ANDROID_NDK_HOME, ANDROID_NDK_ROOT, or the newest version in the
+   `ndk` folder of the SDK (ANDROID_HOME, ANDROID_SDK_ROOT, or where Android Studio puts it). */
+static char *find_ndk(void) {
+    const char *direct[] = { "ANDROID_NDK_HOME", "ANDROID_NDK_ROOT" };
+    for (size_t i = 0; i < 2; i++) {
+        const char *value = getenv(direct[i]);
+        if (value && value[0]) return sosu_strdup(value);
+    }
+    char *sdks[3] = { NULL, NULL, NULL };
+    const char *home = getenv("ANDROID_HOME");
+    const char *root = getenv("ANDROID_SDK_ROOT");
+    if (home && home[0]) sdks[0] = sosu_strdup(home);
+    if (root && root[0]) sdks[1] = sosu_strdup(root);
+#if defined(_WIN32)
+    const char *local = getenv("LOCALAPPDATA");
+    if (local) sdks[2] = sosu_format("%s/Android/Sdk", local);
+#elif defined(__APPLE__)
+    const char *user = getenv("HOME");
+    if (user) sdks[2] = sosu_format("%s/Library/Android/sdk", user);
+#else
+    const char *user = getenv("HOME");
+    if (user) sdks[2] = sosu_format("%s/Android/Sdk", user);
+#endif
+    char *found = NULL;
+    for (size_t i = 0; i < 3 && !found; i++) {
+        if (!sdks[i]) continue;
+        char *versions = path_join(sdks[i], "ndk");
+        char *native = shell_path(versions);
+        char *last = shell_last_entry(native);
+        if (last) found = path_join(versions, last);
+        free(last);
+        free(native);
+        free(versions);
+    }
+    for (size_t i = 0; i < 3; i++) free(sdks[i]);
+    return found;
+}
+
+/* The clang of the NDK for `target`, or NULL after reporting that there is no NDK. */
+static char *android_clang(const Target *target) {
+    char *ndk = find_ndk();
+    if (!ndk) {
+        fprintf(stderr, "sosuc: the Android NDK was not found: install it with the SDK Manager of Android Studio "
+                        "(SDK Tools, NDK), or set ANDROID_NDK_HOME\n");
+        return NULL;
+    }
+#if defined(_WIN32)
+    const char *host = "windows-x86_64";
+    const char *suffix = ".cmd";
+#elif defined(__APPLE__)
+    const char *host = "darwin-x86_64";
+    const char *suffix = "";
+#else
+    const char *host = "linux-x86_64";
+    const char *suffix = "";
+#endif
+    char *clang = sosu_format("%s/toolchains/llvm/prebuilt/%s/bin/%s%d-clang%s", ndk, host, target->triple, ANDROID_API,
+                              suffix);
+    free(ndk);
+    if (!shell_file_exists(clang)) {
+        fprintf(stderr, "sosuc: `%s` was not found: the NDK seems incomplete\n", clang);
+        free(clang);
+        return NULL;
+    }
+    return clang;
 }
 
 /* ---- Linking (the [link] sections of sosu.toml) ---- */
@@ -206,20 +328,35 @@ static char *package_path(const Package *package, const char *relative) {
     return result;
 }
 
-/* [link] and [link.<host>] of every package: a dependency's libraries reach the program. */
-static void collect_links(const Program *program, Links *links) {
+/* A path of a [link] section, `{abi}` replaced by the folder of the architecture of the target
+   (`arm64-v8a`...: `paths = ["vendor/SDL3-android/lib/{abi}"]`, spec §11.5). */
+static char *link_path(const Package *package, const char *relative, const Target *target) {
+    const char *at = strstr(relative, "{abi}");
+    if (!at) return package_path(package, relative);
+    char *replaced = sosu_format("%.*s%s%s", (int)(at - relative), relative, target->abi, at + 5);
+    char *result = package_path(package, replaced);
+    free(replaced);
+    return result;
+}
+
+/* [link] and [link.<target>] of every package (the host, or `android`, `ios`): a dependency's
+   libraries reach the program. */
+static void collect_links(const Program *program, Links *links, const Target *target) {
     memset(links, 0, sizeof *links);
-    int sections[] = { LINK_ALL, HOST_LINK };
+    int own = target->os == TARGET_ANDROID ? LINK_ANDROID : target->os == TARGET_IOS ? LINK_IOS : HOST_LINK;
+    int sections[] = { LINK_ALL, own };
     for (size_t i = 0; i < program->packages.count; i++) {
         const Package *package = program->packages.items[i];
         for (size_t s = 0; s < 2; s++) {
             const LinkSection *link = &package->manifest.link[sections[s]];
             for (size_t j = 0; j < link->libs.count; j++) add_unique(&links->libs, sosu_strdup(link->libs.items[j]));
-            for (size_t j = 0; j < link->paths.count; j++) add_unique(&links->paths, package_path(package, link->paths.items[j]));
+            for (size_t j = 0; j < link->paths.count; j++) {
+                add_unique(&links->paths, link_path(package, link->paths.items[j], target));
+            }
             for (size_t j = 0; j < link->frameworks.count; j++) {
                 add_unique(&links->frameworks, sosu_strdup(link->frameworks.items[j]));
             }
-            for (size_t j = 0; j < link->copy.count; j++) add_unique(&links->copy, package_path(package, link->copy.items[j]));
+            for (size_t j = 0; j < link->copy.count; j++) add_unique(&links->copy, link_path(package, link->copy.items[j], target));
             if (link->subsystem && strcmp(link->subsystem, "window") == 0) links->window = true;
         }
     }
@@ -571,7 +708,7 @@ static int command_build_library(const char *dir, const char *argv0, DiagFormat 
         bool shared = options->lib == 2;
         LibraryFiles files = library_files(build_dir, root->name, shared, msvc);
         Links links;
-        collect_links(&program, &links);
+        collect_links(&program, &links, options->target);
         if (!write_file(c_file, source) || !write_file(h_file, header)) {
             fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
             status = 2;
@@ -601,6 +738,610 @@ static int command_build_library(const char *dir, const char *argv0, DiagFormat 
     sema_free(&sema);
     program_free(&program);
     return status;
+}
+
+/* ---- Phones (spec §11.5) ---- */
+
+/* The folder of the build for a phone, in build/: `android/arm64-v8a`, `ios/simulator`... */
+static char *mobile_dir(const char *build_dir, const Target *target) {
+    if (target->os == TARGET_ANDROID) return sosu_format("%s/android/%s", build_dir, target->abi);
+    return sosu_format("%s/ios/%s", build_dir, target->simulator ? "simulator" : "device");
+}
+
+/* Compiles a program for a phone: `libmain.so` that the activity of SDL loads (Android), or
+   `libmain.a` that the Xcode project links (iOS); its entry is `SDL_main`. */
+static bool compile_mobile(const char *out_dir, const char *c_file, const char *lib, bool optimize, const Links *links,
+                           const Target *target, char **built) {
+    char *runtime = path_join(lib, "runtime");
+    char *runtime_c = path_join(runtime, "sosu_rt.c");
+    const char *level = optimize ? "-O2" : "-O0";
+    char *command = NULL;
+    if (target->os == TARGET_ANDROID) {
+        char *clang = android_clang(target);
+        if (clang) {
+            *built = sosu_format("%s/libmain.so", out_dir);
+            char *link_args = link_arguments(links, false);
+            char *inner = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC -shared -fvisibility=hidden -DSOSU_SDL_MAIN -I\"%s\" \"%s\" \"%s\" -o \"%s\"%s "
+                                      "-llog",
+                                      clang, level, runtime, c_file, runtime_c, *built, link_args);
+#ifdef _WIN32
+            command = sosu_format("\"%s\"", inner); /* cmd keeps the inner quotes when the whole is quoted */
+            free(inner);
+#else
+            command = inner;
+#endif
+            free(link_args);
+            free(clang);
+        }
+    } else {
+#ifdef __APPLE__
+        const char *sdk = target->simulator ? "iphonesimulator" : "iphoneos";
+        const char *minimum = target->simulator ? "-mios-simulator-version-min=13.0" : "-miphoneos-version-min=13.0";
+        *built = sosu_format("%s/libmain.a", out_dir);
+        command = sosu_format("xcrun --sdk %s clang -arch %s %s -std=c99 -g %s -w -DSOSU_SDL_MAIN -I\"%s\" -c \"%s\" -o \"%s/main.o\" && "
+                              "xcrun --sdk %s clang -arch %s %s -std=c99 -g %s -w -I\"%s\" -c \"%s\" -o \"%s/sosu_rt.o\" && "
+                              "rm -f \"%s\" && ar rcs \"%s\" \"%s/main.o\" \"%s/sosu_rt.o\"",
+                              sdk, "arm64", minimum, level, runtime, c_file, out_dir, sdk, "arm64", minimum, level,
+                              runtime, runtime_c, out_dir, *built, *built, out_dir, out_dir);
+#else
+        (void)level;
+        (void)links;
+        fprintf(stderr, "sosuc: building for iOS needs a Mac with Xcode (spec 11.5)\n");
+#endif
+    }
+    int status = command ? shell_run(command) : 1;
+    free(command);
+    free(runtime);
+    free(runtime_c);
+    return status == 0;
+}
+
+/* `sosuc build --target android-arm64|android-x64|ios-arm64|ios-sim`: the program, for a phone. */
+static int command_build_mobile(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *options) {
+    const Target *target = options->target;
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    bool ok = program_load(&program, dir, lib);
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, CODEGEN_PROGRAM, options->checks);
+        ok = source != NULL;
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+    int status = program.fatal ? 2 : 1;
+    if (ok) {
+        const Package *root = program.packages.items[0];
+        char *build_dir = path_join(root->root, "build");
+        char *out_dir = mobile_dir(build_dir, target);
+        shell_make_dir(out_dir);
+        char *file = sosu_format("%s.c", root->name);
+        char *c_file = path_join(out_dir, file);
+        char *built = NULL;
+        Links links;
+        collect_links(&program, &links, target);
+        if (!write_file(c_file, source)) {
+            fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
+            status = 2;
+        } else if (!compile_mobile(out_dir, c_file, lib, options->release, &links, target, &built)) {
+            if (built) fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
+            status = 2;
+        } else if (!copy_files(&links, out_dir)) {
+            status = 2;
+        } else {
+            printf("built %s\n", built);
+            status = 0;
+        }
+        free_links(&links);
+        free(built);
+        free(c_file);
+        free(file);
+        free(out_dir);
+        free(build_dir);
+    }
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
+}
+
+/* ---- sosuc package (spec §11.5) ---- */
+
+/* The Android SDK: ANDROID_HOME, ANDROID_SDK_ROOT, or where Android Studio puts it. */
+static char *find_android_sdk(void) {
+    const char *names[] = { "ANDROID_HOME", "ANDROID_SDK_ROOT" };
+    for (size_t i = 0; i < 2; i++) {
+        const char *value = getenv(names[i]);
+        if (value && value[0]) return sosu_strdup(value);
+    }
+#if defined(_WIN32)
+    const char *local = getenv("LOCALAPPDATA");
+    char *sdk = local ? sosu_format("%s/Android/Sdk", local) : NULL;
+#elif defined(__APPLE__)
+    const char *home = getenv("HOME");
+    char *sdk = home ? sosu_format("%s/Library/Android/sdk", home) : NULL;
+#else
+    const char *home = getenv("HOME");
+    char *sdk = home ? sosu_format("%s/Android/Sdk", home) : NULL;
+#endif
+    char *platforms = sdk ? path_join(sdk, "platforms") : NULL;
+    char *native = platforms ? shell_path(platforms) : NULL;
+    char *last = native ? shell_last_entry(native) : NULL;
+    if (!last) {
+        free(sdk);
+        sdk = NULL;
+    }
+    free(last);
+    free(native);
+    free(platforms);
+    return sdk;
+}
+
+/* The newest API level of the platforms of the SDK (`android-37.0` gives 37), or 0. */
+static int newest_android_api(const char *sdk) {
+    char *platforms = path_join(sdk, "platforms");
+    char *native = shell_path(platforms);
+    char *last = shell_last_entry(native);
+    int api = last && strncmp(last, "android-", 8) == 0 ? atoi(last + 8) : 0;
+    free(last);
+    free(native);
+    free(platforms);
+    return api;
+}
+
+/* `text` with every `from` replaced by `to`. New string. */
+static char *replace_all(const char *text, const char *from, const char *to) {
+    char *result = sosu_strdup("");
+    const char *at;
+    while ((at = strstr(text, from))) {
+        char *joined = sosu_format("%s%.*s%s", result, (int)(at - text), text, to);
+        free(result);
+        result = joined;
+        text = at + strlen(from);
+    }
+    char *joined = sosu_format("%s%s", result, text);
+    free(result);
+    return joined;
+}
+
+/* A path for a .properties file: `\` and `:` escaped. */
+static char *properties_path(const char *path) {
+    char *slashes = sosu_strdup(path);
+    for (char *c = slashes; *c; c++) {
+        if (*c == '\\') *c = '/';
+    }
+    char *colons = replace_all(slashes, ":", "\\:");
+    free(slashes);
+    return colons;
+}
+
+typedef struct {
+    const char *placeholder;
+    char *value;
+} Fill;
+
+/* Copies the template `name` of lib/templates/android into the project, its placeholders filled. */
+static bool write_template(const char *templates, const char *project, const char *name, const Fill *fills, size_t count) {
+    char *from = path_join(templates, name);
+    char *to = path_join(project, name);
+    char *dir = sosu_strdup(to);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = '\0';
+    shell_make_dir(dir);
+    free(dir);
+    bool ok;
+    SourceFile file;
+    if (has_suffix(name, ".jar")) {
+        ok = copy_file(from, to);
+    } else if ((ok = source_load(&file, from))) {
+        char *text = sosu_strdup(file.text);
+        for (size_t i = 0; i < count; i++) {
+            char *filled = replace_all(text, fills[i].placeholder, fills[i].value);
+            free(text);
+            text = filled;
+        }
+        ok = write_file(to, text);
+        free(text);
+        source_free(&file);
+    }
+    if (!ok) fprintf(stderr, "sosuc: cannot write `%s` from the template `%s`\n", to, from);
+    free(from);
+    free(to);
+    return ok;
+}
+
+/* Copies a file or a folder of the package (an asset) to `to`. */
+static bool copy_asset(const char *from, const char *to) {
+    char *native_from = shell_path(from);
+    char *native_to = shell_path(to);
+    char *command;
+#ifdef _WIN32
+    command = sosu_format("xcopy /E /I /Y /Q \"%s\" \"%s\" >nul", native_from, native_to);
+    SourceFile probe;
+    if (source_load(&probe, from)) { /* a file: xcopy asks whether the target is a file */
+        source_free(&probe);
+        free(command);
+        command = NULL;
+    }
+#else
+    command = sosu_format("cp -R \"%s\" \"%s\"", native_from, native_to);
+#endif
+    bool ok = command ? shell_run(command) == 0 : copy_file(from, to);
+    free(command);
+    free(native_from);
+    free(native_to);
+    return ok;
+}
+
+/* The JDK that runs Gradle: JAVA_HOME, or the one of Android Studio. */
+static char *find_jdk(void) {
+    const char *home = getenv("JAVA_HOME");
+    if (home && home[0]) return sosu_strdup(home);
+#if defined(_WIN32)
+    const char *studio = "C:/Program Files/Android/Android Studio/jbr";
+#elif defined(__APPLE__)
+    const char *studio = "/Applications/Android Studio.app/Contents/jbr/Contents/Home";
+#else
+    const char *studio = "/opt/android-studio/jbr";
+#endif
+    char *java = path_join(studio, "bin/java");
+#ifdef _WIN32
+    char *exe = sosu_format("%s.exe", java);
+    free(java);
+    java = exe;
+#endif
+    bool found = shell_file_exists(java);
+    free(java);
+    return found ? sosu_strdup(studio) : NULL;
+}
+
+static const char *const android_templates[] = {
+    "settings.gradle", "build.gradle", "gradle.properties", "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar",
+    "gradle/wrapper/gradle-wrapper.properties", "app/build.gradle", "app/src/main/AndroidManifest.xml",
+};
+
+/* `sosuc package --target android`: `libmain.so` for arm64-v8a and x86_64 in a Gradle project made
+   from lib/templates/android, then its APK (spec §11.5). */
+static int command_package_android(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *options) {
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    bool ok = program_load(&program, dir, lib);
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, CODEGEN_PROGRAM, options->checks);
+        ok = source != NULL;
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+    int status = program.fatal ? 2 : 1;
+    const Package *platform = NULL;
+    for (size_t i = 0; ok && i < program.packages.count; i++) {
+        if (strcmp(program.packages.items[i]->name, "platform") == 0) platform = program.packages.items[i];
+    }
+    if (ok && !platform) {
+        fprintf(stderr, "sosuc: an Android application opens its window with the package `platform` (SDL): this "
+                        "program does not use it\n");
+        ok = false;
+    }
+    char *sdk = ok ? find_android_sdk() : NULL;
+    if (ok && !sdk) {
+        fprintf(stderr, "sosuc: the Android SDK was not found: install Android Studio, or set ANDROID_HOME\n");
+        ok = false;
+    }
+    if (ok) {
+        status = 2;
+        const Package *root = program.packages.items[0];
+        const AppSection *app = &root->manifest.app;
+        char *build_dir = path_join(root->root, "build");
+        char *project = path_join(build_dir, "android/project");
+        char *file = sosu_format("%s.c", root->name);
+        bool built = true;
+        for (size_t t = 0; built && t < 2; t++) {
+            const Target *target = &mobile_targets[t];
+            char *out_dir = mobile_dir(build_dir, target);
+            shell_make_dir(out_dir);
+            char *c_file = path_join(out_dir, file);
+            char *library = NULL;
+            Links links;
+            collect_links(&program, &links, target);
+            built = write_file(c_file, source) && compile_mobile(out_dir, c_file, lib, options->release, &links, target, &library);
+            if (built) {
+                char *jni = sosu_format("%s/app/jniLibs/%s", project, target->abi);
+                shell_make_dir(jni);
+                char *to = path_join(jni, "libmain.so");
+                built = copy_file(library, to);
+                free(to);
+                /* libSDL3.so too: the archive of SDL gives its libraries for building (prefab), not for the APK */
+                built = built && copy_files(&links, jni);
+                free(jni);
+            } else {
+                fprintf(stderr, "sosuc: building for %s failed\n", target->name);
+            }
+            free_links(&links);
+            free(library);
+            free(c_file);
+            free(out_dir);
+        }
+
+        /* the project: the template, the archive of SDL, the assets of [app] */
+        char *templates = path_join(lib, "templates/android");
+        char *vendor = path_join(platform->root, "vendor/SDL3-android");
+        char *version_file = path_join(vendor, "VERSION.txt");
+        SourceFile version;
+        char *aar = NULL;
+        if (built && source_load(&version, version_file)) {
+            char *v = sosu_strdup(version.text);
+            for (char *c = v; *c; c++) {
+                if (*c == '\r' || *c == '\n') *c = '\0';
+            }
+            aar = sosu_format("SDL3-%s.aar", v);
+            free(v);
+            source_free(&version);
+        } else if (built) {
+            fprintf(stderr, "sosuc: SDL3 for Android is missing: run packages/platform/fetch-sdl3-android.ps1 once\n");
+            built = false;
+        }
+        int api = newest_android_api(sdk);
+        Fill fills[] = {
+            { "@ID@", app->id ? sosu_strdup(app->id) : sosu_format("org.sosu.%s", root->name) },
+            { "@NAME@", sosu_strdup(app->name ? app->name : root->name) },
+            { "@VERSION@", sosu_strdup(app->version ? app->version : root->manifest.version ? root->manifest.version : "1.0") },
+            { "@COMPILE_SDK@", sosu_format("%d", api > ANDROID_API ? api : 35) },
+            { "@MIN_SDK@", sosu_format("%d", ANDROID_API) },
+            { "@SDL_AAR@", sosu_strdup(aar ? aar : "") },
+        };
+        size_t fill_count = sizeof fills / sizeof *fills;
+        for (size_t i = 0; built && i < sizeof android_templates / sizeof *android_templates; i++) {
+            built = write_template(templates, project, android_templates[i], fills, fill_count);
+        }
+        if (built) {
+            char *libs = path_join(project, "app/libs");
+            shell_make_dir(libs);
+            char *from = path_join(vendor, aar);
+            char *to = path_join(libs, aar);
+            built = copy_file(from, to);
+            free(to);
+            free(from);
+            free(libs);
+            char *sdk_path = properties_path(sdk);
+            char *properties = sosu_format("# where the Android SDK is (written by sosuc)\nsdk.dir=%s\n", sdk_path);
+            char *local = path_join(project, "local.properties");
+            built = built && write_file(local, properties);
+            free(local);
+            free(properties);
+            free(sdk_path);
+        }
+        if (built && app->assets.count) {
+            char *assets = path_join(project, "app/assets");
+            shell_make_dir(assets);
+            for (size_t i = 0; built && i < app->assets.count; i++) {
+                /* stored under the path the program reads on the desktop: relative to the current folder */
+                char *from = package_path(root, app->assets.items[i]);
+                if (strncmp(from, "../", 3) == 0 || from[0] == '/' || (from[0] && from[1] == ':')) {
+                    fprintf(stderr, "sosuc: the asset `%s` is outside the current folder: run sosuc from a folder that "
+                                    "holds it, as the program does on the desktop\n", from);
+                    free(from);
+                    built = false;
+                    break;
+                }
+                char *to = path_join(assets, from);
+                char *parent = sosu_strdup(to);
+                char *slash = strrchr(parent, '/');
+                if (slash) *slash = '\0';
+                shell_make_dir(parent);
+                built = copy_asset(from, to);
+                if (!built) fprintf(stderr, "sosuc: cannot copy the asset `%s`\n", from);
+                free(parent);
+                free(to);
+                free(from);
+            }
+            free(assets);
+        }
+
+        /* the APK, by Gradle */
+        if (built) {
+            char *jdk = find_jdk();
+            char *native_project = shell_path(project);
+            char *command;
+#ifdef _WIN32
+            char *native_jdk = jdk ? shell_path(jdk) : NULL;
+            char *java = jdk ? sosu_format("set \"JAVA_HOME=%s\" && ", native_jdk) : sosu_strdup("");
+            command = sosu_format("%s\"%s\\gradlew.bat\" --quiet -p \"%s\" assembleDebug", java, native_project, native_project);
+            free(java);
+            free(native_jdk);
+#else
+            command = jdk ? sosu_format("cd \"%s\" && chmod +x gradlew && JAVA_HOME=\"%s\" ./gradlew --quiet assembleDebug", native_project, jdk)
+                          : sosu_format("cd \"%s\" && chmod +x gradlew && ./gradlew --quiet assembleDebug", native_project);
+#endif
+            if (shell_run(command) == 0) {
+                printf("built %s/app/build/outputs/apk/debug/app-debug.apk\n", project);
+                status = 0;
+            } else {
+                fprintf(stderr, "sosuc: Gradle failed on `%s`\n", project);
+            }
+            free(command);
+            free(native_project);
+            free(jdk);
+        }
+        for (size_t i = 0; i < fill_count; i++) free(fills[i].value);
+        free(aar);
+        free(version_file);
+        free(vendor);
+        free(templates);
+        free(file);
+        free(project);
+        free(build_dir);
+    }
+    free(sdk);
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
+}
+
+/* `sosuc package --target ios-sim`: the application for the simulator, `build/ios/<Name>.app`,
+   linked by clang with SDL3.framework, its Info.plist made from [app], signed for the simulator
+   (spec §11.5). A device needs the signing team of the developer: `--target ios-arm64` gives
+   `libmain.a` for their Xcode project. */
+static int command_package_ios(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *options) {
+#ifndef __APPLE__
+    (void)dir;
+    (void)argv0;
+    (void)format;
+    (void)options;
+    fprintf(stderr, "sosuc: building for iOS needs a Mac with Xcode (spec 11.5)\n");
+    return 2;
+#else
+    const Target *target = options->target;
+    if (!target->simulator) {
+        fprintf(stderr, "sosuc: `sosuc package` builds for the simulator (--target ios-sim); for a device, build "
+                        "libmain.a with `sosuc build --target ios-arm64` and link it in an Xcode project with your "
+                        "signing team\n");
+        return 2;
+    }
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    bool ok = program_load(&program, dir, lib);
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, CODEGEN_PROGRAM, options->checks);
+        ok = source != NULL;
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+    int status = program.fatal ? 2 : 1;
+    if (ok) {
+        status = 2;
+        const Package *root = program.packages.items[0];
+        const AppSection *app = &root->manifest.app;
+        char *build_dir = path_join(root->root, "build");
+        char *out_dir = mobile_dir(build_dir, target);
+        shell_make_dir(out_dir);
+        char *file = sosu_format("%s.c", root->name);
+        char *c_file = path_join(out_dir, file);
+        char *library = NULL;
+        Links links;
+        collect_links(&program, &links, target);
+        bool built = write_file(c_file, source) && compile_mobile(out_dir, c_file, lib, options->release, &links, target, &library);
+
+        const char *name = app->name ? app->name : root->name;
+        char *id = app->id ? sosu_strdup(app->id) : sosu_format("org.sosu.%s", root->name);
+        const char *version = app->version ? app->version : root->manifest.version ? root->manifest.version : "1.0";
+        char *bundle = sosu_format("%s/ios/%s.app", build_dir, root->name);
+        if (built) {
+            shell_remove_dir(bundle);
+            char *frameworks = path_join(bundle, "Frameworks");
+            shell_make_dir(frameworks);
+            /* the libraries of [link.ios]: a framework where a path holds one, else a library */
+            char *link_args = sosu_strdup("");
+            for (size_t i = 0; i < links.paths.count; i++) append(&link_args, " -F\"%s\"", links.paths.items[i]);
+            for (size_t i = 0; i < links.paths.count; i++) append(&link_args, " -L\"%s\"", links.paths.items[i]);
+            for (size_t i = 0; i < links.libs.count; i++) {
+                const char *lib_name = links.libs.items[i];
+                bool framework = false;
+                for (size_t j = 0; j < links.paths.count && !framework; j++) {
+                    char *candidate = sosu_format("%s/%s.framework", links.paths.items[j], lib_name);
+                    char *probe = sosu_format("%s/Info.plist", candidate);
+                    framework = shell_file_exists(probe);
+                    if (framework) {
+                        char *copy = sosu_format("cp -R \"%s\" \"%s/\"", candidate, frameworks);
+                        built = built && shell_run(copy) == 0;
+                        free(copy);
+                    }
+                    free(probe);
+                    free(candidate);
+                }
+                append(&link_args, framework ? " -framework %s" : " -l%s", lib_name);
+            }
+            for (size_t i = 0; i < links.frameworks.count; i++) append(&link_args, " -framework %s", links.frameworks.items[i]);
+            char *command = sosu_format("xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=13.0 "
+                                        "-Wl,-force_load,\"%s\"%s -Wl,-rpath,@executable_path/Frameworks -o \"%s/%s\"",
+                                        library, link_args, bundle, root->name);
+            built = built && shell_run(command) == 0;
+            free(command);
+            free(link_args);
+            free(frameworks);
+        }
+        if (built) {
+            char *plist = sosu_format(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                "<plist version=\"1.0\">\n<dict>\n"
+                "    <key>CFBundleIdentifier</key><string>%s</string>\n"
+                "    <key>CFBundleName</key><string>%s</string>\n"
+                "    <key>CFBundleDisplayName</key><string>%s</string>\n"
+                "    <key>CFBundleExecutable</key><string>%s</string>\n"
+                "    <key>CFBundleVersion</key><string>%s</string>\n"
+                "    <key>CFBundleShortVersionString</key><string>%s</string>\n"
+                "    <key>CFBundlePackageType</key><string>APPL</string>\n"
+                "    <key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array>\n"
+                "    <key>MinimumOSVersion</key><string>13.0</string>\n"
+                "    <key>LSRequiresIPhoneOS</key><true/>\n"
+                "    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>\n"
+                "    <key>UILaunchScreen</key><dict/>\n"
+                "    <key>UIRequiresFullScreen</key><true/>\n"
+                "</dict>\n</plist>\n",
+                id, name, name, root->name, version, version);
+            char *plist_file = path_join(bundle, "Info.plist");
+            built = write_file(plist_file, plist);
+            free(plist_file);
+            free(plist);
+        }
+        /* the assets of [app], under the path the program reads (SDL looks in the bundle) */
+        for (size_t i = 0; built && i < app->assets.count; i++) {
+            char *from = package_path(root, app->assets.items[i]);
+            if (strncmp(from, "../", 3) == 0 || from[0] == '/') {
+                fprintf(stderr, "sosuc: the asset `%s` is outside the current folder\n", from);
+                built = false;
+            } else {
+                char *to = path_join(bundle, from);
+                char *parent = path_dirname(to);
+                shell_make_dir(parent);
+                char *copy = sosu_format("cp -R \"%s\" \"%s\"", from, to);
+                built = shell_run(copy) == 0;
+                free(copy);
+                free(parent);
+                free(to);
+            }
+            free(from);
+        }
+        if (built) {
+            char *sign = sosu_format("codesign --force --sign - --timestamp=none \"%s\" >/dev/null 2>&1 || "
+                                     "codesign --force --sign - \"%s\"",
+                                     bundle, bundle);
+            built = shell_run(sign) == 0;
+            free(sign);
+        }
+        if (built) {
+            printf("built %s\n", bundle);
+            printf("on a booted simulator: xcrun simctl install booted %s && xcrun simctl launch booted %s\n", bundle, id);
+            status = 0;
+        } else {
+            fprintf(stderr, "sosuc: building `%s` failed\n", bundle);
+        }
+        free(bundle);
+        free(id);
+        free_links(&links);
+        free(library);
+        free(c_file);
+        free(file);
+        free(out_dir);
+        free(build_dir);
+    }
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
+#endif
 }
 
 static int command_build(const char *dir, const char *argv0, DiagFormat format, BuildMode mode, const BuildOptions *options) {
@@ -633,7 +1374,7 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
 #endif
         char *exe = path_join(build_dir, exe_name);
         Links links;
-        collect_links(&program, &links);
+        collect_links(&program, &links, options->target);
         if (!write_file(c_file, source)) {
             fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
             status = 2;
@@ -849,7 +1590,7 @@ int main(int argc, char **argv) {
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
-    BuildOptions options = { false, 0, { true, true, true } };
+    BuildOptions options = { false, 0, &host_target, { true, true, true } };
     int checks = -1;    /* --checks: -1 when not given */
     int contracts = -1; /* --contracts */
     bool is_fmt = strcmp(command, "fmt") == 0;
@@ -867,6 +1608,10 @@ int main(int argc, char **argv) {
             format = FORMAT_JSON;
         } else if (strcmp(argv[i], "--release") == 0) {
             options.release = true;
+        } else if (strcmp(argv[i], "--target") == 0 || strncmp(argv[i], "--target=", 9) == 0) {
+            const char *name = argv[i][8] == '=' ? argv[i] + 9 : i + 1 < argc ? argv[++i] : "";
+            options.target = find_target(name);
+            if (!options.target) return 2;
         } else if (strcmp(argv[i], "--lib") == 0 || strcmp(argv[i], "--lib=static") == 0) {
             options.lib = 1;
         } else if (strcmp(argv[i], "--lib=shared") == 0) {
@@ -902,6 +1647,24 @@ int main(int argc, char **argv) {
             return 2;
         }
         return command[0] == 'l' ? command_lex(path, format) : command_parse(path, format);
+    }
+    if (strcmp(command, "package") == 0) {
+        if (options.target->os == TARGET_ANDROID) return command_package_android(path ? path : ".", argv[0], format, &options);
+        if (options.target->os == TARGET_IOS) return command_package_ios(path ? path : ".", argv[0], format, &options);
+        fprintf(stderr, "sosuc: `sosuc package` takes `--target android` or `--target ios-sim` (spec 11.5)\n");
+        return 2;
+    }
+    if (options.target->os != TARGET_HOST) {
+        if (strcmp(command, "build") != 0 || options.lib) {
+            fprintf(stderr, "sosuc: `--target %s` goes with `sosuc build` (a program for a phone, spec 11.5)\n",
+                    options.target->name);
+            return 2;
+        }
+        if (!options.target->abi[0]) {
+            fprintf(stderr, "sosuc: `sosuc build` takes one architecture: --target android-arm64 or android-x64\n");
+            return 2;
+        }
+        return command_build_mobile(path ? path : ".", argv[0], format, &options);
     }
     if (options.lib && strcmp(command, "build") != 0) {
         fprintf(stderr, "sosuc: `--lib` goes with `sosuc build`\n");

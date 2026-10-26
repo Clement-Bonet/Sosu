@@ -350,3 +350,43 @@ void sosu_print_char(uint32_t c) {
     }
     fwrite(bytes, 1, (size_t)n, stdout);
 }
+
+/* ---- Android (spec §11.5) ----
+   An application has no console: what the program prints (io.print, the run-time errors) goes
+   to the log of the system, read with `adb logcat -s sosu`. A thread reads standard output and
+   standard error through a pipe, line by line. */
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <pthread.h>
+#include <unistd.h>
+
+static int log_pipe[2];
+
+static void *log_lines(void *unused) {
+    (void)unused;
+    char line[1024];
+    size_t used = 0;
+    char c;
+    while (read(log_pipe[0], &c, 1) == 1) {
+        if (c != '\n' && used + 1 < sizeof line) {
+            line[used++] = c;
+            continue;
+        }
+        line[used] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, "sosu", line);
+        used = 0;
+    }
+    return NULL;
+}
+
+__attribute__((constructor)) static void log_output(void) {
+    if (pipe(log_pipe) != 0) return;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    dup2(log_pipe[1], STDOUT_FILENO);
+    dup2(log_pipe[1], STDERR_FILENO);
+    pthread_t reader;
+    if (pthread_create(&reader, NULL, log_lines, NULL) == 0) pthread_detach(reader);
+}
+#endif

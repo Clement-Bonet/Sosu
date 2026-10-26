@@ -133,6 +133,19 @@ static void test_manifest(void) {
           "subsystem");
     parsed_manifest_free(&parsed);
 
+    /* [app]: what a phone shows of the program (spec §11.5) */
+    parse_manifest(&parsed, "[package]\nname = \"a\"\nversion = \"1\"\n"
+                            "[app]\nid = \"org.sosu.a\"\nname = \"A\"\nassets = [\"assets\", \"fonts/x.ttf\"]\n"
+                            "[link.android]\npaths = [\"vendor/{abi}\"]\n");
+    check_codes("app section", &parsed.diags, "");
+    CHECK(parsed.manifest.app.id && strcmp(parsed.manifest.app.id, "org.sosu.a") == 0 && parsed.manifest.app.name &&
+          strcmp(parsed.manifest.app.name, "A") == 0 && !parsed.manifest.app.version && parsed.manifest.app.assets.count == 2,
+          "app section");
+    CHECK(parsed.manifest.link[LINK_ANDROID].paths.count == 1, "android section");
+    parsed_manifest_free(&parsed);
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nlabel = \"A\"\n", "E0402");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nid = \"x\"\nid = \"y\"\n", "E0408");
+
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link.beos]\nlibs = [\"x\"]\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibraries = [\"x\"]\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nsubsystem = \"gui\"\n", "E0402");

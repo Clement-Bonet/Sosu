@@ -54,6 +54,15 @@ typedef struct {
                               Windows); "console"; NULL when not given */
 } LinkSection;
 
+/* [app]: what a phone shows of the program, for Android and iOS (spec §11.5). NULL when not given. */
+typedef struct {
+    char *id;      /* `org.sosu.window`: by default `org.sosu.<package>` */
+    char *name;    /* shown under the icon: by default the name of the package */
+    char *version; /* by default the version of the package */
+    char *icon;    /* a PNG of the package */
+    StringList assets; /* files and folders of the package given with the application */
+} AppSection;
+
 typedef struct {
     char *name; /* key in [dependencies]: the name used by `import` */
     char *path; /* the fields below are NULL when absent */
@@ -75,6 +84,7 @@ typedef struct {
         size_t cap;
     } deps;
     LinkSection link[LINK_SECTION_COUNT];
+    AppSection app;
 } Manifest;
 
 /* Parses a manifest. Problems are reported to `diags`; returns true if there were none. */
