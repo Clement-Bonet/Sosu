@@ -85,3 +85,31 @@ jobs:
         run: |
           export LIBRARY_PATH="$(brew --prefix)/lib"
           ./build/sosuc run tests/window
+      # iOS (spec 11.5): the application of examples/window for the simulator, linked with the
+      # SDL3.xcframework of the disk image of SDL. Running it in the simulator is done by hand.
+      - name: iOS simulator application (examples/window)
+        timeout-minutes: 10
+        run: |
+          sh packages/platform/fetch-sdl3-apple.sh
+          ./build/sosuc package --target ios-sim examples/window
+          test -x examples/window/build/ios/window.app/window
+
+  # Android (spec 11.5): the NDK and the SDK of the image build examples/window up to its APK.
+  # Running it on an emulator is done by hand.
+  android:
+    name: Android (NDK)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build sosuc
+        run: make build/sosuc
+      - name: Download SDL3 for Android
+        timeout-minutes: 5
+        run: sh packages/platform/fetch-sdl3-android.sh
+      - name: APK of examples/window
+        timeout-minutes: 20
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          export JAVA_HOME="${JAVA_HOME_21_X64:-$JAVA_HOME}"
+          ./build/sosuc package --target android examples/window
+          test -f examples/window/build/android/project/app/build/outputs/apk/debug/app-debug.apk

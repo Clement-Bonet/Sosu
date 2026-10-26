@@ -17,5 +17,9 @@ copy = ["vendor/SDL3/lib/x64/SDL3.dll"]
 paths = ["vendor/SDL3-android/lib/{abi}"]
 copy = ["vendor/SDL3-android/lib/{abi}/libSDL3.so"]
 
+# iOS (spec §11.5): run fetch-sdl3-apple.sh once, on a Mac; `{abi}` is the slice of the framework
+[link.ios]
+paths = ["vendor/SDL3-apple/SDL3.xcframework/{abi}"]
+
 [dependencies]
 render = { path = "../render" }

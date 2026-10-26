@@ -2283,6 +2283,12 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
                    "#ifdef SOSU_SDL_MAIN\n"
                    "__attribute__((visibility(\"default\"))) int SDL_main(int argc, char *argv[]) {\n"
                    "    (void)argc;\n    (void)argv;\n%s}\n"
+                   "#ifdef __APPLE__\n"
+                   "/* iOS: SDL runs the application, then calls SDL_main */\n"
+                   "typedef int (*sosu_sdl_main)(int argc, char *argv[]);\n"
+                   "extern int SDL_RunApp(int argc, char *argv[], sosu_sdl_main main_function, void *reserved);\n"
+                   "int main(int argc, char *argv[]) {\n    return SDL_RunApp(argc, argv, SDL_main, NULL);\n}\n"
+                   "#endif\n"
                    "#else\n"
                    "int main(void) {\n%s}\n"
                    "#endif\n",
