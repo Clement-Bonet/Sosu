@@ -232,6 +232,114 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as ui8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
 - **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only.
 
+### 5.4 Generics (step 10)
+
+Status: design, not implemented yet. One branch, in batches: generic functions and structs, their checking and their monomorphization; generic enums and classes; the constraints; the containers `Vec` and `HashMap` of `std`; effects as parameters; then the tooling (formatter, language server, diagnostics).
+
+```sosu
+import std.io;
+import std.vec;
+
+// a generic function: its type parameters after the name, inferred at the call
+T largest<T: Ordered>(T[] items) requires items.len > 0 {
+    mut T best = items[0];
+    for (T x in items) {
+        if (x > best) {
+            best = x;
+        }
+    }
+    return best;
+}
+
+// a generic struct, and an enum
+pub struct Pair<A, B> {
+    pub A first;
+    pub B second;
+}
+
+pub enum Tree<T> {
+    Leaf(T),
+    Node(Tree<T>*, Tree<T>*),
+}
+
+i32 main() uses io {
+    i32 top = largest([3, 9, 4]);                    // T = i32, from the argument
+    Pair<str, i32> entry = Pair{ first: "x", second: 1 };  // the arguments, from the expected type
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    vec.Vec<str>* names = vec.new(&arena);           // T = str, from the expected type
+    names.push("Ada");
+    io.print("{} {} {}", top, entry.first, names.len());
+    return 0;
+}
+```
+
+#### Declarations and syntax
+
+- Type parameters follow the name of a function, a `struct`, an `enum` or a `class`: `<T>`, `<K, V>`, each with its constraints after a colon (`<T: Ordered>`, `<K: Hash + Equal, V>`). A generic type is written with its arguments: `Pair<str, i32>`, `Vec<Tree<i32>*>*`.
+- `<` after a name is a list of types, never a comparison, wherever the list is followed by `{`, `(`, `.` or a name: `Pair<i32, str>{ ... }`, `largest<i32>(xs)`, `Vec<i32> v`. The two readings cannot both be valid, since comparisons do not chain (§5.1): `a < b > c` is already an error. The parsing note of §5 becomes: a statement is a declaration when it starts with a type followed by a name, the type being read with its arguments.
+- The arguments of a generic function are inferred from its arguments, then from the type expected for its result (`vec.Vec<str>* names = vec.new(&arena)`); when neither says, they are written: `vec.new<str>(&arena)`. A generic type is always written with its arguments, except in a literal whose expected type is known.
+- The methods of a generic type use its parameters (`void push(T value)`); a method has no parameters of its own in this step.
+
+#### What a type parameter can be
+
+- A type argument is a value type: a number, `bool`, `char`, `str`, a pointer (to a class too: `Vec<Node*>`), a struct, an enum, an option, a result, an array or a view. A class is not a value: `Vec<Node>` is an error that proposes `Vec<Node*>`.
+- In this step, an argument cannot own a resource (an `Arena`, §6): every `T` is copied by value, as a plain struct, so that generic code needs no moves. `Vec<Arena>` is an error.
+
+#### Constraints and checking
+
+- A generic body is checked once, against its constraints, not for each use: an operation on a `T` is allowed only if its constraints allow it, and an error is reported in the generic code, where it is, never inside an instance. A use is checked against the constraints only.
+- Without constraint, a `T` is assigned, passed, returned, stored and pointed to (`T*`), nothing else.
+- Built-in constraints, satisfied by the types listed:
+  - `Equal`: `==` and `!=` (numbers, `bool`, `char`, `str`, pointers, enums without data);
+  - `Ordered`: `Equal`, and `<`, `<=`, `>`, `>=` (numbers, `char`, `str`);
+  - `Number`: `Ordered`, and `+`, `-`, `*`, `/`, `min`, `max`, `abs`, and the literals `0` and `1` converted with `as T` (the integers and the floats);
+  - `Integer`: `Number`, and `%`, the bitwise operators and the shifts (the integers);
+  - `Hash`: `Equal`, and `hash(x) -> ui64`, a built-in function (numbers, `bool`, `char`, `str`, pointers, enums without data).
+- An interface as a constraint: `<T: Drawable>` takes a pointer to a class that implements it (`T` is `Button*`), and `t.draw(r)` is a direct call in each instance, not a virtual one.
+- Several constraints are joined by `+`.
+
+#### What it becomes
+
+- Monomorphization: each set of arguments used gives its own C code (`Pair<str, i32>` becomes `Pair__str__i32`, `largest<i32>` becomes `largest__i32`), once per program even if several modules use it. No boxing, no table of functions: a generic is as fast as the code written by hand.
+- A generic declared in a package and used in another is generated in the program that uses it.
+- The diagnostics name the types as they are written: `Pair<str, i32>`.
+
+#### Generic enums and classes
+
+- `enum Tree<T> { Leaf(T), Node(Tree<T>*, Tree<T>*) }`: the variants use the parameters; a variant is written with or without the name of the enum, as today (`Leaf(3)`, `Tree<i32>.Leaf(3)`).
+- `class Vec<T>`: a generic class is created by `arena.new(Vec<i32>, args)` and handled through a pointer, as any class. In this step, a generic class has no parent class and no `virtual` method, and an interface is not generic.
+
+#### Containers: `std.vec` and `std.map`
+
+- `vec.Vec<T>`, a class: its elements in the arena given at its creation, which it grows into (twice as many each time; the old elements stay in the arena until it is freed, as everything allocated there). `vec.new(arena)`; `push(x)`, `pop() -> T?`, `get(i) -> T?`, `at(i) -> T*` (stops out of range), `set(i, x)`, `insert(i, x)`, `remove(i) -> T`, `len()`, `clear()`, `items() -> T[]` (a view of its elements, for `for (T x in v.items())`, valid until the next push).
+- `map.HashMap<K: Hash, V>`, a class: open addressing in the arena given at its creation. `map.new(arena)`; `put(k, v)`, `get(k) -> V?`, `at(k) -> V*?`, `has(k)`, `remove(k) -> V?`, `len()`, `clear()`, and the iteration by `keys() -> K[]` and `values() -> V[]` (copies in the arena).
+- `NumberField` stays bound to an `i64` (§10.9): the decision of §10.9 does not change.
+
+#### Effects as parameters
+
+- A function can take an effect as a parameter, written `uses E` in the list (`<T, uses E>`), and give it to a function type and to its own `uses`: `void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E`. Called with a function that uses `io`, `each` uses `io` there; with a function without effects, `each` has none. This closes the limitation of §7.4.
+
+#### Tooling
+
+- `sosuc fmt` prints the parameters and the arguments without spaces inside the brackets, a space after each comma: `Pair<str, i32>`, `<K: Hash + Equal, V>`.
+- The language server shows a generic with its constraints, and the type of an instance with its arguments, on hover.
+
+#### Tests
+
+- The parser: the parameters and their constraints, the arguments in types and in expressions (`f<i32>(x)`, `Pair<A, B>{ ... }`), and that `a < b` stays a comparison.
+- Sema: a body checked against its constraints (`x > y` without `Ordered` is an error in the generic code), the inference of arguments from the arguments and from the expected type, an argument that does not satisfy a constraint, a class or a resource as an argument, an effect given as a parameter.
+- `tests/programs`: instances of functions, structs, enums and classes with several arguments, generics of another package; `Vec` and `HashMap` of numbers, of texts, of pointers, and of 100 000 elements.
+- `examples`: one example rewritten with `Vec` where it keeps fixed arrays today.
+
+Open questions:
+
+- The syntax: `<T>` (as C++, C#, Java, Rust), or `[T]` (as Go, Scala)? (proposed: `<T>`: `[T]` would mix with arrays `T[N]` and indexing, and `<` cannot be misread since comparisons do not chain)
+- The checking: once against constraints (as C#, Rust), or for each instance (as the templates of C++)? (proposed: once: the errors are short and in the generic code, and the constraints document what a `T` is)
+- A resource as an argument (`Vec<Arena>`, a struct holding a `LongText`): later, with moves inside generic code? (proposed: later; the containers of this step hold plain values and pointers)
+- `Vec` and `HashMap`: classes that grow in an arena given to them, or values that own their arena (as `LongText`)? (proposed: classes in a given arena: no hidden allocation, they can be held by pointer anywhere, and nested (`Vec<Vec<i32>*>`) without moves)
+- Methods with their own parameters (`map<U>(...)`) and generic interfaces (`Iterator<T>`): in this step? (proposed: later, after lambdas)
+
 ## 6. Memory
 
 - No GC, no reference counting.
@@ -1431,7 +1539,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 7. Tooling: `sosuc fmt`, `sosuc test`, `sosuc run`, JSON diagnostics, contracts
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
 9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code
-10. Generics (monomorphized), `Vec` / `HashMap` containers
+10. Generics (monomorphized), `Vec` / `HashMap` containers (designed: §5.4)
 11. `sosuc bindgen`, `sosuc package`, cross-compilation
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
 13. Research: `comptime`, effect polymorphism, regions, concurrency
