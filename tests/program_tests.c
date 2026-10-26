@@ -32,6 +32,8 @@ static const Case cases[] = {
     { "run", "generics", "expected.txt", 0 },
     { "run", "collections", "expected.txt", 0 },
     { "run", "unsigned_floats", "expected.txt", 101 },
+    { "run", "constants", "expected.txt", 0 },
+    { "run", "bindgen", "expected.txt", 0 },
     { "run --release", "overflow", "expected_release.txt", 0 },
     { "run --release", "unsigned_floats", "expected_release.txt", 0 },
     { "test", "testing", "expected.txt", 1 },
@@ -103,6 +105,72 @@ static void test_library(const char *sosuc) {
     }
 }
 
+/* The text of a file after its first `lines` lines. */
+static const char *after_lines(const char *text, int lines) {
+    while (text && lines-- > 0) {
+        text = strchr(text, '\n');
+        if (text) text++;
+    }
+    return text ? text : "";
+}
+
+/* `sosuc bindgen` (spec §11.6): the module of tests/programs/bindgen, written again from its header
+   and checked against it by the C compiler, is the one committed (but its first lines, which name
+   the system and the command); `long` is warned about. */
+static void test_bindgen(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command,
+             "%s bindgen tests/programs/bindgen/c/clib.h -o build/clib.sosu --check > build/bindgen.out 2> build/bindgen.err",
+             sosuc);
+    CHECK(run(command) == 0, "bindgen of clib.h failed (see build/bindgen.err)");
+    char *actual = read_text("build/clib.sosu");
+    char *expected = read_text("tests/programs/bindgen/src/clib.sosu");
+    CHECK(actual && expected && strcmp(after_lines(actual, 2), after_lines(expected, 2)) == 0,
+          "bindgen of clib.h: build/clib.sosu differs from tests/programs/bindgen/src/clib.sosu");
+    free(actual);
+    free(expected);
+    snprintf(command, sizeof command, "%s bindgen tests/programs/bindgen/c/long.h -o build/long.sosu > build/bindgen.out 2> build/bindgen.err",
+             sosuc);
+    CHECK(run(command) == 0, "bindgen of long.h failed");
+    char *warnings = read_text("build/bindgen.err");
+    CHECK(warnings && strstr(warnings, "`clib_long` uses `long`"), "bindgen of long.h: no warning about `long`");
+    free(warnings);
+}
+
+/* `sosuc package` (spec §11.6): the program of tests/programs/packaged in build/package/, with its
+   archive; run from another folder, it reads its asset next to itself. */
+static void test_package(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command, "%s package tests/programs/packaged > build/package.out 2> build/package.err", sosuc);
+    CHECK(run(command) == 0, "sosuc package failed (see build/package.err)");
+    const char *dir = "tests/programs/packaged/build/package";
+#if defined(_WIN32)
+    const char *archive = "packaged-windows-x64.zip";
+    const char *program = "..\\tests\\programs\\packaged\\build\\package\\packaged\\packaged.exe";
+#elif defined(__APPLE__)
+#ifdef __aarch64__
+    const char *archive = "packaged-macos-arm64.zip";
+#else
+    const char *archive = "packaged-macos-x64.zip";
+#endif
+    const char *program = "../tests/programs/packaged/build/package/Packaged.app/Contents/MacOS/packaged";
+#else
+    const char *archive = "packaged-linux-x64.tar.gz";
+    const char *program = "../tests/programs/packaged/build/package/packaged/packaged";
+#endif
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", dir, archive);
+    FILE *file = fopen(path, "rb");
+    CHECK(file != NULL, "sosuc package: no archive %s", path);
+    if (file) fclose(file);
+    snprintf(command, sizeof command, "cd build && %s > packaged.out", program);
+    CHECK(run(command) == 0, "the packaged program failed");
+    char *actual = read_text("build/packaged.out");
+    CHECK(actual && strstr(actual, "Read next to the program."), "the packaged program did not find its asset: %s",
+          actual ? actual : "(nothing)");
+    free(actual);
+}
+
 /* A program for Android (spec §11.5): `libmain.so` for the emulator, an ELF library for x86_64.
    Skipped when this machine has no NDK, or no SDL3 for Android. */
 static void test_android(const char *sosuc) {
@@ -155,6 +223,8 @@ int main(int argc, char **argv) {
     }
 
     test_library(argv[1]);
+    test_bindgen(argv[1]);
+    test_package(argv[1]);
     test_android(argv[1]);
 
     /* `copy` of the [link] section of tests/programs/linking */

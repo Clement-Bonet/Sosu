@@ -2,6 +2,7 @@
 // program back through its `Handler`: on each event, then on each frame, to draw on a
 // `render.canvas.Canvas` the size of the window.
 import platform.sdl;
+import platform.sdl_c;
 import render.canvas;
 import render.image;
 
@@ -79,7 +80,7 @@ pub enum TouchPhase {
 }
 
 // The events that need the window: fingers (their place is from 0 to 1), the safe area and the scale.
-Event? device_event(sdl.Window* window, sdl.Event* event, i32 w, i32 h) uses io {
+Event? device_event(sdl_c.SDL_Window* window, sdl.Event* event, i32 w, i32 h) uses io {
     ui32 kind = event.kind;
     if (kind >= 0x700 && kind <= 0x703) {  // SDL_EVENT_FINGER_DOWN, _UP, _MOTION, _CANCELED
         TouchPhase phase = kind == 0x700 ? Down : kind == 0x701 ? Up : kind == 0x702 ? Move : Cancel;
@@ -170,11 +171,16 @@ Event? translate(sdl.Event* event, Arena* frame) uses io {
 
 // The text of the clipboard, copied into `arena`, or "".
 // A file given with the application, copied into `arena` (spec §11.5): in the APK on Android, in
-// the bundle on iOS, relative to the current folder on the desktop; none if it is not there. The
-// files of `assets` in the [app] section of sosu.toml keep there the path that the program uses
-// on the desktop.
+// the bundle on iOS, relative to the current folder on the desktop, else next to the program (a
+// program of `sosuc package`, run from anywhere, spec §11.6); none if it is not there. The files of
+// `assets` in the [app] section of sosu.toml keep there the path that the program uses on the
+// desktop.
 pub ui8[]? read_asset(Arena* arena, str path) uses io {
-    return sdl.load_file(arena, path);
+    ui8[]? found = sdl.load_file(arena, path);
+    return match (found) {
+        some(bytes) => some(bytes),
+        none => sdl.load_file(arena, sdl.base_path(arena, path)),
+    };
 }
 
 // The folder where the application `name` keeps its data, ending with a separator: the internal
@@ -249,7 +255,7 @@ struct HitTarget {
 
 // The hit test of a window whose title bar the program draws: a border resizes it (6 pixels,
 // none when it is maximized), the drag area of the program moves it, the rest is the program's.
-i32 hit_test(sdl.Window* window, sdl.Point* point, ui8* data) uses io {
+i32 hit_test(sdl_c.SDL_Window* window, sdl_c.SDL_Point* point, ui8* data) uses io {
     mut TitleBar*? bar = none;
     unsafe {
         bar = (data as HitTarget*).bar;
@@ -257,7 +263,7 @@ i32 hit_test(sdl.Window* window, sdl.Point* point, ui8* data) uses io {
     i32 x = point.x;
     i32 y = point.y;
     if (!sdl.is_maximized(window)) {
-        sdl.Point size = sdl.window_size(window);
+        sdl_c.SDL_Point size = sdl.window_size(window);
         i32 edge = 6;
         bool left = x < edge;
         bool right = x >= size.x - edge;
@@ -287,12 +293,12 @@ i32 hit_test(sdl.Window* window, sdl.Point* point, ui8* data) uses io {
 // loop of `run` draws with it, and so does `on_expose` while the system holds that loop.
 class Screen {
     Handler* handler;
-    sdl.Renderer* renderer;
+    sdl_c.SDL_Renderer* renderer;
     mut Arena pixels;
     mut canvas.Canvas surface;
-    mut sdl.Texture*? texture;
+    mut sdl_c.SDL_Texture*? texture;
 
-    void init(Handler* handler, sdl.Renderer* renderer) {
+    void init(Handler* handler, sdl_c.SDL_Renderer* renderer) {
         self.handler = handler;
         self.renderer = renderer;
         pixels = Arena.new(1 * KB);
@@ -347,19 +353,20 @@ class Screen {
 // What `on_expose` needs: given to SDL as its data.
 struct ExposeTarget {
     mut Screen*? screen;
-    mut sdl.Window*? window;
+    mut sdl_c.SDL_Window*? window;
 }
 
 // Called by SDL as each event arrives. While a window is resized, Windows holds the loop of
 // `run` until the mouse is released: SDL then asks for frames with SDL_EVENT_WINDOW_EXPOSED
 // (data1 is 1 during a live resize), drawn here at the new size, or the new part of the
 // window would stay black.
-bool on_expose(ui8* data, sdl.Event* event) uses io {
+bool on_expose(ui8* data, sdl_c.SDL_Event* raw) uses io {
+    sdl.Event* event = sdl.as_event(raw);
     if (event.kind != 0x204 || event.word5 != 1) {
         return true;  // the event goes to the queue, as usual
     }
     mut Screen*? screen = none;
-    mut sdl.Window*? window = none;
+    mut sdl_c.SDL_Window*? window = none;
     unsafe {
         screen = (data as ExposeTarget*).screen;
         window = (data as ExposeTarget*).window;
@@ -368,7 +375,7 @@ bool on_expose(ui8* data, sdl.Event* event) uses io {
         some(s) => {
             match (window) {
                 some(w) => {
-                    sdl.Point size = sdl.window_size(w);
+                    sdl_c.SDL_Point size = sdl.window_size(w);
                     if (s.resize(size.x, size.y)) {
                         s.draw();
                     }
@@ -394,7 +401,7 @@ pub i32 run(Config config, Handler* handler) uses io {
     }
     defer sdl.quit();
 
-    sdl.Window* window = match (sdl.create_window(&arena, config.title, config.width, config.height, !wants_bar)) {
+    sdl_c.SDL_Window* window = match (sdl.create_window(&arena, config.title, config.width, config.height, !wants_bar)) {
         some(created) => created,
         none => {
             return 1;
@@ -423,7 +430,7 @@ pub i32 run(Config config, Handler* handler) uses io {
         none => { },
     }
     sdl.start_text_input(window);
-    sdl.Renderer* renderer = match (sdl.create_renderer(window)) {
+    sdl_c.SDL_Renderer* renderer = match (sdl.create_renderer(window)) {
         some(created) => created,
         none => {
             return 1;
@@ -436,7 +443,7 @@ pub i32 run(Config config, Handler* handler) uses io {
     defer screen.pixels.free();
     defer screen.release();
     // the size the system gave: on a phone, the whole screen, whatever the program asked (spec §11.5)
-    sdl.Point given = sdl.window_size(window);
+    sdl_c.SDL_Point given = sdl.window_size(window);
     if (!screen.resize(given.x, given.y)) {
         return 1;
     }
@@ -524,7 +531,7 @@ pub i32 run(Config config, Handler* handler) uses io {
         // a size SDL gave without SDL_EVENT_WINDOW_RESIZED (Android sets the whole screen after
         // the window is created): the pixels follow it, or they would be stretched and the
         // events would not fall where they are drawn
-        sdl.Point now = sdl.window_size(window);
+        sdl_c.SDL_Point now = sdl.window_size(window);
         if (now.x != screen.surface.width || now.y != screen.surface.height) {
             if (!screen.resize(now.x, now.y)) {
                 return 1;

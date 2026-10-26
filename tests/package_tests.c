@@ -122,8 +122,10 @@ static void test_manifest(void) {
     parse_manifest(&parsed, "[package]\nname = \"a\"\nversion = \"1\"\n"
                             "[link]\nlibs = [\"SDL3\", \"m\",]\nsubsystem = \"window\"\n"
                             "[link.windows]\npaths = [\"vendor/lib\"]\ncopy = [ \"vendor/SDL3.dll\" ]  # next to the exe\n"
-                            "[link.macos]\nframeworks = []\n");
+                            "[link.macos]\nframeworks = []\n"
+                            "[link.linux-arm64]\npaths = [\"vendor/lib/{arch}\"]\n");
     check_codes("link sections", &parsed.diags, "");
+    CHECK(parsed.manifest.link[LINK_LINUX_ARM64].paths.count == 1, "a section of one architecture (spec §11.6)");
     CHECK(parsed.manifest.link[LINK_ALL].libs.count == 2 &&
           strcmp(parsed.manifest.link[LINK_ALL].libs.items[1], "m") == 0, "libs");
     CHECK(parsed.manifest.link[LINK_WINDOWS].paths.count == 1 && parsed.manifest.link[LINK_WINDOWS].copy.count == 1,

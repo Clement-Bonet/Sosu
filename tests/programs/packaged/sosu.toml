@@ -1,0 +1,13 @@
+# A program made by `sosuc package` (spec §11.6), run from another folder: it finds its assets
+# next to itself. tests/program_tests runs `sosuc package` from the root of the repository.
+[package]
+name = "packaged"
+version = "0.1.0"
+
+[app]
+name = "Packaged"
+icon = "../../../examples/workspace/assets/sosu.png"
+assets = ["data"]
+
+[dependencies]
+platform = { path = "../../../packages/platform" }

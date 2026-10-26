@@ -751,7 +751,7 @@ static char *gen_int(Fn *f, const Type *type, uint64_t value, bool negative) {
 /* ---- Expressions ---- */
 
 static bool is_place(const Expr *e) {
-    return e->kind == EXPR_NAME || e->kind == EXPR_INDEX || e->kind == EXPR_SELF ||
+    return (e->kind == EXPR_NAME && e->resolution != RESOLVED_CONST) || e->kind == EXPR_INDEX || e->kind == EXPR_SELF ||
            (e->kind == EXPR_FIELD && e->resolution == RESOLVED_NONE) ||
            (e->kind == EXPR_UNARY && e->as.unary.op == TOK_STAR);
 }
@@ -779,8 +779,32 @@ static char *gen_variant(Fn *f, const Expr *e, const TypeInfo *info, size_t inde
     return result;
 }
 
+/* A constant of a module (spec §11.6): its value where it is used. An integer was computed by
+   semantic analysis; another value is generated from its expression, in its own module. */
+static char *gen_const(Fn *f, const ConstInfo *c) {
+    if (c->evaluated) {
+        bool negative = c->type->as.integer.is_signed && (int64_t)(c->value << (64 - c->type->as.integer.bits)) < 0;
+        uint64_t magnitude = c->value;
+        if (negative) {
+            unsigned bits = c->type->as.integer.bits;
+            uint64_t extended = bits < 64 ? c->value | ~((UINT64_C(1) << bits) - 1) : c->value;
+            magnitude = ~extended + 1;
+        }
+        return gen_int(f, c->type, magnitude, negative);
+    }
+    Unit *unit = f->unit;
+    f->unit = c->unit;
+    char *value = gen_expr(f, c->decl->as.const_.value);
+    f->unit = unit;
+    if (c->type->tag == T_STR) return value; /* a struct: no cast */
+    char *result = sosu_format("((%s)%s)", c_type(f->g, c->type), value);
+    free(value);
+    return result;
+}
+
 static char *gen_name(Fn *f, Expr *e) {
     switch (e->resolution) {
+    case RESOLVED_CONST: return gen_const(f, e->target);
     case RESOLVED_LOCAL: return sosu_format("v_%.*s", NAME_ARGS(e->as.name));
     case RESOLVED_SELF_FIELD: {
         char *path = f->self_info->type->tag == T_CLASS ? field_path(f->self_info, e->as.name) : sosu_strdup("");
@@ -1110,6 +1134,7 @@ static char *gen_index(Fn *f, Expr *e) {
 }
 
 static char *gen_field(Fn *f, Expr *e) {
+    if (e->resolution == RESOLVED_CONST) return gen_const(f, e->target);
     if (e->resolution == RESOLVED_FN) return fn_name_of(f->g, e);
     if (e->resolution == RESOLVED_VARIANT) return gen_variant(f, e, e->target, e->target_index, NULL);
     Expr *object = e->as.field.object;

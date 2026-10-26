@@ -58,7 +58,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0305 | private to its module | `shapes.Secret` without `pub struct Secret` |
 | E0306 | `void` can only be a return type | `void x;`, `void f(void x)` |
 | E0307 | the error type of `T!E` must be an enum | `i32!str` |
-| E0308 | an array has at least one element | `i32[0]` |
+| E0308 | an array has at least one element, of a constant size | `i32[0]`, `ui8[NAME]` where `NAME` is not an integer constant (spec §11.6) |
 | E0309 | a type contains itself by value | `struct A { A a; }` |
 | E0310 | invalid parent class or interface | `class C : SomeStruct`, the parent class not first |
 | E0311 | inheritance cycle | `class A : B {}` and `class B : A {}` |
@@ -105,6 +105,8 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0364 | unknown constraint | `<T: Sortable>`; the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash` and interfaces |
 | E0365 | invalid C name of an export | two exports named `lib_open`, `export "C" void int()`, a name starting with `sosu_`, a generic export (spec §9.2) |
 | E0366 | a type that cannot cross to C in an export | `i32?`, `T!E`, an enum with data, `Arena` by value, an interface, an array by value (spec §9.2) |
+| E0367 | the value of a constant is not computed when the program is compiled | `i32 A = f();`, `ui8 A = 200 + 100;` (does not fit), `i32 A = B;` and `i32 B = A;` (a cycle), a division by zero (spec §11.6) |
+| E0368 | a constant of a type other than a number, `bool`, `char` or `str` | `i32[2] PAIR = [1, 2];` (spec §11.6) |
 
 ## Code generation
 

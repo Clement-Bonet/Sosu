@@ -214,6 +214,7 @@ typedef enum {
     REF_MODULE,
     REF_VARIANT,
     REF_BUILTIN,
+    REF_CONST,
 } RefKind;
 
 typedef struct {
@@ -227,6 +228,7 @@ typedef struct {
     TypeInfo *info; /* REF_VARIANT: the enum */
     size_t variant;
     const char *builtin;
+    ConstInfo *constant;
 } Ref;
 
 static Ref lookup_name(Body *b, Name name, Type *expected) {
@@ -260,6 +262,7 @@ static Ref lookup_name(Body *b, Name name, Type *expected) {
         case SYM_FN: ref.kind = REF_FN; ref.fn = sym->fn; break;
         case SYM_TYPE: ref.kind = REF_TYPE; ref.type = sym->type_info->type; break;
         case SYM_MODULE: ref.kind = REF_MODULE; ref.module = sym->module; break;
+        case SYM_CONST: ref.kind = REF_CONST; ref.constant = sym->constant; break;
         }
         return ref;
     }
@@ -317,6 +320,9 @@ static Ref member_of_module(Body *b, Unit *module, Name name) {
     if (sym->kind == SYM_FN) {
         ref.kind = REF_FN;
         ref.fn = sym->fn;
+    } else if (sym->kind == SYM_CONST) {
+        ref.kind = REF_CONST;
+        ref.constant = sym->constant;
     } else {
         ref.kind = REF_TYPE;
         ref.type = sym->type_info->type;
@@ -401,6 +407,7 @@ static void record(Expr *e, Ref ref) {
     case REF_METHOD: e->resolution = RESOLVED_SELF_METHOD; e->target = ref.method; break;
     case REF_FN: e->resolution = RESOLVED_FN; e->target = ref.fn; break;
     case REF_BUILTIN: e->resolution = RESOLVED_BUILTIN; e->target = ref.builtin; break;
+    case REF_CONST: e->resolution = RESOLVED_CONST; e->target = ref.constant; break;
     case REF_VARIANT:
         e->resolution = RESOLVED_VARIANT;
         e->target = ref.info;
@@ -422,6 +429,7 @@ static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
         }
         return ref.local->type;
     case REF_FIELD: return ref.field->type;
+    case REF_CONST: return ref.constant->type ? ref.constant->type : error_type(b);
     case REF_FN:
         if (ref.fn->param_count || ref.fn->effect_param_count) {
             Diagnostic *d = error_expr(b, "E0360", e, "`%.*s` is generic: it is called, not used as a value",
@@ -1256,6 +1264,10 @@ static Type *check_call(Body *b, Expr *e, Type *expected) {
         check_args_loosely(b, e);
         return error_type(b);
     }
+    case REF_CONST:
+        error_expr(b, "E0338", callee, "`%.*s` is a constant, not a function", NAME_ARGS(name));
+        check_args_loosely(b, e);
+        return error_type(b);
     case REF_MODULE:
         error_expr(b, "E0338", callee, "`%s` is a module, not a function", ref.module->module);
         check_args_loosely(b, e);
@@ -2353,7 +2365,55 @@ void sema_check_instance_field(Sema *s, TypeInfo *instance, const FieldInfo *fie
     s->env = saved;
 }
 
+/* Reports what, in the value of a constant, is not computed when the program is compiled
+   (spec §11.6): calls, variables, structs... Its types are already checked. */
+static void check_constant_expr(Body *b, const Expr *e) {
+    switch (e->kind) {
+    case EXPR_ERROR: case EXPR_INT: case EXPR_FLOAT: case EXPR_STRING: case EXPR_CHAR: case EXPR_BOOL:
+        return;
+    case EXPR_UNARY:
+        if (e->as.unary.op != TOK_STAR && e->as.unary.op != TOK_AMP) {
+            check_constant_expr(b, e->as.unary.operand);
+            return;
+        }
+        break;
+    case EXPR_BINARY:
+        check_constant_expr(b, e->as.binary.left);
+        check_constant_expr(b, e->as.binary.right);
+        return;
+    case EXPR_CAST:
+        check_constant_expr(b, e->as.cast.value);
+        return;
+    case EXPR_TERNARY:
+        check_constant_expr(b, e->as.ternary.cond);
+        check_constant_expr(b, e->as.ternary.then_expr);
+        check_constant_expr(b, e->as.ternary.else_expr);
+        return;
+    case EXPR_NAME:
+    case EXPR_FIELD:
+        if (e->resolution == RESOLVED_CONST || e->type == NULL || is_error(e->type)) return;
+        if (e->resolution == RESOLVED_BUILTIN && e->kind == EXPR_NAME &&
+            (name_is(e->as.name, "KB") || name_is(e->as.name, "MB") || name_is(e->as.name, "GB"))) {
+            return;
+        }
+        break;
+    default: break;
+    }
+    Diagnostic *d = error_expr(b, "E0367", e, "the value of a constant is computed when the program is compiled");
+    diag_help(d, "use literals, operators, `as` and other constants; a value computed at run time is returned by "
+                 "a function");
+}
+
 void sema_check_bodies(Sema *s) {
+    for (size_t i = 0; i < s->consts.count; i++) {
+        ConstInfo *c = s->consts.items[i];
+        if (!c->type || !c->decl->as.const_.value) continue;
+        Body b;
+        init_body(&b, s, c->unit, NULL, c->decl->as.const_.name, s->types.void_, 0);
+        check_expect(&b, c->decl->as.const_.value, c->type);
+        if (c->type->tag != T_ERROR) check_constant_expr(&b, c->decl->as.const_.value);
+        free(b.locals.items);
+    }
     for (size_t i = 0; i < s->fns.count; i++) {
         FnInfo *fn = s->fns.items[i];
         s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;

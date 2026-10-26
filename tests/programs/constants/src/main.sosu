@@ -1,0 +1,26 @@
+import std.io;
+import constants.limits;
+
+i32 TWICE = -(HALF * 2);
+i32 HALF = 21;
+ui32 MASK = ~0 as ui32 >> 16;
+i64 BIG = 4 * GB as i64;
+
+struct Name {
+    mut ui8[limits.NAME_MAX] bytes;
+    ui8[COUNT] counts;
+}
+
+usize COUNT = 3;
+
+i32 main() uses io {
+    io.print("{} {} {}", limits.INIT_VIDEO, limits.INIT_ALL, limits.LOWEST);
+    io.print("{} {} {} {}", limits.TITLE, limits.RATIO, limits.VERBOSE, limits.SEPARATOR);
+    io.print("{} {} {} {}", TWICE, MASK, BIG, limits.secret());
+    mut Name name = Name{ bytes: [0; 16], counts: [1, 2, 3] };
+    name.bytes[limits.NAME_MAX - 1] = 7;
+    io.print("{} {}", name.bytes[15], name.counts[COUNT - 1]);
+    str greeting = limits.TITLE;
+    io.print("{} {}", greeting.len, limits.INIT_ALL & limits.INIT_VIDEO != 0);
+    return 0;
+}

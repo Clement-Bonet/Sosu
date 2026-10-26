@@ -117,6 +117,8 @@ static void test_generics(void) {
     expect_expr("Tree<i32>.Leaf(3)", "(call (. Tree<i32> Leaf) 3)");
     expect_expr("x as Vec<i32>*", "(as x Vec<i32>*)");
     expect_expr("a >> b", "(>> a b)");
+    expect_module("pub ui32 FLAGS = 32 | 16;\nstr NAME = \"a\";\n", "(const ui32 FLAGS (| 32 16))\n(const str NAME \"a\")\n");
+    expect_module("struct S {\n    ui8[limits.SIZE] b;\n}\n", "(struct S\n  (field ui8[limits.SIZE] b))\n");
     expect_module("struct Pair<A, B> {\n    A first;\n    B second;\n}\n",
                   "(struct Pair<A, B>\n  (field A first)\n  (field B second))\n");
     expect_module("enum Tree<T> {\n    Leaf(T value),\n    Node(Tree<T>* left, Tree<T>* right),\n}\n",
@@ -244,6 +246,7 @@ static void test_declarations(void) {
                   "  (ensures (&& (>= result lo) (<= result hi)))\n"
                   "  (block\n"
                   "    (return x)))\n");
+    expect_module("pub extern \"C\" { i32 puts(ui8* s); }\n", "(pub extern \"C\"\n  (fn i32 puts ((ui8* s))))\n");
     expect_module("extern \"C\" { i32 puts(ui8* s); }\n"
                   "unsafe void poke(mut ui8* p) { }\n"
                   "test \"works\" { assert(true); }\n",
@@ -262,7 +265,9 @@ static void test_errors(void) {
     expect_error("void f() { g(; }", "E0201", 1, 14, 1);
     expect_error("void f() { Point* = 3; }", "E0201", 1, 19, 1);
     expect_error("void f() { auto x = 1 + ; }", "E0201", 1, 25, 1);
-    expect_error("i32 x = 3;", "E0203", 1, 1, 1);
+    expect_error("mut i32 x = 3;", "E0203", 1, 1, 1);
+    expect_error("auto x = 3;", "E0203", 1, 1, 1);
+    expect_error("pub ui32 X = 3", "E0200", 1, 15, 1);
     expect_error("+ void", "E0203", 1, 1, 1);
     expect_error("void f() { if (a < b < c) { } }", "E0204", 1, 22, 1);
     expect_error("void f() { if (x = 1) { y = 2; } }", "E0205", 1, 18, 1);

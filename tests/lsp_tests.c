@@ -169,6 +169,15 @@ static void test_session(void) {
               answer("\"label\":\"vector\"") && answer("\"label\":\"i32\""),
           "locals, functions, modules, keywords and types: %s", out.count ? out.items[0] : "nothing");
 
+    /* constants (spec §11.6) */
+    const char *constants = "usize SIZE = 2 * 8;\ni32 main() {\n    usize n = SIZE;\n    return 0;\n}\n";
+    change_main(constants);
+    request("textDocument/hover", constants, "SIZE;", 1);
+    CHECK(answer("usize SIZE = 2 * 8") && answer("`usize` 16"), "hover on a constant: %s",
+          out.count ? out.items[0] : "nothing");
+    request("textDocument/completion", constants, "SIZE;", 0);
+    CHECK(answer("\"label\":\"SIZE\",\"kind\":21"), "a constant completed: %s", out.count ? out.items[0] : "nothing");
+
     exchange("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"textDocument/rename\",\"params\":{}}");
     CHECK(answer("-32601"), "an unknown request is an error");
     exchange("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"shutdown\"}");
