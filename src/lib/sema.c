@@ -211,7 +211,7 @@ static void collect(Sema *s, Unit *unit) {
             break;
         case DECL_EXTERN:
             for (size_t j = 0; j < decl->as.extern_.fn_count; j++) {
-                declare_fn(s, unit, &decl->as.extern_.fns[j], false, true);
+                declare_fn(s, unit, &decl->as.extern_.fns[j], decl->is_pub, true); /* `pub extern`: bindings (spec §11.6) */
             }
             break;
         case DECL_CONST: {

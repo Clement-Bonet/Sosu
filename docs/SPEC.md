@@ -583,7 +583,7 @@ extern "C" {
 ```
 
 - `struct`s are compatible with the C layout.
-- An `extern` call is `unsafe`, unless it is wrapped in a safe function.
+- An `extern` call is `unsafe`, unless it is wrapped in a safe function. `pub extern "C" { ... }` makes its functions public: the module that `sosuc bindgen` writes is used by another (§11.6).
 - `sosuc bindgen` (step 11, §11.6): generates declarations from C headers (functions, structs, enums, constants). Until then, bindings are written by hand.
 - The Sosu declarations must match the C ones exactly (`int` is `i32`, a C struct is a Sosu `struct` with the same fields in the same order): the C compiler never sees the C headers.
 
@@ -1604,7 +1604,7 @@ parameters), not to types.
 program      = { import | decl } ;
 import       = "import" path ";" ;
 path         = IDENT { "." IDENT } ;
-decl         = [ "pub" ] ( struct | class | interface | enum | function | constant ) | extern | export | test ;
+decl         = [ "pub" ] ( struct | class | interface | enum | function | constant | extern ) | export | test ;
 constant     = type IDENT "=" expr ";" ;           (* a constant expression (spec §11.6) *)
 
 struct       = "struct" IDENT "{" { member } "}" ;

@@ -1493,7 +1493,7 @@ static Decl *parse_declaration(Parser *p) {
         }
         return NULL;
     }
-    if (decl->is_pub && (decl->kind == DECL_IMPORT || decl->kind == DECL_EXTERN || decl->kind == DECL_TEST)) {
+    if (decl->is_pub && (decl->kind == DECL_IMPORT || decl->kind == DECL_TEST)) {
         error_at(p, "E0212", pub->offset, pub->length, "`pub` is not allowed on `%s`", token_kind_spelling(token->kind));
     }
     decl->length = span_from(p, decl->offset);

@@ -246,6 +246,7 @@ static void test_declarations(void) {
                   "  (ensures (&& (>= result lo) (<= result hi)))\n"
                   "  (block\n"
                   "    (return x)))\n");
+    expect_module("pub extern \"C\" { i32 puts(ui8* s); }\n", "(pub extern \"C\"\n  (fn i32 puts ((ui8* s))))\n");
     expect_module("extern \"C\" { i32 puts(ui8* s); }\n"
                   "unsafe void poke(mut ui8* p) { }\n"
                   "test \"works\" { assert(true); }\n",

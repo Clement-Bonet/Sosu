@@ -472,7 +472,7 @@ static void print_decl(Printer *pr, const Decl *decl) {
         print_fn(pr, &decl->as.fn, 0);
         break;
     case DECL_EXTERN:
-        fputs("(extern ", out);
+        fputs(decl->is_pub ? "(pub extern " : "(extern ", out);
         print_name(pr, decl->as.extern_.abi);
         for (size_t i = 0; i < decl->as.extern_.fn_count; i++) {
             newline(pr, 1);

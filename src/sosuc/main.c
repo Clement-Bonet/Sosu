@@ -2,12 +2,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
 #endif
 
+#include "bindgen.h"
 #include "codegen.h"
 #include "fmt.h"
 #include "i18n.h"
@@ -34,6 +36,8 @@ static void usage(FILE *out) {
           "  package build a phone application: --target android (an APK) or ios-sim / ios (an Xcode\n"
           "          project, on a Mac) (spec 11.5)\n"
           "  fmt     format files or packages in place (--check: only report)\n"
+          "  bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu] [--check]\n"
+          "          write the Sosu declarations of a C header (spec 11.6)\n"
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
           "  i18n extract [package] [-o messages.locale.default.sosu]\n"
           "          write the template of the catalogs of translations (spec 10.7)\n"
@@ -515,6 +519,307 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     free(runtime);
     free(runtime_c);
     return status == 0;
+}
+
+/* The system sosuc runs on, as a target name (spec §11.1). */
+static const char *host_system(void) {
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
+    return "windows-arm64";
+#elif defined(_WIN32)
+    return "windows-x64";
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "macos-arm64";
+#elif defined(__APPLE__)
+    return "macos-x64";
+#elif defined(__aarch64__)
+    return "linux-arm64";
+#else
+    return "linux-x64";
+#endif
+}
+
+#ifdef _WIN32
+#define LONG_IS_32 true
+#else
+#define LONG_IS_32 false
+#endif
+
+/* ---- sosuc bindgen (spec §11.6) ---- */
+
+/* An absolute path with `/`. New string. */
+static char *absolute_path(const char *path) {
+#ifdef _WIN32
+    char *full = _fullpath(NULL, path, 0);
+#else
+    char *full = realpath(path, NULL);
+#endif
+    char *result = sosu_strdup(full ? full : path);
+    free(full);
+    for (char *c = result; *c; c++) {
+        if (*c == '\\') *c = '/';
+    }
+    return result;
+}
+
+/* A folder of its own for the files of one run, in the temporary folder of the system. */
+static char *temporary_dir(const char *name) {
+    const char *base = getenv("TMPDIR");
+    if (!base || !base[0]) base = getenv("TEMP");
+    if (!base || !base[0]) base = getenv("TMP");
+    if (!base || !base[0]) base = "/tmp";
+    char *dir = sosu_format("%s/sosu-%s-%lu", base, name, (unsigned long)time(NULL));
+    for (char *c = dir; *c; c++) {
+        if (*c == '\\') *c = '/';
+    }
+    shell_make_dir(dir);
+    return dir;
+}
+
+typedef struct {
+    const char *header;
+    StringList includes; /* -I, absolute */
+    StringList defines;  /* -D */
+    StringList prefixes;
+    const char *output;
+    bool check;
+} BindgenOptions;
+
+/* The C compiler of the machine on `c_file`: `mode` 'E' preprocesses into `out`, 'S' only checks.
+   Its messages go to `log`. */
+static bool run_c_compiler(const BindgenOptions *o, const char *dir, const char *c_file, char mode, const char *out,
+                           const char *log) {
+    const char *cc = getenv("SOSU_CC");
+    char *args = sosu_strdup("");
+    bool msvc = false;
+#ifdef _WIN32
+    msvc = !cc || !cc[0];
+#endif
+    for (size_t i = 0; i < o->includes.count; i++) {
+        char *native = shell_path(o->includes.items[i]);
+        append(&args, msvc ? " /I\"%s\"" : " -I\"%s\"", native);
+        free(native);
+    }
+    for (size_t i = 0; i < o->defines.count; i++) append(&args, msvc ? " /D%s" : " -D%s", o->defines.items[i]);
+    char *c = shell_path(c_file);
+    char *output = out ? shell_path(out) : NULL;
+    char *errors = shell_path(log);
+    int status;
+#ifdef _WIN32
+    if (msvc) {
+        char *commands = mode == 'E' ? sosu_format("cl /nologo /E /std:c11 /utf-8%s \"%s\" >\"%s\" 2>\"%s\" || exit /b 1\r\n",
+                                                   args, c, output, errors)
+                                     : sosu_format("cl /nologo /Zs /std:c11 /utf-8%s \"%s\" >\"%s\" 2>&1 || exit /b 1\r\n",
+                                                   args, c, errors);
+        char *script = msvc_script(commands);
+        char *bat = path_join(dir, mode == 'E' ? "preprocess.bat" : "check.bat");
+        char *native_bat = shell_path(bat);
+        char *command = sosu_format("\"%s\"", native_bat);
+        status = write_file(bat, script) ? shell_run(command) : 2;
+        free(command);
+        free(native_bat);
+        free(bat);
+        free(script);
+        free(commands);
+    } else
+#endif
+    {
+        (void)dir;
+        char *command = mode == 'E' ? sosu_format("\"%s\" -E -std=c11%s \"%s\" -o \"%s\" 2>\"%s\"", cc && cc[0] ? cc : "cc", args,
+                                                  c, output, errors)
+                                    : sosu_format("\"%s\" -fsyntax-only -std=c11%s \"%s\" >\"%s\" 2>&1", cc && cc[0] ? cc : "cc",
+                                                  args, c, errors);
+        status = shell_run(command);
+        free(command);
+    }
+    free(args);
+    free(c);
+    free(output);
+    free(errors);
+    return status == 0;
+}
+
+static void print_file(const char *path, FILE *out) {
+    SourceFile file;
+    if (!source_load(&file, path)) return;
+    fputs(file.text, out);
+    source_free(&file);
+}
+
+/* `sosuc bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu] [--check]` */
+static int command_bindgen(int argc, char **argv) {
+    BindgenOptions o;
+    memset(&o, 0, sizeof o);
+    for (int i = 0; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *value = NULL;
+        if ((strcmp(arg, "-I") == 0 || strcmp(arg, "-D") == 0 || strcmp(arg, "-o") == 0 || strcmp(arg, "--prefix") == 0)) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "sosuc: `%s` takes a value\n", arg);
+                return 2;
+            }
+            value = argv[++i];
+        } else if ((arg[0] == '-' && (arg[1] == 'I' || arg[1] == 'D' || arg[1] == 'o') && arg[2])) {
+            value = arg + 2;
+        } else if (strncmp(arg, "--prefix=", 9) == 0) {
+            value = arg + 9;
+        }
+        if (arg[1] == 'I' && arg[0] == '-') {
+            SOSU_VEC_PUSH(&o.includes, absolute_path(value));
+        } else if (arg[1] == 'D' && arg[0] == '-') {
+            SOSU_VEC_PUSH(&o.defines, sosu_strdup(value));
+        } else if (arg[1] == 'o' && arg[0] == '-') {
+            o.output = value;
+        } else if (strncmp(arg, "--prefix", 8) == 0) {
+            SOSU_VEC_PUSH(&o.prefixes, sosu_strdup(value));
+        } else if (strcmp(arg, "--check") == 0) {
+            o.check = true;
+        } else if (arg[0] == '-') {
+            fprintf(stderr, "sosuc: unknown option `%s` of `sosuc bindgen`\n", arg);
+            return 2;
+        } else if (o.header) {
+            fprintf(stderr, "sosuc: `sosuc bindgen` takes one header; it may include others\n");
+            return 2;
+        } else {
+            o.header = arg;
+        }
+    }
+    if (!o.header) {
+        fprintf(stderr, "usage: sosuc bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... "
+                        "[-o file.sosu] [--check]\n");
+        return 2;
+    }
+    if (!shell_file_exists(o.header)) {
+        fprintf(stderr, "sosuc: cannot read `%s`\n", o.header);
+        return 2;
+    }
+    char *header = absolute_path(o.header);
+    char *header_dir = path_dirname(header);
+    char *dir = temporary_dir("bindgen");
+    int status = 2;
+
+    /* the folders whose headers are bound: the header's, and the -I ones */
+    const char **own = sosu_alloc((o.includes.count + 1) * sizeof *own);
+    own[0] = header_dir;
+    for (size_t i = 0; i < o.includes.count; i++) own[i + 1] = o.includes.items[i];
+    size_t own_count = o.includes.count + 1;
+
+    /* 1. the header preprocessed: the files it includes, and the macros they define */
+    char *first = path_join(dir, "first.c");
+    char *first_i = path_join(dir, "first.i");
+    char *log = path_join(dir, "cc.log");
+    char *wrapper = path_join(dir, "probe.c");
+    char *wrapper_i = path_join(dir, "probe.i");
+    char *include = sosu_format("#include \"%s\"\n", header);
+    BindgenNames files = {0};
+    BindgenNames macros = {0};
+    SourceFile text;
+    bool ok = write_file(first, include) && run_c_compiler(&o, dir, first, 'E', first_i, log);
+    if (ok && source_load(&text, first_i)) {
+        bindgen_files(text.text, text.length, &files);
+        source_free(&text);
+        for (size_t i = 0; i < files.count; i++) {
+            if (!bindgen_is_own(files.items[i], own, own_count)) continue;
+            SourceFile source;
+            if (!source_load(&source, files.items[i])) continue;
+            bindgen_macro_names(source.text, source.length, (const char *const *)o.prefixes.items, o.prefixes.count,
+                                &macros);
+            source_free(&source);
+        }
+    } else if (ok) {
+        ok = false;
+    }
+    /* 2. again, with the macros asked of the preprocessor: it knows which `#if` defined them */
+    if (ok) {
+        char *probe = sosu_strdup(include);
+        for (size_t i = 0; i < macros.count; i++) {
+            append(&probe, BINDGEN_PROBE " \"%s\" ", macros.items[i]);
+            append(&probe, "%s ;\n", macros.items[i]);
+        }
+        ok = write_file(wrapper, probe) && run_c_compiler(&o, dir, wrapper, 'E', wrapper_i, log);
+        free(probe);
+    }
+    if (!ok) {
+        print_file(log, stderr);
+        fprintf(stderr, "sosuc: the C compiler cannot preprocess `%s`\n", o.header);
+    } else if (source_load(&text, wrapper_i)) {
+        char *command = sosu_format("sosuc bindgen %s", o.header);
+        for (size_t i = 0; i < o.includes.count; i++) append(&command, " -I %s", o.includes.items[i]);
+        for (size_t i = 0; i < o.defines.count; i++) append(&command, " -D %s", o.defines.items[i]);
+        for (size_t i = 0; i < o.prefixes.count; i++) append(&command, " --prefix %s", o.prefixes.items[i]);
+        if (o.output) append(&command, " -o %s", o.output);
+        char *shown = sosu_strdup(o.header);
+        for (char *c = shown; *c; c++) {
+            if (*c == '\\') *c = '/';
+        }
+        char *comment = sosu_format("// Generated by sosuc bindgen %s from %s, for %s: do not edit (spec §11.6).\n"
+                                    "// %s",
+                                    SOSU_VERSION, shown, host_system(), command);
+        BindgenInput input = { text.text, text.length, own, own_count, (const char *const *)o.prefixes.items,
+                               o.prefixes.count, LONG_IS_32, comment, header };
+        BindgenOutput result;
+        bindgen_generate(&input, &result);
+        fputs(result.warnings, stderr);
+        /* the canonical form (spec §7.6) */
+        SourceFile module;
+        source_from_string(&module, o.output ? o.output : "bindgen.sosu", result.module);
+        DiagList diags = {0};
+        char *formatted = format_source(&module, &diags);
+        if (!formatted) {
+            diag_print_text(&diags, stderr);
+            fprintf(stderr, "sosuc: the module generated does not parse: a bug of bindgen\n");
+        }
+        const char *final = formatted ? formatted : result.module;
+        bool written = o.output ? write_file(o.output, final) : fputs(final, stdout) >= 0;
+        if (!written) fprintf(stderr, "sosuc: cannot write `%s`\n", o.output);
+        status = written && formatted ? 0 : 1;
+        if (o.output && written) {
+            printf("%s: %zu constants, %zu structs, %zu functions", o.output, result.constants, result.structs,
+                   result.functions);
+            if (result.skipped) printf(", %zu left out (listed at its end)", result.skipped);
+            printf("\n");
+        }
+        if (status == 0 && o.check) {
+            char *check = path_join(dir, "check.c");
+            bool checked = write_file(check, result.check) && run_c_compiler(&o, dir, check, 'S', NULL, log);
+            if (!checked) {
+                print_file(log, stderr);
+                fprintf(stderr, "sosuc: the binding does not match `%s` (sizes, alignments, offsets or values above)\n",
+                        o.header);
+                status = 1;
+            } else if (o.output) {
+                printf("checked against the header by the C compiler\n");
+            }
+            free(check);
+        }
+        free(formatted);
+        diag_free(&diags);
+        source_free(&module);
+        bindgen_output_free(&result);
+        free(comment);
+        free(shown);
+        free(command);
+        source_free(&text);
+    }
+    if (!getenv("SOSU_BINDGEN_KEEP")) shell_remove_dir(dir); /* kept to debug bindgen */
+    bindgen_names_free(&files);
+    bindgen_names_free(&macros);
+    free(include);
+    free(wrapper);
+    free(wrapper_i);
+    free(first);
+    free(first_i);
+    free(log);
+    free((void *)own);
+    free(dir);
+    free(header_dir);
+    free(header);
+    for (size_t i = 0; i < o.includes.count; i++) free(o.includes.items[i]);
+    free(o.includes.items);
+    for (size_t i = 0; i < o.defines.count; i++) free(o.defines.items[i]);
+    free(o.defines.items);
+    for (size_t i = 0; i < o.prefixes.count; i++) free(o.prefixes.items[i]);
+    free(o.prefixes.items);
+    return status;
 }
 
 /* ---- Libraries (spec §9.2) ---- */
@@ -1587,6 +1892,7 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(command, "i18n") == 0) return command_i18n(argc - 2, argv + 2, argv[0]);
+    if (strcmp(command, "bindgen") == 0) return command_bindgen(argc - 2, argv + 2);
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;

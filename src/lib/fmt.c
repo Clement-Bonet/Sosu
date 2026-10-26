@@ -799,6 +799,7 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
     case DECL_EXTERN: {
         size_t end = decl->offset + decl->length - 1;
         start_line(f);
+        if (decl->is_pub) put(f, "pub ");
         put(f, "extern ");
         put_name(f, decl->as.extern_.abi);
         put(f, " {");
