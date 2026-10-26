@@ -1474,6 +1474,65 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc build --lib[=shared]` (planned, §9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages and for mobile.
 - `sosuc package` and `sosuc bindgen`: v1.
 
+### 11.5 Android and iOS (step 9, second part)
+
+Status: design, not implemented yet. One branch, in batches: cross-compilation (`--target`), the program as the library of a host, Android (the NDK, a Gradle project, the emulator), the files of an application, iOS (Xcode, the simulator), then the CI.
+
+```sh
+sosuc build --target android-arm64 examples/window   # build/android/arm64-v8a/libmain.so
+sosuc build --target android-x64 examples/window     # the same for the emulator (x86_64)
+sosuc package --target android examples/window       # build/android/: a Gradle project around it, and its APK
+sosuc package --target ios-sim examples/window       # build/ios/: an Xcode project for the simulator (on a Mac)
+```
+
+#### Targets
+
+- `sosuc build --target <os>-<arch>` (§11.1): `android-arm64`, `android-x64`, `ios-arm64`, `ios-sim` (the simulator, arm64 on Apple silicon), and the desktop targets of the machine (`windows-x64`, `linux-x64`, `macos-arm64`...: the default, as today). Another target is an error that names the tools it needs.
+- The C compiler of a target: the clang of the Android NDK (`aarch64-linux-android24-clang`, `x86_64-linux-android24-clang`), found in `ANDROID_NDK_HOME`, or in the `ndk` folder of the Android SDK (`ANDROID_HOME`, or the place where Android Studio puts it); `xcrun --sdk iphoneos clang` or `--sdk iphonesimulator` on a Mac. `SOSU_CC` still overrides it.
+- The `[link]` sections of `sosu.toml` gain the targets as hosts: `[link.android]`, `[link.ios]`, so that `platform` links the SDL of each system.
+
+#### The program as the library of a host
+
+- On a phone, the system starts an activity (Android) or an application delegate (iOS), not a `main`: SDL3 provides them, and calls `SDL_main`. A program built for a mobile target is a library whose entry is `SDL_main`, which calls the `main` of the program; nothing changes in the Sosu code. Android loads it as `libmain.so` (the name SDL looks for); iOS links it statically into the application.
+- Run-time errors stop the application, as on the desktop (code 101, the message in the log: `logcat` on Android, the console of Xcode on iOS). `io.print` writes to the same log (`__android_log_print`, `os_log` through SDL).
+- The events of §10.3 already exist in `platform` (`Touch`, `SafeAreaChanged`, `Suspend`, `Resume`, `LowMemory`): on a phone they come from the system. `on_frame` is not called while the application is suspended.
+
+#### SDL for mobile
+
+- SDL3 for Android, its prebuilt libraries (`libSDL3.so` per ABI) and its Java classes (`SDLActivity`...), are kept in `packages/platform/vendor/SDL3-android` as the libraries of Windows are kept today, at the version of `VERSION.txt` (3.4.18); `SDL3.xcframework` for iOS in `packages/platform/vendor/SDL3-apple`. No download while building.
+
+#### Android
+
+- `sosuc package --target android`: builds `libmain.so` for `arm64-v8a` and `x86_64`, copies `libSDL3.so` next to it, and writes `build/android/`: a Gradle project made from a template (`lib/templates/android`: `settings.gradle`, `app/build.gradle`, `AndroidManifest.xml`, the activity, which is `SDLActivity` and nothing else), then runs `gradlew assembleDebug` if Gradle is found (the wrapper of the template, with the JDK of Android Studio): `build/android/app/build/outputs/apk/debug/app-debug.apk`. `adb install` puts it on a phone or an emulator.
+- `sosu.toml` gains an `[app]` section, used by Android and iOS: `id` (`org.sosu.window`), `name` (shown under the icon), `version`, `icon` (a PNG of the package). Without it, the id is `org.sosu.<package>` and the name the name of the package.
+- Minimum: Android 7 (API 24), the oldest that SDL3 and the NDK still support well; the target API is the one of the SDK found.
+- Debug builds are signed with the debug key of the SDK; release builds and the stores (signing, AAB) are for the developer, as §11.2 says.
+
+#### The files of an application
+
+- A phone has no current folder: a program finds its files through the platform. `platform.app` gains `app.data_folder(arena)` (where the application keeps its data: `SDL_GetPrefPath`, the internal storage on Android, `Library/Application Support` on iOS) and `app.read_asset(arena, path)` (a file given with the application: in the APK, in the bundle; on the desktop, relative to the package, as today).
+- The files a package gives with it (`assets/`, fonts) are listed in `sosu.toml` (`[app] assets = ["assets", "fonts/NotoSans-Regular.ttf"]`) and copied into the APK or the bundle. `std.io` stays for paths the program knows.
+- The examples that read files (`themes`, `workspace`) read them through `app.read_asset`, so that they run on a phone too.
+
+#### iOS
+
+- `sosuc package --target ios-sim` (or `ios`, for a device): builds the static library of the program and writes `build/ios/`: an Xcode project from a template (`lib/templates/ios`), linking it with `SDL3.xcframework`, with the `Info.plist` made from `[app]`. `xcodebuild` builds the application; on the simulator, `xcrun simctl install` and `launch` run it.
+- iOS needs a Mac with Xcode: on another system, `--target ios-*` is an error that says so. Devices need a signing team, given by the developer in Xcode.
+
+#### Tests and CI
+
+- `tests/programs`: `sosuc build --target android-x64` of a program, checked by the tools of the NDK (`llvm-readelf`: an ELF library for x86_64 that exports `SDL_main`), when an NDK is found; skipped otherwise, with a line that says so.
+- The CI gains an `Android` job (Ubuntu, whose image has the SDK and the NDK): `sosuc package --target android` of `examples/window`, up to the APK. The `macOS` job builds `examples/window` for the simulator with `xcodebuild`.
+- Running on the emulator and on the simulator, and touching the screen, is done by hand (the examples of §10): the CI builds, the developer tries.
+
+Open questions:
+
+- SDL3 for mobile: kept in `vendor/` (offline, as Windows today, ~25 MB), or downloaded by `sosuc package` on first use? (proposed: kept in `vendor/`: building needs no network, and the version is the one tested)
+- `sosuc package`: in this step, or templates copied by hand as §11.2 planned for v0? (proposed: in this step, since a template copied by hand must be kept up to date by each developer; `sosuc package` writes it again at each build)
+- One `[app]` section for both systems, or `[android]` and `[ios]`? (proposed: one `[app]`, with `[app.android]` and `[app.ios]` later for what differs)
+- The minimum Android version: 24 (Android 7) or 21? (proposed: 24)
+- Files on a phone: `app.read_asset` and `app.data_folder` in `platform`, or a `std.app` module as §8 planned? (proposed: in `platform`, which already depends on SDL, the only one that knows the places; `std` stays without it)
+
 ## 12. Grammar (v0, EBNF)
 
 This is the grammar implemented by `sosuc`. `mut` belongs to declarations (variables, fields,
