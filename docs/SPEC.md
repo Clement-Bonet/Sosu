@@ -1449,7 +1449,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 ### 11.2 Mobile: how it works
 
-- The Sosu program is compiled into a library (`.so` on Android, static library on iOS; `sosuc build --lib`, §9.2), loaded by a small host project (Android activity, Xcode project). SDL3 provides this host code; in v0, project templates are provided by hand, and `sosuc package --target android|ios` (v1) generates them.
+- The Sosu program is compiled into a library (`.so` on Android, static library on iOS), loaded by the host code that SDL3 provides (its activity, its application), which calls `SDL_main`. `sosuc package` makes the project around it (§11.5).
 - Sosu compiles ahead of time (AOT): no problem with the ban on run-time generated code on iOS.
 - Files: always through `std.app` (sandbox), never hard-coded paths.
 - Permissions and native APIs (camera, notifications, purchases...): dedicated packages, with host code (JNI on Android, Objective-C on iOS); outside v0.
@@ -1465,24 +1465,24 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including the language server.
 
-- `sosuc build [--target <os>-<arch>]`: compiles (cross-compiling depending on the available tooling). The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target` is not implemented yet.
+- `sosuc build [--target <os>-<arch>]`: compiles. The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target android-arm64`, `android-x64`, `ios-arm64` and `ios-sim` build for a phone (§11.5); another desktop is not supported yet.
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
 - `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
 - `sosuc lsp`: the language server of editors (Language Server Protocol, JSON-RPC on stdin and stdout, behind `Content-Length` headers). While typing, it checks the package of the open file as `sosuc check` does, with the text of the open files in place of their files on disk, and publishes the diagnostics. It shows the type of what is under the mouse (the signature of a function or method, the type of a variable or field), goes to the definition of a name (variable, parameter, function, method, field, variant, type, module), and completes the members after `.` (fields and methods of a value, public names of a module, variants of an enum) and otherwise the names in scope (variables, functions, types, imported modules, keywords). Positions are in UTF-16 code units, as the protocol has them. Hover, definition and member completion need a package that loads without errors (semantic analysis only runs then); a file outside any package, or that no import reaches, is only parsed. Renaming and the references of a name come later.
-- `sosuc build --lib[=shared]` (planned, §9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages and for mobile.
-- `sosuc package` and `sosuc bindgen`: v1.
+- `sosuc build --lib[=shared]` (§9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages.
+- `sosuc package --target android` (an APK) or `--target ios-sim` (an application for the simulator), §11.5. `sosuc bindgen`: v1.
 
 ### 11.5 Android and iOS (step 9, second part)
 
-Status: design, not implemented yet. One branch, in batches: cross-compilation (`--target`), the program as the library of a host, Android (the NDK, a Gradle project, the emulator), the files of an application, iOS (Xcode, the simulator), then the CI.
+Status: available. One branch, in batches: cross-compilation (`--target`), the program as the library of a host, Android (the NDK, a Gradle project, the emulator), the files of an application, iOS (the simulator), then the CI. `examples/window`, `themes` and `workspace` run on the Android emulator. What differs from the design is said at the end.
 
 ```sh
 sosuc build --target android-arm64 examples/window   # build/android/arm64-v8a/libmain.so
 sosuc build --target android-x64 examples/window     # the same for the emulator (x86_64)
 sosuc package --target android examples/window       # build/android/: a Gradle project around it, and its APK
-sosuc package --target ios-sim examples/window       # build/ios/: an Xcode project for the simulator (on a Mac)
+sosuc package --target ios-sim examples/window       # build/ios/window.app, for the simulator (on a Mac)
 ```
 
 #### Targets
@@ -1516,7 +1516,7 @@ sosuc package --target ios-sim examples/window       # build/ios/: an Xcode proj
 
 #### iOS
 
-- `sosuc package --target ios-sim` (or `ios`, for a device): builds the static library of the program and writes `build/ios/`: an Xcode project from a template (`lib/templates/ios`), linking it with `SDL3.xcframework`, with the `Info.plist` made from `[app]`. `xcodebuild` builds the application; on the simulator, `xcrun simctl install` and `launch` run it.
+- `sosuc package --target ios-sim`: builds the static library of the program and `build/ios/<package>.app`, linked with `SDL3.xcframework`, with the `Info.plist` made from `[app]`; `xcrun simctl install booted ...` and `launch` run it on the simulator.
 - iOS needs a Mac with Xcode: on another system, `--target ios-*` is an error that says so. Devices need a signing team, given by the developer in Xcode.
 
 #### Tests and CI
@@ -1525,13 +1525,16 @@ sosuc package --target ios-sim examples/window       # build/ios/: an Xcode proj
 - The CI gains an `Android` job (Ubuntu, whose image has the SDK and the NDK): `sosuc package --target android` of `examples/window`, up to the APK. The `macOS` job builds `examples/window` for the simulator with `xcodebuild`.
 - Running on the emulator and on the simulator, and touching the screen, is done by hand (the examples of §10): the CI builds, the developer tries.
 
-Open questions:
+#### Decisions, and what differs from the design
 
-- SDL3 for mobile: kept in `vendor/` (offline, as Windows today, ~25 MB), or downloaded by `sosuc package` on first use? (proposed: kept in `vendor/`: building needs no network, and the version is the one tested)
-- `sosuc package`: in this step, or templates copied by hand as §11.2 planned for v0? (proposed: in this step, since a template copied by hand must be kept up to date by each developer; `sosuc package` writes it again at each build)
-- One `[app]` section for both systems, or `[android]` and `[ios]`? (proposed: one `[app]`, with `[app.android]` and `[app.ios]` later for what differs)
-- The minimum Android version: 24 (Android 7) or 21? (proposed: 24)
-- Files on a phone: `app.read_asset` and `app.data_folder` in `platform`, or a `std.app` module as §8 planned? (proposed: in `platform`, which already depends on SDL, the only one that knows the places; `std` stays without it)
+- SDL3 for phones is fetched once by scripts, as SDL3 for Windows (`packages/platform/fetch-sdl3-android.ps1` or `.sh`, `fetch-sdl3-apple.sh` on a Mac): a fixed version checked by its SHA-256, kept in `vendor/` (ignored by git), and no network while building. The Android archive of SDL gives its Java classes; its libraries (`libSDL3.so`) are copied into the APK next to `libmain.so`.
+- `sosuc package` comes in this step, and writes its project again at each build. `[app]` is one section for both systems. The minimum is Android 7 (API 24); the target is the newest platform of the SDK. The files of an application are read through `platform` (`app.read_asset`, `app.data_folder`), not `std`.
+- iOS: `sosuc package --target ios-sim` builds the `.app` itself (clang, `SDL3.framework` in `Frameworks/`, `Info.plist`, signed for the simulator), without an Xcode project: there is nothing to keep up to date. For a device, `sosuc build --target ios-arm64` gives `libmain.a`, linked in an Xcode project with the signing team of the developer.
+- `app.data_folder(arena, name)` takes the name of the application (`SDL_GetPrefPath`).
+- An asset is kept in the APK or the bundle under the path the program reads on the desktop: its path relative to the folder where `sosuc` runs (`assets = ["../../packages/render/fonts/NotoSans-Regular.ttf"]` in `examples/themes` is read as `packages/render/fonts/NotoSans-Regular.ttf`, from the repository).
+- On a phone, the window takes the whole screen: `run` starts the program with `Resized`, `SafeAreaChanged` and `ScaleChanged` when the screen differs from what it asked for, and the program gives them to `ui` (`ui.safe_area`, `ui.scale`). The widths that the program gives its widgets stay its own: a layout made for the desktop is not adapted to a phone.
+- `io.print` and the run-time errors go to the log of Android (`adb logcat -s sosu`) through a thread that reads standard output.
+- The CI builds an APK in an `Android (NDK)` job and the simulator application in the `macOS` job; `tests/programs` builds `examples/window` for `android-x64` when an NDK is found, and says it skipped otherwise.
 
 ## 12. Grammar (v0, EBNF)
 
@@ -1619,7 +1622,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 6. Arenas, `defer`, move, `unsafe`, debug checks
 7. Tooling: `sosuc fmt`, `sosuc test`, `sosuc run`, JSON diagnostics, contracts
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
-9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code
+9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code: done (§9.2, §11.5)
 10. Generics (monomorphized), `Vec` / `HashMap` containers: done (§5.4)
 11. `sosuc bindgen`, `sosuc package`, cross-compilation
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
