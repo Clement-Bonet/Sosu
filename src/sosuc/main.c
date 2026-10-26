@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700 /* realpath */
+#endif
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
