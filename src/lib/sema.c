@@ -214,6 +214,20 @@ static void collect(Sema *s, Unit *unit) {
                 declare_fn(s, unit, &decl->as.extern_.fns[j], false, true);
             }
             break;
+        case DECL_CONST: {
+            ConstInfo *info = arena_alloc(&s->arena, sizeof *info);
+            memset(info, 0, sizeof *info);
+            info->decl = decl;
+            info->unit = unit;
+            SOSU_VEC_PUSH(&s->consts, info);
+            Symbol symbol = {0};
+            symbol.kind = SYM_CONST;
+            symbol.name = decl->as.const_.name;
+            symbol.is_pub = decl->is_pub;
+            symbol.constant = info;
+            declare(s, unit, symbol);
+            break;
+        }
         case DECL_IMPORT:
         case DECL_TEST:
             break;
@@ -229,7 +243,8 @@ static void report_not_a_type(Sema *s, Unit *unit, const Symbol *sym, Name name)
                                  NAME_ARGS(name));
         diag_help(d, "name one of its types: `%.*s.<Type>`", NAME_ARGS(name));
     } else {
-        error_at(s, unit, "E0304", name.offset, name.length, "`%.*s` is a function, not a type", NAME_ARGS(name));
+        error_at(s, unit, "E0304", name.offset, name.length, "`%.*s` is a %s, not a type", NAME_ARGS(name),
+                 sym->kind == SYM_CONST ? "constant" : "function");
     }
 }
 
@@ -326,6 +341,8 @@ static unsigned resolve_effects(Sema *s, Unit *unit, Path effects) {
     return mask;
 }
 
+static uint64_t array_size_of(Sema *s, Unit *unit, const TypeExpr *te);
+
 static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition position) {
     switch (te->kind) {
     case TYPE_NAME: {
@@ -352,6 +369,10 @@ static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition 
         return type_slice(&s->types, resolve_type(s, unit, te->as.inner, POSITION_VALUE));
     case TYPE_ARRAY: {
         Type *element = resolve_type(s, unit, te->as.array.element, POSITION_VALUE);
+        if (te->as.array.size_name.count) {
+            uint64_t size = array_size_of(s, unit, te);
+            return size ? type_array(&s->types, element, size) : s->types.error;
+        }
         if (te->as.array.size == 0) {
             error_at(s, unit, "E0308", te->offset, te->length, "an array has at least one element");
             return s->types.error;
@@ -1255,6 +1276,303 @@ static void check_exports(Sema *s) {
 
 /* ---- Entry point ---- */
 
+/* ---- Constants (spec §11.6) ---- */
+
+/* An integer during evaluation: its sign and magnitude, so that `-128` is computed before it
+   is known to fit an `i8`. */
+typedef struct {
+    bool neg;
+    uint64_t mag;
+} Wide;
+
+typedef struct {
+    Sema *s;
+    ConstInfo *owner; /* whose value is evaluated, for the messages */
+    bool failed;      /* reported, or not an integer: no value */
+} Eval;
+
+static void visit_const(Sema *s, ConstInfo *c);
+
+static bool is_word(Name name, const char *word) {
+    return name.length == strlen(word) && memcmp(name.text, word, name.length) == 0;
+}
+
+/* The constant a NAME or FIELD expression of `unit` designates, or NULL. Visibility and
+   unknown names are reported when the expression is checked. */
+static ConstInfo *find_const(Sema *s, Unit *unit, const Expr *e) {
+    Symbol *sym = NULL;
+    if (e->kind == EXPR_NAME) {
+        sym = scope_find(scope_of(s, unit), e->as.name);
+        if (!sym && s->prelude && unit != s->prelude) {
+            sym = scope_find(scope_of(s, s->prelude), e->as.name);
+            if (sym && !sym->is_pub) sym = NULL;
+        }
+    } else if (e->kind == EXPR_FIELD && e->as.field.object->kind == EXPR_NAME) {
+        Symbol *module = scope_find(scope_of(s, unit), e->as.field.object->as.name);
+        if (module && module->kind == SYM_MODULE) sym = scope_find(scope_of(s, module->module), e->as.field.name);
+    }
+    return sym && sym->kind == SYM_CONST ? sym->constant : NULL;
+}
+
+static uint64_t bits_of(Wide w) { return w.neg ? ~w.mag + 1 : w.mag; }
+
+/* `bits` read as an integer of `type` (C's conversion: the low bits, sign-extended). */
+static Wide wide_from_bits(const Type *type, uint64_t bits) {
+    unsigned n = type->as.integer.bits;
+    if (n < 64) bits &= ((uint64_t)1 << n) - 1;
+    Wide w = { false, bits };
+    if (type->as.integer.is_signed && (bits >> (n - 1)) & 1) {
+        if (n < 64) bits |= ~(((uint64_t)1 << n) - 1);
+        w.neg = true;
+        w.mag = ~bits + 1;
+    }
+    return w;
+}
+
+static bool wide_fits(const Type *type, Wide w) {
+    unsigned n = type->as.integer.bits;
+    if (!type->as.integer.is_signed) return !w.neg && (n == 64 || w.mag < ((uint64_t)1 << n));
+    uint64_t limit = (uint64_t)1 << (n - 1); /* -limit .. limit - 1 */
+    return w.neg ? w.mag <= limit : w.mag < limit;
+}
+
+static void eval_overflow(Eval *ev, Unit *unit, const Expr *e, const Type *type) {
+    if (ev->failed) return;
+    char *name = type_to_string(type);
+    error_at(ev->s, unit, "E0367", e->offset, e->length, "the value of `%.*s` does not fit `%s`",
+             NAME_ARGS(ev->owner->decl->as.const_.name), name);
+    free(name);
+    ev->failed = true;
+}
+
+static Wide wide_add(Eval *ev, Unit *unit, const Expr *e, const Type *type, Wide a, Wide b) {
+    Wide r;
+    if (a.neg == b.neg) {
+        r.neg = a.neg;
+        r.mag = a.mag + b.mag;
+        if (r.mag < a.mag) eval_overflow(ev, unit, e, type);
+    } else if (a.mag >= b.mag) {
+        r.neg = a.neg;
+        r.mag = a.mag - b.mag;
+    } else {
+        r.neg = b.neg;
+        r.mag = b.mag - a.mag;
+    }
+    if (r.mag == 0) r.neg = false;
+    return r;
+}
+
+/* The value of `e`, an integer of `type`; ev->failed if it is not a constant integer. */
+static Wide eval_wide(Eval *ev, Unit *unit, const Expr *e, const Type *type) {
+    Wide zero = { false, 0 };
+    if (ev->failed) return zero;
+    switch (e->kind) {
+    case EXPR_INT: {
+        Wide w = { false, e->as.int_value };
+        return w;
+    }
+    case EXPR_CHAR: {
+        Wide w = { false, e->as.char_value };
+        return w;
+    }
+    case EXPR_NAME:
+    case EXPR_FIELD: {
+        if (e->kind == EXPR_NAME && (is_word(e->as.name, "KB") || is_word(e->as.name, "MB") || is_word(e->as.name, "GB"))) {
+            Wide w = { false, (uint64_t)1 << (is_word(e->as.name, "KB") ? 10 : is_word(e->as.name, "MB") ? 20 : 30) };
+            return w;
+        }
+        ConstInfo *c = find_const(ev->s, unit, e);
+        if (!c) break;
+        visit_const(ev->s, c);
+        if (!c->evaluated) break;
+        return wide_from_bits(c->type, c->value);
+    }
+    case EXPR_UNARY: {
+        Wide w = eval_wide(ev, unit, e->as.unary.operand, type);
+        if (e->as.unary.op == TOK_MINUS) {
+            w.neg = !w.neg && w.mag != 0;
+            return w;
+        }
+        if (e->as.unary.op == TOK_TILDE) return wide_from_bits(type, ~bits_of(w));
+        break;
+    }
+    case EXPR_BINARY: {
+        Wide a = eval_wide(ev, unit, e->as.binary.left, type);
+        Wide b = eval_wide(ev, unit, e->as.binary.right, type);
+        if (ev->failed) return zero;
+        Wide r = zero;
+        switch (e->as.binary.op) {
+        case TOK_PLUS: return wide_add(ev, unit, e, type, a, b);
+        case TOK_MINUS:
+            b.neg = !b.neg && b.mag != 0;
+            return wide_add(ev, unit, e, type, a, b);
+        case TOK_STAR:
+            r.mag = a.mag * b.mag;
+            if (a.mag != 0 && r.mag / a.mag != b.mag) eval_overflow(ev, unit, e, type);
+            r.neg = (a.neg != b.neg) && r.mag != 0;
+            return r;
+        case TOK_SLASH:
+        case TOK_PERCENT:
+            if (b.mag == 0) {
+                error_at(ev->s, unit, "E0367", e->offset, e->length, "division by zero in the value of `%.*s`",
+                         NAME_ARGS(ev->owner->decl->as.const_.name));
+                ev->failed = true;
+                return zero;
+            }
+            r.mag = e->as.binary.op == TOK_SLASH ? a.mag / b.mag : a.mag % b.mag;
+            r.neg = (e->as.binary.op == TOK_SLASH ? a.neg != b.neg : a.neg) && r.mag != 0;
+            return r;
+        case TOK_AMP: return wide_from_bits(type, bits_of(a) & bits_of(b));
+        case TOK_PIPE: return wide_from_bits(type, bits_of(a) | bits_of(b));
+        case TOK_CARET: return wide_from_bits(type, bits_of(a) ^ bits_of(b));
+        case TOK_SHL:
+        case TOK_SHR:
+            if (b.neg || b.mag >= type->as.integer.bits) {
+                eval_overflow(ev, unit, e, type);
+                return zero;
+            }
+            if (e->as.binary.op == TOK_SHL) return wide_from_bits(type, bits_of(a) << b.mag);
+            if (a.neg) return wide_from_bits(type, ~(~bits_of(a) >> b.mag)); /* arithmetic shift */
+            r.mag = a.mag >> b.mag;
+            return r;
+        default: break;
+        }
+        break;
+    }
+    case EXPR_CAST: {
+        /* `x as T`: x in its own type when it is a constant, else in T; then C's conversion */
+        const Expr *value = e->as.cast.value;
+        ConstInfo *c = value->kind == EXPR_NAME || value->kind == EXPR_FIELD ? find_const(ev->s, unit, value) : NULL;
+        Type *to = resolve_type(ev->s, unit, e->as.cast.type, POSITION_VALUE);
+        if (to->tag != T_INT) break;
+        const Type *from = c && c->type && c->type->tag == T_INT ? c->type : to;
+        Wide w = eval_wide(ev, unit, value, from);
+        return wide_from_bits(to, bits_of(w));
+    }
+    default: break;
+    }
+    ev->failed = true;
+    return zero;
+}
+
+/* The constants that `e` uses, visited first: a cycle is found there. */
+static void visit_uses(Sema *s, Unit *unit, const Expr *e) {
+    if (!e) return;
+    switch (e->kind) {
+    case EXPR_NAME:
+    case EXPR_FIELD: {
+        ConstInfo *c = find_const(s, unit, e);
+        if (c) visit_const(s, c);
+        break;
+    }
+    case EXPR_UNARY: visit_uses(s, unit, e->as.unary.operand); break;
+    case EXPR_BINARY:
+        visit_uses(s, unit, e->as.binary.left);
+        visit_uses(s, unit, e->as.binary.right);
+        break;
+    case EXPR_CAST: visit_uses(s, unit, e->as.cast.value); break;
+    case EXPR_TERNARY:
+        visit_uses(s, unit, e->as.ternary.cond);
+        visit_uses(s, unit, e->as.ternary.then_expr);
+        visit_uses(s, unit, e->as.ternary.else_expr);
+        break;
+    default: break;
+    }
+}
+
+/* Checks that `c` does not depend on itself, and evaluates it if it is an integer. */
+static void visit_const(Sema *s, ConstInfo *c) {
+    if (c->mark == 2) return;
+    Name name = c->decl->as.const_.name;
+    if (c->mark == 1) {
+        Diagnostic *d = error_at(s, c->unit, "E0367", name.offset, name.length, "the value of `%.*s` depends on itself",
+                                 NAME_ARGS(name));
+        diag_help(d, "a constant is computed from literals and other constants, without a cycle");
+        c->mark = 2;
+        c->cyclic = true;
+        return;
+    }
+    c->mark = 1;
+    const Expr *value = c->decl->as.const_.value;
+    visit_uses(s, c->unit, value);
+    if (c->type && c->type->tag == T_INT && value && !c->cyclic) {
+        Eval ev = { s, c, false };
+        Wide w = eval_wide(&ev, c->unit, value, c->type);
+        if (!ev.failed && !wide_fits(c->type, w)) {
+            /* a literal that does not fit is reported when the value is checked */
+            bool literal = value->kind == EXPR_INT ||
+                           (value->kind == EXPR_UNARY && value->as.unary.operand->kind == EXPR_INT);
+            if (literal) ev.failed = true;
+            else eval_overflow(&ev, c->unit, value, c->type);
+        }
+        if (!ev.failed) {
+            c->evaluated = true;
+            c->value = bits_of(w);
+        }
+    }
+    c->mark = 2;
+}
+
+static void resolve_consts(Sema *s) {
+    for (size_t i = 0; i < s->consts.count; i++) {
+        ConstInfo *c = s->consts.items[i];
+        const TypeExpr *te = c->decl->as.const_.type;
+        c->type = resolve_type(s, c->unit, te, POSITION_VALUE);
+        TypeTag tag = c->type->tag;
+        if (tag != T_INT && tag != T_FLOAT && tag != T_BOOL && tag != T_CHAR && tag != T_STR && tag != T_ERROR) {
+            Diagnostic *d = error_at(s, c->unit, "E0368", te->offset, te->length,
+                                     "a constant is a number, a `bool`, a `char` or a `str`");
+            diag_help(d, "a value of another type is built where it is used, or returned by a function");
+            c->type = s->types.error;
+        }
+    }
+    for (size_t i = 0; i < s->consts.count; i++) visit_const(s, s->consts.items[i]);
+}
+
+/* The size of `ui8[NAME]`: an integer constant, at least 1; 0 if it is not one (reported). */
+static uint64_t array_size_of(Sema *s, Unit *unit, const TypeExpr *te) {
+    Path path = te->as.array.size_name;
+    Expr e = {0};
+    Expr object = {0};
+    if (path.count == 1) {
+        e.kind = EXPR_NAME;
+        e.as.name = path.items[0];
+    } else if (path.count == 2) {
+        object.kind = EXPR_NAME;
+        object.as.name = path.items[0];
+        e.kind = EXPR_FIELD;
+        e.as.field.object = &object;
+        e.as.field.name = path.items[1];
+    }
+    Name last = path.items[path.count - 1];
+    ConstInfo *c = path.count <= 2 ? find_const(s, unit, &e) : NULL;
+    if (!c) {
+        Diagnostic *d = error_at(s, unit, "E0308", last.offset, last.length, "`%.*s` is not a constant",
+                                 NAME_ARGS(last));
+        diag_help(d, "the size of an array is a number, or an integer constant: `ui8[SIZE]`");
+        return 0;
+    }
+    if (path.count == 2 && !c->decl->is_pub && c->unit != unit) {
+        error_at(s, unit, "E0305", last.offset, last.length, "`%.*s` is private to the module `%s`", NAME_ARGS(last),
+                 c->unit->module);
+    }
+    if (!c->type) return 0; /* a field resolved before the constants: not possible, they come first */
+    visit_const(s, c);
+    if (!c->evaluated) {
+        if (c->type->tag != T_ERROR && c->type->tag != T_INT) {
+            error_at(s, unit, "E0308", last.offset, last.length, "the size of an array is an integer, not `%.*s`",
+                     NAME_ARGS(c->type->name));
+        }
+        return 0;
+    }
+    Wide w = wide_from_bits(c->type, c->value);
+    if (w.neg || w.mag == 0) {
+        error_at(s, unit, "E0308", te->offset, te->length, "an array has at least one element");
+        return 0;
+    }
+    return w.mag;
+}
+
 bool sema_check(Sema *s, Program *program) {
     memset(s, 0, sizeof *s);
     s->program = program;
@@ -1268,6 +1586,7 @@ bool sema_check(Sema *s, Program *program) {
         collect(s, program->units.items[i]);
     }
     resolve_generics(s);
+    resolve_consts(s);
 
     for (size_t i = 0; i < s->type_infos.count; i++) {
         TypeInfo *info = s->type_infos.items[i];
@@ -1330,6 +1649,7 @@ void sema_free(Sema *s) {
     free(s->scopes);
     free(s->type_infos.items);
     free(s->fns.items);
+    free(s->consts.items);
     types_free(&s->types);
     arena_free(&s->arena);
     memset(s, 0, sizeof *s);

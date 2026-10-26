@@ -1,0 +1,16 @@
+// Constants of a module (spec §11.6), used from another.
+
+pub ui32 INIT_VIDEO = 0x20;
+pub ui32 INIT_EVENTS = 0x4000;
+pub ui32 INIT_ALL = INIT_VIDEO | INIT_EVENTS;
+pub usize NAME_MAX = 2 * 8;
+pub i8 LOWEST = -128;
+pub str TITLE = "Sosu";
+pub f64 RATIO = 1.5;
+pub bool VERBOSE = false;
+pub char SEPARATOR = ':';
+ui64 SECRET = 42;
+
+pub ui64 secret() {
+    return SECRET;
+}

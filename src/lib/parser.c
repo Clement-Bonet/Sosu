@@ -373,6 +373,12 @@ static size_t skip_type(const Parser *p, size_t index) {
         } else if (kind == TOK_LBRACKET) {
             if (token_at(p, index + 1)->kind == TOK_RBRACKET) index += 2;
             else if (token_at(p, index + 1)->kind == TOK_INT && token_at(p, index + 2)->kind == TOK_RBRACKET) index += 3;
+            else if (token_at(p, index + 1)->kind == TOK_IDENT) {
+                size_t after = index + 2;
+                while (token_at(p, after)->kind == TOK_DOT && token_at(p, after + 1)->kind == TOK_IDENT) after += 2;
+                if (token_at(p, after)->kind != TOK_RBRACKET) return index;
+                index = after + 1;
+            }
             else return index;
         } else if (kind == TOK_BANG && token_at(p, index + 1)->kind == TOK_IDENT) {
             index += 2;
@@ -562,6 +568,10 @@ static TypeExpr *parse_type(Parser *p, bool in_cast) {
                 outer = new_type(p, TYPE_ARRAY, start);
                 outer->as.array.element = type;
                 outer->as.array.size = advance(p)->int_value;
+            } else if (check(p, TOK_IDENT)) { /* `ui8[NAME]`: the size is a constant (spec §11.6) */
+                outer = new_type(p, TYPE_ARRAY, start);
+                outer->as.array.element = type;
+                outer->as.array.size_name = parse_path(p);
             } else {
                 outer = new_type(p, TYPE_SLICE, start);
                 outer->as.inner = type;
@@ -1462,14 +1472,24 @@ static Decl *parse_declaration(Parser *p) {
             parse_function(p, &decl->as.fn, false);
             break;
         }
+        if (at_variable_declaration(p) && !check(p, TOK_KW_MUT) && !check(p, TOK_KW_AUTO)) {
+            /* `ui32 NAME = value;`: a constant (spec §11.6) */
+            decl->kind = DECL_CONST;
+            decl->as.const_.type = parse_type(p, false);
+            expect_name(p, &decl->as.const_.name, "a constant name");
+            if (expect(p, TOK_EQ)) decl->as.const_.value = parse_expr(p);
+            expect(p, TOK_SEMICOLON);
+            break;
+        }
         if (at_variable_declaration(p)) {
             Diagnostic *d = error_at(p, "E0203", token->offset, token->length, "global variables are not supported");
-            diag_help(d, "pass the value as a parameter, or store it in a struct");
+            if (token->kind == TOK_KW_MUT) diag_help(d, "a constant is declared without `mut`: `ui32 SIZE = 64;`");
+            else diag_help(d, "a constant names its type: `ui32 SIZE = 64;`");
         } else {
             char found[64];
             describe_token(p, token, found, sizeof found);
             Diagnostic *d = error_at(p, "E0203", token->offset, token->length, "expected a declaration, found %s", found);
-            diag_help(d, "a file contains `import`, `struct`, `class`, `interface`, `enum`, `extern`, `test` and functions");
+            diag_help(d, "a file contains `import`, `struct`, `class`, `interface`, `enum`, `extern`, `test`, constants and functions");
         }
         return NULL;
     }

@@ -82,7 +82,13 @@ static void print_type(Printer *pr, const TypeExpr *type) {
         break;
     case TYPE_ARRAY:
         print_type(pr, type->as.array.element);
-        fprintf(pr->out, "[%llu]", (unsigned long long)type->as.array.size);
+        if (type->as.array.size_name.count) {
+            fputc('[', pr->out);
+            print_path(pr, type->as.array.size_name);
+            fputc(']', pr->out);
+        } else {
+            fprintf(pr->out, "[%llu]", (unsigned long long)type->as.array.size);
+        }
         break;
     case TYPE_SLICE:
         print_type(pr, type->as.inner);
@@ -479,6 +485,15 @@ static void print_decl(Printer *pr, const Decl *decl) {
         print_name(pr, decl->as.test.name);
         newline(pr, 1);
         print_stmt(pr, decl->as.test.body, 1);
+        fputc(')', out);
+        break;
+    case DECL_CONST:
+        fputs("(const ", out);
+        print_type(pr, decl->as.const_.type);
+        fputc(' ', out);
+        print_name(pr, decl->as.const_.name);
+        fputc(' ', out);
+        print_expr(pr, decl->as.const_.value, 0);
         fputc(')', out);
         break;
     }

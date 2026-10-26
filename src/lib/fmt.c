@@ -192,8 +192,14 @@ static void fmt_type(Fmt *f, const TypeExpr *type) {
     case TYPE_SLICE: fmt_type(f, type->as.inner); put(f, "[]"); break;
     case TYPE_ARRAY:
         fmt_type(f, type->as.array.element);
-        snprintf(size, sizeof size, "[%llu]", (unsigned long long)type->as.array.size);
-        put(f, size);
+        if (type->as.array.size_name.count) {
+            put(f, "[");
+            fmt_path(f, type->as.array.size_name);
+            put(f, "]");
+        } else {
+            snprintf(size, sizeof size, "[%llu]", (unsigned long long)type->as.array.size);
+            put(f, size);
+        }
         break;
     case TYPE_RESULT:
         fmt_type(f, type->as.result.value);
@@ -816,6 +822,17 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
         put_name(f, decl->as.test.name);
         put(f, " ");
         fmt_block(f, decl->as.test.body);
+        end_line(f);
+        break;
+    case DECL_CONST:
+        start_line(f);
+        if (decl->is_pub) put(f, "pub ");
+        fmt_type(f, decl->as.const_.type);
+        put(f, " ");
+        put_name(f, decl->as.const_.name);
+        put(f, " = ");
+        fmt_expr(f, decl->as.const_.value);
+        put(f, ";");
         end_line(f);
         break;
     }

@@ -502,7 +502,10 @@ static void find_type(Find *f, const TypeExpr *t) {
     if (t->kind == TYPE_NAME && better(f, t->offset, t->length, FOUND_TYPE)) f->type = t;
     switch (t->kind) {
     case TYPE_POINTER: case TYPE_OPTION: case TYPE_SLICE: find_type(f, t->as.inner); break;
-    case TYPE_ARRAY: find_type(f, t->as.array.element); break;
+    case TYPE_ARRAY:
+        find_type(f, t->as.array.element);
+        if (t->as.array.size_name.count) find_path(f, &t->as.array.size_name);
+        break;
     case TYPE_RESULT:
         find_type(f, t->as.result.value);
         find_type(f, t->as.result.error);
@@ -678,6 +681,11 @@ static void find_decl(Find *f, const Decl *d) {
         for (size_t i = 0; i < d->as.extern_.fn_count; i++) find_fn(f, &d->as.extern_.fns[i], NULL);
         break;
     case DECL_TEST: find_stmt(f, d->as.test.body); break;
+    case DECL_CONST:
+        find_type(f, d->as.const_.type);
+        find_name(f, d->as.const_.name, NULL, d);
+        find_expr(f, d->as.const_.value);
+        break;
     default: break;
     }
 }
@@ -754,6 +762,29 @@ static void write_header(JsonOut *out, const SourceFile *file, const Decl *d) {
     write_source(out, file, d->offset, end);
 }
 
+/* `pub ui32 NAME = value`, without its `;` (spec §11.6). */
+static void write_const(JsonOut *out, const SourceFile *file, const Decl *d) {
+    size_t end = d->offset + d->length;
+    if (end > d->offset && end <= file->length && file->text[end - 1] == ';') end--;
+    write_source(out, file, d->offset, end);
+}
+
+static void describe_const(Target *t, const ConstInfo *c) {
+    write_const(&t->text, &c->unit->file, c->decl);
+    if (c->evaluated && c->decl->as.const_.value && c->decl->as.const_.value->kind != EXPR_INT) {
+        char *type = type_to_string(c->type);
+        if (c->type->as.integer.is_signed && (int64_t)(c->value << (64 - c->type->as.integer.bits)) < 0) {
+            unsigned bits = c->type->as.integer.bits;
+            uint64_t extended = bits < 64 ? c->value | ~((UINT64_C(1) << bits) - 1) : c->value;
+            json_raw(&t->note, "`%s` %lld", type, (long long)extended);
+        } else {
+            json_raw(&t->note, "`%s` %llu", type, (unsigned long long)c->value);
+        }
+        free(type);
+    }
+    set_target(t, &c->unit->file, c->decl->as.const_.name);
+}
+
 static void describe_fn(Target *t, const FnInfo *fn) {
     if (!fn->unit) return;
     write_signature(&t->text, &fn->unit->file, fn->decl);
@@ -821,6 +852,7 @@ static void describe_symbol(Target *t, const Symbol *sym) {
     case SYM_TYPE: describe_type(t, sym->type_info); break;
     case SYM_FN: describe_fn(t, sym->fn); break;
     case SYM_MODULE: if (sym->module) describe_module(t, sym->module); break;
+    case SYM_CONST: describe_const(t, sym->constant); break;
     }
 }
 
@@ -909,6 +941,7 @@ static void describe_expr(Target *t, const Analysis *a, const Unit *unit, const 
         describe_type_values(t, e->target, e);
         return;
     case RESOLVED_VARIANT: describe_variant(t, e->target, e->target_index); return;
+    case RESOLVED_CONST: describe_const(t, e->target); return;
     default: break;
     }
     Symbol *sym = symbol_of(a, unit, e);
@@ -963,6 +996,7 @@ static Target describe(const Analysis *a, const Unit *unit, size_t offset) {
     case FOUND_DECLARED:
         set_target(&t, &unit->file, f.declared);
         if (f.declared_fn) write_signature(&t.text, &unit->file, f.declared_fn);
+        else if (f.declared_decl && f.declared_decl->kind == DECL_CONST) write_const(&t.text, &unit->file, f.declared_decl);
         else if (f.declared_decl) write_header(&t.text, &unit->file, f.declared_decl);
         break;
     default: break;
@@ -1056,6 +1090,7 @@ enum {
     ITEM_ENUM = 13,
     ITEM_STRUCT = 22,
     ITEM_ENUM_MEMBER = 20,
+    ITEM_CONSTANT = 21,
 };
 
 typedef struct {
@@ -1103,6 +1138,9 @@ static void add_symbol(Items *items, const Symbol *sym) {
     } else if (sym->kind == SYM_FN) {
         kind = ITEM_FUNCTION;
         if (sym->fn->unit) write_signature(&detail, &sym->fn->unit->file, sym->fn->decl);
+    } else if (sym->kind == SYM_CONST) {
+        kind = ITEM_CONSTANT;
+        write_const(&detail, &sym->constant->unit->file, sym->constant->decl);
     } else if (sym->module) {
         json_raw(&detail, "module %s", sym->module->module);
     }

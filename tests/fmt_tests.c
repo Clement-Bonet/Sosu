@@ -34,6 +34,8 @@ static void test_canonical(void) {
     expect_format("void f(){x=c?a:(b?d:e);y=(c?a:b)?d:e;z=*(p+4);w=(*p).x;}",
                   "void f() {\n    x = c ? a : b ? d : e;\n    y = (c ? a : b) ? d : e;\n    z = *(p + 4);\n    w = (*p).x;\n}\n");
     expect_format("enum E { A, B(i32 x) }", "enum E { A, B(i32 x) }\n");
+    expect_format("pub  ui32 A=0x20|(B);\nusize B=4;\nstruct S{ui8[B] b;}",
+                  "pub ui32 A = 0x20 | B;\nusize B = 4;\nstruct S {\n    ui8[B] b;\n}\n");
     expect_format("enum E {\nA,\nB }", "enum E {\n    A,\n    B,\n}\n");
     expect_format("i32 clamp(i32 x) requires x > 0 ensures result > 0 { return x; }",
                   "i32 clamp(i32 x)\n    requires x > 0\n    ensures result > 0\n{\n    return x;\n}\n");

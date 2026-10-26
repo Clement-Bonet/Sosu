@@ -46,7 +46,7 @@ struct TypeExpr {
     union {
         Path name;
         TypeExpr *inner; /* POINTER, OPTION, SLICE */
-        struct { TypeExpr *element; uint64_t size; } array;
+        struct { TypeExpr *element; uint64_t size; Path size_name; } array; /* size_name: `ui8[NAME]` */
         struct { TypeExpr *value; TypeExpr *error; } result;
         struct { TypeExpr **params; size_t param_count; TypeExpr *ret; Path effects; } fn;
     } as;
@@ -117,6 +117,7 @@ typedef enum {
     RESOLVED_VARIANT,     /* target: TypeInfo of the enum, target_index: the variant */
     RESOLVED_BUILTIN,     /* target: the name, e.g. "some" */
     RESOLVED_PRINT,       /* io.print */
+    RESOLVED_CONST,       /* a constant of a module (target: ConstInfo) */
 } Resolution;
 
 struct Expr {
@@ -268,6 +269,7 @@ typedef enum {
     DECL_FN,
     DECL_EXTERN,
     DECL_TEST,
+    DECL_CONST, /* `pub ui32 NAME = value;` (spec §11.6) */
 } DeclKind;
 
 typedef struct {
@@ -292,6 +294,7 @@ typedef struct {
         FnDecl fn;
         struct { Name abi; FnDecl *fns; size_t fn_count; } extern_; /* abi: string literal, quotes included */
         struct { Name name; Stmt *body; } test;                     /* name: string literal, quotes included */
+        struct { TypeExpr *type; Name name; Expr *value; } const_;
     } as;
 } Decl;
 

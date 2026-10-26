@@ -69,10 +69,24 @@ typedef struct {
     size_t effect_param_count;
 } FnInfo;
 
+/* A constant of a module (spec §11.6): a number, `bool`, `char` or `str`. An integer constant is
+   evaluated by semantic analysis (for array sizes, and so that an overflow is a compile-time
+   error); the others are generated where they are used. */
+typedef struct {
+    const Decl *decl;
+    Unit *unit;
+    Type *type;
+    int mark; /* 0: not visited, 1: being visited, 2: done (cycles) */
+    bool cyclic;
+    bool evaluated; /* an integer whose value is known */
+    uint64_t value;
+} ConstInfo;
+
 typedef enum {
     SYM_TYPE,
     SYM_FN,
     SYM_MODULE, /* an import, named after the last name of its path */
+    SYM_CONST,
 } SymbolKind;
 
 typedef struct {
@@ -82,6 +96,7 @@ typedef struct {
     TypeInfo *type_info;
     FnInfo *fn;
     Unit *module;
+    ConstInfo *constant;
 } Symbol;
 
 /* What the names of type and effect parameters stand for while a generic declaration is
@@ -110,6 +125,7 @@ typedef struct {
     Unit *prelude; /* core.prelude: its public names are used without import, or NULL */
     struct { TypeInfo **items; size_t count; size_t cap; } type_infos;
     struct { FnInfo **items; size_t count; size_t cap; } fns;
+    struct { ConstInfo **items; size_t count; size_t cap; } consts;
     struct { TypeInfo **items; size_t count; size_t cap; } instances; /* of generic types, in creation order */
     const TypeEnv *env; /* NULL outside generic declarations */
     bool quiet;         /* resolving the members of an instance: its errors were reported for the generic */

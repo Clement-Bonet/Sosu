@@ -110,7 +110,7 @@ Parsing note: a statement starting with `Ident Ident` is a declaration, otherwis
 starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `ui8[4] buf`, `i32!E r`).
 
 Every variable receives its value where it is declared: `i32 x;` is an error. There are no global
-variables in v0.
+variables in v0; a module has constants (`pub ui32 FLAGS = 0x20;`, §11.6).
 
 Control flow: `if / else`, `while`, `for (init; cond; step)`, `for (T x in a..b)`, `break`, `continue`.
 
@@ -1604,7 +1604,8 @@ parameters), not to types.
 program      = { import | decl } ;
 import       = "import" path ";" ;
 path         = IDENT { "." IDENT } ;
-decl         = [ "pub" ] ( struct | class | interface | enum | function ) | extern | export | test ;
+decl         = [ "pub" ] ( struct | class | interface | enum | function | constant ) | extern | export | test ;
+constant     = type IDENT "=" expr ";" ;           (* a constant expression (spec §11.6) *)
 
 struct       = "struct" IDENT "{" { member } "}" ;
 class        = "class" IDENT [ ":" path { "," path } ] "{" { member } "}" ;
@@ -1624,7 +1625,7 @@ param        = [ "mut" ] type IDENT ;
 effects      = "uses" IDENT { "," IDENT } ;
 contract     = ( "requires" | "ensures" ) expr ;
 
-type         = base_type { "*" | "?" | "[" [ INT ] "]" | "!" base_type } ;
+type         = base_type { "*" | "?" | "[" [ INT | path ] "]" | "!" base_type } ;  (* path: an integer constant *)
 base_type    = path | "fn" "(" [ type { "," type } ] ")" "->" type [ effects ] ;
 
 block        = "{" { stmt } "}" ;
