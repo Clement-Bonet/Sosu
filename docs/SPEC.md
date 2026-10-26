@@ -584,7 +584,7 @@ extern "C" {
 
 - `struct`s are compatible with the C layout.
 - An `extern` call is `unsafe`, unless it is wrapped in a safe function. `pub extern "C" { ... }` makes its functions public: the module that `sosuc bindgen` writes is used by another (§11.6).
-- `sosuc bindgen` (step 11, §11.6): generates declarations from C headers (functions, structs, enums, constants). Until then, bindings are written by hand.
+- `sosuc bindgen` (§11.6): generates declarations from C headers (functions, structs, enums, constants), checked by the C compiler with `--check`.
 - The Sosu declarations must match the C ones exactly (`int` is `i32`, a C struct is a Sosu `struct` with the same fields in the same order): the C compiler never sees the C headers.
 
 ### 9.1 Linking C libraries
@@ -608,7 +608,7 @@ frameworks = ["Cocoa"]
 - `subsystem`: `"window"` for a package whose programs open windows (`platform` declares it). In a `--release` build on Windows, a program that links such a package has no console behind its windows (`/SUBSYSTEM:WINDOWS` with MSVC, `-mwindows` with MinGW); a debug build keeps it, for `io.print`. `"console"` is the default.
 - Paths are relative to the package, never absolute, so that the manifest works on every machine.
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
-- The values are one-line lists of strings. [link.<target>] uses the target names of `--target` (§11.1); for now, the target is the system running `sosuc`.
+- The values are one-line lists of strings. [link.<target>] uses the systems of `--target` (§11.1): `windows`, `linux`, `macos`, `android`, `ios`; a section of one architecture, `[link.windows-arm64]`, adds to that of its system, and `{arch}` in a path is the architecture of the target (`vendor/SDL3/lib/{arch}`, §11.6).
 
 ### 9.2 Using Sosu from other languages
 
@@ -1465,7 +1465,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including the language server.
 
-- `sosuc build [--target <os>-<arch>]`: compiles. The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target android-arm64`, `android-x64`, `ios-arm64` and `ios-sim` build for a phone (§11.5); another desktop is not supported yet.
+- `sosuc build [--target <os>-<arch>]`: compiles. The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target android-arm64`, `android-x64`, `ios-arm64` and `ios-sim` build for a phone (§11.5); `windows-arm64`, `linux-arm64`, `macos-universal`... for another desktop, in `build/<target>/` (§11.6).
 - `sosuc run`: compiles and runs in one command (useful for learning and workshops).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
@@ -1538,7 +1538,7 @@ sosuc package --target ios-sim examples/window       # build/ios/window.app, for
 
 ### 11.6 `sosuc bindgen`, desktop packages, cross-compilation (step 11)
 
-Status: design. One branch, in batches: constants (needed by bindings), `sosuc bindgen`, `sosuc package` for the desktop, cross-compilation between desktops, then the CI and the documentation. iOS stays checked by the CI only (no Mac here).
+Status: available. One branch, in batches: constants (needed by bindings), `sosuc bindgen`, `platform` on the declarations it writes for SDL3, `sosuc package` for the desktop, cross-compilation between desktops, then the CI and the documentation. iOS stays checked by the CI only (no Mac here). What differs from the design is said at the end.
 
 ```sh
 sosuc bindgen vendor/SDL3/include/SDL3/SDL.h -I vendor/SDL3/include --prefix SDL_ -o src/sdl_c.sosu
@@ -1594,6 +1594,19 @@ sosuc build --target linux-arm64 examples/window     # another architecture of a
 - C `enum`s as constants, or as Sosu enums without data? (proposed: constants; flags are combined with `|`, and a C function may return a value that no variant names)
 - The archive of a Linux program: `.tar.gz` of a folder, or an AppImage? (proposed: `.tar.gz`; an AppImage needs a tool of its own)
 - Cross-compilation to another system in this step, or only other architectures? (proposed: other architectures, tested by the CI; another system when a sysroot is given, without CI, said as such)
+
+#### Decisions, and what differs from the design
+
+- The open questions above were answered as proposed.
+- Constants: an integer constant is computed by semantic analysis (an overflow, a division by zero, a cycle are errors, E0367), and generated as its value; another constant (`f64`, `str`...) is generated from its expression where it is used. A constant of another type is E0368; `mut` or `auto` at the top of a module stay E0203, with a help that shows a constant.
+- `pub extern "C" { ... }`: the functions of a module of bindings are used by another module, as the design needed (`sdl.sosu` calls those of `sdl_c.sosu`). They stay `unsafe` to call.
+- The values of the macros are asked of the preprocessor, not read from the headers: a second preprocessing of the header adds `__sosu_macro__ "NAME" NAME ;` for each object-like `#define` of the bound headers, so that the value is the one of the `#if` branch that defined it, its macros expanded. A macro whose value depends on where it is used (`__LINE__`, `__FILE__`...) is left out. A character constant is an `i32`, as in C.
+- What the module holds: the constants (macros, then the values of the enums), the structs (fields `pub mut`; an anonymous struct or union of a field is a struct of its own, `Parent_1`), then a `pub extern "C"` block; a pointer to a struct of another header (`FILE*`) is `ui8*`; a name that is a word of Sosu is followed by `_` (`match_`); what is left out (variadic functions, mostly) is listed at the end of the module, as comments.
+- `--check` also checks the value of each integer constant, not only the layouts.
+- `bindgen` writes for this machine: `--target` is not one of its options. A binding is the same on every system when the header uses fixed-size types, as SDL does: `platform/src/sdl_c.sosu`, written on Windows (1972 constants, 168 structs, 1231 functions; SDL3 checked whole), is used everywhere; its few functions with `long` or `va_list` are written for Windows and not used by `platform`.
+- `sosuc package` builds in release. `app.read_asset` reads from the current folder first, as before (and on a phone), then next to the program: a packaged program runs from anywhere. On Windows, the icon of `[app]` (a PNG, kept in an `.ico`) is a resource of the program when it is packaged on Windows. A `.zip` made on Linux needs `zip`.
+- Cross-compilation: the tools of MSVC for ARM64 come from `vcvarsall.bat x64_arm64` (they need the ARM64 component of Visual Studio, and its libraries); `macos-universal` is one `clang -arch arm64 -arch x86_64`, without `lipo`. A program for another desktop is built (`sosuc build`, `sosuc package`), not run; `--lib` stays for this machine.
+- The CI builds `tests/programs/basics` for linux-arm64 (checked with `file`), windows-arm64 (the machine of its PE header) and macos-universal (`lipo -info`), and keeps the archive of `examples/workspace` of each desktop as an artifact of the run.
 
 ## 12. Grammar (v0, EBNF)
 
@@ -1684,7 +1697,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
 9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code: done (§9.2, §11.5)
 10. Generics (monomorphized), `Vec` / `HashMap` containers: done (§5.4)
-11. `sosuc bindgen`, `sosuc package`, cross-compilation (design: §11.6)
+11. `sosuc bindgen`, `sosuc package`, cross-compilation: done (§11.6)
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
 13. Research: `comptime`, effect polymorphism, regions, concurrency
 14. Self-hosting

@@ -19,6 +19,7 @@ English is the working language of the project: code, comments, compiler message
 | 8. `platform` / `render` / `ui` / `i18n` | done on the desktop: window, keyboard, mouse, touch and text events, drawing in a canvas of pixels, text (TrueType fonts read and drawn in Sosu, and a built-in 8 by 8 font with the Latin accented letters), widgets in immediate mode (`ui`), `.ui.sosu` interface files with themes, styles and translations; touch and mobile events written, Android and iOS builds are step 9 |
 | 9. Libraries for other languages, then mobile | done: `export "C"` and `sosuc build --lib` (static) or `--lib=shared`, with a C header and errors returned to the host (spec §9.2); `--target android-*` and `ios-*`, `sosuc package --target android` (an APK) and `ios-sim` (spec §11.5) |
 | 10. Generics | done: functions, structs, enums and classes with type parameters and constraints, effects as parameters, `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (spec §5.4) |
+| 11. `sosuc bindgen`, `sosuc package`, cross-compilation | done: constants of modules; the declarations of C headers as Sosu modules, checked by the C compiler (`platform` binds SDL3 so); desktop packages with their archive; `--target windows-arm64`, `linux-arm64`, `macos-universal`..., another system with clang and a sysroot (spec §11.6) |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -53,6 +54,10 @@ sosuc build --lib tests/programs/library          # a C library and its header b
 sosuc build --lib=shared tests/programs/library   # the same, as a .dll, .so or .dylib
 sosuc package --target android examples/window   # an APK (Android NDK and SDK; spec §11.5)
 sosuc package --target ios-sim examples/window   # an application for the iOS simulator (on a Mac)
+sosuc package examples/workspace                 # build/package/workspace/ and its .zip or .tar.gz (spec §11.6)
+sosuc build --target linux-arm64 tests/programs/basics   # another architecture: build/linux-arm64/basics
+sosuc bindgen vendor/SDL3/include/SDL3/SDL.h -I vendor/SDL3/include --prefix SDL_ -o src/sdl_c.sosu --check
+                                    # the declarations of a C header, checked by the C compiler (spec §11.6)
 sosuc check tests/packages/app      # checks without compiling
 sosuc fmt packages/platform         # formats in place (spec §7.6); --check only reports
 sosuc i18n extract examples/workspace -o examples/workspace/locales/messages.locale.default.sosu   # the texts to translate (spec §10.7)
