@@ -18,6 +18,7 @@ typedef struct {
     DiagList *diags;
     bool panic;
     bool no_struct_literal; /* `Name {` starts a body, not a literal (contracts) */
+    bool half_gt;           /* the current token is `>>`, and its first `>` closed a list of type arguments */
     /* .ui.sosu files: the `bind:` and `on_change:` of the `Dropdown` whose options are being
        read (`ui_dropdown` NULL: not in one); whether the next item is the first node of a
        window, the place of a `TitleBar`, and whether the window has one. */
@@ -290,6 +291,48 @@ static void sync_declaration(Parser *p) {
 
 /* ---- Lookahead ---- */
 
+/* Skips a list of type arguments `<...>` starting at `index` (on `<`), without reporting
+   anything (spec §5.4). Returns the index just after it, or 0 if the tokens cannot be one:
+   then `<` is a comparison. */
+static size_t skip_type_args(const Parser *p, size_t index) {
+    int angles = 0;
+    int parens = 0;
+    for (;;) {
+        switch (token_at(p, index)->kind) {
+        case TOK_LT: angles++; break;
+        case TOK_GT: angles--; break;
+        case TOK_SHR: angles -= 2; break;
+        case TOK_LPAREN: parens++; break;
+        case TOK_RPAREN:
+            if (--parens < 0) return 0;
+            break;
+        case TOK_IDENT: case TOK_DOT: case TOK_COMMA: case TOK_STAR: case TOK_QUESTION: case TOK_LBRACKET:
+        case TOK_RBRACKET: case TOK_INT: case TOK_BANG: case TOK_ARROW: case TOK_KW_USES:
+            break;
+        default:
+            return 0;
+        }
+        index++;
+        if (angles == 0) return parens == 0 ? index : 0;
+        if (angles == -1 && parens == 0) return index - 1; /* `>>` closes this list and the outer one */
+        if (angles < 0) return 0;
+    }
+}
+
+/* Skips a list of type parameters `<T: Ordered, uses E>` (on `<`); 0 if there is none. */
+static size_t skip_type_params(const Parser *p, size_t index) {
+    int angles = 0;
+    for (;;) {
+        TokenKind kind = token_at(p, index)->kind;
+        if (kind == TOK_LT) angles++;
+        else if (kind == TOK_GT) angles--;
+        else if (kind == TOK_SHR) angles -= 2;
+        else if (kind == TOK_EOF || kind == TOK_LBRACE || kind == TOK_SEMICOLON) return 0;
+        index++;
+        if (angles <= 0) return angles == 0 ? index : 0;
+    }
+}
+
 /* Skips the tokens of a type starting at `index`, without reporting anything.
    Returns the index just after the type, or 0 if there is no type there. */
 static size_t skip_type(const Parser *p, size_t index) {
@@ -317,6 +360,10 @@ static size_t skip_type(const Parser *p, size_t index) {
     } else {
         index++;
         while (token_at(p, index)->kind == TOK_DOT && token_at(p, index + 1)->kind == TOK_IDENT) index += 2;
+        if (token_at(p, index)->kind == TOK_LT) {
+            size_t after = skip_type_args(p, index);
+            if (after) index = after;
+        }
     }
 
     for (;;) {
@@ -346,7 +393,10 @@ static bool at_variable_declaration(const Parser *p) {
 static bool at_function(const Parser *p) {
     if (check(p, TOK_KW_UNSAFE)) return true;
     size_t after = skip_type(p, p->pos);
-    return after != 0 && token_at(p, after)->kind == TOK_IDENT && token_at(p, after + 1)->kind == TOK_LPAREN;
+    if (after == 0 || token_at(p, after)->kind != TOK_IDENT) return false;
+    after++;
+    if (token_at(p, after)->kind == TOK_LT) after = skip_type_params(p, after);
+    return after != 0 && token_at(p, after)->kind == TOK_LPAREN;
 }
 
 /* ---- Names and types ---- */
@@ -391,6 +441,56 @@ static TypeExpr *new_type(Parser *p, TypeKind kind, size_t start) {
     return type;
 }
 
+/* `>` closing a list of type arguments; `>>` closes two, one at a time. */
+static void close_angle(Parser *p) {
+    if (p->half_gt) {
+        p->half_gt = false;
+        advance(p);
+    } else if (check(p, TOK_SHR)) {
+        p->half_gt = true;
+    } else {
+        expect(p, TOK_GT);
+    }
+}
+
+/* `<A, B>`, after a generic name (the caller checked it with skip_type_args). */
+static TypeExpr **parse_type_args(Parser *p, size_t *count) {
+    advance(p); /* < */
+    VEC(TypeExpr *) args = {0};
+    do {
+        TypeExpr *arg = parse_type(p, false);
+        SOSU_VEC_PUSH(&args, arg);
+    } while (!p->half_gt && accept(p, TOK_COMMA));
+    close_angle(p);
+    *count = args.count;
+    return FINISH(p, args);
+}
+
+/* `<T, K: Hash + Equal, uses E>` after the name of a declaration (spec §5.4). */
+static void parse_type_params(Parser *p, TypeParams *out) {
+    if (!check(p, TOK_LT)) return;
+    advance(p);
+    VEC(TypeParam) params = {0};
+    do {
+        TypeParam param = {0};
+        param.is_effect = accept(p, TOK_KW_USES);
+        expect_name(p, &param.name, param.is_effect ? "the name of an effect parameter" : "the name of a type parameter");
+        if (!param.is_effect && accept(p, TOK_COLON)) {
+            VEC(Path) constraints = {0};
+            do {
+                Path constraint = parse_path(p);
+                SOSU_VEC_PUSH(&constraints, constraint);
+            } while (accept(p, TOK_PLUS));
+            param.constraint_count = constraints.count;
+            param.constraints = FINISH(p, constraints);
+        }
+        SOSU_VEC_PUSH(&params, param);
+    } while (accept(p, TOK_COMMA));
+    close_angle(p);
+    out->count = params.count;
+    out->items = FINISH(p, params);
+}
+
 static TypeExpr *parse_base_type(Parser *p) {
     skip_error_tokens(p);
     size_t start = cur(p)->offset;
@@ -417,6 +517,7 @@ static TypeExpr *parse_base_type(Parser *p) {
     TypeExpr *type = new_type(p, TYPE_NAME, start);
     if (check(p, TOK_IDENT)) {
         type->as.name = parse_path(p);
+        if (check(p, TOK_LT) && skip_type_args(p, p->pos)) type->args = parse_type_args(p, &type->arg_count);
     } else {
         report_expected(p, "E0202", "a type", false);
     }
@@ -544,6 +645,8 @@ static Expr *parse_struct_literal(Parser *p, Expr *type_expr) {
     collect_path(type_expr, &names);
     type->as.name.count = names.count;
     type->as.name.items = FINISH(p, names);
+    type->args = type_expr->type_args;
+    type->arg_count = type_expr->type_arg_count;
     expr->as.struct_lit.type = type;
 
     advance(p); /* { */
@@ -781,6 +884,17 @@ static Expr *parse_call(Parser *p, Expr *callee) {
     return close_expr(p, expr);
 }
 
+/* After a name in an expression, `<` starts type arguments when they are followed by `(`, `{`,
+   `.`, or end an argument (`arena.new(Vec<i32>, a)`): the other reading, two comparisons in a
+   row, is an error anyway (spec §5.4). */
+static bool type_args_follow(const Parser *p) {
+    size_t after = skip_type_args(p, p->pos);
+    if (!after) return false;
+    TokenKind next = token_at(p, after)->kind;
+    return next == TOK_LPAREN || next == TOK_DOT || next == TOK_COMMA || next == TOK_RPAREN ||
+           (next == TOK_LBRACE && !p->no_struct_literal);
+}
+
 static Expr *parse_postfix(Parser *p) {
     Expr *expr = parse_primary(p);
     for (;;) {
@@ -808,6 +922,9 @@ static Expr *parse_postfix(Parser *p) {
             expr = close_expr(p, field);
         } else if (check(p, TOK_LBRACE) && !p->no_struct_literal && is_type_path(expr)) {
             expr = parse_struct_literal(p, expr);
+        } else if (check(p, TOK_LT) && is_type_path(expr) && expr->type_arg_count == 0 && type_args_follow(p)) {
+            expr->type_args = parse_type_args(p, &expr->type_arg_count);
+            expr->length = span_from(p, expr->offset);
         } else {
             return expr;
         }
@@ -1130,6 +1247,7 @@ static void parse_function(Parser *p, FnDecl *fn, bool signature) {
     fn->is_unsafe = accept(p, TOK_KW_UNSAFE);
     fn->ret = parse_type(p, false);
     expect_name(p, &fn->name, "a function name");
+    parse_type_params(p, &fn->type_params);
     parse_params(p, &fn->params, &fn->param_count, true);
     if (accept(p, TOK_KW_USES)) fn->effects = parse_effects(p, false);
 
@@ -1272,6 +1390,7 @@ static Decl *parse_declaration(Parser *p) {
         decl->kind = token->kind == TOK_KW_STRUCT ? DECL_STRUCT : token->kind == TOK_KW_CLASS ? DECL_CLASS : DECL_INTERFACE;
         advance(p);
         expect_name(p, &decl->as.type.name, "a type name");
+        parse_type_params(p, &decl->type_params);
         if (check(p, TOK_COLON)) {
             const Token *colon = advance(p);
             if (decl->kind != DECL_CLASS) {
@@ -1292,6 +1411,7 @@ static Decl *parse_declaration(Parser *p) {
         decl->kind = DECL_ENUM;
         advance(p);
         expect_name(p, &decl->as.enum_.name, "an enum name");
+        parse_type_params(p, &decl->type_params);
         parse_enum_body(p, decl);
         break;
     case TOK_KW_EXTERN:

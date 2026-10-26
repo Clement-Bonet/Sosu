@@ -86,6 +86,10 @@ static const char *const good =
     "    return v;\n"
     "}\n"
     "\n"
+    "T pick<T>(T a, T b) {\n"
+    "    return a;\n"
+    "}\n"
+    "\n"
     "shapes.Shape unit_circle() {\n"
     "    return shapes.Shape.Circle(1.0);\n"
     "}\n"
@@ -93,6 +97,7 @@ static const char *const good =
     "i32 main() uses io {\n"
     "    i32 count = 2;\n"
     "    vector.Vec2 o = origin();\n"
+    "    i32 n = pick(count, 3);\n"
     "    return count + 1;\n"
     "}\n";
 
@@ -117,6 +122,9 @@ static void test_session(void) {
     CHECK(answer("i32 count"), "hover on a local: %s", out.count ? out.items[0] : "nothing");
     request("textDocument/hover", good, "origin();", 1);
     CHECK(answer("vector.Vec2 origin()"), "hover on a call: %s", out.count ? out.items[0] : "nothing");
+    request("textDocument/hover", good, "pick(count", 1);
+    CHECK(answer("T pick<T>(T a, T b)") && answer("here: `T` is `i32`"), "hover on a generic call: %s",
+          out.count ? out.items[0] : "nothing");
     request("textDocument/hover", good, "Circle(1.0)", 1);
     CHECK(answer("Shape.Circle(f32)"), "hover on a variant: %s", out.count ? out.items[0] : "nothing");
     request("textDocument/hover", good, "x: 0.0", 0);
@@ -124,7 +132,7 @@ static void test_session(void) {
 
     /* go to definition */
     request("textDocument/definition", good, "count + 1", 0);
-    CHECK(answer("\"start\":{\"line\":14,\"character\":8}"), "a local: %s", out.count ? out.items[0] : "nothing");
+    CHECK(answer("\"start\":{\"line\":18,\"character\":8}"), "a local: %s", out.count ? out.items[0] : "nothing");
     request("textDocument/definition", good, "Vec2 origin", 1);
     CHECK(answer("geometry/src/vector.sosu") && answer("\"start\":{\"line\":0,\"character\":11}"), "a type of a module: %s",
           out.count ? out.items[0] : "nothing");

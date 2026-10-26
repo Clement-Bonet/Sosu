@@ -150,10 +150,43 @@ static void fmt_effects(Fmt *f, Path effects) {
     }
 }
 
+static void fmt_type(Fmt *f, const TypeExpr *type);
+
+/* `<A, B>` (spec §5.4). */
+static void fmt_type_args(Fmt *f, TypeExpr **args, size_t count) {
+    if (!count) return;
+    put(f, "<");
+    for (size_t i = 0; i < count; i++) {
+        if (i) put(f, ", ");
+        fmt_type(f, args[i]);
+    }
+    put(f, ">");
+}
+
+/* `<T: Ordered + Hash, uses E>`. */
+static void fmt_type_params(Fmt *f, TypeParams params) {
+    if (!params.count) return;
+    put(f, "<");
+    for (size_t i = 0; i < params.count; i++) {
+        const TypeParam *param = &params.items[i];
+        if (i) put(f, ", ");
+        if (param->is_effect) put(f, "uses ");
+        put_name(f, param->name);
+        for (size_t j = 0; j < param->constraint_count; j++) {
+            put(f, j ? " + " : ": ");
+            fmt_path(f, param->constraints[j]);
+        }
+    }
+    put(f, ">");
+}
+
 static void fmt_type(Fmt *f, const TypeExpr *type) {
     char size[32];
     switch (type->kind) {
-    case TYPE_NAME: fmt_path(f, type->as.name); break;
+    case TYPE_NAME:
+        fmt_path(f, type->as.name);
+        fmt_type_args(f, type->args, type->arg_count);
+        break;
     case TYPE_POINTER: fmt_type(f, type->as.inner); put(f, "*"); break;
     case TYPE_OPTION: fmt_type(f, type->as.inner); put(f, "?"); break;
     case TYPE_SLICE: fmt_type(f, type->as.inner); put(f, "[]"); break;
@@ -316,7 +349,10 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         put_source(f, e->offset, e->length);
         break;
     case EXPR_BOOL: put(f, e->as.bool_value ? "true" : "false"); break;
-    case EXPR_NAME: put_name(f, e->as.name); break;
+    case EXPR_NAME:
+        put_name(f, e->as.name);
+        fmt_type_args(f, e->type_args, e->type_arg_count);
+        break;
     case EXPR_SELF: put(f, "self"); break;
     case EXPR_BASE: put(f, "base"); break;
     case EXPR_RESULT: put(f, "result"); break;
@@ -378,6 +414,7 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         fmt_operand(f, e->as.field.object, precedence(e->as.field.object) < P_POSTFIX);
         put(f, ".");
         put_name(f, e->as.field.name);
+        fmt_type_args(f, e->type_args, e->type_arg_count);
         break;
     case EXPR_STRUCT_LIT:
         fmt_type(f, e->as.struct_lit.type);
@@ -580,6 +617,7 @@ static void fmt_function(Fmt *f, const FnDecl *fn) {
     fmt_type(f, fn->ret);
     put(f, " ");
     put_name(f, fn->name);
+    fmt_type_params(f, fn->type_params);
     fmt_params(f, fn->params, fn->param_count);
     fmt_effects(f, fn->effects);
     if (!fn->body) {
@@ -733,6 +771,7 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
         if (decl->is_pub) put(f, "pub ");
         put(f, decl->kind == DECL_STRUCT ? "struct " : decl->kind == DECL_CLASS ? "class " : "interface ");
         put_name(f, decl->as.type.name);
+        fmt_type_params(f, decl->type_params);
         for (size_t i = 0; i < decl->as.type.base_count; i++) {
             put(f, i ? ", " : " : ");
             fmt_path(f, decl->as.type.bases[i]);
@@ -744,6 +783,7 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
         if (decl->is_pub) put(f, "pub ");
         put(f, "enum ");
         put_name(f, decl->as.enum_.name);
+        fmt_type_params(f, decl->type_params);
         fmt_enum(f, decl);
         break;
     case DECL_FN:

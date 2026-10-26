@@ -1,0 +1,151 @@
+// Generics (spec §5.4): functions, structs, enums and classes with several arguments,
+// constraints, an interface as a constraint and an effect as a parameter; each instance is
+// generated once.
+import std.io;
+
+T largest<T: Ordered>(T[] items)
+    requires items.len > 0
+{
+    mut T best = items[0];
+    for (T x in items) {
+        if (x > best) {
+            best = x;
+        }
+    }
+    return best;
+}
+
+T twice<T: Number>(T x) {
+    return x + x;
+}
+
+struct Pair<A, B> {
+    A first;
+    B second;
+
+    B other() {
+        return second;
+    }
+}
+
+Pair<B, A> swap<A, B>(Pair<A, B> p) {
+    return Pair<B, A>{ first: p.second, second: p.first };
+}
+
+enum Tree<T> {
+    Leaf(T value),
+    Node(Tree<T>* left, Tree<T>* right),
+}
+
+T sum<T: Number>(Tree<T>* t) {
+    return match (*t) {
+        Leaf(v) => v,
+        Node(l, r) => sum(l) + sum(r),
+    };
+}
+
+// A stack that grows in the arena it is given.
+class Stack<T> {
+    mut T[] items;
+    mut usize count;
+    Arena* arena;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        unsafe {
+            items = arena.alloc_slice(T, 2);
+        }
+        count = 0;
+    }
+
+    pub void push(T value) {
+        if (count == items.len) {
+            mut T[] grown = items;
+            unsafe {
+                grown = arena.alloc_slice(T, items.len * 2);
+            }
+            for (usize i in 0..count) {
+                grown[i] = items[i];
+            }
+            items = grown;
+        }
+        items[count] = value;
+        count += 1;
+    }
+
+    pub T? pop() {
+        if (count == 0) {
+            return none;
+        }
+        count -= 1;
+        return some(items[count]);
+    }
+}
+
+interface Named {
+    str name();
+}
+
+class Dog : Named {
+    override str name() {
+        return "dog";
+    }
+}
+
+str greet<T: Named>(T who) {
+    return who.name();
+}
+
+void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E {
+    for (T x in items) {
+        f(x);
+    }
+}
+
+void show(i32 x) uses io {
+    io.print("item {}", x);
+}
+
+void quiet(i32 x) { }
+
+ui64 key<K: Hash>(K k) {
+    return hash(k);
+}
+
+i32 main() uses io {
+    mut i32[3] scores = [3, 9, 4];
+    mut str[2] names = ["ada", "bob"];
+    io.print("largest: {} {}", largest(scores[0..3]), largest(names[0..2]));
+    io.print("twice: {} {}", twice(21), twice(1.5));
+
+    Pair<str, i32> p = Pair{ first: "x", second: 7 };
+    Pair<i32, str> q = swap(p);
+    io.print("pair: {} {} {}", p.other(), q.first, q.second);
+
+    mut Tree<i32> a = Tree<i32>.Leaf(2);
+    mut Tree<i32> c = Leaf(5);
+    mut Tree<i32> t = Node(&a, &c);
+    io.print("tree: {}", sum(&t));
+
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Stack<str>* words = arena.new(Stack<str>, &arena);
+    words.push("a");
+    words.push("b");
+    words.push("c");
+    io.print("stack: {}", words.count);
+    match (words.pop()) {
+        some(w) => io.print("popped {}", w),
+        none => io.print("empty"),
+    }
+    Stack<Pair<str, i32>>* pairs = arena.new(Stack<Pair<str, i32>>, &arena);
+    pairs.push(p);
+    io.print("pairs: {}", pairs.count);
+
+    Dog* d = arena.new(Dog);
+    io.print("greet: {}", greet(d));
+    each(scores[0..3], show);
+    each(scores[0..3], quiet);
+    io.print("hash: {} {}", key("abc") == key("abc"), key(1) == key(2));
+    return 0;
+}

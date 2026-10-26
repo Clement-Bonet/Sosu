@@ -1,0 +1,12 @@
+largest: 9 bob
+twice: 42 3.0
+pair: 7 7 x
+tree: 7
+stack: 3
+popped c
+pairs: 1
+greet: dog
+item 3
+item 9
+item 4
+hash: true false

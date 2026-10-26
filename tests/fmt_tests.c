@@ -37,6 +37,13 @@ static void test_canonical(void) {
     expect_format("enum E {\nA,\nB }", "enum E {\n    A,\n    B,\n}\n");
     expect_format("i32 clamp(i32 x) requires x > 0 ensures result > 0 { return x; }",
                   "i32 clamp(i32 x)\n    requires x > 0\n    ensures result > 0\n{\n    return x;\n}\n");
+    /* generics (spec §5.4) */
+    expect_format("struct Pair<A,B>{A first;B second;}", "struct Pair<A, B> {\n    A first;\n    B second;\n}\n");
+    expect_format("T max_of<T:Ordered+Hash,uses E>(T a,T b)uses E{return a>b?a:b;}",
+                  "T max_of<T: Ordered + Hash, uses E>(T a, T b) uses E {\n    return a > b ? a : b;\n}\n");
+    expect_format("void f(){Vec<Vec<i32>*>* v=vec.new<Vec<i32>*>(&a);auto t=Tree<i32>.Leaf(1);auto p=Pair<str,i32>{first:\"x\",second:1};}",
+                  "void f() {\n    Vec<Vec<i32>*>* v = vec.new<Vec<i32>*>(&a);\n    auto t = Tree<i32>.Leaf(1);\n"
+                  "    auto p = Pair<str, i32>{ first: \"x\", second: 1 };\n}\n");
     expect_format("void f(E e) { match (e) { A => g(), B(x) => { h(x); } } }",
                   "void f(E e) {\n    match (e) {\n        A => g(),\n        B(x) => {\n            h(x);\n        },\n"
                   "    }\n}\n");

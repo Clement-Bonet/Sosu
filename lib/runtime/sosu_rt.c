@@ -234,6 +234,39 @@ bool sosu_str_eq(sosu_str a, sosu_str b) {
     return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0);
 }
 
+/* hash(x) (spec §5.4): the same value for equal values, spread over 64 bits (not for cryptography). */
+uint64_t sosu_hash_u64(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDULL;
+    x ^= x >> 33;
+    x *= 0xC4CEB9FE1A85EC53ULL;
+    return x ^ (x >> 33);
+}
+
+uint64_t sosu_hash_f64(double x) {
+    if (x == 0.0) x = 0.0; /* -0.0 == 0.0 */
+    uint64_t bits;
+    memcpy(&bits, &x, sizeof bits);
+    return sosu_hash_u64(bits);
+}
+
+uint64_t sosu_hash_str(sosu_str text) {
+    uint64_t h = 0xCBF29CE484222325ULL; /* FNV-1a */
+    for (size_t i = 0; i < text.len; i++) {
+        h ^= text.ptr[i];
+        h *= 0x100000001B3ULL;
+    }
+    return sosu_hash_u64(h);
+}
+
+/* The order of two texts, byte by byte (the order of their code points, in UTF-8). */
+int sosu_str_cmp(sosu_str a, sosu_str b) {
+    size_t n = a.len < b.len ? a.len : b.len;
+    int order = n ? memcmp(a.ptr, b.ptr, n) : 0;
+    if (order) return order;
+    return a.len < b.len ? -1 : a.len > b.len;
+}
+
 uint32_t sosu_next_char(sosu_str text, size_t *pos) {
     const uint8_t *s = text.ptr + *pos;
     uint32_t c;

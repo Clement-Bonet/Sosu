@@ -149,14 +149,14 @@ component LongTree(state.Demo* s) {
 
 // The folders and the files of the folder `parent` (-1: the top), the folders first.
 component Folder(state.Demo* s, i32 parent) {
-    for (i32 i in 0..s.count, key: i) {
+    for (i32 i in 0..s.count(), key: i) {
         if (s.in_folder(i, parent, true)) {
-            Branch(s.name(i), open: s.entries[i].open, icon: s.folder_icon) {
+            Branch(s.name(i), open: s.entry(i).open, icon: s.folder_icon) {
                 Folder(s, i)
             }
         }
     }
-    for (i32 i in 0..s.count, key: i) {
+    for (i32 i in 0..s.count(), key: i) {
         if (s.in_folder(i, parent, false)) {
             Leaf(s.name(i), on_click: s.open_file(i), icon: s.file_icon)
         }

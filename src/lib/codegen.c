@@ -55,6 +55,15 @@ typedef struct {
     char *copier; /* the function behind `.copy()`, once generated */
 } TypeEntry;
 
+/* An instance of a generic function (spec §5.4), generated once per program. */
+typedef struct {
+    FnInfo *fn;
+    Type **args;
+    unsigned *effects;
+    char *name;
+    bool done;
+} FnInstance;
+
 typedef struct {
     Sema *s;
     Program *program;
@@ -63,6 +72,8 @@ typedef struct {
     Buf protos; /* function prototypes */
     Buf code;   /* function definitions */
     VEC(TypeEntry) types;
+    VEC(FnInstance) fn_instances;
+    size_t instances_done; /* the instances of generic types generated, in sema->instances */
     CodegenOptions options;
 } Gen;
 
@@ -117,11 +128,19 @@ static char *module_c_name(const Unit *unit) {
     return name;
 }
 
-static char *nominal_c_name(const TypeInfo *info) {
+static void mangle(Gen *g, Buf *out, const Type *type);
+
+/* `T_<module>__<name>`, and for an instance of a generic, `__` and each of its arguments. */
+static char *nominal_c_name(Gen *g, const TypeInfo *info) {
     char *module = module_c_name(info->unit);
-    char *name = sosu_format("T_%s__%.*s", module, NAME_ARGS(info->name));
+    Buf name = {0};
+    buf_printf(&name, "T_%s__%.*s", module, NAME_ARGS(info->name));
     free(module);
-    return name;
+    for (size_t i = 0; info->generic && i < info->type->type_arg_count; i++) {
+        buf_puts(&name, "__");
+        mangle(g, &name, info->type->type_args[i]);
+    }
+    return name.items;
 }
 
 static char *fn_c_name(const FnInfo *fn) {
@@ -130,6 +149,40 @@ static char *fn_c_name(const FnInfo *fn) {
     char *name = sosu_format("F_%s__%.*s", module, NAME_ARGS(fn->decl->name));
     free(module);
     return name;
+}
+
+/* The C name of the function a name or a callee designates. An instance of a generic function
+   is requested here, and generated after the rest of the program (spec §5.4). */
+static char *fn_name_of(Gen *g, const Expr *e) {
+    FnInfo *fn = (FnInfo *)e->target;
+    if (!fn->param_count && !fn->effect_param_count) return fn_c_name(fn);
+    for (size_t i = 0; i < g->fn_instances.count; i++) {
+        const FnInstance *inst = &g->fn_instances.items[i];
+        if (inst->fn != fn) continue;
+        bool same = true;
+        for (size_t k = 0; k < fn->param_count; k++) same &= inst->args[k] == e->type_values[k];
+        for (size_t k = 0; k < fn->effect_param_count; k++) same &= inst->effects[k] == e->effect_values[k];
+        if (same) return sosu_strdup(inst->name);
+    }
+    FnInstance inst = { fn, NULL, NULL, NULL, false };
+    inst.args = sosu_alloc((fn->param_count + 1) * sizeof *inst.args);
+    inst.effects = sosu_alloc((fn->effect_param_count + 1) * sizeof *inst.effects);
+    Buf name = {0};
+    char *base = fn_c_name(fn);
+    buf_puts(&name, base);
+    free(base);
+    for (size_t k = 0; k < fn->param_count; k++) {
+        inst.args[k] = e->type_values[k];
+        buf_puts(&name, "__");
+        mangle(g, &name, inst.args[k]);
+    }
+    for (size_t k = 0; k < fn->effect_param_count; k++) {
+        inst.effects[k] = e->effect_values[k];
+        if (inst.effects[k]) buf_printf(&name, "__E%u", inst.effects[k]);
+    }
+    inst.name = name.items;
+    SOSU_VEC_PUSH(&g->fn_instances, inst);
+    return sosu_strdup(inst.name);
 }
 
 static char *method_c_name(Gen *g, const MethodInfo *method) {
@@ -164,6 +217,7 @@ static void mangle(Gen *g, Buf *out, const Type *type) {
         break;
     case T_FN:
         buf_printf(out, "F%zu", type->as.fn.param_count);
+        if (type->as.fn.effects) buf_printf(out, "E%u", type->as.fn.effects); /* types differing by their effects */
         for (size_t i = 0; i < type->as.fn.param_count; i++) mangle(g, out, type->as.fn.params[i]);
         mangle(g, out, type->as.fn.ret);
         break;
@@ -196,7 +250,7 @@ static const char *struct_name(Gen *g, const Type *type) {
     if (entry) return entry->name;
     char *name;
     if (type->tag == T_STRUCT || type->tag == T_ENUM || type->tag == T_CLASS || type->tag == T_INTERFACE) {
-        name = nominal_c_name(type->as.info);
+        name = nominal_c_name(g, type->as.info);
     } else {
         Buf code = {0};
         buf_puts(&code, "T_");
@@ -232,6 +286,7 @@ static const char *c_type(Gen *g, const Type *type) {
     case T_ARENA: return "sosu_arena";
     case T_INT: return int_c_type(type);
     case T_FLOAT: return type->as.floating.bits == 32 ? "float" : "double";
+    case T_PARAM: return "void"; /* never generated: instances are checked again with their arguments */
     case T_POINTER: {
         TypeEntry *entry = find_type(g, type);
         if (entry) return entry->name;
@@ -733,7 +788,7 @@ static char *gen_name(Fn *f, Expr *e) {
         free(path);
         return result;
     }
-    case RESOLVED_FN: return fn_c_name(e->target);
+    case RESOLVED_FN: return fn_name_of(f->g, e);
     case RESOLVED_VARIANT: return gen_variant(f, e, e->target, e->target_index, NULL);
     case RESOLVED_BUILTIN: {
         const char *name = e->target;
@@ -905,6 +960,10 @@ static char *gen_binary(Fn *f, Expr *e) {
         break;
     }
     case TOK_LT: case TOK_LT_EQ: case TOK_GT: case TOK_GT_EQ:
+        if (lt->tag == T_STR) {
+            result = sosu_format("(sosu_str_cmp(%s, %s) %s 0)", values[0], values[1], token_kind_spelling(op));
+            break;
+        }
         result = sosu_format("(%s %s %s)", values[0], token_kind_spelling(op), values[1]);
         break;
     default:
@@ -1051,7 +1110,7 @@ static char *gen_index(Fn *f, Expr *e) {
 }
 
 static char *gen_field(Fn *f, Expr *e) {
-    if (e->resolution == RESOLVED_FN) return fn_c_name(e->target);
+    if (e->resolution == RESOLVED_FN) return fn_name_of(f->g, e);
     if (e->resolution == RESOLVED_VARIANT) return gen_variant(f, e, e->target, e->target_index, NULL);
     Expr *object = e->as.field.object;
     Name name = e->as.field.name;
@@ -1125,6 +1184,7 @@ static char *gen_struct_literal(Fn *f, Expr *e) {
             /* the default value is written in the module of the type, maybe not this one */
             Unit *here = f->unit;
             f->unit = info->unit;
+            if (info->generic) sema_check_instance_field(f->g->s, (TypeInfo *)info, &info->fields[j]);
             fallback = gen_expr(f, info->fields[j].decl->init);
             f->unit = here;
         }
@@ -1196,6 +1256,13 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
         emit(f, "sosu_check(%s, %s, \"assertion failed: \" %s);", values[0], where, text);
         free(where);
         free(text);
+    } else if (strcmp(name, "hash") == 0) {
+        const Type *arg = args[0]->type;
+        if (arg->tag == T_STR) result = sosu_format("sosu_hash_str(%s)", values[0]);
+        else if (arg->tag == T_FLOAT) result = sosu_format("sosu_hash_f64((double)%s)", values[0]);
+        else if (arg->tag == T_POINTER) result = sosu_format("sosu_hash_u64((uint64_t)(uintptr_t)%s)", values[0]);
+        else if (arg->tag == T_ENUM) result = sosu_format("sosu_hash_u64((uint64_t)%s.tag)", values[0]);
+        else result = sosu_format("sosu_hash_u64((uint64_t)%s)", values[0]);
     } else if (strncmp(name, "wrapping_", 9) == 0) {
         const char *op = strcmp(name, "wrapping_add") == 0 ? "+" : strcmp(name, "wrapping_sub") == 0 ? "-" : "*";
         const char *wide = wrapping_type(e->type);
@@ -1364,7 +1431,7 @@ static char *gen_call(Fn *f, Expr *e) {
     char *function;
     char *self = NULL;
     switch (callee->resolution) {
-    case RESOLVED_FN: function = fn_c_name(callee->target); break;
+    case RESOLVED_FN: function = fn_name_of(f->g, callee); break;
     case RESOLVED_SELF_METHOD:
         if (f->self_info->type->tag == T_CLASS) {
             class_call(f, callee->target, "v_self", false, &function, &self);
@@ -1938,6 +2005,39 @@ static void gen_method(Gen *g, TypeInfo *info, MethodInfo *method) {
     free(name);
 }
 
+/* The instances requested while generating code, and those they request in turn. Each body is
+   checked again with the arguments of its instance just before it is generated. */
+static void gen_instances(Gen *g) {
+    for (bool progress = true; progress;) {
+        progress = false;
+        for (size_t i = 0; i < g->fn_instances.count; i++) {
+            if (g->fn_instances.items[i].done) continue;
+            g->fn_instances.items[i].done = true;
+            FnInstance inst = g->fn_instances.items[i]; /* the list may grow while it is generated */
+            FnInfo *fn = inst.fn;
+            sema_check_instance_fn(g->s, fn, inst.args, inst.effects);
+            Type *type = sema_subst(g->s, fn->type, fn->params, inst.args, fn->param_count, inst.effects,
+                                    fn->effect_param_count);
+            char *header = signature(g, inst.name, type, fn->decl, NULL);
+            buf_printf(&g->protos, "%s;\n", header);
+            gen_body(g, fn->unit, header, fn->decl, type->as.fn.ret, NULL, fn->decl->body);
+            free(header);
+            progress = true;
+        }
+        while (g->instances_done < g->s->instances.count) {
+            TypeInfo *info = g->s->instances.items[g->instances_done++];
+            progress = true;
+            if (info->open) continue;
+            define_type(g, info->type);
+            for (size_t j = 0; j < info->method_count; j++) {
+                if (!info->methods[j].decl->body) continue;
+                sema_check_instance_method(g->s, info, &info->methods[j]);
+                gen_method(g, info, &info->methods[j]);
+            }
+        }
+    }
+}
+
 /* ---- Class and interface tables ---- */
 
 /* A function with the signature of a slot (`self` typed as `self_type`) that calls `impl`:
@@ -1997,9 +2097,17 @@ static size_t class_depth(const TypeInfo *cls) {
 }
 
 static void gen_tables(Gen *g, Buf *out) {
-    /* interfaces: an identity, and a dispatcher per method */
+    /* the declarations, except generics, and the instances of generic classes */
+    VEC(const TypeInfo *) infos = {0};
     for (size_t i = 0; i < g->s->type_infos.count; i++) {
-        const TypeInfo *info = g->s->type_infos.items[i];
+        if (g->s->type_infos.items[i]->param_count == 0) SOSU_VEC_PUSH(&infos, g->s->type_infos.items[i]);
+    }
+    for (size_t i = 0; i < g->s->instances.count; i++) {
+        if (!g->s->instances.items[i]->open) SOSU_VEC_PUSH(&infos, g->s->instances.items[i]);
+    }
+    /* interfaces: an identity, and a dispatcher per method */
+    for (size_t i = 0; i < infos.count; i++) {
+        const TypeInfo *info = infos.items[i];
         if (info->type->tag != T_INTERFACE) continue;
         const char *name = value_type(g, info->type);
         buf_printf(out, "static const char %s__id = 0;\n\n", name);
@@ -2024,13 +2132,13 @@ static void gen_tables(Gen *g, Buf *out) {
 
     /* classes, parents first: interface tables, thunks, then the class table */
     size_t max_depth = 0;
-    for (size_t i = 0; i < g->s->type_infos.count; i++) {
-        const TypeInfo *info = g->s->type_infos.items[i];
+    for (size_t i = 0; i < infos.count; i++) {
+        const TypeInfo *info = infos.items[i];
         if (info->type->tag == T_CLASS && class_depth(info) > max_depth) max_depth = class_depth(info);
     }
     for (size_t depth = 0; depth <= max_depth; depth++) {
-        for (size_t i = 0; i < g->s->type_infos.count; i++) {
-            const TypeInfo *cls = g->s->type_infos.items[i];
+        for (size_t i = 0; i < infos.count; i++) {
+            const TypeInfo *cls = infos.items[i];
             if (cls->type->tag != T_CLASS || class_depth(cls) != depth) continue;
             const char *name = value_type(g, cls->type);
 
@@ -2071,6 +2179,7 @@ static void gen_tables(Gen *g, Buf *out) {
             free(init.items);
         }
     }
+    free(infos.items);
 }
 
 static FnInfo *find_main(Gen *g) {
@@ -2087,6 +2196,7 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
     g.s = s;
     g.program = program;
     g.options = options;
+    size_t errors_before = program->diags.error_count;
 
 
     FnInfo *main_fn = NULL;
@@ -2106,9 +2216,12 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
         }
     }
 
-    for (size_t i = 0; i < s->type_infos.count; i++) define_type(&g, s->type_infos.items[i]->type);
+    for (size_t i = 0; i < s->type_infos.count; i++) {
+        if (s->type_infos.items[i]->param_count == 0) define_type(&g, s->type_infos.items[i]->type);
+    }
     for (size_t i = 0; i < s->fns.count; i++) {
         FnInfo *fn = s->fns.items[i];
+        if (fn->param_count || fn->effect_param_count) continue; /* its instances, below */
         if (fn->is_extern) {
             Buf params = {0};
             for (size_t j = 0; j < fn->decl->param_count; j++) {
@@ -2124,6 +2237,7 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
     }
     for (size_t i = 0; i < s->type_infos.count; i++) {
         TypeInfo *info = s->type_infos.items[i];
+        if (info->param_count) continue;
         for (size_t j = 0; j < info->method_count; j++) gen_method(&g, info, &info->methods[j]);
     }
 
@@ -2160,6 +2274,7 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
         free(runs.items);
     }
 
+    gen_instances(&g);
     Buf tables = {0};
     gen_tables(&g, &tables);
 
@@ -2186,5 +2301,15 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
         free(g.types.items[i].copier);
     }
     free(g.types.items);
+    for (size_t i = 0; i < g.fn_instances.count; i++) {
+        free(g.fn_instances.items[i].args);
+        free(g.fn_instances.items[i].effects);
+        free(g.fn_instances.items[i].name);
+    }
+    free(g.fn_instances.items);
+    if (program->diags.error_count > errors_before) { /* an instance that does not check */
+        free(out.items);
+        return NULL;
+    }
     return out.items;
 }
