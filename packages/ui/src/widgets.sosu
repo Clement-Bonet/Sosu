@@ -695,6 +695,9 @@ pub struct Ui {
     pub mut catalog.Catalog*? catalog = none;
     // The colors and sizes of the widgets (spec §10.7); none: `default_theme()`.
     pub mut Theme? theme = none;
+    // The theme for this frame, copied once in `begin`: `look` reads it through a pointer.
+    mut Theme frame_theme = Theme{ };
+    mut bool themed = false;
     // The size of a pixel of `ui` in pixels of the screen (spec §10.10, `platform.app.ScaleChanged`):
     // the sizes of the theme and the fonts are multiplied by it.
     pub mut f32 scale = 1.0;
@@ -1629,7 +1632,7 @@ Props in_states(Style s, u32 states) {
     return p;
 }
 
-Style style_of(Theme t, Kind kind) {
+Style style_of(Theme* t, Kind kind) {
     return match (kind) {
         Window => t.window,
         Text => t.text,
@@ -4363,11 +4366,8 @@ pub struct Frame {
     // What the theme and the styles of the node say about it, in `states`; and its parts.
     Props explicit_props(Kind kind, u32 states) {
         mut Props p = Props{ };
-        match (ui.theme) {
-            some(t) => {
-                p = in_states(style_of(t, kind), states);
-            },
-            none => { },
+        if (ui.themed) {
+            p = in_states(style_of(&ui.frame_theme, kind), states);
         }
         for (usize i in 0..node_style_count) {
             p = merge_props(p, in_states(node_styles[i], states));
@@ -4377,12 +4377,9 @@ pub struct Frame {
 
     Props part(Kind kind, u32 which) {
         mut Props p = Props{ };
-        match (ui.theme) {
-            some(t) => {
-                Style s = style_of(t, kind);
-                p = which == 0 ? s.placeholder : which == 1 ? s.selection : s.bar;
-            },
-            none => { },
+        if (ui.themed) {
+            Style s = style_of(&ui.frame_theme, kind);
+            p = which == 0 ? s.placeholder : which == 1 ? s.selection : s.bar;
         }
         for (usize i in 0..node_style_count) {
             Style s = node_styles[i];
@@ -4396,13 +4393,7 @@ pub struct Frame {
     Look look(Kind kind, u32 states) {
         Look d = default_look(kind, states);
         Props p = explicit_props(kind, states);
-        mut Props all = Props{ };
-        match (ui.theme) {
-            some(t) => {
-                all = t.all;
-            },
-            none => { },
-        }
+        Props all = ui.themed ? ui.frame_theme.all : Props{ };
         Layout l = layouts[depth];
         // a disabled button and a title keep their own default unless a rule says otherwise
         bool own_color = states & state_disabled() != 0;
@@ -6417,6 +6408,8 @@ pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
     // the background of the window, when the theme gives one (spec §10.7)
     match (ui.theme) {
         some(t) => {
+            ui.frame_theme = t;
+            ui.themed = true;
             match (in_states(t.window, 0).background) {
                 some(c) => {
                     surface.clear(c);
@@ -6424,7 +6417,9 @@ pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
                 none => { },
             }
         },
-        none => { },
+        none => {
+            ui.themed = false;
+        },
     }
     return f;
 }
