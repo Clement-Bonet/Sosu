@@ -24,7 +24,7 @@ pub class Demo {
     pub mut bool compact;
     pub mut i32 selected;
     pub mut i32 deleted;
-    mut u8[12] digits;
+    mut ui8[12] digits;
 
     void init(bool system_dark) {
         choice = System;
@@ -70,7 +70,7 @@ pub class Demo {
         mut i32 n = deleted;
         while (true) {
             at -= 1;
-            digits[at] = (48 + n % 10) as u8;
+            digits[at] = (48 + n % 10) as ui8;
             n /= 10;
             if (n == 0 || at == 0) {
                 break;

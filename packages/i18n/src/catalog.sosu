@@ -9,7 +9,7 @@ import std.io;
 
 pub enum I18nError {
     Unreadable,  // the file cannot be read
-    Damaged(u32 line),  // a line that is not of the format
+    Damaged(ui32 line),  // a line that is not of the format
 }
 
 // A translation: its context ("" for none), its source text, and its forms (`msgstr`, or
@@ -22,11 +22,11 @@ struct Entry {
 
 pub class Catalog {
     Entry[] entries;
-    u32[] table;  // open addressing: an index of `entries` plus 1, or 0 for an empty slot
+    ui32[] table;  // open addressing: an index of `entries` plus 1, or 0 for an empty slot
     str rule;  // the expression of `Plural-Forms`, "" for the rule of English
     usize forms;  // how many plural forms the language has
 
-    void init(Entry[] entries, u32[] table, str rule, usize forms) {
+    void init(Entry[] entries, ui32[] table, str rule, usize forms) {
         self.entries = entries;
         self.table = table;
         self.rule = rule;
@@ -72,7 +72,7 @@ pub class Catalog {
         }
         mut Rule r = Rule{ text: rule, n: n };
         i64 form = r.ternary();
-        if (r.failed || form < 0 || form as u64 >= forms as u64) {
+        if (r.failed || form < 0 || form as ui64 >= forms as ui64) {
             return n == 1 ? 0 : 1;
         }
         return form as usize;
@@ -113,14 +113,14 @@ bool same(str a, str b) {
 }
 
 // FNV-1a over the context, a separator (4, as gettext), and the text.
-u32 key_hash(str context, str id) {
-    mut u32 h = 0x811C9DC5;
-    for (u8 b in context.bytes) {
-        h = wrapping_mul(h ^ b as u32, 0x01000193);
+ui32 key_hash(str context, str id) {
+    mut ui32 h = 0x811C9DC5;
+    for (ui8 b in context.bytes) {
+        h = wrapping_mul(h ^ b as ui32, 0x01000193);
     }
     h = wrapping_mul(h ^ 4, 0x01000193);
-    for (u8 b in id.bytes) {
-        h = wrapping_mul(h ^ b as u32, 0x01000193);
+    for (ui8 b in id.bytes) {
+        h = wrapping_mul(h ^ b as ui32, 0x01000193);
     }
     return h;
 }
@@ -133,7 +133,7 @@ struct Rule {
     mut usize at = 0;
     mut bool failed = false;
 
-    u8 peek() {
+    ui8 peek() {
         while (at < text.len && (text.bytes[at] == 32 || text.bytes[at] == 9)) {
             at += 1;
         }
@@ -141,8 +141,8 @@ struct Rule {
     }
 
     // `a` and then `b` (the second byte of an operator), if they come next.
-    bool eat(u8 a, u8 b) {
-        u8 c = peek();
+    bool eat(ui8 a, ui8 b) {
+        ui8 c = peek();
         if (c != a) {
             return false;
         }
@@ -265,7 +265,7 @@ struct Rule {
     }
 
     i64 primary() {
-        u8 c = peek();
+        ui8 c = peek();
         if (c == 40) {  // (
             at += 1;
             i64 v = ternary();
@@ -336,14 +336,14 @@ str decode(Arena* arena, str file, Field f) {
     for (usize k in 0..f.count) {
         length += f.ends[k] - f.starts[k];
     }
-    mut u8[] bytes = arena.alloc_slice(u8, length);
+    mut ui8[] bytes = arena.alloc_slice(ui8, length);
     mut usize out = 0;
     for (usize k in 0..f.count) {
         mut usize i = f.starts[k];
         while (i < f.ends[k]) {
-            u8 c = file.bytes[i];
+            ui8 c = file.bytes[i];
             if (c == 92 && i + 1 < f.ends[k]) {  // a backslash
-                u8 e = file.bytes[i + 1];
+                ui8 e = file.bytes[i + 1];
                 bytes[out] = e == 110 ? 10 : e == 116 ? 9 : e == 114 ? 13 : e;  // \n \t \r, \" \\ ...
                 i += 2;
             } else {
@@ -477,7 +477,7 @@ pub Catalog*!I18nError parse(Arena* arena, str file) {
     mut PluralForms plurals = PluralForms{ };
     mut Reading r = Reading{ };
     mut bool fuzzy_next = false;
-    mut u32 line = 0;
+    mut ui32 line = 0;
     at = 0;
     while (at <= file.len) {
         // the line: from `at` to `end`, its spaces before skipped
@@ -551,13 +551,13 @@ pub Catalog*!I18nError parse(Arena* arena, str file) {
     while (size < 2 * count) {
         size *= 2;
     }
-    mut u32[] table = arena.alloc_slice(u32, size);
+    mut ui32[] table = arena.alloc_slice(ui32, size);
     for (usize e in 0..count) {
         mut usize slot = key_hash(entries[e].context, entries[e].id) as usize & size - 1;
         while (table[slot] != 0) {
             slot = slot + 1 & size - 1;
         }
-        table[slot] = (e + 1) as u32;
+        table[slot] = (e + 1) as ui32;
     }
     return ok(arena.new(Catalog, entries[0..count], table, plurals.rule, plurals.count));
 }
@@ -630,8 +630,8 @@ bool same_tag(str a, str b, bool language_only) {
         return false;
     }
     for (usize i in 0..la) {
-        u8 x = a.bytes[i] == 95 ? 45 : a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
-        u8 y = b.bytes[i] == 95 ? 45 : b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
+        ui8 x = a.bytes[i] == 95 ? 45 : a.bytes[i] >= 65 && a.bytes[i] <= 90 ? a.bytes[i] + 32 : a.bytes[i];
+        ui8 y = b.bytes[i] == 95 ? 45 : b.bytes[i] >= 65 && b.bytes[i] <= 90 ? b.bytes[i] + 32 : b.bytes[i];
         if (x != y) {
             return false;
         }
@@ -653,7 +653,7 @@ usize language_length(str tag) {
 Catalog* parsed(Arena* arena, str text) {
     return match (parse(arena, text)) {
         ok(c) => c,
-        err(e) => arena.new(Catalog, arena.alloc_slice(Entry, 0), arena.alloc_slice(u32, 0), "", 2),
+        err(e) => arena.new(Catalog, arena.alloc_slice(Entry, 0), arena.alloc_slice(ui32, 0), "", 2),
     };
 }
 

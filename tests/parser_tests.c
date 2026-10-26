@@ -99,8 +99,8 @@ static void test_casts(void) {
     expect_expr("-x as f32", "(as (- x) f32)");
     expect_expr("a * b as f32", "(* a (as b f32))");
     expect_expr("x as i32 * 2", "(* (as x i32) 2)");
-    expect_expr("p as u8*", "(as p u8*)");
-    expect_expr("(p as u8*) + 4", "(+ (as p u8*) 4)");
+    expect_expr("p as ui8*", "(as p ui8*)");
+    expect_expr("(p as ui8*) + 4", "(+ (as p ui8*) 4)");
     expect_expr("w as? Button*", "(as? w Button*)");
     expect_expr("x as bool ? a : b", "(?: (as x bool) a b)");
     expect_expr("x as i32?", "(as x i32?)");
@@ -146,7 +146,7 @@ static void test_statements(void) {
                   "    for (mut i32 i = 0; i < 3; i += 1) { break; }\n"
                   "    for (;;) { return; }\n"
                   "    defer arena.free();\n"
-                  "    unsafe { u8 first = *(q + 4); }\n"
+                  "    unsafe { ui8 first = *(q + 4); }\n"
                   "}\n",
                   "(fn void f ()\n"
                   "  (block\n"
@@ -170,12 +170,12 @@ static void test_statements(void) {
                   "        (return)))\n"
                   "    (defer (call (. arena free)))\n"
                   "    (unsafe (block\n"
-                  "      (var u8 first (* (+ q 4)))))))\n");
-    expect_module("void f() { Point* p = a.alloc(Point); u8[4] b = x; i32!E r = g(); fn(i32) -> i32 uses io h = k; }",
+                  "      (var ui8 first (* (+ q 4)))))))\n");
+    expect_module("void f() { Point* p = a.alloc(Point); ui8[4] b = x; i32!E r = g(); fn(i32) -> i32 uses io h = k; }",
                   "(fn void f ()\n"
                   "  (block\n"
                   "    (var Point* p (call (. a alloc) Point))\n"
-                  "    (var u8[4] b x)\n"
+                  "    (var ui8[4] b x)\n"
                   "    (var i32!E r (call g))\n"
                   "    (var fn(i32) -> i32 uses io h k)))\n");
 }
@@ -218,12 +218,12 @@ static void test_declarations(void) {
                   "  (ensures (&& (>= result lo) (<= result hi)))\n"
                   "  (block\n"
                   "    (return x)))\n");
-    expect_module("extern \"C\" { i32 puts(u8* s); }\n"
-                  "unsafe void poke(mut u8* p) { }\n"
+    expect_module("extern \"C\" { i32 puts(ui8* s); }\n"
+                  "unsafe void poke(mut ui8* p) { }\n"
                   "test \"works\" { assert(true); }\n",
                   "(extern \"C\"\n"
-                  "  (fn i32 puts ((u8* s))))\n"
-                  "(fn unsafe void poke ((mut u8* p))\n"
+                  "  (fn i32 puts ((ui8* s))))\n"
+                  "(fn unsafe void poke ((mut ui8* p))\n"
                   "  (block))\n"
                   "(test \"works\"\n"
                   "  (block\n"
@@ -452,7 +452,7 @@ static void test_ui_files(void) {
               "    (call (. ui_frame push_id) 24)\n"
               "    (for-in Task* k (. t tasks)\n"
               "      (block\n"
-              "        (call (. ui_frame push_id) (as (. k id) u64))\n"
+              "        (call (. ui_frame push_id) (as (. k id) ui64))\n"
               "        (if (. k fresh)\n"
               "          (block\n"
               "            (call (. ui_frame focus_here))))\n"
@@ -658,7 +658,7 @@ static void test_ui_grids(void) {
               "    (call (. ui_frame list_of) (. s n) 300.0 200.0 none)\n"
               "    (for-in i32 i (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
               "      (block\n"
-              "        (call (. ui_frame push_id) (as i u64))\n"
+              "        (call (. ui_frame push_id) (as i ui64))\n"
               "        (call (. ui_frame label) (index (. s names) i))\n"
               "        (call (. ui_frame pop_id))))\n"
               "    (call (. ui_frame end_list))\n"
@@ -669,7 +669,7 @@ static void test_ui_grids(void) {
               "    (call (. ui_frame table_rows))\n"
               "    (for-in i32 k (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
               "      (block\n"
-              "        (call (. ui_frame push_id) (as k u64))\n"
+              "        (call (. ui_frame push_id) (as k ui64))\n"
               "        (call (. ui_frame table_cell))\n"
               "        (call (. ui_frame label) (index (. s names) k))\n"
               "        (call (. ui_frame table_cell))\n"
@@ -725,7 +725,7 @@ static void test_ui_grids(void) {
               "    (call (. ui_frame list_of) (. s n) 300.0 200.0 none)\n"
               "    (for-in i32 i (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
               "      (block\n"
-              "        (call (. ui_frame push_id) (as i u64))\n"
+              "        (call (. ui_frame push_id) (as i ui64))\n"
               "        (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
               "        (call (. ui_frame pop_id))))\n"
               "    (call (. ui_frame end_list))))\n"
@@ -741,7 +741,7 @@ static void test_ui_grids(void) {
               "    (call (. ui_frame tree_of) (. s n) 300.0 200.0 none)\n"
               "    (for-in i32 i (.. (call (. ui_frame first_shown)) (call (. ui_frame last_shown)))\n"
               "      (block\n"
-              "        (call (. ui_frame push_id) (as i u64))\n"
+              "        (call (. ui_frame push_id) (as i ui64))\n"
               "        (if (call (. ui_frame tree_row) (call (. s depth) i) (call (. s folder) i) (call (. s open) i))\n"
               "          (block\n"
               "            (call (. s toggle) i)))\n"

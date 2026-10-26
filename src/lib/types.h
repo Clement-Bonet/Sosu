@@ -45,7 +45,7 @@ struct Type {
     Name name; /* built-in and nominal types */
     union {
         struct { uint8_t bits; bool is_signed; } integer; /* isize / usize: 64 bits */
-        uint8_t float_bits;
+        struct { uint8_t bits; bool is_unsigned; } floating; /* uf32 / uf64: never negative */
         Type *inner; /* POINTER, OPTION, SLICE */
         struct { Type *element; uint64_t size; } array;
         struct { Type *value; Type *error; } result;

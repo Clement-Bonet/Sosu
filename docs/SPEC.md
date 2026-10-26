@@ -42,7 +42,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 - Integers: decimal, hexadecimal (`0x`, lowercase prefix) or binary (`0b`), at most 2^64 - 1. A decimal literal cannot start with `0` (`007` is an error): C reads it as octal, Sosu has no octal literals.
 - Floats: digits, a dot and digits (`3.14`), and an optional exponent (`1e5`, `2.5e-3`, lowercase `e`). A digit is required after the dot, so `0..n` is a range and `3.abs()` a method call.
-- No type suffix: `300u8` is an error, the conversion is written `300 as u8`.
+- No type suffix: `300ui8` is an error, the conversion is written `300 as ui8`.
 - Strings stay on one line. Escapes, in strings and characters: `\n \t \r \0 \\ \' \"`, `\xNN` (ASCII only, `\x00` to `\x7F`, so that a `str` stays valid UTF-8) and `\u{N}` (1 to 6 hexadecimal digits, a Unicode scalar value).
 - A character literal holds exactly one code point.
 - `++`, `--` and `::` are recognized only to report an error that gives the Sosu form (§5.1).
@@ -51,8 +51,8 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 | Category | Types |
 |---|---|
-| Integers | `i8 i16 i32 i64 u8 u16 u32 u64 isize usize` |
-| Floats | `f32 f64` |
+| Integers | `i8 i16 i32 i64 ui8 ui16 ui32 ui64 isize usize` |
+| Floats | `f32 f64`, and the unsigned floats `uf32 uf64` |
 | Others | `bool char void` |
 | String | `str` (valid UTF-8, pointer + length, not owned) |
 | Pointer | `T*` (never null; possibly absent pointer: `T*?`) |
@@ -63,13 +63,16 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 
 Conversions: always explicit with `as` (`x as f32`).
 
+- The unsigned integers are `ui8`, `ui16`, `ui32` and `ui64` (and `usize`, a size). The former names `u8`, `u16`, `u32` and `u64` are errors that give the new one.
+- `uf32` and `uf64` are floats that are never negative (a size, a distance, a duration): `float` and `double` in C, types of their own beside `f32` and `f64`, with `as` between them. A negative result or conversion (and NaN) is checked as an integer overflow: in debug, it stops the program (code 101); in release, it is not checked. `-x` on an unsigned float is an error, so a negative literal is refused while compiling.
+
 ### 4.1 Text and UTF-8
 
 - A `str` always holds valid UTF-8, without a null terminator; its length is in bytes.
 - `char` is a Unicode code point (32 bits).
 - Iteration: `for (char c in s.chars())`; byte access: `s.bytes[i]`.
-- Building a `str` from arbitrary bytes can fail: `str.from_bytes(u8[]) -> str!Utf8Error`.
-- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(u8*)` is `unsafe`). `to_cstr` takes an `Arena` or an `Arena*` and returns a `u8*` ending with a NUL byte. `Utf8Error` (one variant, `Invalid`) is declared in `core.prelude`. `str.from_cstr` is not implemented yet.
+- Building a `str` from arbitrary bytes can fail: `str.from_bytes(ui8[]) -> str!Utf8Error`.
+- C strings: explicit conversion (`s.to_cstr(arena)` allocates in an arena; `str.from_cstr(ui8*)` is `unsafe`). `to_cstr` takes an `Arena` or an `Arena*` and returns a `ui8*` ending with a NUL byte. `Utf8Error` (one variant, `Invalid`) is declared in `core.prelude`. `str.from_cstr` is not implemented yet.
 
 ## 5. Declarations and syntax
 
@@ -103,7 +106,7 @@ i32 main() uses io {
 
 Parsing note: a statement starting with `Ident Ident` is a declaration, otherwise an expression
 (enough as long as there are no generics). More precisely, a statement is a declaration when it
-starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `u8[4] buf`, `i32!E r`).
+starts with `mut`, `auto`, or a type followed by a name (`Point* p`, `ui8[4] buf`, `i32!E r`).
 
 Every variable receives its value where it is declared: `i32 x;` is an error. There are no global
 variables in v0.
@@ -162,7 +165,7 @@ Precedence (tightest first):
 Details:
 
 - `as` applies to the result of the unary operators: `-x as f32` is `(-x) as f32`.
-- After `as`, `*` and `?` belong to the type unless an operand follows: `p as u8*` converts to a pointer, `x as i32 * 2` multiplies, `x as bool ? a : b` is a conditional.
+- After `as`, `*` and `?` belong to the type unless an operand follows: `p as ui8*` converts to a pointer, `x as i32 * 2` multiplies, `x as bool ? a : b` is a conditional.
 - A struct literal is written `Point{ x: 1.0, y: 2.0 }` (trailing comma allowed). It cannot appear in `requires` / `ensures`, where the brace opens the function body.
 - Function types: `fn(i32, i32) -> i32 uses io`; the arrow and the return type are mandatory (`-> void`). In a function type, the `uses` list only continues after a comma with a predefined effect (§7.4), so that the comma is not confused with a parameter separator.
 
@@ -213,7 +216,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet). They are part of the compiler, since they work for several types and Sosu v0 has no generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
-- **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: u8`, `1` is a `u8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
+- **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: ui8`, `1` is a `ui8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
 - **Operators need operands of the same type**: `i32 + i64` is an error, convert one side with `as`. Comparisons give a `bool`; `&&`, `||` and `!` need `bool`; bitwise operators need integers. Shifts accept any integer as the shift amount.
 - **Mutability**: assigning to a variable or a parameter requires it to be declared `mut`. Assigning to a field requires the field to be `mut`, except in `init`; through a value (not a pointer), the variable holding it must also be `mut`. `*p = v` and the elements of a slice can always be assigned. A view `x[a..b]` shares the elements of `x` without copying them (checked: `a <= b <= x.len`); taking one of an array is like taking its address, so the array must be `mut`.
 - **Taking an address** `&x` follows the same rules, since the pointer allows writing: `x` must be `mut` (and a field must be `mut`). Pointers that only allow reading may come later.
@@ -223,10 +226,10 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Statements**: an expression statement must be a call or a `match`; `x == 1;` is an error. The value of a call returning `T!E` must be used (with `try`, `match`, or a variable).
 - **Functions** that return a value must end every path with `return`.
 - **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`.
-- **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `u8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as u8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
+- **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `ui8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as ui8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
 - **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`. It ends the line. A float always prints with a dot (`25.0`).
 - **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`.
-- **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as u8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
+- **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as ui8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
 - **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only.
 
 ## 6. Memory
@@ -369,7 +372,7 @@ error[E0312]: non-exhaustive match
 - `sosuc fmt`: a single style, no configuration option. It prints the file from its syntax tree, so a file must parse to be formatted, and puts every comment back where it was. The style:
   - 4 spaces of indentation; `{` at the end of the line, `}` on its own line; a non-empty block always spans several lines, an empty one is `{ }`;
   - one statement per line; spaces around binary operators and after commas, none inside parentheses or brackets; struct literals on one line: `Point{ x: 1.0, y: 2.0 }`;
-  - parentheses only where the precedence needs them (`(a + b) * c`, `-(x as f32)`, `(p as u8*) + 1`);
+  - parentheses only where the precedence needs them (`(a + b) * c`, `-(x as f32)`, `(p as ui8*) + 1`);
   - at most one blank line, where the source has one; none after `{`;
   - a comment on its own line stays on its own line; a comment after code stays at the end of the line, after two spaces;
   - a function with contracts puts each `requires` / `ensures` on its own line and `{` alone below them;
@@ -381,14 +384,14 @@ error[E0312]: non-exhaustive match
 
 - `unsafe { ... }` is the only place where pointer arithmetic, raw pointer conversions (`p as T*`) or unwrapped calls to C are allowed. A function marked `unsafe` can only be called from an `unsafe` block.
 - Outside `unsafe`, a `T*` always points to a valid value.
-- In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, contracts.
-- In release, bounds stay checked by default (`--checks=off` disables them); contracts and overflows are not.
+- In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, unsigned floats never negative, contracts.
+- In release, bounds stay checked by default (`--checks=off` disables them); contracts, overflows and unsigned floats are not.
 - Options of `sosuc build`, `run` and `test`: `--release` (optimized C, modulo arithmetic, no contracts), `--checks=on|off` (indexes), `--contracts=check|off` (`requires` / `ensures`). Division by zero always stops the program, as do `assert` failures.
 
 ```sosu
 unsafe {
-    u8* p = base as u8*;
-    u8 first = *(p + 4);
+    ui8* p = base as ui8*;
+    ui8 first = *(p + 4);
 }
 ```
 
@@ -410,7 +413,7 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 
 `core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` two small functions where C differs between systems (`errno`, file sizes). Available so far:
 
-- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> u8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
+- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> ui8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
 - `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`.
 - `std.random`: `random.Rng`, a generator holding its state (SplitMix64; not for cryptography): `next()` (64 bits), `below(bound)`, `between(low, high)`, `unit()` (a float in [0, 1)). `random.seeded(seed)` gives the same numbers for the same seed, without effect; `random.from_system()` seeds it differently on each run, with the effect `random`.
 - `core.prelude`: `Utf8Error` (§5.3).
@@ -458,7 +461,7 @@ shared = { path = "../shared" }
 
 ```sosu
 extern "C" {
-    i32 puts(u8* s);
+    i32 puts(ui8* s);
 }
 ```
 
@@ -714,7 +717,7 @@ Translation in v0:
 | `Scroll(width: w, height: h) { ... }` | `f.scroll(w, h)`, the nodes, `f.end_scroll()`; `width` and `height` are required |
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
-- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as u64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
+- `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as ui64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
 - `theme` and `style` blocks, and `style:` on a node: see §10.7. `Grid` and the places of its nodes (`row:`, `col:`, `span:`, `align:`), `Group`, `Tabs` and `Tree`: see §10.8. `bind:` goes on `TextField`, `TextArea`, `NumberField`, `MoneyField`, `Checkbox`, `Radio`, `Dropdown`, `Slider` and `DateField` (elsewhere: error E0215). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
@@ -871,8 +874,8 @@ The first of the batches that complete `ui` (grid, frames, tabs, tree, table, te
 Today a widget is the number of its call in the frame. A widget that appears (`if`) or an item added to a list (`for`) shifts the numbers of those after it: the field that has the keyboard, the button held or the list scrolled becomes another one. The grid, the tabs and the tree make widgets appear and disappear all the time, so this comes first.
 
 - An identity is a 64-bit hash (FNV-1a) of a path: the scopes open around the widget, then the widget itself. `Ui` keeps identities (`active`, `focus`, the dropdown open, the menus open), never numbers; 0 is none.
-- `f.at(site)` gives the widget that follows its place, a `u32`; without it, the place is the number of the call in its scope, as today, so code written by hand keeps working.
-- `f.push_id(key)` ... `f.pop_id()` open a scope, `key` a `u64`.
+- `f.at(site)` gives the widget that follows its place, a `ui32`; without it, the place is the number of the call in its scope, as today, so code written by hand keeps working.
+- `f.push_id(key)` ... `f.pop_id()` open a scope, `key` a `ui64`.
 - The translator of `.ui.sosu` files writes them:
   - each node gets `f.at(site)`, `site` being its offset in the file: a widget keeps its identity whatever appears before it;
   - the body of a `for` is a scope per iteration, its key the index of the loop, or the value of `key:` when the loop gives one: `for (Task* t in state.tasks, key: t.id) { ... }`, so that an item keeps its focus when another is inserted before it;

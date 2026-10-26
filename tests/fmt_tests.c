@@ -29,8 +29,8 @@ static void test_canonical(void) {
     expect_format("void f(){}", "void f() { }\n");
     expect_format("i32 f(){return (a+b)*c-(d-e);}", "i32 f() {\n    return (a + b) * c - (d - e);\n}\n");
     expect_format("i32 f(){return ((a*b))+(c);}", "i32 f() {\n    return a * b + c;\n}\n");
-    expect_format("void f(){auto x=-(y as f32);auto p=(q as u8*)+1;auto z=(a<b)==c;}",
-                  "void f() {\n    auto x = -(y as f32);\n    auto p = (q as u8*) + 1;\n    auto z = (a < b) == c;\n}\n");
+    expect_format("void f(){auto x=-(y as f32);auto p=(q as ui8*)+1;auto z=(a<b)==c;}",
+                  "void f() {\n    auto x = -(y as f32);\n    auto p = (q as ui8*) + 1;\n    auto z = (a < b) == c;\n}\n");
     expect_format("void f(){x=c?a:(b?d:e);y=(c?a:b)?d:e;z=*(p+4);w=(*p).x;}",
                   "void f() {\n    x = c ? a : b ? d : e;\n    y = (c ? a : b) ? d : e;\n    z = *(p + 4);\n    w = (*p).x;\n}\n");
     expect_format("enum E { A, B(i32 x) }", "enum E { A, B(i32 x) }\n");

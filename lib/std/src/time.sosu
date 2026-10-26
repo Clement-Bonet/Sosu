@@ -2,22 +2,22 @@
 // Written in Sosu; the runtime gives the clocks, which differ by system.
 
 extern "C" {
-    u64 sosu_monotonic_ns() uses time;
+    ui64 sosu_monotonic_ns() uses time;
     i64 sosu_unix_seconds() uses time;
-    void sosu_sleep_ms(u32 ms) uses time;
+    void sosu_sleep_ms(ui32 ms) uses time;
 }
 
 // Nanoseconds from an unspecified start. This clock never goes backwards: measure durations
 // with it.
-pub u64 monotonic_ns() uses time {
-    mut u64 now = 0;
+pub ui64 monotonic_ns() uses time {
+    mut ui64 now = 0;
     unsafe {
         now = sosu_monotonic_ns();
     }
     return now;
 }
 
-pub u64 monotonic_ms() uses time {
+pub ui64 monotonic_ms() uses time {
     return monotonic_ns() / 1000000;
 }
 
@@ -31,7 +31,7 @@ pub i64 unix_seconds() uses time {
 }
 
 // Waits at least `ms` milliseconds.
-pub void sleep_ms(u32 ms) uses time {
+pub void sleep_ms(ui32 ms) uses time {
     unsafe {
         sosu_sleep_ms(ms);
     }

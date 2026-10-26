@@ -5,10 +5,10 @@ import render.image;
 import render.truetype;
 
 pub struct Color {
-    pub u8 r;
-    pub u8 g;
-    pub u8 b;
-    pub u8 a = 255;  // 0: transparent, 255: opaque
+    pub ui8 r;
+    pub ui8 g;
+    pub ui8 b;
+    pub ui8 a = 255;  // 0: transparent, 255: opaque
 }
 
 pub struct Rect {
@@ -30,7 +30,7 @@ struct Clip {
 pub struct Canvas {
     pub i32 width;
     pub i32 height;
-    pub u32[] pixels;
+    pub ui32[] pixels;
     // Drawing stays inside `clip`: the whole canvas, or the rectangles pushed, intersected.
     mut Clip clip = Clip{ };
     mut Clip[16] saved = [Clip{ }; 16];
@@ -55,7 +55,7 @@ pub struct Canvas {
 
     // Fills the whole canvas, whatever the clip.
     pub void clear(Color color) {
-        u32 value = pack(color);
+        ui32 value = pack(color);
         for (mut usize i = 0; i < pixels.len; i += 1) {
             pixels[i] = value;
         }
@@ -84,7 +84,7 @@ pub struct Canvas {
         f32 limit = radius * radius;
         for (mut i32 y = y0; y < y1; y += 1) {
             for (mut i32 x = x0; x < x1; x += 1) {
-                mut u32 inside = 0;
+                mut ui32 inside = 0;
                 for (mut i32 sy = 0; sy < 4; sy += 1) {
                     for (mut i32 sx = 0; sx < 4; sx += 1) {
                         f32 dx = x as f32 + (sx as f32 + 0.5) / 4.0 - cx;
@@ -93,7 +93,7 @@ pub struct Canvas {
                     }
                 }
                 if (inside > 0) {
-                    blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
+                    blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as ui32 * inside / 16) as ui8 });
                 }
             }
         }
@@ -142,7 +142,7 @@ pub struct Canvas {
                     x = max(x + 1, (rect.x + rect.w - margin) as i32);
                     continue;
                 }
-                mut u32 inside = 16;
+                mut ui32 inside = 16;
                 if (dx <= r + 1.0 && dy <= r + 1.0) {
                     inside = coverage(rect, r, ring, hole, x, y);  // near a corner
                 } else {
@@ -154,7 +154,7 @@ pub struct Canvas {
                     }
                 }
                 if (inside > 0) {
-                    blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
+                    blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as ui32 * inside / 16) as ui8 });
                 }
                 x += 1;
             }
@@ -163,8 +163,8 @@ pub struct Canvas {
 
     // How many of 16 samples of the pixel (x, y) are in the rounded rectangle, and out of its
     // `hole` for a ring.
-    u32 coverage(Rect rect, f32 r, f32 ring, Rect hole, i32 x, i32 y) {
-        mut u32 inside = 0;
+    ui32 coverage(Rect rect, f32 r, f32 ring, Rect hole, i32 x, i32 y) {
+        mut ui32 inside = 0;
         for (mut i32 sy = 0; sy < 4; sy += 1) {
             for (mut i32 sx = 0; sx < 4; sx += 1) {
                 f32 px = x as f32 + (sx as f32 + 0.5) / 4.0;
@@ -226,11 +226,11 @@ pub struct Canvas {
                 pen_y += font.line_height() * s;
                 continue;
             }
-            u64 glyph = font.glyph(c);
+            ui64 glyph = font.glyph(c);
             for (mut i32 row = 0; row < 8; row += 1) {
-                u64 bits = glyph >> (row * 8) as u64 & 0xFF;
+                ui64 bits = glyph >> (row * 8) as ui64 & 0xFF;
                 for (mut i32 col = 0; col < 8; col += 1) {
-                    if (bits >> col as u64 & 1 == 1) {
+                    if (bits >> col as ui64 & 1 == 1) {
                         dot(pen_x + col * s, pen_y + row * s, s, color);
                     }
                 }
@@ -244,7 +244,7 @@ pub struct Canvas {
     pub void text_with(truetype.Font* face, f32 size, f32 x, f32 y, str text, Color color) {
         mut f32 pen = x;
         mut f32 baseline = y + face.ascent(size);
-        mut u32 previous = 0;  // the glyph before, for kerning (spec §10.10)
+        mut ui32 previous = 0;  // the glyph before, for kerning (spec §10.10)
         mut truetype.Font* previous_font = face;
         for (char c in text.chars()) {
             if (c == '\n') {
@@ -254,7 +254,7 @@ pub struct Canvas {
                 continue;
             }
             truetype.Font* font = face.font_of(c);  // its fallback, for a character it lacks
-            u32 glyph = font.glyph_of(c);
+            ui32 glyph = font.glyph_of(c);
             if (font == previous_font) {
                 pen += font.kerning(previous, glyph, size);
             }
@@ -265,9 +265,9 @@ pub struct Canvas {
             i32 top = (baseline + 0.5) as i32 - image.top;
             for (mut i32 row = 0; row < image.height; row += 1) {
                 for (mut i32 column = 0; column < image.width; column += 1) {
-                    u32 coverage = image.coverage[(row * image.width + column) as usize] as u32;
+                    ui32 coverage = image.coverage[(row * image.width + column) as usize] as ui32;
                     if (coverage != 0) {
-                        u8 alpha = (color.a as u32 * coverage / 255) as u8;
+                        ui8 alpha = (color.a as ui32 * coverage / 255) as ui8;
                         blend(left + column, top + row, Color{ r: color.r, g: color.g, b: color.b, a: alpha });
                     }
                 }
@@ -296,30 +296,30 @@ pub struct Canvas {
             for (mut i32 x = x0; x < x1; x += 1) {
                 i32 left = min(max(((x as f32 - rect.x) * sx) as i32, 0), img.width - 1);
                 i32 right = min(max(((x as f32 + 1.0 - rect.x) * sx) as i32, left + 1), img.width);
-                mut u64 n = 0;
-                mut u64 a = 0;
-                mut u64 r = 0;
-                mut u64 g = 0;
-                mut u64 b = 0;
+                mut ui64 n = 0;
+                mut ui64 a = 0;
+                mut ui64 r = 0;
+                mut ui64 g = 0;
+                mut ui64 b = 0;
                 for (i32 iy in top..bottom) {
                     for (i32 ix in left..right) {
-                        u32 p = img.at(ix, iy);
-                        u64 alpha = (p >> 24) as u64;
+                        ui32 p = img.at(ix, iy);
+                        ui64 alpha = (p >> 24) as ui64;
                         n += 1;
                         a += alpha;
-                        r += (p >> 16 & 0xFF) as u64 * alpha;
-                        g += (p >> 8 & 0xFF) as u64 * alpha;
-                        b += (p & 0xFF) as u64 * alpha;
+                        r += (p >> 16 & 0xFF) as ui64 * alpha;
+                        g += (p >> 8 & 0xFF) as ui64 * alpha;
+                        b += (p & 0xFF) as ui64 * alpha;
                     }
                 }
                 if (a > 0) {
-                    blend(x, y, Color{ r: (r / a) as u8, g: (g / a) as u8, b: (b / a) as u8, a: (a / n) as u8 });
+                    blend(x, y, Color{ r: (r / a) as ui8, g: (g / a) as ui8, b: (b / a) as ui8, a: (a / n) as ui8 });
                 }
             }
         }
     }
 
-    pub u32 at(i32 x, i32 y) {
+    pub ui32 at(i32 x, i32 y) {
         if (x < 0 || y < 0 || x >= width || y >= height) {
             return 0;
         }
@@ -344,11 +344,11 @@ pub struct Canvas {
             pixels[i] = pack(color);
             return;
         }
-        u32 below = pixels[i];
-        u32 a = color.a as u32;
-        u32 r = mix(color.r as u32, below >> 16 & 0xFF, a);
-        u32 g = mix(color.g as u32, below >> 8 & 0xFF, a);
-        u32 b = mix(color.b as u32, below & 0xFF, a);
+        ui32 below = pixels[i];
+        ui32 a = color.a as ui32;
+        ui32 r = mix(color.r as ui32, below >> 16 & 0xFF, a);
+        ui32 g = mix(color.g as ui32, below >> 8 & 0xFF, a);
+        ui32 b = mix(color.b as ui32, below & 0xFF, a);
         pixels[i] = 0xFF000000 | r << 16 | g << 8 | b;
     }
 }
@@ -387,15 +387,15 @@ pub Rect text_size(str text, i32 scale) {
 pub Canvas create(Arena* arena, i32 width, i32 height) {
     usize count = (max(width, 0) * max(height, 0)) as usize;
     Clip all = Clip{ x0: 0, y0: 0, x1: max(width, 0), y1: max(height, 0) };
-    return Canvas{ width: max(width, 0), height: max(height, 0), pixels: arena.alloc_slice(u32, count), clip: all };
+    return Canvas{ width: max(width, 0), height: max(height, 0), pixels: arena.alloc_slice(ui32, count), clip: all };
 }
 
-pub u32 pack(Color color) {
-    return color.a as u32 << 24 | color.r as u32 << 16 | color.g as u32 << 8 | color.b as u32;
+pub ui32 pack(Color color) {
+    return color.a as ui32 << 24 | color.r as ui32 << 16 | color.g as ui32 << 8 | color.b as ui32;
 }
 
 // `over` drawn with opacity `a` (0 to 255) on `below`, rounded.
-u32 mix(u32 over, u32 below, u32 a) {
+ui32 mix(ui32 over, ui32 below, ui32 a) {
     return (over * a + below * (255 - a) + 127) / 255;
 }
 
@@ -520,7 +520,7 @@ test "discs" {
     c.fill_circle(10.0, 10.0, 5.0, Color{ r: 255, g: 255, b: 255 });
     assert(c.at(10, 10) == 0xFFFFFFFF && c.at(7, 10) == 0xFFFFFFFF);  // inside
     assert(c.at(2, 2) == 0 && c.at(16, 10) == 0);  // outside
-    u32 edge = c.at(13, 13) & 0xFF;  // across the circle: partly covered
+    ui32 edge = c.at(13, 13) & 0xFF;  // across the circle: partly covered
     assert(edge > 0 && edge < 255);
 }
 
@@ -530,7 +530,7 @@ test "images are drawn scaled, with their alpha" {
     mut Canvas c = create(&arena, 20, 20);
     c.clear(Color{ r: 0, g: 0, b: 0 });
     // 4 by 4: the left half opaque red, the right half transparent
-    mut u32[] pixels = arena.alloc_slice(u32, 16);
+    mut ui32[] pixels = arena.alloc_slice(ui32, 16);
     for (usize i in 0..16) {
         pixels[i] = i % 4 < 2 ? 0xFFFF0000 : 0x00FFFFFF;
     }
@@ -541,7 +541,7 @@ test "images are drawn scaled, with their alpha" {
     c.draw_image(img, Rect{ x: 12.0, y: 12.0, w: 2.0, h: 2.0 });  // reduced: 2 by 2 per pixel
     assert(c.at(12, 12) == 0xFFFF0000 && c.at(13, 12) == 0xFF000000);
     c.draw_image(img, Rect{ x: 16.0, y: 16.0, w: 1.0, h: 1.0 });  // red, half covered
-    u32 half = c.at(16, 16);
+    ui32 half = c.at(16, 16);
     assert(half >> 16 & 0xFF > 120 && half >> 16 & 0xFF < 135 && half & 0xFFFF == 0);
     c.push_clip(Rect{ x: 0.0, y: 0.0, w: 3.0, h: 20.0 });
     c.clear(Color{ r: 0, g: 0, b: 0 });
@@ -585,9 +585,9 @@ test "rounded rectangles: the pixels sampled alone are those of every pixel samp
                 Rect hole = Rect{ x: rect.x + ring, y: rect.y + ring, w: rect.w - 2.0 * ring, h: rect.h - 2.0 * ring };
                 for (mut i32 y = 0; y < 64; y += 1) {
                     for (mut i32 x = 0; x < 64; x += 1) {
-                        u32 inside = every.coverage(rect, r, ring, hole, x, y);
+                        ui32 inside = every.coverage(rect, r, ring, hole, x, y);
                         if (inside > 0) {
-                            every.blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as u32 * inside / 16) as u8 });
+                            every.blend(x, y, Color{ r: color.r, g: color.g, b: color.b, a: (color.a as ui32 * inside / 16) as ui8 });
                         }
                     }
                 }

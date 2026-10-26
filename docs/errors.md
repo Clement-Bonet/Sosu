@@ -15,7 +15,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0105 | empty character literal | `''` |
 | E0106 | character literal contains more than one character | `'ab'` |
 | E0107 | unknown or invalid escape sequence | `"\q"`, `"\xFF"` |
-| E0108 | invalid number literal (digits or suffix) | `0b102`, `12abc`, `0x`, `300u8` |
+| E0108 | invalid number literal (digits or suffix) | `0b102`, `12abc`, `0x`, `300ui8` |
 | E0109 | integer literal is too large | above 2^64 - 1 |
 | E0110 | `++` / `--` does not exist | `x++` |
 | E0111 | `::` does not exist | `std::io` |
@@ -51,7 +51,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 |---|---|---|
 | E0301 | name already declared, or a built-in type | `struct A {}` twice, `struct i32 {}` |
 | E0302 | name already used by an import | `import a.util; import b.util;`, `import std.io; struct io {}` |
-| E0303 | unknown type or module | `Pont p;` (did you mean `Point`?), `io.File f;` |
+| E0303 | unknown type or module | `Pont p;` (did you mean `Point`?), `io.File f;`, `u8 b;` (now `ui8`) |
 | E0304 | not a type | a function or a module used as a type |
 | E0305 | private to its module | `shapes.Secret` without `pub struct Secret` |
 | E0306 | `void` can only be a return type | `void x;`, `void f(void x)` |
@@ -72,16 +72,16 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0321 | class or interface used by value | `Widget w;` instead of `Widget* w;` |
 | E0330 | unknown name | `cuont` (did you mean `count`?) |
 | E0331 | type mismatch | `i32 b = a;` with `a: i64`, `f32 x = 3;` |
-| E0332 | number literal out of range | `u8 x = 256;` |
+| E0332 | number literal out of range | `ui8 x = 256;` |
 | E0333 | not a value | a type, a module or a method used as a value |
-| E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing or slicing a `str` |
+| E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing or slicing a `str`, `-x` on a `ui32` or a `uf32` |
 | E0335 | cannot assign | a variable or a field that is not `mut`, `&a` or `a[0..2]` of an array that is not `mut`, `v[0..2] = w` |
 | E0336 | wrong number of arguments or variant fields | `g(1, 2)` for `g(i32 a)` |
 | E0337 | no such field, method or variant | `p.y` on a struct without `y`, `.copy()` on a value without an `Arena` |
 | E0338 | not a function | `x()` with `x: i32`, `Point(...)` |
 | E0339 | invalid conversion | `3.0 as bool`, `as?` to a type that is not a subclass |
 | E0340 | missing effect | calling a `uses io` function from a function without `uses io` |
-| E0341 | unsafe operation outside `unsafe` | calling C, pointer arithmetic, `p as u8*` |
+| E0341 | unsafe operation outside `unsafe` | calling C, pointer arithmetic, `p as ui8*` |
 | E0342 | type cannot be inferred | `auto x = none;`, `auto r = ok(1);` |
 | E0343 | invalid `match` | unknown case, case matched twice, unreachable arm, wrong number of bindings |
 | E0344 | `break`, `continue` or `return` out of place | `break` outside a loop, `return` in `defer` |

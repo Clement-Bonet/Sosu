@@ -12,10 +12,10 @@ pub enum IoError {
 struct CFile { }
 
 extern "C" {
-    CFile* fopen(u8* path, u8* mode) uses io;
+    CFile* fopen(ui8* path, ui8* mode) uses io;
     i32 fclose(CFile* file) uses io;
-    usize fread(u8* buffer, usize size, usize count, CFile* file) uses io;
-    usize fwrite(u8* buffer, usize size, usize count, CFile* file) uses io;
+    usize fread(ui8* buffer, usize size, usize count, CFile* file) uses io;
+    usize fwrite(ui8* buffer, usize size, usize count, CFile* file) uses io;
     // From the Sosu runtime: errno is a macro, and the C types of file offsets differ by system.
     i32 sosu_errno() uses io;
     i64 sosu_file_size(CFile* file) uses io;
@@ -37,11 +37,11 @@ IoError last_error() uses io {
 
 // Opens a file with a C mode ("rb", "wb"...), or none with the error in `error`.
 CFile*? open(Arena* arena, str path, str mode) uses io {
-    u8* c_path = path.to_cstr(arena);
-    u8* c_mode = mode.to_cstr(arena);
+    ui8* c_path = path.to_cstr(arena);
+    ui8* c_mode = mode.to_cstr(arena);
     unsafe {
         CFile* file = fopen(c_path, c_mode);
-        if (file as u64 == 0) {
+        if (file as ui64 == 0) {
             return none;
         }
         return some(file);
@@ -56,7 +56,7 @@ void close(CFile* file) uses io {
 
 // The whole content of a text file, allocated in `arena`.
 pub str!IoError read_file(Arena* arena, str path) uses io {
-    u8[] bytes = try read_bytes(arena, path);
+    ui8[] bytes = try read_bytes(arena, path);
     return match (str.from_bytes(bytes)) {
         ok(text) => ok(text),
         err(e) => err(InvalidUtf8),
@@ -64,7 +64,7 @@ pub str!IoError read_file(Arena* arena, str path) uses io {
 }
 
 // The whole content of a file, as bytes (a font, an image...), allocated in `arena`.
-pub u8[]!IoError read_bytes(Arena* arena, str path) uses io {
+pub ui8[]!IoError read_bytes(Arena* arena, str path) uses io {
     CFile* file = match (open(arena, path, "rb")) {
         some(opened) => opened,
         none => {
@@ -80,7 +80,7 @@ pub u8[]!IoError read_bytes(Arena* arena, str path) uses io {
     if (size < 0) {
         return err(Other);
     }
-    u8[] bytes = arena.alloc_slice(u8, size as usize);
+    ui8[] bytes = arena.alloc_slice(ui8, size as usize);
     if (size == 0) {
         return ok(bytes);
     }

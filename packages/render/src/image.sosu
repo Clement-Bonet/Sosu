@@ -15,10 +15,10 @@ pub enum ImageError {
 pub struct Image {
     pub i32 width;
     pub i32 height;
-    pub u32[] pixels;
+    pub ui32[] pixels;
 
     // The pixel at (x, y), or 0 (transparent) outside of the image.
-    pub u32 at(i32 x, i32 y) {
+    pub ui32 at(i32 x, i32 y) {
         if (x < 0 || y < 0 || x >= width || y >= height) {
             return 0;
         }
@@ -29,20 +29,20 @@ pub struct Image {
 // ---- Inflate: the bits of a deflate stream, least significant first ----
 
 struct Bits {
-    u8[] data;
-    mut u64 at = 0;  // in bits
+    ui8[] data;
+    mut ui64 at = 0;  // in bits
     mut bool past = false;  // a read went past the end
 
     // `count` bits (at most 16), the first one lowest.
-    u32 take(u32 count) {
-        mut u32 value = 0;
-        for (u32 i in 0..count) {
-            u64 index = at >> 3;
-            if (index >= data.len as u64) {
+    ui32 take(ui32 count) {
+        mut ui32 value = 0;
+        for (ui32 i in 0..count) {
+            ui64 index = at >> 3;
+            if (index >= data.len as ui64) {
                 past = true;
                 return 0;
             }
-            u32 bit = data[index as usize] as u32 >> (at & 7) as u32 & 1;
+            ui32 bit = data[index as usize] as ui32 >> (at & 7) as ui32 & 1;
             value = value | bit << i;
             at += 1;
         }
@@ -51,19 +51,19 @@ struct Bits {
 
     // Skips to the next whole byte (stored blocks start there).
     void align() {
-        at = at + 7 & ~(7 as u64);
+        at = at + 7 & ~(7 as ui64);
     }
 }
 
 // A canonical Huffman code: how many codes of each length, and the symbols in code order.
 struct Huffman {
-    mut u16[16] count = [0; 16];
-    mut u16[320] symbol = [0; 320];
+    mut ui16[16] count = [0; 16];
+    mut ui16[320] symbol = [0; 320];
 
     // The code of `lengths` (0: a symbol without code). False if it is over-subscribed.
-    bool build(u8[] lengths) {
+    bool build(ui8[] lengths) {
         count = [0; 16];
-        for (u8 l in lengths) {
+        for (ui8 l in lengths) {
             count[l as usize] += 1;
         }
         mut i32 left = 1;
@@ -73,14 +73,14 @@ struct Huffman {
                 return false;
             }
         }
-        mut u16[16] offset = [0; 16];
+        mut ui16[16] offset = [0; 16];
         for (usize l in 1..15) {
             offset[l + 1] = offset[l] + count[l];
         }
         for (usize s in 0..lengths.len) {
             usize l = lengths[s] as usize;
             if (l != 0) {
-                symbol[offset[l] as usize] = s as u16;
+                symbol[offset[l] as usize] = s as ui16;
                 offset[l] += 1;
             }
         }
@@ -107,28 +107,28 @@ struct Huffman {
 }
 
 // The lengths and distances of the codes 257 to 285 and 0 to 29: base and extra bits.
-u32[29] length_base() {
+ui32[29] length_base() {
     return [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
 }
 
-u32[29] length_extra() {
+ui32[29] length_extra() {
     return [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
 }
 
-u32[30] distance_base() {
+ui32[30] distance_base() {
     return [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
 }
 
-u32[30] distance_extra() {
+ui32[30] distance_extra() {
     return [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
 }
 
 // What is being inflated into: `out`, filled up to `len`.
 struct Output {
-    u8[] out;
+    ui8[] out;
     mut usize len = 0;
 
-    bool put(u8 b) {
+    bool put(ui8 b) {
         if (len >= out.len) {
             return false;
         }
@@ -140,49 +140,49 @@ struct Output {
 
 // The codes of a block with fixed codes (RFC 1951, 3.2.6).
 bool fixed_codes(Huffman* lengths, Huffman* distances) {
-    mut u8[288] l = [8; 288];
+    mut ui8[288] l = [8; 288];
     for (usize i in 144..256) {
         l[i] = 9;
     }
     for (usize i in 256..280) {
         l[i] = 7;
     }
-    mut u8[30] d = [5; 30];
+    mut ui8[30] d = [5; 30];
     return lengths.build(l[0..288]) && distances.build(d[0..30]);
 }
 
 // The codes of a block with dynamic codes, read from `bits` (RFC 1951, 3.2.7).
 bool dynamic_codes(Bits* bits, Huffman* lengths, Huffman* distances) {
-    u32 nlen = bits.take(5) + 257;
-    u32 ndist = bits.take(5) + 1;
-    u32 ncode = bits.take(4) + 4;
+    ui32 nlen = bits.take(5) + 257;
+    ui32 ndist = bits.take(5) + 1;
+    ui32 ncode = bits.take(4) + 4;
     if (nlen > 286 || ndist > 30) {
         return false;
     }
-    u32[19] order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-    mut u8[19] code_lengths = [0; 19];
-    for (u32 i in 0..ncode) {
-        code_lengths[order[i as usize] as usize] = bits.take(3) as u8;
+    ui32[19] order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+    mut ui8[19] code_lengths = [0; 19];
+    for (ui32 i in 0..ncode) {
+        code_lengths[order[i as usize] as usize] = bits.take(3) as ui8;
     }
     mut Huffman codes = Huffman{ };
     if (!codes.build(code_lengths[0..19])) {
         return false;
     }
-    mut u8[316] l = [0; 316];
-    u32 total = nlen + ndist;
-    mut u32 i = 0;
+    mut ui8[316] l = [0; 316];
+    ui32 total = nlen + ndist;
+    mut ui32 i = 0;
     while (i < total) {
         i32 s = codes.decode(bits);
         if (s < 0 || bits.past) {
             return false;
         }
         if (s < 16) {
-            l[i as usize] = s as u8;
+            l[i as usize] = s as ui8;
             i += 1;
             continue;
         }
-        mut u8 repeated = 0;
-        mut u32 times = 0;
+        mut ui8 repeated = 0;
+        mut ui32 times = 0;
         if (s == 16) {
             if (i == 0) {
                 return false;
@@ -197,7 +197,7 @@ bool dynamic_codes(Bits* bits, Huffman* lengths, Huffman* distances) {
         if (i + times > total) {
             return false;
         }
-        for (u32 k in 0..times) {
+        for (ui32 k in 0..times) {
             l[(i + k) as usize] = repeated;
         }
         i += times;
@@ -210,17 +210,17 @@ bool dynamic_codes(Bits* bits, Huffman* lengths, Huffman* distances) {
 
 // The symbols of a compressed block, until its end. False if the data is damaged.
 bool inflate_block(Bits* bits, Output* output, Huffman* lengths, Huffman* distances) {
-    u32[29] lbase = length_base();
-    u32[29] lextra = length_extra();
-    u32[30] dbase = distance_base();
-    u32[30] dextra = distance_extra();
+    ui32[29] lbase = length_base();
+    ui32[29] lextra = length_extra();
+    ui32[30] dbase = distance_base();
+    ui32[30] dextra = distance_extra();
     while (true) {
         i32 s = lengths.decode(bits);
         if (s < 0 || bits.past) {
             return false;
         }
         if (s < 256) {
-            if (!output.put(s as u8)) {
+            if (!output.put(s as ui8)) {
                 return false;
             }
         } else if (s == 256) {
@@ -230,7 +230,7 @@ bool inflate_block(Bits* bits, Output* output, Huffman* lengths, Huffman* distan
             if (code >= 29) {
                 return false;
             }
-            u32 length = lbase[code] + bits.take(lextra[code]);
+            ui32 length = lbase[code] + bits.take(lextra[code]);
             i32 d = distances.decode(bits);
             if (d < 0 || d >= 30) {
                 return false;
@@ -239,7 +239,7 @@ bool inflate_block(Bits* bits, Output* output, Huffman* lengths, Huffman* distan
             if (distance > output.len || bits.past) {
                 return false;
             }
-            for (u32 k in 0..length) {
+            for (ui32 k in 0..length) {
                 if (!output.put(output.out[output.len - distance])) {
                     return false;
                 }
@@ -251,8 +251,8 @@ bool inflate_block(Bits* bits, Output* output, Huffman* lengths, Huffman* distan
 
 // Inflates the zlib stream `data` into `out`; the number of bytes written, or none if the
 // stream is damaged.
-usize? inflate(u8[] data, u8[] out) {
-    if (data.len < 2 || data[0] & 0x0F != 8 || (data[0] as u32 * 256 + data[1] as u32) % 31 != 0 || data[1] & 0x20 != 0) {
+usize? inflate(ui8[] data, ui8[] out) {
+    if (data.len < 2 || data[0] & 0x0F != 8 || (data[0] as ui32 * 256 + data[1] as ui32) % 31 != 0 || data[1] & 0x20 != 0) {
         return none;  // not deflate, or a preset dictionary (never in a PNG file)
     }
     mut Bits bits = Bits{ data: data[2..data.len] };
@@ -262,17 +262,17 @@ usize? inflate(u8[] data, u8[] out) {
     mut bool last = false;
     while (!last) {
         last = bits.take(1) == 1;
-        u32 kind = bits.take(2);
+        ui32 kind = bits.take(2);
         if (kind == 0) {  // stored
             bits.align();
-            u32 length = bits.take(16);
-            u32 complement = bits.take(16);
+            ui32 length = bits.take(16);
+            ui32 complement = bits.take(16);
             if (length != ~complement & 0xFFFF) {
                 return none;
             }
-            for (u32 k in 0..length) {
-                u32 b = bits.take(8);
-                if (bits.past || !output.put(b as u8)) {
+            for (ui32 k in 0..length) {
+                ui32 b = bits.take(8);
+                if (bits.past || !output.put(b as ui8)) {
                     return none;
                 }
             }
@@ -296,14 +296,14 @@ usize? inflate(u8[] data, u8[] out) {
 
 // ---- PNG: chunks, filters, interlacing and pixels ----
 
-u32 u32_at(u8[] data, usize at) {
+ui32 u32_at(ui8[] data, usize at) {
     if (at + 4 > data.len) {
         return 0;
     }
-    return data[at] as u32 << 24 | data[at + 1] as u32 << 16 | data[at + 2] as u32 << 8 | data[at + 3] as u32;
+    return data[at] as ui32 << 24 | data[at + 1] as ui32 << 16 | data[at + 2] as ui32 << 8 | data[at + 3] as ui32;
 }
 
-bool is_tag(u8[] data, usize at, str tag) {
+bool is_tag(ui8[] data, usize at, str tag) {
     if (at + 4 > data.len) {
         return false;
     }
@@ -317,18 +317,18 @@ bool is_tag(u8[] data, usize at, str tag) {
 
 // What the header of a PNG file says about its pixels.
 struct Header {
-    u32 width;
-    u32 height;
-    u32 depth;  // bits per sample: 1, 2, 4, 8 or 16
-    u32 color;  // 0 gray, 2 RGB, 3 palette, 4 gray and alpha, 6 RGB and alpha
+    ui32 width;
+    ui32 height;
+    ui32 depth;  // bits per sample: 1, 2, 4, 8 or 16
+    ui32 color;  // 0 gray, 2 RGB, 3 palette, 4 gray and alpha, 6 RGB and alpha
     bool interlaced;
 
-    u32 channels() {
+    ui32 channels() {
         return color == 2 ? 3 : color == 4 ? 2 : color == 6 ? 4 : 1;
     }
 
     // Bits per pixel, and bytes per pixel for the filters (at least 1).
-    u32 pixel_bits() {
+    ui32 pixel_bits() {
         return channels() * depth;
     }
 
@@ -337,8 +337,8 @@ struct Header {
     }
 
     // The bytes of a row of `w` pixels, its filter byte included.
-    usize row_bytes(u32 w) {
-        return ((w as u64 * pixel_bits() as u64 + 7) / 8) as usize + 1;
+    usize row_bytes(ui32 w) {
+        return ((w as ui64 * pixel_bits() as ui64 + 7) / 8) as usize + 1;
     }
 
     bool valid() {
@@ -349,24 +349,24 @@ struct Header {
 }
 
 // The 7 passes of Adam7: where each starts and how far apart its pixels are.
-u32[7] pass_x() {
+ui32[7] pass_x() {
     return [0, 4, 0, 2, 0, 1, 0];
 }
 
-u32[7] pass_y() {
+ui32[7] pass_y() {
     return [0, 0, 4, 0, 2, 0, 1];
 }
 
-u32[7] pass_dx() {
+ui32[7] pass_dx() {
     return [8, 8, 4, 4, 2, 2, 1];
 }
 
-u32[7] pass_dy() {
+ui32[7] pass_dy() {
     return [8, 8, 8, 4, 4, 2, 2];
 }
 
 // The size of a pass of an image `size` pixels wide (or high).
-u32 pass_size(u32 size, u32 start, u32 step) {
+ui32 pass_size(ui32 size, ui32 start, ui32 step) {
     return size > start ? (size - start + step - 1) / step : 0;
 }
 
@@ -379,10 +379,10 @@ i32 paeth(i32 a, i32 b, i32 c) {
 }
 
 // Undoes the filters of `rows` rows of `stride` bytes (the filter byte first) at `data`.
-bool unfilter(u8[] data, usize rows, usize stride, usize step) {
+bool unfilter(ui8[] data, usize rows, usize stride, usize step) {
     for (usize y in 0..rows) {
         usize row = y * stride;
-        u8 kind = data[row];
+        ui8 kind = data[row];
         for (usize i in 1..stride) {
             i32 a = i > step ? data[row + i - step] as i32 : 0;
             i32 b = y > 0 ? data[row - stride + i] as i32 : 0;
@@ -392,61 +392,61 @@ bool unfilter(u8[] data, usize rows, usize stride, usize step) {
             if (value < 0) {
                 return false;
             }
-            data[row + i] = (value & 0xFF) as u8;
+            data[row + i] = (value & 0xFF) as ui8;
         }
     }
     return true;
 }
 
 // The sample `index` of a row of samples of `depth` bits (16 bits: the whole value).
-u32 sample(u8[] data, usize row, u32 index, u32 depth) {
+ui32 sample(ui8[] data, usize row, ui32 index, ui32 depth) {
     if (depth == 16) {
         usize at = row + 2 * index as usize;
-        return data[at] as u32 << 8 | data[at + 1] as u32;
+        return data[at] as ui32 << 8 | data[at + 1] as ui32;
     }
     if (depth == 8) {
-        return data[row + index as usize] as u32;
+        return data[row + index as usize] as ui32;
     }
-    u32 bit = index * depth;
-    u32 b = data[row + (bit / 8) as usize] as u32;
+    ui32 bit = index * depth;
+    ui32 b = data[row + (bit / 8) as usize] as ui32;
     return b >> 8 - depth - bit % 8 & (1 << depth) - 1;
 }
 
 // A sample of `depth` bits brought to 8 bits.
-u32 to8(u32 value, u32 depth) {
+ui32 to8(ui32 value, ui32 depth) {
     return depth == 16 ? value >> 8 : value * 255 / ((1 << depth) - 1);
 }
 
 // What the pixels need besides their samples: the palette and the transparency (`tRNS`).
 struct Extras {
-    mut u32[256] palette = [0xFF000000; 256];
+    mut ui32[256] palette = [0xFF000000; 256];
     mut bool keyed = false;  // a gray or RGB value is transparent
-    mut u32[3] key = [0; 3];
+    mut ui32[3] key = [0; 3];
 }
 
 // The pixel `x` of a row that starts at `row` (after its filter byte).
-u32 pixel(Header h, Extras* e, u8[] data, usize row, u32 x) {
-    u32 n = h.channels();
-    u32 d = h.depth;
+ui32 pixel(Header h, Extras* e, ui8[] data, usize row, ui32 x) {
+    ui32 n = h.channels();
+    ui32 d = h.depth;
     if (h.color == 3) {
         return e.palette[sample(data, row, x, d) as usize];
     }
     if (h.color == 0 || h.color == 4) {
-        u32 raw = sample(data, row, x * n, d);
-        u32 v = to8(raw, d);
-        u32 a = h.color == 4 ? to8(sample(data, row, x * n + 1, d), d) : e.keyed && raw == e.key[0] ? 0 : 255;
+        ui32 raw = sample(data, row, x * n, d);
+        ui32 v = to8(raw, d);
+        ui32 a = h.color == 4 ? to8(sample(data, row, x * n + 1, d), d) : e.keyed && raw == e.key[0] ? 0 : 255;
         return a << 24 | v << 16 | v << 8 | v;
     }
-    u32 r = sample(data, row, x * n, d);
-    u32 g = sample(data, row, x * n + 1, d);
-    u32 b = sample(data, row, x * n + 2, d);
-    u32 a = h.color == 6 ? to8(sample(data, row, x * n + 3, d), d) : e.keyed && r == e.key[0] && g == e.key[1] && b == e.key[2] ? 0 : 255;
+    ui32 r = sample(data, row, x * n, d);
+    ui32 g = sample(data, row, x * n + 1, d);
+    ui32 b = sample(data, row, x * n + 2, d);
+    ui32 a = h.color == 6 ? to8(sample(data, row, x * n + 3, d), d) : e.keyed && r == e.key[0] && g == e.key[1] && b == e.key[2] ? 0 : 255;
     return a << 24 | to8(r, d) << 16 | to8(g, d) << 8 | to8(b, d);
 }
 
 // Decodes the PNG file `data`; the pixels are allocated in `arena`.
-pub Image!ImageError decode(Arena* arena, u8[] data) {
-    u8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
+pub Image!ImageError decode(Arena* arena, ui8[] data) {
+    ui8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
     if (data.len < 33) {
         return err(NotPng);
     }
@@ -458,7 +458,7 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
     if (!is_tag(data, 12, "IHDR") || u32_at(data, 8) != 13) {
         return err(Damaged);
     }
-    Header h = Header{ width: u32_at(data, 16), height: u32_at(data, 20), depth: data[24] as u32, color: data[25] as u32, interlaced: data[28] == 1 };
+    Header h = Header{ width: u32_at(data, 16), height: u32_at(data, 20), depth: data[24] as ui32, color: data[25] as ui32, interlaced: data[28] == 1 };
     if (!h.valid() || h.width == 0 || h.height == 0 || h.width > 16384 || h.height > 16384 || data[26] != 0 || data[27] != 0 || data[28] > 1) {
         return err(Damaged);
     }
@@ -478,17 +478,17 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
         } else if (is_tag(data, at + 4, "PLTE")) {
             for (usize i in 0..min(length / 3, 256)) {
                 usize p = body + 3 * i;
-                extras.palette[i] = 0xFF000000 | data[p] as u32 << 16 | data[p + 1] as u32 << 8 | data[p + 2] as u32;
+                extras.palette[i] = 0xFF000000 | data[p] as ui32 << 16 | data[p + 1] as ui32 << 8 | data[p + 2] as ui32;
             }
         } else if (is_tag(data, at + 4, "tRNS")) {
             if (h.color == 3) {
                 for (usize i in 0..min(length, 256)) {
-                    extras.palette[i] = extras.palette[i] & 0x00FFFFFF | data[body + i] as u32 << 24;
+                    extras.palette[i] = extras.palette[i] & 0x00FFFFFF | data[body + i] as ui32 << 24;
                 }
             } else if (h.color == 0 && length >= 2 || h.color == 2 && length >= 6) {
                 extras.keyed = true;
                 for (usize i in 0..(h.color == 0 ? 1 : 3)) {
-                    extras.key[i] = data[body + 2 * i] as u32 << 8 | data[body + 2 * i + 1] as u32;
+                    extras.key[i] = data[body + 2 * i] as ui32 << 8 | data[body + 2 * i + 1] as ui32;
                 }
             }
         } else if (is_tag(data, at + 4, "IEND")) {
@@ -496,7 +496,7 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
         }
         at = body + length + 4;
     }
-    mut u8[] stream = arena.alloc_slice(u8, compressed);
+    mut ui8[] stream = arena.alloc_slice(ui8, compressed);
     mut usize filled = 0;
     at = 8;
     while (at + 12 <= data.len && filled < compressed) {
@@ -513,19 +513,19 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
 
     // The rows of each pass (one pass when not interlaced), their filter bytes included.
     usize passes = h.interlaced ? 7 : 1;
-    u32[7] px = pass_x();
-    u32[7] py = pass_y();
-    u32[7] pdx = pass_dx();
-    u32[7] pdy = pass_dy();
+    ui32[7] px = pass_x();
+    ui32[7] py = pass_y();
+    ui32[7] pdx = pass_dx();
+    ui32[7] pdy = pass_dy();
     mut usize expected = 0;
     for (usize p in 0..passes) {
-        u32 w = h.interlaced ? pass_size(h.width, px[p], pdx[p]) : h.width;
-        u32 rows = h.interlaced ? pass_size(h.height, py[p], pdy[p]) : h.height;
+        ui32 w = h.interlaced ? pass_size(h.width, px[p], pdx[p]) : h.width;
+        ui32 rows = h.interlaced ? pass_size(h.height, py[p], pdy[p]) : h.height;
         if (w > 0) {
             expected += h.row_bytes(w) * rows as usize;
         }
     }
-    mut u8[] raw = arena.alloc_slice(u8, expected);
+    mut ui8[] raw = arena.alloc_slice(ui8, expected);
     match (inflate(stream, raw)) {
         some(written) => {
             if (written != expected) {
@@ -537,11 +537,11 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
         },
     }
 
-    mut u32[] pixels = arena.alloc_slice(u32, (h.width * h.height) as usize);
+    mut ui32[] pixels = arena.alloc_slice(ui32, (h.width * h.height) as usize);
     mut usize start = 0;
     for (usize p in 0..passes) {
-        u32 w = h.interlaced ? pass_size(h.width, px[p], pdx[p]) : h.width;
-        u32 rows = h.interlaced ? pass_size(h.height, py[p], pdy[p]) : h.height;
+        ui32 w = h.interlaced ? pass_size(h.width, px[p], pdx[p]) : h.width;
+        ui32 rows = h.interlaced ? pass_size(h.height, py[p], pdy[p]) : h.height;
         if (w == 0 || rows == 0) {
             continue;
         }
@@ -549,11 +549,11 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
         if (!unfilter(raw[start..start + stride * rows as usize], rows as usize, stride, h.filter_step())) {
             return err(Damaged);
         }
-        for (u32 y in 0..rows) {
+        for (ui32 y in 0..rows) {
             usize row = start + y as usize * stride + 1;
-            u32 ty = h.interlaced ? py[p] + y * pdy[p] : y;
-            for (u32 x in 0..w) {
-                u32 tx = h.interlaced ? px[p] + x * pdx[p] : x;
+            ui32 ty = h.interlaced ? py[p] + y * pdy[p] : y;
+            for (ui32 x in 0..w) {
+                ui32 tx = h.interlaced ? px[p] + x * pdx[p] : x;
                 pixels[(ty * h.width + tx) as usize] = pixel(h, &extras, raw, row, x);
             }
         }
@@ -564,7 +564,7 @@ pub Image!ImageError decode(Arena* arena, u8[] data) {
 
 // Reads and decodes the PNG file at `path`.
 pub Image!ImageError load(Arena* arena, str path) uses io {
-    u8[] data = match (io.read_bytes(arena, path)) {
+    ui8[] data = match (io.read_bytes(arena, path)) {
         ok(bytes) => bytes,
         err(e) => {
             return err(Unreadable);
@@ -577,15 +577,15 @@ pub Image!ImageError load(Arena* arena, str path) uses io {
 
 // A PNG file being built: its bytes, in an arena.
 struct Builder {
-    mut u8[] bytes;
+    mut ui8[] bytes;
     mut usize len = 0;
 
-    void put(u32 b) {
-        bytes[len] = (b & 0xFF) as u8;
+    void put(ui32 b) {
+        bytes[len] = (b & 0xFF) as ui8;
         len += 1;
     }
 
-    void put32(u32 v) {
+    void put32(ui32 v) {
         put(v >> 24);
         put(v >> 16);
         put(v >> 8);
@@ -593,49 +593,49 @@ struct Builder {
     }
 
     void tag(str name) {
-        for (u8 b in name.bytes) {
-            put(b as u32);
+        for (ui8 b in name.bytes) {
+            put(b as ui32);
         }
     }
 
     // A chunk; its CRC is left 0, since it is not checked.
-    void chunk(str name, u8[] body) {
-        put32(body.len as u32);
+    void chunk(str name, ui8[] body) {
+        put32(body.len as ui32);
         tag(name);
-        for (u8 b in body) {
-            put(b as u32);
+        for (ui8 b in body) {
+            put(b as ui32);
         }
         put32(0);
     }
 
     // The data of the image: `raw` (filter bytes included) in a zlib stream of one stored block.
-    void stored(u8[] raw) {
-        put32((raw.len + 11) as u32);
+    void stored(ui8[] raw) {
+        put32((raw.len + 11) as ui32);
         tag("IDAT");
         put(0x78);
         put(0x01);
         put(1);  // the last block, stored
-        put(raw.len as u32);
-        put(raw.len as u32 >> 8);
-        put(~(raw.len as u32));
-        put(~(raw.len as u32) >> 8);
-        for (u8 b in raw) {
-            put(b as u32);
+        put(raw.len as ui32);
+        put(raw.len as ui32 >> 8);
+        put(~(raw.len as ui32));
+        put(~(raw.len as ui32) >> 8);
+        for (ui8 b in raw) {
+            put(b as ui32);
         }
         put32(0);  // Adler-32, not checked
         put32(0);  // CRC
     }
 
-    u8[] done() {
+    ui8[] done() {
         return bytes[0..len];
     }
 }
 
-Builder png(Arena* arena, u32 w, u32 h, u32 depth, u32 color, u32 interlace) {
-    mut Builder b = Builder{ bytes: arena.alloc_slice(u8, 4096) };
-    u8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
-    for (u8 s in signature) {
-        b.put(s as u32);
+Builder png(Arena* arena, ui32 w, ui32 h, ui32 depth, ui32 color, ui32 interlace) {
+    mut Builder b = Builder{ bytes: arena.alloc_slice(ui8, 4096) };
+    ui8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    for (ui8 s in signature) {
+        b.put(s as ui32);
     }
     b.put32(13);
     b.tag("IHDR");
@@ -650,10 +650,10 @@ Builder png(Arena* arena, u32 w, u32 h, u32 depth, u32 color, u32 interlace) {
     return b;
 }
 
-Image decoded(Arena* arena, u8[] data) {
+Image decoded(Arena* arena, ui8[] data) {
     return match (decode(arena, data)) {
         ok(img) => img,
-        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(u32, 0) },
+        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
     };
 }
 
@@ -662,13 +662,13 @@ test "a PNG file with alpha, compressed with dynamic codes" {
     defer arena.free();
     Image img = match (load(&arena, "packages/render/images/rgba.png")) {
         ok(found) => found,
-        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(u32, 0) },
+        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
     };
     assert(img.width == 48 && img.height == 40);
     mut bool all = true;
     for (i32 y in 0..40) {
         for (i32 x in 0..48) {
-            u32 expected = (x * 5) as u32 << 24 | (y * 6) as u32 << 16 | 100 << 8 | 200;
+            ui32 expected = (x * 5) as ui32 << 24 | (y * 6) as ui32 << 16 | 100 << 8 | 200;
             all = all && img.at(x, y) == expected;
         }
     }
@@ -681,7 +681,7 @@ test "a palette, with a transparent entry" {
     defer arena.free();
     Image img = match (load(&arena, "packages/render/images/palette.png")) {
         ok(found) => found,
-        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(u32, 0) },
+        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
     };
     assert(img.width == 30 && img.height == 20);
     assert(img.at(5, 5) == 0xFFFF0000 && img.at(15, 5) == 0xFF00FF00 && img.at(15, 15) == 0xFF0000FF);
@@ -693,7 +693,7 @@ test "gray of 1 bit, and of 16 bits with a transparent value" {
     defer arena.free();
     // 10 pixels of 1 bit: 2 bytes a row, the last 6 bits unused
     mut Builder b = png(&arena, 10, 2, 1, 0, 0);
-    mut u8[6] rows = [0, 0b10100000, 0b10000000, 0, 0xFF, 0b11000000];
+    mut ui8[6] rows = [0, 0b10100000, 0b10000000, 0, 0xFF, 0b11000000];
     b.stored(rows[0..6]);
     b.chunk("IEND", rows[0..0]);
     Image one = decoded(&arena, b.done());
@@ -701,9 +701,9 @@ test "gray of 1 bit, and of 16 bits with a transparent value" {
     assert(one.at(8, 0) == 0xFFFFFFFF && one.at(9, 0) == 0xFF000000 && one.at(9, 1) == 0xFFFFFFFF);
 
     b = png(&arena, 2, 1, 16, 0, 0);
-    mut u8[2] key = [0x12, 0x34];
+    mut ui8[2] key = [0x12, 0x34];
     b.chunk("tRNS", key[0..2]);
-    mut u8[5] wide = [0, 0x12, 0x34, 0xAB, 0xCD];
+    mut ui8[5] wide = [0, 0x12, 0x34, 0xAB, 0xCD];
     b.stored(wide[0..5]);
     Image sixteen = decoded(&arena, b.done());
     assert(sixteen.at(0, 0) == 0x00121212 && sixteen.at(1, 0) == 0xFFABABAB);
@@ -713,19 +713,19 @@ test "gray and alpha, RGB of 16 bits, and the filters" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
     mut Builder b = png(&arena, 2, 1, 8, 4, 0);
-    mut u8[5] ga = [0, 200, 128, 50, 255];
+    mut ui8[5] ga = [0, 200, 128, 50, 255];
     b.stored(ga[0..5]);
     Image gray = decoded(&arena, b.done());
     assert(gray.at(0, 0) == 0x80C8C8C8 && gray.at(1, 0) == 0xFF323232);
 
     b = png(&arena, 1, 1, 16, 2, 0);
-    mut u8[7] rgb = [0, 0xFF, 0x00, 0x80, 0x00, 0x01, 0x00];
+    mut ui8[7] rgb = [0, 0xFF, 0x00, 0x80, 0x00, 0x01, 0x00];
     b.stored(rgb[0..7]);
     assert(decoded(&arena, b.done()).at(0, 0) == 0xFFFF8001);
 
     // 3 gray pixels on 2 rows: Sub on the first, Up then Average and Paeth on the second
     b = png(&arena, 3, 3, 8, 0, 0);
-    mut u8[12] filtered = [1, 10, 5, 5, 2, 1, 1, 1, 3, 10, 0, 0];
+    mut ui8[12] filtered = [1, 10, 5, 5, 2, 1, 1, 1, 3, 10, 0, 0];
     b.stored(filtered[0..12]);
     Image f = decoded(&arena, b.done());
     assert(f.at(0, 0) == 0xFF0A0A0A && f.at(1, 0) == 0xFF0F0F0F && f.at(2, 0) == 0xFF141414);
@@ -739,13 +739,13 @@ test "an interlaced image (Adam7)" {
     defer arena.free();
     // 3 by 3, gray, pixel (x, y) = 10 * y + x: passes 1, 4, 5, 6 and 7 hold pixels
     mut Builder b = png(&arena, 3, 3, 8, 0, 1);
-    mut u8[17] passes = [0, 0, 0, 2, 0, 20, 22, 0, 1, 0, 21, 0, 10, 11, 12, 0, 0];
+    mut ui8[17] passes = [0, 0, 0, 2, 0, 20, 22, 0, 1, 0, 21, 0, 10, 11, 12, 0, 0];
     b.stored(passes[0..15]);
     Image img = decoded(&arena, b.done());
     mut bool all = img.width == 3;
     for (i32 y in 0..3) {
         for (i32 x in 0..3) {
-            u32 v = (10 * y + x) as u32;
+            ui32 v = (10 * y + x) as ui32;
             all = all && img.at(x, y) == 0xFF000000 | v << 16 | v << 8 | v;
         }
     }
@@ -766,16 +766,16 @@ test "what is not a PNG file, or a damaged one" {
     };
     assert(missing);
     mut Builder b = png(&arena, 4, 4, 8, 0, 0);
-    mut u8[5] short = [0, 1, 2, 3, 4];  // one row of the four
+    mut ui8[5] short = [0, 1, 2, 3, 4];  // one row of the four
     b.stored(short[0..5]);
     bool damaged = match (decode(&arena, b.done())) {
         ok(img) => false,
         err(e) => e == Damaged,
     };
     assert(damaged);
-    u8[] real = match (io.read_bytes(&arena, "packages/render/images/rgba.png")) {
+    ui8[] real = match (io.read_bytes(&arena, "packages/render/images/rgba.png")) {
         ok(bytes) => bytes,
-        err(e) => arena.alloc_slice(u8, 0),
+        err(e) => arena.alloc_slice(ui8, 0),
     };
     bool truncated = match (decode(&arena, real[0..real.len / 2])) {
         ok(img) => false,

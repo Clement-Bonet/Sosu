@@ -6,24 +6,24 @@ pub struct Renderer { }
 
 // SDL_Event: 128 bytes, read through the fields of the events `platform` handles.
 pub struct Event {
-    pub u32 kind;  // SDL_EventType
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    pub u32 word5;  // window events: data1; keyboard events: keyboard id
-    pub u32 word6;  // window events: data2; keyboard events: scancode
-    pub u32 word7;  // keyboard events: key code
-    u8[96] rest;
+    pub ui32 kind;  // SDL_EventType
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    pub ui32 word5;  // window events: data1; keyboard events: keyboard id
+    pub ui32 word6;  // window events: data2; keyboard events: scancode
+    pub ui32 word7;  // keyboard events: key code
+    ui8[96] rest;
 }
 
 // SDL_MouseMotionEvent, the same 128 bytes seen differently.
 pub struct MouseMotion {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    u32 which;
-    u32 state;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    ui32 which;
+    ui32 state;
     pub f32 x;
     pub f32 y;
     f32 xrel;
@@ -32,66 +32,66 @@ pub struct MouseMotion {
 
 // SDL_MouseButtonEvent.
 pub struct MouseButton {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    u32 which;
-    pub u8 button;  // 1: left, 2: middle, 3: right
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    ui32 which;
+    pub ui8 button;  // 1: left, 2: middle, 3: right
     bool down;
-    u8 clicks;
-    u8 padding;
+    ui8 clicks;
+    ui8 padding;
     pub f32 x;
     pub f32 y;
 }
 
 // SDL_TextInputEvent: `text` is a UTF-8 C string owned by SDL until the next event.
 struct TextInput {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    u32 padding;
-    u8* text;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    ui32 padding;
+    ui8* text;
 }
 
 // SDL_TextEditingEvent: the text being composed by an input method, and its cursor.
 struct TextEditing {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    u32 padding;
-    u8* text;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    ui32 padding;
+    ui8* text;
     i32 start;
     i32 length;
 }
 
 // SDL_TouchFingerEvent: a finger on a touch screen, its place from 0 to 1.
 struct TouchFinger {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u64 touch;
-    u64 finger;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui64 touch;
+    ui64 finger;
     f32 x;
     f32 y;
     f32 dx;
     f32 dy;
     f32 pressure;
-    u32 window;
+    ui32 window;
 }
 
 // SDL_DropEvent: a file dropped on the window, from the system.
 struct Drop {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
     f32 x;
     f32 y;
-    u8* source;
-    u8* data;
+    ui8* source;
+    ui8* data;
 }
 
 // SDL_Rect.
@@ -104,15 +104,15 @@ struct IntRect {
 
 // SDL_KeyboardEvent.
 pub struct Keyboard {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    u32 which;
-    u32 scancode;
-    pub u32 key;
-    pub u16 mods;  // SDL_Keymod: Shift 0x3, Ctrl 0xC0, Alt 0x300, GUI (Cmd, Windows) 0xC00
-    u16 raw;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    ui32 which;
+    ui32 scancode;
+    pub ui32 key;
+    pub ui16 mods;  // SDL_Keymod: Shift 0x3, Ctrl 0xC0, Alt 0x300, GUI (Cmd, Windows) 0xC00
+    ui16 raw;
     bool down;
     bool repeat;
 }
@@ -121,8 +121,8 @@ pub struct Texture { }
 
 // SDL_Locale: a language (`fr`), and a country (`FR`) or NULL.
 pub struct Locale {
-    u8* language;
-    u8* country;
+    ui8* language;
+    ui8* country;
 }
 pub struct Surface { }
 
@@ -141,63 +141,63 @@ pub struct FRect {
 
 // A C string (NUL-terminated) built from a `str`.
 struct CString {
-    mut u8[256] bytes;
+    mut ui8[256] bytes;
 }
 
 extern "C" {
-    bool SDL_Init(u32 flags) uses io;
+    bool SDL_Init(ui32 flags) uses io;
     void SDL_Quit() uses io;
-    Window* SDL_CreateWindow(u8* title, i32 w, i32 h, u64 flags) uses io;
+    Window* SDL_CreateWindow(ui8* title, i32 w, i32 h, ui64 flags) uses io;
     void SDL_DestroyWindow(Window* window) uses io;
-    Renderer* SDL_CreateRenderer(Window* window, u8* name) uses io;
+    Renderer* SDL_CreateRenderer(Window* window, ui8* name) uses io;
     void SDL_DestroyRenderer(Renderer* renderer) uses io;
     bool SDL_PollEvent(Event* event) uses io;
     bool SDL_PushEvent(Event* event) uses io;
-    bool SDL_SetRenderDrawColor(Renderer* renderer, u8 r, u8 g, u8 b, u8 a) uses io;
+    bool SDL_SetRenderDrawColor(Renderer* renderer, ui8 r, ui8 g, ui8 b, ui8 a) uses io;
     bool SDL_RenderClear(Renderer* renderer) uses io;
     bool SDL_RenderFillRect(Renderer* renderer, FRect* rect) uses io;
     bool SDL_RenderPresent(Renderer* renderer) uses io;
-    void SDL_Delay(u32 ms) uses io;
-    u64 SDL_GetTicks() uses io;
-    Texture* SDL_CreateTexture(Renderer* renderer, u32 format, i32 access, i32 w, i32 h) uses io;
+    void SDL_Delay(ui32 ms) uses io;
+    ui64 SDL_GetTicks() uses io;
+    Texture* SDL_CreateTexture(Renderer* renderer, ui32 format, i32 access, i32 w, i32 h) uses io;
     void SDL_DestroyTexture(Texture* texture) uses io;
-    bool SDL_UpdateTexture(Texture* texture, FRect* rect, u8* pixels, i32 pitch) uses io;
+    bool SDL_UpdateTexture(Texture* texture, FRect* rect, ui8* pixels, i32 pitch) uses io;
     bool SDL_RenderTexture(Renderer* renderer, Texture* texture, FRect* source, FRect* target) uses io;
     bool SDL_StartTextInput(Window* window) uses io;
     bool SDL_StopTextInput(Window* window) uses io;
     bool SDL_GetWindowSafeArea(Window* window, IntRect* rect) uses io;
     f32 SDL_GetWindowDisplayScale(Window* window) uses io;
     bool SDL_SetTextInputArea(Window* window, IntRect* rect, i32 cursor) uses io;
-    u8* SDL_GetClipboardText() uses io;  // to free with SDL_free; "" when empty
-    bool SDL_SetClipboardText(u8* text) uses io;
-    void SDL_free(u8* memory) uses io;
+    ui8* SDL_GetClipboardText() uses io;  // to free with SDL_free; "" when empty
+    bool SDL_SetClipboardText(ui8* text) uses io;
+    void SDL_free(ui8* memory) uses io;
     // SDL_HitTest: what is at a point of the window (an SDL_HitTestResult), asked by the system.
-    bool SDL_SetWindowHitTest(Window* window, fn(Window*, Point*, u8*) -> i32 uses io callback, u8* data) uses io;
+    bool SDL_SetWindowHitTest(Window* window, fn(Window*, Point*, ui8*) -> i32 uses io callback, ui8* data) uses io;
     bool SDL_SetWindowBordered(Window* window, bool bordered) uses io;
     bool SDL_MinimizeWindow(Window* window) uses io;
     bool SDL_MaximizeWindow(Window* window) uses io;
     bool SDL_RestoreWindow(Window* window) uses io;
-    u64 SDL_GetWindowFlags(Window* window) uses io;
+    ui64 SDL_GetWindowFlags(Window* window) uses io;
     bool SDL_GetWindowSize(Window* window, i32* w, i32* h) uses io;
-    Surface* SDL_CreateSurfaceFrom(i32 w, i32 h, u32 format, u8* pixels, i32 pitch) uses io;
+    Surface* SDL_CreateSurfaceFrom(i32 w, i32 h, ui32 format, ui8* pixels, i32 pitch) uses io;
     void SDL_DestroySurface(Surface* surface) uses io;
     bool SDL_SetWindowIcon(Window* window, Surface* icon) uses io;
     Locale** SDL_GetPreferredLocales(i32* count) uses io;  // to free with SDL_free
     i32 SDL_GetSystemTheme() uses io;  // 0: unknown, 1: light, 2: dark
     // SDL_EventFilter: called as each event arrives, before the queue.
-    bool SDL_AddEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
-    void SDL_RemoveEventWatch(fn(u8*, Event*) -> bool uses io filter, u8* data) uses io;
+    bool SDL_AddEventWatch(fn(ui8*, Event*) -> bool uses io filter, ui8* data) uses io;
+    void SDL_RemoveEventWatch(fn(ui8*, Event*) -> bool uses io filter, ui8* data) uses io;
 }
 
 // A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
-unsafe str copy_cstring(Arena* arena, u8* text, usize limit) {
+unsafe str copy_cstring(Arena* arena, ui8* text, usize limit) {
     mut usize length = 0;
-    mut u8[] bytes = arena.alloc_slice(u8, 0);
+    mut ui8[] bytes = arena.alloc_slice(ui8, 0);
     unsafe {
         while (length < limit && *(text + length) != 0) {
             length += 1;
         }
-        bytes = arena.alloc_slice(u8, length);
+        bytes = arena.alloc_slice(ui8, length);
         for (mut usize i = 0; i < length; i += 1) {
             bytes[i] = *(text + i);
         }
@@ -211,8 +211,8 @@ unsafe str copy_cstring(Arena* arena, u8* text, usize limit) {
 // The text of the clipboard, copied into `arena` (at most 64 KB), or "".
 pub str clipboard_text(Arena* arena) uses io {
     unsafe {
-        u8* text = SDL_GetClipboardText();
-        if (text as u64 == 0) {
+        ui8* text = SDL_GetClipboardText();
+        if (text as ui64 == 0) {
             return "";
         }
         str copy = copy_cstring(arena, text, 64 * KB);
@@ -222,7 +222,7 @@ pub str clipboard_text(Arena* arena) uses io {
 }
 
 pub void set_clipboard_text(Arena* arena, str text) uses io {
-    u8* c_text = text.to_cstr(arena);
+    ui8* c_text = text.to_cstr(arena);
     unsafe {
         SDL_SetClipboardText(c_text);
     }
@@ -347,12 +347,12 @@ pub void text_input(Window* window, bool on) uses io {
 
 // Queues a request with a rectangle: the area of the text being typed.
 pub void push_area(i32 x, i32 y, i32 w, i32 h) uses io {
-    mut u8[96] size = [0; 96];  // its width and height, in the first bytes after `word7`
-    size[0] = (w & 0xFF) as u8;
-    size[1] = (w >> 8 & 0xFF) as u8;
-    size[2] = (h & 0xFF) as u8;
-    size[3] = (h >> 8 & 0xFF) as u8;
-    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: 3, word6: x as u32, word7: y as u32, rest: size };
+    mut ui8[96] size = [0; 96];  // its width and height, in the first bytes after `word7`
+    size[0] = (w & 0xFF) as ui8;
+    size[1] = (w >> 8 & 0xFF) as ui8;
+    size[2] = (h & 0xFF) as ui8;
+    size[3] = (h >> 8 & 0xFF) as ui8;
+    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: 3, word6: x as ui32, word7: y as ui32, rest: size };
     unsafe {
         SDL_PushEvent(&event);
     }
@@ -373,14 +373,14 @@ pub MouseButton* as_button(Event* event) {
 
 // SDL_MouseWheelEvent.
 pub struct MouseWheel {
-    u32 kind;
-    u32 reserved;
-    u64 timestamp;
-    u32 window;
-    u32 which;
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    ui32 which;
     pub f32 x;  // steps to the right
     pub f32 y;  // steps away from the user
-    pub u32 direction;  // 1: flipped (natural scrolling), the steps are the other way
+    pub ui32 direction;  // 1: flipped (natural scrolling), the steps are the other way
 }
 
 pub MouseWheel* as_wheel(Event* event) {
@@ -394,7 +394,7 @@ pub Texture*? create_texture(Renderer* renderer, i32 width, i32 height) uses io 
     unsafe {
         // SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING
         Texture* texture = SDL_CreateTexture(renderer, 0x16362004, 1, width, height);
-        if (texture as u64 == 0) {
+        if (texture as ui64 == 0) {
             return none;
         }
         return some(texture);
@@ -408,12 +408,12 @@ pub void destroy_texture(Texture* texture) uses io {
 }
 
 // Copies `pixels` (`width` per row) into the texture, then draws it over the whole window.
-pub void show_pixels(Renderer* renderer, Texture* texture, u32[] pixels, i32 width) uses io {
+pub void show_pixels(Renderer* renderer, Texture* texture, ui32[] pixels, i32 width) uses io {
     if (pixels.len == 0) {
         return;
     }
     unsafe {
-        SDL_UpdateTexture(texture, 0 as FRect*, &pixels[0] as u8*, width * 4);
+        SDL_UpdateTexture(texture, 0 as FRect*, &pixels[0] as ui8*, width * 4);
         SDL_RenderTexture(renderer, texture, 0 as FRect*, 0 as FRect*);
     }
 }
@@ -442,8 +442,8 @@ pub Window*? create_window(Arena* arena, str title, i32 width, i32 height, bool 
     }
     unsafe {
         // SDL_WINDOW_RESIZABLE, and SDL_WINDOW_BORDERLESS
-        Window* window = SDL_CreateWindow(&text.bytes as u8*, width, height, decorated ? 0x20 : 0x30);
-        if (window as u64 == 0) {
+        Window* window = SDL_CreateWindow(&text.bytes as ui8*, width, height, decorated ? 0x20 : 0x30);
+        if (window as ui64 == 0) {
             return none;
         }
         return some(window);
@@ -452,7 +452,7 @@ pub Window*? create_window(Arena* arena, str title, i32 width, i32 height, bool 
 
 // Asks the system to call `callback` with `data` for each point of the window where the mouse
 // acts (to drag it, to resize it). False when the system cannot.
-pub bool set_hit_test(Window* window, fn(Window*, Point*, u8*) -> i32 uses io callback, u8* data) uses io {
+pub bool set_hit_test(Window* window, fn(Window*, Point*, ui8*) -> i32 uses io callback, ui8* data) uses io {
     mut bool ok = false;
     unsafe {
         ok = SDL_SetWindowHitTest(window, callback, data);
@@ -462,13 +462,13 @@ pub bool set_hit_test(Window* window, fn(Window*, Point*, u8*) -> i32 uses io ca
 
 // Asks SDL to call `watch` with `data` on each event as it arrives, even while the system
 // holds the loop of the program (a window resized on Windows).
-pub void add_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
+pub void add_event_watch(fn(ui8*, Event*) -> bool uses io watch, ui8* data) uses io {
     unsafe {
         SDL_AddEventWatch(watch, data);
     }
 }
 
-pub void remove_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) uses io {
+pub void remove_event_watch(fn(ui8*, Event*) -> bool uses io watch, ui8* data) uses io {
     unsafe {
         SDL_RemoveEventWatch(watch, data);
     }
@@ -476,14 +476,14 @@ pub void remove_event_watch(fn(u8*, Event*) -> bool uses io watch, u8* data) use
 
 // Sets the icon of the window (the task bar, Alt+Tab, the title bar of the system) from
 // `width * height` pixels 0xAARRGGBB. SDL copies them.
-pub void set_icon(Window* window, u32[] pixels, i32 width, i32 height) uses io {
+pub void set_icon(Window* window, ui32[] pixels, i32 width, i32 height) uses io {
     if (pixels.len == 0) {
         return;
     }
     unsafe {
         // SDL_PIXELFORMAT_ARGB8888
-        Surface* surface = SDL_CreateSurfaceFrom(width, height, 0x16362004, &pixels[0] as u8*, width * 4);
-        if (surface as u64 != 0) {
+        Surface* surface = SDL_CreateSurfaceFrom(width, height, 0x16362004, &pixels[0] as ui8*, width * 4);
+        if (surface as ui64 != 0) {
             SDL_SetWindowIcon(window, surface);
             SDL_DestroySurface(surface);
         }
@@ -496,24 +496,24 @@ pub str[] preferred_locales(Arena* arena) uses io {
     mut i32 count = 0;
     unsafe {
         Locale** list = SDL_GetPreferredLocales(&count);
-        if (list as u64 == 0) {
+        if (list as ui64 == 0) {
             return found;
         }
         found = arena.alloc_slice(str, count as usize);
         for (usize i in 0..count as usize) {
             Locale* l = *(list + i);
             str language = copy_cstring(arena, l.language, 16);
-            str country = l.country as u64 == 0 ? "" : copy_cstring(arena, l.country, 16);
+            str country = l.country as ui64 == 0 ? "" : copy_cstring(arena, l.country, 16);
             found[i] = country.len == 0 ? language : joined(arena, language, country);
         }
-        SDL_free(list as u8*);
+        SDL_free(list as ui8*);
     }
     return found;
 }
 
 // `language-country`, in `arena`.
 str joined(Arena* arena, str language, str country) {
-    mut u8[] bytes = arena.alloc_slice(u8, language.len + 1 + country.len);
+    mut ui8[] bytes = arena.alloc_slice(ui8, language.len + 1 + country.len);
     for (usize i in 0..language.len) {
         bytes[i] = language.bytes[i];
     }
@@ -562,7 +562,7 @@ pub void toggle_maximize(Window* window) uses io {
 }
 
 pub bool is_maximized(Window* window) uses io {
-    mut u64 flags = 0;
+    mut ui64 flags = 0;
     unsafe {
         flags = SDL_GetWindowFlags(window);
     }
@@ -587,8 +587,8 @@ pub void destroy_window(Window* window) uses io {
 
 pub Renderer*? create_renderer(Window* window) uses io {
     unsafe {
-        Renderer* renderer = SDL_CreateRenderer(window, 0 as u8*);
-        if (renderer as u64 == 0) {
+        Renderer* renderer = SDL_CreateRenderer(window, 0 as ui8*);
+        if (renderer as ui64 == 0) {
             return none;
         }
         return some(renderer);
@@ -619,14 +619,14 @@ pub void push_quit() uses io {
 
 // Queues an SDL_EVENT_USER with `code`: a request of the program that `run` carries out on
 // its window (SDL_UserEvent keeps its code where `word5` is).
-pub void push_request(u32 code) uses io {
+pub void push_request(ui32 code) uses io {
     mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: code, word6: 0, word7: 0, rest: [0; 96] };
     unsafe {
         SDL_PushEvent(&event);
     }
 }
 
-pub void set_color(Renderer* renderer, u8 r, u8 g, u8 b, u8 a) uses io {
+pub void set_color(Renderer* renderer, ui8 r, ui8 g, ui8 b, ui8 a) uses io {
     unsafe {
         SDL_SetRenderDrawColor(renderer, r, g, b, a);
     }
@@ -651,14 +651,14 @@ pub void present(Renderer* renderer) uses io {
     }
 }
 
-pub void delay(u32 ms) uses io {
+pub void delay(ui32 ms) uses io {
     unsafe {
         SDL_Delay(ms);
     }
 }
 
 // Milliseconds since SDL started.
-pub u64 ticks() uses io {
+pub ui64 ticks() uses io {
     unsafe {
         return SDL_GetTicks();
     }

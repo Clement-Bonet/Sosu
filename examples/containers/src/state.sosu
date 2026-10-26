@@ -57,7 +57,7 @@ pub class Demo {
     mut widgets.TextBuffer big_label;
     pub image.Image folder_icon;
     pub image.Image file_icon;
-    mut u8[12] digits;
+    mut ui8[12] digits;
 
     void init(Arena* arena) {
         page = 0;
@@ -107,10 +107,10 @@ pub class Demo {
 
     // A folder (yellow, with a tab) or a file (a white page, its corner folded), 16 by 16 pixels.
     image.Image icon(Arena* arena, bool folder) {
-        mut u32[] pixels = arena.alloc_slice(u32, 256);
+        mut ui32[] pixels = arena.alloc_slice(ui32, 256);
         for (i32 y in 0..16) {
             for (i32 x in 0..16) {
-                mut u32 c = 0;  // transparent
+                mut ui32 c = 0;  // transparent
                 if (folder) {
                     bool tab = y >= 2 && y < 4 && x >= 1 && x < 7;
                     bool body = y >= 4 && y < 14 && x >= 1 && x < 15;
@@ -268,7 +268,7 @@ pub class Demo {
         mut i32 n = sent;
         while (true) {
             at -= 1;
-            digits[at] = (48 + n % 10) as u8;
+            digits[at] = (48 + n % 10) as ui8;
             n /= 10;
             if (n == 0 || at == 0) {
                 break;

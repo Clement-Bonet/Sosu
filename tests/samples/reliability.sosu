@@ -37,7 +37,7 @@ test "clamp stays in range" {
 }
 
 extern "C" {
-    i32 puts(u8* s);
+    i32 puts(ui8* s);
 }
 
 void memory() {
@@ -45,10 +45,10 @@ void memory() {
     defer arena.free();
     Point* p = arena.alloc(Point);
     unsafe {
-        u8* q = p as u8*;
-        u8 first = *(q + 4);
+        ui8* q = p as ui8*;
+        ui8 first = *(q + 4);
     }
-    u32 mask = (0xFF & 0b1010) << 2;
+    ui32 mask = (0xFF & 0b1010) << 2;
     char c = '\u{E9}';
     str s = "caf\u{E9} \"quoted\"\n";
 }
