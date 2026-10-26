@@ -12,5 +12,10 @@ subsystem = "window"  # its programs open windows: no console behind them in rel
 paths = ["vendor/SDL3/lib/x64"]
 copy = ["vendor/SDL3/lib/x64/SDL3.dll"]
 
+# Android (spec §11.5): run fetch-sdl3-android.ps1 once; `{abi}` is the folder of the target
+[link.android]
+paths = ["vendor/SDL3-android/lib/{abi}"]
+copy = ["vendor/SDL3-android/lib/{abi}/libSDL3.so"]
+
 [dependencies]
 render = { path = "../render" }
