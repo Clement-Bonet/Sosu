@@ -574,6 +574,86 @@ shared = { path = "../shared" }
 - No circular dependencies between packages.
 - `platform`, `render` and `ui` are packages like any other.
 
+### 8.2 Libraries planned
+
+What a program needs beyond §8.0, and how each library is made: in Sosu (portable, tested without a C library), or on a C library bound by `sosuc bindgen` (§11.6) and given with the package as C sources (§13.1, work 3) or taken from the system. "1.0" marks what version 1.0 holds (§13.1); the rest comes after, as packages that do not change the language.
+
+`std` stays small and without C dependencies other than the C library and the system; the domains below that need a C library are packages of their own (`db`, `image`, `audio`...), as `platform` is.
+
+#### Mathematics
+
+| Module | Content | How | When |
+|---|---|---|---|
+| `std.math` | `sqrt`, `pow`, `exp`, `log`, trigonometry, `floor` / `ceil` / `round`, `PI`, `E`, `INFINITY`; `is_nan`; integer `gcd`, `pow` with overflow checked | the C library (`libm`), wrapped | 1.0 |
+| `math.linear` | `Vec2`, `Vec3`, `Vec4`, `Mat3`, `Mat4`, quaternions, transforms (for `render` and 3D) | Sosu | 1.0 |
+| `math.stats` | mean, median, variance, percentiles, histograms; the distributions of `std.random` (normal, exponential) | Sosu | after |
+| `math.big` | big integers and decimals of chosen precision (money beyond `i64`, §14.2) | Sosu | after |
+| `math.complex`, `math.fft` | complex numbers, fast Fourier transform (also for `audio`) | Sosu | after |
+| `math.matrix` | dense matrices, solving linear systems; BLAS / LAPACK when they are there | Sosu, then C | after |
+
+#### Databases
+
+A common interface first, as Go's `database/sql` or JDBC: a `db.Connection` (an interface, §5.2) that opens, runs a statement with parameters (never text joined to a query: no SQL injection), and gives rows read by column, as typed values (`db.Value`: an enum of integer, float, text, bytes, null). Each database is a driver implementing it.
+
+| Package | Database | How | When |
+|---|---|---|---|
+| `db` | the interface, transactions, prepared statements, a pool of connections (with threads, §13.1) | Sosu | 1.0 |
+| `db.sqlite` | SQLite: a file, nothing to install; also on phones | the C sources of SQLite (its amalgamation, public domain) | 1.0 |
+| `db.postgres` | PostgreSQL | `libpq` of the system | after |
+| `db.mysql` | MySQL and MariaDB | `libmariadb` (LGPL: linked, not given) | after |
+| `db.odbc` | SQL Server, Oracle and the others, through ODBC | `odbc32` on Windows, unixODBC elsewhere | after |
+| `db.redis` | Redis (a key-value store) | Sosu, on `std.net` | after |
+
+#### Images
+
+`render.image` reads PNG in Sosu today (§10). Images become a package of their own, `image`, that `render` uses: an `image.Image` of pixels (RGBA 8 bits, and gray), read and written in several formats, and transformed.
+
+| Module | Content | How | When |
+|---|---|---|---|
+| `image` | `Image`, its pixels, conversions (RGBA, gray, premultiplied alpha) | Sosu (from `render.image`) | 1.0 |
+| `image.png` | read (done) and write PNG | Sosu (`compress.deflate`) | 1.0 |
+| `image.jpeg` | read and write JPEG (photos) | Sosu, or `stb_image` (public domain) | 1.0 |
+| `image.bmp`, `image.gif`, `image.qoi` | other simple formats (GIF: its frames) | Sosu | after |
+| `image.webp` | WebP | `libwebp` (BSD) | after |
+| `image.ops` | crop, resize (bilinear, Lanczos), rotate, flip, blur, sharpen, brightness and contrast, draw an image on another | Sosu | 1.0 (resize, crop, rotate), after (filters) |
+| `image.svg` | vector drawings (icons that stay sharp at any scale) | Sosu, a subset of SVG | after |
+
+#### Sound
+
+SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`): `audio` is a package on it, with decoders in Sosu or in small C libraries.
+
+| Module | Content | How | When |
+|---|---|---|---|
+| `audio` | play and record, the devices of the system, a mixer of several sounds (volume, panning), resampling | SDL3 (`platform`) | 1.0 |
+| `audio.wav` | read and write WAV | Sosu | 1.0 |
+| `audio.ogg`, `audio.mp3`, `audio.flac` | read Ogg Vorbis, MP3, FLAC | `stb_vorbis`, `dr_mp3`, `dr_flac` (public domain), as C sources | 1.0 (Ogg), after (MP3, FLAC) |
+| `audio.effects` | filters (low-pass, high-pass), echo, reverberation, compression of the dynamics; analysis (levels, spectrum with `math.fft`) | Sosu | after |
+| `audio.midi` | read MIDI files, MIDI devices; a synthesizer | Sosu, SDL3 | after |
+
+#### The other domains
+
+| Module | Content | How | When |
+|---|---|---|---|
+| `std.text` | building texts (`TextBuilder`), split, trim, find, replace, upper and lower case (Unicode), numbers read and written (`parse_i64`, `format_f64` with decimals) | Sosu | 1.0 |
+| `std.fs` | folders (list, create, remove), paths (join, parent, extension), file information, rename, copy; files read by parts | the C library and the system | 1.0 |
+| `std.os` | the arguments of the program, the environment, the exit code; running another program and reading its output | the system | 1.0 |
+| `std.cli` | the options of a command (`--name value`, help written from them) | Sosu | 1.0 |
+| `std.time` | dates and times of the calendar, time zones, durations, formats (ISO 8601) | Sosu, the system for the zones | 1.0 (dates, ISO 8601), after (zones) |
+| `std.sort` | sort, sort by a key, binary search (with lambdas) | Sosu | 1.0 |
+| `std.json` | read and write JSON (the language server has one in C already) | Sosu | 1.0 |
+| `std.csv`, `std.toml` | CSV; TOML (the manifests, §8.1) | Sosu | after |
+| `std.log` | logs with levels, to the console, a file or the log of the system (`logcat`, §11.5) | Sosu | 1.0 |
+| `std.thread`, `std.channel` | threads, channels, mutexes, atomics (§13.1, work 2) | the system | 1.0 |
+| `compress` | deflate and gzip (`render.image` inflates already), zip archives | Sosu | 1.0 (deflate), after (zip) |
+| `crypto` | SHA-256 and SHA-1, HMAC, random numbers for security, base64 and hexadecimal | Sosu, the system for the random numbers | 1.0 (hashes, base64), after (cryptography itself, which should come from a reviewed library) |
+| `net` | TCP and UDP sockets, names resolved (DNS) | the system | after |
+| `net.http` | HTTP client and server, WebSocket; HTTPS with the TLS of the system (Schannel, Secure Transport) or OpenSSL | Sosu, the system | after |
+| `regex` | regular expressions (RE2-like: linear time) | Sosu | after |
+| `platform.dialogs` | open and save files, choose a folder, message boxes of the system (SDL3 has them) | SDL3 | 1.0 |
+| `platform.notify`, `platform.tray` | notifications, the icon of the tray | the system | after |
+| `gpu` | 3D drawing and compute with SDL_GPU (Vulkan, Metal, Direct3D 12) | SDL3 | after |
+| `testing` | benchmarks, test fixtures, values compared with their difference shown | Sosu, `sosuc test` | 1.0 |
+
 ## 9. C interop
 
 ```sosu
@@ -1702,6 +1782,30 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 13. Research: `comptime`, effect polymorphism, regions, concurrency
 14. Self-hosting
 15. Responsive windows (not urgent): layouts that adapt to the width of the window, with breakpoints, as the grid of Bootstrap (`xs`, `md`, `lg`...): columns that stack on a phone and sit side by side on a desktop, widgets shown or hidden by width, in `.ui.sosu` (§10.2) and `ui`
+Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the libraries of §8.2 marked 1.0, and what the language still lacks (lambdas, concurrency).
+
+### 13.1 Version 1.0
+
+Version 1.0 is a promise of stability: the language, `core`, `std` and the commands of `sosuc` no longer break the code written for them (a change that would is a 2.0). It does not need the native backend nor self-hosting: the C backend stays the path of phones anyway (§11.2), and steps 12 to 14 come after 1.0.
+
+What 1.0 holds, in the proposed order (the estimates are in working days of the pace of steps 1 to 11):
+
+| # | Work | Content | Estimate |
+|---|---|---|---|
+| 1 | Language | Lambdas and closures (§5, announced for v1), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4); the open points of §14.2 that change the language | 8 to 12 |
+| 2 | Concurrency | Threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` | 5 to 10 |
+| 3 | C sources in a package | `[build] c = ["vendor/sqlite3.c"]` in `sosu.toml`: C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it | 2 to 3 |
+| 4 | Standard library | The modules of `std` of §8.2 marked 1.0 | 10 to 15 |
+| 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured | 8 to 10 |
+| 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished | 5 to 10 |
+| 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 | 5 to 10 |
+| 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) | 3 to 5 |
+| 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries | 3 to 5 |
+
+In all, about 50 to 80 working days: 2 to 3.5 months. Then 0.x versions tried by others than their authors, for a few weeks, before 1.0 is called stable.
+
+- iOS: supported in 1.0 once it has run on a device (it needs a Mac and an iPhone); until then, a preview, built by the CI for the simulator.
+- After 1.0 (2.x): the native backend (12), `comptime` and regions (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
 
 ## 14. Decisions and open questions
 

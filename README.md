@@ -20,6 +20,7 @@ English is the working language of the project: code, comments, compiler message
 | 9. Libraries for other languages, then mobile | done: `export "C"` and `sosuc build --lib` (static) or `--lib=shared`, with a C header and errors returned to the host (spec §9.2); `--target android-*` and `ios-*`, `sosuc package --target android` (an APK) and `ios-sim` (spec §11.5) |
 | 10. Generics | done: functions, structs, enums and classes with type parameters and constraints, effects as parameters, `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (spec §5.4) |
 | 11. `sosuc bindgen`, `sosuc package`, cross-compilation | done: constants of modules; the declarations of C headers as Sosu modules, checked by the C compiler (`platform` binds SDL3 so); desktop packages with their archive; `--target windows-arm64`, `linux-arm64`, `macos-universal`..., another system with clang and a sysroot (spec §11.6) |
+| Version 1.0 | planned: its content, its order and an estimate of each work in spec §13.1; the libraries to come (mathematics, databases, images, sound, text, files, network...) in spec §8.2 |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
