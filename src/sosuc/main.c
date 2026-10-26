@@ -33,8 +33,8 @@ static void usage(FILE *out) {
           "  build   compile a package into build/<name> (through C)\n"
           "  run     compile and run a package\n"
           "  test    compile and run the test blocks of a package\n"
-          "  package build a phone application: --target android (an APK) or ios-sim / ios (an Xcode\n"
-          "          project, on a Mac) (spec 11.5)\n"
+          "  package a release of a program in build/package, with its files, and its archive (spec 11.6);\n"
+          "          --target android (an APK) or ios-sim (an application for the simulator, on a Mac) (11.5)\n"
           "  fmt     format files or packages in place (--check: only report)\n"
           "  bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu] [--check]\n"
           "          write the Sosu declarations of a C header (spec 11.6)\n"
@@ -313,6 +313,7 @@ typedef struct {
     StringList frameworks;
     StringList copy;
     bool window; /* a package is for programs with windows: no console in release (Windows) */
+    char *resource; /* Windows: the icon of the program, compiled (sosuc package), or NULL */
 } Links;
 
 static void add_unique(StringList *list, char *item) {
@@ -367,6 +368,7 @@ static void collect_links(const Program *program, Links *links, const Target *ta
 }
 
 static void free_links(Links *links) {
+    free(links->resource);
     StringList *lists[] = { &links->libs, &links->paths, &links->frameworks, &links->copy };
     for (size_t i = 0; i < 4; i++) {
         for (size_t j = 0; j < lists[i]->count; j++) free(lists[i]->items[j]);
@@ -478,10 +480,12 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             append(&link_args, "%s", link_args[0] ? " /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
                                                    : " /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup");
         }
+        char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
         char *commands = sosu_format(
-            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\"%s "
+            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\"%s%s "
             ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n",
-            optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, link_args, dir, dir);
+            optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, resource, link_args, dir, dir);
+        free(resource);
         char *script = msvc_script(commands);
         free(commands);
         bool written = write_file(bat, script);
@@ -510,8 +514,10 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
 #ifdef _WIN32
         if (optimize && links->window) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
 #endif
-        command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\" -o \"%s\"%s", cc && cc[0] ? cc : "cc",
-                              optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, exe, link_args);
+        char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
+        command = sosu_format("\"%s\" -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s -o \"%s\"%s", cc && cc[0] ? cc : "cc",
+                              optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, resource, exe, link_args);
+        free(resource);
         free(link_args);
     }
     int status = shell_run(command);
@@ -1314,6 +1320,8 @@ static const char *const android_templates[] = {
 
 /* `sosuc package --target android`: `libmain.so` for arm64-v8a and x86_64 in a Gradle project made
    from lib/templates/android, then its APK (spec §11.5). */
+static bool copy_app_assets(const Package *root, const char *dest);
+
 static int command_package_android(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *options) {
     char *lib = library_dir(argv0);
     Program program;
@@ -1428,27 +1436,7 @@ static int command_package_android(const char *dir, const char *argv0, DiagForma
         if (built && app->assets.count) {
             char *assets = path_join(project, "app/assets");
             shell_make_dir(assets);
-            for (size_t i = 0; built && i < app->assets.count; i++) {
-                /* stored under the path the program reads on the desktop: relative to the current folder */
-                char *from = package_path(root, app->assets.items[i]);
-                if (strncmp(from, "../", 3) == 0 || from[0] == '/' || (from[0] && from[1] == ':')) {
-                    fprintf(stderr, "sosuc: the asset `%s` is outside the current folder: run sosuc from a folder that "
-                                    "holds it, as the program does on the desktop\n", from);
-                    free(from);
-                    built = false;
-                    break;
-                }
-                char *to = path_join(assets, from);
-                char *parent = sosu_strdup(to);
-                char *slash = strrchr(parent, '/');
-                if (slash) *slash = '\0';
-                shell_make_dir(parent);
-                built = copy_asset(from, to);
-                if (!built) fprintf(stderr, "sosuc: cannot copy the asset `%s`\n", from);
-                free(parent);
-                free(to);
-                free(from);
-            }
+            built = copy_app_assets(root, assets);
             free(assets);
         }
 
@@ -1605,23 +1593,7 @@ static int command_package_ios(const char *dir, const char *argv0, DiagFormat fo
             free(plist);
         }
         /* the assets of [app], under the path the program reads (SDL looks in the bundle) */
-        for (size_t i = 0; built && i < app->assets.count; i++) {
-            char *from = package_path(root, app->assets.items[i]);
-            if (strncmp(from, "../", 3) == 0 || from[0] == '/') {
-                fprintf(stderr, "sosuc: the asset `%s` is outside the current folder\n", from);
-                built = false;
-            } else {
-                char *to = path_join(bundle, from);
-                char *parent = path_dirname(to);
-                shell_make_dir(parent);
-                char *copy = sosu_format("cp -R \"%s\" \"%s\"", from, to);
-                built = shell_run(copy) == 0;
-                free(copy);
-                free(parent);
-                free(to);
-            }
-            free(from);
-        }
+        built = built && copy_app_assets(root, bundle);
         if (built) {
             char *sign = sosu_format("codesign --force --sign - --timestamp=none \"%s\" >/dev/null 2>&1 || "
                                      "codesign --force --sign - \"%s\"",
@@ -1708,6 +1680,302 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
         free(c_file);
         free(file);
         free(name);
+        free(build_dir);
+    }
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
+}
+
+/* ---- sosuc package for the desktop (spec §11.6) ---- */
+
+/* Copies the assets of [app] into `dest`, each under the path the program reads: its path
+   relative to the current folder (spec §11.5). False, reported, if one cannot be copied. */
+static bool copy_app_assets(const Package *root, const char *dest) {
+    const AppSection *app = &root->manifest.app;
+    for (size_t i = 0; i < app->assets.count; i++) {
+        char *from = package_path(root, app->assets.items[i]);
+        if (strncmp(from, "../", 3) == 0 || from[0] == '/' || (from[0] && from[1] == ':')) {
+            fprintf(stderr, "sosuc: the asset `%s` is outside the current folder: run sosuc from a folder that "
+                            "holds it, as the program does on the desktop\n", from);
+            free(from);
+            return false;
+        }
+        char *to = path_join(dest, from);
+        char *parent = sosu_strdup(to);
+        char *slash = strrchr(parent, '/');
+        if (slash) *slash = '\0';
+        shell_make_dir(parent);
+        bool ok = copy_asset(from, to);
+        if (!ok) fprintf(stderr, "sosuc: cannot copy the asset `%s`\n", from);
+        free(parent);
+        free(to);
+        free(from);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/* An icon file (.ico) holding the PNG `png`: Windows reads PNG icons since Vista. */
+static bool write_ico(const char *png, const char *ico) {
+    SourceFile image;
+    if (!source_load(&image, png)) return false;
+    const unsigned char *bytes = (const unsigned char *)image.text;
+    bool ok = image.length > 24 && memcmp(bytes, "\x89PNG", 4) == 0;
+    FILE *out = ok ? fopen(ico, "wb") : NULL;
+    if (out) {
+        unsigned width = (unsigned)bytes[16] << 24 | (unsigned)bytes[17] << 16 | (unsigned)bytes[18] << 8 | bytes[19];
+        unsigned height = (unsigned)bytes[20] << 24 | (unsigned)bytes[21] << 16 | (unsigned)bytes[22] << 8 | bytes[23];
+        uint32_t size = (uint32_t)image.length;
+        unsigned char header[22] = {
+            0, 0, 1, 0, 1, 0,                                         /* ICONDIR: an icon, one image */
+            (unsigned char)(width >= 256 ? 0 : width), (unsigned char)(height >= 256 ? 0 : height), 0, 0,
+            1, 0, 32, 0,                                              /* planes, bits per pixel */
+            (unsigned char)size, (unsigned char)(size >> 8), (unsigned char)(size >> 16), (unsigned char)(size >> 24),
+            22, 0, 0, 0,                                              /* where the PNG starts */
+        };
+        ok = fwrite(header, 1, sizeof header, out) == sizeof header && fwrite(bytes, 1, image.length, out) == image.length;
+        ok = fclose(out) == 0 && ok;
+    } else {
+        ok = false;
+    }
+    source_free(&image);
+    return ok;
+}
+
+/* The icon of [app] as a resource of the program, on Windows: a .res (MSVC) or a .o (MinGW),
+   or NULL if there is none or the tools are missing (reported). */
+static char *windows_icon(const Package *root, const char *relative_dir) {
+#ifdef _WIN32
+    const char *icon = root->manifest.app.icon;
+    if (!icon) return NULL;
+    char *build_dir = absolute_path(relative_dir); /* rc runs from it */
+    char *png = package_path(root, icon);
+    char *ico = path_join(build_dir, "icon.ico");
+    char *rc = path_join(build_dir, "icon.rc");
+    const char *cc = getenv("SOSU_CC");
+    bool msvc = !cc || !cc[0];
+    char *res = path_join(build_dir, msvc ? "icon.res" : "icon_res.o");
+    char *text = sosu_strdup("1 ICON \"icon.ico\"\n");
+    bool ok = write_ico(png, ico) && write_file(rc, text);
+    if (ok) {
+        char *native_rc = shell_path(rc);
+        char *native_res = shell_path(res);
+        char *native_dir = shell_path(build_dir);
+        if (msvc) {
+            char *commands = sosu_format("cd /d \"%s\" && rc /nologo /fo \"%s\" \"%s\" >nul || exit /b 1\r\n", native_dir,
+                                         native_res, native_rc);
+            char *script = msvc_script(commands);
+            char *bat = path_join(build_dir, "icon.bat");
+            char *native_bat = shell_path(bat);
+            char *command = sosu_format("\"%s\"", native_bat);
+            ok = write_file(bat, script) && shell_run(command) == 0;
+            free(command);
+            free(native_bat);
+            free(bat);
+            free(script);
+            free(commands);
+        } else {
+            char *command = sosu_format("cd /d \"%s\" && windres \"%s\" -O coff -o \"%s\"", native_dir, native_rc, native_res);
+            ok = shell_run(command) == 0;
+            free(command);
+        }
+        free(native_dir);
+        free(native_res);
+        free(native_rc);
+    }
+    if (!ok) fprintf(stderr, "sosuc: the icon `%s` was not added to the program (a PNG, and rc or windres, are needed)\n", icon);
+    free(text);
+    free(rc);
+    free(ico);
+    free(png);
+    free(build_dir);
+    if (ok) return res;
+    free(res);
+    return NULL;
+#else
+    (void)root;
+    (void)relative_dir;
+    return NULL;
+#endif
+}
+
+/* `sosuc package <package>`: a release build of the program in build/package/<name>/, with the
+   files of `copy` and the assets of [app], then its archive (spec §11.6). */
+static int command_package_desktop(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *given) {
+    BuildOptions options = *given;
+    options.release = true;
+    options.checks.overflow_checks = false;
+    options.checks.contracts = false;
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    bool ok = program_load(&program, dir, lib);
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, CODEGEN_PROGRAM, options.checks);
+        ok = source != NULL;
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+    int status = program.fatal ? 2 : 1;
+    if (ok) {
+        status = 2;
+        const Package *root = program.packages.items[0];
+        const AppSection *app = &root->manifest.app;
+        const char *system = host_system();
+        char *build_dir = path_join(root->root, "build");
+        char *packages = path_join(build_dir, "package");
+        shell_make_dir(packages);
+        char *file = sosu_format("%s.c", root->name);
+        char *c_file = path_join(build_dir, file);
+        const char *title = app->name ? app->name : root->name;
+        (void)title; /* the name of a .app or of a .desktop entry */
+#ifdef __APPLE__
+        /* <Name>.app: the program in Contents/MacOS, its libraries in Contents/Frameworks, the
+           assets in Contents/Resources, which SDL_GetBasePath gives */
+        char *folder_name = sosu_format("%s.app", title);
+        char *folder = path_join(packages, folder_name);
+        char *bin_dir = path_join(folder, "Contents/MacOS");
+        char *files_dir = path_join(folder, "Contents/Frameworks");
+        char *assets_dir = path_join(folder, "Contents/Resources");
+#else
+        char *folder_name = sosu_strdup(root->name);
+        char *folder = path_join(packages, folder_name);
+        char *bin_dir = sosu_strdup(folder);
+        char *files_dir = sosu_strdup(folder);
+        char *assets_dir = sosu_strdup(folder);
+#endif
+        shell_remove_dir(folder);
+        shell_make_dir(bin_dir);
+        shell_make_dir(files_dir);
+        shell_make_dir(assets_dir);
+#ifdef _WIN32
+        char *exe_name = sosu_format("%s.exe", root->name);
+#else
+        char *exe_name = sosu_strdup(root->name);
+#endif
+        char *exe = path_join(bin_dir, exe_name);
+        Links links;
+        collect_links(&program, &links, options.target);
+        links.resource = windows_icon(root, build_dir);
+        bool built = write_file(c_file, source);
+        if (!built) fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
+        if (built && !compile_c(build_dir, c_file, exe, lib, true, &links)) {
+            fprintf(stderr, "sosuc: the C compiler failed on `%s`\n", c_file);
+            built = false;
+        }
+#ifdef _WIN32
+        if (built) { /* what MSVC writes for the debugger stays out of the package */
+            const char *extras[] = { ".ilk", ".pdb" };
+            for (size_t i = 0; i < 2; i++) {
+                char *extra = sosu_format("%s/%s%s", bin_dir, root->name, extras[i]);
+                remove(extra);
+                free(extra);
+            }
+        }
+#endif
+        built = built && copy_files(&links, files_dir) && copy_app_assets(root, assets_dir);
+        if (built && app->icon) {
+            char *png = package_path(root, app->icon);
+            const char *slash = strrchr(png, '/');
+            char *icon_copy = path_join(assets_dir, slash ? slash + 1 : png);
+#ifndef _WIN32
+            built = copy_file(png, icon_copy);
+#endif
+            free(icon_copy);
+            free(png);
+        }
+#if !defined(_WIN32) && !defined(__APPLE__)
+        if (built) { /* a .desktop file, for the menus of the system */
+            char *icon_line = sosu_strdup("");
+            if (app->icon) {
+                const char *slash = strrchr(app->icon, '/');
+                append(&icon_line, "Icon=%s\n", slash ? slash + 1 : app->icon);
+            }
+            char *entry = sosu_format("[Desktop Entry]\nType=Application\nName=%s\nExec=%s\n%sTerminal=false\n", title,
+                                      root->name, icon_line);
+            char *entry_name = sosu_format("%s.desktop", root->name);
+            char *entry_path = path_join(folder, entry_name);
+            built = write_file(entry_path, entry);
+            free(entry_path);
+            free(entry_name);
+            free(entry);
+            free(icon_line);
+        }
+#endif
+#ifdef __APPLE__
+        if (built) {
+            char *id = app->id ? sosu_strdup(app->id) : sosu_format("org.sosu.%s", root->name);
+            const char *version = app->version ? app->version : root->manifest.version ? root->manifest.version : "1.0";
+            char *plist = sosu_format(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                "<plist version=\"1.0\">\n<dict>\n"
+                "    <key>CFBundleIdentifier</key><string>%s</string>\n"
+                "    <key>CFBundleName</key><string>%s</string>\n"
+                "    <key>CFBundleExecutable</key><string>%s</string>\n"
+                "    <key>CFBundleVersion</key><string>%s</string>\n"
+                "    <key>CFBundleShortVersionString</key><string>%s</string>\n"
+                "    <key>CFBundlePackageType</key><string>APPL</string>\n"
+                "    <key>NSHighResolutionCapable</key><true/>\n"
+                "</dict>\n</plist>\n",
+                id, title, root->name, version, version);
+            char *plist_file = path_join(folder, "Contents/Info.plist");
+            built = write_file(plist_file, plist);
+            /* the program finds the libraries of Frameworks */
+            char *rpath = sosu_format("install_name_tool -add_rpath @executable_path/../Frameworks \"%s\" 2>/dev/null; true", exe);
+            shell_run(rpath);
+            free(rpath);
+            free(plist_file);
+            free(plist);
+            free(id);
+        }
+#endif
+        /* the archive: .zip on Windows and macOS, .tar.gz on Linux */
+        char *archive = NULL;
+        if (built) {
+#if defined(_WIN32)
+            archive = sosu_format("%s-%s.zip", root->name, system);
+            char *native = shell_path(packages);
+            char *command = sosu_format("cd /d \"%s\" && (del /q \"%s\" 2>nul & tar -a -c -f \"%s\" \"%s\")", native, archive,
+                                        archive, folder_name);
+#elif defined(__APPLE__)
+            archive = sosu_format("%s-%s.zip", root->name, system);
+            char *native = shell_path(packages);
+            char *command = sosu_format("cd \"%s\" && rm -f \"%s\" && ditto -c -k --keepParent \"%s\" \"%s\"", native, archive,
+                                        folder_name, archive);
+#else
+            archive = sosu_format("%s-%s.tar.gz", root->name, system);
+            char *native = shell_path(packages);
+            char *command = sosu_format("cd \"%s\" && rm -f \"%s\" && tar -czf \"%s\" \"%s\"", native, archive, archive,
+                                        folder_name);
+#endif
+            built = shell_run(command) == 0;
+            if (!built) fprintf(stderr, "sosuc: cannot make the archive `%s`\n", archive);
+            free(command);
+            free(native);
+        }
+        if (built) {
+            printf("packaged %s/%s\n", packages, folder_name);
+            printf("archive %s/%s\n", packages, archive);
+            status = 0;
+        }
+        free(archive);
+        free_links(&links);
+        free(exe);
+        free(exe_name);
+        free(assets_dir);
+        free(files_dir);
+        free(bin_dir);
+        free(folder);
+        free(folder_name);
+        free(c_file);
+        free(file);
+        free(packages);
         free(build_dir);
     }
     free(source);
@@ -1961,8 +2229,7 @@ int main(int argc, char **argv) {
     if (strcmp(command, "package") == 0) {
         if (options.target->os == TARGET_ANDROID) return command_package_android(path ? path : ".", argv[0], format, &options);
         if (options.target->os == TARGET_IOS) return command_package_ios(path ? path : ".", argv[0], format, &options);
-        fprintf(stderr, "sosuc: `sosuc package` takes `--target android` or `--target ios-sim` (spec 11.5)\n");
-        return 2;
+        return command_package_desktop(path ? path : ".", argv[0], format, &options);
     }
     if (options.target->os != TARGET_HOST) {
         if (strcmp(command, "build") != 0 || options.lib) {

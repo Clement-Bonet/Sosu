@@ -171,11 +171,16 @@ Event? translate(sdl.Event* event, Arena* frame) uses io {
 
 // The text of the clipboard, copied into `arena`, or "".
 // A file given with the application, copied into `arena` (spec §11.5): in the APK on Android, in
-// the bundle on iOS, relative to the current folder on the desktop; none if it is not there. The
-// files of `assets` in the [app] section of sosu.toml keep there the path that the program uses
-// on the desktop.
+// the bundle on iOS, relative to the current folder on the desktop, else next to the program (a
+// program of `sosuc package`, run from anywhere, spec §11.6); none if it is not there. The files of
+// `assets` in the [app] section of sosu.toml keep there the path that the program uses on the
+// desktop.
 pub ui8[]? read_asset(Arena* arena, str path) uses io {
-    return sdl.load_file(arena, path);
+    ui8[]? found = sdl.load_file(arena, path);
+    return match (found) {
+        some(bytes) => some(bytes),
+        none => sdl.load_file(arena, sdl.base_path(arena, path)),
+    };
 }
 
 // The folder where the application `name` keeps its data, ending with a separator: the internal

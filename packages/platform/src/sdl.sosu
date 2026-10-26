@@ -160,6 +160,28 @@ pub str pref_path(Arena* arena, str organization, str application) uses io {
     }
 }
 
+// `path` in the folder of the program (`Contents/Resources` in a .app of macOS), in `arena`.
+pub str base_path(Arena* arena, str path) uses io {
+    unsafe {
+        ui8* folder_c = sdl_c.SDL_GetBasePath();  // owned by SDL
+        if (folder_c as ui64 == 0) {
+            return path;
+        }
+        str folder = copy_cstring(arena, folder_c, 4 * KB);
+        mut ui8[] bytes = arena.alloc_slice(ui8, folder.len + path.len);
+        for (usize i in 0..folder.len) {
+            bytes[i] = folder.bytes[i];
+        }
+        for (usize i in 0..path.len) {
+            bytes[folder.len + i] = path.bytes[i];
+        }
+        return match (str.from_bytes(bytes)) {
+            ok(text) => text,
+            err(e) => path,
+        };
+    }
+}
+
 // The bytes of the file `path`, copied into `arena`: in the APK on Android, in the bundle on iOS,
 // relative to the current folder elsewhere; none if it is not found (spec §11.5).
 pub ui8[]? load_file(Arena* arena, str path) uses io {
