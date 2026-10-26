@@ -2275,8 +2275,25 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
         gen_exports(&g, &main_code);
     } else if (mode == CODEGEN_PROGRAM) {
         char *name = fn_c_name(main_fn);
-        if (main_fn->type->as.fn.ret->tag == T_VOID) buf_printf(&main_code, "int main(void) {\n    %s();\n    return 0;\n}\n", name);
-        else buf_printf(&main_code, "int main(void) {\n    return (int)%s();\n}\n", name);
+        /* on a phone, the activity or the application of SDL starts the program: its entry is
+           `SDL_main` (spec §11.5) */
+        char *body = main_fn->type->as.fn.ret->tag == T_VOID ? sosu_format("    %s();\n    return 0;\n", name)
+                                                             : sosu_format("    return (int)%s();\n", name);
+        buf_printf(&main_code,
+                   "#ifdef SOSU_SDL_MAIN\n"
+                   "__attribute__((visibility(\"default\"))) int SDL_main(int argc, char *argv[]) {\n"
+                   "    (void)argc;\n    (void)argv;\n%s}\n"
+                   "#ifdef __APPLE__\n"
+                   "/* iOS: SDL runs the application, then calls SDL_main */\n"
+                   "typedef int (*sosu_sdl_main)(int argc, char *argv[]);\n"
+                   "extern int SDL_RunApp(int argc, char *argv[], sosu_sdl_main main_function, void *reserved);\n"
+                   "int main(int argc, char *argv[]) {\n    return SDL_RunApp(argc, argv, SDL_main, NULL);\n}\n"
+                   "#endif\n"
+                   "#else\n"
+                   "int main(void) {\n%s}\n"
+                   "#endif\n",
+                   body, body);
+        free(body);
         free(name);
     } else {
         Buf runs = {0};

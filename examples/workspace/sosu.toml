@@ -9,3 +9,9 @@ platform = { path = "../../packages/platform" }
 render = { path = "../../packages/render" }
 ui = { path = "../../packages/ui" }
 i18n = { path = "../../packages/i18n" }
+
+# On a phone (spec §11.5): `sosuc package --target android examples/workspace`, from the repository
+[app]
+id = "org.sosu.workspace"
+name = "Sosu workspace"
+assets = ["../../packages/render/fonts/NotoSans-Regular.ttf", "assets/sosu.png", "locales"]

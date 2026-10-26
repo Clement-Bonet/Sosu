@@ -1,0 +1,28 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "@ID@"
+    compileSdk @COMPILE_SDK@
+
+    defaultConfig {
+        applicationId "@ID@"
+        minSdk @MIN_SDK@
+        targetSdk @COMPILE_SDK@
+        versionCode 1
+        versionName "@VERSION@"
+    }
+
+    // libmain.so and libSDL3.so, put there by sosuc for each ABI; the Java classes of SDL come from its archive below
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ["jniLibs"]
+            assets.srcDirs = ["assets"]
+        }
+    }
+}
+
+dependencies {
+    implementation files("libs/@SDL_AAR@")
+}

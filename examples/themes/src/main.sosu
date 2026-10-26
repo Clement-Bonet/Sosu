@@ -64,6 +64,12 @@ class App : app.Handler {
             Wheel(x, y) => {
                 ui.scroll_wheel(y);
             },
+            SafeAreaChanged(left, top, right, bottom) => {
+                ui.safe_area(left, top, right, bottom);  // a phone: its bars and its notch (spec §10.3)
+            },
+            ScaleChanged(scale) => {
+                ui.scale = scale;  // a dense screen (spec §10.10)
+            },
             _ => { },
         }
         return true;
@@ -86,11 +92,19 @@ i32 main() uses io {
     };
     state.Demo* s = arena.new(state.Demo, dark);
     App* handler = arena.new(App, s);
-    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
-        ok(noto) => {
-            handler.ui.font = some(noto);
+    // a file given with the application: on a phone, in its APK or its bundle (spec §11.5)
+    match (app.read_asset(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        some(bytes) => {
+            match (truetype.parse(&arena, bytes)) {
+                ok(noto) => {
+                    handler.ui.font = some(noto);
+                },
+                err(e) => {
+                    io.print("Noto Sans is damaged: the built-in font is used");
+                },
+            }
         },
-        err(e) => {
+        none => {
             io.print("Noto Sans not found: the built-in font is used");
         },
     }

@@ -9,6 +9,7 @@ typedef enum {
     SECTION_DEPENDENCIES,
     SECTION_UNKNOWN,
     SECTION_LINK,
+    SECTION_APP, /* [app]: what a phone shows of the program (spec §11.5) */
 } Section;
 
 const char *const link_section_names[LINK_SECTION_COUNT] = { "", "windows", "linux", "macos", "android", "ios" };
@@ -245,6 +246,8 @@ static void parse_header(Toml *t) {
         t->package_offset = start;
     } else if (key_is(t, key_start, key_length, "dependencies")) {
         section = SECTION_DEPENDENCIES;
+    } else if (key_is(t, key_start, key_length, "app")) {
+        section = SECTION_APP;
     } else {
         for (int i = 0; i < LINK_SECTION_COUNT; i++) {
             char *name = i == LINK_ALL ? sosu_strdup("link") : sosu_format("link.%s", link_section_names[i]);
@@ -258,11 +261,11 @@ static void parse_header(Toml *t) {
     if (section == SECTION_UNKNOWN) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown section [%.*s]",
                                  (int)key_length, t->s + key_start);
-        diag_help(d, "sosu.toml contains [package], [dependencies], [link] and [link.<target>] "
+        diag_help(d, "sosu.toml contains [package], [dependencies], [app], [link] and [link.<target>] "
                      "(windows, linux, macos, android, ios)");
         return;
     }
-    int index = section == SECTION_LINK ? 3 + link : (int)section; /* link sections after the others */
+    int index = section == SECTION_LINK ? 3 + link : section == SECTION_APP ? 15 : (int)section; /* link sections after the others */
     unsigned bit = 1u << index;
     if (t->seen_sections & bit) {
         error_at(t, "E0408", key_start, key_length, "the section [%.*s] appears twice", (int)key_length,
@@ -333,6 +336,35 @@ static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
     parse_string_array(t, list);
 }
 
+/* `id = "org.sosu.window"`, `name`, `version`, `icon`, `assets = [...]` in [app]. */
+static void parse_app_entry(Toml *t, size_t key_start, size_t key_length) {
+    AppSection *app = &t->manifest->app;
+    if (key_is(t, key_start, key_length, "assets")) {
+        if (app->assets.count > 0) {
+            error_at(t, "E0408", key_start, key_length, "duplicate key `assets`");
+            return;
+        }
+        parse_string_array(t, &app->assets);
+        return;
+    }
+    char **field = key_is(t, key_start, key_length, "id")        ? &app->id
+                 : key_is(t, key_start, key_length, "name")    ? &app->name
+                 : key_is(t, key_start, key_length, "version") ? &app->version
+                 : key_is(t, key_start, key_length, "icon")    ? &app->icon
+                 : NULL;
+    if (!field) {
+        Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [app]", (int)key_length,
+                                 t->s + key_start);
+        diag_help(d, "[app] contains `id`, `name`, `version`, `icon` and `assets` (spec §11.5)");
+        return;
+    }
+    if (*field) {
+        error_at(t, "E0408", key_start, key_length, "duplicate key `%.*s`", (int)key_length, t->s + key_start);
+        return;
+    }
+    *field = parse_string(t);
+}
+
 static void parse_line(Toml *t) {
     skip_spaces(t);
     if (at_line_end(t)) return;
@@ -358,6 +390,7 @@ static void parse_line(Toml *t) {
     }
     case SECTION_PACKAGE: parse_package_entry(t, key_start, key_length); break;
     case SECTION_LINK: parse_link_entry(t, key_start, key_length); break;
+    case SECTION_APP: parse_app_entry(t, key_start, key_length); break;
     case SECTION_DEPENDENCIES: parse_dependency(t, key_start, key_length); break;
     case SECTION_UNKNOWN: /* already reported: ignore its content */
         while (t->pos < t->len && t->s[t->pos] != '\n') t->pos++;
@@ -454,5 +487,11 @@ void manifest_free(Manifest *manifest) {
         }
         free(manifest->link[i].subsystem);
     }
+    free(manifest->app.id);
+    free(manifest->app.name);
+    free(manifest->app.version);
+    free(manifest->app.icon);
+    for (size_t i = 0; i < manifest->app.assets.count; i++) free(manifest->app.assets.items[i]);
+    free(manifest->app.assets.items);
     memset(manifest, 0, sizeof *manifest);
 }

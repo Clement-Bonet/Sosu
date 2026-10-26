@@ -169,6 +169,21 @@ Event? translate(sdl.Event* event, Arena* frame) uses io {
 }
 
 // The text of the clipboard, copied into `arena`, or "".
+// A file given with the application, copied into `arena` (spec §11.5): in the APK on Android, in
+// the bundle on iOS, relative to the current folder on the desktop; none if it is not there. The
+// files of `assets` in the [app] section of sosu.toml keep there the path that the program uses
+// on the desktop.
+pub ui8[]? read_asset(Arena* arena, str path) uses io {
+    return sdl.load_file(arena, path);
+}
+
+// The folder where the application `name` keeps its data, ending with a separator: the internal
+// storage on Android, `Library/Application Support` on iOS, the folder of the user's applications
+// on the desktop (spec §11.5).
+pub str data_folder(Arena* arena, str name) uses io {
+    return sdl.pref_path(arena, "sosu", name);
+}
+
 pub str clipboard(Arena* arena) uses io {
     return sdl.clipboard_text(arena);
 }
@@ -420,7 +435,9 @@ pub i32 run(Config config, Handler* handler) uses io {
     Screen* screen = arena.new(Screen, handler, renderer);
     defer screen.pixels.free();
     defer screen.release();
-    if (!screen.resize(config.width, config.height)) {
+    // the size the system gave: on a phone, the whole screen, whatever the program asked (spec §11.5)
+    sdl.Point given = sdl.window_size(window);
+    if (!screen.resize(given.x, given.y)) {
         return 1;
     }
     // Frames while the window is resized, when the system holds this loop.
@@ -440,6 +457,18 @@ pub i32 run(Config config, Handler* handler) uses io {
     mut bool running = true;
     if (wants_bar) {
         running = handler.on_event(CustomTitleBar(custom));
+    }
+    if (running && (given.x != config.width || given.y != config.height)) {
+        running = handler.on_event(Resized(given.x, given.y));
+    }
+    // a phone: its system bars and its notch, and the density of its screen, from the start
+    i32[4] area = sdl.safe_area(window);
+    if (running && (area[0] != 0 || area[1] != 0 || area[2] != given.x || area[3] != given.y)) {
+        running = handler.on_event(SafeAreaChanged(area[0] as f32, area[1] as f32, (given.x - area[0] - area[2]) as f32, (given.y - area[1] - area[3]) as f32));
+    }
+    f32 density = sdl.display_scale(window);
+    if (running && density != 1.0 && density > 0.0) {
+        running = handler.on_event(ScaleChanged(density));
     }
     while (running) {
         frame.free();
@@ -491,6 +520,18 @@ pub i32 run(Config config, Handler* handler) uses io {
         if (suspended) {  // in the background: nothing is drawn, the events are awaited slowly
             sdl.delay(100);
             continue;
+        }
+        // a size SDL gave without SDL_EVENT_WINDOW_RESIZED (Android sets the whole screen after
+        // the window is created): the pixels follow it, or they would be stretched and the
+        // events would not fall where they are drawn
+        sdl.Point now = sdl.window_size(window);
+        if (now.x != screen.surface.width || now.y != screen.surface.height) {
+            if (!screen.resize(now.x, now.y)) {
+                return 1;
+            }
+            if (!handler.on_event(Resized(now.x, now.y))) {
+                break;
+            }
         }
         screen.draw();
         sdl.delay(16);

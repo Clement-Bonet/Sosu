@@ -103,6 +103,28 @@ static void test_library(const char *sosuc) {
     }
 }
 
+/* A program for Android (spec §11.5): `libmain.so` for the emulator, an ELF library for x86_64.
+   Skipped when this machine has no NDK, or no SDL3 for Android. */
+static void test_android(const char *sosuc) {
+    char command[512];
+    snprintf(command, sizeof command, "%s build --target android-x64 examples/window > build/android.out 2> build/android.err",
+             sosuc);
+    if (run(command) != 0) {
+        char *err = read_text("build/android.err");
+        int missing = err && (strstr(err, "NDK was not found") || strstr(err, "SDL3"));
+        if (missing) printf("android: skipped (no Android NDK, or no SDL3 for Android: see build/android.err)\n");
+        CHECK(missing, "build --target android-x64 failed: %s", err ? err : "");
+        free(err);
+        return;
+    }
+    FILE *file = fopen("examples/window/build/android/x86_64/libmain.so", "rb");
+    unsigned char header[20] = { 0 };
+    size_t read = file ? fread(header, 1, sizeof header, file) : 0;
+    if (file) fclose(file);
+    CHECK(read == sizeof header && memcmp(header, "\x7f" "ELF", 4) == 0 && header[18] == 62,
+          "libmain.so for android-x64 is not an ELF library for x86_64");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fputs("usage: program_tests <path to sosuc>\n", stderr);
@@ -133,6 +155,7 @@ int main(int argc, char **argv) {
     }
 
     test_library(argv[1]);
+    test_android(argv[1]);
 
     /* `copy` of the [link] section of tests/programs/linking */
     char *copied = read_text("tests/programs/linking/build/message.txt");
