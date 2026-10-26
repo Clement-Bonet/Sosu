@@ -1,0 +1,75 @@
+// A library for other languages (spec §9.2): its exports, called by host/host.c.
+
+pub struct Vec2 {
+    pub f32 x;
+    pub f32 y;
+}
+
+pub enum Mode {
+    Add,
+    Multiply,
+}
+
+// An object that owns the arena holding it: created by `geom_counter_new`, freed by
+// `geom_counter_free`.
+pub class Counter {
+    mut Arena arena;
+    mut i64 total;
+
+    void init(Arena home) {
+        arena = home;
+        total = 0;
+    }
+}
+
+export "C" f32 geom_dot(Vec2 a, Vec2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+
+export "C" Vec2 geom_scale(Vec2 v, f32 k) {
+    return Vec2{ x: v.x * k, y: v.y * k };
+}
+
+export "C" usize geom_bytes(str text) {
+    return text.len;
+}
+
+export "C" i64 geom_combine(i64[] values, Mode mode) {
+    mut i64 result = mode == Add ? 0 : 1;
+    for (i64 v in values) {
+        result = mode == Add ? result + v : result * v;
+    }
+    return result;
+}
+
+export "C" i32 geom_apply(fn(i32) -> i32 f, i32 x) {
+    return f(f(x));
+}
+
+// The element `i`: out of range, the error goes back to the host.
+export "C" i64 geom_at(i64[] values, usize i) {
+    return values[i];
+}
+
+export "C" i32 geom_half(i32 x)
+    requires x % 2 == 0
+{
+    return x / 2;
+}
+
+export "C" Counter* geom_counter_new() {
+    mut Arena arena = Arena.new(1 * KB);
+    return arena.new(Counter, arena);
+}
+
+export "C" void geom_counter_add(Counter* c, i64 n) {
+    c.total += n;
+}
+
+export "C" i64 geom_counter_total(Counter* c) {
+    return c.total;
+}
+
+export "C" void geom_counter_free(Counter* c) {
+    c.arena.free();
+}

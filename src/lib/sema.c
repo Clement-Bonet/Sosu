@@ -1152,6 +1152,107 @@ static void resolve_generics(Sema *s) {
 }
 
 uint32_t sema_constraints_of(const Type *type) { return constraints_of(type); }
+/* ---- Exports (spec §9.2) ---- */
+
+static const char *const c_keywords[] = {
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern",
+    "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed",
+    "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "main",
+};
+
+/* Why `type` cannot cross to C in the signature of an export, or NULL if it can. Arrays are
+   allowed in the fields of a struct only, `void` as a result only. */
+static const char *export_problem(const Type *type, bool is_field, bool is_result) {
+    switch (type->tag) {
+    case T_ERROR: case T_INT: case T_FLOAT: case T_BOOL: case T_CHAR: case T_STR:
+        return NULL;
+    case T_VOID:
+        return is_result ? NULL : "`void`";
+    case T_POINTER: {
+        const Type *inner = type->as.inner;
+        if (inner->tag == T_CLASS || inner->tag == T_ARENA) return inner->type_arg_count ? "a generic class" : NULL;
+        if (inner->tag == T_INTERFACE) return "an interface";
+        return export_problem(inner, true, false);
+    }
+    case T_SLICE:
+        return export_problem(type->as.inner, true, false);
+    case T_ARRAY:
+        return is_field ? export_problem(type->as.array.element, true, false) : "an array by value (pass a view `T[]`)";
+    case T_FN:
+        for (size_t i = 0; i < type->as.fn.param_count; i++) {
+            const char *problem = export_problem(type->as.fn.params[i], false, false);
+            if (problem) return problem;
+        }
+        return export_problem(type->as.fn.ret, false, true);
+    case T_STRUCT:
+        if (type->as.info->generic || type->as.info->param_count) return "an instance of a generic struct";
+        for (size_t i = 0; i < type->as.info->field_count; i++) {
+            const char *problem = export_problem(type->as.info->fields[i].type, true, false);
+            if (problem) return problem;
+        }
+        return NULL;
+    case T_ENUM:
+        if (type->as.info->generic || type->as.info->param_count) return "an instance of a generic enum";
+        for (size_t i = 0; i < type->as.info->variant_count; i++) {
+            if (type->as.info->variants[i].field_count) return "an enum with data";
+        }
+        return NULL;
+    case T_OPTION: return "an option `T?`";
+    case T_RESULT: return "a result `T!E`";
+    case T_ARENA: return "an `Arena` by value";
+    case T_INTERFACE: return "an interface";
+    case T_CLASS: return "a class by value";
+    default: return "this type";
+    }
+}
+
+static void check_exports(Sema *s) {
+    VEC(const FnInfo *) exports = {0};
+    for (size_t i = 0; i < s->fns.count; i++) {
+        const FnInfo *fn = s->fns.items[i];
+        const FnDecl *decl = fn->decl;
+        if (!decl->is_export) continue;
+        Name name = decl->name;
+        bool keyword = false;
+        for (size_t k = 0; k < sizeof c_keywords / sizeof *c_keywords; k++) {
+            keyword |= strlen(c_keywords[k]) == name.length && memcmp(c_keywords[k], name.text, name.length) == 0;
+        }
+        if (keyword || (name.length >= 5 && memcmp(name.text, "sosu_", 5) == 0)) {
+            Diagnostic *d = error_at(s, fn->unit, "E0365", name.offset, name.length, "`%.*s` cannot be the C name of an export",
+                                     NAME_ARGS(name));
+            diag_help(d, "a C keyword, `main` and the names starting with `sosu_` are taken; prefix it with the name of "
+                         "the library, e.g. `%s_%.*s`", fn->unit->package->name, NAME_ARGS(name));
+        }
+        for (size_t j = 0; j < exports.count; j++) {
+            if (!name_eq(exports.items[j]->decl->name, name)) continue;
+            Diagnostic *d = error_at(s, fn->unit, "E0365", name.offset, name.length, "two exports are named `%.*s`",
+                                     NAME_ARGS(name));
+            diag_help(d, "C has a single namespace: the other one is in `%s`", exports.items[j]->unit->module);
+        }
+        SOSU_VEC_PUSH(&exports, fn);
+        if (decl->type_params.count) {
+            Diagnostic *d = error_at(s, fn->unit, "E0365", name.offset, name.length, "an export cannot be generic");
+            diag_help(d, "export one function per type, each calling the generic one");
+            continue;
+        }
+        if (fn->type->tag != T_FN) continue;
+        for (size_t j = 0; j <= decl->param_count; j++) {
+            bool is_result = j == decl->param_count;
+            const Type *type = is_result ? fn->type->as.fn.ret : fn->type->as.fn.params[j];
+            const TypeExpr *te = is_result ? decl->ret : decl->params[j].type;
+            const char *problem = export_problem(type, false, is_result);
+            if (!problem) continue;
+            char *text = type_to_string(type);
+            Diagnostic *d = error_at(s, fn->unit, "E0366", te->offset, te->length,
+                                     "`%s` cannot cross to C: it is or holds %s", text, problem);
+            diag_help(d, "an export takes numbers, `bool`, `char`, `str`, views, structs of those, pointers and "
+                         "functions; return a `bool` and fill an out pointer instead (spec §9.2)");
+            free(text);
+        }
+    }
+    free(exports.items);
+}
+
 /* ---- Entry point ---- */
 
 bool sema_check(Sema *s, Program *program) {
@@ -1195,6 +1296,7 @@ bool sema_check(Sema *s, Program *program) {
         TypeInfo *info = s->type_infos.items[i];
         if (info->decl->kind == DECL_CLASS) check_class(s, info);
     }
+    check_exports(s);
     sema_check_bodies(s);
     return program->diags.error_count == errors_before;
 }

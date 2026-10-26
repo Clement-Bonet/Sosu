@@ -2182,6 +2182,35 @@ static void gen_tables(Gen *g, Buf *out) {
     free(infos.items);
 }
 
+/* The functions a library offers (spec §9.2): each calls its Sosu function under a guard, so
+   that a run-time error returns a zero value to the host, and `<package>_error()` tells it. */
+static void gen_exports(Gen *g, Buf *out) {
+    for (size_t i = 0; i < g->s->fns.count; i++) {
+        FnInfo *fn = g->s->fns.items[i];
+        if (!fn->decl->is_export || fn->param_count) continue;
+        const Type *type = fn->type;
+        Buf params = {0};
+        Buf args = {0};
+        for (size_t j = 0; j < type->as.fn.param_count; j++) {
+            buf_printf(&params, "%s%s a%zu", j ? ", " : "", value_type(g, type->as.fn.params[j]), j);
+            buf_printf(&args, "%sa%zu", j ? ", " : "", j);
+        }
+        bool returns = type->as.fn.ret->tag != T_VOID;
+        const char *ret = returns ? value_type(g, type->as.fn.ret) : "void";
+        char *inner = fn_c_name(fn);
+        buf_printf(out, "SOSU_EXPORT %s %.*s(%s) {\n    jmp_buf here;\n    jmp_buf *outer = sosu_guard_enter(&here);\n", ret,
+                   NAME_ARGS(fn->decl->name), params.items ? params.items : "void");
+        if (returns) buf_printf(out, "    %s result = {0};\n", ret);
+        buf_printf(out, "    if (setjmp(here) == 0) %s%s(%s);\n    sosu_guard_leave(outer);\n%s}\n\n", returns ? "result = " : "",
+                   inner, args.items ? args.items : "", returns ? "    return result;\n" : "");
+        free(inner);
+        free(params.items);
+        free(args.items);
+    }
+    buf_printf(out, "SOSU_EXPORT const char *%s_error(void) {\n    return sosu_last_error();\n}\n",
+               g->program->packages.items[0]->name);
+}
+
 static FnInfo *find_main(Gen *g) {
     Unit *entry = g->program->units.items[0];
     for (size_t i = 0; i < g->s->fns.count; i++) {
@@ -2242,7 +2271,9 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
     }
 
     Buf main_code = {0};
-    if (mode == CODEGEN_PROGRAM) {
+    if (mode == CODEGEN_LIBRARY) {
+        gen_exports(&g, &main_code);
+    } else if (mode == CODEGEN_PROGRAM) {
         char *name = fn_c_name(main_fn);
         if (main_fn->type->as.fn.ret->tag == T_VOID) buf_printf(&main_code, "int main(void) {\n    %s();\n    return 0;\n}\n", name);
         else buf_printf(&main_code, "int main(void) {\n    return (int)%s();\n}\n", name);

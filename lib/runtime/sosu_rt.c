@@ -16,7 +16,21 @@
 #include <windows.h>
 #endif
 
-static jmp_buf *current_test;
+/* Variables of each thread: a library is called from several threads at once (spec §9.2). */
+#if defined(_MSC_VER)
+#define SOSU_THREAD __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+#define SOSU_THREAD __thread
+#else
+#define SOSU_THREAD _Thread_local
+#endif
+
+/* The guard of the running test or export: a run-time error jumps back to it. A test prints
+   the message; an export keeps it for `<package>_error()`. */
+static SOSU_THREAD jmp_buf *current_guard;
+static SOSU_THREAD bool guard_prints;
+static SOSU_THREAD char last_error[512];
+static SOSU_THREAD bool has_error;
 
 /* ---- For std.time and std.random ----
    Declared by std itself with `extern "C"`: the clock and sleeping differ by system. */
@@ -64,9 +78,11 @@ uint64_t sosu_random_seed(void) {
 
 void sosu_fail(const char *loc, const char *message) {
     fflush(stdout);
-    if (current_test) {
-        fprintf(stderr, "    %s: %s\n", loc, message);
-        longjmp(*current_test, 1);
+    if (current_guard) {
+        if (guard_prints) fprintf(stderr, "    %s: %s\n", loc, message);
+        snprintf(last_error, sizeof last_error, "%s: %s", loc, message);
+        has_error = true;
+        longjmp(*current_guard, 1);
     }
     fprintf(stderr, "sosu: %s: %s\n", loc, message);
     exit(101);
@@ -135,16 +151,19 @@ sosu_arena sosu_arena_copy(const sosu_arena *arena, const char *loc) {
     return sosu_arena_new(arena->state->block_size, loc);
 }
 
+/* `arena` may lie in one of its own blocks (an object that owns the arena holding it, spec
+   §9.2): it is marked freed before its blocks are. */
 void sosu_arena_free(sosu_arena *arena) {
-    if (!arena->state) return;
-    sosu_block *block = arena->state->head;
+    sosu_arena_state *state = arena->state;
+    if (!state) return;
+    arena->state = NULL;
+    sosu_block *block = state->head;
     while (block) {
         sosu_block *next = block->next;
         free(block);
         block = next;
     }
-    free(arena->state);
-    arena->state = NULL;
+    free(state);
 }
 
 void *sosu_arena_alloc_array(sosu_arena *arena, size_t size, uint64_t count, const char *loc) {
@@ -215,15 +234,28 @@ bool sosu_instance_of(const sosu_class *klass, const sosu_class *target) {
 bool sosu_run_test(void (*test)(void), const char *name) {
     jmp_buf here;
     bool passed = false;
-    current_test = &here;
+    current_guard = &here;
+    guard_prints = true;
     if (setjmp(here) == 0) {
         test();
         passed = true;
     }
-    current_test = NULL;
+    current_guard = NULL;
+    guard_prints = false;
     printf("test %s ... %s\n", name, passed ? "ok" : "FAILED");
     return passed;
 }
+
+jmp_buf *sosu_guard_enter(jmp_buf *here) {
+    jmp_buf *outer = current_guard;
+    current_guard = here;
+    has_error = false;
+    return outer;
+}
+
+void sosu_guard_leave(jmp_buf *outer) { current_guard = outer; }
+
+const char *sosu_last_error(void) { return has_error ? last_error : NULL; }
 
 int sosu_test_summary(int total, int failed) {
     printf("\n%d test%s, %d passed, %d failed\n", total, total == 1 ? "" : "s", total - failed, failed);

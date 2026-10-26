@@ -3,6 +3,7 @@
 #ifndef SOSU_RT_H
 #define SOSU_RT_H
 
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -79,6 +80,20 @@ uint32_t sosu_next_char(sosu_str text, size_t *pos);
 
 /* `sosuc test`: runs one test block; returns false if it failed. */
 bool sosu_run_test(void (*test)(void), const char *name);
+
+/* Exports of a library (spec §9.2): each runs under a guard, so that a run-time error returns
+   to the host instead of stopping its process. `sosu_last_error` gives the message of the
+   last call of this thread, or NULL if it succeeded. */
+jmp_buf *sosu_guard_enter(jmp_buf *here);
+void sosu_guard_leave(jmp_buf *outer);
+const char *sosu_last_error(void);
+#if defined(SOSU_SHARED) && defined(_WIN32)
+#define SOSU_EXPORT __declspec(dllexport)
+#elif defined(SOSU_SHARED)
+#define SOSU_EXPORT __attribute__((visibility("default")))
+#else
+#define SOSU_EXPORT
+#endif
 /* Prints the summary of a test run and returns the exit code. */
 int sosu_test_summary(int total, int failed);
 

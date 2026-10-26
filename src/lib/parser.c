@@ -254,7 +254,7 @@ static bool starts_statement(TokenKind kind) {
 static bool starts_declaration(TokenKind kind) {
     switch (kind) {
     case TOK_KW_STRUCT: case TOK_KW_CLASS: case TOK_KW_INTERFACE: case TOK_KW_ENUM:
-    case TOK_KW_IMPORT: case TOK_KW_EXTERN: case TOK_KW_PUB: case TOK_KW_TEST:
+    case TOK_KW_IMPORT: case TOK_KW_EXTERN: case TOK_KW_EXPORT: case TOK_KW_PUB: case TOK_KW_TEST:
         return true;
     default:
         return false;
@@ -1414,6 +1414,33 @@ static Decl *parse_declaration(Parser *p) {
         parse_type_params(p, &decl->type_params);
         parse_enum_body(p, decl);
         break;
+    case TOK_KW_EXPORT: {
+        /* `export "C" f32 dot(...)`: a function offered to other languages (spec §9.2) */
+        advance(p);
+        if (check(p, TOK_STRING)) {
+            const Token *abi = advance(p);
+            if (abi->length != 3 || p->file->text[abi->offset + 1] != 'C') {
+                Diagnostic *d = error_at(p, "E0218", abi->offset, abi->length, "only `export \"C\"` exists");
+                diag_help(d, "a library is offered to other languages through the C ABI (spec §9.2)");
+            }
+        } else {
+            report_expected(p, "E0200", "`\"C\"` after `export`", false);
+        }
+        if (!at_function(p)) {
+            report_expected(p, "E0218", "a function after `export \"C\"`", false);
+            sync_declaration(p);
+            return NULL;
+        }
+        decl->kind = DECL_FN;
+        decl->is_pub = true;
+        decl->as.fn.is_pub = true;
+        decl->as.fn.is_export = true;
+        parse_function(p, &decl->as.fn, false);
+        if (pub->kind == TOK_KW_PUB) {
+            error_at(p, "E0212", pub->offset, pub->length, "an export is public already: `pub` is not needed");
+        }
+        break;
+    }
     case TOK_KW_EXTERN:
         decl->kind = DECL_EXTERN;
         advance(p);
