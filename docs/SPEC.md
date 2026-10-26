@@ -584,7 +584,7 @@ extern "C" {
 
 - `struct`s are compatible with the C layout.
 - An `extern` call is `unsafe`, unless it is wrapped in a safe function.
-- `sosuc bindgen` (v1): generates declarations from C headers (functions, structs, enums, constants). In v0, bindings are written by hand.
+- `sosuc bindgen` (step 11, §11.6): generates declarations from C headers (functions, structs, enums, constants). Until then, bindings are written by hand.
 - The Sosu declarations must match the C ones exactly (`int` is `i32`, a C struct is a Sosu `struct` with the same fields in the same order): the C compiler never sees the C headers.
 
 ### 9.1 Linking C libraries
@@ -1472,7 +1472,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
 - `sosuc lsp`: the language server of editors (Language Server Protocol, JSON-RPC on stdin and stdout, behind `Content-Length` headers). While typing, it checks the package of the open file as `sosuc check` does, with the text of the open files in place of their files on disk, and publishes the diagnostics. It shows the type of what is under the mouse (the signature of a function or method, the type of a variable or field), goes to the definition of a name (variable, parameter, function, method, field, variant, type, module), and completes the members after `.` (fields and methods of a value, public names of a module, variants of an enum) and otherwise the names in scope (variables, functions, types, imported modules, keywords). Positions are in UTF-16 code units, as the protocol has them. Hover, definition and member completion need a package that loads without errors (semantic analysis only runs then); a file outside any package, or that no import reaches, is only parsed. Renaming and the references of a name come later.
 - `sosuc build --lib[=shared]` (§9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages.
-- `sosuc package --target android` (an APK) or `--target ios-sim` (an application for the simulator), §11.5. `sosuc bindgen`: v1.
+- `sosuc package --target android` (an APK) or `--target ios-sim` (an application for the simulator), §11.5. `sosuc bindgen`, and `sosuc package` for the desktop: §11.6.
 
 ### 11.5 Android and iOS (step 9, second part)
 
@@ -1532,9 +1532,68 @@ sosuc package --target ios-sim examples/window       # build/ios/window.app, for
 - iOS: `sosuc package --target ios-sim` builds the `.app` itself (clang, `SDL3.framework` in `Frameworks/`, `Info.plist`, signed for the simulator), without an Xcode project: there is nothing to keep up to date. For a device, `sosuc build --target ios-arm64` gives `libmain.a`, linked in an Xcode project with the signing team of the developer.
 - `app.data_folder(arena, name)` takes the name of the application (`SDL_GetPrefPath`).
 - An asset is kept in the APK or the bundle under the path the program reads on the desktop: its path relative to the folder where `sosuc` runs (`assets = ["../../packages/render/fonts/NotoSans-Regular.ttf"]` in `examples/themes` is read as `packages/render/fonts/NotoSans-Regular.ttf`, from the repository).
-- On a phone, the window takes the whole screen: `run` starts the program with `Resized`, `SafeAreaChanged` and `ScaleChanged` when the screen differs from what it asked for, and the program gives them to `ui` (`ui.safe_area`, `ui.scale`). The widths that the program gives its widgets stay its own: a layout made for the desktop is not adapted to a phone.
+- On a phone, the window takes the whole screen: `run` starts the program with `Resized`, `SafeAreaChanged` and `ScaleChanged` when the screen differs from what it asked for, and the program gives them to `ui` (`ui.safe_area`, `ui.scale`). The widths that the program gives its widgets stay its own: a layout made for the desktop is not adapted to a phone (responsive layouts: step 15 of the roadmap, §13).
 - `io.print` and the run-time errors go to the log of Android (`adb logcat -s sosu`) through a thread that reads standard output.
 - The CI builds an APK in an `Android (NDK)` job and the simulator application in the `macOS` job; `tests/programs` builds `examples/window` for `android-x64` when an NDK is found, and says it skipped otherwise.
+
+### 11.6 `sosuc bindgen`, desktop packages, cross-compilation (step 11)
+
+Status: design. One branch, in batches: constants (needed by bindings), `sosuc bindgen`, `sosuc package` for the desktop, cross-compilation between desktops, then the CI and the documentation. iOS stays checked by the CI only (no Mac here).
+
+```sh
+sosuc bindgen vendor/SDL3/include/SDL3/SDL.h -I vendor/SDL3/include --prefix SDL_ -o src/sdl_c.sosu
+sosuc package examples/workspace                      # build/package/workspace/, and workspace-windows-x64.zip
+sosuc build --target linux-arm64 examples/window     # another architecture of a desktop
+```
+
+#### Constants
+
+- Bindings are mostly constants (`SDL_INIT_VIDEO`, the values of C enums), and Sosu has no global variables (§5). A module gains constants: `pub ui32 SDL_INIT_VIDEO = 0x20;` at the top level, a declaration without `mut` whose value is a constant expression (literals, operators, casts, other constants; no call). They are values, not variables: nothing is stored, the C gets a `#define` or the value itself, and §9.2 stays true (a library is reentrant).
+- Names follow the rules of the other declarations: `pub` to export, qualified by the module (`sdl.SDL_INIT_VIDEO`); a cycle between constants is an error.
+- Usable wherever a value is, and where a constant is needed: the size of an array (`ui8[NAME_MAX] name`).
+
+#### `sosuc bindgen`
+
+- `sosuc bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu]`: writes a Sosu module with the declarations of the header and of the headers it includes from the same folders (not those of the system: `stdint.h`, `windows.h`), so that a binding of SDL is SDL only.
+- How: the C compiler of the target (§11.4) preprocesses the header (`cl /E`, `cc -E`), with `-I` and `-D`; `sosuc` reads the result with a parser of the declarations of C99 (no bodies of functions: `static inline` functions are left out), and the `#line` markers say which file each declaration comes from. The `#define`s are lost by preprocessing: they are read from the headers themselves (the files the markers name), and kept when their value is a constant expression of C (numbers, characters, strings, operators, casts, other macros). No libclang: the compiler depends on the libc only (§1).
+- What becomes what:
+  - functions → an `extern "C"` block, each `uses io` (C can do anything); variadic functions (`SDL_Log(const char *fmt, ...)`) are left out, with a comment;
+  - `struct`s → `struct`s with the same fields in the same order; an incomplete struct (`typedef struct SDL_Window SDL_Window;`) → an empty `struct` used through pointers, as `sdl.sosu` does today; a `union`, or a struct with bit fields, → a `struct` of bytes of the same size and alignment (`ui8[56] data`), with a comment, since Sosu has neither;
+  - `enum`s of C → constants of their type (`i32`, or the type of the `typedef`), not Sosu enums, which are sum types: C passes them as integers and may combine them (flags);
+  - `#define`s of constants → constants (`ui32` for a hexadecimal value, `i32` or `i64` for a decimal one, `f64`, `str` for a string); macros with parameters are left out;
+  - pointers to functions → function types (`fn(ui8*, Event*) -> bool uses io`);
+  - `typedef`s → the type they name (Sosu has no aliases); a `typedef` of a struct gives the struct its name.
+- Types: `char` → `ui8` (a byte of a string), `int` → `i32`, `unsigned` → `ui32`, `long long` → `i64`, `size_t` → `usize`, `intN_t` / `uintN_t` → `iN` / `uiN`, `float` / `double` → `f32` / `f64`, `bool` → `bool`, `void*` → `ui8*`, `const` dropped. `long` is 32 bits on Windows and 64 elsewhere: a declaration that uses it is written for the target, with a warning (a binding with `long` is not portable).
+- `--prefix SDL_` keeps the declarations whose name starts with it (several prefixes allowed); without it, every declaration of the headers given. Names stay as in C (`SDL_CreateWindow`), as §9.2 keeps the C names: the safe Sosu wrapper around them is still written by hand, as `sdl.sosu` does.
+- Layout: the C compiler never sees the headers when a program is built (§9). `sosuc bindgen --check` also writes a C file of `_Static_assert(sizeof(T) == n && _Alignof(T) == a)` and `offsetof` per field, compiled with the header: a binding that does not match is found when it is made.
+- The generated module starts with a comment: the header, the version of `sosuc`, the target, the command. It is formatted (§7.6) and committed as any source: generating is not part of `sosuc build`.
+
+#### `sosuc package` for the desktop
+
+- `sosuc package [--target <desktop>] <package>`: a release build (`--release`, §7.7) in `build/package/<name>/`: the program, the files of `[link] copy` (`SDL3.dll`), and the assets of `[app]` under the path the program reads (§11.5); then an archive next to it, `<name>-<target>.zip` on Windows (`tar -a`, which Windows 10 has), `.tar.gz` on Linux, and on macOS `<Name>.app` (the `Info.plist` of `[app]`, the libraries in `Contents/Frameworks`, the assets in `Contents/Resources`) in a `.zip`.
+- `app.read_asset` looks next to the program first (`SDL_GetBasePath`, which is `Contents/Resources` in a `.app`), then in the current folder as today: a packaged program runs from anywhere.
+- On Windows the icon of `[app]` becomes the icon of the `.exe` (a resource, `rc` with MSVC, `windres` with MinGW); on Linux, a `.desktop` file beside the program. Installers (MSI, `.deb`, notarization on macOS) are left to the developer, as the stores are on phones (§11.2).
+
+#### Cross-compilation between desktops
+
+- `sosuc build --target <os>-<arch>` accepts the other architectures of the machine's system: `windows-arm64` from `windows-x64` (MSVC's `vcvarsamd64_arm64`), `linux-arm64` from `linux-x64` (`aarch64-linux-gnu-gcc`, or clang with `--target=aarch64-linux-gnu`), `macos-x64` from `macos-arm64` (`clang -arch x86_64`); and `macos-universal` (both, joined by `lipo`).
+- Another system (Linux from Windows...): with clang and a sysroot of the target given by `SOSU_SYSROOT` (`clang --target=x86_64-linux-gnu --sysroot=...`); without them, an error that names what is missing. The libraries of the target come from `[link.<target>]`, whose paths take `{arch}` as they take `{abi}` (`vendor/SDL3/lib/{arch}`).
+- `[link]` sections may name an architecture: `[link.windows-arm64]` adds to `[link.windows]`.
+
+#### Tests and CI
+
+- `tests/package`: constants (types, constant expressions, cycles, use as an array size, `pub`).
+- `tests/bindgen`: small headers (functions, structs, unions, bit fields, enums, macros, pointers to functions, variadics, `long`), the module expected, and the layout check compiled by the C compiler of the machine; and `SDL.h` of `vendor/` when it is there, checked with `--check`, compiled, and the parts of `sdl.sosu` compared to it.
+- `tests/programs`: `sosuc package` of `examples/window` (the archive, its files, the program run from another folder reads its assets).
+- The CI: `linux-arm64` built in the Linux jobs (`gcc-aarch64-linux-gnu`), `windows-arm64` in the Windows job, `macos-universal` in the macOS job; an archive of `examples/workspace` per desktop kept as an artifact of the run.
+
+#### Open questions (with the answer proposed)
+
+- Constants in the language, or `bindgen` writing functions (`pub ui32 SDL_INIT_VIDEO() { return 0x20; }`)? (proposed: constants; they are needed by any program, not only bindings, and an array size needs one)
+- `sdl.sosu` rewritten on a generated module, or kept by hand? (proposed: its `extern` block and its structs generated in `sdl_c.sosu`, private to `platform`; the safe functions stay by hand. The events, read today through structs written by hand, keep their structs)
+- C `enum`s as constants, or as Sosu enums without data? (proposed: constants; flags are combined with `|`, and a C function may return a value that no variant names)
+- The archive of a Linux program: `.tar.gz` of a folder, or an AppImage? (proposed: `.tar.gz`; an AppImage needs a tool of its own)
+- Cross-compilation to another system in this step, or only other architectures? (proposed: other architectures, tested by the CI; another system when a sysroot is given, without CI, said as such)
 
 ## 12. Grammar (v0, EBNF)
 
@@ -1624,10 +1683,11 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 8. `platform` / `render` / `ui` packages: window, rectangle, events, then the `.ui.sosu` translator
 9. Libraries for other languages (`export "C"`, `sosuc build --lib`, §9.2), then mobile with the same output: Android (NDK, emulator), then iOS (simulator), with the same code: done (§9.2, §11.5)
 10. Generics (monomorphized), `Vec` / `HashMap` containers: done (§5.4)
-11. `sosuc bindgen`, `sosuc package`, cross-compilation
+11. `sosuc bindgen`, `sosuc package`, cross-compilation (design: §11.6)
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
 13. Research: `comptime`, effect polymorphism, regions, concurrency
 14. Self-hosting
+15. Responsive windows (not urgent): layouts that adapt to the width of the window, with breakpoints, as the grid of Bootstrap (`xs`, `md`, `lg`...): columns that stack on a phone and sit side by side on a desktop, widgets shown or hidden by width, in `.ui.sosu` (§10.2) and `ui`
 
 ## 14. Decisions and open questions
 
