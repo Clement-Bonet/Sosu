@@ -74,7 +74,15 @@ catalog.Catalog*? choose_language(Arena* arena) uses io {
     if (chosen == 0) {
         return none;
     }
-    return match (catalog.load(arena, "examples/workspace/locales/messages.locale.fr.sosu")) {
+    ui8[] bytes = match (app.read_asset(arena, "examples/workspace/locales/messages.locale.fr.sosu")) {
+        some(found) => found,
+        none => arena.alloc_slice(ui8, 0),
+    };
+    str text = match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
+    return match (catalog.parse(arena, text)) {
         ok(c) => some(c),
         err(e) => none,
     };
@@ -167,6 +175,12 @@ class App : app.Handler, app.TitleBar {
                 ui.scroll_wheel(y);
                 ui.scroll_wheel_x(x);  // the sideways wheel: `Scroll` areas
             },
+            SafeAreaChanged(left, top, right, bottom) => {
+                ui.safe_area(left, top, right, bottom);  // a phone: its bars and its notch (spec §10.3)
+            },
+            ScaleChanged(scale) => {
+                ui.scale = scale;  // a dense screen (spec §10.10)
+            },
             _ => { },
         }
         return true;
@@ -217,11 +231,18 @@ i32 main() uses io {
     widgets.Window window = screen.WorkspaceConfig();
     // the icon of the window, a PNG file with transparency: for the system, and in the bar
     mut image.Image icon = image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) };
-    match (image.load(&arena, window.icon)) {
-        ok(found) => {
-            icon = found;
+    match (app.read_asset(&arena, window.icon)) {
+        some(bytes) => {
+            match (image.decode(&arena, bytes)) {
+                ok(found) => {
+                    icon = found;
+                },
+                err(e) => {
+                    io.print("{} is damaged: the window has no icon", window.icon);
+                },
+            }
         },
-        err(e) => {
+        none => {
             io.print("{} not found: the window has no icon", window.icon);
         },
     }
@@ -234,11 +255,19 @@ i32 main() uses io {
         Light => false,
         _ => true,
     };
-    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
-        ok(noto) => {
-            handler.ui.font = some(noto);
+    // a file given with the application: on a phone, in its APK or its bundle (spec §11.5)
+    match (app.read_asset(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        some(bytes) => {
+            match (truetype.parse(&arena, bytes)) {
+                ok(noto) => {
+                    handler.ui.font = some(noto);
+                },
+                err(e) => {
+                    io.print("Noto Sans is damaged: the built-in font is used");
+                },
+            }
         },
-        err(e) => {
+        none => {
             io.print("Noto Sans not found: the built-in font is used");
         },
     }

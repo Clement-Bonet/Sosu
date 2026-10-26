@@ -169,6 +169,8 @@ extern "C" {
     f32 SDL_GetWindowDisplayScale(Window* window) uses io;
     bool SDL_SetTextInputArea(Window* window, IntRect* rect, i32 cursor) uses io;
     ui8* SDL_GetClipboardText() uses io;  // to free with SDL_free; "" when empty
+    ui8* SDL_GetPrefPath(ui8* org, ui8* app) uses io;  // to free with SDL_free; NULL on failure
+    ui8* SDL_LoadFile(ui8* file, usize* size) uses io;  // to free with SDL_free; NULL if not found
     bool SDL_SetClipboardText(ui8* text) uses io;
     void SDL_free(ui8* memory) uses io;
     // SDL_HitTest: what is at a point of the window (an SDL_HitTestResult), asked by the system.
@@ -218,6 +220,40 @@ pub str clipboard_text(Arena* arena) uses io {
         str copy = copy_cstring(arena, text, 64 * KB);
         SDL_free(text);
         return copy;
+    }
+}
+
+// The folder where an application keeps its data, ending with a separator (spec §11.5).
+pub str pref_path(Arena* arena, str organization, str application) uses io {
+    ui8* org = organization.to_cstr(arena);
+    ui8* app = application.to_cstr(arena);
+    unsafe {
+        ui8* path = SDL_GetPrefPath(org, app);
+        if (path as ui64 == 0) {
+            return "";
+        }
+        str copy = copy_cstring(arena, path, 4 * KB);
+        SDL_free(path);
+        return copy;
+    }
+}
+
+// The bytes of the file `path`, copied into `arena`: in the APK on Android, in the bundle on iOS,
+// relative to the current folder elsewhere; none if it is not found (spec §11.5).
+pub ui8[]? load_file(Arena* arena, str path) uses io {
+    ui8* name = path.to_cstr(arena);
+    unsafe {
+        mut usize size = 0;
+        ui8* data = SDL_LoadFile(name, &size);
+        if (data as ui64 == 0) {
+            return none;
+        }
+        mut ui8[] bytes = arena.alloc_slice(ui8, size);
+        for (usize i in 0..size) {
+            bytes[i] = *(data + i);
+        }
+        SDL_free(data);
+        return some(bytes);
     }
 }
 

@@ -8,3 +8,9 @@ version = "0.1.0"
 platform = { path = "../../packages/platform" }
 render = { path = "../../packages/render" }
 ui = { path = "../../packages/ui" }
+
+# On a phone (spec §11.5): `sosuc package --target android examples/themes`, from the repository
+[app]
+id = "org.sosu.themes"
+name = "Sosu themes"
+assets = ["../../packages/render/fonts/NotoSans-Regular.ttf"]

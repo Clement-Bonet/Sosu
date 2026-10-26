@@ -1120,8 +1120,16 @@ static int command_package_android(const char *dir, const char *argv0, DiagForma
             char *assets = path_join(project, "app/assets");
             shell_make_dir(assets);
             for (size_t i = 0; built && i < app->assets.count; i++) {
+                /* stored under the path the program reads on the desktop: relative to the current folder */
                 char *from = package_path(root, app->assets.items[i]);
-                char *to = path_join(assets, app->assets.items[i]);
+                if (strncmp(from, "../", 3) == 0 || from[0] == '/' || (from[0] && from[1] == ':')) {
+                    fprintf(stderr, "sosuc: the asset `%s` is outside the current folder: run sosuc from a folder that "
+                                    "holds it, as the program does on the desktop\n", from);
+                    free(from);
+                    built = false;
+                    break;
+                }
+                char *to = path_join(assets, from);
                 char *parent = sosu_strdup(to);
                 char *slash = strrchr(parent, '/');
                 if (slash) *slash = '\0';
