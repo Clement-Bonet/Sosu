@@ -1788,21 +1788,21 @@ Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the librarie
 
 Version 1.0 is a promise of stability: the language, `core`, `std` and the commands of `sosuc` no longer break the code written for them (a change that would is a 2.0). It does not need the native backend nor self-hosting: the C backend stays the path of phones anyway (§11.2), and steps 12 to 14 come after 1.0.
 
-What 1.0 holds, in the proposed order (the estimates are in working days of the pace of steps 1 to 11):
+What 1.0 holds, in the proposed order. The estimates are measured on steps 1 to 11, written with Claude Code: they took 6 days (October 21 to 26, 2026), about 49,000 lines, 3.2 million output tokens and 1.6 billion tokens read from the cache. A week of the Pro plan's quota held about 2.2 million output tokens. The effort is relative to steps 1 to 11 (100); the days and tokens add a quarter, since a larger code base and specification make each call heavier:
 
-| # | Work | Content | Estimate |
-|---|---|---|---|
-| 1 | Language | Lambdas and closures (§5, announced for v1), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4); the open points of §14.2 that change the language | 8 to 12 |
-| 2 | Concurrency | Threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` | 5 to 10 |
-| 3 | C sources in a package | `[build] c = ["vendor/sqlite3.c"]` in `sosu.toml`: C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it | 2 to 3 |
-| 4 | Standard library | The modules of `std` of §8.2 marked 1.0 | 10 to 15 |
-| 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured | 8 to 10 |
-| 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished | 5 to 10 |
-| 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 | 5 to 10 |
-| 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) | 3 to 5 |
-| 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries | 3 to 5 |
+| # | Work | Content | Effort | Days | Output tokens | Weekly quota |
+|---|---|---|---|---|---|---|
+| 1 | Language | Lambdas and closures (§5, announced for v1), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4); the open points of §14.2 that change the language | 12 | 1 to 1.5 | 400 to 600 k | 18 to 27 % |
+| 2 | Concurrency | Threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
+| 3 | C sources in a package | `[build] c = ["vendor/sqlite3.c"]` in `sosu.toml`: C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it | 2 | 0.2 | 60 to 100 k | 3 to 4 % |
+| 4 | Standard library | The modules of `std` of §8.2 marked 1.0 | 25 | 1.5 to 2.5 | 0.8 to 1.2 M | 36 to 54 % |
+| 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured | 10 | 0.5 to 1 | 300 to 500 k | 13 to 22 % |
+| 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
+| 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 | 8 | 0.5 to 1 | 200 to 400 k | 9 to 18 % |
+| 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) | 5 | 0.5 | 150 to 250 k | 7 to 11 % |
+| 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries | 4 | 0.5 | 120 to 250 k | 5 to 11 % |
 
-In all, about 50 to 80 working days: 2 to 3.5 months. Then 0.x versions tried by others than their authors, for a few weeks, before 1.0 is called stable.
+In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output tokens: 1.1 to 1.8 weeks of the Pro quota, so 2 to 3 weeks of calendar, the quota and not the work setting the pace. The standard library is the least certain line: it depends on how many modules are written in Sosu. Most of the tokens are context read again at each call (about 490,000 per call on steps 1 to 11, whose sessions lasted up to 3 days): a new session for each work spends much less. Then 0.x versions tried by others than their authors, for a few weeks, before 1.0 is called stable.
 
 - iOS: supported in 1.0 once it has run on a device (it needs a Mac and an iPhone); until then, a preview, built by the CI for the simulator.
 - After 1.0 (2.x): the native backend (12), `comptime` and regions (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
