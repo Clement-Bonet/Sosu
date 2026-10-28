@@ -2589,7 +2589,7 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
     b.in_init = self_info && name_is(fn->name, "init");
     for (size_t i = 0; i < fn->param_count; i++) {
         Local param = { fn->params[i].name, typed ? type->as.fn.params[i] : s->types.error, fn->params[i].is_mut,
-                        false, 0, 0 };
+                        false, 0, 0, false };
         SOSU_VEC_PUSH(&b.locals, param); /* duplicates were reported with the declarations (E0319) */
     }
     for (size_t i = 0; i < fn->contract_count; i++) {

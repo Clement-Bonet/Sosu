@@ -2380,7 +2380,7 @@ int main(int argc, char **argv) {
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
-    BuildOptions options = { false, 0, &host_target, { true, true, true } };
+    BuildOptions options = { false, 0, &host_target, { true, true, true }, NULL };
     int checks = -1;    /* --checks: -1 when not given */
     int contracts = -1; /* --contracts */
     bool is_fmt = strcmp(command, "fmt") == 0;
