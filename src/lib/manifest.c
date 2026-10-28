@@ -324,11 +324,14 @@ static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
                      : key_is(t, key_start, key_length, "paths")        ? &section->paths
                      : key_is(t, key_start, key_length, "frameworks")   ? &section->frameworks
                      : key_is(t, key_start, key_length, "copy")         ? &section->copy
+                     : key_is(t, key_start, key_length, "c")            ? &section->c
+                     : key_is(t, key_start, key_length, "include")      ? &section->include
+                     : key_is(t, key_start, key_length, "defines")      ? &section->defines
                      : NULL;
     if (!list) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [%s]", (int)key_length,
                                  t->s + key_start, t->link == LINK_ALL ? "link" : "link.<target>");
-        diag_help(d, "a link section contains `libs`, `paths`, `frameworks`, `copy` and `subsystem`");
+        diag_help(d, "a link section contains `libs`, `paths`, `frameworks`, `copy`, `c`, `include`, `defines` and `subsystem`");
         return;
     }
     if (list->count > 0) {
@@ -482,8 +485,9 @@ void manifest_free(Manifest *manifest) {
     free(manifest->deps.items);
     for (int i = 0; i < LINK_SECTION_COUNT; i++) {
         StringList *lists[] = { &manifest->link[i].libs, &manifest->link[i].paths, &manifest->link[i].frameworks,
-                                &manifest->link[i].copy };
-        for (size_t j = 0; j < 4; j++) {
+                                &manifest->link[i].copy, &manifest->link[i].c, &manifest->link[i].include,
+                                &manifest->link[i].defines };
+        for (size_t j = 0; j < sizeof lists / sizeof *lists; j++) {
             for (size_t k = 0; k < lists[j]->count; k++) free(lists[j]->items[k]);
             free(lists[j]->items);
         }

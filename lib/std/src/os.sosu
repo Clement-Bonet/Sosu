@@ -1,0 +1,153 @@
+// std.os: the arguments of the program, its environment and its exit code, and the other
+// programs it runs (spec §8.2). With the effect `io`: they are the outside world. The runtime
+// gives them in UTF-8 on every system.
+
+import std.io;
+
+extern "C" {
+    usize sosu_os_arg_count() uses io;
+    i64 sosu_os_arg(usize index) uses io;
+    i64 sosu_os_env(ui8* name) uses io;
+    bool sosu_os_set_env(ui8* name, ui8* value) uses io;
+    i64 sosu_os_run(ui8** args, usize count, i32* code) uses io;
+    void sosu_os_take(ui8* out) uses io;
+    void sosu_os_exit(i32 code) uses io;
+}
+
+// A C string; an array of them is an array of `ui8*` in C.
+struct CText {
+    ui8* text;
+}
+
+// What a program run by `run` gave.
+pub struct Output {
+    pub i32 code;  // its exit code: 0 when it succeeded
+    pub ui8[] bytes;  // what it wrote to its output
+
+    // Its output as text; none if it is not UTF-8.
+    pub str? text() {
+        return match (str.from_bytes(bytes)) {
+            ok(t) => some(t),
+            err(e) => none,
+        };
+    }
+}
+
+// The arguments given to the program, without its own name: `prog a b` gives "a" and "b".
+pub str[] args(Arena* arena) uses io {
+    mut usize count = 0;
+    unsafe {
+        count = sosu_os_arg_count();
+    }
+    if (count <= 1) {
+        return arena.alloc_slice(str, 0);
+    }
+    mut str[] found = arena.alloc_slice(str, 0);
+    unsafe {
+        found = arena.alloc_slice(str, count - 1);  // each written before it is read
+    }
+    for (usize i in 1..count) {
+        mut i64 length = 0;
+        unsafe {
+            length = sosu_os_arg(i);
+        }
+        found[i - 1] = taken(arena, length);
+    }
+    return found;
+}
+
+// The path of the program as it was started (its first argument).
+pub str program(Arena* arena) uses io {
+    mut i64 length = 0;
+    unsafe {
+        length = sosu_os_arg(0);
+    }
+    if (length < 0) {
+        return "";
+    }
+    return taken(arena, length);
+}
+
+// The value of the variable `name` of the environment, or none if it is not set.
+pub str? env(Arena* arena, str name) uses io {
+    ui8* c_name = name.to_cstr(arena);
+    mut i64 length = 0;
+    unsafe {
+        length = sosu_os_env(c_name);
+    }
+    if (length < 0) {
+        return none;
+    }
+    return some(taken(arena, length));
+}
+
+// Sets the variable `name` of the environment, for this program and those it runs; false if
+// the system refused (an empty name, or one with `=`).
+pub bool set_env(Arena* arena, str name, str value) uses io {
+    ui8* c_name = name.to_cstr(arena);
+    ui8* c_value = value.to_cstr(arena);
+    mut bool done = false;
+    unsafe {
+        done = sosu_os_set_env(c_name, c_value);
+    }
+    return done;
+}
+
+// Removes the variable `name` of the environment.
+pub bool unset_env(Arena* arena, str name) uses io {
+    ui8* c_name = name.to_cstr(arena);
+    mut bool done = false;
+    unsafe {
+        done = sosu_os_set_env(c_name, 0 as ui8*);
+    }
+    return done;
+}
+
+// Ends the program now with `code`, after writing what it printed. The `defer`s that have not
+// run yet do not run: to end normally, return from `main`.
+pub void exit(i32 code) uses io {
+    unsafe {
+        sosu_os_exit(code);
+    }
+}
+
+// Runs the program `command[0]` (looked for in the folders of PATH) with the other elements as
+// its arguments, waits for its end, and gives its exit code and its output; its errors go to
+// those of this program. The arguments are given as they are, never read by a shell.
+// NotFound if there is no such program, Other if it could not start (on iOS, never).
+pub Output!io.IoError run(Arena* arena, str[] command) uses io
+    requires command.len > 0
+{
+    mut i32 code = 0;
+    mut i64 length = 0;
+    unsafe {
+        CText[] c_args = arena.alloc_slice(CText, command.len);  // each written before it is read
+        for (usize i in 0..command.len) {
+            c_args[i] = CText{ text: command[i].to_cstr(arena) };
+        }
+        length = sosu_os_run(&c_args[0] as ui8**, c_args.len, &code);
+    }
+    if (length == -1) {
+        return err(io.IoError.NotFound);
+    }
+    if (length < 0) {
+        return err(io.IoError.Other);
+    }
+    return ok(Output{ code: code, bytes: taken_bytes(arena, length) });
+}
+
+// The text that the runtime kept, of `length` bytes, copied into `arena`.
+str taken(Arena* arena, i64 length) uses io {
+    return match (str.from_bytes(taken_bytes(arena, length))) {
+        ok(t) => t,
+        err(e) => "",  // the runtime gives UTF-8
+    };
+}
+
+ui8[] taken_bytes(Arena* arena, i64 length) uses io {
+    ui8[] bytes = arena.alloc_slice(ui8, length as usize + 1);
+    unsafe {
+        sosu_os_take(&bytes[0]);
+    }
+    return bytes[0..length as usize];
+}

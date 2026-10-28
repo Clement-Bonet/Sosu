@@ -1,0 +1,265 @@
+// std.sort: sorting views in place, and binary search in sorted ones (spec §8.2).
+// `sort` and `sort_by` are an introsort: a quicksort, insertion sort for short runs, and a
+// heapsort when the quicksort goes too deep, so they take O(n log n) at worst and no memory;
+// they are not stable. `stable_sort_by` keeps the order of equal elements, with a merge sort
+// that takes `n` elements of room in an arena.
+// The order is given by `less(a, b)`: true when `a` goes before `b`. It must be a strict order
+// (`less(a, a)` false), else the result is in some order but not sorted.
+
+// Runs this short are sorted by insertion.
+usize SHORT = 16;
+
+// Sorts `items` from the smallest to the largest.
+pub void sort<T: Ordered>(T[] items) {
+    sort_by(items, (T a, T b) => a < b);
+}
+
+// Sorts `items` from the largest to the smallest.
+pub void sort_descending<T: Ordered>(T[] items) {
+    sort_by(items, (T a, T b) => a > b);
+}
+
+// Sorts `items` in the order of `less`.
+pub void sort_by<T, uses E>(T[] items, fn(T, T) -> bool uses E less) uses E {
+    mut usize depth = 2;  // 2 log2(n): beyond it, the pivots were bad
+    mut usize n = items.len;
+    while (n > 1) {
+        depth += 2;
+        n /= 2;
+    }
+    quicksort(items, less, depth);
+}
+
+// Sorts `items` by the key that `key` gives to each one (computed at each comparison).
+pub void sort_by_key<T, K: Ordered, uses E>(T[] items, fn(T) -> K uses E key) uses E {
+    sort_by(items, (T a, T b) => key(a) < key(b));
+}
+
+// The same, keeping the order of the elements whose keys are equal.
+pub void stable_sort_by_key<T, K: Ordered, uses E>(Arena* arena, T[] items, fn(T) -> K uses E key) uses E {
+    stable_sort_by(arena, items, (T a, T b) => key(a) < key(b));
+}
+
+// Sorts `items` in the order of `less`, keeping the order of the elements that are equal
+// (neither goes before the other). Takes `items.len` elements of room in `arena`.
+pub void stable_sort_by<T, uses E>(Arena* arena, T[] items, fn(T, T) -> bool uses E less) uses E {
+    if (items.len <= 1) {
+        return;
+    }
+    mut T[] room = items;
+    unsafe {
+        room = arena.alloc_slice(T, items.len);  // written before it is read
+    }
+    // Runs of SHORT by insertion, then merged by twice as long each time, from `items` to
+    // `room` and back.
+    mut usize start = 0;
+    while (start < items.len) {
+        insertion(items[start..min(start + SHORT, items.len)], less);
+        start += SHORT;
+    }
+    mut T[] from = items;
+    mut T[] to = room;
+    mut usize width = SHORT;
+    while (width < items.len) {
+        mut usize left = 0;
+        while (left < items.len) {
+            usize middle = min(left + width, items.len);
+            usize right = min(left + 2 * width, items.len);
+            merge(from, to, left, middle, right, less);
+            left += 2 * width;
+        }
+        T[] swapped = from;
+        from = to;
+        to = swapped;
+        width *= 2;
+    }
+    if (from.len != 0 && &from[0] != &items[0]) {  // the last pass wrote into `room`
+        for (usize i in 0..items.len) {
+            items[i] = from[i];
+        }
+    }
+}
+
+// Sorts `items` from the smallest to the largest, keeping the order of equal elements.
+pub void stable_sort<T: Ordered>(Arena* arena, T[] items) {
+    stable_sort_by(arena, items, (T a, T b) => a < b);
+}
+
+// Whether `items` is in the order of `less` (each element not before the previous one).
+pub bool is_sorted_by<T, uses E>(T[] items, fn(T, T) -> bool uses E less) uses E {
+    for (usize i in 1..max(items.len, 1)) {
+        if (less(items[i], items[i - 1])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub bool is_sorted<T: Ordered>(T[] items) {
+    return is_sorted_by(items, (T a, T b) => a < b);
+}
+
+// Binary search in `items`, sorted from the smallest: the place of an element equal to
+// `value`, or none. With several equal elements, any of them.
+pub usize? search<T: Ordered>(T[] items, T value) {
+    usize place = lower_bound(items, value);
+    if (place < items.len && items[place] == value) {
+        return some(place);
+    }
+    return none;
+}
+
+// The first place whose element is not smaller than `value` (`items.len` if all are): where
+// `value` would be inserted to keep `items` sorted, before its equals.
+pub usize lower_bound<T: Ordered>(T[] items, T value) {
+    mut usize low = 0;
+    mut usize high = items.len;
+    while (low < high) {
+        usize middle = low + (high - low) / 2;
+        if (items[middle] < value) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+// The first place whose element is larger than `value`: after its equals.
+pub usize upper_bound<T: Ordered>(T[] items, T value) {
+    mut usize low = 0;
+    mut usize high = items.len;
+    while (low < high) {
+        usize middle = low + (high - low) / 2;
+        if (value < items[middle]) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    return low;
+}
+
+// Puts the elements of `items` in the reverse order.
+pub void reverse<T>(T[] items) {
+    if (items.len < 2) {
+        return;
+    }
+    mut usize i = 0;
+    mut usize j = items.len - 1;
+    while (i < j) {
+        swap(items, i, j);
+        i += 1;
+        j -= 1;
+    }
+}
+
+void swap<T>(T[] items, usize i, usize j) {
+    T kept = items[i];
+    items[i] = items[j];
+    items[j] = kept;
+}
+
+void quicksort<T, uses E>(T[] whole, fn(T, T) -> bool uses E less, usize depth) uses E {
+    mut T[] items = whole;
+    mut usize left_depth = depth;
+    while (items.len > SHORT) {
+        if (left_depth == 0) {
+            heapsort(items, less);
+            return;
+        }
+        left_depth -= 1;
+        usize p = partition(items, less);
+        // The shorter side by recursion, the longer by the loop: a depth of log2(n) at most.
+        if (p < items.len - p) {
+            quicksort(items[0..p], less, left_depth);
+            items = items[p + 1..items.len];
+        } else {
+            quicksort(items[p + 1..items.len], less, left_depth);
+            items = items[0..p];
+        }
+    }
+    insertion(items, less);
+}
+
+// Puts a pivot (the median of the first, middle and last elements) at its place, the smaller
+// elements before it and the others after it, and gives its place.
+usize partition<T, uses E>(T[] items, fn(T, T) -> bool uses E less) uses E {
+    usize last = items.len - 1;
+    usize middle = last / 2;
+    if (less(items[middle], items[0])) {
+        swap(items, middle, 0);
+    }
+    if (less(items[last], items[0])) {
+        swap(items, last, 0);
+    }
+    if (less(items[last], items[middle])) {
+        swap(items, last, middle);
+    }
+    swap(items, middle, last);  // the median, kept at the end
+    T pivot = items[last];
+    mut usize store = 0;
+    for (usize i in 0..last) {
+        if (less(items[i], pivot)) {
+            swap(items, i, store);
+            store += 1;
+        }
+    }
+    swap(items, store, last);
+    return store;
+}
+
+void insertion<T, uses E>(T[] items, fn(T, T) -> bool uses E less) uses E {
+    for (usize i in 1..max(items.len, 1)) {
+        T value = items[i];
+        mut usize j = i;
+        while (j > 0 && less(value, items[j - 1])) {
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = value;
+    }
+}
+
+void heapsort<T, uses E>(T[] items, fn(T, T) -> bool uses E less) uses E {
+    usize n = items.len;
+    for (mut usize start = n / 2; start > 0; start -= 1) {
+        sift_down(items, start - 1, n, less);
+    }
+    for (mut usize end = n; end > 1; end -= 1) {
+        swap(items, 0, end - 1);
+        sift_down(items, 0, end - 1, less);
+    }
+}
+
+// Moves the element `root` down the heap of the first `end` elements, the largest on top.
+void sift_down<T, uses E>(T[] items, usize root, usize end, fn(T, T) -> bool uses E less) uses E {
+    mut usize parent = root;
+    while (2 * parent + 1 < end) {
+        mut usize child = 2 * parent + 1;
+        if (child + 1 < end && less(items[child], items[child + 1])) {
+            child += 1;
+        }
+        if (!less(items[parent], items[child])) {
+            return;
+        }
+        swap(items, parent, child);
+        parent = child;
+    }
+}
+
+// Merges the sorted runs `from[left..middle]` and `from[middle..right]` into `to[left..right]`;
+// on equal elements, the left one first.
+void merge<T, uses E>(T[] from, T[] to, usize left, usize middle, usize right, fn(T, T) -> bool uses E less) uses E {
+    mut usize i = left;
+    mut usize j = middle;
+    for (usize k in left..right) {
+        if (i < middle && (j >= right || !less(from[j], from[i]))) {
+            to[k] = from[i];
+            i += 1;
+        } else {
+            to[k] = from[j];
+            j += 1;
+        }
+    }
+}

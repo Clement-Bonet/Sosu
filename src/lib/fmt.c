@@ -180,6 +180,17 @@ static void fmt_type_params(Fmt *f, TypeParams params) {
     put(f, ">");
 }
 
+/* The type under a suffix: a function type in parentheses, `(fn(i32) -> i32)[2]`. */
+static void fmt_inner_type(Fmt *f, const TypeExpr *type) {
+    if (type->kind != TYPE_FN) {
+        fmt_type(f, type);
+        return;
+    }
+    put(f, "(");
+    fmt_type(f, type);
+    put(f, ")");
+}
+
 static void fmt_type(Fmt *f, const TypeExpr *type) {
     char size[32];
     switch (type->kind) {
@@ -187,11 +198,11 @@ static void fmt_type(Fmt *f, const TypeExpr *type) {
         fmt_path(f, type->as.name);
         fmt_type_args(f, type->args, type->arg_count);
         break;
-    case TYPE_POINTER: fmt_type(f, type->as.inner); put(f, "*"); break;
-    case TYPE_OPTION: fmt_type(f, type->as.inner); put(f, "?"); break;
-    case TYPE_SLICE: fmt_type(f, type->as.inner); put(f, "[]"); break;
+    case TYPE_POINTER: fmt_inner_type(f, type->as.inner); put(f, "*"); break;
+    case TYPE_OPTION: fmt_inner_type(f, type->as.inner); put(f, "?"); break;
+    case TYPE_SLICE: fmt_inner_type(f, type->as.inner); put(f, "[]"); break;
     case TYPE_ARRAY:
-        fmt_type(f, type->as.array.element);
+        fmt_inner_type(f, type->as.array.element);
         if (type->as.array.size_name.count) {
             put(f, "[");
             fmt_path(f, type->as.array.size_name);
@@ -202,7 +213,7 @@ static void fmt_type(Fmt *f, const TypeExpr *type) {
         }
         break;
     case TYPE_RESULT:
-        fmt_type(f, type->as.result.value);
+        fmt_inner_type(f, type->as.result.value);
         put(f, "!");
         fmt_type(f, type->as.result.error);
         break;
@@ -260,6 +271,7 @@ static int binary_precedence(TokenKind op) {
 
 static int precedence(const Expr *e) {
     switch (e->kind) {
+    case EXPR_LAMBDA: return 0; /* below everything: `((x) => x)(3)` */
     case EXPR_TERNARY: return P_TERNARY;
     case EXPR_RANGE: return P_RANGE;
     case EXPR_BINARY: return binary_precedence(e->as.binary.op);
@@ -456,6 +468,21 @@ static void fmt_expr(Fmt *f, const Expr *e) {
             fmt_args(f, e->as.array.items, e->as.array.count);
         }
         put(f, "]");
+        break;
+    case EXPR_LAMBDA:
+        put(f, "(");
+        for (size_t i = 0; i < e->as.lambda.param_count; i++) {
+            const Param *param = &e->as.lambda.params[i];
+            if (i) put(f, ", ");
+            if (param->type) {
+                fmt_type(f, param->type);
+                put(f, " ");
+            }
+            put_name(f, param->name);
+        }
+        put(f, ") => ");
+        if (e->as.lambda.block) fmt_block(f, e->as.lambda.block);
+        else fmt_expr(f, e->as.lambda.body);
         break;
     }
 }
@@ -782,6 +809,7 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
         for (size_t i = 0; i < decl->as.type.base_count; i++) {
             put(f, i ? ", " : " : ");
             fmt_path(f, decl->as.type.bases[i]);
+            if (decl->as.type.base_args) fmt_type_args(f, decl->as.type.base_args[i], decl->as.type.base_arg_counts[i]);
         }
         fmt_members(f, decl);
         break;

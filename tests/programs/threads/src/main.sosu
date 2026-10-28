@@ -1,0 +1,71 @@
+// Threads and channels (spec §5.6): work given to threads, values copied through a channel.
+import std.io;
+import std.thread;
+import std.channel;
+
+struct Job {
+    i64 from;
+    i64 to;
+    channel.Channel<i64> results;
+}
+
+// The sum of the squares of a range, in a thread of its own.
+i64 squares(Arena* arena, Job job) uses threads {
+    mut i64 total = 0;
+    for (i64 i in job.from..job.to) {
+        total += i * i;
+    }
+    bool sent = job.results.send(total);
+    return sent ? total : -1;
+}
+
+// Receives numbers until the channel is closed, and counts them.
+i32 count(Arena* arena, channel.Channel<i64> numbers) uses threads {
+    mut i32 seen = 0;
+    mut bool open = true;
+    while (open) {
+        match (numbers.receive()) {
+            some(n) => {
+                seen += 1;
+            },
+            none => {
+                open = false;
+            },
+        }
+    }
+    return seen;
+}
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    channel.Channel<i64> results = channel.new<i64>(4);
+    auto a = thread.spawn(&arena, squares, Job{ from: 0, to: 1000, results: results });
+    auto b = thread.spawn(&arena, squares, Job{ from: 1000, to: 2000, results: results });
+    i64 first = a.join();
+    i64 second = b.join();
+    mut i64 received = 0;
+    for (i32 i in 0..2) {
+        match (results.receive()) {
+            some(n) => {
+                received += n;
+            },
+            none => { },
+        }
+    }
+    io.print("joined: {}, received: {}", first + second, received);
+    results.free();
+
+    // a consumer and a producer, with a lambda without captures
+    channel.Channel<i64> numbers = channel.new<i64>(2);
+    auto consumer = thread.spawn(&arena, count, numbers);
+    for (i64 n in 0..100) {
+        bool ok = numbers.send(n);
+    }
+    numbers.close();
+    io.print("counted: {}", consumer.join());
+    numbers.free();
+    auto doubled = thread.spawn(&arena, (Arena* own, i32 x) => x * 2, 21);
+    io.print("lambda: {}", doubled.join());
+    return 0;
+}

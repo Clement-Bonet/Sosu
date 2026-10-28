@@ -1,0 +1,8 @@
+[package]
+name = "csources"
+version = "0.1.0"
+
+[link]
+c = ["vendor/mathx.c"]
+include = ["vendor/include"]
+defines = ["MATHX_OFFSET=1"]

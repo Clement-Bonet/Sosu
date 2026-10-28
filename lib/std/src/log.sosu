@@ -1,0 +1,151 @@
+// std.log: messages with a level, to the error output or to a file (spec §8.2). On Android,
+// the error output is the log of the system (`adb logcat -s sosu`, spec §11.5). A line is
+// "2026-10-28T07:43:05Z WARN message", the time in UTC; without timestamps, "WARN message".
+// Writing a message allocates nothing.
+
+import std.io;
+import std.time;
+
+extern "C" {
+    void sosu_write_stderr(ui8* bytes, usize length) uses io;
+}
+
+pub enum Level {
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Off,  // nothing is written
+}
+
+// Where messages go, and from which level.
+pub struct Logger {
+    Level level;
+    bool timestamps;
+    io.File? file;  // none: the error output
+
+    pub void debug(str message) uses io, time {
+        write(Debug, message);
+    }
+
+    pub void info(str message) uses io, time {
+        write(Info, message);
+    }
+
+    pub void warn(str message) uses io, time {
+        write(Warn, message);
+    }
+
+    pub void error(str message) uses io, time {
+        write(Error, message);
+    }
+
+    // Whether a message of `at` would be written: to skip building one that would not.
+    pub bool enabled(Level at) {
+        return at != Off && rank(at) >= rank(level);
+    }
+
+    // Writes `message` at the level `at`, if it is enabled.
+    pub void write(Level at, str message) uses io, time {
+        if (!enabled(at)) {
+            return;
+        }
+        mut ui8[21] stamp = [32; 21];  // "2026-10-28T07:43:05Z "
+        if (timestamps) {
+            time.DateTime now = time.now();
+            put(stamp[0..4], now.year);
+            stamp[4] = 45;
+            put(stamp[5..7], now.month as i64);
+            stamp[7] = 45;
+            put(stamp[8..10], now.day as i64);
+            stamp[10] = 84;
+            put(stamp[11..13], now.hour as i64);
+            stamp[13] = 58;
+            put(stamp[14..16], now.minute as i64);
+            stamp[16] = 58;
+            put(stamp[17..19], now.second as i64);
+            stamp[19] = 90;
+            out(stamp[0..21]);
+        }
+        out(name(at).bytes);
+        out(" ".bytes);
+        out(message.bytes);
+        out("\n".bytes);
+        match (file) {
+            some(f) => f.flush(),
+            none => { },
+        }
+    }
+
+    // Closes the file of a logger made by `to_file`.
+    pub void close() uses io {
+        match (file) {
+            some(f) => f.close(),
+            none => { },
+        }
+    }
+
+    void out(ui8[] bytes) uses io {
+        if (bytes.len == 0) {
+            return;
+        }
+        match (file) {
+            some(f) => {
+                match (f.write(bytes)) {
+                    ok => { },
+                    err(e) => { },  // a log that cannot be written is not reported
+                }
+            },
+            none => {
+                unsafe {
+                    sosu_write_stderr(&bytes[0], bytes.len);
+                }
+            },
+        }
+    }
+}
+
+// A logger to the error output, writing the messages of `level` and above.
+pub Logger console(Level level) {
+    return Logger{ level: level, timestamps: true, file: none };
+}
+
+// The same, without the time at the start of each line (for tests, or a system that adds it).
+pub Logger console_plain(Level level) {
+    return Logger{ level: level, timestamps: false, file: none };
+}
+
+// A logger that appends to the file at `path` (created if needed). Close it when done.
+pub Logger!io.IoError to_file(Arena* arena, str path, Level level) uses io {
+    io.File f = try io.open(arena, path, io.Mode.Append);
+    return ok(Logger{ level: level, timestamps: true, file: some(f) });
+}
+
+pub str name(Level level) {
+    return match (level) {
+        Debug => "DEBUG",
+        Info => "INFO",
+        Warn => "WARN",
+        Error => "ERROR",
+        Off => "OFF",
+    };
+}
+
+i32 rank(Level level) {
+    return match (level) {
+        Debug => 0,
+        Info => 1,
+        Warn => 2,
+        Error => 3,
+        Off => 4,
+    };
+}
+
+// `value` in decimal, with zeros before it, in all of `digits` (its last digits if too long).
+void put(ui8[] digits, i64 value) {
+    mut i64 rest = abs(value);
+    for (mut usize i = digits.len; i > 0; i -= 1) {
+        digits[i - 1] = (48 + rest % 10) as ui8;
+        rest /= 10;
+    }
+}

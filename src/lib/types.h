@@ -50,6 +50,7 @@ enum {
     CONSTRAINT_NUMBER = 4,
     CONSTRAINT_INTEGER = 8,
     CONSTRAINT_HASH = 16,
+    CONSTRAINT_SEND = 32, /* no pointer: crosses to another thread (spec §5.6) */
 };
 
 typedef struct TypeInfo TypeInfo;

@@ -1,0 +1,35 @@
+1970-01-01T00:00:00Z Thursday
+2001-09-09T01:46:40Z Sunday
+1969-12-31T23:59:59Z Wednesday
+2000-03-01T00:00:00Z Wednesday
+1000000000 -86400
+2024-02-29T00:00:00Z Thursday
+none
+2026-10-28T07:43:05Z Wednesday
+none
+301
+366 365
+2024-02-29T00:00:00Z Thursday
+2022-12-31T00:00:00Z Saturday
+2027-02-05T00:00:00Z Friday
+2026-10-27T23:59:59Z Tuesday
+0000-02-29
+0000-01-01
+-0044-03-15
+31536000 -31536000
+true false
+false true true 28
+2026-10-28T00:00:00Z Wednesday
+2026-10-28T07:43:05.250Z Wednesday
+2026-10-29T01:00:00Z Thursday
+2026-10-28T10:00:00.123456789Z Wednesday
+2026-10-28T10:00:00.000001Z Wednesday
+-0044-03-15T12:00:00Z Thursday
+none
+none
+none
+none
+none
+none
+round trip: true
+now is after 2026: true

@@ -62,6 +62,14 @@ static void print_type_params(Printer *pr, TypeParams params) {
     fputc('>', pr->out);
 }
 
+/* The type under a suffix: a function type in parentheses, `(fn(i32) -> i32)[2]`. */
+static void print_inner(Printer *pr, const TypeExpr *type) {
+    bool fn = type && type->kind == TYPE_FN;
+    if (fn) fputc('(', pr->out);
+    print_type(pr, type);
+    if (fn) fputc(')', pr->out);
+}
+
 static void print_type(Printer *pr, const TypeExpr *type) {
     if (!type) {
         fputs("auto", pr->out);
@@ -73,15 +81,15 @@ static void print_type(Printer *pr, const TypeExpr *type) {
         print_type_args(pr, type->args, type->arg_count);
         break;
     case TYPE_POINTER:
-        print_type(pr, type->as.inner);
+        print_inner(pr, type->as.inner);
         fputc('*', pr->out);
         break;
     case TYPE_OPTION:
-        print_type(pr, type->as.inner);
+        print_inner(pr, type->as.inner);
         fputc('?', pr->out);
         break;
     case TYPE_ARRAY:
-        print_type(pr, type->as.array.element);
+        print_inner(pr, type->as.array.element);
         if (type->as.array.size_name.count) {
             fputc('[', pr->out);
             print_path(pr, type->as.array.size_name);
@@ -91,11 +99,11 @@ static void print_type(Printer *pr, const TypeExpr *type) {
         }
         break;
     case TYPE_SLICE:
-        print_type(pr, type->as.inner);
+        print_inner(pr, type->as.inner);
         fputs("[]", pr->out);
         break;
     case TYPE_RESULT:
-        print_type(pr, type->as.result.value);
+        print_inner(pr, type->as.result.value);
         fputc('!', pr->out);
         print_type(pr, type->as.result.error);
         break;
@@ -269,6 +277,30 @@ static void print_expr(Printer *pr, const Expr *expr, int indent) {
         }
         fputc(')', out);
         break;
+    case EXPR_LAMBDA:
+        fputs("(lambda (", out);
+        for (size_t i = 0; i < expr->as.lambda.param_count; i++) {
+            const Param *param = &expr->as.lambda.params[i];
+            if (i) fputc(' ', out);
+            if (param->type) {
+                fputc('(', out);
+                print_type(pr, param->type);
+                fputc(' ', out);
+                print_name(pr, param->name);
+                fputc(')', out);
+            } else {
+                print_name(pr, param->name);
+            }
+        }
+        fputs(") ", out);
+        if (expr->as.lambda.block) {
+            newline(pr, indent + 1);
+            print_stmt(pr, expr->as.lambda.block, indent + 1);
+        } else {
+            print_expr(pr, expr->as.lambda.body, indent);
+        }
+        fputc(')', out);
+        break;
     }
 }
 
@@ -431,6 +463,7 @@ static void print_decl(Printer *pr, const Decl *decl) {
             for (size_t i = 0; i < decl->as.type.base_count; i++) {
                 fputc(' ', out);
                 print_path(pr, decl->as.type.bases[i]);
+                if (decl->as.type.base_args) print_type_args(pr, decl->as.type.base_args[i], decl->as.type.base_arg_counts[i]);
             }
             fputc(')', out);
         }

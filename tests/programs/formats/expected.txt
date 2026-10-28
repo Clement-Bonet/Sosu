@@ -1,0 +1,68 @@
+[a.txt] verbose false quiet false min 1 file a.txt rest  include 
+[-v a.txt b.txt c.txt] verbose true quiet false min 1 file a.txt rest b.txt+c.txt include 
+[-vq --min 3 a.txt] verbose true quiet true min 3 file a.txt rest  include 
+[--min=4 -m5 a.txt --include x --include=y] verbose false quiet false min 5 file a.txt rest  include x+y
+[a.txt -- -v --min] verbose false quiet false min 1 file a.txt rest -v+--min include 
+[-qv -m 2 a.txt] verbose true quiet true min 2 file a.txt rest  include 
+[] missing <file>
+try `count --help`
+[--colour a.txt] unknown option `--colour`
+try `count --help`
+[-x a.txt] unknown option `-x`
+try `count --help`
+[a.txt --min] the option `--min` needs a value
+try `count --help`
+[--verbose=yes a.txt] the option `--verbose` takes no value
+try `count --help`
+[a.txt -h] help
+unexpected argument `b`
+try `plain --help`
+usage: count [options] <file> [files...]
+
+Counts the words of files.
+
+arguments:
+  file               the first file to read
+  files              the other files
+
+options:
+  -v, --verbose      print each file
+  -q, --quiet        print nothing but the total
+  -m, --min N        only the words of N letters or more (default: 1)
+      --include DIR  also read DIR
+  -h, --help         show this help
+
+debug false error true
+true INFO started
+true WARN a warning
+true ERROR an error
+off: false
+  {"name": "Ada", "age": 36, "langs": ["en", "fr"], "x": null, "ok": true}   -> {"name":"Ada","age":36,"langs":["en","fr"],"x":null,"ok":true}
+[1, -0.5, 2.5e3, 1e21, 0.1, 123456789012, -0] -> [1,-0.5,2500,1e+21,0.1,123456789012,0]
+"\u00e9t\u00e9 \ud83d\ude00 \"q\" \\ \/ \n\t\b" -> "été 😀 \"q\" \\ / \n\t\u0008"
+[] -> []
+{} -> {}
+[1, 2,] -> invalid JSON at byte 6
+{"a" 1} -> invalid JSON at byte 5
+01 -> invalid JSON at byte 1
+1. -> invalid JSON at byte 2
+"\ud800" -> invalid JSON at byte 7
+"tab	here" -> invalid JSON at byte 4
+tru -> invalid JSON at byte 0
+[1] 2 -> invalid JSON at byte 4
+1e999 -> invalid JSON at byte 0
+ -> invalid JSON at byte 0
+[[[[[ -> invalid JSON at byte 5
+600 deep: JSON nested too deep at byte 512
+Ada 36 false 5 2 fr true true
+{
+  "name": "Ada",
+  "age": 36,
+  "size": 1.75,
+  "langs": [
+    "en",
+    "fr"
+  ],
+  "x": null
+}
+{"title":"line\nbreak","values":[]}

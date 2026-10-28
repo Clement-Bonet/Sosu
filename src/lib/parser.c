@@ -337,9 +337,13 @@ static size_t skip_type_params(const Parser *p, size_t index) {
    Returns the index just after the type, or 0 if there is no type there. */
 static size_t skip_type(const Parser *p, size_t index) {
     const Token *token = token_at(p, index);
-    if (token->kind != TOK_IDENT) return 0;
-
-    if (token_is(p, token, "fn") && token_at(p, index + 1)->kind == TOK_LPAREN) {
+    if (token->kind == TOK_LPAREN) { /* `(fn(i32) -> i32)[2]` */
+        size_t inner = skip_type(p, index + 1);
+        if (inner == 0 || token_at(p, inner)->kind != TOK_RPAREN) return 0;
+        index = inner + 1;
+    } else if (token->kind != TOK_IDENT) {
+        return 0;
+    } else if (token_is(p, token, "fn") && token_at(p, index + 1)->kind == TOK_LPAREN) {
         size_t depth = 0;
         index++;
         do {
@@ -500,6 +504,12 @@ static void parse_type_params(Parser *p, TypeParams *out) {
 static TypeExpr *parse_base_type(Parser *p) {
     skip_error_tokens(p);
     size_t start = cur(p)->offset;
+    if (check(p, TOK_LPAREN)) { /* `(fn(i32) -> i32)[2]`: an array of functions (spec §5.5) */
+        advance(p);
+        TypeExpr *inner = parse_type(p, false);
+        expect_closing(p, TOK_RPAREN);
+        return inner;
+    }
     if (token_is(p, cur(p), "fn") && kind_at(p, 1) == TOK_LPAREN) {
         TypeExpr *type = new_type(p, TYPE_FN, start);
         advance(p);
@@ -760,7 +770,7 @@ static Expr *parse_array(Parser *p) {
     return close_expr(p, expr);
 }
 
-/* `(...) =>` starts a lambda, planned for v1. */
+/* `(...) =>` starts a lambda (spec §5.5). */
 static bool at_lambda(const Parser *p) {
     size_t depth = 0;
     size_t index = p->pos;
@@ -774,20 +784,34 @@ static bool at_lambda(const Parser *p) {
     return token_at(p, index + 1)->kind == TOK_FAT_ARROW;
 }
 
+/* `(i32 a, b) => expr` or `(...) => { ... }`: a parameter is a type and a name, or a name
+   alone, whose type is the one expected. */
 static Expr *parse_lambda(Parser *p) {
-    size_t start = cur(p)->offset;
-    Diagnostic *d = error_at(p, "E0208", start, 1, "lambdas are not available in v0");
-    diag_help(d, "lambdas are planned for v1; declare a named function instead");
-    size_t depth = 0;
-    do {
-        TokenKind kind = advance(p)->kind;
-        if (kind == TOK_LPAREN) depth++;
-        else if (kind == TOK_RPAREN) depth--;
-    } while (depth > 0);
-    advance(p); /* => */
-    if (check(p, TOK_LBRACE)) skip_balanced_braces(p);
-    else parse_expr(p);
-    return close_expr(p, new_expr(p, EXPR_ERROR, start));
+    Expr *expr = new_expr(p, EXPR_LAMBDA, cur(p)->offset);
+    advance(p);
+    VEC(Param) params = {0};
+    if (!check(p, TOK_RPAREN)) {
+        do {
+            Param param = {0};
+            const Token *mut = cur(p);
+            if (accept(p, TOK_KW_MUT)) error_at(p, "E0212", mut->offset, mut->length, "`mut` is not allowed here");
+            if (!(check(p, TOK_IDENT) && (kind_at(p, 1) == TOK_COMMA || kind_at(p, 1) == TOK_RPAREN))) {
+                param.type = parse_type(p, false);
+            }
+            expect_name(p, &param.name, "a parameter name");
+            SOSU_VEC_PUSH(&params, param);
+        } while (accept(p, TOK_COMMA));
+    }
+    expect_closing(p, TOK_RPAREN);
+    expr->as.lambda.param_count = params.count;
+    expr->as.lambda.params = FINISH(p, params);
+    expect(p, TOK_FAT_ARROW);
+    bool saved = p->no_struct_literal;
+    p->no_struct_literal = false;
+    if (check(p, TOK_LBRACE)) expr->as.lambda.block = parse_block(p);
+    else expr->as.lambda.body = parse_expr(p);
+    p->no_struct_literal = saved;
+    return close_expr(p, expr);
 }
 
 static Expr *parse_primary(Parser *p) {
@@ -1282,13 +1306,23 @@ static void parse_function(Parser *p, FnDecl *fn, bool signature) {
     fn->length = span_from(p, fn->offset);
 }
 
-static Path *parse_bases(Parser *p, size_t *count) {
+/* `: Parent, Iterator<i32>`: each base with its type arguments, if it has some. */
+static Path *parse_bases(Parser *p, size_t *count, TypeExpr ****args, size_t **arg_counts) {
     VEC(Path) bases = {0};
+    VEC(TypeExpr **) all_args = {0};
+    VEC(size_t) counts = {0};
     do {
         Path base = parse_path(p);
+        TypeExpr **base_args = NULL;
+        size_t base_count = 0;
+        if (check(p, TOK_LT)) base_args = parse_type_args(p, &base_count);
         SOSU_VEC_PUSH(&bases, base);
+        SOSU_VEC_PUSH(&all_args, base_args);
+        SOSU_VEC_PUSH(&counts, base_count);
     } while (accept(p, TOK_COMMA));
     *count = bases.count;
+    *args = FINISH(p, all_args);
+    *arg_counts = FINISH(p, counts);
     return FINISH(p, bases);
 }
 
@@ -1409,7 +1443,8 @@ static Decl *parse_declaration(Parser *p) {
                 diag_help(d, decl->kind == DECL_STRUCT ? "use a class to inherit or implement an interface"
                                                        : "interfaces cannot extend other interfaces in v0");
             }
-            decl->as.type.bases = parse_bases(p, &decl->as.type.base_count);
+            decl->as.type.bases = parse_bases(p, &decl->as.type.base_count, &decl->as.type.base_args,
+                                              &decl->as.type.base_arg_counts);
         }
         if (decl->kind == DECL_INTERFACE) {
             decl->as.type.methods = parse_signatures(p, &decl->as.type.method_count);

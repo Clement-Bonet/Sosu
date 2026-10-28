@@ -37,9 +37,13 @@ void *sosu_arena_alloc_array(sosu_arena *arena, size_t size, uint64_t count, con
 uint8_t *sosu_str_to_cstr(sosu_arena *arena, sosu_str text, const char *loc); /* s.to_cstr(arena) */
 bool sosu_utf8_valid(const uint8_t *bytes, size_t length);                   /* str.from_bytes */
 
-/* sosu_rt.c also defines `sosu_errno` and `sosu_file_size` for std.io, which declares them
-   itself with `extern "C"` (with its own types): they are not declared here, so that the
-   two declarations cannot conflict. */
+/* The arguments of the program, kept by `main` for std.os (on Windows, the command line is read
+   again in UTF-16 instead). */
+void sosu_set_args(int argc, char **argv);
+
+/* sosu_rt.c also defines `sosu_errno` and `sosu_file_size` for std.io, and the `sosu_math_*`
+   functions for std.math, which declare them themselves with `extern "C"` (with their own
+   types): they are not declared here, so that the two declarations cannot conflict. */
 
 /* Classes (spec §5.2). Every object starts with a pointer to its class's table of virtual
    methods, which itself starts with this description of the class. */
@@ -99,6 +103,30 @@ int sosu_test_summary(int total, int failed);
 
 static inline void sosu_check(bool condition, const char *loc, const char *message) {
     if (!condition) sosu_fail(loc, message);
+}
+
+/* Values of function type (spec §5.5): the code, and the variables a lambda captured (NULL
+   for a function, or a lambda that captures nothing, whose code is then a plain C function).
+   A field and a C function hold the code alone, a C function pointer. */
+typedef void (*sosu_code)(void);
+typedef struct {
+    sosu_code code;
+    void *env;
+} sosu_fn;
+
+static inline sosu_fn sosu_fn_of(sosu_code code) {
+    sosu_fn f = { code, NULL };
+    return f;
+}
+
+/* A value that leaves its function (returned, stored...) must not have captured variables. */
+static inline sosu_fn sosu_fn_check(sosu_fn f, const char *loc) {
+    if (f.env) sosu_fail(loc, "a lambda that captures variables cannot leave the function that creates it");
+    return f;
+}
+
+static inline sosu_code sosu_fn_code(sosu_fn f, const char *loc) {
+    return sosu_fn_check(f, loc).code;
 }
 
 static inline size_t sosu_index(int64_t index, size_t length, const char *loc) {

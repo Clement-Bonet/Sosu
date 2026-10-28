@@ -1,0 +1,65 @@
+// std.channel: channels between threads (spec §5.6), with the effect `threads` (spec §7.4).
+// A channel copies the values it carries (`Send`: without pointers), in a queue of a fixed
+// capacity. It is itself a value without pointer, given to the threads that use it.
+
+extern "C" {
+    ui64 sosu_channel_new(ui64 size, ui64 capacity) uses threads;
+    bool sosu_channel_send(ui64 channel, ui8* value) uses threads;
+    ui64 sosu_channel_receive(ui64 channel) uses threads;
+    void sosu_channel_close(ui64 channel) uses threads;
+    void sosu_channel_free(ui64 channel) uses threads;
+}
+
+pub struct Channel<T: Send> {
+    ui64 id;
+
+    // Copies `value` in, waiting while the channel is full; false if it is closed.
+    pub bool send(T value) uses threads {
+        mut T copy = value;
+        mut bool sent = false;
+        unsafe {
+            sent = sosu_channel_send(id, &copy as ui8*);
+        }
+        return sent;
+    }
+
+    // The next value, waiting while the channel is empty; none once it is closed and empty.
+    pub T? receive() uses threads {
+        mut ui64 at = 0;
+        unsafe {
+            at = sosu_channel_receive(id);
+        }
+        if (at == 0) {
+            return none;
+        }
+        unsafe {
+            T* value = at as T*;
+            return some(*value);
+        }
+    }
+
+    // No more values: the receivers get those left, then none.
+    pub void close() uses threads {
+        unsafe {
+            sosu_channel_close(id);
+        }
+    }
+
+    // Releases the channel, once the threads that use it are joined.
+    pub void free() uses threads {
+        unsafe {
+            sosu_channel_free(id);
+        }
+    }
+}
+
+// A channel of `capacity` values of `T`.
+pub Channel<T> new<T: Send>(ui64 capacity) uses threads
+    requires capacity > 0
+{
+    mut ui64 id = 0;
+    unsafe {
+        id = sosu_channel_new(size_of(T) as ui64, capacity);
+    }
+    return Channel{ id: id };
+}
