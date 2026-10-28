@@ -1,0 +1,65 @@
+// crypto.secure: random numbers for security (keys, tokens, salts), from the generator of the
+// system: BCryptGenRandom on Windows, arc4random on macOS and iOS, /dev/urandom on Linux and
+// Android. Each gives none (or false) if the system gives no random bytes, which does not happen
+// on a working system. For games and simulations, `std.random` is faster.
+import crypto.hex;
+
+extern "C" {
+    i32 sosu_crypto_random(ui8* buffer, usize size) uses random;
+}
+
+// Fills `buffer` with random bytes; false if the system gave none.
+pub bool fill(ui8[] buffer) uses random {
+    if (buffer.len == 0) {
+        return true;
+    }
+    mut i32 done = 0;
+    unsafe {
+        done = sosu_crypto_random(&buffer[0], buffer.len);
+    }
+    return done == 1;
+}
+
+// 64 random bits.
+pub ui64? next() uses random {
+    mut ui8[8] b = [0; 8];
+    if (!fill(b[0..8])) {
+        return none;
+    }
+    mut ui64 n = 0;
+    for (ui8 x in b) {
+        n = n << 8 | x as ui64;
+    }
+    return some(n);
+}
+
+// A random number in [0, bound), each as likely (`bound` > 0).
+pub ui64? below(ui64 bound) uses random
+    requires bound > 0
+{
+    // The values under `threshold` would make the low numbers more likely: they are drawn again.
+    ui64 threshold = wrapping_sub(0 as ui64, bound) % bound;
+    while (true) {
+        match (next()) {
+            some(n) => {
+                if (n >= threshold) {
+                    return some(n % bound);
+                }
+            },
+            none => {
+                return none;
+            },
+        }
+    }
+    return none;
+}
+
+// `size` random bytes as hexadecimal text (`2 * size` digits), in `arena`: a token for a link or
+// a session.
+pub str? token(Arena* arena, usize size) uses random {
+    mut ui8[] bytes = arena.alloc_slice(ui8, size);
+    if (!fill(bytes)) {
+        return none;
+    }
+    return some(hex.encode(arena, bytes));
+}

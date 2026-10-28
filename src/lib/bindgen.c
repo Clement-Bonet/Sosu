@@ -1924,23 +1924,18 @@ static bool float_literal(Buf *b, double f) {
         char shorter[64];
         snprintf(shorter, sizeof shorter, "%.*g", digits, f);
         if (strtod(shorter, NULL) == f) {
-            strcpy(text, shorter);
+            snprintf(text, sizeof text, "%s", shorter);
             break;
         }
     }
-    char *e = strpbrk(text, "eE");
-    if (!strchr(text, '.')) {
-        if (e) {
-            char tail[64];
-            strcpy(tail, e);
-            *e = 0;
-            strcat(text, ".0");
-            strcat(text, tail);
-        } else {
-            strcat(text, ".0");
-        }
+    const char *e = strpbrk(text, "eE");
+    if (strchr(text, '.')) {
+        buf_add(b, "%s", text);
+    } else if (e) { /* 1e+20 becomes 1.0e+20: a float literal of Sosu has a dot */
+        buf_add(b, "%.*s.0%s", (int)(e - text), text, e);
+    } else {
+        buf_add(b, "%s.0", text);
     }
-    buf_add(b, "%s", text);
     return true;
 }
 

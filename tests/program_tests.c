@@ -45,6 +45,10 @@ static const Case cases[] = {
     { "run", "calendar", "expected.txt", 0, NULL },
     { "run", "system", "expected.txt", 3, "first \"two words\" 3" },
     { "run", "formats", "expected.txt", 0, NULL },
+    { "run", "readme", "expected.txt", 0, NULL }, /* the example of README.md */
+    { "run", "hashes", "expected.txt", 0, NULL },
+    { "run", "compression", "expected.txt", 0, NULL },
+    { "run", "geometry", "expected.txt", 0, NULL },
     { "run --release", "overflow", "expected_release.txt", 0, NULL },
     { "run --release", "unsigned_floats", "expected_release.txt", 0, NULL },
     { "test", "testing", "expected.txt", 1, NULL },

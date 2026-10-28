@@ -1,0 +1,820 @@
+// compress.deflate: the deflate stream (RFC 1951), without container. `inflate` reads every
+// stream (stored blocks, fixed and dynamic codes); `deflate` finds the repeated bytes with hash
+// chains and writes each block in the smallest of the three kinds. Every read is checked: a
+// damaged stream gives `Damaged`, never a read outside of its bytes.
+
+pub enum CompressError {
+    Damaged,  // not a valid stream, or one that was cut
+    WrongChecksum,  // the stream was read, but its checksum is not that of what it holds
+    TooLarge,  // more bytes than the room given (`inflate_into`)
+}
+
+// A short description of `e`, in English.
+pub str message(CompressError e) {
+    return match (e) {
+        Damaged => "damaged data",
+        WrongChecksum => "wrong checksum",
+        TooLarge => "too large for the room given",
+    };
+}
+
+// What a stream held, and how many bytes of the input it took (a container's trailer follows).
+pub struct Inflated {
+    pub ui8[] bytes;
+    pub usize read;
+}
+
+// ---- Inflate: the bits of a deflate stream, least significant first ----
+
+struct Bits {
+    ui8[] data;
+    mut ui64 at = 0;  // in bits
+    mut bool past = false;  // a read went past the end
+
+    // `count` bits (at most 16), the first one lowest.
+    ui32 take(ui32 count) {
+        mut ui32 value = 0;
+        for (ui32 i in 0..count) {
+            ui64 index = at >> 3;
+            if (index >= data.len as ui64) {
+                past = true;
+                return 0;
+            }
+            ui32 bit = data[index as usize] as ui32 >> (at & 7) as ui32 & 1;
+            value = value | bit << i;
+            at += 1;
+        }
+        return value;
+    }
+
+    // Skips to the next whole byte (stored blocks start there).
+    void align() {
+        at = at + 7 & ~(7 as ui64);
+    }
+}
+
+// A canonical Huffman code: how many codes of each length, and the symbols in code order.
+struct Huffman {
+    mut ui16[16] count = [0; 16];
+    mut ui16[320] symbol = [0; 320];
+
+    // The code of `lengths` (0: a symbol without code). False if it is over-subscribed.
+    bool build(ui8[] lengths) {
+        count = [0; 16];
+        for (ui8 l in lengths) {
+            count[l as usize] += 1;
+        }
+        mut i32 left = 1;
+        for (usize l in 1..16) {
+            left = left * 2 - count[l] as i32;
+            if (left < 0) {
+                return false;
+            }
+        }
+        mut ui16[16] offset = [0; 16];
+        for (usize l in 1..15) {
+            offset[l + 1] = offset[l] + count[l];
+        }
+        for (usize s in 0..lengths.len) {
+            usize l = lengths[s] as usize;
+            if (l != 0) {
+                symbol[offset[l] as usize] = s as ui16;
+                offset[l] += 1;
+            }
+        }
+        return true;
+    }
+
+    // The next symbol of `bits`, or -1 if no code matches.
+    i32 decode(Bits* bits) {
+        mut i32 code = 0;
+        mut i32 first = 0;
+        mut i32 index = 0;
+        for (usize l in 1..16) {
+            code = code | bits.take(1) as i32;
+            i32 n = count[l] as i32;
+            if (code - n < first) {
+                return symbol[(index + code - first) as usize] as i32;
+            }
+            index += n;
+            first = first + n << 1;
+            code = code << 1;
+        }
+        return -1;
+    }
+}
+
+// The lengths and distances of the codes 257 to 285 and 0 to 29: base and extra bits.
+ui32[29] length_base() {
+    return [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+}
+
+ui32[29] length_extra() {
+    return [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+}
+
+ui32[30] distance_base() {
+    return [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+}
+
+ui32[30] distance_extra() {
+    return [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+}
+
+// What is being inflated into: `out`, filled up to `len`, which grows in `arena` if there is one.
+struct Output {
+    Arena*? arena;
+    mut ui8[] out;
+    mut usize len = 0;
+    mut bool full = false;  // `out` could not grow
+
+    bool put(ui8 b) {
+        if (len >= out.len) {
+            match (arena) {
+                some(a) => {
+                    mut ui8[] grown = a.alloc_slice(ui8, max(out.len * 2, 1024));
+                    for (usize i in 0..len) {
+                        grown[i] = out[i];
+                    }
+                    out = grown;
+                },
+                none => {
+                    full = true;
+                    return false;
+                },
+            }
+        }
+        out[len] = b;
+        len += 1;
+        return true;
+    }
+}
+
+// The codes of a block with fixed codes (RFC 1951, 3.2.6).
+ui8[288] fixed_lengths() {
+    mut ui8[288] l = [8; 288];
+    for (usize i in 144..256) {
+        l[i] = 9;
+    }
+    for (usize i in 256..280) {
+        l[i] = 7;
+    }
+    return l;
+}
+
+bool fixed_codes(Huffman* lengths, Huffman* distances) {
+    mut ui8[288] l = fixed_lengths();
+    mut ui8[30] d = [5; 30];
+    return lengths.build(l[0..288]) && distances.build(d[0..30]);
+}
+
+// The codes of a block with dynamic codes, read from `bits` (RFC 1951, 3.2.7).
+bool dynamic_codes(Bits* bits, Huffman* lengths, Huffman* distances) {
+    ui32 nlen = bits.take(5) + 257;
+    ui32 ndist = bits.take(5) + 1;
+    ui32 ncode = bits.take(4) + 4;
+    if (nlen > 286 || ndist > 30) {
+        return false;
+    }
+    ui32[19] order = code_length_order();
+    mut ui8[19] code_lengths = [0; 19];
+    for (ui32 i in 0..ncode) {
+        code_lengths[order[i as usize] as usize] = bits.take(3) as ui8;
+    }
+    mut Huffman codes = Huffman{ };
+    if (!codes.build(code_lengths[0..19])) {
+        return false;
+    }
+    mut ui8[316] l = [0; 316];
+    ui32 total = nlen + ndist;
+    mut ui32 i = 0;
+    while (i < total) {
+        i32 s = codes.decode(bits);
+        if (s < 0 || bits.past) {
+            return false;
+        }
+        if (s < 16) {
+            l[i as usize] = s as ui8;
+            i += 1;
+            continue;
+        }
+        mut ui8 repeated = 0;
+        mut ui32 times = 0;
+        if (s == 16) {
+            if (i == 0) {
+                return false;
+            }
+            repeated = l[(i - 1) as usize];
+            times = 3 + bits.take(2);
+        } else if (s == 17) {
+            times = 3 + bits.take(3);
+        } else {
+            times = 11 + bits.take(7);
+        }
+        if (i + times > total) {
+            return false;
+        }
+        for (ui32 k in 0..times) {
+            l[(i + k) as usize] = repeated;
+        }
+        i += times;
+    }
+    if (l[256] == 0) {
+        return false;  // no end of block
+    }
+    return lengths.build(l[0..nlen as usize]) && distances.build(l[nlen as usize..total as usize]);
+}
+
+// The order in which the lengths of the code lengths are written.
+ui32[19] code_length_order() {
+    return [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+}
+
+// The symbols of a compressed block, until its end. False if the data is damaged.
+bool inflate_block(Bits* bits, Output* output, Huffman* lengths, Huffman* distances) {
+    ui32[29] lbase = length_base();
+    ui32[29] lextra = length_extra();
+    ui32[30] dbase = distance_base();
+    ui32[30] dextra = distance_extra();
+    while (true) {
+        i32 s = lengths.decode(bits);
+        if (s < 0 || bits.past) {
+            return false;
+        }
+        if (s < 256) {
+            if (!output.put(s as ui8)) {
+                return false;
+            }
+        } else if (s == 256) {
+            return true;
+        } else {
+            usize code = (s - 257) as usize;
+            if (code >= 29) {
+                return false;
+            }
+            ui32 length = lbase[code] + bits.take(lextra[code]);
+            i32 d = distances.decode(bits);
+            if (d < 0 || d >= 30) {
+                return false;
+            }
+            usize distance = (dbase[d as usize] + bits.take(dextra[d as usize])) as usize;
+            if (distance > output.len || bits.past) {
+                return false;
+            }
+            for (ui32 k in 0..length) {
+                if (!output.put(output.out[output.len - distance])) {
+                    return false;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Inflates `data` into `output`; the bytes of `data` taken.
+usize!CompressError inflate_to(ui8[] data, Output* output) {
+    mut Bits bits = Bits{ data: data };
+    mut Huffman lengths = Huffman{ };
+    mut Huffman distances = Huffman{ };
+    mut bool last = false;
+    while (!last) {
+        last = bits.take(1) == 1;
+        ui32 kind = bits.take(2);
+        mut bool good = true;
+        if (kind == 0) {  // stored
+            bits.align();
+            ui32 length = bits.take(16);
+            ui32 complement = bits.take(16);
+            if (length != ~complement & 0xFFFF) {
+                return err(Damaged);
+            }
+            for (ui32 k in 0..length) {
+                ui32 b = bits.take(8);
+                if (bits.past || !output.put(b as ui8)) {
+                    good = false;
+                    break;
+                }
+            }
+        } else if (kind == 1) {
+            good = fixed_codes(&lengths, &distances) && inflate_block(&bits, output, &lengths, &distances);
+        } else if (kind == 2) {
+            good = dynamic_codes(&bits, &lengths, &distances) && inflate_block(&bits, output, &lengths, &distances);
+        } else {
+            good = false;
+        }
+        if (!good || bits.past) {
+            return err(output.full ? TooLarge : Damaged);
+        }
+    }
+    return ok(((bits.at + 7) / 8) as usize);
+}
+
+// Inflates the stream at the start of `data`, in `arena`; what follows it is left.
+pub Inflated!CompressError inflate_stream(Arena* arena, ui8[] data) {
+    mut Output output = Output{ arena: some(arena), out: arena.alloc_slice(ui8, max(data.len * 3, 1024)) };
+    usize read = try inflate_to(data, &output);
+    return ok(Inflated{ bytes: output.out[0..output.len], read: read });
+}
+
+// Inflates the stream at the start of `data` into `out`, which does not grow (`TooLarge`).
+pub Inflated!CompressError inflate_stream_into(ui8[] data, ui8[] out) {
+    mut Output output = Output{ arena: none, out: out };
+    usize read = try inflate_to(data, &output);
+    return ok(Inflated{ bytes: out[0..output.len], read: read });
+}
+
+// The bytes of the deflate stream `data`, in `arena`.
+pub ui8[]!CompressError inflate(Arena* arena, ui8[] data) {
+    Inflated done = try inflate_stream(arena, data);
+    return ok(done.bytes);
+}
+
+// Inflates `data` into `out`: the number of bytes written.
+pub usize!CompressError inflate_into(ui8[] data, ui8[] out) {
+    Inflated done = try inflate_stream_into(data, out);
+    return ok(done.bytes.len);
+}
+
+// ---- Deflate: matches found by hash chains, then each block coded ----
+
+// The output: bits added after the last ones, first bit lowest; it grows in `arena`.
+struct Writer {
+    Arena* arena;
+    mut ui8[] data;
+    mut usize len = 0;
+    mut ui64 buffer = 0;
+    mut ui32 count = 0;  // bits in `buffer`
+
+    void byte(ui8 b) {
+        if (len >= data.len) {
+            mut ui8[] grown = arena.alloc_slice(ui8, max(data.len * 2, 256));
+            for (usize i in 0..len) {
+                grown[i] = data[i];
+            }
+            data = grown;
+        }
+        data[len] = b;
+        len += 1;
+    }
+
+    // The `n` low bits of `value`.
+    void bits(ui32 value, ui32 n) {
+        buffer = buffer | value as ui64 << count as ui64;
+        count += n;
+        while (count >= 8) {
+            byte((buffer & 0xFF) as ui8);
+            buffer = buffer >> 8;
+            count -= 8;
+        }
+    }
+
+    void align() {
+        if (count > 0) {
+            byte((buffer & 0xFF) as ui8);
+            buffer = 0;
+            count = 0;
+        }
+    }
+}
+
+// The tables of lengths and distances, made once.
+struct Tables {
+    ui32[29] lbase;
+    ui32[29] lextra;
+    ui32[30] dbase;
+    ui32[30] dextra;
+    mut ui8[259] length_index = [0; 259];  // the code of each length 3 to 258, from 0
+
+    usize distance_index(ui32 d) {
+        mut usize i = 29;
+        while (dbase[i] > d) {
+            i -= 1;
+        }
+        return i;
+    }
+}
+
+Tables tables() {
+    mut Tables t = Tables{ lbase: length_base(), lextra: length_extra(), dbase: distance_base(), dextra: distance_extra() };
+    mut usize code = 0;
+    for (ui32 length in 3..259) {
+        while (code < 28 && t.lbase[code + 1] <= length) {
+            code += 1;
+        }
+        t.length_index[length as usize] = code as ui8;
+    }
+    return t;
+}
+
+// The matches and literals of a block: a literal is below 256, a match 256 plus its length
+// less 3, with its distance.
+struct Tokens {
+    ui16[] litlen;
+    ui16[] dist;
+    mut usize count = 0;
+
+    void add(ui32 value, ui32 distance) {
+        litlen[count] = value as ui16;
+        dist[count] = distance as ui16;
+        count += 1;
+    }
+}
+
+// Code lengths for `freq`, none longer than `limit`, into `lengths` (at most 286 symbols). The
+// tree is built again from smaller frequencies until it is short enough.
+void build_lengths(ui32[] freq, ui8[] lengths, ui32 limit) {
+    usize n = freq.len;
+    mut ui32[286] f = [0; 286];
+    mut usize used = 0;
+    for (usize i in 0..n) {
+        f[i] = freq[i];
+        if (f[i] > 0) {
+            used += 1;
+        }
+    }
+    // two codes at least: a code alone would have no bits
+    mut usize k = 0;
+    while (used < 2) {
+        if (f[k] == 0) {
+            f[k] = 1;
+            used += 1;
+        }
+        k += 1;
+    }
+    while (true) {
+        mut ui32[572] weight = [0; 572];
+        mut i32[572] parent = [-1; 572];
+        mut bool[572] alive = [false; 572];
+        for (usize i in 0..n) {
+            weight[i] = f[i];
+            alive[i] = f[i] > 0;
+        }
+        mut usize nodes = n;
+        for (usize step in 0..used - 1) {
+            mut i32 a = -1;
+            mut i32 b = -1;
+            for (usize i in 0..nodes) {
+                if (!alive[i]) {
+                    continue;
+                }
+                if (a < 0 || weight[i] < weight[a as usize]) {
+                    b = a;
+                    a = i as i32;
+                } else if (b < 0 || weight[i] < weight[b as usize]) {
+                    b = i as i32;
+                }
+            }
+            weight[nodes] = weight[a as usize] + weight[b as usize];
+            alive[a as usize] = false;
+            alive[b as usize] = false;
+            alive[nodes] = true;
+            parent[a as usize] = nodes as i32;
+            parent[b as usize] = nodes as i32;
+            nodes += 1;
+        }
+        mut ui32 longest = 0;
+        for (usize i in 0..n) {
+            mut ui32 depth = 0;
+            if (f[i] > 0) {
+                mut i32 p = parent[i];
+                while (p >= 0) {
+                    depth += 1;
+                    p = parent[p as usize];
+                }
+            }
+            lengths[i] = depth as ui8;
+            longest = max(longest, depth);
+        }
+        if (longest <= limit) {
+            return;
+        }
+        for (usize i in 0..n) {
+            f[i] = (f[i] + 1) / 2;
+        }
+    }
+}
+
+// The canonical codes of `lengths` (RFC 1951, 3.2.2), their bits reversed: deflate writes a
+// code from its first bit.
+void build_codes(ui8[] lengths, ui16[] codes) {
+    mut ui32[16] count = [0; 16];
+    for (ui8 l in lengths) {
+        if (l > 0) {
+            count[l as usize] += 1;
+        }
+    }
+    mut ui32[16] next = [0; 16];
+    mut ui32 code = 0;
+    for (usize bits in 1..16) {
+        code = code + count[bits - 1] << 1;
+        next[bits] = code;
+    }
+    for (usize s in 0..lengths.len) {
+        ui32 l = lengths[s] as ui32;
+        if (l == 0) {
+            continue;
+        }
+        ui32 c = next[l as usize];
+        next[l as usize] += 1;
+        mut ui32 reversed = 0;
+        for (ui32 i in 0..l) {
+            reversed = reversed << 1 | c >> i & 1;
+        }
+        codes[s] = reversed as ui16;
+    }
+}
+
+// The lengths of the codes of a block written with the codes 0 to 18 (RFC 1951, 3.2.7): 16
+// repeats the length before, 17 and 18 repeat zeros. The number of symbols written.
+usize run_lengths(ui8[] all, ui8[] symbols, ui8[] extras) {
+    mut usize count = 0;
+    mut usize i = 0;
+    while (i < all.len) {
+        ui8 l = all[i];
+        mut usize run = 1;
+        while (i + run < all.len && all[i + run] == l) {
+            run += 1;
+        }
+        i += run;
+        mut usize left = run;
+        if (l == 0) {
+            while (left >= 11) {
+                usize k = min(left, 138);
+                symbols[count] = 18;
+                extras[count] = (k - 11) as ui8;
+                count += 1;
+                left -= k;
+            }
+            if (left >= 3) {
+                symbols[count] = 17;
+                extras[count] = (left - 3) as ui8;
+                count += 1;
+                left = 0;
+            }
+        } else {
+            symbols[count] = l;
+            count += 1;
+            left -= 1;
+            while (left >= 3) {
+                usize k = min(left, 6);
+                symbols[count] = 16;
+                extras[count] = (k - 3) as ui8;
+                count += 1;
+                left -= k;
+            }
+        }
+        while (left > 0) {
+            symbols[count] = l;
+            count += 1;
+            left -= 1;
+        }
+    }
+    return count;
+}
+
+// The bits of the tokens of a block with the codes given, extra bits included.
+ui64 tokens_cost(Tables* t, ui32[] lf, ui32[] df, ui8[] ll, ui8[] dl) {
+    mut ui64 bits = 0;
+    for (usize s in 0..286) {
+        bits += lf[s] as ui64 * ll[s] as ui64;
+        if (s > 256) {
+            bits += lf[s] as ui64 * t.lextra[s - 257] as ui64;
+        }
+    }
+    for (usize d in 0..30) {
+        bits += df[d] as ui64 * (dl[d] as ui64 + t.dextra[d] as ui64);
+    }
+    return bits;
+}
+
+// The tokens, then the end of the block, with the codes given.
+void write_tokens(Writer* w, Tables* t, Tokens* tokens, ui16[] lcodes, ui8[] ll, ui16[] dcodes, ui8[] dl) {
+    for (usize i in 0..tokens.count) {
+        ui32 v = tokens.litlen[i] as ui32;
+        if (v < 256) {
+            w.bits(lcodes[v as usize] as ui32, ll[v as usize] as ui32);
+            continue;
+        }
+        ui32 length = v - 253;
+        usize li = t.length_index[length as usize] as usize;
+        w.bits(lcodes[257 + li] as ui32, ll[257 + li] as ui32);
+        if (t.lextra[li] > 0) {
+            w.bits(length - t.lbase[li], t.lextra[li]);
+        }
+        ui32 d = tokens.dist[i] as ui32;
+        usize di = t.distance_index(d);
+        w.bits(dcodes[di] as ui32, dl[di] as ui32);
+        if (t.dextra[di] > 0) {
+            w.bits(d - t.dbase[di], t.dextra[di]);
+        }
+    }
+    w.bits(lcodes[256] as ui32, ll[256] as ui32);
+}
+
+// `raw` as stored blocks of 65535 bytes at most.
+void write_stored(Writer* w, ui8[] raw, bool last) {
+    mut usize at = 0;
+    while (true) {
+        usize size = min(raw.len - at, 65535);
+        bool closing = last && at + size == raw.len;
+        w.bits(closing ? 1 : 0, 3);
+        w.align();
+        w.bits(size as ui32, 16);
+        w.bits(~(size as ui32) & 0xFFFF, 16);
+        for (usize k in 0..size) {
+            w.byte(raw[at + k]);
+        }
+        at += size;
+        if (at >= raw.len) {
+            break;
+        }
+    }
+}
+
+// The tokens of `raw` as one block (or several stored ones): stored, fixed or dynamic codes,
+// whichever is the smallest.
+void write_block(Writer* w, Tables* t, ui8[] raw, Tokens* tokens, bool last) {
+    mut ui32[286] lf = [0; 286];
+    mut ui32[30] df = [0; 30];
+    for (usize i in 0..tokens.count) {
+        ui32 v = tokens.litlen[i] as ui32;
+        if (v < 256) {
+            lf[v as usize] += 1;
+        } else {
+            lf[257 + t.length_index[(v - 253) as usize] as usize] += 1;
+            df[t.distance_index(tokens.dist[i] as ui32)] += 1;
+        }
+    }
+    lf[256] = 1;
+
+    // the dynamic codes, and the lengths of their codes written with the codes 0 to 18
+    mut ui8[286] ll = [0; 286];
+    mut ui8[30] dl = [0; 30];
+    build_lengths(lf[0..286], ll[0..286], 15);
+    build_lengths(df[0..30], dl[0..30], 15);
+    mut usize nlen = 286;
+    while (nlen > 257 && ll[nlen - 1] == 0) {
+        nlen -= 1;
+    }
+    mut usize ndist = 30;
+    while (ndist > 1 && dl[ndist - 1] == 0) {
+        ndist -= 1;
+    }
+    mut ui8[316] all = [0; 316];
+    for (usize i in 0..nlen) {
+        all[i] = ll[i];
+    }
+    for (usize i in 0..ndist) {
+        all[nlen + i] = dl[i];
+    }
+    mut ui8[316] symbols = [0; 316];
+    mut ui8[316] extras = [0; 316];
+    usize runs = run_lengths(all[0..nlen + ndist], symbols[0..316], extras[0..316]);
+    mut ui32[19] cf = [0; 19];
+    for (usize i in 0..runs) {
+        cf[symbols[i] as usize] += 1;
+    }
+    mut ui8[19] cl = [0; 19];
+    build_lengths(cf[0..19], cl[0..19], 7);
+    ui32[19] order = code_length_order();
+    mut usize ncl = 19;
+    while (ncl > 4 && cl[order[ncl - 1] as usize] == 0) {
+        ncl -= 1;
+    }
+    mut ui64 dynamic = 17 + 3 * ncl as ui64 + tokens_cost(t, lf[0..286], df[0..30], ll[0..286], dl[0..30]);
+    for (usize s in 16..19) {
+        dynamic += cf[s] as ui64 * (cl[s] as ui64 + (s == 16 ? 2 : s == 17 ? 3 : 7) as ui64);
+    }
+    for (usize s in 0..16) {
+        dynamic += cf[s] as ui64 * cl[s] as ui64;
+    }
+
+    mut ui8[288] fl = fixed_lengths();
+    mut ui8[30] fd = [5; 30];
+    ui64 fixed = 3 + tokens_cost(t, lf[0..286], df[0..30], fl[0..286], fd[0..30]);
+    ui64 stored = (raw.len / 65535 + 1) as ui64 * 40 + 8 * raw.len as ui64;
+
+    if (stored <= fixed && stored <= dynamic) {
+        write_stored(w, raw, last);
+    } else if (fixed <= dynamic) {
+        mut ui16[288] lcodes = [0; 288];
+        mut ui16[30] dcodes = [0; 30];
+        build_codes(fl[0..288], lcodes[0..288]);
+        build_codes(fd[0..30], dcodes[0..30]);
+        w.bits(last ? 3 : 2, 3);
+        write_tokens(w, t, tokens, lcodes[0..288], fl[0..288], dcodes[0..30], fd[0..30]);
+    } else {
+        mut ui16[286] lcodes = [0; 286];
+        mut ui16[30] dcodes = [0; 30];
+        mut ui16[19] ccodes = [0; 19];
+        build_codes(ll[0..286], lcodes[0..286]);
+        build_codes(dl[0..30], dcodes[0..30]);
+        build_codes(cl[0..19], ccodes[0..19]);
+        w.bits(last ? 5 : 4, 3);
+        w.bits((nlen - 257) as ui32, 5);
+        w.bits((ndist - 1) as ui32, 5);
+        w.bits((ncl - 4) as ui32, 4);
+        for (usize i in 0..ncl) {
+            w.bits(cl[order[i] as usize] as ui32, 3);
+        }
+        for (usize i in 0..runs) {
+            usize s = symbols[i] as usize;
+            w.bits(ccodes[s] as ui32, cl[s] as ui32);
+            if (s >= 16) {
+                w.bits(extras[i] as ui32, s == 16 ? 2 : s == 17 ? 3 : 7);
+            }
+        }
+        write_tokens(w, t, tokens, lcodes[0..286], ll[0..286], dcodes[0..30], dl[0..30]);
+    }
+}
+
+// The hash of the 3 bytes at `p`.
+usize hash3(ui8[] data, usize p) {
+    return ((data[p] as ui32 << 10 ^ data[p + 1] as ui32 << 5 ^ data[p + 2] as ui32) & 0x7FFF) as usize;
+}
+
+// Adds the position `p` to its hash chain. `prev` holds the window only: the last 32 KB.
+void insert(ui8[] data, ui32[] head, ui32[] prev, usize p) {
+    if (p + 3 <= data.len) {
+        usize h = hash3(data, p);
+        prev[p & 0x7FFF] = head[h];
+        head[h] = (p + 1) as ui32;
+    }
+}
+
+// `data` compressed as a deflate stream at `level`: 0 stores it, 1 is the fastest, 9 the
+// smallest. In `arena`.
+pub ui8[] deflate_level(Arena* arena, ui8[] data, i32 level)
+    requires level >= 0 && level <= 9
+{
+    mut Writer w = Writer{ arena: arena, data: arena.alloc_slice(ui8, data.len / 2 + 64) };
+    if (level == 0) {
+        write_stored(&w, data, true);
+        return w.data[0..w.len];
+    }
+    mut Tables t = tables();
+    ui32[10] chains = [0, 4, 8, 16, 32, 64, 128, 256, 1024, 4096];
+    ui32 chain = chains[level as usize];
+    usize n = data.len;
+    mut ui32[] head = arena.alloc_slice(ui32, 32768);  // a position plus 1 for each hash, 0 if none
+    mut ui32[] prev = arena.alloc_slice(ui32, 32768);
+    mut Tokens tokens = Tokens{ litlen: arena.alloc_slice(ui16, 16384), dist: arena.alloc_slice(ui16, 16384) };
+    mut usize start = 0;  // of the block
+    mut usize i = 0;
+    while (i < n) {
+        mut usize best = 0;
+        mut usize distance = 0;
+        if (i + 3 <= n) {
+            usize most = min(258, n - i);
+            mut ui32 candidate = head[hash3(data, i)];
+            mut ui32 tries = chain;
+            while (candidate != 0 && tries > 0) {
+                usize c = (candidate - 1) as usize;
+                if (i - c > 32768) {
+                    break;
+                }
+                if (data[c + best] == data[i + best] || best == 0) {
+                    mut usize l = 0;
+                    while (l < most && data[c + l] == data[i + l]) {
+                        l += 1;
+                    }
+                    if (l > best) {
+                        best = l;
+                        distance = i - c;
+                        if (l == most) {
+                            break;
+                        }
+                    }
+                }
+                candidate = prev[c & 0x7FFF];
+                tries -= 1;
+            }
+        }
+        if (best >= 3) {
+            tokens.add((256 + best - 3) as ui32, distance as ui32);
+            for (usize k in 0..best) {
+                insert(data, head, prev, i + k);
+            }
+            i += best;
+        } else {
+            tokens.add(data[i] as ui32, 0);
+            insert(data, head, prev, i);
+            i += 1;
+        }
+        if (tokens.count == 16384) {
+            write_block(&w, &t, data[start..i], &tokens, i == n);
+            start = i;
+            tokens.count = 0;
+        }
+    }
+    if (tokens.count > 0 || n == 0) {
+        write_block(&w, &t, data[start..n], &tokens, true);
+    }
+    w.align();
+    return w.data[0..w.len];
+}
+
+// `data` compressed as a deflate stream (level 6), in `arena`.
+pub ui8[] deflate(Arena* arena, ui8[] data) {
+    return deflate_level(arena, data, 6);
+}

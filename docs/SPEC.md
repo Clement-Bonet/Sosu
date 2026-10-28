@@ -19,7 +19,7 @@ Extension: `.sosu` — Compiler: `sosuc` (written in C99, libc only)
 4. Syntax that is simple to parse (generics with `<T>`, which cannot be misread since comparisons do not chain, §5.4).
 5. The whole language is in English: keywords, standard library, std identifiers, compiler messages.
 6. Symbols inherited from C/C++, with their inconsistencies fixed (see §5.1).
-7. Local readability: a fragment of code can be understood without knowing the whole project (no implicit conversion, no hidden control flow, no undefined behavior).
+7. Local readability: a fragment of code can be understood without knowing the whole project (no implicit conversion, no hidden control flow, no undefined behavior outside `unsafe`, except the pointers left dangling that the compiler does not catch yet, §7.7).
 8. Absence and failure are in the types (`T?`, `T!E`), never in exceptions or implicit null pointers.
 9. Small core, one way to do things: no overloading, no macros, no preprocessor.
 10. Intent is checkable: contracts and tests are part of the language (see §7).
@@ -614,7 +614,7 @@ error[E0312]: non-exhaustive match
 ### 7.7 `unsafe` and debug checks
 
 - `unsafe { ... }` is the only place where pointer arithmetic, raw pointer conversions (`p as T*`) or unwrapped calls to C are allowed. A function marked `unsafe` can only be called from an `unsafe` block.
-- Outside `unsafe`, a `T*` always points to a valid value.
+- Outside `unsafe`, a `T*` is never null, and a view stays within its bounds. A pointer or a view can still be left dangling in three cases, which the compiler does not catch yet: a pointer into an arena after its `free()` (using the arena itself afterwards stops the program, §6, but its pointers are not checked); a pointer to a local variable, and a view of a local array, that outlive their function. The compiler refuses those that are returned as they are made (E0371: `return &x;`, `return &p.v;`, `return a[0..2];`, also in `some(...)`, a literal or `?:`), not those kept in a variable first, nor those stored in memory that lasts longer. Reading through them is undefined behavior, as in C. The rule of regions (§6, after 1.0) is meant to close these cases; until then, an arena freed by a `defer` of the scope that uses it, and pointers to locals kept within their function, avoid them.
 - In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, unsigned floats never negative, contracts.
 - In release, bounds stay checked by default (`--checks=off` disables them); contracts, overflows and unsigned floats are not.
 - Options of `sosuc build`, `run` and `test`: `--release` (optimized C, modulo arithmetic, no contracts), `--checks=on|off` (indexes), `--contracts=check|off` (`requires` / `ensures`). Division by zero always stops the program, as do `assert` failures.
@@ -697,6 +697,7 @@ shared = { path = "../shared" }
 - A Git dependency names a `tag` or a `rev` (a commit, possibly abbreviated); a branch is not accepted, since it moves. The compiler calls the `git` command, which must be installed: the repository is cloned into `build/deps/<name>-<commit>` of the root package, once per commit. A URL without a scheme (`../ui`, `C:/repos/ui`) is a local repository, relative to the package that declares it.
 - `sosu.lock`, next to the `sosu.toml` of the root package, is written by the compiler and kept in version control. One line per Git dependency of the program, transitive ones included: `<name> <url> tag|rev <tag or rev> <commit>`. While a dependency keeps its URL and its `tag` or `rev`, the commit of the lock is used, even if the tag has moved since, and nothing is fetched once the clone exists. Changing the `tag` or `rev` fetches the new version and updates the lock; it is not written when a dependency has an error. The locks of the dependencies themselves are not read.
 - URLs, tags and revs are passed to the shell: they may contain letters, digits and `-._~:/@+=,` only (and `\` in URLs).
+- The other values of `sosu.toml` (the paths, libraries, C files, folders and defines of [link], the `path` of a dependency, the files of [app]) are given to the commands of the C compiler and of the tools between quotes: they cannot contain a quote, `` ` ``, `$`, `%` or a control character (E0416), which would end the quotes or be expanded inside them by cmd or sh. So a dependency, even one cloned from the repository of someone else, cannot slip a command of its own into those of the build. The `name` of [app], a text shown, is free.
 - No circular dependencies between packages.
 - `platform`, `render` and `ui` are packages like any other.
 
@@ -711,7 +712,7 @@ What a program needs beyond §8.0, and how each library is made: in Sosu (portab
 | Module | Content | How | When |
 |---|---|---|---|
 | `std.math` | `sqrt`, `pow`, `exp`, `log`, trigonometry, `floor` / `ceil` / `round`, `PI`, `E`, `infinity()`; `is_nan`; integer `gcd`, `pow_i64` with overflow checked | the C library (`libm`), wrapped | 1.0 (done, §8.0) |
-| `math.linear` | `Vec2`, `Vec3`, `Vec4`, `Mat3`, `Mat4`, quaternions, transforms (for `render` and 3D) | Sosu | 1.0 |
+| `math.linear` | `Vec2`, `Vec3`, `Vec4`, `Mat3`, `Mat4`, quaternions, transforms (for `render` and 3D) | Sosu | 1.0 (done, §8.3) |
 | `math.stats` | mean, median, variance, percentiles, histograms; the distributions of `std.random` (normal, exponential) | Sosu | after |
 | `math.big` | big integers and decimals of chosen precision (money beyond `i64`, §14.2) | Sosu | after |
 | `math.complex`, `math.fft` | complex numbers, fast Fourier transform (also for `audio`) | Sosu | after |
@@ -732,7 +733,7 @@ A common interface first, as Go's `database/sql` or JDBC: a `db.Connection` (an 
 
 #### Images
 
-`render.image` reads PNG in Sosu today (§10). Images become a package of their own, `image`, that `render` uses: an `image.Image` of pixels (RGBA 8 bits, and gray), read and written in several formats, and transformed.
+`render.image` reads PNG in Sosu today (§10), inflated by `compress.zlib` (§8.3). Images become a package of their own, `image`, that `render` uses: an `image.Image` of pixels (RGBA 8 bits, and gray), read and written in several formats, and transformed.
 
 | Module | Content | How | When |
 |---|---|---|---|
@@ -770,8 +771,8 @@ SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`):
 | `std.csv`, `std.toml` | CSV; TOML (the manifests, §8.1) | Sosu | after |
 | `std.log` | logs with levels, to the console, a file or the log of the system (`logcat`, §11.5) | Sosu | 1.0 (done, §8.0) |
 | `std.thread`, `std.channel` | threads and channels (§5.6, done); mutexes and atomics | the system | 1.0 (threads, channels), after (mutexes, atomics) |
-| `compress` | deflate and gzip (`render.image` inflates already), zip archives | Sosu | 1.0 (deflate), after (zip) |
-| `crypto` | SHA-256 and SHA-1, HMAC, random numbers for security, base64 and hexadecimal | Sosu, the system for the random numbers | 1.0 (hashes, base64), after (cryptography itself, which should come from a reviewed library) |
+| `compress` | deflate, zlib and gzip, compressed and read (`render.image` inflates with it); zip archives | Sosu | 1.0 (deflate, zlib, gzip: done, §8.3), after (zip) |
+| `crypto` | SHA-256 and SHA-1, HMAC, random numbers for security, base64 and hexadecimal | Sosu, the system for the random numbers | 1.0 (done, §8.3), after (cryptography itself, which should come from a reviewed library) |
 | `net` | TCP and UDP sockets, names resolved (DNS) | the system | after |
 | `net.http` | HTTP client and server, WebSocket; HTTPS with the TLS of the system (Schannel, Secure Transport) or OpenSSL | Sosu, the system | after |
 | `regex` | regular expressions (RE2-like: linear time) | Sosu | after |
@@ -779,6 +780,14 @@ SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`):
 | `platform.notify`, `platform.tray` | notifications, the icon of the tray | the system | after |
 | `gpu` | 3D drawing and compute with SDL_GPU (Vulkan, Metal, Direct3D 12) | SDL3 | after |
 | `testing` | benchmarks, test fixtures, values compared with their difference shown | Sosu, `sosuc test` | 1.0 |
+
+### 8.3 The packages of 1.0
+
+The packages of §8.2 written so far (`crypto`, `compress`, `math`), each a folder of `packages/` that a program names in its `[dependencies]` (`crypto = { path = "..." }`, §8.1), tested by a program of `tests/programs`:
+
+- `crypto` (tested by `tests/programs/hashes`, with the vectors of FIPS 180-4, RFC 4231, RFC 2202 and RFC 4648): `crypto.sha256` and `crypto.sha1`, `sum(data)` at once (`ui8[32]`, `ui8[20]`), or `start()` then `update(data)` by parts and `finish()`; SHA-1 only for the formats that still name it. `crypto.hmac`: `with_sha256(key, message)`, `with_sha1`, and `equal(a, b)`, which compares two codes in a time that does not depend on where they differ. `crypto.base64`: `encode(arena, bytes)` and `decode(arena, text) -> ui8[]?` (the standard alphabet, padded), `encode_url` and `decode_url` (`-` and `_`, without padding); a decoder refuses what an encoder would not write. `crypto.hex`: `encode` (lowercase) and `decode` (either case). `crypto.secure` (effect `random`): `fill(buffer) -> bool`, `next() -> ui64?`, `below(bound)` (without bias), `token(arena, size)` (random bytes as hexadecimal), from the generator of the system: `BCryptGenRandom` on Windows, `arc4random_buf` on macOS and iOS, `/dev/urandom` on Linux and Android, in a C file of the package (§9.1). Ciphers and signatures are not there: they should come from a reviewed library.
+- `math` (tested by `tests/programs/geometry`): `math.linear`, of `f32`, for `render` and 3D. Column vectors (a matrix applies on the left), matrices stored by columns as the GPU APIs read them, right-handed axes, angles in radians, a depth of 0 to 1 after projection (SDL_GPU, Vulkan, Metal, Direct3D). `Vec2`, `Vec3`, `Vec4` (`vec2(x, y)`...): `add`, `sub`, `scale`, `mul` (by component), `neg`, `dot`, `cross` (a number for `Vec2`), `length`, `distance`, `normalized` (zero stays zero), `lerp`, `near(o, eps)`; `Vec2.perpendicular`, `Vec4.project` (divided by w), `xyz`. `Mat3` and `Mat4` (the identity by default, `identity3()`, `identity4()`): `at(row, col)`, `set`, `mul` (`a.mul(b)` applies `b` first), `mul_vec`, `transform_point` (divided by w), `transform_vector`, `transposed`, `determinant`, `inverse() -> Mat3?` (none when the determinant is 0), `near`; `Mat4.upper3`. The plane: `translation2`, `rotation2`, `scaling2`. 3D: `translation`, `scaling`, `rotation(axis, angle)`, `rotation_x`, `rotation_y`, `rotation_z`, `look_at(eye, target, up)`, `perspective(fov_y, aspect, near, far)`, `orthographic(left, right, bottom, top, near, far)`. `Quat` (`from_axis_angle`, `identity_quat()`): `mul`, `conjugate`, `dot`, `length`, `normalized`, `rotate(v)`, `to_mat4`, `slerp` (the short way), `near` (q and -q are the same rotation). `Transform` (`transform()`: `position`, `rotation`, `scale`, applied scale first, then rotation, then position): `to_mat4`, `apply(p)`, `then(child)` (exact when the scale of the parent is the same on its three axes). Operators are methods: Sosu has no operator overloading.
+- `compress` (tested by `tests/programs/compression`, with streams of zlib and of the `gzip` command; what it writes is read by `gzip -d`): `compress.deflate`, the bare stream: `inflate(arena, data) -> ui8[]!CompressError`, `inflate_into(data, out)` for a size known before, `inflate_stream` and `inflate_stream_into`, which also say how many bytes the stream took (`Inflated`: `bytes`, `read`); `deflate(arena, data)` (level 6) and `deflate_level(arena, data, level)`, 0 storing, 9 the smallest: matches found by hash chains in a window of 32 KB, each block written stored, with the fixed codes or with dynamic ones, whichever is the smallest (within a few percent of `gzip -6`, which also matches lazily). `CompressError` is `Damaged`, `WrongChecksum` or `TooLarge` (`message(e)` describes it). `compress.zlib` (RFC 1950): `compress`, `compress_level`, `decompress`, `decompress_into`, the Adler-32 checked. `compress.gzip` (RFC 1952): `compress`, `compress_level` (without name nor date), `decompress` (the CRC-32 and the size checked; the name, comment and extra fields of the header skipped; several members read as one). `compress.checksum`: `adler32`, `crc32`, and `adler32_from`, `crc32_from` (with the table of `crc32_table()`) to compute them by parts. `render.image` inflates the pixels of PNG files with `compress.zlib`. Every read is checked: a damaged stream gives `Damaged`, never a read outside of its bytes. Not yet: zip archives, and a bound on the size `inflate` may reach (a small damaged or hostile file can hold gigabytes; `inflate_into` is bounded by its room).
 
 ## 9. C interop
 
@@ -813,6 +822,7 @@ frameworks = ["Cocoa"]
 - `libs`: library names, translated for the C compiler; `paths`: folders searched by the linker; `frameworks`: macOS and iOS frameworks; `copy`: files placed next to the program (a DLL must be beside the `.exe` on Windows).
 - `subsystem`: `"window"` for a package whose programs open windows (`platform` declares it). In a `--release` build on Windows, a program that links such a package has no console behind its windows (`/SUBSYSTEM:WINDOWS` with MSVC, `-mwindows` with MinGW); a debug build keeps it, for `io.print`. `"console"` is the default.
 - Paths are relative to the package, never absolute, so that the manifest works on every machine.
+- A folder of `paths`, or a file of `copy` or `c`, that does not exist is reported by `sosuc` before the C compiler runs, with the package that names it (`vendor/` of `platform` not fetched gives `sosuc: the folder ... of the [link] paths of the package platform does not exist`), rather than as a library the linker cannot find.
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the systems of `--target` (§11.1): `windows`, `linux`, `macos`, `android`, `ios`; a section of one architecture, `[link.windows-arm64]`, adds to that of its system, and `{arch}` in a path is the architecture of the target (`vendor/SDL3/lib/{arch}`, §11.6).
 - A C library given with the package as its sources (SQLite, the decoders of §8.2), so that the user installs nothing: `c = ["vendor/sqlite3.c"]`, the C files compiled with the program; `include = ["vendor/include"]`, the folders of their headers; `defines = ["SQLITE_OMIT_LOAD_EXTENSION", "LEVEL=2"]`. They are compiled as C99, with the program, into a shared library, or as objects of their own into a static library (§9.2), and on Android into `libmain.so`; on iOS, not yet. Their functions are declared in `extern "C"` (or by `sosuc bindgen`, §11.6). Being in [link], a C file can belong to one target only (`[link.windows] c = [...]`). Tested by `tests/programs/csources`.
@@ -1089,7 +1099,7 @@ state        = IDENT "{" property { [ "," ] property } "}" ;        (* hover, fo
      - Reading: the tables `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf` and `cmap` (formats 4 and 12), through checked reads: a damaged file gives wrong glyphs, never a read outside of its bytes. Drawing: the outlines (lines and quadratic curves, composite glyphs moved and scaled) accumulate the area they cover under each pixel; the image of a glyph is kept per size (256 images at most, then forgotten), and `close()` frees them.
      - Not yet: hinting (the instructions of a font are ignored), kerning, CFF outlines (`.otf`), color fonts, fallback to another font for missing characters.
      - `packages/render/fonts/NotoSans-Regular.ttf` (Noto Sans, SIL Open Font License, with `OFL.txt`) is the font of the examples and of the tests, run from the root of the repository. `ui.font` (a `widgets.Ui` field) gives it to the widgets: 18 pixels per em for labels, 27 for titles; without it, they use the 8 by 8 font.
-   - Images: `render.image` reads PNG files in Sosu. `image.load(arena, path)` gives an `Image` (`width`, `height`, `pixels` 0xAARRGGBB, alpha not premultiplied), or `Unreadable`, `NotPng`, `Damaged`; `image.decode(arena, bytes)` does the same from bytes. Every kind of PNG file is read: gray, RGB, palette, with alpha or a transparent color (`tRNS`), 1 to 16 bits, interlaced (Adam7) or not. The data is inflated (zlib) in Sosu, through checked reads: a damaged file gives `Damaged`, never a read outside of its bytes; the checksums are not verified. `surface.draw_image(img, rect)` draws it scaled into `rect`, blended with what is below: each pixel takes the average of the pixels it covers, weighted by their alpha (the nearest one when it is enlarged). Not yet: other formats (JPEG, GIF), color profiles and gamma (`iCCP`, `gAMA` are ignored).
+   - Images: `render.image` reads PNG files in Sosu. `image.load(arena, path)` gives an `Image` (`width`, `height`, `pixels` 0xAARRGGBB, alpha not premultiplied), or `Unreadable`, `NotPng`, `Damaged`; `image.decode(arena, bytes)` does the same from bytes. Every kind of PNG file is read: gray, RGB, palette, with alpha or a transparent color (`tRNS`), 1 to 16 bits, interlaced (Adam7) or not. The data is inflated by `compress.zlib` (§8.3), through checked reads: a damaged file gives `Damaged`, never a read outside of its bytes; the Adler-32 of the data is checked, the CRC of the chunks is not. `surface.draw_image(img, rect)` draws it scaled into `rect`, blended with what is below: each pixel takes the average of the pixels it covers, weighted by their alpha (the nearest one when it is enlarged). Not yet: other formats (JPEG, GIF), color profiles and gamma (`iCCP`, `gAMA` are ignored).
 2. The same program on the Android emulator, then on the iOS simulator.
 3. A window described in `.ui.sosu` (title, text field, button) with the same interface on every target. Done on the desktop: `examples/form` describes its window in `screen.ui.sosu` (§10.2), and `tests/programs/screens` drives such a window with simulated input, without a screen.
    - The `ui` package: without lambdas (v1), a widget cannot call the program back, so `ui` works in immediate mode, which matches the re-evaluation of §10.2. At each frame, the program describes its interface from its state, `if (f.button("OK")) { ... }`; a `widgets.Ui` keeps what lasts between frames (the input received, the widget pressed, the text field that has the keyboard), and a `widgets.Frame` places the widgets of the frame in nested columns and rows (`column(gap, padding)`, `row_with(gap, padding)`, `end()`; `row()` and `end_row()` for a row with the default gap).
@@ -1820,6 +1830,8 @@ sosuc build --target linux-arm64 examples/window     # another architecture of a
 This is the grammar implemented by `sosuc`. `mut` belongs to declarations (variables, fields,
 parameters), not to types.
 
+A file nests 512 levels at most (E0219): each expression, operand, statement, type, suffix (`.f`, `(...)`, `[i]`, `*`) and term of a chain of operators counts one, so a parenthesis counts two. The passes after the parser walk the tree by recursion; the limit keeps them three times below the stack they need on Windows (1 MB), and the language server alive on any text. After E0219, the rest of the file is not read.
+
 ```
 program      = { import | decl } ;
 import       = "import" path ";" ;
@@ -1917,22 +1929,21 @@ Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the librarie
 
 Version 1.0 is a promise of stability: the language, `core`, `std` and the commands of `sosuc` no longer break the code written for them (a change that would is a 2.0). It does not need the native backend nor self-hosting: the C backend stays the path of phones anyway (§11.2), and steps 12 to 14 come after 1.0.
 
-What 1.0 holds, in the proposed order. The estimates are measured on steps 1 to 11, written with Claude Code: they took 6 days (October 21 to 26, 2026), about 49,000 lines, 3.2 million output tokens and 1.6 billion tokens read from the cache. A week of the Pro plan's quota held about 2.2 million output tokens. The effort is relative to steps 1 to 11 (100); the days and tokens add a quarter, since a larger code base and specification make each call heavier:
+What 1.0 holds, in the proposed order; how long each work may take is estimated in [ROADMAP.md](ROADMAP.md). Then 0.x versions tried by others than their authors, for a few weeks, before 1.0 is called stable.
 
-| # | Work | Content | Effort | Days | Output tokens | Weekly quota |
-|---|---|---|---|---|---|---|
-| 1 | Language | Lambdas and closures (§5.5, done), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4, done); the open points of §14.2 that change the language (types in parentheses, done) | 12 | 1 to 1.5 | 400 to 600 k | 18 to 27 % |
-| 2 | Concurrency | done (§5.6): threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
-| 3 | C sources in a package | done (§9.1), in [link] rather than a [build] section, so that a file can belong to one target: `c = ["vendor/sqlite3.c"]` in `sosu.toml`, C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it | 2 | 0.2 | 60 to 100 k | 3 to 4 % |
-| 4 | Standard library | The modules of `std` of §8.2 marked 1.0: done (§8.0), `std.math`, `std.sort`, `std.text`, the dates of `std.time`, `std.os`, `std.fs`, `std.cli`, `std.log`, `std.json`. The packages of §8.2 marked 1.0 come next: `math.linear`, `compress`, `crypto`, `testing`, `image`, `audio`, `db`, `platform.dialogs` | 25 | 1.5 to 2.5 | 0.8 to 1.2 M | 36 to 54 % |
-| 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured | 10 | 0.5 to 1 | 300 to 500 k | 13 to 22 % |
-| 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
-| 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 | 8 | 0.5 to 1 | 200 to 400 k | 9 to 18 % |
-| 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) | 5 | 0.5 | 150 to 250 k | 7 to 11 % |
-| 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries | 4 | 0.5 | 120 to 250 k | 5 to 11 % |
+| # | Work | Content |
+|---|---|---|
+| 1 | Language | Lambdas and closures (§5.5, done), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4, done); the open points of §14.2 that change the language (types in parentheses, done) |
+| 2 | Concurrency | done (§5.6): threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` |
+| 3 | C sources in a package | done (§9.1), in [link] rather than a [build] section, so that a file can belong to one target: `c = ["vendor/sqlite3.c"]` in `sosu.toml`, C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it |
+| 4 | Standard library | The modules of `std` of §8.2 marked 1.0: done (§8.0), `std.math`, `std.sort`, `std.text`, the dates of `std.time`, `std.os`, `std.fs`, `std.cli`, `std.log`, `std.json`. The packages of §8.2 marked 1.0 come next (§8.3): `crypto`, `compress` and `math.linear` done; `testing`, `image`, `audio`, `db`, `platform.dialogs` to come |
+| 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured. Begun: the depth of the tree bounded (E0219, §12), the values of `sosu.toml` checked before they reach a command (E0416, §8.1), the pointers returned into a function refused (E0371, §7.7) |
+| 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished |
+| 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 |
+| 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) |
+| 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries |
 
-In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output tokens: 1.1 to 1.8 weeks of the Pro quota, so 2 to 3 weeks of calendar, the quota and not the work setting the pace. The standard library is the least certain line: it depends on how many modules are written in Sosu. Most of the tokens are context read again at each call (about 490,000 per call on steps 1 to 11, whose sessions lasted up to 3 days): a new session for each work spends much less. Then 0.x versions tried by others than their authors, for a few weeks, before 1.0 is called stable.
-
+- Android: the CI builds the APK of `examples/window` (arm64 and x86_64) on each push, but does not run it; running on the emulator or a phone, and touching the screen, is done by hand (§11.5). Supported in 1.0 once the examples of §10 have run on a phone.
 - iOS: supported in 1.0 once it has run on a device (it needs a Mac and an iPhone); until then, a preview, built by the CI for the simulator.
 - After 1.0 (2.x): the native backend (12), `comptime` and regions (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
 

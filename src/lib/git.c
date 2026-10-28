@@ -168,7 +168,7 @@ static bool move_dir(const char *from, const char *to) {
     for (int attempt = 0; attempt < 5; attempt++) {
         if (rename(from, to) == 0) return true;
 #ifdef _WIN32
-        shell_run("ping -n 2 127.0.0.1 >nul"); /* about one second */
+        shell_wait_second();
 #else
         break;
 #endif

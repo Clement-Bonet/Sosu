@@ -16,6 +16,12 @@ void shell_make_dir(const char *path);
 void shell_remove_dir(const char *path);
 /* True if the file exists and can be read. */
 bool shell_file_exists(const char *path);
+/* True if the folder exists. */
+bool shell_dir_exists(const char *path);
+#ifdef _WIN32
+/* Waits about a second: a file just written may stay open a moment (antivirus, indexing). */
+void shell_wait_second(void);
+#endif
 /* The entry of a folder that comes last in byte order (the newest of folders named by version,
    `27.1.12297006`), or NULL if it is empty or does not exist. New string. */
 char *shell_last_entry(const char *dir);

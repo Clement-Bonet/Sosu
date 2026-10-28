@@ -1,0 +1,663 @@
+// math.linear: vectors, matrices, quaternions and transforms of f32, for `render` and 3D.
+// Conventions: column vectors (a matrix applies on the left: `m.mul_vec(v)`), matrices stored by
+// columns (as the GPU APIs read them), right-handed axes, angles in radians, and a depth of 0 to
+// 1 after projection (Vulkan, Metal, Direct3D, SDL_GPU).
+import std.math;
+
+f32 sqrt32(f32 x) {
+    return math.sqrt(x as f64) as f32;
+}
+
+f32 sin32(f32 x) {
+    return math.sin(x as f64) as f32;
+}
+
+f32 cos32(f32 x) {
+    return math.cos(x as f64) as f32;
+}
+
+bool close(f32 a, f32 b, f32 eps) {
+    return abs(a - b) <= eps;
+}
+
+// ---- Vectors ----
+
+pub struct Vec2 {
+    pub f32 x;
+    pub f32 y;
+
+    pub Vec2 add(Vec2 o) {
+        return Vec2{ x: x + o.x, y: y + o.y };
+    }
+
+    pub Vec2 sub(Vec2 o) {
+        return Vec2{ x: x - o.x, y: y - o.y };
+    }
+
+    pub Vec2 scale(f32 s) {
+        return Vec2{ x: x * s, y: y * s };
+    }
+
+    // Each component times that of `o`.
+    pub Vec2 mul(Vec2 o) {
+        return Vec2{ x: x * o.x, y: y * o.y };
+    }
+
+    pub Vec2 neg() {
+        return Vec2{ x: -x, y: -y };
+    }
+
+    pub f32 dot(Vec2 o) {
+        return x * o.x + y * o.y;
+    }
+
+    // The z of the cross product of the two vectors in the plane: positive if `o` turns left.
+    pub f32 cross(Vec2 o) {
+        return x * o.y - y * o.x;
+    }
+
+    pub f32 length() {
+        return sqrt32(x * x + y * y);
+    }
+
+    pub f32 distance(Vec2 o) {
+        return sub(o).length();
+    }
+
+    // The vector of length 1 in the same direction; the zero vector stays zero.
+    pub Vec2 normalized() {
+        f32 l = length();
+        return l == 0.0 ? Vec2{ x: 0.0, y: 0.0 } : scale(1.0 / l);
+    }
+
+    // The vector turned by a quarter of a turn, counterclockwise.
+    pub Vec2 perpendicular() {
+        return Vec2{ x: -y, y: x };
+    }
+
+    // The point at `t` from here (0) to `o` (1).
+    pub Vec2 lerp(Vec2 o, f32 t) {
+        return Vec2{ x: x + (o.x - x) * t, y: y + (o.y - y) * t };
+    }
+
+    pub bool near(Vec2 o, f32 eps) {
+        return close(x, o.x, eps) && close(y, o.y, eps);
+    }
+}
+
+pub struct Vec3 {
+    pub f32 x;
+    pub f32 y;
+    pub f32 z;
+
+    pub Vec3 add(Vec3 o) {
+        return Vec3{ x: x + o.x, y: y + o.y, z: z + o.z };
+    }
+
+    pub Vec3 sub(Vec3 o) {
+        return Vec3{ x: x - o.x, y: y - o.y, z: z - o.z };
+    }
+
+    pub Vec3 scale(f32 s) {
+        return Vec3{ x: x * s, y: y * s, z: z * s };
+    }
+
+    pub Vec3 mul(Vec3 o) {
+        return Vec3{ x: x * o.x, y: y * o.y, z: z * o.z };
+    }
+
+    pub Vec3 neg() {
+        return Vec3{ x: -x, y: -y, z: -z };
+    }
+
+    pub f32 dot(Vec3 o) {
+        return x * o.x + y * o.y + z * o.z;
+    }
+
+    pub Vec3 cross(Vec3 o) {
+        return Vec3{ x: y * o.z - z * o.y, y: z * o.x - x * o.z, z: x * o.y - y * o.x };
+    }
+
+    pub f32 length() {
+        return sqrt32(x * x + y * y + z * z);
+    }
+
+    pub f32 distance(Vec3 o) {
+        return sub(o).length();
+    }
+
+    pub Vec3 normalized() {
+        f32 l = length();
+        return l == 0.0 ? Vec3{ x: 0.0, y: 0.0, z: 0.0 } : scale(1.0 / l);
+    }
+
+    pub Vec3 lerp(Vec3 o, f32 t) {
+        return Vec3{ x: x + (o.x - x) * t, y: y + (o.y - y) * t, z: z + (o.z - z) * t };
+    }
+
+    pub bool near(Vec3 o, f32 eps) {
+        return close(x, o.x, eps) && close(y, o.y, eps) && close(z, o.z, eps);
+    }
+}
+
+pub struct Vec4 {
+    pub f32 x;
+    pub f32 y;
+    pub f32 z;
+    pub f32 w;
+
+    pub Vec4 add(Vec4 o) {
+        return Vec4{ x: x + o.x, y: y + o.y, z: z + o.z, w: w + o.w };
+    }
+
+    pub Vec4 sub(Vec4 o) {
+        return Vec4{ x: x - o.x, y: y - o.y, z: z - o.z, w: w - o.w };
+    }
+
+    pub Vec4 scale(f32 s) {
+        return Vec4{ x: x * s, y: y * s, z: z * s, w: w * s };
+    }
+
+    pub Vec4 mul(Vec4 o) {
+        return Vec4{ x: x * o.x, y: y * o.y, z: z * o.z, w: w * o.w };
+    }
+
+    pub f32 dot(Vec4 o) {
+        return x * o.x + y * o.y + z * o.z + w * o.w;
+    }
+
+    pub f32 length() {
+        return sqrt32(x * x + y * y + z * z + w * w);
+    }
+
+    pub Vec4 normalized() {
+        f32 l = length();
+        return l == 0.0 ? Vec4{ x: 0.0, y: 0.0, z: 0.0, w: 0.0 } : scale(1.0 / l);
+    }
+
+    pub Vec4 lerp(Vec4 o, f32 t) {
+        return Vec4{ x: x + (o.x - x) * t, y: y + (o.y - y) * t, z: z + (o.z - z) * t, w: w + (o.w - w) * t };
+    }
+
+    // The point in 3D: x, y and z divided by w (after a projection).
+    pub Vec3 project() {
+        return Vec3{ x: x / w, y: y / w, z: z / w };
+    }
+
+    pub Vec3 xyz() {
+        return Vec3{ x: x, y: y, z: z };
+    }
+
+    pub bool near(Vec4 o, f32 eps) {
+        return close(x, o.x, eps) && close(y, o.y, eps) && close(z, o.z, eps) && close(w, o.w, eps);
+    }
+}
+
+pub Vec2 vec2(f32 x, f32 y) {
+    return Vec2{ x: x, y: y };
+}
+
+pub Vec3 vec3(f32 x, f32 y, f32 z) {
+    return Vec3{ x: x, y: y, z: z };
+}
+
+pub Vec4 vec4(f32 x, f32 y, f32 z, f32 w) {
+    return Vec4{ x: x, y: y, z: z, w: w };
+}
+
+// ---- Matrices ----
+
+// A 3 by 3 matrix: rotations in 3D, and the transforms of the plane (a point being (x, y, 1)).
+pub struct Mat3 {
+    pub mut f32[9] m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];  // by columns
+
+    pub f32 at(usize row, usize col) {
+        return m[col * 3 + row];
+    }
+
+    pub void set(usize row, usize col, f32 value) {
+        m[col * 3 + row] = value;
+    }
+
+    pub Mat3 mul(Mat3 o) {
+        mut Mat3 r = Mat3{ };
+        for (usize row in 0..3) {
+            for (usize col in 0..3) {
+                mut f32 s = 0.0;
+                for (usize k in 0..3) {
+                    s += at(row, k) * o.at(k, col);
+                }
+                r.set(row, col, s);
+            }
+        }
+        return r;
+    }
+
+    pub Vec3 mul_vec(Vec3 v) {
+        return Vec3{ x: at(0, 0) * v.x + at(0, 1) * v.y + at(0, 2) * v.z, y: at(1, 0) * v.x + at(1, 1) * v.y + at(1, 2) * v.z, z: at(2, 0) * v.x + at(2, 1) * v.y + at(2, 2) * v.z };
+    }
+
+    // A point of the plane moved by the matrix (a transform of `translation2`...).
+    pub Vec2 transform_point(Vec2 p) {
+        Vec3 r = mul_vec(Vec3{ x: p.x, y: p.y, z: 1.0 });
+        return Vec2{ x: r.x / r.z, y: r.y / r.z };
+    }
+
+    // A direction of the plane: turned and scaled, not moved.
+    pub Vec2 transform_vector(Vec2 v) {
+        Vec3 r = mul_vec(Vec3{ x: v.x, y: v.y, z: 0.0 });
+        return Vec2{ x: r.x, y: r.y };
+    }
+
+    pub Mat3 transposed() {
+        mut Mat3 r = Mat3{ };
+        for (usize row in 0..3) {
+            for (usize col in 0..3) {
+                r.set(row, col, at(col, row));
+            }
+        }
+        return r;
+    }
+
+    pub f32 determinant() {
+        return at(0, 0) * (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1)) - at(0, 1) * (at(1, 0) * at(2, 2) - at(1, 2) * at(2, 0)) + at(0, 2) * (at(1, 0) * at(2, 1) - at(1, 1) * at(2, 0));
+    }
+
+    // The inverse, or none if the matrix has none (its determinant is 0).
+    pub Mat3? inverse() {
+        f32 d = determinant();
+        if (d == 0.0) {
+            return none;
+        }
+        mut Mat3 r = Mat3{ };
+        for (usize row in 0..3) {
+            for (usize col in 0..3) {
+                // the cofactor of (col, row), over the determinant
+                usize r1 = (col + 1) % 3;
+                usize r2 = (col + 2) % 3;
+                usize c1 = (row + 1) % 3;
+                usize c2 = (row + 2) % 3;
+                r.set(row, col, (at(r1, c1) * at(r2, c2) - at(r1, c2) * at(r2, c1)) / d);
+            }
+        }
+        return some(r);
+    }
+
+    pub bool near(Mat3 o, f32 eps) {
+        for (usize i in 0..9) {
+            if (!close(m[i], o.m[i], eps)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// A 4 by 4 matrix: the transforms of 3D, and projections.
+pub struct Mat4 {
+    pub mut f32[16] m = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];  // by columns
+
+    pub f32 at(usize row, usize col) {
+        return m[col * 4 + row];
+    }
+
+    pub void set(usize row, usize col, f32 value) {
+        m[col * 4 + row] = value;
+    }
+
+    // This matrix after `o`: `a.mul(b).mul_vec(v)` is `a.mul_vec(b.mul_vec(v))`.
+    pub Mat4 mul(Mat4 o) {
+        mut Mat4 r = Mat4{ };
+        for (usize row in 0..4) {
+            for (usize col in 0..4) {
+                mut f32 s = 0.0;
+                for (usize k in 0..4) {
+                    s += at(row, k) * o.at(k, col);
+                }
+                r.set(row, col, s);
+            }
+        }
+        return r;
+    }
+
+    pub Vec4 mul_vec(Vec4 v) {
+        mut f32[4] r = [0.0; 4];
+        for (usize row in 0..4) {
+            r[row] = at(row, 0) * v.x + at(row, 1) * v.y + at(row, 2) * v.z + at(row, 3) * v.w;
+        }
+        return Vec4{ x: r[0], y: r[1], z: r[2], w: r[3] };
+    }
+
+    // A point moved by the matrix, divided by its w (so also through a projection).
+    pub Vec3 transform_point(Vec3 p) {
+        return mul_vec(Vec4{ x: p.x, y: p.y, z: p.z, w: 1.0 }).project();
+    }
+
+    // A direction: turned and scaled, not moved.
+    pub Vec3 transform_vector(Vec3 v) {
+        return mul_vec(Vec4{ x: v.x, y: v.y, z: v.z, w: 0.0 }).xyz();
+    }
+
+    pub Mat4 transposed() {
+        mut Mat4 r = Mat4{ };
+        for (usize row in 0..4) {
+            for (usize col in 0..4) {
+                r.set(row, col, at(col, row));
+            }
+        }
+        return r;
+    }
+
+    pub f32 determinant() {
+        Inverse parts = inverse_parts(Mat4{ m: m });
+        return parts.det;
+    }
+
+    // The inverse, or none if the matrix has none (its determinant is 0).
+    pub Mat4? inverse() {
+        Inverse parts = inverse_parts(Mat4{ m: m });
+        if (parts.det == 0.0) {
+            return none;
+        }
+        mut Mat4 r = parts.adjugate;
+        for (usize i in 0..16) {
+            r.m[i] = r.m[i] / parts.det;
+        }
+        return some(r);
+    }
+
+    // The upper left 3 by 3 part (the rotation and scale of a transform).
+    pub Mat3 upper3() {
+        mut Mat3 r = Mat3{ };
+        for (usize row in 0..3) {
+            for (usize col in 0..3) {
+                r.set(row, col, at(row, col));
+            }
+        }
+        return r;
+    }
+
+    pub bool near(Mat4 o, f32 eps) {
+        for (usize i in 0..16) {
+            if (!close(m[i], o.m[i], eps)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// The determinant of a 4 by 4 matrix and its adjugate, from its 2 by 2 minors.
+struct Inverse {
+    f32 det;
+    Mat4 adjugate;
+}
+
+Inverse inverse_parts(Mat4 a) {
+    f32 s0 = a.at(0, 0) * a.at(1, 1) - a.at(1, 0) * a.at(0, 1);
+    f32 s1 = a.at(0, 0) * a.at(1, 2) - a.at(1, 0) * a.at(0, 2);
+    f32 s2 = a.at(0, 0) * a.at(1, 3) - a.at(1, 0) * a.at(0, 3);
+    f32 s3 = a.at(0, 1) * a.at(1, 2) - a.at(1, 1) * a.at(0, 2);
+    f32 s4 = a.at(0, 1) * a.at(1, 3) - a.at(1, 1) * a.at(0, 3);
+    f32 s5 = a.at(0, 2) * a.at(1, 3) - a.at(1, 2) * a.at(0, 3);
+    f32 c5 = a.at(2, 2) * a.at(3, 3) - a.at(3, 2) * a.at(2, 3);
+    f32 c4 = a.at(2, 1) * a.at(3, 3) - a.at(3, 1) * a.at(2, 3);
+    f32 c3 = a.at(2, 1) * a.at(3, 2) - a.at(3, 1) * a.at(2, 2);
+    f32 c2 = a.at(2, 0) * a.at(3, 3) - a.at(3, 0) * a.at(2, 3);
+    f32 c1 = a.at(2, 0) * a.at(3, 2) - a.at(3, 0) * a.at(2, 2);
+    f32 c0 = a.at(2, 0) * a.at(3, 1) - a.at(3, 0) * a.at(2, 1);
+    mut Mat4 b = Mat4{ };
+    b.set(0, 0, a.at(1, 1) * c5 - a.at(1, 2) * c4 + a.at(1, 3) * c3);
+    b.set(0, 1, -a.at(0, 1) * c5 + a.at(0, 2) * c4 - a.at(0, 3) * c3);
+    b.set(0, 2, a.at(3, 1) * s5 - a.at(3, 2) * s4 + a.at(3, 3) * s3);
+    b.set(0, 3, -a.at(2, 1) * s5 + a.at(2, 2) * s4 - a.at(2, 3) * s3);
+    b.set(1, 0, -a.at(1, 0) * c5 + a.at(1, 2) * c2 - a.at(1, 3) * c1);
+    b.set(1, 1, a.at(0, 0) * c5 - a.at(0, 2) * c2 + a.at(0, 3) * c1);
+    b.set(1, 2, -a.at(3, 0) * s5 + a.at(3, 2) * s2 - a.at(3, 3) * s1);
+    b.set(1, 3, a.at(2, 0) * s5 - a.at(2, 2) * s2 + a.at(2, 3) * s1);
+    b.set(2, 0, a.at(1, 0) * c4 - a.at(1, 1) * c2 + a.at(1, 3) * c0);
+    b.set(2, 1, -a.at(0, 0) * c4 + a.at(0, 1) * c2 - a.at(0, 3) * c0);
+    b.set(2, 2, a.at(3, 0) * s4 - a.at(3, 1) * s2 + a.at(3, 3) * s0);
+    b.set(2, 3, -a.at(2, 0) * s4 + a.at(2, 1) * s2 - a.at(2, 3) * s0);
+    b.set(3, 0, -a.at(1, 0) * c3 + a.at(1, 1) * c1 - a.at(1, 2) * c0);
+    b.set(3, 1, a.at(0, 0) * c3 - a.at(0, 1) * c1 + a.at(0, 2) * c0);
+    b.set(3, 2, -a.at(3, 0) * s3 + a.at(3, 1) * s1 - a.at(3, 2) * s0);
+    b.set(3, 3, a.at(2, 0) * s3 - a.at(2, 1) * s1 + a.at(2, 2) * s0);
+    return Inverse{ det: s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0, adjugate: b };
+}
+
+pub Mat3 identity3() {
+    return Mat3{ };
+}
+
+pub Mat4 identity4() {
+    return Mat4{ };
+}
+
+// The transforms of the plane, as 3 by 3 matrices.
+pub Mat3 translation2(Vec2 t) {
+    mut Mat3 r = Mat3{ };
+    r.set(0, 2, t.x);
+    r.set(1, 2, t.y);
+    return r;
+}
+
+pub Mat3 rotation2(f32 angle) {
+    f32 c = cos32(angle);
+    f32 s = sin32(angle);
+    mut Mat3 r = Mat3{ };
+    r.set(0, 0, c);
+    r.set(0, 1, -s);
+    r.set(1, 0, s);
+    r.set(1, 1, c);
+    return r;
+}
+
+pub Mat3 scaling2(Vec2 s) {
+    mut Mat3 r = Mat3{ };
+    r.set(0, 0, s.x);
+    r.set(1, 1, s.y);
+    return r;
+}
+
+// The transforms of 3D, as 4 by 4 matrices.
+pub Mat4 translation(Vec3 t) {
+    mut Mat4 r = Mat4{ };
+    r.set(0, 3, t.x);
+    r.set(1, 3, t.y);
+    r.set(2, 3, t.z);
+    return r;
+}
+
+pub Mat4 scaling(Vec3 s) {
+    mut Mat4 r = Mat4{ };
+    r.set(0, 0, s.x);
+    r.set(1, 1, s.y);
+    r.set(2, 2, s.z);
+    return r;
+}
+
+// A turn of `angle` around `axis` (of any length but 0), counterclockwise seen from its tip.
+pub Mat4 rotation(Vec3 axis, f32 angle) {
+    return from_axis_angle(axis, angle).to_mat4();
+}
+
+pub Mat4 rotation_x(f32 angle) {
+    return rotation(Vec3{ x: 1.0, y: 0.0, z: 0.0 }, angle);
+}
+
+pub Mat4 rotation_y(f32 angle) {
+    return rotation(Vec3{ x: 0.0, y: 1.0, z: 0.0 }, angle);
+}
+
+pub Mat4 rotation_z(f32 angle) {
+    return rotation(Vec3{ x: 0.0, y: 0.0, z: 1.0 }, angle);
+}
+
+// The view of a camera at `eye` looking at `target`, `up` giving the top of the image: the
+// camera looks down its -z.
+pub Mat4 look_at(Vec3 eye, Vec3 target, Vec3 up) {
+    Vec3 f = target.sub(eye).normalized();
+    Vec3 s = f.cross(up).normalized();
+    Vec3 u = s.cross(f);
+    mut Mat4 r = Mat4{ };
+    r.set(0, 0, s.x);
+    r.set(0, 1, s.y);
+    r.set(0, 2, s.z);
+    r.set(0, 3, -s.dot(eye));
+    r.set(1, 0, u.x);
+    r.set(1, 1, u.y);
+    r.set(1, 2, u.z);
+    r.set(1, 3, -u.dot(eye));
+    r.set(2, 0, -f.x);
+    r.set(2, 1, -f.y);
+    r.set(2, 2, -f.z);
+    r.set(2, 3, f.dot(eye));
+    return r;
+}
+
+// A perspective: `fov_y` the angle seen from bottom to top, `aspect` the width over the height;
+// the depth goes from 0 at `near` to 1 at `far`.
+pub Mat4 perspective(f32 fov_y, f32 aspect, f32 near, f32 far)
+    requires near > 0.0 && far > near && aspect > 0.0
+{
+    f32 f = 1.0 / math.tan((fov_y / 2.0) as f64) as f32;
+    mut Mat4 r = Mat4{ };
+    r.set(0, 0, f / aspect);
+    r.set(1, 1, f);
+    r.set(2, 2, far / (near - far));
+    r.set(2, 3, near * far / (near - far));
+    r.set(3, 2, -1.0);
+    r.set(3, 3, 0.0);
+    return r;
+}
+
+// A parallel projection of the box given; the depth goes from 0 at `near` to 1 at `far`.
+pub Mat4 orthographic(f32 left, f32 right, f32 bottom, f32 top, f32 near, f32 far)
+    requires right != left && top != bottom && far != near
+{
+    mut Mat4 r = Mat4{ };
+    r.set(0, 0, 2.0 / (right - left));
+    r.set(1, 1, 2.0 / (top - bottom));
+    r.set(2, 2, 1.0 / (near - far));
+    r.set(0, 3, -(right + left) / (right - left));
+    r.set(1, 3, -(top + bottom) / (top - bottom));
+    r.set(2, 3, near / (near - far));
+    return r;
+}
+
+// ---- Quaternions ----
+
+// A rotation in 3D, as a quaternion of length 1 (x, y, z the axis times sin(angle / 2), w its
+// cosine). Turns compose without the drift of matrices, and blend with `slerp`.
+pub struct Quat {
+    pub f32 x;
+    pub f32 y;
+    pub f32 z;
+    pub f32 w;
+
+    // This rotation after `o`.
+    pub Quat mul(Quat o) {
+        return Quat{ x: w * o.x + x * o.w + y * o.z - z * o.y, y: w * o.y - x * o.z + y * o.w + z * o.x, z: w * o.z + x * o.y - y * o.x + z * o.w, w: w * o.w - x * o.x - y * o.y - z * o.z };
+    }
+
+    // The rotation back (for a quaternion of length 1).
+    pub Quat conjugate() {
+        return Quat{ x: -x, y: -y, z: -z, w: w };
+    }
+
+    pub f32 dot(Quat o) {
+        return x * o.x + y * o.y + z * o.z + w * o.w;
+    }
+
+    pub f32 length() {
+        return sqrt32(x * x + y * y + z * z + w * w);
+    }
+
+    pub Quat normalized() {
+        f32 l = length();
+        return l == 0.0 ? Quat{ x: 0.0, y: 0.0, z: 0.0, w: 1.0 } : Quat{ x: x / l, y: y / l, z: z / l, w: w / l };
+    }
+
+    // `v` turned by the rotation.
+    pub Vec3 rotate(Vec3 v) {
+        Vec3 q = Vec3{ x: x, y: y, z: z };
+        Vec3 t = q.cross(v).scale(2.0);
+        return v.add(t.scale(w)).add(q.cross(t));
+    }
+
+    pub Mat4 to_mat4() {
+        mut Mat4 r = Mat4{ };
+        r.set(0, 0, 1.0 - 2.0 * (y * y + z * z));
+        r.set(0, 1, 2.0 * (x * y - z * w));
+        r.set(0, 2, 2.0 * (x * z + y * w));
+        r.set(1, 0, 2.0 * (x * y + z * w));
+        r.set(1, 1, 1.0 - 2.0 * (x * x + z * z));
+        r.set(1, 2, 2.0 * (y * z - x * w));
+        r.set(2, 0, 2.0 * (x * z - y * w));
+        r.set(2, 1, 2.0 * (y * z + x * w));
+        r.set(2, 2, 1.0 - 2.0 * (x * x + y * y));
+        return r;
+    }
+
+    // The rotation at `t` from this one (0) to `o` (1), at a steady speed, the short way.
+    pub Quat slerp(Quat o, f32 t) {
+        mut f32 d = dot(o);
+        mut Quat b = o;
+        if (d < 0.0) {
+            d = -d;
+            b = Quat{ x: -o.x, y: -o.y, z: -o.z, w: -o.w };
+        }
+        if (d > 0.9995) {  // nearly the same: a straight line is as good, and stable
+            return Quat{ x: x + (b.x - x) * t, y: y + (b.y - y) * t, z: z + (b.z - z) * t, w: w + (b.w - w) * t }.normalized();
+        }
+        f32 theta = math.acos(d as f64) as f32;
+        f32 s = sin32(theta);
+        f32 ka = sin32((1.0 - t) * theta) / s;
+        f32 kb = sin32(t * theta) / s;
+        return Quat{ x: x * ka + b.x * kb, y: y * ka + b.y * kb, z: z * ka + b.z * kb, w: w * ka + b.w * kb };
+    }
+
+    // Whether the two give the same rotation (q and -q do).
+    pub bool near(Quat o, f32 eps) {
+        return abs(abs(dot(o)) - 1.0) <= eps;
+    }
+}
+
+pub Quat identity_quat() {
+    return Quat{ x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+}
+
+// A turn of `angle` around `axis` (of any length but 0).
+pub Quat from_axis_angle(Vec3 axis, f32 angle) {
+    Vec3 a = axis.normalized().scale(sin32(angle / 2.0));
+    return Quat{ x: a.x, y: a.y, z: a.z, w: cos32(angle / 2.0) };
+}
+
+// ---- Transforms ----
+
+// Where a thing of a scene is: scaled first, then turned, then moved.
+pub struct Transform {
+    pub mut Vec3 position;
+    pub mut Quat rotation;
+    pub mut Vec3 scale;
+
+    pub Mat4 to_mat4() {
+        return translation(position).mul(rotation.to_mat4()).mul(scaling(scale));
+    }
+
+    pub Vec3 apply(Vec3 p) {
+        return rotation.rotate(p.mul(scale)).add(position);
+    }
+
+    // This transform after `inner` (the transform of a child, relative to its parent); exact
+    // when the scale of this one is the same on the three axes.
+    pub Transform then(Transform inner) {
+        return Transform{ position: apply(inner.position), rotation: rotation.mul(inner.rotation), scale: scale.mul(inner.scale) };
+    }
+}
+
+// A transform that changes nothing.
+pub Transform transform() {
+    return Transform{ position: Vec3{ x: 0.0, y: 0.0, z: 0.0 }, rotation: identity_quat(), scale: Vec3{ x: 1.0, y: 1.0, z: 1.0 } };
+}

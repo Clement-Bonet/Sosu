@@ -1,0 +1,71 @@
+// crypto.hmac: HMAC (RFC 2104) with SHA-256 or SHA-1, and `equal` to compare two of them in a
+// time that does not depend on where they differ.
+import crypto.sha256;
+import crypto.sha1;
+
+// The key brought to one block of 64 bytes, each byte xored with `pad`.
+ui8[64] padded_key(ui8[] key, ui8 pad, bool use_sha1) {
+    mut ui8[64] block = [0; 64];
+    if (key.len > 64) {
+        if (use_sha1) {
+            mut ui8[20] short = sha1.sum(key);
+            for (usize i in 0..20) {
+                block[i] = short[i];
+            }
+        } else {
+            mut ui8[32] short = sha256.sum(key);
+            for (usize i in 0..32) {
+                block[i] = short[i];
+            }
+        }
+    } else {
+        for (usize i in 0..key.len) {
+            block[i] = key[i];
+        }
+    }
+    for (usize i in 0..64) {
+        block[i] = block[i] ^ pad;
+    }
+    return block;
+}
+
+// HMAC-SHA256 of `message` with `key`: 32 bytes.
+pub ui8[32] with_sha256(ui8[] key, ui8[] message) {
+    mut ui8[64] inner_key = padded_key(key, 0x36, false);
+    mut ui8[64] outer_key = padded_key(key, 0x5c, false);
+    mut sha256.Sha256 inner = sha256.start();
+    inner.update(inner_key[0..64]);
+    inner.update(message);
+    mut ui8[32] inside = inner.finish();
+    mut sha256.Sha256 outer = sha256.start();
+    outer.update(outer_key[0..64]);
+    outer.update(inside[0..32]);
+    return outer.finish();
+}
+
+// HMAC-SHA1 of `message` with `key`: 20 bytes.
+pub ui8[20] with_sha1(ui8[] key, ui8[] message) {
+    mut ui8[64] inner_key = padded_key(key, 0x36, true);
+    mut ui8[64] outer_key = padded_key(key, 0x5c, true);
+    mut sha1.Sha1 inner = sha1.start();
+    inner.update(inner_key[0..64]);
+    inner.update(message);
+    mut ui8[20] inside = inner.finish();
+    mut sha1.Sha1 outer = sha1.start();
+    outer.update(outer_key[0..64]);
+    outer.update(inside[0..20]);
+    return outer.finish();
+}
+
+// Whether `a` and `b` hold the same bytes, looking at all of them whatever they hold: a code
+// received is compared with the one computed without telling an attacker how much was right.
+pub bool equal(ui8[] a, ui8[] b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    mut ui8 differ = 0;
+    for (usize i in 0..a.len) {
+        differ = differ | a[i] ^ b[i];
+    }
+    return differ == 0;
+}

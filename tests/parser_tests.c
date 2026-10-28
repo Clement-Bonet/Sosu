@@ -294,6 +294,38 @@ static void test_errors(void) {
     expect_error("void f() { auto x = if (a) { 1 }; }", "E0201", 1, 21, 1);
 }
 
+/* `count` copies of `open`, `middle`, `count` copies of `close`, in a function. */
+static const char *nested(const char *open, const char *middle, const char *close, int count) {
+    static char text[200000];
+    size_t n = (size_t)snprintf(text, sizeof text, "void f() { x = ");
+    for (int i = 0; i < count; i++) n += (size_t)snprintf(text + n, sizeof text - n, "%s", open);
+    n += (size_t)snprintf(text + n, sizeof text - n, "%s", middle);
+    for (int i = 0; i < count; i++) n += (size_t)snprintf(text + n, sizeof text - n, "%s", close);
+    snprintf(text + n, sizeof text - n, "; }");
+    return text;
+}
+
+/* Spec §12: the tree has 512 levels at most (E0219, once), so that the passes after the
+   parser do not exhaust the stack. */
+static void test_nesting(void) {
+    const char *cases[][3] = { { "(", "1", ")" }, { "[", "1", "]" }, { "- ", "1", "" }, { "", "1", " + 1" },
+                               { "", "x", ".f" }, { "", "x", "(1)" }, { "", "1", " as i32" } };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        const char *text = nested(cases[i][0], cases[i][1], cases[i][2], 200);
+        Parsed parsed;
+        parse_text(&parsed, text, false);
+        CHECK(parsed.diags.count == 0, "200 levels of `%s%s%s`: %zu diagnostics", cases[i][0], cases[i][1], cases[i][2],
+              parsed.diags.count);
+        parsed_free(&parsed);
+        text = nested(cases[i][0], cases[i][1], cases[i][2], 20000);
+        parse_text(&parsed, text, false);
+        CHECK(parsed.diags.count == 1 && strcmp(parsed.diags.items[0].code, "E0219") == 0,
+              "20000 levels of `%s%s%s`: %zu diagnostics, the first %s", cases[i][0], cases[i][1], cases[i][2],
+              parsed.diags.count, parsed.diags.count ? parsed.diags.items[0].code : "none");
+        parsed_free(&parsed);
+    }
+}
+
 static void test_recovery(void) {
     /* One error per broken statement, and the following ones are still parsed. */
     expect_error("void f() {\n    x = ;\n    y = 2;\n    z = );\n}\nvoid g() { }", "E0201", 2, 9, 2);
@@ -933,5 +965,6 @@ int main(void) {
     test_declarations();
     test_errors();
     test_recovery();
+    test_nesting();
     return test_summary("parser tests");
 }

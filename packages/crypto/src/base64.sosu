@@ -1,0 +1,141 @@
+// crypto.base64: bytes as base64 text (RFC 4648), and back. `encode` and `decode` use the
+// standard alphabet with `=` padding; `encode_url` and `decode_url` the alphabet safe in URLs
+// and file names (`-` and `_`), without padding.
+
+str standard_alphabet() {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+}
+
+str url_alphabet() {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+}
+
+str encode_with(Arena* arena, ui8[] bytes, str alphabet, bool pad) {
+    usize whole = bytes.len / 3;
+    usize rest = bytes.len % 3;
+    usize size = pad ? (bytes.len + 2) / 3 * 4 : whole * 4 + (rest == 0 ? 0 : rest + 1);
+    mut ui8[] out = arena.alloc_slice(ui8, size);
+    mut usize at = 0;
+    for (usize i in 0..whole) {
+        ui32 n = bytes[3 * i] as ui32 << 16 | bytes[3 * i + 1] as ui32 << 8 | bytes[3 * i + 2] as ui32;
+        for (usize k in 0..4) {
+            out[at + k] = alphabet.bytes[(n >> (18 - 6 * k) as ui32 & 63) as usize];
+        }
+        at += 4;
+    }
+    if (rest > 0) {
+        mut ui32 n = bytes[3 * whole] as ui32 << 16;
+        if (rest == 2) {
+            n = n | bytes[3 * whole + 1] as ui32 << 8;
+        }
+        for (usize k in 0..rest + 1) {
+            out[at + k] = alphabet.bytes[(n >> (18 - 6 * k) as ui32 & 63) as usize];
+        }
+        at += rest + 1;
+        if (pad) {
+            while (at < size) {
+                out[at] = '=' as ui8;
+                at += 1;
+            }
+        }
+    }
+    return ascii(out);
+}
+
+// `bytes` as base64, with padding, in `arena`.
+pub str encode(Arena* arena, ui8[] bytes) {
+    return encode_with(arena, bytes, standard_alphabet(), true);
+}
+
+// `bytes` as base64 for URLs, without padding, in `arena`.
+pub str encode_url(Arena* arena, ui8[] bytes) {
+    return encode_with(arena, bytes, url_alphabet(), false);
+}
+
+// The value of a base64 character, or -1.
+i32 value(ui8 c, bool url) {
+    if (c >= 'A' as ui8 && c <= 'Z' as ui8) {
+        return (c - 'A' as ui8) as i32;
+    }
+    if (c >= 'a' as ui8 && c <= 'z' as ui8) {
+        return (c - 'a' as ui8) as i32 + 26;
+    }
+    if (c >= '0' as ui8 && c <= '9' as ui8) {
+        return (c - '0' as ui8) as i32 + 52;
+    }
+    if (c == (url ? '-' : '+') as ui8) {
+        return 62;
+    }
+    if (c == (url ? '_' : '/') as ui8) {
+        return 63;
+    }
+    return -1;
+}
+
+ui8[]? decode_with(Arena* arena, str text, bool url) {
+    mut usize len = text.len;
+    if (!url) {
+        if (len % 4 != 0) {
+            return none;
+        }
+        mut usize pads = 0;
+        while (pads < 2 && len > 0 && text.bytes[len - 1] == '=' as ui8) {
+            len -= 1;
+            pads += 1;
+        }
+    }
+    if (len % 4 == 1) {
+        return none;
+    }
+    mut ui8[] out = arena.alloc_slice(ui8, len / 4 * 3 + (len % 4 == 0 ? 0 : len % 4 - 1));
+    mut ui32 n = 0;
+    mut usize got = 0;  // characters in `n`
+    mut usize at = 0;
+    for (usize i in 0..len) {
+        i32 v = value(text.bytes[i], url);
+        if (v < 0) {
+            return none;
+        }
+        n = n << 6 | v as ui32;
+        got += 1;
+        if (got == 4) {
+            out[at] = (n >> 16 & 0xFF) as ui8;
+            out[at + 1] = (n >> 8 & 0xFF) as ui8;
+            out[at + 2] = (n & 0xFF) as ui8;
+            at += 3;
+            n = 0;
+            got = 0;
+        }
+    }
+    if (got == 2) {
+        if (n & 15 != 0) {
+            return none;  // bits left that are not zero: not what an encoder writes
+        }
+        out[at] = (n >> 4 & 0xFF) as ui8;
+    } else if (got == 3) {
+        if (n & 3 != 0) {
+            return none;
+        }
+        out[at] = (n >> 10 & 0xFF) as ui8;
+        out[at + 1] = (n >> 2 & 0xFF) as ui8;
+    }
+    return some(out);
+}
+
+// The bytes of base64 `text` (standard alphabet, padded), or none if it is not base64.
+pub ui8[]? decode(Arena* arena, str text) {
+    return decode_with(arena, text, false);
+}
+
+// The bytes of base64 `text` written for URLs (without padding), or none.
+pub ui8[]? decode_url(Arena* arena, str text) {
+    return decode_with(arena, text, true);
+}
+
+// Bytes known to be ASCII seen as a `str`: a view and a `str` are both a pointer and a length.
+str ascii(ui8[] bytes) {
+    mut ui8[] view = bytes;
+    unsafe {
+        return *(&view as str*);
+    }
+}

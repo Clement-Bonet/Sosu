@@ -148,6 +148,15 @@ static void test_manifest(void) {
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nlabel = \"A\"\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nid = \"x\"\nid = \"y\"\n", "E0408");
 
+    /* values given to commands: nothing that ends their quotes or is expanded in them */
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibs = [\"m\\\" & calc & \\\"\"]\n", "E0416");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nc = [\"$(id).c\"]\n", "E0416");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\npaths = [\"%PATH%\"]\n", "E0416");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\ncopy = [\"a`b`\"]\n", "E0416");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\ndefines = [\"X\\n\"]\n", "E0416");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[dependencies]\nb = { path = \"../$b\" }\n", "E0416");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\npaths = [\"C:\\\\Program Files\\\\été (x86)\"]\n", "");
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nname = \"100% $ \\\"fun\\\"\"\n", "");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link.beos]\nlibs = [\"x\"]\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nlibraries = [\"x\"]\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[link]\nsubsystem = \"gui\"\n", "E0402");

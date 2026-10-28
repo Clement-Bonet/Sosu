@@ -1,0 +1,4 @@
+# Linear algebra for 2D and 3D in Sosu (spec §8.2): vectors, matrices, quaternions, transforms.
+[package]
+name = "math"
+version = "0.1.0"

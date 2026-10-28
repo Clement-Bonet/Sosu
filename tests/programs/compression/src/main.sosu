@@ -1,0 +1,134 @@
+// The package compress (spec §8.2): checksums, deflate at each level, zlib and gzip.
+import std.io;
+import std.text;
+import std.random;
+import compress.checksum;
+import compress.deflate;
+import compress.zlib;
+import compress.gzip;
+import crypto.hex;
+
+ui8[] bytes_of_hex(Arena* arena, str digits) {
+    return match (hex.decode(arena, digits)) {
+        some(bytes) => bytes,
+        none => arena.alloc_slice(ui8, 0),
+    };
+}
+
+bool same(ui8[] a, ui8[] b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (usize i in 0..a.len) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `data` compressed at each level, its sizes, and whether each reads back the same.
+void levels(Arena* arena, str name, ui8[] data) uses io {
+    mut text.TextBuilder* line = text.builder(arena);
+    line.push(name);
+    line.push(": ");
+    line.push_u64(data.len as ui64);
+    line.push(" bytes ->");
+    mut bool all = true;
+    for (i32 level in [0, 1, 6, 9]) {
+        ui8[] packed = deflate.deflate_level(arena, data, level);
+        line.push(" ");
+        line.push_u64(packed.len as ui64);
+        match (deflate.inflate(arena, packed)) {
+            ok(back) => {
+                all = all && same(back, data);
+            },
+            err(e) => {
+                all = false;
+            },
+        }
+    }
+    ui8[] z = zlib.compress(arena, data);
+    ui8[] g = gzip.compress(arena, data);
+    bool z_back = match (zlib.decompress(arena, z)) {
+        ok(back) => same(back, data),
+        err(e) => false,
+    };
+    bool g_back = match (gzip.decompress(arena, g)) {
+        ok(back) => same(back, data),
+        err(e) => false,
+    };
+    io.print("{}; read back: {}, zlib {} ({}), gzip {} ({})", line.text(), all, z_back, z.len, g_back, g.len);
+}
+
+void read_zlib(Arena* arena, str name, ui8[] data) uses io {
+    match (zlib.decompress(arena, data)) {
+        ok(bytes) => io.print("{}: \"{}\"", name, as_text(bytes)),
+        err(e) => io.print("{}: {}", name, deflate.message(e)),
+    }
+}
+
+void read_gzip(Arena* arena, str name, ui8[] data) uses io {
+    match (gzip.decompress(arena, data)) {
+        ok(bytes) => io.print("{}: \"{}\"", name, as_text(bytes)),
+        err(e) => io.print("{}: {}", name, deflate.message(e)),
+    }
+}
+
+str as_text(ui8[] bytes) {
+    return match (str.from_bytes(bytes)) {
+        ok(s) => s,
+        err(e) => "(not UTF-8)",
+    };
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+
+    io.print("adler32: {}, crc32: {}", checksum.adler32("Wikipedia".bytes) == 0x11E60398, checksum.crc32("123456789".bytes) == 0xCBF43926);
+    mut checksum.Crc32Table table = checksum.crc32_table();
+    ui32 parts = checksum.crc32_from(&table, checksum.crc32("12345".bytes), "6789".bytes);
+    io.print("crc32 by parts: {}, adler32 by parts: {}", parts == 0xCBF43926, checksum.adler32_from(checksum.adler32("Wiki".bytes), "pedia".bytes) == 0x11E60398);
+
+    // written here, read back
+    levels(&arena, "empty", "".bytes);
+    levels(&arena, "one byte", "a".bytes);
+    levels(&arena, "a sentence", "the quick brown fox jumps over the lazy dog".bytes);
+    levels(&arena, "repeated", text.repeat(&arena, "the quick brown fox jumps over the lazy dog. ", 2000).bytes);
+    mut ui8[] noise = arena.alloc_slice(ui8, 100000);
+    mut random.Rng rng = random.seeded(42);
+    for (usize i in 0..noise.len) {
+        noise[i] = (rng.next() & 0xFF) as ui8;
+    }
+    levels(&arena, "noise", noise);
+    mut ui8[] mixed = arena.alloc_slice(ui8, 300000);
+    for (usize i in 0..mixed.len) {
+        mixed[i] = i % 7 == 0 ? (rng.below(4) + 65) as ui8 : (i / 1000 % 26 + 97) as ui8;
+    }
+    levels(&arena, "mixed", mixed);
+
+    // written by zlib and by the command gzip (a name in the header, two members)
+    read_zlib(&arena, "zlib", bytes_of_hex(&arena, "789ccb48cdc9c90700062c0215"));
+    read_gzip(&arena, "gzip", bytes_of_hex(&arena, "1f8b0800000000000003cb48cdc9c9070086a6103605000000"));
+    read_gzip(&arena, "gzip with a name", bytes_of_hex(&arena, "1f8b08082154e26a00036e616d65642e74787400cb48cdc9c957c8402701e3513d8d17000000"));
+    read_gzip(&arena, "two members", bytes_of_hex(&arena, "1f8b08000000000000034b4c4a0600c2412435030000001f8b08000000000000034b494d030061e1c40c03000000"));
+
+    // damaged
+    read_zlib(&arena, "cut", bytes_of_hex(&arena, "789ccb48cdc9"));
+    read_zlib(&arena, "wrong Adler-32", bytes_of_hex(&arena, "789ccb48cdc9c90700062c0216"));
+    read_zlib(&arena, "not zlib", "hello".bytes);
+    read_gzip(&arena, "wrong CRC-32", bytes_of_hex(&arena, "1f8b0800000000000003cb48cdc9c9070086a6103705000000"));
+    read_gzip(&arena, "wrong size", bytes_of_hex(&arena, "1f8b0800000000000003cb48cdc9c9070086a6103606000000"));
+    mut ui8[4] small = [0; 4];
+    match (zlib.decompress_into(bytes_of_hex(&arena, "789ccb48cdc9c90700062c0215"), small[0..4])) {
+        ok(n) => io.print("into 4 bytes: {}", n),
+        err(e) => io.print("into 4 bytes: {}", deflate.message(e)),
+    }
+    mut ui8[5] exact = [0; 5];
+    match (zlib.decompress_into(bytes_of_hex(&arena, "789ccb48cdc9c90700062c0215"), exact[0..5])) {
+        ok(n) => io.print("into 5 bytes: {} \"{}\"", n, as_text(exact[0..n])),
+        err(e) => io.print("into 5 bytes: {}", deflate.message(e)),
+    }
+    return 0;
+}

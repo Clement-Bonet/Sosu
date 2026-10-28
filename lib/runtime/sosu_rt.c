@@ -299,11 +299,15 @@ void *sosu_arena_try_alloc(sosu_arena *arena, size_t size) {
     sosu_arena_state *state = arena->state;
     if (!state) return NULL;
     size_t align = sizeof(sosu_max_align);
+    if (size > SIZE_MAX - sizeof(sosu_block) - align) return NULL; /* the sums below would wrap around */
     size = (size + align - 1) / align * align;
     if (size == 0) size = align;
     if (!state->head || state->head->cap - state->head->used < size) {
         size_t cap = size > state->block_size ? size : state->block_size;
-        sosu_block *block = malloc(sizeof(sosu_block) + cap);
+        if (cap > SIZE_MAX - sizeof(sosu_block)) return NULL;
+        /* zeroed once, by the system: memory is handed out only once (a block is never reused), and
+           large blocks often come as pages already zero, untouched until they are written */
+        sosu_block *block = calloc(1, sizeof(sosu_block) + cap);
         if (!block) return NULL;
         block->next = state->head;
         block->used = 0;
@@ -312,8 +316,7 @@ void *sosu_arena_try_alloc(sosu_arena *arena, size_t size) {
     }
     void *memory = (char *)state->head->data + state->head->used;
     state->head->used += size;
-    memset(memory, 0, size);
-    return memory;
+    return memory; /* zero: `alloc` gives zeroed memory (spec §6) */
 }
 
 void *sosu_arena_alloc(sosu_arena *arena, size_t size, const char *loc) {

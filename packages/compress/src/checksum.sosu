@@ -1,0 +1,59 @@
+// compress.checksum: the checksums of the containers, Adler-32 (zlib) and CRC-32 (gzip, PNG,
+// zip). Both can be computed by parts: the value of what came before is given back.
+
+// The Adler-32 of `data`, continuing from `previous` (1 for the first part).
+pub ui32 adler32_from(ui32 previous, ui8[] data) {
+    mut ui32 a = previous & 0xFFFF;
+    mut ui32 b = previous >> 16;
+    mut usize at = 0;
+    while (at < data.len) {
+        // 5552 bytes at most between two reductions: the sums stay below 2^32
+        usize end = min(at + 5552, data.len);
+        for (usize i in at..end) {
+            a += data[i] as ui32;
+            b += a;
+        }
+        a = a % 65521;
+        b = b % 65521;
+        at = end;
+    }
+    return b << 16 | a;
+}
+
+// The Adler-32 of `data`.
+pub ui32 adler32(ui8[] data) {
+    return adler32_from(1, data);
+}
+
+// The table of the CRC-32 of each byte (the polynomial 0xEDB88320, reflected).
+pub struct Crc32Table {
+    mut ui32[256] entries = [0; 256];
+}
+
+// The table, computed once and given to `crc32_from`.
+pub Crc32Table crc32_table() {
+    mut Crc32Table t = Crc32Table{ };
+    for (ui32 n in 0..256) {
+        mut ui32 c = n;
+        for (i32 k in 0..8) {
+            c = c & 1 != 0 ? 0xEDB88320 ^ c >> 1 : c >> 1;
+        }
+        t.entries[n as usize] = c;
+    }
+    return t;
+}
+
+// The CRC-32 of `data`, continuing from `previous` (0 for the first part).
+pub ui32 crc32_from(Crc32Table* table, ui32 previous, ui8[] data) {
+    mut ui32 c = ~previous;
+    for (ui8 x in data) {
+        c = table.entries[((c ^ x as ui32) & 0xFF) as usize] ^ c >> 8;
+    }
+    return ~c;
+}
+
+// The CRC-32 of `data`.
+pub ui32 crc32(ui8[] data) {
+    mut Crc32Table table = crc32_table();
+    return crc32_from(&table, 0, data);
+}
