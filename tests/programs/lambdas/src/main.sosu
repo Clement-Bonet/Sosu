@@ -1,0 +1,150 @@
+// Lambdas and closures (spec §5.5): parameters written or taken from the expected type,
+// captures by copy, effects inferred, generic functions, methods, fields and C pointers.
+import std.io;
+
+struct Op {
+    fn(i32) -> i32 apply;
+}
+
+class Counter {
+    mut i32 total;
+
+    void init(i32 start) {
+        total = start;
+    }
+
+    // a lambda in a method captures `self`
+    void add_all(i32[] values) {
+        each(values, (i32 v) => add(v));
+    }
+
+    void add(i32 v) {
+        total += v;
+    }
+}
+
+i32 twice(fn(i32) -> i32 f, i32 x) {
+    return f(f(x));
+}
+
+void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E {
+    for (T x in items) {
+        f(x);
+    }
+}
+
+U fold<T, U>(T[] items, U start, fn(U, T) -> U f) {
+    mut U acc = start;
+    for (T x in items) {
+        acc = f(acc, x);
+    }
+    return acc;
+}
+
+i32 apply_all((fn(i32) -> i32)[2] fs, i32 x) {
+    mut i32 result = x;
+    for (fn(i32) -> i32 f in fs) {
+        result = f(result);
+    }
+    return result;
+}
+
+i32 double(i32 x) {
+    return x * 2;
+}
+
+// methods with type parameters of their own (spec §5.4)
+struct Box<T> {
+    T value;
+
+    U map<U>(fn(T) -> U f) {
+        return f(value);
+    }
+
+    Box<U> rebox<U>(fn(T) -> U f) {
+        return Box{ value: map(f) };
+    }
+}
+
+class Log {
+    mut i32 count;
+
+    void init() {
+        count = 0;
+    }
+
+    T note<T>(T x) {
+        count += 1;
+        return x;
+    }
+}
+
+// a function received as a parameter cannot be kept when it captured variables: checked at run time
+fn(i32) -> i32 keep(fn(i32) -> i32 f) {
+    return f;
+}
+
+i32 main() uses io {
+    // the types of the parameters come from the expected type
+    io.print("twice: {}", twice((x) => x + 3, 1));
+
+    // a closure copies what it uses
+    i32 step = 10;
+    auto add_step = (i32 x) => x + step;
+    io.print("closure: {}", twice(add_step, 1));
+
+    // a block body, and a function as a value
+    fn(i32) -> i32 clamp = (i32 x) => {
+        if (x > 100) {
+            return 100;
+        }
+        return x;
+    };
+    io.print("block: {} {}", clamp(250), clamp(7));
+    io.print("function: {}", twice(double, 5));
+
+    // generic functions: the types and the effects are inferred
+    mut i32[4] values = [1, 2, 3, 4];
+    each(values[0..4], (v) => io.print("item {}", v));
+    i32 first = 100;
+    io.print("fold: {}", fold(values[0..4], first, (i32 acc, i32 v) => acc + v * step));
+    str joined = fold(values[0..2], "", (str acc, i32 v) => v == 1 ? "one" : acc);
+    io.print("fold str: {}", joined);
+
+    // nested lambdas capture through the outer one
+    i32 k = 3;
+    auto outer = (i32 x) => twice((i32 y) => y * k, x);
+    io.print("nested: {}", outer(2));
+
+    // a method, through self
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Counter* counter = arena.new(Counter, 5);
+    counter.add_all(values[0..4]);
+    io.print("counter: {}", counter.total);
+
+    // a field holds a function without captures
+    Op op = Op{ apply: (x) => x - 1 };
+    io.print("field: {}", op.apply(10));
+
+    // methods with type parameters of their own
+    Box<i32> box = Box{ value: 21 };
+    str text = box.map((v) => v > 20 ? "big" : "small");
+    Box<i64> wide = box.rebox((v) => v as i64 * 2);
+    Log* log = arena.new(Log);
+    io.print("methods: {} {} {} {}", text, wide.value, log.note(true), log.note("x"));
+    io.print("notes: {}", log.count);
+
+    // an array of functions, its type in parentheses
+    (fn(i32) -> i32)[2] fs = [double, (x) => x + 1];
+    io.print("array: {}", apply_all(fs, 4));
+
+    // a lambda without captures can leave its function
+    fn(i32) -> i32 kept = keep((x) => x * x);
+    io.print("kept: {}", kept(9));
+
+    // one that captured variables cannot: the program stops (code 101)
+    fn(i32) -> i32 lost = keep(add_step);
+    io.print("not reached: {}", lost(1));
+    return 0;
+}

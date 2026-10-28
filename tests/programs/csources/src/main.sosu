@@ -1,0 +1,13 @@
+// A C file of the package, compiled with the program ([link] c, spec §9.1).
+import std.io;
+
+extern "C" {
+    i32 mathx_scale(i32 x);
+}
+
+i32 main() uses io {
+    unsafe {
+        io.print("scaled: {}", mathx_scale(4));
+    }
+    return 0;
+}

@@ -1,0 +1,462 @@
+// std.cli: the options and arguments of a command, and its help written from them (spec §8.2).
+//
+//     cli.Command* c = cli.command(&arena, "count", "Counts the words of files.");
+//     c.flag("verbose", 'v', "print each file");
+//     c.option("min", 'm', "N", "only the words of N letters or more", "1");
+//     c.argument("file", "the first file to read");
+//     c.rest("files", "the other files");
+//     match (c.parse(os.args(&arena))) {
+//         ok(m) => ... m.flag("verbose"), m.value("min"), m.argument("file"), m.rest() ...
+//         err(e) => io.print("{}", c.message(&arena, e)),  // the help, or what is wrong
+//     }
+//
+// Written `--name value`, `--name=value`, `-n value` or `-nvalue`; flags without value join
+// (`-vq`). `--` ends the options: what follows are arguments, even if they start with `-`.
+// `-h` and `--help` give `HelpWanted`.
+
+import std.text;
+import std.vec;
+
+pub enum CliError {
+    HelpWanted,  // -h or --help
+    UnknownOption(str name),  // as written: "--colour", "-x"
+    MissingValue(str name),  // an option without its value
+    NotAFlag(str name),  // --verbose=yes: a flag takes no value
+    MissingArgument(str name),  // fewer arguments than declared
+    TooManyArguments(str value),  // the first one beyond those declared
+}
+
+struct Spec {
+    str name;
+    char? short;
+    str value_name;  // "" for a flag
+    str help;
+    str default_value;
+}
+
+struct Given {
+    str name;
+    str value;
+}
+
+// A command: its options and arguments, declared before `parse`.
+pub class Command {
+    str name;
+    str about;
+    Arena* arena;
+    vec.Vec<Spec>* options;
+    vec.Vec<Spec>* arguments;
+    mut str rest_name;  // "" without `rest`
+    mut str rest_help;
+
+    void init(Arena* arena, str name, str about) {
+        self.arena = arena;
+        self.name = name;
+        self.about = about;
+        options = vec.new(arena);
+        arguments = vec.new(arena);
+        rest_name = "";
+        rest_help = "";
+    }
+
+    // An option without value, false unless given: `--name` or `-s`.
+    pub void flag(str name, char short, str help) {
+        options.push(Spec{ name: name, short: some(short), value_name: "", help: help, default_value: "" });
+    }
+
+    // The same, without a short name.
+    pub void long_flag(str name, str help) {
+        options.push(Spec{ name: name, short: none, value_name: "", help: help, default_value: "" });
+    }
+
+    // An option with a value, `default_value` unless given; the help shows it as `value_name`.
+    pub void option(str name, char short, str value_name, str help, str default_value) {
+        options.push(Spec{ name: name, short: some(short), value_name: value_name, help: help, default_value: default_value });
+    }
+
+    pub void long_option(str name, str value_name, str help, str default_value) {
+        options.push(Spec{ name: name, short: none, value_name: value_name, help: help, default_value: default_value });
+    }
+
+    // An argument that must be given, after those declared before it.
+    pub void argument(str name, str help) {
+        arguments.push(Spec{ name: name, short: none, value_name: "", help: help, default_value: "" });
+    }
+
+    // The arguments after the declared ones, as many as given (none too).
+    pub void rest(str name, str help) {
+        rest_name = name;
+        rest_help = help;
+    }
+
+    // Reads `args` (without the name of the program: `os.args`).
+    pub Matches*!CliError parse(str[] args) {
+        Matches* m = arena.new(Matches, arena);
+        mut bool options_done = false;
+        mut usize i = 0;
+        while (i < args.len) {
+            str a = args[i];
+            i += 1;
+            if (options_done || a.len < 2 || a.bytes[0] != 45 || a == "-") {  // not an option
+                m.positionals.push(a);
+                continue;
+            }
+            if (a == "--") {
+                options_done = true;
+                continue;
+            }
+            if (a == "--help" || a == "-h") {
+                return err(HelpWanted);
+            }
+            if (a.bytes[1] == 45) {  // --name or --name=value
+                str body = text.slice(a, 2, a.len);
+                mut str key = body;
+                mut str? inline = none;
+                match (text.find(body, "=")) {
+                    some(eq) => {
+                        key = text.slice(body, 0, eq);
+                        inline = some(text.slice(body, eq + 1, body.len));
+                    },
+                    none => { },
+                }
+                Spec spec = match (find_long(key)) {
+                    some(s) => s,
+                    none => {
+                        return err(UnknownOption(a));
+                    },
+                };
+                if (spec.value_name.len == 0) {
+                    match (inline) {
+                        some(v) => {
+                            return err(NotAFlag(spec.name));
+                        },
+                        none => { },
+                    }
+                    m.given.push(Given{ name: spec.name, value: "" });
+                    continue;
+                }
+                match (inline) {
+                    some(v) => m.given.push(Given{ name: spec.name, value: v }),
+                    none => {
+                        if (i >= args.len) {
+                            return err(MissingValue(spec.name));
+                        }
+                        m.given.push(Given{ name: spec.name, value: args[i] });
+                        i += 1;
+                    },
+                }
+                continue;
+            }
+            // -x, -xvalue, -xyz (flags joined)
+            mut usize at = 1;
+            while (at < a.len) {
+                char c = first_char(text.slice(a, at, a.len));
+                usize width = char_width(a.bytes[at]);
+                Spec spec = match (find_short(c)) {
+                    some(s) => s,
+                    none => {
+                        return err(UnknownOption(text.slice(a, at - 1, at + width)));
+                    },
+                };
+                at += width;
+                if (spec.value_name.len == 0) {
+                    m.given.push(Given{ name: spec.name, value: "" });
+                    continue;
+                }
+                if (at < a.len) {
+                    m.given.push(Given{ name: spec.name, value: text.slice(a, at, a.len) });
+                } else if (i < args.len) {
+                    m.given.push(Given{ name: spec.name, value: args[i] });
+                    i += 1;
+                } else {
+                    return err(MissingValue(spec.name));
+                }
+                break;
+            }
+        }
+        usize declared = arguments.len();
+        if (m.positionals.len() < declared) {
+            return err(MissingArgument(arguments.items()[m.positionals.len()].name));
+        }
+        if (m.positionals.len() > declared && rest_name.len == 0) {
+            return err(TooManyArguments(m.positionals.items()[declared]));
+        }
+        m.command = some(self);
+        return ok(m);
+    }
+
+    // The help: how the command is written, what it does, its arguments and its options.
+    pub str help(Arena* arena) {
+        text.TextBuilder* b = text.builder(arena);
+        b.push("usage: ");
+        b.push(name);
+        b.push(" [options]");
+        for (Spec a in arguments.items()) {
+            b.push(" <");
+            b.push(a.name);
+            b.push(">");
+        }
+        if (rest_name.len > 0) {
+            b.push(" [");
+            b.push(rest_name);
+            b.push("...]");
+        }
+        b.push("\n");
+        if (about.len > 0) {
+            b.push("\n");
+            b.push(about);
+            b.push("\n");
+        }
+        // The names, then their help in one column.
+        mut usize width = 10;  // "-h, --help"
+        for (Spec a in arguments.items()) {
+            width = max(width, a.name.len);
+        }
+        width = max(width, rest_name.len);
+        for (Spec o in options.items()) {
+            width = max(width, option_label(arena, o).len);
+        }
+        if (arguments.len() > 0 || rest_name.len > 0) {
+            b.push("\narguments:\n");
+            for (Spec a in arguments.items()) {
+                line(b, a.name, width, a.help);
+            }
+            if (rest_name.len > 0) {
+                line(b, rest_name, width, rest_help);
+            }
+        }
+        b.push("\noptions:\n");
+        for (Spec o in options.items()) {
+            mut str help = o.help;
+            if (o.default_value.len > 0) {
+                text.TextBuilder* h = text.builder(arena);
+                h.push(o.help);
+                h.push(" (default: ");
+                h.push(o.default_value);
+                h.push(")");
+                help = h.text();
+            }
+            line(b, option_label(arena, o), width, help);
+        }
+        line(b, "-h, --help", width, "show this help");
+        return b.text();
+    }
+
+    // What to print after `parse` failed: the help, or the error and how to get the help.
+    pub str message(Arena* arena, CliError e) {
+        text.TextBuilder* b = text.builder(arena);
+        match (e) {
+            HelpWanted => {
+                return help(arena);
+            },
+            UnknownOption(n) => {
+                b.push("unknown option `");
+                b.push(n);
+                b.push("`");
+            },
+            MissingValue(n) => {
+                b.push("the option `--");
+                b.push(n);
+                b.push("` needs a value");
+            },
+            NotAFlag(n) => {
+                b.push("the option `--");
+                b.push(n);
+                b.push("` takes no value");
+            },
+            MissingArgument(n) => {
+                b.push("missing <");
+                b.push(n);
+                b.push(">");
+            },
+            TooManyArguments(v) => {
+                b.push("unexpected argument `");
+                b.push(v);
+                b.push("`");
+            },
+        }
+        b.push("\n");
+        b.push("try `");
+        b.push(name);
+        b.push(" --help`");
+        return b.text();
+    }
+
+    Spec? find_long(str key) {
+        for (Spec o in options.items()) {
+            if (o.name == key) {
+                return some(o);
+            }
+        }
+        return none;
+    }
+
+    Spec? find_short(char c) {
+        for (Spec o in options.items()) {
+            match (o.short) {
+                some(s) => {
+                    if (s == c) {
+                        return some(o);
+                    }
+                },
+                none => { },
+            }
+        }
+        return none;
+    }
+
+    Spec? spec(str key) {
+        return find_long(key);
+    }
+}
+
+// What `parse` read.
+pub class Matches {
+    Arena* arena;
+    vec.Vec<Given>* given;
+    vec.Vec<str>* positionals;
+    mut Command*? command;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        given = vec.new(arena);
+        positionals = vec.new(arena);
+        command = none;
+    }
+
+    // Whether the flag `name` was given.
+    pub bool flag(str name) {
+        for (Given g in given.items()) {
+            if (g.name == name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The value of the option `name`: the last one given, or its default.
+    pub str value(str name) {
+        mut str? found = none;
+        for (Given g in given.items()) {
+            if (g.name == name) {
+                found = some(g.value);
+            }
+        }
+        return match (found) {
+            some(v) => v,
+            none => default_of(name),
+        };
+    }
+
+    // Every value given to the option `name`, in order (`-I a -I b`); none given: an empty view.
+    pub str[] values(str name) {
+        vec.Vec<str>* found = vec.new(arena);
+        for (Given g in given.items()) {
+            if (g.name == name) {
+                found.push(g.value);
+            }
+        }
+        return found.items();
+    }
+
+    // Whether the option or the flag `name` was given (else `value` is its default).
+    pub bool has(str name) {
+        return flag(name);
+    }
+
+    // The declared argument `name`.
+    pub str argument(str name) {
+        Command* c = match (command) {
+            some(c) => c,
+            none => {
+                return "";
+            },
+        };
+        mut usize i = 0;
+        for (Spec a in c.arguments.items()) {
+            if (a.name == name) {
+                return positionals.items()[i];
+            }
+            i += 1;
+        }
+        return "";
+    }
+
+    // The arguments after the declared ones.
+    pub str[] rest() {
+        usize declared = match (command) {
+            some(c) => c.arguments.len(),
+            none => 0,
+        };
+        str[] all = positionals.items();
+        return all[declared..all.len];
+    }
+
+    str default_of(str name) {
+        Command* c = match (command) {
+            some(c) => c,
+            none => {
+                return "";
+            },
+        };
+        return match (c.spec(name)) {
+            some(s) => s.default_value,
+            none => "",
+        };
+    }
+}
+
+// A command named `name` (as the help shows it), doing what `about` says.
+pub Command* command(Arena* arena, str name, str about) {
+    return arena.new(Command, arena, name, about);
+}
+
+str option_label(Arena* arena, Spec o) {
+    text.TextBuilder* b = text.builder(arena);
+    match (o.short) {
+        some(s) => {
+            b.push("-");
+            b.push_char(s);
+            b.push(", ");
+        },
+        none => b.push("    "),
+    }
+    b.push("--");
+    b.push(o.name);
+    if (o.value_name.len > 0) {
+        b.push(" ");
+        b.push(o.value_name);
+    }
+    return b.text();
+}
+
+void line(text.TextBuilder* b, str label, usize width, str help) {
+    b.push("  ");
+    b.push(label);
+    for (usize i in label.len..width + 2) {
+        b.push(" ");
+    }
+    b.push(help);
+    b.push("\n");
+}
+
+char first_char(str s) {
+    for (char c in s.chars()) {
+        return c;
+    }
+    return ' ';
+}
+
+// The bytes of the character that starts with `b`.
+usize char_width(ui8 b) {
+    if (b < 0x80) {
+        return 1;
+    }
+    if (b < 0xE0) {
+        return 2;
+    }
+    if (b < 0xF0) {
+        return 3;
+    }
+    return 4;
+}

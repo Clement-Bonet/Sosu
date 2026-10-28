@@ -10,6 +10,7 @@
    of every expression in Expr.type. */
 
 typedef struct MethodInfo MethodInfo;
+typedef struct FnInfo FnInfo;
 
 typedef struct {
     Name name;
@@ -22,6 +23,7 @@ struct MethodInfo {
     Type *type; /* T_FN, without `self` */
     TypeInfo *owner;
     MethodInfo *overridden; /* the parent or interface method it overrides, or NULL */
+    FnInfo *generic; /* a method with type parameters of its own (`map<U>`): them, as a generic function */
 };
 
 typedef struct {
@@ -58,7 +60,7 @@ struct TypeInfo {
 };
 
 /* A function, or a function of an extern block. */
-typedef struct {
+struct FnInfo {
     const FnDecl *decl;
     Unit *unit;
     Type *type;
@@ -67,7 +69,7 @@ typedef struct {
     size_t param_count;
     Name *effect_params;
     size_t effect_param_count;
-} FnInfo;
+};
 
 /* A constant of a module (spec §11.6): a number, `bool`, `char` or `str`. An integer constant is
    evaluated by semantic analysis (for array sizes, and so that an overflow is a compile-time
@@ -127,6 +129,8 @@ typedef struct {
     struct { FnInfo **items; size_t count; size_t cap; } fns;
     struct { ConstInfo **items; size_t count; size_t cap; } consts;
     struct { TypeInfo **items; size_t count; size_t cap; } instances; /* of generic types, in creation order */
+    /* the type parameters of the methods that have their own, resolved once for every instance */
+    struct { FnInfo **items; size_t count; size_t cap; } method_params;
     const TypeEnv *env; /* NULL outside generic declarations */
     bool quiet;         /* resolving the members of an instance: its errors were reported for the generic */
 } Sema;
@@ -150,6 +154,8 @@ Type *sema_subst(Sema *sema, Type *type, Type **from, Type **to, size_t count, c
    types of its expressions become those of the instance. */
 void sema_check_instance_fn(Sema *sema, FnInfo *fn, Type **args, const unsigned *effects);
 void sema_check_instance_method(Sema *sema, TypeInfo *instance, MethodInfo *method);
+/* A method with type parameters of its own (`map<U>`), for `args` and `effects`; returns its type there. */
+Type *sema_check_generic_method(Sema *sema, TypeInfo *owner, MethodInfo *method, Type **args, const unsigned *effects);
 void sema_check_instance_field(Sema *sema, TypeInfo *instance, const FieldInfo *field);
 /* True if `type` contains a type parameter. */
 bool type_is_open(const Type *type);

@@ -1,0 +1,174 @@
+// std.cli, std.log and std.json.
+import std.io;
+import std.cli;
+import std.json;
+import std.log;
+import std.text;
+
+cli.Command* counter(Arena* arena) {
+    cli.Command* c = cli.command(arena, "count", "Counts the words of files.");
+    c.flag("verbose", 'v', "print each file");
+    c.flag("quiet", 'q', "print nothing but the total");
+    c.option("min", 'm', "N", "only the words of N letters or more", "1");
+    c.long_option("include", "DIR", "also read DIR", "");
+    c.argument("file", "the first file to read");
+    c.rest("files", "the other files");
+    return c;
+}
+
+void try_args(Arena* arena, str line) uses io {
+    str[] args = text.words(arena, line);
+    cli.Command* c = counter(arena);
+    match (c.parse(args)) {
+        ok(m) => {
+            io.print("[{}] verbose {} quiet {} min {} file {} rest {} include {}", line, m.flag("verbose"), m.flag("quiet"), m.value("min"), m.argument("file"), text.join(arena, m.rest(), "+"), text.join(arena, m.values("include"), "+"));
+        },
+        err(e) => {
+            match (e) {
+                HelpWanted => io.print("[{}] help", line),
+                _ => io.print("[{}] {}", line, c.message(arena, e)),
+            }
+        },
+    }
+}
+
+void json_round(Arena* arena, str source) uses io {
+    match (json.parse(arena, source)) {
+        ok(v) => io.print("{} -> {}", source, json.write(arena, v)),
+        err(e) => io.print("{} -> {}", source, json.message(arena, e)),
+    }
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+
+    // cli
+    try_args(&arena, "a.txt");
+    try_args(&arena, "-v a.txt b.txt c.txt");
+    try_args(&arena, "-vq --min 3 a.txt");
+    try_args(&arena, "--min=4 -m5 a.txt --include x --include=y");
+    try_args(&arena, "a.txt -- -v --min");
+    try_args(&arena, "-qv -m 2 a.txt");
+    try_args(&arena, "");
+    try_args(&arena, "--colour a.txt");
+    try_args(&arena, "-x a.txt");
+    try_args(&arena, "a.txt --min");
+    try_args(&arena, "--verbose=yes a.txt");
+    try_args(&arena, "a.txt -h");
+    cli.Command* plain = cli.command(&arena, "plain", "");
+    plain.argument("only", "one argument");
+    match (plain.parse(text.words(&arena, "a b"))) {
+        ok(m) => io.print("unexpected"),
+        err(e) => io.print("{}", plain.message(&arena, e)),
+    }
+    io.print("{}", counter(&arena).help(&arena));
+
+    // log, to a file
+    str path = "tests/programs/formats/build/test.log";
+    match (io.write_file(&arena, path, "")) {
+        ok => { },
+        err(e) => io.print("cannot empty the log"),
+    }
+    match (log.to_file(&arena, path, log.Level.Info)) {
+        ok(logger) => {
+            logger.debug("not written");
+            logger.info("started");
+            logger.warn("a warning");
+            logger.error("an error");
+            io.print("debug {} error {}", logger.enabled(log.Level.Debug), logger.enabled(log.Level.Error));
+            logger.close();
+        },
+        err(e) => io.print("cannot open the log"),
+    }
+    match (io.read_file(&arena, path)) {
+        ok(content) => {
+            for (str line in text.lines(&arena, content)) {
+                // "2026-10-28T07:43:05Z INFO started": the time, then the rest
+                io.print("{} {}", line.bytes[10] == 84 && line.bytes[19] == 90, text.slice(line, 21, line.len));
+            }
+        },
+        err(e) => io.print("cannot read the log"),
+    }
+    log.Logger quiet = log.console_plain(log.Level.Off);
+    quiet.error("never written");
+    io.print("off: {}", quiet.enabled(log.Level.Error));
+
+    // json
+    json_round(&arena, "  {\"name\": \"Ada\", \"age\": 36, \"langs\": [\"en\", \"fr\"], \"x\": null, \"ok\": true}  ");
+    json_round(&arena, "[1, -0.5, 2.5e3, 1e21, 0.1, 123456789012, -0]");
+    json_round(&arena, "\"\\u00e9t\\u00e9 \\ud83d\\ude00 \\\"q\\\" \\\\ \\/ \\n\\t\\b\"");
+    json_round(&arena, "[]");
+    json_round(&arena, "{}");
+    json_round(&arena, "[1, 2,]");
+    json_round(&arena, "{\"a\" 1}");
+    json_round(&arena, "01");
+    json_round(&arena, "1.");
+    json_round(&arena, "\"\\ud800\"");
+    json_round(&arena, "\"tab\there\"");
+    json_round(&arena, "tru");
+    json_round(&arena, "[1] 2");
+    json_round(&arena, "1e999");
+    json_round(&arena, "");
+    str deep = text.repeat(&arena, "[", 600);
+    json_round(&arena, text.slice(deep, 0, 5));
+    match (json.parse(&arena, deep)) {
+        ok(v) => io.print("unexpected"),
+        err(e) => io.print("600 deep: {}", json.message(&arena, e)),
+    }
+
+    match (json.parse(&arena, "{\"name\": \"Ada\", \"age\": 36, \"size\": 1.75, \"langs\": [\"en\", \"fr\"], \"x\": null}")) {
+        ok(v) => {
+            str name = match (json.get(v, "name")) {
+                some(n) => match (json.as_str(n)) {
+                    some(s) => s,
+                    none => "?",
+                },
+                none => "?",
+            };
+            i64 age = match (json.get(v, "age")) {
+                some(a) => match (json.as_i64(a)) {
+                    some(i) => i,
+                    none => -1,
+                },
+                none => -1,
+            };
+            bool size_integer = match (json.get(v, "size")) {
+                some(s) => match (json.as_i64(s)) {
+                    some(i) => true,
+                    none => false,
+                },
+                none => true,
+            };
+            json.Value langs = match (json.get(v, "langs")) {
+                some(l) => l,
+                none => json.Value.Null,
+            };
+            str second = match (json.at(langs, 1)) {
+                some(l) => match (json.as_str(l)) {
+                    some(s) => s,
+                    none => "?",
+                },
+                none => "?",
+            };
+            bool x_null = match (json.get(v, "x")) {
+                some(x) => json.is_null(x),
+                none => false,
+            };
+            bool missing = match (json.get(v, "nothing")) {
+                some(m) => false,
+                none => true,
+            };
+            io.print("{} {} {} {} {} {} {} {}", name, age, size_integer, json.len(v), json.len(langs), second, x_null, missing);
+            io.print("{}", json.write_pretty(&arena, v));
+        },
+        err(e) => io.print("{}", json.message(&arena, e)),
+    }
+    mut json.Value[1] nothing = [json.Value.Null];
+    mut json.Member[2] members = [
+        json.Member{ key: "title", value: json.Value.Text("line\nbreak") },
+        json.Member{ key: "values", value: json.Value.Array(nothing[0..0]) },
+    ];
+    io.print("{}", json.write(&arena, json.Value.Object(members[0..2])));
+    return 0;
+}

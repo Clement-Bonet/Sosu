@@ -1,0 +1,75 @@
+// Generic interfaces (spec §5.4): one interface, implemented for several types.
+import std.io;
+
+interface Iterator<T> {
+    T? next();
+}
+
+class Countdown : Iterator<i32> {
+    mut i32 left;
+
+    void init(i32 from) {
+        left = from;
+    }
+
+    override i32? next() {
+        if (left == 0) {
+            return none;
+        }
+        left -= 1;
+        return some(left + 1);
+    }
+}
+
+class Words : Iterator<str> {
+    mut i32 index;
+
+    void init() {
+        index = 0;
+    }
+
+    override str? next() {
+        index += 1;
+        return index == 1 ? some("one") : index == 2 ? some("two") : none;
+    }
+}
+
+i32 sum(Iterator<i32>* items) {
+    mut i32 total = 0;
+    mut bool more = true;
+    while (more) {
+        match (items.next()) {
+            some(x) => {
+                total += x;
+            },
+            none => {
+                more = false;
+            },
+        }
+    }
+    return total;
+}
+
+void each<T, uses E>(Iterator<T>* items, fn(T) -> void uses E f) uses E {
+    mut bool more = true;
+    while (more) {
+        match (items.next()) {
+            some(x) => {
+                f(x);
+            },
+            none => {
+                more = false;
+            },
+        }
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Countdown* c = arena.new(Countdown, 4);
+    io.print("sum: {}", sum(c as Iterator<i32>*));
+    Words* w = arena.new(Words);
+    each(w as Iterator<str>*, (s) => io.print("word {}", s));
+    return 0;
+}

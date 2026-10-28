@@ -1,0 +1,110 @@
+import std.io;
+import std.random;
+import std.sort;
+
+struct Person {
+    str name;
+    i32 age;
+}
+
+struct Entry {
+    i32 key;
+    usize place;  // before the sort
+}
+
+void show(i32[] items) uses io {
+    mut i64 first = 0;
+    mut i64 last = 0;
+    if (items.len > 0) {
+        first = items[0] as i64;
+        last = items[items.len - 1] as i64;
+    }
+    io.print("{} items, {} to {}, sorted: {}", items.len, first, last, sort.is_sorted(items));
+}
+
+i32 main() uses io {
+    mut i32[10] small = [5, 3, 9, 1, 5, 7, 2, 8, 0, 6];
+    sort.sort(small[0..10]);
+    io.print("{} {} {} {} {} {} {} {} {} {}", small[0], small[1], small[2], small[3], small[4], small[5], small[6], small[7], small[8], small[9]);
+    sort.sort_descending(small[0..10]);
+    io.print("{} {} {}", small[0], small[1], small[9]);
+    sort.reverse(small[0..10]);
+    io.print("{} {} {}", small[0], small[1], small[9]);
+
+    // many elements: random, sorted already, reversed, all equal
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    i32[] many = arena.alloc_slice(i32, 100000);
+    mut random.Rng rng = random.seeded(42);
+    for (usize i in 0..many.len) {
+        many[i] = rng.between(-1000, 1000) as i32;
+    }
+    sort.sort(many);
+    show(many);
+    sort.sort(many);
+    show(many);
+    sort.sort_descending(many);
+    io.print("descending: {}", sort.is_sorted_by(many, (a, b) => a > b));
+    for (usize i in 0..many.len) {
+        many[i] = 7;
+    }
+    sort.sort(many);
+    show(many);
+    i32[] empty = many[0..0];
+    sort.sort(empty);
+    show(empty);
+
+    // by a key, and stable
+    mut Person[6] people = [
+        Person{ name: "Ada", age: 36 },
+        Person{ name: "Bob", age: 25 },
+        Person{ name: "Cid", age: 36 },
+        Person{ name: "Dee", age: 19 },
+        Person{ name: "Eve", age: 25 },
+        Person{ name: "Fay", age: 36 },
+    ];
+    sort.stable_sort_by_key(&arena, people[0..6], (p) => p.age);
+    for (Person p in people) {
+        io.print("{} {}", p.name, p.age);
+    }
+    sort.sort_by_key(people[0..6], (p) => p.name);
+    io.print("{} {}", people[0].name, people[5].name);
+    mut i32 comparisons = 0;
+    i32* counter = &comparisons;
+    sort.sort_by(people[0..6], (a, b) => {
+        *counter += 1;
+        return a.name > b.name;
+    });
+    io.print("{} first, compared: {}", people[0].name, comparisons > 0);
+
+    // a stable sort of many: equal keys keep their order
+    Entry[] entries = arena.alloc_slice(Entry, 5000);
+    for (usize i in 0..entries.len) {
+        entries[i] = Entry{ key: i as i32 * 7919 % 10, place: i };
+    }
+    sort.stable_sort_by(&arena, entries, (a, b) => a.key < b.key);
+    mut bool stable = true;
+    for (usize i in 1..entries.len) {
+        if (entries[i].key == entries[i - 1].key && entries[i].place < entries[i - 1].place) {
+            stable = false;
+        }
+    }
+    io.print("stable: {} {}", stable, sort.is_sorted_by(entries, (a, b) => a.key < b.key));
+
+    // binary search
+    mut i32[7] sorted = [1, 3, 3, 3, 5, 8, 13];
+    i32[] view = sorted[0..7];
+    io.print("{} {} {} {}", sort.lower_bound(view, 3), sort.upper_bound(view, 3), sort.lower_bound(view, 0), sort.lower_bound(view, 99));
+    match (sort.search(view, 8)) {
+        some(place) => io.print("8 at {}", place),
+        none => io.print("8 not found"),
+    }
+    match (sort.search(view, 4)) {
+        some(place) => io.print("4 at {}", place),
+        none => io.print("4 not found"),
+    }
+    mut str[4] words = ["pear", "apple", "fig", "banana"];
+    sort.sort(words[0..4]);
+    io.print("{} {} {} {}", words[0], words[1], words[2], words[3]);
+    return 0;
+}

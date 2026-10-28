@@ -103,8 +103,8 @@ static void test_names(void) {
     expect_codes("void f(uf64 a) { uf64 b = -a; }", "E0334");
     expect_help("void f(f32 a) { uf32 b = a; }", "E0331", "conversions are explicit: write `... as uf32`");
     expect_codes("void f(uf32 a) { f32 b = a; }", "E0331");
-    expect_codes("import std.io;\nstruct A { io.File f; }", "E0303");
-    expect_codes("import std.io;\nstruct A { std.io.File f; }", "E0303");
+    expect_codes("import std.io;\nstruct A { io.Socket f; }", "E0303");
+    expect_codes("import std.io;\nstruct A { std.io.Socket f; }", "E0303");
     expect_codes("void f() { }\nstruct A { f x; }", "E0304");
     expect_codes("import std.io;\nstruct A { io x; }", "E0304");
 }
@@ -437,8 +437,49 @@ static void test_generics(void) {
                  "T first<T>(Tree<T>* t) { return match (*t) { Leaf(v) => v, Node(l, r) => first(l) }; }\n"
                  "void f() { Tree<i32> t = Tree<i32>.Leaf(1); mut Tree<i32> u = Leaf(2); i32 x = first(&u); }",
                  "");
-    expect_codes("struct Box<T> {\n    T value;\n    T get<U>() { return value; }\n}", "E0217");
-    expect_codes("interface Shows<T> { void show(T x); }", "E0217");
+    /* methods with type parameters of their own */
+    const char *box = "struct Box<T> {\n    T value;\n    U map<U>(fn(T) -> U f) { return f(value); }\n"
+                      "    U zero<U: Number>() { return 0 as U; }\n}\n";
+    snprintf(text, sizeof text, "%svoid f() { Box<i32> b = Box{ value: 1 }; str s = b.map((v) => \"x\"); "
+             "bool t = b.map<bool>((v) => true); f64 z = b.zero(); }", box);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%svoid f() { Box<i32> b = Box{ value: 1 }; str s = b.map((v) => 3); }", box);
+    expect_codes(text, "E0331");
+    snprintf(text, sizeof text, "%svoid f() { Box<i32> b = Box{ value: 1 }; bool z = b.zero(); }", box);
+    expect_codes(text, "E0362");
+    expect_codes("struct Box<T> {\n    T value;\n    U pick<U>() { return value; }\n}", "E0331");
+    expect_codes("class C { virtual U get<U>(U x) { return x; } }", "E0217");
+    /* `Send`: values without pointers, which cross to another thread (spec §5.6) */
+    const char *send = "struct P { i32 x; f64[2] y; }\nstruct Q { str name; }\nenum E { A(P p), B }\n"
+                       "void take<T: Send>(T x) { }\n";
+    snprintf(text, sizeof text, "%svoid f() { take(1); take(P{ x: 1, y: [1.0, 2.0] }); take(E.B); take(some(true)); }", send);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%svoid f() { take(\"text\"); }", send);
+    expect_codes(text, "E0362");
+    snprintf(text, sizeof text, "%svoid f() { take(Q{ name: \"x\" }); }", send);
+    expect_codes(text, "E0362");
+    snprintf(text, sizeof text, "%svoid f(i32* p) { take(p); }", send);
+    expect_codes(text, "E0362");
+    expect_codes("void take<T: Send>(T x) { }\nvoid g<U>(U u) { take(u); }", "E0362");
+    expect_codes("void take<T: Send>(T x) { }\nvoid g<U: Send>(U u) { take(u); }", "");
+    /* size_of, and functions converted to other effects in `unsafe` */
+    expect_codes("struct P { i32 x; }\nusize f() { return size_of(P) + size_of(i64); }", "");
+    expect_codes("usize f() { return size_of(3); }", "E0336");
+    expect_codes("import std.io;\nvoid show(i32 x) uses io { }\nvoid f() { unsafe { fn(i32) -> void g = show as fn(i32) -> void; } }",
+                 "");
+    expect_codes("import std.io;\nvoid show(i32 x) uses io { }\nvoid f() { fn(i32) -> void g = show as fn(i32) -> void; }",
+                 "E0341");
+    /* generic interfaces */
+    const char *shows = "interface Shows<T> { str show(T x); }\n";
+    snprintf(text, sizeof text, "%sclass Num : Shows<i32> { override str show(i32 x) { return \"n\"; } }\n"
+             "str f(Num* n) { Shows<i32>* s = n as Shows<i32>*; return s.show(3); }", shows);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%sclass Num : Shows<i32> { override str show(i64 x) { return \"n\"; } }", shows);
+    expect_codes(text, "E0316");
+    snprintf(text, sizeof text, "%sclass Num : Shows { }", shows);
+    expect_codes(text, "E0361");
+    snprintf(text, sizeof text, "%sclass Num : Shows<i32> { }\nvoid f(Num* n) { Shows<str>* s = n as Shows<str>*; }", shows);
+    expect_codes(text, "E0318 E0341");
     expect_codes("void f<T: Sortable>(T x) { }", "E0364");
     /* interfaces as constraints, effects as parameters */
     expect_codes("interface Named { str name(); }\nclass Dog : Named {\n    override str name() { return \"dog\"; }\n}\n"
@@ -497,6 +538,50 @@ static void test_packages(void) {
     expect_package("tests/programs/screens", "");
 }
 
+/* Lambdas and closures (spec §5.5). */
+static void test_lambdas(void) {
+    const char *twice = "i32 twice(fn(i32) -> i32 f, i32 x) { return f(f(x)); }\n";
+    char text[1024];
+    snprintf(text, sizeof text, "%svoid f() { i32 k = 2; i32 a = twice((x) => x * k, 1); auto g = (i32 y) => y + k; "
+             "i32 b = twice(g, a); }", twice);
+    expect_codes(text, "");
+    /* the type of a parameter, unknown without an expected type */
+    expect_codes("void f() { auto g = (x) => x; }", "E0369");
+    /* the number of parameters */
+    snprintf(text, sizeof text, "%svoid f() { i32 a = twice((x, y) => x, 1); }", twice);
+    expect_codes(text, "E0336");
+    /* the type of the body */
+    snprintf(text, sizeof text, "%svoid f() { i32 a = twice((x) => true, 1); }", twice);
+    expect_codes(text, "E0331");
+    /* a captured variable is a copy */
+    expect_codes("void f() { mut i32 n = 0; auto g = (i32 x) => { n = x; }; }", "E0369");
+    expect_help("void f() { mut i32 n = 0; auto g = (i32 x) => { n = x; }; }", "E0369",
+                "a lambda copies the variables it uses; to change one, capture a pointer to it (spec §5.5)");
+    expect_codes("void f() { mut i32 n = 0; i32* p = &n; auto g = (i32 x) => { *p = x; }; g(1); }", "");
+    /* a resource cannot be captured */
+    expect_codes("void f() { mut Arena a = Arena.new(1024); auto g = (i32 x) => a.alloc(i32); a.free(); }", "E0369");
+    /* a closure stays in its function */
+    expect_codes("fn(i32) -> i32 f(i32 k) { return (i32 x) => x + k; }", "E0370");
+    expect_codes("fn(i32) -> i32 f() { return (i32 x) => x + 1; }", "");
+    expect_codes("fn(i32) -> i32 f(i32 k) { auto g = (i32 x) => x + k; return g; }", "E0370");
+    expect_codes("struct S { fn(i32) -> i32 h; }\nS f(i32 k) { return S{ h: (x) => x + k }; }", "E0370");
+    expect_codes("void f(i32 k) { mut fn(i32) -> i32 g = (x) => x; g = (x) => x + k; }", "E0370");
+    expect_codes("void f(i32 k) { auto g = some((i32 x) => x + k); }", "E0370");
+    /* effects: inferred from the body, or given by the expected type */
+    expect_codes("import std.io;\nvoid f() { auto g = (i32 x) => io.print(\"{}\", x); }", "");
+    expect_codes("import std.io;\nvoid f() uses io { auto g = (i32 x) => io.print(\"{}\", x); g(1); }", "");
+    expect_codes("import std.io;\nvoid f() { auto g = (i32 x) => io.print(\"{}\", x); g(1); }", "E0340");
+    expect_codes("import std.io;\nvoid f() { fn(i32) -> void g = (x) => io.print(\"{}\", x); }", "E0340");
+    /* generics: the types and effects come from the other arguments, and from the lambda */
+    expect_codes("import std.io;\nvoid each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E { for (T x in items) { f(x); } }\n"
+                 "void f(i32[] a) uses io { each(a, (x) => io.print(\"{}\", x)); }", "");
+    expect_codes("U map<T, U>(T x, fn(T) -> U f) { return f(x); }\nvoid f() { str s = map(1, (x) => \"a\"); }", "");
+    /* `self` in a method */
+    expect_codes("class C { mut i32 n; void init() { n = 0; } void f() { auto g = (i32 x) => { n = x; }; g(1); } }", "");
+    /* `break` does not leave a lambda */
+    expect_codes("void f() { while (true) { auto g = (i32 x) => { break; }; } }", "E0344");
+}
+
 int main(void) {
     test_valid();
     test_names();
@@ -506,6 +591,7 @@ int main(void) {
     test_valid_bodies();
     test_body_errors();
     test_generics();
+    test_lambdas();
     test_constants();
     test_packages();
     return test_summary("sema tests");

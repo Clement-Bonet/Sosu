@@ -1,0 +1,133 @@
+import std.io;
+import std.text;
+
+void place(usize? found) uses io {
+    match (found) {
+        some(i) => io.print("at {}", i),
+        none => io.print("none"),
+    }
+}
+
+void number(i64!text.ParseError parsed) uses io {
+    match (parsed) {
+        ok(v) => io.print("ok {}", v),
+        err(e) => io.print("error {}", reason(e)),
+    }
+}
+
+void float(f64!text.ParseError parsed) uses io {
+    match (parsed) {
+        ok(v) => io.print("ok {}", v),
+        err(e) => io.print("error {}", reason(e)),
+    }
+}
+
+str reason(text.ParseError e) {
+    return match (e) {
+        Empty => "empty",
+        Invalid => "invalid",
+        OutOfRange => "out of range",
+    };
+}
+
+void pieces(str[] parts) uses io {
+    io.print("{} pieces", parts.len);
+    for (str p in parts) {
+        io.print("[{}]", p);
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+
+    // finding
+    str s = "the cat sat on the mat";
+    place(text.find(s, "the"));
+    place(text.find_from(s, "the", 1));
+    place(text.find_last(s, "at"));
+    place(text.find(s, "dog"));
+    place(text.find(s, ""));
+    io.print("{} {} {}", text.contains(s, "sat"), text.starts_with(s, "the c"), text.ends_with(s, "mat"));
+    io.print("{} {}", text.count(s, "at"), text.count("aaaa", "aa"));
+    io.print("{} {} {}", text.slice(s, 4, 7), "été".len, text.char_count("été"));
+    io.print("{} {}", text.is_boundary("été", 1), text.is_boundary("été", 2));
+
+    // trimming
+    io.print("[{}] [{}] [{}]", text.trim("  a b \t\n"), text.trim_start("  x "), text.trim_end("  x "));
+    io.print("[{}]", text.trim(" \t "));
+    match (text.strip_prefix("v1.2", "v")) {
+        some(rest) => io.print("{}", rest),
+        none => io.print("no prefix"),
+    }
+    match (text.strip_suffix("v1.2", ".txt")) {
+        some(rest) => io.print("{}", rest),
+        none => io.print("no suffix"),
+    }
+
+    // splitting and joining
+    pieces(text.split(&arena, ",x,,y", ","));
+    pieces(text.split(&arena, "a::b", "::"));
+    pieces(text.lines(&arena, "one\r\ntwo\n\nfour\n"));
+    pieces(text.lines(&arena, "last without end"));
+    pieces(text.words(&arena, "  several   words\there "));
+    str[] parts = text.split(&arena, "1-2-3", "-");
+    io.print("{}", text.join(&arena, parts, " + "));
+    io.print("{}", text.replace(&arena, s, "at", "og"));
+    io.print("{}", text.replace(&arena, "aaa", "a", "bb"));
+    io.print("{}", text.repeat(&arena, "ab", 3));
+
+    // case
+    io.print("{}", text.to_upper(&arena, "Hello, wörld! ÿ ç ß ł"));
+    io.print("{}", text.to_lower(&arena, "ÉCOLE ŁÓDŹ İ Ÿ"));
+    io.print("{} {}", text.to_upper(&arena, "αβγ ς ά"), text.to_lower(&arena, "ΣΟΦΙΑ Ώ"));
+    io.print("{} {}", text.to_upper(&arena, "привет ё"), text.to_lower(&arena, "МОСКВА Ё"));
+    io.print("{} {} {}", text.upper('q'), text.lower('Q'), text.upper('7'));
+    io.print("{} {} {} {}", text.is_digit('4'), text.is_ascii_letter('é'), text.is_cased('é'), text.is_space('\t'));
+
+    // numbers read
+    number(text.parse_i64("42"));
+    number(text.parse_i64("  -17 "));
+    number(text.parse_i64("+5"));
+    number(text.parse_i64("9223372036854775807"));
+    number(text.parse_i64("-9223372036854775808"));
+    number(text.parse_i64("9223372036854775808"));
+    number(text.parse_i64("12a"));
+    number(text.parse_i64("-"));
+    number(text.parse_i64("   "));
+    match (text.parse_u64("18446744073709551615")) {
+        ok(v) => io.print("ok {}", v),
+        err(e) => io.print("error {}", reason(e)),
+    }
+    match (text.parse_u64("18446744073709551616")) {
+        ok(v) => io.print("ok {}", v),
+        err(e) => io.print("error {}", reason(e)),
+    }
+    float(text.parse_f64("3.25"));
+    float(text.parse_f64("-.5"));
+    float(text.parse_f64("6.02E+23"));
+    float(text.parse_f64("1e400"));
+    float(text.parse_f64("1e"));
+    float(text.parse_f64("."));
+    float(text.parse_f64("inf"));
+
+    // numbers written, and a builder
+    io.print("{} {} {}", text.format_i64(&arena, -9223372036854775807 - 1), text.format_i64(&arena, 0), text.format_u64(&arena, 18446744073709551615));
+    io.print("{} {} {}", text.format_f64(&arena, 3.14159, 2), text.format_f64(&arena, -2.5, 0), text.format_f64(&arena, 0.125, 5));
+    io.print("{} {}", text.format_f64(&arena, 1.0e30, 1).len, text.format_f64(&arena, -1.0e300 * 1.0e10, 2));
+    text.TextBuilder* b = text.builder(&arena);
+    for (i32 i in 0..100) {
+        b.push_char('é');
+    }
+    io.print("{} {}", b.len(), text.char_count(b.text()));
+    b.clear();
+    b.push("total: ");
+    b.push_i64(-12);
+    b.push_char(' ');
+    b.push_char('€');
+    b.push_char('😀');
+    b.push(" ");
+    b.push_f64(2.0 / 3.0, 3);
+    io.print("{}", b.text());
+    return 0;
+}

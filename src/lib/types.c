@@ -163,29 +163,38 @@ static void append(Buffer *buffer, const char *text, size_t length) {
 
 static void append_text(Buffer *buffer, const char *text) { append(buffer, text, strlen(text)); }
 
+static void append_type(Buffer *buffer, const Type *type);
+
+/* The type under a suffix: a function type in parentheses, `(fn(i32) -> i32)[2]`. */
+static void append_inner(Buffer *buffer, const Type *type) {
+    if (type->tag == T_FN) append_text(buffer, "(");
+    append_type(buffer, type);
+    if (type->tag == T_FN) append_text(buffer, ")");
+}
+
 static void append_type(Buffer *buffer, const Type *type) {
     switch (type->tag) {
     case T_POINTER:
-        append_type(buffer, type->as.inner);
+        append_inner(buffer, type->as.inner);
         append_text(buffer, "*");
         break;
     case T_OPTION:
-        append_type(buffer, type->as.inner);
+        append_inner(buffer, type->as.inner);
         append_text(buffer, "?");
         break;
     case T_SLICE:
-        append_type(buffer, type->as.inner);
+        append_inner(buffer, type->as.inner);
         append_text(buffer, "[]");
         break;
     case T_ARRAY: {
         char size[32];
         snprintf(size, sizeof size, "[%llu]", (unsigned long long)type->as.array.size);
-        append_type(buffer, type->as.array.element);
+        append_inner(buffer, type->as.array.element);
         append_text(buffer, size);
         break;
     }
     case T_RESULT:
-        append_type(buffer, type->as.result.value);
+        append_inner(buffer, type->as.result.value);
         append_text(buffer, "!");
         append_type(buffer, type->as.result.error);
         break;

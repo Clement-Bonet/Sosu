@@ -13,30 +13,41 @@ typedef struct {
     const char *program;
     const char *expected; /* file in the program folder */
     int exit_code;
+    const char *args; /* after `--`, for the program; NULL: none */
 } Case;
 
 static const Case cases[] = {
-    { "run", "basics", "expected.txt", 0 },
-    { "run", "overflow", "expected.txt", 101 },
-    { "run", "classes", "expected.txt", 0 },
-    { "run", "linking", "expected.txt", 0 },
-    { "run", "files", "expected.txt", 0 },
-    { "run", "clock_random", "expected.txt", 0 },
-    { "run", "arrays", "expected.txt", 0 },
-    { "run", "copies", "expected.txt", 0 },
-    { "run", "screens", "expected.txt", 0 },
-    { "run", "titlebar", "expected.txt", 0 },
-    { "run", "identity", "expected.txt", 0 },
-    { "run", "languages", "expected.txt", 0 },
-    { "run", "places", "expected.txt", 0 },
-    { "run", "generics", "expected.txt", 0 },
-    { "run", "collections", "expected.txt", 0 },
-    { "run", "unsigned_floats", "expected.txt", 101 },
-    { "run", "constants", "expected.txt", 0 },
-    { "run", "bindgen", "expected.txt", 0 },
-    { "run --release", "overflow", "expected_release.txt", 0 },
-    { "run --release", "unsigned_floats", "expected_release.txt", 0 },
-    { "test", "testing", "expected.txt", 1 },
+    { "run", "basics", "expected.txt", 0, NULL },
+    { "run", "overflow", "expected.txt", 101, NULL },
+    { "run", "classes", "expected.txt", 0, NULL },
+    { "run", "linking", "expected.txt", 0, NULL },
+    { "run", "files", "expected.txt", 0, NULL },
+    { "run", "clock_random", "expected.txt", 0, NULL },
+    { "run", "arrays", "expected.txt", 0, NULL },
+    { "run", "copies", "expected.txt", 0, NULL },
+    { "run", "screens", "expected.txt", 0, NULL },
+    { "run", "titlebar", "expected.txt", 0, NULL },
+    { "run", "identity", "expected.txt", 0, NULL },
+    { "run", "languages", "expected.txt", 0, NULL },
+    { "run", "places", "expected.txt", 0, NULL },
+    { "run", "generics", "expected.txt", 0, NULL },
+    { "run", "collections", "expected.txt", 0, NULL },
+    { "run", "unsigned_floats", "expected.txt", 101, NULL },
+    { "run", "constants", "expected.txt", 0, NULL },
+    { "run", "bindgen", "expected.txt", 0, NULL },
+    { "run", "lambdas", "expected.txt", 101, NULL },
+    { "run", "iterators", "expected.txt", 0, NULL },
+    { "run", "csources", "expected.txt", 0, NULL },
+    { "run", "threads", "expected.txt", 0, NULL },
+    { "run", "mathematics", "expected.txt", 0, NULL },
+    { "run", "sorting", "expected.txt", 0, NULL },
+    { "run", "texts", "expected.txt", 0, NULL },
+    { "run", "calendar", "expected.txt", 0, NULL },
+    { "run", "system", "expected.txt", 3, "first \"two words\" 3" },
+    { "run", "formats", "expected.txt", 0, NULL },
+    { "run --release", "overflow", "expected_release.txt", 0, NULL },
+    { "run --release", "unsigned_floats", "expected_release.txt", 0, NULL },
+    { "test", "testing", "expected.txt", 1, NULL },
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */
@@ -89,7 +100,7 @@ static void test_library(const char *sosuc) {
 #endif
         char libs[256];
         if (shared) snprintf(libs, sizeof libs, "%s/%s", dir, shared_lib);
-        else snprintf(libs, sizeof libs, "%s/libgeom.a %s/libsosu_rt.a", dir, dir);
+        else snprintf(libs, sizeof libs, "%s/libgeom.a %s/libsosu_rt.a -lm -pthread", dir, dir); /* its .links */
         snprintf(command, sizeof command, "cc -std=c99 -I%s tests/programs/library/host/host.c %s -o %s/host%d > build/host.log 2>&1",
                  dir, libs, dir, shared);
         CHECK(run(command) == 0, "the host of the library does not compile (see build/host.log)");
@@ -207,8 +218,8 @@ int main(int argc, char **argv) {
 #endif
         char command[512], output[256], expected_path[256];
         snprintf(output, sizeof output, "build%s%s.out", sep, c->program);
-        snprintf(command, sizeof command, "%s %s tests/programs/%s > %s 2> build%s%s.err", argv[1], c->command,
-                 c->program, output, sep, c->program);
+        snprintf(command, sizeof command, "%s %s tests/programs/%s%s%s > %s 2> build%s%s.err", argv[1], c->command,
+                 c->program, c->args ? " -- " : "", c->args ? c->args : "", output, sep, c->program);
         int status = run(command);
         CHECK(status == c->exit_code, "%s %s: exit code %d, expected %d (see build/%s.err)", c->command, c->program,
               status, c->exit_code, c->program);

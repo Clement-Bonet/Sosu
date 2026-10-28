@@ -1,0 +1,219 @@
+// std.os and std.fs: run by the tests with `-- first "two words" 3`; it runs itself again
+// with `child`, and ends with the exit code 3.
+import std.io;
+import std.fs;
+import std.os;
+import std.text;
+
+str describe(io.IoError e) {
+    return match (e) {
+        NotFound => "not found",
+        PermissionDenied => "permission denied",
+        AlreadyExists => "already exists",
+        NotEmpty => "not empty",
+        InvalidUtf8 => "not UTF-8",
+        Other => "other",
+    };
+}
+
+void names(Arena* arena, str path) uses io {
+    match (fs.list(arena, path)) {
+        ok(found) => io.print("{}: {}", fs.file_name(path), text.join(arena, found, ", ")),
+        err(e) => io.print("list {}: {}", path, describe(e)),
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    if (args.len == 1 && args[0] == "child") {
+        io.print("child output été");
+        return 7;
+    }
+
+    // the program
+    io.print("{} arguments", args.len);
+    for (str a in args) {
+        io.print("[{}]", a);
+    }
+    io.print("program: {}", fs.stem(os.program(&arena)));
+
+    // the environment
+    io.print("set: {}", os.set_env(&arena, "SOSU_TEST_VARIABLE", "valeur été"));
+    match (os.env(&arena, "SOSU_TEST_VARIABLE")) {
+        some(v) => io.print("env: {}", v),
+        none => io.print("env: none"),
+    }
+    io.print("unset: {}", os.unset_env(&arena, "SOSU_TEST_VARIABLE"));
+    match (os.env(&arena, "SOSU_TEST_VARIABLE")) {
+        some(v) => io.print("env: {}", v),
+        none => io.print("env: none"),
+    }
+    match (os.env(&arena, "PATH")) {
+        some(v) => io.print("PATH: {}", v.len > 0),
+        none => io.print("PATH: none"),
+    }
+
+    // another program: this one
+    mut str[2] command = [os.program(&arena), "child"];
+    match (os.run(&arena, command[0..2])) {
+        ok(out) => {
+            str shown = match (out.text()) {
+                some(t) => text.trim(t),
+                none => "(not text)",
+            };
+            io.print("child: code {}, [{}]", out.code, shown);
+        },
+        err(e) => io.print("run: {}", describe(e)),
+    }
+    mut str[1] missing = ["sosu-no-such-program"];
+    match (os.run(&arena, missing[0..1])) {
+        ok(out) => io.print("unexpected: code {}", out.code),
+        err(e) => io.print("missing program: {}", describe(e)),
+    }
+
+    // folders and files
+    str sandbox = "tests/programs/system/build/sandbox";
+    if (fs.exists(&arena, sandbox)) {
+        match (fs.remove_all(&arena, sandbox)) {
+            ok => io.print("clean: ok"),
+            err(e) => io.print("clean: {}", describe(e)),
+        }
+    }
+    match (fs.create_dirs(&arena, fs.join(&arena, sandbox, "a/b"))) {
+        ok => io.print("create_dirs: ok"),
+        err(e) => io.print("create_dirs: {}", describe(e)),
+    }
+    match (fs.create_dirs(&arena, fs.join(&arena, sandbox, "a/b"))) {
+        ok => io.print("create_dirs again: ok"),
+        err(e) => io.print("create_dirs again: {}", describe(e)),
+    }
+    match (fs.create_dir(&arena, fs.join(&arena, sandbox, "a"))) {
+        ok => io.print("create_dir again: ok"),
+        err(e) => io.print("create_dir again: {}", describe(e)),
+    }
+    str note = fs.join(&arena, sandbox, "a/note.txt");
+    match (io.write_file(&arena, note, "hello")) {
+        ok => io.print("write: ok"),
+        err(e) => io.print("write: {}", describe(e)),
+    }
+    match (io.append_file(&arena, note, ", world")) {
+        ok => io.print("append: ok"),
+        err(e) => io.print("append: {}", describe(e)),
+    }
+    match (io.write_file(&arena, fs.join(&arena, sandbox, "a/été.txt"), "accents")) {
+        ok => io.print("write été: ok"),
+        err(e) => io.print("write été: {}", describe(e)),
+    }
+    names(&arena, fs.join(&arena, sandbox, "a"));
+    match (fs.info(&arena, note)) {
+        ok(i) => io.print("info: file {}, {} bytes, recent {}", i.kind == fs.Kind.File, i.size, i.modified > 1700000000),
+        err(e) => io.print("info: {}", describe(e)),
+    }
+    io.print("is_dir {} {}, is_file {} {}", fs.is_dir(&arena, sandbox), fs.is_dir(&arena, note), fs.is_file(&arena, note), fs.is_file(&arena, sandbox));
+    match (fs.copy(&arena, note, fs.join(&arena, sandbox, "copy.txt"))) {
+        ok => io.print("copy: ok"),
+        err(e) => io.print("copy: {}", describe(e)),
+    }
+    match (fs.rename(&arena, fs.join(&arena, sandbox, "copy.txt"), fs.join(&arena, sandbox, "a/b/moved.txt"))) {
+        ok => io.print("rename: ok"),
+        err(e) => io.print("rename: {}", describe(e)),
+    }
+    names(&arena, sandbox);
+    names(&arena, fs.join(&arena, sandbox, "a/b"));
+    match (io.read_file(&arena, fs.join(&arena, sandbox, "a/b/moved.txt"))) {
+        ok(t) => io.print("moved: {}", t),
+        err(e) => io.print("moved: {}", describe(e)),
+    }
+    match (fs.remove_dir(&arena, fs.join(&arena, sandbox, "a"))) {
+        ok => io.print("remove_dir not empty: ok"),
+        err(e) => io.print("remove_dir not empty: {}", describe(e)),
+    }
+    match (fs.remove_file(&arena, fs.join(&arena, sandbox, "nothing"))) {
+        ok => io.print("remove_file missing: ok"),
+        err(e) => io.print("remove_file missing: {}", describe(e)),
+    }
+    match (fs.list(&arena, fs.join(&arena, sandbox, "nothing"))) {
+        ok(found) => io.print("unexpected list"),
+        err(e) => io.print("list missing: {}", describe(e)),
+    }
+
+    // a file by parts
+    match (io.open(&arena, fs.join(&arena, sandbox, "parts.bin"), io.Mode.Write)) {
+        ok(file) => {
+            mut ui8[6] bytes = [1, 2, 3, 4, 5, 6];
+            match (file.write(bytes[0..6])) {
+                ok => io.print("write parts: ok"),
+                err(e) => io.print("write parts: {}", describe(e)),
+            }
+            match (file.write_text("xyz")) {
+                ok => io.print("write text: ok"),
+                err(e) => io.print("write text: {}", describe(e)),
+            }
+            io.print("size {}, at {}", file.size(), file.position());
+            file.close();
+        },
+        err(e) => io.print("open: {}", describe(e)),
+    }
+    match (io.open(&arena, fs.join(&arena, sandbox, "parts.bin"), io.Mode.Read)) {
+        ok(file) => {
+            mut ui8[4] buffer = [0; 4];
+            match (file.seek(2, io.From.Start)) {
+                ok => io.print("seek: ok"),
+                err(e) => io.print("seek: {}", describe(e)),
+            }
+            match (file.read(buffer[0..4])) {
+                ok(n) => io.print("read {}: {} {} {} {}", n, buffer[0], buffer[1], buffer[2], buffer[3]),
+                err(e) => io.print("read: {}", describe(e)),
+            }
+            match (file.seek(-2, io.From.End)) {
+                ok => io.print("seek end: ok"),
+                err(e) => io.print("seek end: {}", describe(e)),
+            }
+            match (file.read(buffer[0..4])) {
+                ok(n) => io.print("read {} at the end: {} {}", n, buffer[0], buffer[1]),
+                err(e) => io.print("read: {}", describe(e)),
+            }
+            match (file.read(buffer[0..4])) {
+                ok(n) => io.print("read {} after the end", n),
+                err(e) => io.print("read: {}", describe(e)),
+            }
+            file.close();
+        },
+        err(e) => io.print("open: {}", describe(e)),
+    }
+    match (io.open(&arena, fs.join(&arena, sandbox, "none.bin"), io.Mode.Read)) {
+        ok(file) => io.print("unexpected open"),
+        err(e) => io.print("open missing: {}", describe(e)),
+    }
+    match (fs.remove_all(&arena, sandbox)) {
+        ok => io.print("remove_all: ok"),
+        err(e) => io.print("remove_all: {}", describe(e)),
+    }
+    io.print("exists after: {}", fs.exists(&arena, sandbox));
+
+    // paths
+    io.print("{} {} {}", fs.join(&arena, "a", "b"), fs.join(&arena, "a/", "b"), fs.join(&arena, "a", "/b"));
+    io.print("{} {}", fs.join(&arena, "", "b"), fs.join(&arena, "C:\\x", "y"));
+    str[8] paths = ["a/b/c.txt", "c.txt", "/c", "/", "C:/x", "C:\\", "a/b/", ""];
+    for (str p in paths) {
+        str above = match (fs.parent(p)) {
+            some(q) => q,
+            none => "none",
+        };
+        io.print("[{}] parent [{}] name [{}]", p, above, fs.file_name(p));
+    }
+    str[4] files = ["a/c.txt", "x.tar.gz", ".profile", "dir.d/file"];
+    for (str p in files) {
+        str ext = match (fs.extension(p)) {
+            some(e) => e,
+            none => "none",
+        };
+        io.print("[{}] extension [{}] stem [{}]", p, ext, fs.stem(p));
+    }
+    io.print("{} {} {} {}", fs.is_absolute("/x"), fs.is_absolute("C:\\x"), fs.is_absolute("x/y"), fs.is_absolute("C:x"));
+    io.print("current is absolute: {}", fs.is_absolute(fs.current_dir(&arena)));
+    os.exit(3);
+    return 0;
+}

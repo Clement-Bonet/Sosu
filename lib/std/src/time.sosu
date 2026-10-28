@@ -1,5 +1,8 @@
-// std.time: the clock and waiting (spec §8), with the effect `time` (spec §7.4).
+// std.time: the clock and waiting (spec §8), with the effect `time` (spec §7.4), and the dates
+// and times of the calendar (spec §8.2).
 // Written in Sosu; the runtime gives the clocks, which differ by system.
+
+import std.text;
 
 extern "C" {
     ui64 sosu_monotonic_ns() uses time;
@@ -34,5 +37,357 @@ pub i64 unix_seconds() uses time {
 pub void sleep_ms(ui32 ms) uses time {
     unsafe {
         sosu_sleep_ms(ms);
+    }
+}
+
+// Dates and times of the calendar, in UTC (time zones come later): the proleptic Gregorian
+// calendar, with the years before 1 (year 0 is 1 BC). Computed without effect; only `now`
+// reads the clock.
+
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+// A moment, to the nanosecond, in UTC. Built by `date_time` and `date`, which check it.
+pub struct DateTime {
+    pub i64 year;
+    pub i32 month;  // 1 to 12
+    pub i32 day;  // 1 to 28, 29, 30 or 31
+    pub i32 hour;  // 0 to 23
+    pub i32 minute;  // 0 to 59
+    pub i32 second;  // 0 to 59: no leap second, as the clocks of the systems
+    pub i32 nanosecond;  // 0 to 999 999 999
+
+    // Seconds since 1970-01-01T00:00:00Z (negative before), without the nanoseconds.
+    pub i64 to_unix() {
+        return days_from_civil(year, month, day) * 86400 + (hour * 3600 + minute * 60 + second) as i64;
+    }
+
+    pub Weekday weekday() {
+        // 1970-01-01 was a Thursday: 3, counting from Monday.
+        i64 index = floor_mod(days_from_civil(year, month, day) + 3, 7);
+        Weekday[7] days = [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday];
+        return days[index as usize];
+    }
+
+    // 1 for January 1st, up to 365 or 366.
+    pub i32 day_of_year() {
+        return (days_from_civil(year, month, day) - days_from_civil(year, 1, 1)) as i32 + 1;
+    }
+
+    // This moment, `seconds` later (earlier if negative).
+    pub DateTime add_seconds(i64 seconds) {
+        return with_nanosecond(from_unix(to_unix() + seconds), nanosecond);
+    }
+
+    pub DateTime add_days(i64 days) {
+        return add_seconds(days * 86400);
+    }
+
+    // The same day and time, `months` later (earlier if negative); the day becomes the last of
+    // the month when that month has fewer (January 31 and 1 month is February 28 or 29).
+    pub DateTime add_months(i64 months) {
+        i64 total = year * 12 + (month - 1) as i64 + months;
+        i64 y = floor_div(total, 12);
+        i32 m = (total - y * 12) as i32 + 1;
+        return DateTime{ year: y, month: m, day: min(day, days_in_month(y, m)), hour: hour, minute: minute, second: second, nanosecond: nanosecond };
+    }
+
+    // Seconds from this moment to `later` (negative if `later` is before), without nanoseconds.
+    pub i64 seconds_until(DateTime later) {
+        return later.to_unix() - to_unix();
+    }
+
+    // Whether this moment is before `other`.
+    pub bool before(DateTime other) {
+        i64 a = to_unix();
+        i64 b = other.to_unix();
+        return a < b || a == b && nanosecond < other.nanosecond;
+    }
+
+    // ISO 8601, in `arena`: "2026-10-28T07:43:05Z", with the fraction of the second when there
+    // is one: "2026-10-28T07:43:05.250Z" (milliseconds, or more digits when needed).
+    pub str format(Arena* arena) {
+        text.TextBuilder* b = text.builder(arena);
+        push_date(b, year, month, day);
+        b.push_char('T');
+        push_digits(b, hour as i64, 2);
+        b.push_char(':');
+        push_digits(b, minute as i64, 2);
+        b.push_char(':');
+        push_digits(b, second as i64, 2);
+        if (nanosecond != 0) {
+            b.push_char('.');
+            mut i32 width = 9;
+            mut i32 rest = nanosecond;
+            while (width > 3 && rest % 10 == 0) {
+                rest /= 10;
+                width -= 1;
+            }
+            push_digits(b, rest as i64, width);
+        }
+        b.push_char('Z');
+        return b.text();
+    }
+
+    // The date alone, ISO 8601: "2026-10-28".
+    pub str format_date(Arena* arena) {
+        text.TextBuilder* b = text.builder(arena);
+        push_date(b, year, month, day);
+        return b.text();
+    }
+}
+
+// The moment, or none if it is not one (February 30, hour 24...).
+pub DateTime? date_time(i64 year, i32 month, i32 day, i32 hour, i32 minute, i32 second) {
+    if (month < 1 || month > 12 || day < 1 || day > days_in_month(year, month)) {
+        return none;
+    }
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return none;
+    }
+    return some(DateTime{ year: year, month: month, day: day, hour: hour, minute: minute, second: second, nanosecond: 0 });
+}
+
+// Midnight of that day, or none.
+pub DateTime? date(i64 year, i32 month, i32 day) {
+    return date_time(year, month, day, 0, 0, 0);
+}
+
+// The moment `seconds` after 1970-01-01T00:00:00Z (before it if negative).
+pub DateTime from_unix(i64 seconds) {
+    i64 days = floor_div(seconds, 86400);
+    i32 rest = (seconds - days * 86400) as i32;
+    // The date of the day (civil_from_days, by Howard Hinnant): eras of 400 years from
+    // 0000-03-01, so that February and its leap day end a year.
+    i64 z = days + 719468;
+    i64 era = floor_div(z, 146097);
+    i64 day_of_era = z - era * 146097;
+    i64 year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    i64 day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    i64 shifted_month = (5 * day_of_year + 2) / 153;  // 0 for March
+    i32 d = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as i32;
+    mut i32 m = (shifted_month + 3) as i32;
+    if (m > 12) {
+        m -= 12;
+    }
+    mut i64 y = year_of_era + era * 400;
+    if (m <= 2) {
+        y += 1;
+    }
+    return DateTime{ year: y, month: m, day: d, hour: rest / 3600, minute: rest / 60 % 60, second: rest % 60, nanosecond: 0 };
+}
+
+// This moment, from the wall clock of the system.
+pub DateTime now() uses time {
+    return from_unix(unix_seconds());
+}
+
+pub bool is_leap_year(i64 year) {
+    return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+}
+
+pub i32 days_in_month(i64 year, i32 month)
+    requires month >= 1 && month <= 12
+{
+    if (month == 2) {
+        if (is_leap_year(year)) {
+            return 29;
+        }
+        return 28;
+    }
+    if (month == 4 || month == 6 || month == 9 || month == 11) {
+        return 30;
+    }
+    return 31;
+}
+
+// Reads ISO 8601: a date ("2026-10-28"), or a date and a time with "T" or a space between them,
+// the seconds and their fraction optional, then the zone: "Z", "+02:00", "-0530", or none for
+// UTC. "2026-10-28T09:43:05.25+02:00" is 07:43:05.25 in UTC. None if the text is not one, or
+// not a valid moment.
+pub DateTime? parse(str s) {
+    mut Reader r = Reader{ s: text.trim(s), at: 0, failed: false };
+    mut i64 sign = 1;
+    if (r.take(45)) {  // '-': a year before 0
+        sign = -1;
+    }
+    i64 year = r.digits(4, 9) * sign;
+    r.expect(45);
+    i32 month = r.digits(2, 2) as i32;
+    r.expect(45);
+    i32 day = r.digits(2, 2) as i32;
+    if (r.failed) {
+        return none;
+    }
+    if (r.done()) {
+        return date(year, month, day);
+    }
+    if (!r.take(84) && !r.take(116) && !r.take(32)) {  // 'T', 't', ' '
+        return none;
+    }
+    i32 hour = r.digits(2, 2) as i32;
+    r.expect(58);  // ':'
+    i32 minute = r.digits(2, 2) as i32;
+    mut i32 second = 0;
+    mut i32 nanosecond = 0;
+    if (r.take(58)) {
+        second = r.digits(2, 2) as i32;
+        if (r.take(46) || r.take(44)) {  // '.' or ','
+            mut i32 count = 0;
+            while (r.peek_digit()) {
+                if (count < 9) {  // beyond the nanoseconds, the digits are dropped
+                    nanosecond = nanosecond * 10 + (r.s.bytes[r.at] - 48) as i32;
+                    count += 1;
+                }
+                r.at += 1;
+            }
+            if (count == 0) {
+                return none;
+            }
+            for (i32 i in count..9) {
+                nanosecond *= 10;
+            }
+        }
+    }
+    mut i64 offset = 0;  // seconds east of UTC
+    if (r.peek(43) || r.peek(45)) {  // '+', '-'
+        mut i64 direction = 1;
+        if (r.peek(45)) {
+            direction = -1;
+        }
+        r.at += 1;
+        i64 hours = r.digits(2, 2);
+        r.take(58);  // the colon is optional
+        i64 minutes = r.digits(2, 2);
+        if (hours > 23 || minutes > 59) {
+            return none;
+        }
+        offset = direction * (hours * 3600 + minutes * 60);
+    } else if (!r.take(90)) {  // 'Z'
+        r.take(122);  // 'z'
+    }
+    if (r.failed || !r.done()) {
+        return none;
+    }
+    DateTime utc = match (date_time(year, month, day, hour, minute, second)) {
+        some(local) => local.add_seconds(-offset),
+        none => {
+            return none;
+        },
+    };
+    return some(with_nanosecond(utc, nanosecond));
+}
+
+DateTime with_nanosecond(DateTime t, i32 nanosecond) {
+    return DateTime{ year: t.year, month: t.month, day: t.day, hour: t.hour, minute: t.minute, second: t.second, nanosecond: nanosecond };
+}
+
+// The days from 1970-01-01 to that date (days_from_civil, by Howard Hinnant).
+i64 days_from_civil(i64 year, i32 month, i32 day) {
+    mut i64 y = year;
+    if (month <= 2) {
+        y -= 1;
+    }
+    i64 era = floor_div(y, 400);
+    i64 year_of_era = y - era * 400;
+    mut i64 m = month as i64 + 9;  // March is 0
+    if (m >= 12) {
+        m -= 12;
+    }
+    i64 day_of_year = (153 * m + 2) / 5 + day as i64 - 1;
+    i64 day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
+// a / b rounded down (towards minus infinity), for b > 0.
+i64 floor_div(i64 a, i64 b) {
+    i64 q = a / b;
+    if (a % b < 0) {
+        return q - 1;
+    }
+    return q;
+}
+
+// The remainder of `floor_div`, from 0 to b - 1.
+i64 floor_mod(i64 a, i64 b) {
+    return a - floor_div(a, b) * b;
+}
+
+void push_date(text.TextBuilder* b, i64 year, i32 month, i32 day) {
+    if (year < 0) {
+        b.push_char('-');
+    }
+    push_digits(b, abs(year), 4);
+    b.push_char('-');
+    push_digits(b, month as i64, 2);
+    b.push_char('-');
+    push_digits(b, day as i64, 2);
+}
+
+// `value`, not negative, with zeros before it up to `width` digits.
+void push_digits(text.TextBuilder* b, i64 value, i32 width) {
+    mut i64 power = 1;
+    for (i32 i in 1..width) {
+        power *= 10;
+    }
+    while (power > 1 && value < power) {
+        b.push_char('0');
+        power /= 10;
+    }
+    b.push_i64(value);
+}
+
+// A place in a text being read; `failed` once something expected was not there.
+struct Reader {
+    str s;
+    mut usize at;
+    mut bool failed;
+
+    bool done() {
+        return at >= s.len;
+    }
+
+    bool peek(ui8 b) {
+        return at < s.len && s.bytes[at] == b;
+    }
+
+    bool peek_digit() {
+        return at < s.len && s.bytes[at] >= 48 && s.bytes[at] <= 57;
+    }
+
+    bool take(ui8 b) {
+        if (peek(b)) {
+            at += 1;
+            return true;
+        }
+        return false;
+    }
+
+    void expect(ui8 b) {
+        if (!take(b)) {
+            failed = true;
+        }
+    }
+
+    // From `fewest` to `most` digits, as a number.
+    i64 digits(i32 fewest, i32 most) {
+        mut i64 value = 0;
+        mut i32 n = 0;
+        while (n < most && peek_digit()) {
+            value = value * 10 + (s.bytes[at] - 48) as i64;
+            at += 1;
+            n += 1;
+        }
+        if (n < fewest) {
+            failed = true;
+        }
+        return value;
     }
 }

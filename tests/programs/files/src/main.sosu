@@ -5,6 +5,8 @@ str describe(io.IoError e) {
     return match (e) {
         NotFound => "not found",
         PermissionDenied => "permission denied",
+        AlreadyExists => "already exists",
+        NotEmpty => "not empty",
         InvalidUtf8 => "not UTF-8 text",
         Other => "other error",
     };

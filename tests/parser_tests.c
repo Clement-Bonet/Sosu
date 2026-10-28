@@ -275,7 +275,16 @@ static void test_errors(void) {
     expect_error("void f() { if (a) return; }", "E0206", 1, 19, 1);
     expect_error("void f() { while (a) x += 1; }", "E0206", 1, 22, 1);
     expect_error("void f() { i32 x; }", "E0207", 1, 16, 1);
-    expect_error("void f() { auto g = (i32 a) => a + 1; }", "E0208", 1, 21, 1);
+    /* lambdas (spec §5.5) */
+    expect_expr("(i32 a) => a + 1", "(lambda ((i32 a)) (+ a 1))");
+    expect_expr("(a, i32 b) => a * b", "(lambda (a (i32 b)) (* a b))");
+    expect_expr("() => f()", "(lambda () (call f))");
+    expect_expr("f((x) => x > 3, 2)", "(call f (lambda (x) (> x 3)) 2)");
+    expect_expr("(a + b) * 2", "(* (+ a b) 2)");
+    expect_module("void f() { (fn(i32) -> i32)[2] fs = g(); }",
+                  "(fn void f ()\n  (block\n    (var (fn(i32) -> i32)[2] fs (call g))))\n");
+    expect_error("void f() { auto g = (mut i32 a) => a; }", "E0212", 1, 22, 1);
+    expect_error("void f() { auto g = (i32 a) => ; }", "E0201", 1, 32, 1);
     expect_error("void f() { i32 a, b = 0; }", "E0209", 1, 17, 1);
     expect_error("void f() { p->x = 1; }", "E0210", 1, 13, 1);
     expect_error("void f() { i32 a[4] = x; }", "E0211", 1, 17, 1);

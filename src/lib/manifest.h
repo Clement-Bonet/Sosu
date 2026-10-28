@@ -56,6 +56,9 @@ typedef struct {
     StringList paths;      /* folders where the linker looks for them */
     StringList frameworks; /* macOS and iOS frameworks */
     StringList copy;       /* files placed next to the program (DLLs...) */
+    StringList c;          /* C files compiled with the program (spec §9.1): a library given as its sources */
+    StringList include;    /* folders of their headers */
+    StringList defines;    /* `NAME` or `NAME=value`, for them */
     char *subsystem;       /* "window": a program that links it opens windows, without a console (in release, on
                               Windows); "console"; NULL when not given */
 } LinkSection;

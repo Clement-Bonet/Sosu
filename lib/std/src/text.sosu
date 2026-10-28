@@ -1,0 +1,767 @@
+// std.text: building texts, finding, splitting, trimming and replacing in them, upper and
+// lower case, and numbers read and written (spec §8.2).
+// Places in a text are in bytes, as `s.len` (spec §4.1): those given by `find` and the others
+// fall between characters, and `slice` checks that the places it is given do. What allocates
+// takes an `Arena*`; the pieces of a text (`slice`, `trim`, `split`) share its bytes, without
+// copy.
+
+extern "C" {
+    usize sosu_format_f64(f64 value, ui32 decimals, ui8* out, usize capacity);
+    f64 sosu_parse_f64(ui8* bytes, usize length);
+    usize sosu_format_f64_shortest(f64 value, ui8* out);
+}
+
+pub enum ParseError {
+    Empty,  // nothing but spaces, or nothing
+    Invalid,  // not a number written in decimal
+    OutOfRange,  // too large for the type
+}
+
+// Pieces
+
+// The bytes `start` to `end` - 1 of `s`; the program stops if a place falls inside a character.
+pub str slice(str s, usize start, usize end) {
+    assert(start <= end && end <= s.len);
+    assert(is_boundary(s, start) && is_boundary(s, end));
+    return unchecked(s.bytes[start..end]);
+}
+
+// Whether the place `i` of `s` falls between two characters (or at an end).
+pub bool is_boundary(str s, usize i) {
+    if (i == 0 || i >= s.len) {
+        return i <= s.len;
+    }
+    return s.bytes[i] & 0xC0 != 0x80;  // not a continuation byte
+}
+
+// Bytes known to be UTF-8, cut between characters, seen as a `str`: a view and a `str` are both
+// a pointer and a length.
+str unchecked(ui8[] bytes) {
+    mut ui8[] view = bytes;
+    unsafe {
+        return *(&view as str*);
+    }
+}
+
+// The number of characters (code points) of `s`.
+pub usize char_count(str s) {
+    mut usize count = 0;
+    for (ui8 b in s.bytes) {
+        if (b & 0xC0 != 0x80) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// Finding
+
+// The first place of `needle` in `s`, or none; an empty needle is at 0.
+pub usize? find(str s, str needle) {
+    return find_from(s, needle, 0);
+}
+
+// The first place of `needle` in `s` at `start` or after it.
+pub usize? find_from(str s, str needle, usize start) {
+    if (needle.len > s.len) {
+        return none;
+    }
+    for (usize i in start..s.len - needle.len + 1) {
+        if (matches_at(s, needle, i)) {
+            return some(i);
+        }
+    }
+    return none;
+}
+
+// The last place of `needle` in `s`, or none.
+pub usize? find_last(str s, str needle) {
+    if (needle.len > s.len) {
+        return none;
+    }
+    for (mut usize i = s.len - needle.len + 1; i > 0; i -= 1) {
+        if (matches_at(s, needle, i - 1)) {
+            return some(i - 1);
+        }
+    }
+    return none;
+}
+
+pub bool contains(str s, str needle) {
+    return match (find(s, needle)) {
+        some(i) => true,
+        none => false,
+    };
+}
+
+pub bool starts_with(str s, str prefix) {
+    return prefix.len <= s.len && matches_at(s, prefix, 0);
+}
+
+pub bool ends_with(str s, str suffix) {
+    return suffix.len <= s.len && matches_at(s, suffix, s.len - suffix.len);
+}
+
+// How many times `needle` is in `s`, without overlapping.
+pub usize count(str s, str needle)
+    requires needle.len > 0
+{
+    mut usize found = 0;
+    mut usize from = 0;
+    while (true) {
+        match (find_from(s, needle, from)) {
+            some(i) => {
+                found += 1;
+                from = i + needle.len;
+            },
+            none => {
+                return found;
+            },
+        }
+    }
+    return found;
+}
+
+bool matches_at(str s, str needle, usize at) {
+    for (usize j in 0..needle.len) {
+        if (s.bytes[at + j] != needle.bytes[j]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Trimming: the spaces are those of ASCII (space, tab, line feed, carriage return, vertical
+// tab, form feed).
+
+pub str trim(str s) {
+    return trim_end(trim_start(s));
+}
+
+pub str trim_start(str s) {
+    mut usize start = 0;
+    while (start < s.len && is_space_byte(s.bytes[start])) {
+        start += 1;
+    }
+    return unchecked(s.bytes[start..s.len]);
+}
+
+pub str trim_end(str s) {
+    mut usize end = s.len;
+    while (end > 0 && is_space_byte(s.bytes[end - 1])) {
+        end -= 1;
+    }
+    return unchecked(s.bytes[0..end]);
+}
+
+// `s` without `prefix` at its start, or none if it does not start with it.
+pub str? strip_prefix(str s, str prefix) {
+    if (!starts_with(s, prefix)) {
+        return none;
+    }
+    return some(unchecked(s.bytes[prefix.len..s.len]));
+}
+
+pub str? strip_suffix(str s, str suffix) {
+    if (!ends_with(s, suffix)) {
+        return none;
+    }
+    return some(unchecked(s.bytes[0..s.len - suffix.len]));
+}
+
+bool is_space_byte(ui8 b) {
+    return b == 32 || b >= 9 && b <= 13;
+}
+
+// Splitting: the pieces share the bytes of `s`; their list is allocated in `arena`.
+
+// The pieces of `s` between the `separator`s: n separators give n + 1 pieces, empty ones
+// included (`split(a, ",x,", ",")` is "", "x", "").
+pub str[] split(Arena* arena, str s, str separator)
+    requires separator.len > 0
+{
+    mut str[] pieces = room(arena, count(s, separator) + 1);
+    mut usize from = 0;
+    mut usize n = 0;
+    while (true) {
+        match (find_from(s, separator, from)) {
+            some(i) => {
+                pieces[n] = unchecked(s.bytes[from..i]);
+                n += 1;
+                from = i + separator.len;
+            },
+            none => {
+                pieces[n] = unchecked(s.bytes[from..s.len]);
+                return pieces;
+            },
+        }
+    }
+    return pieces;
+}
+
+// The lines of `s`, without their end (`\n` or `\r\n`); a last line feed adds no empty line.
+pub str[] lines(Arena* arena, str s) {
+    mut usize n = 0;
+    for (usize i in 0..s.len) {
+        if (s.bytes[i] == 10) {
+            n += 1;
+        }
+    }
+    if (s.len > 0 && s.bytes[s.len - 1] != 10) {
+        n += 1;
+    }
+    mut str[] found = room(arena, n);
+    mut usize start = 0;
+    mut usize k = 0;
+    for (usize i in 0..s.len) {
+        if (s.bytes[i] == 10) {
+            found[k] = without_return(unchecked(s.bytes[start..i]));
+            k += 1;
+            start = i + 1;
+        }
+    }
+    if (start < s.len) {
+        found[k] = without_return(unchecked(s.bytes[start..s.len]));
+    }
+    return found;
+}
+
+str without_return(str line) {
+    if (line.len > 0 && line.bytes[line.len - 1] == 13) {
+        return unchecked(line.bytes[0..line.len - 1]);
+    }
+    return line;
+}
+
+// The words of `s`: the pieces between runs of spaces, never empty.
+pub str[] words(Arena* arena, str s) {
+    mut usize n = 0;
+    mut bool inside = false;
+    for (ui8 b in s.bytes) {
+        bool space = is_space_byte(b);
+        if (!space && !inside) {
+            n += 1;
+        }
+        inside = !space;
+    }
+    mut str[] found = room(arena, n);
+    mut usize k = 0;
+    mut usize start = 0;
+    inside = false;
+    for (usize i in 0..s.len) {
+        bool space = is_space_byte(s.bytes[i]);
+        if (!space && !inside) {
+            start = i;
+        }
+        if (space && inside) {
+            found[k] = unchecked(s.bytes[start..i]);
+            k += 1;
+        }
+        inside = !space;
+    }
+    if (inside) {
+        found[k] = unchecked(s.bytes[start..s.len]);
+    }
+    return found;
+}
+
+str[] room(Arena* arena, usize n) {
+    mut str[] pieces = arena.alloc_slice(str, 0);
+    unsafe {
+        pieces = arena.alloc_slice(str, n);  // each written before it is read
+    }
+    return pieces;
+}
+
+// New texts, in `arena`
+
+// The `parts`, with `separator` between them.
+pub str join(Arena* arena, str[] parts, str separator) {
+    TextBuilder* b = builder(arena);
+    for (usize i in 0..parts.len) {
+        if (i > 0) {
+            b.push(separator);
+        }
+        b.push(parts[i]);
+    }
+    return b.text();
+}
+
+// `s` with each `from` replaced by `to`, from the start, without overlapping.
+pub str replace(Arena* arena, str s, str from, str to)
+    requires from.len > 0
+{
+    TextBuilder* b = builder(arena);
+    mut usize start = 0;
+    while (true) {
+        match (find_from(s, from, start)) {
+            some(i) => {
+                b.push(unchecked(s.bytes[start..i]));
+                b.push(to);
+                start = i + from.len;
+            },
+            none => {
+                b.push(unchecked(s.bytes[start..s.len]));
+                return b.text();
+            },
+        }
+    }
+    return b.text();
+}
+
+// `s`, `times` times.
+pub str repeat(Arena* arena, str s, usize times) {
+    TextBuilder* b = builder(arena);
+    for (usize i in 0..times) {
+        b.push(s);
+    }
+    return b.text();
+}
+
+// Upper and lower case: ASCII, Latin-1 and Latin Extended-A (the languages of Europe written in
+// Latin letters), Greek and Cyrillic. A letter changes alone, never into two (`ß` stays `ß`).
+
+pub str to_upper(Arena* arena, str s) {
+    TextBuilder* b = builder(arena);
+    for (char c in s.chars()) {
+        b.push_char(upper(c));
+    }
+    return b.text();
+}
+
+pub str to_lower(Arena* arena, str s) {
+    TextBuilder* b = builder(arena);
+    for (char c in s.chars()) {
+        b.push_char(lower(c));
+    }
+    return b.text();
+}
+
+// The capital of a letter, or `c` itself.
+pub char upper(char c) {
+    ui32 x = c as ui32;
+    if (x >= 0x61 && x <= 0x7A || x >= 0xE0 && x <= 0xFE && x != 0xF7) {
+        return char_of(x - 32);
+    }
+    if (x == 0xFF) {
+        return char_of(0x178);
+    }
+    if (x >= 0x100 && x <= 0x17F) {
+        if (pairs_even_odd(x) && x % 2 == 1 || pairs_odd_even(x) && x % 2 == 0) {
+            return char_of(x - 1);
+        }
+        if (x == 0x131) {  // dotless i
+            return 'I';
+        }
+        return c;
+    }
+    if (x >= 0x3B1 && x <= 0x3C9 && x != 0x3C2) {
+        return char_of(x - 32);
+    }
+    if (x == 0x3C2) {  // final sigma
+        return char_of(0x3A3);
+    }
+    if (x == 0x3AC) {
+        return char_of(0x386);
+    }
+    if (x >= 0x3AD && x <= 0x3AF) {
+        return char_of(x - 37);
+    }
+    if (x == 0x3CC) {
+        return char_of(0x38C);
+    }
+    if (x == 0x3CD || x == 0x3CE) {
+        return char_of(x - 63);
+    }
+    if (x >= 0x430 && x <= 0x44F) {
+        return char_of(x - 32);
+    }
+    if (x >= 0x450 && x <= 0x45F) {
+        return char_of(x - 80);
+    }
+    return c;
+}
+
+// The small letter of a capital, or `c` itself.
+pub char lower(char c) {
+    ui32 x = c as ui32;
+    if (x >= 0x41 && x <= 0x5A || x >= 0xC0 && x <= 0xDE && x != 0xD7) {
+        return char_of(x + 32);
+    }
+    if (x == 0x178) {
+        return char_of(0xFF);
+    }
+    if (x >= 0x100 && x <= 0x17F) {
+        if (pairs_even_odd(x) && x % 2 == 0 || pairs_odd_even(x) && x % 2 == 1) {
+            return char_of(x + 1);
+        }
+        if (x == 0x130) {  // capital I with a dot
+            return 'i';
+        }
+        return c;
+    }
+    if (x >= 0x391 && x <= 0x3A9 && x != 0x3A2) {
+        return char_of(x + 32);
+    }
+    if (x == 0x386) {
+        return char_of(0x3AC);
+    }
+    if (x >= 0x388 && x <= 0x38A) {
+        return char_of(x + 37);
+    }
+    if (x == 0x38C) {
+        return char_of(0x3CC);
+    }
+    if (x == 0x38E || x == 0x38F) {
+        return char_of(x + 63);
+    }
+    if (x >= 0x410 && x <= 0x42F) {
+        return char_of(x + 32);
+    }
+    if (x >= 0x400 && x <= 0x40F) {
+        return char_of(x + 80);
+    }
+    return c;
+}
+
+// Latin Extended-A: capitals at even code points, their small letters just after...
+bool pairs_even_odd(ui32 x) {
+    return x >= 0x100 && x <= 0x12F || x >= 0x132 && x <= 0x137 || x >= 0x14A && x <= 0x177;
+}
+
+// ... or at odd ones.
+bool pairs_odd_even(ui32 x) {
+    return x >= 0x139 && x <= 0x148 || x >= 0x179 && x <= 0x17E;
+}
+
+// The character of a code point (`as` gives a `char` from a `ui8` only).
+pub char char_of(ui32 code)
+    requires code <= 0x10FFFF && (code < 0xD800 || code > 0xDFFF)
+{
+    mut ui32 value = code;
+    unsafe {
+        return *(&value as char*);
+    }
+}
+
+pub bool is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+// A letter of ASCII.
+pub bool is_ascii_letter(char c) {
+    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';
+}
+
+// A letter that has a capital or a small letter in the ranges above (or is one).
+pub bool is_cased(char c) {
+    return upper(c) != c || lower(c) != c;
+}
+
+pub bool is_space(char c) {
+    ui32 x = c as ui32;
+    return x == 32 || x >= 9 && x <= 13;
+}
+
+// Numbers read: spaces around them are allowed, nothing else.
+
+pub i64!ParseError parse_i64(str s) {
+    str t = trim(s);
+    if (t.len == 0) {
+        return err(Empty);
+    }
+    mut usize i = 0;
+    bool negative = t.bytes[0] == 45;  // '-'
+    if (negative || t.bytes[0] == 43) {  // '+'
+        i = 1;
+    }
+    if (i == t.len) {
+        return err(Invalid);
+    }
+    // Gathered as a negative number, whose range is one larger.
+    mut i64 value = 0;
+    while (i < t.len) {
+        ui8 b = t.bytes[i];
+        if (b < 48 || b > 57) {
+            return err(Invalid);
+        }
+        i64 digit = (b - 48) as i64;
+        if (value < -922337203685477580 || value == -922337203685477580 && digit > 8) {
+            return err(OutOfRange);
+        }
+        value = value * 10 - digit;
+        i += 1;
+    }
+    if (negative) {
+        return ok(value);
+    }
+    if (value == -9223372036854775807 - 1) {
+        return err(OutOfRange);
+    }
+    return ok(-value);
+}
+
+pub ui64!ParseError parse_u64(str s) {
+    str t = trim(s);
+    if (t.len == 0) {
+        return err(Empty);
+    }
+    mut usize i = 0;
+    if (t.bytes[0] == 43) {  // '+'
+        i = 1;
+    }
+    if (i == t.len) {
+        return err(Invalid);
+    }
+    mut ui64 value = 0;
+    while (i < t.len) {
+        ui8 b = t.bytes[i];
+        if (b < 48 || b > 57) {
+            return err(Invalid);
+        }
+        ui64 digit = (b - 48) as ui64;
+        if (value > 1844674407370955161 || value == 1844674407370955161 && digit > 5) {
+            return err(OutOfRange);
+        }
+        value = value * 10 + digit;
+        i += 1;
+    }
+    return ok(value);
+}
+
+// A float written in decimal: a sign, digits with a dot among them or not, and an exponent
+// (`-1.5`, `.5`, `2e10`, `6.02E+23`). Too large, it is OutOfRange; not `inf` nor `nan`.
+pub f64!ParseError parse_f64(str s) {
+    str t = trim(s);
+    if (t.len == 0) {
+        return err(Empty);
+    }
+    mut usize i = 0;
+    if (t.bytes[0] == 45 || t.bytes[0] == 43) {
+        i = 1;
+    }
+    mut usize digits = 0;
+    while (i < t.len && is_digit_byte(t.bytes[i])) {
+        i += 1;
+        digits += 1;
+    }
+    if (i < t.len && t.bytes[i] == 46) {  // '.'
+        i += 1;
+        while (i < t.len && is_digit_byte(t.bytes[i])) {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if (digits == 0) {
+        return err(Invalid);
+    }
+    if (i < t.len && (t.bytes[i] == 101 || t.bytes[i] == 69)) {  // 'e', 'E'
+        i += 1;
+        if (i < t.len && (t.bytes[i] == 45 || t.bytes[i] == 43)) {
+            i += 1;
+        }
+        mut usize exponent = 0;
+        while (i < t.len && is_digit_byte(t.bytes[i])) {
+            i += 1;
+            exponent += 1;
+        }
+        if (exponent == 0) {
+            return err(Invalid);
+        }
+    }
+    if (i != t.len) {
+        return err(Invalid);
+    }
+    mut f64 value = 0.0;
+    unsafe {
+        value = sosu_parse_f64(&t.bytes[0], t.len);
+    }
+    if (value - value != 0.0) {  // an infinity
+        return err(OutOfRange);
+    }
+    return ok(value);
+}
+
+bool is_digit_byte(ui8 b) {
+    return b >= 48 && b <= 57;
+}
+
+// Numbers written, in `arena`.
+
+pub str format_i64(Arena* arena, i64 value) {
+    TextBuilder* b = builder(arena);
+    b.push_i64(value);
+    return b.text();
+}
+
+pub str format_u64(Arena* arena, ui64 value) {
+    TextBuilder* b = builder(arena);
+    b.push_u64(value);
+    return b.text();
+}
+
+// `value` with `decimals` digits after the dot, rounded (`format_f64(a, 3.14159, 2)` is
+// "3.14"; 0 decimals give no dot). An infinity is "inf" or "-inf", NaN is "NaN".
+pub str format_f64(Arena* arena, f64 value, ui32 decimals) {
+    TextBuilder* b = builder(arena);
+    b.push_f64(value, decimals);
+    return b.text();
+}
+
+// `value` with the fewest digits that read it back exactly: "0.1", "2.5", "1e+21", "3" for 3.0.
+pub str format_f64_shortest(Arena* arena, f64 value) {
+    TextBuilder* b = builder(arena);
+    b.push_f64_shortest(value);
+    return b.text();
+}
+
+// A text built piece by piece, in the arena given at its creation. When it is full, its bytes
+// move to a place twice as large; the old place stays in the arena until it is freed.
+pub class TextBuilder {
+    mut ui8[] data;
+    mut usize count;
+    Arena* arena;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        data = arena.alloc_slice(ui8, 0);
+        count = 0;
+    }
+
+    // Room for `more` bytes after the text.
+    void reserve(usize more) {
+        if (count + more <= data.len) {
+            return;
+        }
+        mut usize size = max(data.len * 2, 32);
+        while (size < count + more) {
+            size *= 2;
+        }
+        ui8[] grown = arena.alloc_slice(ui8, size);
+        for (usize i in 0..count) {
+            grown[i] = data[i];
+        }
+        data = grown;
+    }
+
+    pub void push(str s) {
+        reserve(s.len);
+        for (usize i in 0..s.len) {
+            data[count + i] = s.bytes[i];
+        }
+        count += s.len;
+    }
+
+    pub void push_char(char c) {
+        ui32 x = c as ui32;
+        reserve(4);
+        if (x < 0x80) {
+            data[count] = x as ui8;
+            count += 1;
+        } else if (x < 0x800) {
+            data[count] = (0xC0 | x >> 6) as ui8;
+            data[count + 1] = (0x80 | x & 0x3F) as ui8;
+            count += 2;
+        } else if (x < 0x10000) {
+            data[count] = (0xE0 | x >> 12) as ui8;
+            data[count + 1] = (0x80 | x >> 6 & 0x3F) as ui8;
+            data[count + 2] = (0x80 | x & 0x3F) as ui8;
+            count += 3;
+        } else {
+            data[count] = (0xF0 | x >> 18) as ui8;
+            data[count + 1] = (0x80 | x >> 12 & 0x3F) as ui8;
+            data[count + 2] = (0x80 | x >> 6 & 0x3F) as ui8;
+            data[count + 3] = (0x80 | x & 0x3F) as ui8;
+            count += 4;
+        }
+    }
+
+    pub void push_i64(i64 value) {
+        if (value < 0) {
+            push("-");
+            push_u64(wrapping_sub(0, value as ui64));  // -(i64 minimum) fits in a ui64
+        } else {
+            push_u64(value as ui64);
+        }
+    }
+
+    pub void push_u64(ui64 value) {
+        mut ui8[20] digits = [0; 20];
+        mut usize n = 0;
+        mut ui64 rest = value;
+        while (true) {
+            digits[n] = (48 + rest % 10) as ui8;
+            n += 1;
+            rest /= 10;
+            if (rest == 0) {
+                break;
+            }
+        }
+        reserve(n);
+        for (usize i in 0..n) {
+            data[count + i] = digits[n - 1 - i];
+        }
+        count += n;
+    }
+
+    // `value` with `decimals` digits after the dot (see `format_f64`).
+    pub void push_f64(f64 value, ui32 decimals) {
+        if (value != value) {
+            push("NaN");
+            return;
+        }
+        if (value - value != 0.0) {
+            if (value < 0.0) {
+                push("-inf");
+            } else {
+                push("inf");
+            }
+            return;
+        }
+        mut usize needed = 0;
+        reserve(64);
+        unsafe {
+            needed = sosu_format_f64(value, decimals, &data[count], data.len - count);
+        }
+        if (needed > data.len - count) {
+            reserve(needed);
+            unsafe {
+                needed = sosu_format_f64(value, decimals, &data[count], data.len - count);
+            }
+        }
+        count += needed;
+    }
+
+    // `value` with the fewest digits that read it back exactly (see `format_f64_shortest`).
+    pub void push_f64_shortest(f64 value) {
+        if (value != value || value - value != 0.0) {
+            push_f64(value, 0);  // NaN, inf, -inf
+            return;
+        }
+        reserve(32);
+        mut usize n = 0;
+        unsafe {
+            n = sosu_format_f64_shortest(value, &data[count]);
+        }
+        count += n;
+    }
+
+    // The length of the text, in bytes.
+    pub usize len() {
+        return count;
+    }
+
+    pub void clear() {
+        count = 0;
+    }
+
+    // The text built so far: valid until the next `push` (it shares the bytes of the builder).
+    pub str text() {
+        return unchecked(data[0..count]);
+    }
+}
+
+// An empty builder, in `arena`.
+pub TextBuilder* builder(Arena* arena) {
+    return arena.new(TextBuilder, arena);
+}

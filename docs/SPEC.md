@@ -114,7 +114,7 @@ variables in v0; a module has constants (`pub ui32 FLAGS = 0x20;`, §11.6).
 
 Control flow: `if / else`, `while`, `for (init; cond; step)`, `for (T x in a..b)`, `break`, `continue`.
 
-Lambdas (v1): `(i32 a) => a + 1`; the body is an expression or a `{ ... }` block.
+Lambdas: `(i32 a) => a + 1`; the body is an expression or a `{ ... }` block (§5.5).
 
 ### 5.1 Symbols and operators
 
@@ -214,7 +214,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 ### 5.3 Names, values and typing rules
 
 - **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
-- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet), and `hash(x) -> ui64` (§5.4). They are part of the compiler, since they work for several types and existed before generics.
+- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet), and `hash(x) -> ui64` (§5.4), and `size_of(T) -> usize`, the size of a type in bytes (§5.6). They are part of the compiler, since they work for several types and existed before generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: ui8`, `1` is a `ui8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
@@ -281,7 +281,7 @@ i32 main() uses io {
 - Type parameters follow the name of a function, a `struct`, an `enum` or a `class`: `<T>`, `<K, V>`, each with its constraints after a colon (`<T: Ordered>`, `<K: Hash + Equal, V>`). A generic type is written with its arguments: `Pair<str, i32>`, `Vec<Tree<i32>*>*`.
 - `<` after a name is a list of types, never a comparison, wherever the list is followed by `{`, `(`, `.`, a name, or the end of an argument (`,`, `)`: `arena.new(Vec<i32>, a)`): `Pair<i32, str>{ ... }`, `largest<i32>(xs)`, `Vec<i32> v`. The two readings cannot both be valid, since comparisons do not chain (§5.1): `a < b > c` is already an error. The parsing note of §5 becomes: a statement is a declaration when it starts with a type followed by a name, the type being read with its arguments.
 - The arguments of a generic function are inferred from its arguments, then from the type expected for its result (`vec.Vec<str>* names = vec.new(&arena)`); when neither says, they are written: `vec.new<str>(&arena)`. A generic type is always written with its arguments, except in a literal whose expected type is known.
-- The methods of a generic type use its parameters (`void push(T value)`); a method has no parameters of its own in this step.
+- The methods of a generic type use its parameters (`void push(T value)`). A method can also have parameters of its own, inferred at the call as for a function: `U map<U>(fn(T) -> U f)`, called `b.map((v) => v * 2)` or `b.map<str>(...)`. Each set of arguments gives its own C function (`T_main__Box__i32__map__str`). Such a method is not `virtual`, and an interface has none (E0217): each instance would need a slot in the table of the class.
 
 #### What a type parameter can be
 
@@ -298,6 +298,7 @@ i32 main() uses io {
   - `Number`: `Ordered`, and `+`, `-`, `*`, `/`, `min`, `max`, the conversions with `as` from and to the other numbers (`1 as T`: a literal is never a `T` by itself), and `io.print` (the integers and the floats). Not `-x` nor `abs`, since a `T` may be unsigned: write `(0 as T) - x`;
   - `Integer`: `Number`, and `%`, the bitwise operators and the shifts (the integers);
   - `Hash`: `Equal`, and `hash(x) -> ui64`, a built-in function (numbers, `bool`, `char`, `str`, pointers, enums without data).
+  - `Send`: values without pointers, which cross to another thread (numbers, `bool`, `char`, and the structs, enums, arrays, options and results made of them, §5.6).
 - An interface as a constraint: `<T: Drawable>` takes a pointer to a class that implements it (`T` is `Button*`), and `t.draw(r)` is a direct call in each instance, not a virtual one.
 - Several constraints are joined by `+`.
 
@@ -311,7 +312,8 @@ i32 main() uses io {
 #### Generic enums and classes
 
 - `enum Tree<T> { Leaf(T value), Node(Tree<T>* left, Tree<T>* right) }`: the variants use the parameters; a variant is written with or without the name of the enum, as today (`Leaf(3)`, `Tree<i32>.Leaf(3)`).
-- `class Vec<T>`: a generic class is created by `arena.new(Vec<i32>, args)` and handled through a pointer, as any class. In this step, a generic class has no parent class and no `virtual` method, and an interface is not generic.
+- `class Vec<T>`: a generic class is created by `arena.new(Vec<i32>, args)` and handled through a pointer, as any class. In this step, a generic class has no parent class, no interface and no `virtual` method.
+- `interface Iterator<T> { T? next(); }`: a generic interface; a class implements an instance of it, `class Countdown : Iterator<i32>`, and is converted to it with `as` (`c as Iterator<i32>*`). A generic function takes it as `Iterator<T>*`. Each instance has its own identity and dispatchers, as a non-generic interface (§5.2).
 
 #### Containers: `std.vec` and `std.map`
 
@@ -341,12 +343,125 @@ i32 main() uses io {
 - A generic body is checked once, against its constraints, as in C# and Rust.
 - No resource as an argument in this step (`Vec<Arena>`, a struct holding a `LongText`): the containers hold plain values and pointers.
 - `Vec` and `HashMap` are classes that grow in an arena given to them: no hidden allocation, they are held by pointer anywhere and nested (`Vec<Vec<i32>*>*`) without moves.
-- Methods with their own parameters (`map<U>(...)`) and generic interfaces (`Iterator<T>`) come later, after lambdas.
+- Methods with their own parameters (`map<U>(...)`) and generic interfaces (`Iterator<T>`) came with the lambdas (§5.5).
 - A variant has named fields, as every variant (`Leaf(T value)`), and a view is passed where a slice is expected (`largest(scores[0..3])`): the example of the design had written them otherwise.
 - `Number` has no `abs` and no `-x` (a `T` may be unsigned); `Ordered` also orders texts, and `<` on `str` is available outside generics too (byte by byte, §5.3).
 - `keys` and `values` of a `HashMap` take the arena of their copy.
 - In an `unsafe` block, `alloc`, `try_alloc` and `alloc_slice` give memory even for a type that zeroed memory does not make valid (a pointer, a type parameter): `Vec` and `HashMap` are written so, and read only what they wrote (§6).
 - A function type with effects gets a C name of its own (`T_F1i32voidE1`), so that two types differing only by their effects are two C types.
+
+### 5.5 Lambdas and closures
+
+Status: available (version 1.0, §13.1, work 1), with the methods that have type parameters of their own and the generic interfaces (§5.4).
+
+```sosu
+import std.io;
+
+void each<T, uses E>(T[] items, fn(T) -> void uses E f) uses E {
+    for (T x in items) {
+        f(x);
+    }
+}
+
+i32 twice(fn(i32) -> i32 f, i32 x) {
+    return f(f(x));
+}
+
+i32 main() uses io {
+    mut i32[3] scores = [3, 9, 4];
+    each(scores[0..3], (s) => io.print("{}", s));   // T = i32 and E = io, inferred
+    i32 bonus = 10;
+    auto add_bonus = (i32 s) => s + bonus;          // captures `bonus`, by copy
+    io.print("{}", twice(add_bonus, 1));            // 21
+    fn(i32) -> i32 clamp = (x) => {
+        if (x > 100) {
+            return 100;
+        }
+        return x;
+    };
+    io.print("{}", clamp(250));
+    return 0;
+}
+```
+
+#### Syntax and types
+
+- `(parameters) => body`: the body is an expression, or a block with `return` as in a function. A parameter is a type and a name, or a name alone, whose type is the one expected (`(s) => ...` given to a `fn(i32) -> void`); without an expected type, every parameter has its type written.
+- The type of a lambda is a function type, `fn(i32) -> i32`. Its return type is the expected one, else the type of its expression, or of its first `return`.
+- Its effects are those of the expected type; without one, those of its body (`(s) => io.print(...)` is a `fn(i32) -> void uses io`). Calling it needs them, not creating it. Given to a generic function, a lambda takes the types already known and gives the others: in `each(scores, (s) => io.print("{}", s))`, `T` comes from `scores`, then `E` from the lambda.
+- A named function is a value of the same types: `twice(double, 5)`.
+- `break`, `continue` and `return` belong to the lambda: `return` leaves the lambda, not the function around it.
+
+#### Captures
+
+- A lambda captures the variables and parameters of the enclosing function that it uses, by copy, when it is created. A copy cannot be changed (E0369): to change a variable, capture a pointer to it (`i32* p = &n;`, then `*p = x`). In a method, it captures `self`, a pointer: the fields of the object are those of the object, and change with it.
+- A value that owns a resource (an `Arena`, §6) cannot be captured, since a copy would own it twice (E0369): capture a pointer to it.
+- Nested lambdas capture through the lambdas around them.
+
+#### Where a closure lives
+
+A lambda that captures variables, a closure, lives as long as the function that creates it runs: what it captured is kept in the variables of that function. So a closure is called, given to a variable at its declaration (`auto f = ...`), and passed as an argument; it is not returned, nor stored in a field, an array, an option, a result or an enum, nor given to a C function, nor assigned with `=` (E0370). These cover `map`, `filter`, `sort_by` and the interface in immediate mode (§10.4), which call the function while they run. A lambda without captures, and a named function, go everywhere.
+
+- The compiler reports the closures it sees (E0370). A function received as a parameter may be one: where it would leave its function, it is checked when the program runs, which stops with the code 101 if it captured variables.
+- A closure kept beyond its function (a callback stored by the interface) needs another rule, regions or an arena that holds what it captured: after 1.0 (§13).
+
+#### What it becomes
+
+- A value of function type is a pair: the code, and a pointer to what a lambda captured (`NULL` for a function or a lambda without captures). A call passes that pointer to a lambda, and calls a function as it is.
+- A lambda is a C function of its own (`L_1`). What it captures is copied into a struct declared at the start of the enclosing function, so that it lives as long as that function; the code of the lambda starts by copying it back into variables of the same names.
+- A field of function type, and a parameter or a result of a C function, is a C function pointer (the code alone): the structs given to C keep their layout, and C callbacks take named functions and lambdas without captures. Storing a value there checks that it captured nothing; reading it gives a pair without captures.
+- The address of a field of function type cannot be taken (E0353): its C pointer is not a pair. A C function whose parameters are functions is called, not used as a value (E0370).
+- `fn(i32) -> i32[2]` is a function that returns an array; an array of functions puts the function type in parentheses: `(fn(i32) -> i32)[2]`, and so do an option, a view or a result of functions (`(fn() -> void)?`). A type in parentheses is the type itself, and the formatter writes them only there.
+
+### 5.6 Threads and channels
+
+Status: available (version 1.0, §13.1, work 2): `std.thread` and `std.channel`, tested by `tests/programs/threads`. Locks and atomics come after 1.0: without memory shared between threads, they have nothing to protect.
+
+```sosu
+import std.io;
+import std.thread;
+import std.channel;
+
+struct Job {
+    i64 from;
+    i64 to;
+    channel.Channel<i64> results;
+}
+
+i64 squares(Arena* arena, Job job) uses threads {
+    mut i64 total = 0;
+    for (i64 i in job.from..job.to) {
+        total += i * i;
+    }
+    bool sent = job.results.send(total);
+    return total;
+}
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    channel.Channel<i64> results = channel.new<i64>(4);
+    auto a = thread.spawn(&arena, squares, Job{ from: 0, to: 1000, results: results });
+    auto b = thread.spawn(&arena, squares, Job{ from: 1000, to: 2000, results: results });
+    io.print("{}", a.join() + b.join());
+    results.free();
+    return 0;
+}
+```
+
+#### Rules
+
+- Threads share no memory. A thread runs a function on a copy of a value; it gets an arena of its own, freed when the function returns (an arena belongs to one thread, §14.1). Threads talk through channels, which copy what they carry.
+- `Send`, a built-in constraint (§5.4), is satisfied by the values without pointers: numbers, `bool`, `char`, and the structs, enums, arrays, options and results made of them. A pointer, a view, a `str` (its bytes are in an arena or in the program), a function, an `Arena`, a class or an interface are not `Send` (E0362). The value given to a thread, its result and what a channel carries are `Send`.
+- `thread.spawn(arena, work, value)`, with `work` a `fn(Arena*, T) -> R uses E`: runs `work(own arena, value)` on a new thread, and returns a `thread.Thread<T, R>*` created in `arena`. `join()` waits for its end and gives the `R`. `work` is a function or a lambda without captures: a closure would read the variables of the thread that created it (checked when the program runs, §5.5). `spawn` uses `threads` and the effects of `work`.
+- `channel.new<T>(capacity)` gives a `channel.Channel<T>`, a queue of `capacity` values (at least one). The channel is itself `Send` (a number naming it in the runtime), so it is given to threads in their value. `send(x)` copies `x` in, waiting while the queue is full, and gives false once the channel is closed; `receive()` gives the next value, waiting while the queue is empty, and `none` once it is closed and empty; `close()` ends it; `free()` releases it, once the threads that use it are joined.
+- A run-time error in a thread stops the program (code 101), as in the main thread.
+- The interface stays on the main thread (§10.4): a thread gives its results to it through a channel.
+
+#### What it becomes
+
+- The runtime starts threads with the system (`CreateThread`, `pthread_create`), and keeps a channel as a ring of bytes behind a lock and a condition (`SRWLOCK` and `CONDITION_VARIABLE`, or those of pthreads). gcc and clang link with `-pthread`.
+- `std.thread` and `std.channel` are written in Sosu over it. Two parts of the language came with them: `size_of(T)`, the size of a type in bytes (a built-in function), and, in `unsafe`, the conversion with `as` of a function to the same type with other effects, for a function given to C (the runtime calls the work of a thread, which does not know its effects).
 
 ## 6. Memory
 
@@ -527,13 +642,24 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 
 ### 8.0 The standard library in v0
 
-`core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` two small functions where C differs between systems (`errno`, file sizes). Available so far:
+`core` and `std` are written in Sosu, on the C library through `extern "C"` (§9), like any package: the compiler only provides what cannot be written in Sosu v0 (`io.print`, `min`, `max`, `abs`, the text conversions of §4.1, arenas). The runtime gives `std` small functions where C differs between systems (`errno`, file sizes and offsets, folders, processes, the command line and the environment in UTF-8 on Windows), and the functions of the C library whose names `std.math` takes (`sosu_math_sqrt`...). Available so far:
 
-- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> ui8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`. `IoError` is `NotFound`, `PermissionDenied`, `InvalidUtf8` or `Other`.
-- `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`.
+- `std.io`: `io.print(...)`; `io.read_file(arena, path) -> str!IoError` (the whole file as text, allocated in the arena); `io.read_bytes(arena, path) -> ui8[]!IoError` (the same, as bytes: a font, an image); `io.write_file(arena, path, text) -> void!IoError`, `io.append_file(arena, path, text)`. Files by parts: `io.open(arena, path, mode) -> File!IoError`, `mode` being `Read`, `Write`, `Append` or `ReadWrite`; a `File` has `read(buffer) -> usize!IoError` (0 at the end), `write(bytes)`, `write_text(s)`, `seek(offset, From.Start|Current|End)`, `position()`, `size()`, `flush()` and `close()`. `IoError` is `NotFound`, `PermissionDenied`, `AlreadyExists`, `NotEmpty`, `InvalidUtf8` or `Other`. Paths are UTF-8 on every system (`_wfopen` on Windows).
+- `std.time` (effect `time`): `time.monotonic_ns()` and `time.monotonic_ms()` (a clock that never goes backwards, for durations), `time.unix_seconds()` (the wall clock), `time.sleep_ms(ms)`. The calendar, without effect except `now()`: `DateTime` (year, month, day, hour, minute, second, nanosecond, in UTC; the proleptic Gregorian calendar, year 0 included), built by `date_time(...)` and `date(y, m, d)`, which give none for an invalid moment, and `from_unix(seconds)`; its methods `to_unix()`, `weekday()`, `day_of_year()`, `add_seconds`, `add_days`, `add_months` (the day kept, or the last of the month), `seconds_until`, `before`, `format(arena)` (ISO 8601, `2026-10-28T07:43:05Z`, with the fraction when there is one) and `format_date`; `time.parse(s)` reads ISO 8601 with a zone (`Z`, `+02:00`, `-0530`) and gives the moment in UTC; `is_leap_year`, `days_in_month`. Time zones come later.
 - `std.vec` and `std.map`: `Vec<T>` and `HashMap<K: Hash, V>`, which grow in the arena given to them (§5.4).
 - `std.random`: `random.Rng`, a generator holding its state (SplitMix64; not for cryptography): `next()` (64 bits), `below(bound)`, `between(low, high)`, `unit()` (a float in [0, 1)). `random.seeded(seed)` gives the same numbers for the same seed, without effect; `random.from_system()` seeds it differently on each run, with the effect `random`.
+- `std.math`: `sqrt`, `cbrt`, `pow`, `exp`, `exp2`, `log`, `log2`, `log10`, `hypot`, the trigonometry (`sin` to `atan2`, `sinh`, `cosh`, `tanh`, `to_radians`, `to_degrees`), `floor`, `ceil`, `round` (halves away from zero), `trunc`, `fmod`, `clamp`, `lerp`; `PI`, `TAU`, `E`, `SQRT2`, `LN2`, `LN10`, `infinity()`, `nan()`, `is_nan`, `is_infinite`, `is_finite`; for integers, `gcd`, and `lcm` and `pow_i64` that give none when the result does not fit. The functions of floats are those of the C library (`libm`, linked with `-lm`).
+- `std.sort`: `sort` and `sort_descending` (`T: Ordered`), `sort_by(items, less)` and `sort_by_key(items, key)` with lambdas, in place and without memory (an introsort: O(n log n) at worst, not stable); `stable_sort`, `stable_sort_by` and `stable_sort_by_key`, which take their room in an arena (a merge sort); `is_sorted`, `is_sorted_by`; in a sorted view, `search` (a place or none), `lower_bound`, `upper_bound`; `reverse`.
+- `std.text`: places in bytes, between characters (`slice` checks it, `is_boundary`); `char_count`, `find`, `find_from`, `find_last`, `contains`, `starts_with`, `ends_with`, `count`; `trim`, `trim_start`, `trim_end`, `strip_prefix`, `strip_suffix`; `split`, `lines` (`\n` and `\r\n`), `words`, whose pieces share the bytes of the text; `join`, `replace`, `repeat`, `to_upper`, `to_lower` (ASCII, Latin-1, Latin Extended-A, Greek, Cyrillic: a letter changes alone), `upper`, `lower`, `char_of`, `is_digit`, `is_ascii_letter`, `is_cased`, `is_space`; `parse_i64`, `parse_u64`, `parse_f64` (`ParseError`: `Empty`, `Invalid`, `OutOfRange`); `format_i64`, `format_u64`, `format_f64(arena, x, decimals)`, `format_f64_shortest` (the fewest digits that read back the same); `TextBuilder` (`text.builder(arena)`: `push`, `push_char`, `push_i64`, `push_u64`, `push_f64`, `push_f64_shortest`, `len`, `clear`, `text()`).
+- `std.os` (effect `io`): `os.args(arena)` (without the name of the program; `sosuc run <package> -- a b` gives them), `os.program(arena)`, `os.env(arena, name) -> str?`, `set_env`, `unset_env`, `os.exit(code)` (the `defer`s not run), and `os.run(arena, command) -> Output!IoError`: another program with its arguments, never read by a shell, its exit code and its output (`Output.code`, `bytes`, `text()`); its errors go to those of the program. Not on iOS, which runs no other program.
+- `std.fs` (effect `io`): `fs.list(arena, folder)` (the names, sorted), `create_dir`, `create_dirs`, `remove_dir`, `remove_file`, `remove_all`, `rename`, `copy`, `info(arena, path) -> Info` (`kind`: `File`, `Folder` or `Other`; `size`; `modified`, seconds since 1970), `exists`, `is_dir`, `is_file`, `current_dir`; paths from their text alone, `/` and `\` both separating their parts: `join`, `parent`, `file_name`, `extension`, `stem`, `is_absolute`.
+- `std.cli`: `cli.command(arena, name, about)`, then `flag`, `long_flag`, `option` (with a default), `long_option`, `argument`, `rest`; `parse(args) -> Matches*!CliError` reads `--name value`, `--name=value`, `-n value`, `-nvalue`, joined flags (`-vq`) and `--`; `Matches` has `flag`, `has`, `value`, `values` (an option given several times), `argument`, `rest`; `help(arena)` writes the help from the declarations, and `message(arena, error)` the help or what is wrong. `-h` and `--help` give `HelpWanted`.
+- `std.log`: `log.console(level)`, `log.console_plain(level)` (without the time), `log.to_file(arena, path, level)`; a `Logger` writes `2026-10-28T07:43:05Z WARN message` lines with `debug`, `info`, `warn`, `error` (effects `io` and `time`), and `enabled(level)` says whether a message would be written. The console is the error output, which is the log of the system on Android (§11.5). A message allocates nothing.
+- `std.json`: `json.Value` (`Null`, `Bool`, `Number` (an f64), `Text`, `Array`, `Object` of `Member`s in the order of the text); `json.parse(arena, s) -> Value!JsonError` (`Invalid(offset)`, `TooDeep(offset)` beyond 512 levels; texts without escapes share the bytes of `s`); `write` and `write_pretty` (integers without a dot, other numbers with the fewest digits, NaN and infinities as `null`); `get(v, key)`, `at(v, i)`, `len`, `as_str`, `as_f64`, `as_i64` (an integer up to 2^53), `as_bool`, `is_null`. Enums have no methods, so these are functions.
+- `std.thread` and `std.channel`: §5.6.
 - `core.prelude`: `Utf8Error` (§5.3).
+
+Two limits of the language showed while writing these modules, for work 5 (§13.1): `void!E` is a return type only, not the type of a parameter or a variable (E0306), so a result without value is matched where it is made; and a type argument cannot be a pointer (`arena.alloc_slice(ui8*, n)`): an array of C strings is an array of a struct holding one `ui8*`, of the same layout.
 
 ### 8.1 Packages and manifest
 
@@ -564,7 +690,7 @@ shared = { path = "../shared" }
 - The entry file of a package is `src/main.sosu` for an application, or `src/lib.sosu` for a library. The compiler loads the modules reachable by `import` from it.
 - The modules of a package may import each other.
 - The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`: the folder of the program run, or, when it was run by its name alone (an editor runs `sosuc lsp`), the folder of PATH where it was found.
-- `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
+- `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1, with the C files of a package). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
 - In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
@@ -584,7 +710,7 @@ What a program needs beyond §8.0, and how each library is made: in Sosu (portab
 
 | Module | Content | How | When |
 |---|---|---|---|
-| `std.math` | `sqrt`, `pow`, `exp`, `log`, trigonometry, `floor` / `ceil` / `round`, `PI`, `E`, `INFINITY`; `is_nan`; integer `gcd`, `pow` with overflow checked | the C library (`libm`), wrapped | 1.0 |
+| `std.math` | `sqrt`, `pow`, `exp`, `log`, trigonometry, `floor` / `ceil` / `round`, `PI`, `E`, `infinity()`; `is_nan`; integer `gcd`, `pow_i64` with overflow checked | the C library (`libm`), wrapped | 1.0 (done, §8.0) |
 | `math.linear` | `Vec2`, `Vec3`, `Vec4`, `Mat3`, `Mat4`, quaternions, transforms (for `render` and 3D) | Sosu | 1.0 |
 | `math.stats` | mean, median, variance, percentiles, histograms; the distributions of `std.random` (normal, exponential) | Sosu | after |
 | `math.big` | big integers and decimals of chosen precision (money beyond `i64`, §14.2) | Sosu | after |
@@ -634,16 +760,16 @@ SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`):
 
 | Module | Content | How | When |
 |---|---|---|---|
-| `std.text` | building texts (`TextBuilder`), split, trim, find, replace, upper and lower case (Unicode), numbers read and written (`parse_i64`, `format_f64` with decimals) | Sosu | 1.0 |
-| `std.fs` | folders (list, create, remove), paths (join, parent, extension), file information, rename, copy; files read by parts | the C library and the system | 1.0 |
-| `std.os` | the arguments of the program, the environment, the exit code; running another program and reading its output | the system | 1.0 |
-| `std.cli` | the options of a command (`--name value`, help written from them) | Sosu | 1.0 |
-| `std.time` | dates and times of the calendar, time zones, durations, formats (ISO 8601) | Sosu, the system for the zones | 1.0 (dates, ISO 8601), after (zones) |
-| `std.sort` | sort, sort by a key, binary search (with lambdas) | Sosu | 1.0 |
-| `std.json` | read and write JSON (the language server has one in C already) | Sosu | 1.0 |
+| `std.text` | building texts (`TextBuilder`), split, trim, find, replace, upper and lower case (Unicode), numbers read and written (`parse_i64`, `format_f64` with decimals) | Sosu | 1.0 (done, §8.0) |
+| `std.fs` | folders (list, create, remove), paths (join, parent, extension), file information, rename, copy; files read by parts (in `std.io`, which owns the C files) | the C library and the system | 1.0 (done, §8.0) |
+| `std.os` | the arguments of the program, the environment, the exit code; running another program and reading its output | the system | 1.0 (done, §8.0) |
+| `std.cli` | the options of a command (`--name value`, help written from them) | Sosu | 1.0 (done, §8.0) |
+| `std.time` | dates and times of the calendar, time zones, durations, formats (ISO 8601) | Sosu, the system for the zones | 1.0 (dates, ISO 8601: done, §8.0), after (zones) |
+| `std.sort` | sort, sort by a key, binary search (with lambdas) | Sosu | 1.0 (done, §8.0) |
+| `std.json` | read and write JSON (the language server has one in C already) | Sosu | 1.0 (done, §8.0) |
 | `std.csv`, `std.toml` | CSV; TOML (the manifests, §8.1) | Sosu | after |
-| `std.log` | logs with levels, to the console, a file or the log of the system (`logcat`, §11.5) | Sosu | 1.0 |
-| `std.thread`, `std.channel` | threads, channels, mutexes, atomics (§13.1, work 2) | the system | 1.0 |
+| `std.log` | logs with levels, to the console, a file or the log of the system (`logcat`, §11.5) | Sosu | 1.0 (done, §8.0) |
+| `std.thread`, `std.channel` | threads and channels (§5.6, done); mutexes and atomics | the system | 1.0 (threads, channels), after (mutexes, atomics) |
 | `compress` | deflate and gzip (`render.image` inflates already), zip archives | Sosu | 1.0 (deflate), after (zip) |
 | `crypto` | SHA-256 and SHA-1, HMAC, random numbers for security, base64 and hexadecimal | Sosu, the system for the random numbers | 1.0 (hashes, base64), after (cryptography itself, which should come from a reviewed library) |
 | `net` | TCP and UDP sockets, names resolved (DNS) | the system | after |
@@ -689,6 +815,7 @@ frameworks = ["Cocoa"]
 - Paths are relative to the package, never absolute, so that the manifest works on every machine.
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the systems of `--target` (§11.1): `windows`, `linux`, `macos`, `android`, `ios`; a section of one architecture, `[link.windows-arm64]`, adds to that of its system, and `{arch}` in a path is the architecture of the target (`vendor/SDL3/lib/{arch}`, §11.6).
+- A C library given with the package as its sources (SQLite, the decoders of §8.2), so that the user installs nothing: `c = ["vendor/sqlite3.c"]`, the C files compiled with the program; `include = ["vendor/include"]`, the folders of their headers; `defines = ["SQLITE_OMIT_LOAD_EXTENSION", "LEVEL=2"]`. They are compiled as C99, with the program, into a shared library, or as objects of their own into a static library (§9.2), and on Android into `libmain.so`; on iOS, not yet. Their functions are declared in `extern "C"` (or by `sosuc bindgen`, §11.6). Being in [link], a C file can belong to one target only (`[link.windows] c = [...]`). Tested by `tests/programs/csources`.
 
 ### 9.2 Using Sosu from other languages
 
@@ -733,7 +860,7 @@ Building:
 - `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/lib<name>.a`, or `build/<name>.lib` with MSVC), and the runtime into a library of its own (`build/libsosu_rt.a`, `build/sosu_rt.lib`) that the host links once, however many Sosu libraries it uses; `--lib=shared` into a shared one with the runtime inside (`lib<name>.so`, `lib<name>.dylib`, or `<name>.dll` with its import library `<name>.dll.lib`). Both come with `build/<name>.h`.
 - The header is plain C99 (`stdint.h`, `stdbool.h`, `stddef.h`), usable from C++ (`extern "C"` guards). It declares the exports, and the types they use under the name `<package>_<Type>`. The `#line` directives stay in the C code of the library: a debugger shows the `.sosu` files.
 - The runtime (`sosu_rt.c`) is compiled into the library. In a shared library, its symbols, and those of the generated code, are hidden: only the exports are visible.
-- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list in `build/<name>.links` (`lib`, `path` and `framework` lines), since the host links them.
+- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list in `build/<name>.links` (`lib`, `path` and `framework` lines), since the host links them; outside Windows, it ends with `lib m` and `lib pthread`, which the runtime needs (`std.math`, `std.thread`).
 - Mobile (§11.2) uses the same output: the Android activity loads a shared library, the Xcode project links a static one.
 
 Run-time errors:
@@ -1546,7 +1673,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 The compiler is designed as a library (`libsosu`: lexer, parser, type checking, IR) shared by all the tools, including the language server.
 
 - `sosuc build [--target <os>-<arch>]`: compiles. The generated C file and the program go to the `build/` folder of the package. The C compiler is MSVC on Windows (found through `vswhere`), `cc` elsewhere, or the one named by the `SOSU_CC` variable (gcc or clang style). `--target android-arm64`, `android-x64`, `ios-arm64` and `ios-sim` build for a phone (§11.5); `windows-arm64`, `linux-arm64`, `macos-universal`... for another desktop, in `build/<target>/` (§11.6).
-- `sosuc run`: compiles and runs in one command (useful for learning and workshops).
+- `sosuc run`: compiles and runs in one command (useful for learning and workshops). What follows `--` is given to the program: `sosuc run . -- a "b c"` (`os.args`, §8.0).
 - `sosuc test`: compiles and runs the `test` blocks of the package, prints one line per test and a summary; the exit code is 1 if a test failed.
 - `sosuc check`: checks a package without compiling it.
 - `sosuc fmt [--check] path...`: formats files, or the modules of packages (not their dependencies), in place (§7.6). With `--check`, it changes nothing and fails if a file is not formatted (for the CI).
@@ -1719,7 +1846,7 @@ effects      = "uses" IDENT { "," IDENT } ;
 contract     = ( "requires" | "ensures" ) expr ;
 
 type         = base_type { "*" | "?" | "[" [ INT | path ] "]" | "!" base_type } ;  (* path: an integer constant *)
-base_type    = path | "fn" "(" [ type { "," type } ] ")" "->" type [ effects ] ;
+base_type    = path | "fn" "(" [ type { "," type } ] ")" "->" type [ effects ] | "(" type ")" ;
 
 block        = "{" { stmt } "}" ;
 stmt         = block | var_decl ";" | simple ";" | if | while | for | return
@@ -1743,8 +1870,10 @@ postfix      = primary { call | "[" expr "]" | "." IDENT | struct_lit } ;
 call         = "(" [ expr { "," expr } [ "," ] ] ")" ;
 struct_lit   = "{" [ IDENT ":" expr { "," IDENT ":" expr } [ "," ] ] "}" ;  (* after a path *)
 primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base"
-             | IDENT | "(" expr ")" | match | array ;
+             | IDENT | "(" expr ")" | match | array | lambda ;
 array        = "[" [ expr ( ";" INT | { "," expr } [ "," ] ) ] "]" ;   (* [1, 2, 3] or [0; 64] *)
+lambda       = "(" [ lparam { "," lparam } ] ")" "=>" ( block | expr ) ;  (* `)` followed by `=>` (§5.5) *)
+lparam       = [ type ] IDENT ;
 match        = "match" "(" expr ")" "{" [ arm { "," arm } [ "," ] ] "}" ;
 arm          = pattern "=>" ( block | expr ) ;
 pattern      = "_" | path [ "(" [ IDENT { "," IDENT } ] ")" ] ;
@@ -1782,7 +1911,7 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 13. Research: `comptime`, effect polymorphism, regions, concurrency
 14. Self-hosting
 15. Responsive windows (not urgent): layouts that adapt to the width of the window, with breakpoints, as the grid of Bootstrap (`xs`, `md`, `lg`...): columns that stack on a phone and sit side by side on a desktop, widgets shown or hidden by width, in `.ui.sosu` (§10.2) and `ui`
-Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the libraries of §8.2 marked 1.0, and what the language still lacks (lambdas, concurrency).
+Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the libraries of §8.2 marked 1.0, and what the language lacked: lambdas (§5.5) and concurrency (§5.6), now done.
 
 ### 13.1 Version 1.0
 
@@ -1792,10 +1921,10 @@ What 1.0 holds, in the proposed order. The estimates are measured on steps 1 to 
 
 | # | Work | Content | Effort | Days | Output tokens | Weekly quota |
 |---|---|---|---|---|---|---|
-| 1 | Language | Lambdas and closures (§5, announced for v1), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4); the open points of §14.2 that change the language | 12 | 1 to 1.5 | 400 to 600 k | 18 to 27 % |
-| 2 | Concurrency | Threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
-| 3 | C sources in a package | `[build] c = ["vendor/sqlite3.c"]` in `sosu.toml`: C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it | 2 | 0.2 | 60 to 100 k | 3 to 4 % |
-| 4 | Standard library | The modules of `std` of §8.2 marked 1.0 | 25 | 1.5 to 2.5 | 0.8 to 1.2 M | 36 to 54 % |
+| 1 | Language | Lambdas and closures (§5.5, done), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4, done); the open points of §14.2 that change the language (types in parentheses, done) | 12 | 1 to 1.5 | 400 to 600 k | 18 to 27 % |
+| 2 | Concurrency | done (§5.6): threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
+| 3 | C sources in a package | done (§9.1), in [link] rather than a [build] section, so that a file can belong to one target: `c = ["vendor/sqlite3.c"]` in `sosu.toml`, C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it | 2 | 0.2 | 60 to 100 k | 3 to 4 % |
+| 4 | Standard library | The modules of `std` of §8.2 marked 1.0: done (§8.0), `std.math`, `std.sort`, `std.text`, the dates of `std.time`, `std.os`, `std.fs`, `std.cli`, `std.log`, `std.json`. The packages of §8.2 marked 1.0 come next: `math.linear`, `compress`, `crypto`, `testing`, `image`, `audio`, `db`, `platform.dialogs` | 25 | 1.5 to 2.5 | 0.8 to 1.2 M | 36 to 54 % |
 | 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured | 10 | 0.5 to 1 | 300 to 500 k | 13 to 22 % |
 | 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished | 8 | 0.5 to 1 | 250 to 400 k | 11 to 18 % |
 | 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 | 8 | 0.5 to 1 | 200 to 400 k | 9 to 18 % |
@@ -1841,6 +1970,7 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 - Class destructors: none in v0, external resources are released with `defer`? (proposed: yes)
 - Uninitialized variables: the grammar requires a value at declaration, while §7.7 mentions checking "variables initialized before being read" in debug. (proposed: keep the value mandatory; the debug check then concerns memory from `alloc`)
 - Multiple effects in a function type (`fn() -> void uses io, time`) rely on the list of predefined effects to tell them from the next parameter. User-defined effects would need another syntax. (proposed: no user-defined effects in v0)
+- An array, an option or a result of functions (§5.5): decided, a type in parentheses, `(fn(i32) -> i32)[2]`; a name given to a type (`type Op = fn(i32) -> i32;`) may come later.
 
 Libraries for other languages (§9.2):
 

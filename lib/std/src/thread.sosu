@@ -1,0 +1,54 @@
+// std.thread: threads (spec §5.6), with the effect `threads` (spec §7.4).
+// A thread runs a function on a copy of a value, with an arena of its own; it shares no memory
+// with the others (`Send`), and talks to them through channels (std.channel).
+
+extern "C" {
+    ui8* sosu_thread_start(fn(ui8*) -> void entry, ui8* data) uses threads;
+    void sosu_thread_join(ui8* handle) uses threads;
+}
+
+// A thread started by `spawn`: `join` waits for its end and gives what its function returned.
+pub class Thread<T: Send, R: Send> {
+    mut fn(Arena*, T) -> R work;
+    T value;
+    mut R result;  // written by the thread, read after `join`
+    mut ui8*? handle;
+
+    void init(T value) {
+        self.value = value;
+        handle = none;
+    }
+
+    // Waits for the end of the thread, then gives its result (again, if called twice).
+    pub R join() uses threads {
+        match (handle) {
+            some(h) => {
+                unsafe {
+                    sosu_thread_join(h);
+                }
+                handle = none;
+            },
+            none => { },
+        }
+        return result;
+    }
+}
+
+// Runs `work(arena, value)` on a new thread, with an arena of its own (freed when `work`
+// returns). `work` is a function or a lambda without captures: a closure would read the
+// variables of this thread. The `Thread` is created in `arena`; join it before freeing it.
+pub Thread<T, R>* spawn<T: Send, R: Send, uses E>(Arena* arena, fn(Arena*, T) -> R uses E work, T value) uses threads, E {
+    Thread<T, R>* thread = arena.new(Thread<T, R>, value);
+    unsafe {
+        thread.work = work as fn(Arena*, T) -> R;  // the thread has the effects of `work`: this function says them
+        thread.handle = some(sosu_thread_start((ui8* data) => {
+            unsafe {
+                Thread<T, R>* running = data as Thread<T, R>*;
+                mut Arena own = Arena.new(64 * KB);
+                running.result = running.work(&own, running.value);
+                own.free();
+            }
+        }, thread as ui8*));
+    }
+    return thread;
+}
