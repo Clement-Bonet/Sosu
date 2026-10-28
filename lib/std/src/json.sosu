@@ -1,0 +1,528 @@
+// std.json: JSON read into values and written from them (RFC 8259, spec §8.2).
+// `parse` builds the values in the arena given; the texts without escapes share the bytes of
+// the text read. Numbers are f64, as in JavaScript; `as_i64` gives those that are integers.
+// Objects keep their members in the order of the text, duplicates included (`get` gives the
+// first).
+
+import std.text;
+import std.vec;
+
+pub enum Value {
+    Null,
+    Bool(bool value),
+    Number(f64 value),
+    Text(str value),
+    Array(Value[] items),
+    Object(Member[] members),
+}
+
+pub struct Member {
+    pub str key;
+    pub Value value;
+}
+
+pub enum JsonError {
+    Invalid(usize offset),  // the byte where the text stops being JSON
+    TooDeep(usize offset),  // more than 512 arrays and objects inside each other
+}
+
+usize MAX_DEPTH = 512;
+
+// Reading
+
+pub Value!JsonError parse(Arena* arena, str s) {
+    mut Parser p = Parser{ s: s, at: 0, depth: 0, arena: arena };
+    p.skip_spaces();
+    Value v = try p.value();
+    p.skip_spaces();
+    if (p.at != s.len) {
+        return err(Invalid(p.at));
+    }
+    return ok(v);
+}
+
+// What went wrong, for a person: "invalid JSON at byte 12".
+pub str message(Arena* arena, JsonError e) {
+    text.TextBuilder* b = text.builder(arena);
+    match (e) {
+        Invalid(offset) => {
+            b.push("invalid JSON at byte ");
+            b.push_u64(offset as ui64);
+        },
+        TooDeep(offset) => {
+            b.push("JSON nested too deep at byte ");
+            b.push_u64(offset as ui64);
+        },
+    }
+    return b.text();
+}
+
+struct Parser {
+    str s;
+    mut usize at;
+    mut usize depth;
+    Arena* arena;
+
+    void skip_spaces() {
+        while (at < s.len) {
+            ui8 b = s.bytes[at];
+            if (b != 32 && b != 9 && b != 10 && b != 13) {
+                return;
+            }
+            at += 1;
+        }
+    }
+
+    bool take(ui8 b) {
+        if (at < s.len && s.bytes[at] == b) {
+            at += 1;
+            return true;
+        }
+        return false;
+    }
+
+    bool take_word(str word) {
+        if (text.starts_with(text.slice(s, at, s.len), word)) {
+            at += word.len;
+            return true;
+        }
+        return false;
+    }
+
+    Value!JsonError value() {
+        if (at >= s.len) {
+            return err(Invalid(at));
+        }
+        ui8 b = s.bytes[at];
+        if (b == 123) {  // '{'
+            return object();
+        }
+        if (b == 91) {  // '['
+            return array();
+        }
+        if (b == 34) {  // '"'
+            str t = try string();
+            return ok(Text(t));
+        }
+        if (take_word("true")) {
+            return ok(Bool(true));
+        }
+        if (take_word("false")) {
+            return ok(Bool(false));
+        }
+        if (take_word("null")) {
+            return ok(Null);
+        }
+        if (b == 45 || is_digit(b)) {
+            return number();
+        }
+        return err(Invalid(at));
+    }
+
+    Value!JsonError array() {
+        depth += 1;
+        if (depth > MAX_DEPTH) {
+            return err(TooDeep(at));
+        }
+        at += 1;  // '['
+        vec.Vec<Value>* items = vec.new(arena);
+        skip_spaces();
+        if (!take(93)) {  // ']'
+            while (true) {
+                skip_spaces();
+                items.push(try value());
+                skip_spaces();
+                if (take(93)) {
+                    break;
+                }
+                if (!take(44)) {  // ','
+                    return err(Invalid(at));
+                }
+            }
+        }
+        depth -= 1;
+        return ok(Array(items.items()));
+    }
+
+    Value!JsonError object() {
+        depth += 1;
+        if (depth > MAX_DEPTH) {
+            return err(TooDeep(at));
+        }
+        at += 1;  // '{'
+        vec.Vec<Member>* members = vec.new(arena);
+        skip_spaces();
+        if (!take(125)) {  // '}'
+            while (true) {
+                skip_spaces();
+                if (at >= s.len || s.bytes[at] != 34) {
+                    return err(Invalid(at));
+                }
+                str key = try string();
+                skip_spaces();
+                if (!take(58)) {  // ':'
+                    return err(Invalid(at));
+                }
+                skip_spaces();
+                Value v = try value();
+                members.push(Member{ key: key, value: v });
+                skip_spaces();
+                if (take(125)) {
+                    break;
+                }
+                if (!take(44)) {
+                    return err(Invalid(at));
+                }
+            }
+        }
+        depth -= 1;
+        return ok(Object(members.items()));
+    }
+
+    // A string, its quotes included; without escapes, it shares the bytes of `s`.
+    str!JsonError string() {
+        at += 1;  // '"'
+        usize start = at;
+        while (at < s.len && s.bytes[at] != 34 && s.bytes[at] != 92) {
+            if (s.bytes[at] < 32) {
+                return err(Invalid(at));
+            }
+            at += 1;
+        }
+        if (at >= s.len) {
+            return err(Invalid(at));
+        }
+        if (s.bytes[at] == 34) {
+            str plain = text.slice(s, start, at);
+            at += 1;
+            return ok(plain);
+        }
+        text.TextBuilder* b = text.builder(arena);
+        b.push(text.slice(s, start, at));
+        while (true) {
+            if (at >= s.len) {
+                return err(Invalid(at));
+            }
+            ui8 c = s.bytes[at];
+            if (c == 34) {
+                at += 1;
+                return ok(b.text());
+            }
+            if (c < 32) {
+                return err(Invalid(at));
+            }
+            if (c != 92) {
+                usize from = at;
+                while (at < s.len && s.bytes[at] != 34 && s.bytes[at] != 92 && s.bytes[at] >= 32) {
+                    at += 1;
+                }
+                b.push(text.slice(s, from, at));
+                continue;
+            }
+            at += 1;  // '\'
+            if (at >= s.len) {
+                return err(Invalid(at));
+            }
+            ui8 e = s.bytes[at];
+            at += 1;
+            if (e == 34 || e == 92 || e == 47) {
+                b.push_char(e as char);
+            } else if (e == 98) {
+                b.push_char(text.char_of(8));
+            } else if (e == 102) {
+                b.push_char(text.char_of(12));
+            } else if (e == 110) {
+                b.push_char('\n');
+            } else if (e == 114) {
+                b.push_char('\r');
+            } else if (e == 116) {
+                b.push_char('\t');
+            } else if (e == 117) {  // 'u'
+                mut ui32 code = try hex4();
+                if (code >= 0xD800 && code <= 0xDBFF) {  // a high surrogate: its low one follows
+                    if (!take(92) || !take(117)) {
+                        return err(Invalid(at));
+                    }
+                    ui32 low = try hex4();
+                    if (low < 0xDC00 || low > 0xDFFF) {
+                        return err(Invalid(at));
+                    }
+                    code = 0x10000 + (code - 0xD800 << 10) + (low - 0xDC00);
+                } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                    return err(Invalid(at));
+                }
+                b.push_char(text.char_of(code));
+            } else {
+                return err(Invalid(at - 1));
+            }
+        }
+        return ok(b.text());
+    }
+
+    ui32!JsonError hex4() {
+        if (at + 4 > s.len) {
+            return err(Invalid(at));
+        }
+        mut ui32 code = 0;
+        for (usize i in 0..4) {
+            ui8 h = s.bytes[at + i];
+            mut ui32 digit = 0;
+            if (is_digit(h)) {
+                digit = (h - 48) as ui32;
+            } else if (h >= 97 && h <= 102) {
+                digit = (h - 87) as ui32;
+            } else if (h >= 65 && h <= 70) {
+                digit = (h - 55) as ui32;
+            } else {
+                return err(Invalid(at + i));
+            }
+            code = code * 16 + digit;
+        }
+        at += 4;
+        return ok(code);
+    }
+
+    Value!JsonError number() {
+        usize start = at;
+        take(45);  // '-'
+        if (take(48)) {  // '0': no other digit after it
+        } else if (at < s.len && is_digit(s.bytes[at])) {
+            while (at < s.len && is_digit(s.bytes[at])) {
+                at += 1;
+            }
+        } else {
+            return err(Invalid(at));
+        }
+        if (take(46)) {  // '.'
+            if (!digits()) {
+                return err(Invalid(at));
+            }
+        }
+        if (take(101) || take(69)) {  // 'e', 'E'
+            if (!take(43)) {
+                take(45);
+            }
+            if (!digits()) {
+                return err(Invalid(at));
+            }
+        }
+        return match (text.parse_f64(text.slice(s, start, at))) {
+            ok(v) => ok(Number(v)),
+            err(e) => err(Invalid(start)),  // too large for an f64
+        };
+    }
+
+    // One digit or more.
+    bool digits() {
+        usize start = at;
+        while (at < s.len && is_digit(s.bytes[at])) {
+            at += 1;
+        }
+        return at > start;
+    }
+}
+
+bool is_digit(ui8 b) {
+    return b >= 48 && b <= 57;
+}
+
+// Writing
+
+// `v` as JSON on one line, without spaces: {"a":[1,2]}.
+pub str write(Arena* arena, Value v) {
+    text.TextBuilder* b = text.builder(arena);
+    put(b, v, false, 0);
+    return b.text();
+}
+
+// `v` as JSON on several lines, indented by two spaces.
+pub str write_pretty(Arena* arena, Value v) {
+    text.TextBuilder* b = text.builder(arena);
+    put(b, v, true, 0);
+    return b.text();
+}
+
+void put(text.TextBuilder* b, Value v, bool pretty, usize depth) {
+    match (v) {
+        Null => b.push("null"),
+        Bool(x) => {
+            if (x) {
+                b.push("true");
+            } else {
+                b.push("false");
+            }
+        },
+        Number(x) => put_number(b, x),
+        Text(t) => put_string(b, t),
+        Array(items) => {
+            if (items.len == 0) {
+                b.push("[]");
+                return;
+            }
+            b.push("[");
+            for (usize i in 0..items.len) {
+                if (i > 0) {
+                    b.push(",");
+                }
+                new_line(b, pretty, depth + 1);
+                put(b, items[i], pretty, depth + 1);
+            }
+            new_line(b, pretty, depth);
+            b.push("]");
+        },
+        Object(members) => {
+            if (members.len == 0) {
+                b.push("{}");
+                return;
+            }
+            b.push("{");
+            for (usize i in 0..members.len) {
+                if (i > 0) {
+                    b.push(",");
+                }
+                new_line(b, pretty, depth + 1);
+                put_string(b, members[i].key);
+                b.push(":");
+                if (pretty) {
+                    b.push(" ");
+                }
+                put(b, members[i].value, pretty, depth + 1);
+            }
+            new_line(b, pretty, depth);
+            b.push("}");
+        },
+    }
+}
+
+void new_line(text.TextBuilder* b, bool pretty, usize depth) {
+    if (!pretty) {
+        return;
+    }
+    b.push("\n");
+    for (usize i in 0..depth) {
+        b.push("  ");
+    }
+}
+
+// Integers as integers (3, not 3.0), the others with the fewest digits; NaN and the
+// infinities, which JSON does not have, as null.
+void put_number(text.TextBuilder* b, f64 x) {
+    if (x != x || x - x != 0.0) {
+        b.push("null");
+    } else if (x > -1.0e15 && x < 1.0e15 && x == x as i64 as f64) {  // in range before `as`
+        b.push_i64(x as i64);
+    } else {
+        b.push_f64_shortest(x);
+    }
+}
+
+void put_string(text.TextBuilder* b, str s) {
+    b.push("\"");
+    mut usize from = 0;
+    for (usize i in 0..s.len) {
+        ui8 c = s.bytes[i];
+        if (c != 34 && c != 92 && c >= 32) {
+            continue;
+        }
+        b.push(text.slice(s, from, i));
+        from = i + 1;
+        if (c == 34) {
+            b.push("\\\"");
+        } else if (c == 92) {
+            b.push("\\\\");
+        } else if (c == 10) {
+            b.push("\\n");
+        } else if (c == 13) {
+            b.push("\\r");
+        } else if (c == 9) {
+            b.push("\\t");
+        } else {
+            b.push("\\u00");
+            str digits = "0123456789abcdef";
+            b.push(text.slice(digits, (c >> 4) as usize, (c >> 4) as usize + 1));
+            b.push(text.slice(digits, (c & 15) as usize, (c & 15) as usize + 1));
+        }
+    }
+    b.push(text.slice(s, from, s.len));
+    b.push("\"");
+}
+
+// Reading values
+
+// The value of the first member `key` of an object; none if it has none, or is not an object.
+pub Value? get(Value v, str key) {
+    match (v) {
+        Object(members) => {
+            for (Member m in members) {
+                if (m.key == key) {
+                    return some(m.value);
+                }
+            }
+        },
+        _ => { },
+    }
+    return none;
+}
+
+// The element `i` of an array; none out of range, or if it is not an array.
+pub Value? at(Value v, usize i) {
+    match (v) {
+        Array(items) => {
+            if (i < items.len) {
+                return some(items[i]);
+            }
+        },
+        _ => { },
+    }
+    return none;
+}
+
+// The number of elements of an array or of members of an object; 0 for the others.
+pub usize len(Value v) {
+    return match (v) {
+        Array(items) => items.len,
+        Object(members) => members.len,
+        _ => 0,
+    };
+}
+
+pub str? as_str(Value v) {
+    return match (v) {
+        Text(t) => some(t),
+        _ => none,
+    };
+}
+
+pub f64? as_f64(Value v) {
+    return match (v) {
+        Number(x) => some(x),
+        _ => none,
+    };
+}
+
+// A number that is an integer and fits in an i64 (exactly: up to 2^53 in magnitude).
+pub i64? as_i64(Value v) {
+    match (v) {
+        Number(x) => {
+            if (x >= -9007199254740992.0 && x <= 9007199254740992.0 && x == x as i64 as f64) {
+                return some(x as i64);
+            }
+        },
+        _ => { },
+    }
+    return none;
+}
+
+pub bool? as_bool(Value v) {
+    return match (v) {
+        Bool(x) => some(x),
+        _ => none,
+    };
+}
+
+pub bool is_null(Value v) {
+    return match (v) {
+        Null => true,
+        _ => false,
+    };
+}

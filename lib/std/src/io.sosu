@@ -4,6 +4,8 @@
 pub enum IoError {
     NotFound,
     PermissionDenied,
+    AlreadyExists,  // std.fs: a file or a folder is already there
+    NotEmpty,  // std.fs: a folder to remove still holds something
     InvalidUtf8,  // read_file: the file is not text (str is always valid UTF-8)
     Other,
 }
@@ -12,13 +14,17 @@ pub enum IoError {
 struct CFile { }
 
 extern "C" {
-    CFile* fopen(ui8* path, ui8* mode) uses io;
+    CFile* sosu_fs_open(ui8* path, ui8* mode) uses io;  // fopen, with UTF-8 paths on Windows too
     i32 fclose(CFile* file) uses io;
     usize fread(ui8* buffer, usize size, usize count, CFile* file) uses io;
     usize fwrite(ui8* buffer, usize size, usize count, CFile* file) uses io;
     // From the Sosu runtime: errno is a macro, and the C types of file offsets differ by system.
     i32 sosu_errno() uses io;
     i64 sosu_file_size(CFile* file) uses io;
+    i32 sosu_fs_seek(CFile* file, i64 offset, i32 whence) uses io;
+    i64 sosu_fs_tell(CFile* file) uses io;
+    i32 ferror(CFile* file) uses io;
+    i32 fflush(CFile* file) uses io;
 }
 
 IoError last_error() uses io {
@@ -36,11 +42,11 @@ IoError last_error() uses io {
 }
 
 // Opens a file with a C mode ("rb", "wb"...), or none with the error in `error`.
-CFile*? open(Arena* arena, str path, str mode) uses io {
+CFile*? open_c(Arena* arena, str path, str mode) uses io {
     ui8* c_path = path.to_cstr(arena);
     ui8* c_mode = mode.to_cstr(arena);
     unsafe {
-        CFile* file = fopen(c_path, c_mode);
+        CFile* file = sosu_fs_open(c_path, c_mode);
         if (file as ui64 == 0) {
             return none;
         }
@@ -65,7 +71,7 @@ pub str!IoError read_file(Arena* arena, str path) uses io {
 
 // The whole content of a file, as bytes (a font, an image...), allocated in `arena`.
 pub ui8[]!IoError read_bytes(Arena* arena, str path) uses io {
-    CFile* file = match (open(arena, path, "rb")) {
+    CFile* file = match (open_c(arena, path, "rb")) {
         some(opened) => opened,
         none => {
             return err(last_error());
@@ -96,7 +102,7 @@ pub ui8[]!IoError read_bytes(Arena* arena, str path) uses io {
 
 // Replaces the content of a file (created if needed) with `text`.
 pub void!IoError write_file(Arena* arena, str path, str text) uses io {
-    CFile* file = match (open(arena, path, "wb")) {
+    CFile* file = match (open_c(arena, path, "wb")) {
         some(opened) => opened,
         none => {
             return err(last_error());
@@ -114,4 +120,132 @@ pub void!IoError write_file(Arena* arena, str path, str text) uses io {
         return err(Other);
     }
     return ok();
+}
+
+// Appends `text` at the end of a file (created if needed).
+pub void!IoError append_file(Arena* arena, str path, str text) uses io {
+    File file = try open(arena, path, Append);
+    defer file.close();
+    return file.write_text(text);
+}
+
+// How a file is opened.
+pub enum Mode {
+    Read,  // from its start; the file must exist
+    Write,  // emptied, or created
+    Append,  // written at its end, created if needed
+    ReadWrite,  // read and written anywhere; the file must exist
+}
+
+// Where `seek` counts from.
+pub enum From {
+    Start,
+    Current,
+    End,
+}
+
+// An open file, read or written by parts. Close it when done: `defer file.close();`.
+pub struct File {
+    CFile* handle;
+
+    // Reads into `buffer` up to its length; gives how many bytes were read, 0 at the end.
+    pub usize!IoError read(ui8[] buffer) uses io {
+        if (buffer.len == 0) {
+            return ok(0 as usize);
+        }
+        mut usize n = 0;
+        mut i32 failed = 0;
+        unsafe {
+            n = fread(&buffer[0], 1, buffer.len, handle);
+            if (n < buffer.len) {
+                failed = ferror(handle);
+            }
+        }
+        if (failed != 0) {
+            return err(Other);
+        }
+        return ok(n);
+    }
+
+    pub void!IoError write(ui8[] bytes) uses io {
+        if (bytes.len == 0) {
+            return ok();
+        }
+        mut usize n = 0;
+        unsafe {
+            n = fwrite(&bytes[0], 1, bytes.len, handle);
+        }
+        if (n != bytes.len) {
+            return err(Other);
+        }
+        return ok();
+    }
+
+    pub void!IoError write_text(str text) uses io {
+        return write(text.bytes);
+    }
+
+    // Goes to the byte `offset` counted from `from`; the next read or write starts there.
+    pub void!IoError seek(i64 offset, From from) uses io {
+        i32 whence = match (from) {
+            Start => 0,
+            Current => 1,
+            End => 2,
+        };
+        mut i32 result = 0;
+        unsafe {
+            result = sosu_fs_seek(handle, offset, whence);
+        }
+        if (result != 0) {
+            return err(Other);
+        }
+        return ok();
+    }
+
+    // The place of the next read or write, in bytes from the start.
+    pub i64 position() uses io {
+        mut i64 at = 0;
+        unsafe {
+            at = sosu_fs_tell(handle);
+        }
+        return at;
+    }
+
+    // The size of the file, in bytes.
+    pub i64 size() uses io {
+        mut i64 n = 0;
+        unsafe {
+            n = sosu_file_size(handle);  // from the current place
+            i64 at = sosu_fs_tell(handle);
+            n += at;
+        }
+        return n;
+    }
+
+    // Writes what is buffered.
+    pub void flush() uses io {
+        unsafe {
+            fflush(handle);
+        }
+    }
+
+    pub void close() uses io {
+        unsafe {
+            fclose(handle);
+        }
+    }
+}
+
+// Opens the file at `path`.
+pub File!IoError open(Arena* arena, str path, Mode mode) uses io {
+    str c_mode = match (mode) {
+        Read => "rb",
+        Write => "wb",
+        Append => "ab",
+        ReadWrite => "r+b",
+    };
+    return match (open_c(arena, path, c_mode)) {
+        some(handle) => ok(File{ handle: handle }),
+        none => err(last_error()),
+    };
 }

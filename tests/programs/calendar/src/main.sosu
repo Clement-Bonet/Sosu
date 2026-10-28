@@ -1,0 +1,88 @@
+import std.io;
+import std.time;
+
+str day_name(time.Weekday d) {
+    return match (d) {
+        Monday => "Monday",
+        Tuesday => "Tuesday",
+        Wednesday => "Wednesday",
+        Thursday => "Thursday",
+        Friday => "Friday",
+        Saturday => "Saturday",
+        Sunday => "Sunday",
+    };
+}
+
+void show(Arena* arena, time.DateTime? t) uses io {
+    match (t) {
+        some(v) => io.print("{} {}", v.format(arena), day_name(v.weekday())),
+        none => io.print("none"),
+    }
+}
+
+time.DateTime day(i64 year, i32 month, i32 d) {
+    return match (time.date(year, month, d)) {
+        some(t) => t,
+        none => time.from_unix(0),
+    };
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    show(&arena, some(time.from_unix(0)));
+    show(&arena, some(time.from_unix(1000000000)));
+    show(&arena, some(time.from_unix(-1)));
+    show(&arena, some(time.from_unix(951868800)));
+    io.print("{} {}", time.from_unix(1000000000).to_unix(), day(1969, 12, 31).to_unix());
+
+    show(&arena, time.date(2024, 2, 29));
+    show(&arena, time.date(2023, 2, 29));
+    show(&arena, time.date_time(2026, 10, 28, 7, 43, 5));
+    show(&arena, time.date_time(2026, 10, 28, 24, 0, 0));
+    io.print("{}", day(2026, 10, 28).day_of_year());
+    io.print("{} {}", day(2024, 12, 31).day_of_year(), day(2023, 12, 31).day_of_year());
+
+    show(&arena, some(day(2024, 1, 31).add_months(1)));
+    show(&arena, some(day(2024, 1, 31).add_months(-13)));
+    show(&arena, some(day(2026, 10, 28).add_days(100)));
+    show(&arena, some(day(2026, 10, 28).add_seconds(-1)));
+    io.print("{}", day(0, 3, 1).add_days(-1).format_date(&arena));
+    io.print("{}", day(-1, 12, 31).add_days(1).format_date(&arena));
+    io.print("{}", day(-44, 3, 15).format_date(&arena));
+    io.print("{} {}", day(2026, 1, 1).seconds_until(day(2027, 1, 1)), day(2027, 1, 1).seconds_until(day(2026, 1, 1)));
+    io.print("{} {}", day(2026, 1, 1).before(day(2026, 1, 2)), day(2026, 1, 2).before(day(2026, 1, 1)));
+    io.print("{} {} {} {}", time.is_leap_year(1900), time.is_leap_year(2000), time.is_leap_year(2024), time.days_in_month(2023, 2));
+
+    show(&arena, time.parse("2026-10-28"));
+    show(&arena, time.parse("2026-10-28T09:43:05.25+02:00"));
+    show(&arena, time.parse("2026-10-28 23:30-0130"));
+    show(&arena, time.parse(" 2026-10-28T10:00:00.123456789Z "));
+    show(&arena, time.parse("2026-10-28t10:00:00.000001z"));
+    show(&arena, time.parse("-0044-03-15T12:00Z"));
+    show(&arena, time.parse("2026-02-30"));
+    show(&arena, time.parse("2026-10-28T24:00"));
+    show(&arena, time.parse("20261028"));
+    show(&arena, time.parse("2026-10-28T10:00:00."));
+    show(&arena, time.parse("2026-10-28T10:00:00Zx"));
+    show(&arena, time.parse("2026-10-28T10"));
+
+    // a round trip over many days, before and after 1970
+    mut bool same = true;
+    for (i64 d in -800000..800000) {
+        time.DateTime t = time.from_unix(d * 86400 + 3661);
+        match (time.date_time(t.year, t.month, t.day, t.hour, t.minute, t.second)) {
+            some(back) => {
+                if (back.to_unix() != d * 86400 + 3661) {
+                    same = false;
+                }
+            },
+            none => {
+                same = false;
+            },
+        }
+    }
+    io.print("round trip: {}", same);
+    io.print("now is after 2026: {}", time.now().year >= 2026);
+    return 0;
+}

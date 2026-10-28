@@ -5,6 +5,7 @@
 #include "sosu_rt.h"
 
 #include <errno.h>
+#include <math.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +16,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <dirent.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #endif
 
 /* Variables of each thread: a library is called from several threads at once (spec §9.2). */
@@ -378,6 +387,632 @@ int64_t sosu_file_size(void *file) {
     long end = ftell(f);
     if (fseek(f, start, SEEK_SET) != 0) return -1;
     return end < 0 ? -1 : (int64_t)(end - start);
+}
+
+/* ---- std.math: the C library, under names that do not take those of the module ---- */
+
+#define SOSU_MATH1(name) double sosu_math_##name(double x) { return name(x); }
+#define SOSU_MATH2(name) double sosu_math_##name(double x, double y) { return name(x, y); }
+SOSU_MATH1(sqrt) SOSU_MATH1(cbrt) SOSU_MATH1(exp) SOSU_MATH1(exp2) SOSU_MATH1(log) SOSU_MATH1(log2)
+SOSU_MATH1(log10) SOSU_MATH1(sin) SOSU_MATH1(cos) SOSU_MATH1(tan) SOSU_MATH1(asin) SOSU_MATH1(acos)
+SOSU_MATH1(atan) SOSU_MATH1(sinh) SOSU_MATH1(cosh) SOSU_MATH1(tanh) SOSU_MATH1(floor) SOSU_MATH1(ceil)
+SOSU_MATH1(round) SOSU_MATH1(trunc)
+SOSU_MATH2(pow) SOSU_MATH2(atan2) SOSU_MATH2(hypot) SOSU_MATH2(fmod)
+double sosu_math_infinity(void) { return HUGE_VAL; }
+double sosu_math_nan(void) { return nan(""); }
+
+/* ---- std.text: floats written and read by the C library ---- */
+
+/* `value` with `decimals` digits after the dot, in `out`; gives the length it needs, which is
+   more than `capacity` when it did not fit (nothing is written then). */
+size_t sosu_format_f64(double value, uint32_t decimals, uint8_t *out, size_t capacity) {
+    char small[64];
+    int n = snprintf(small, sizeof small, "%.*f", (int)(decimals > 300 ? 300 : decimals), value);
+    if (n < 0) return 0;
+    if ((size_t)n <= capacity) {
+        if ((size_t)n < sizeof small) {
+            memcpy(out, small, (size_t)n);
+        } else {
+            char *big = malloc((size_t)n + 1);
+            if (!big) return 0;
+            snprintf(big, (size_t)n + 1, "%.*f", (int)(decimals > 300 ? 300 : decimals), value);
+            memcpy(out, big, (size_t)n);
+            free(big);
+        }
+    }
+    return (size_t)n;
+}
+
+/* `value` with the fewest digits that read back the same (15 to 17), as `%g` writes them:
+   0.1, 1e+21. Gives its length; `out` holds at least 32 bytes. */
+size_t sosu_format_f64_shortest(double value, uint8_t *out) {
+    char text[32];
+    int n = 0;
+    for (int digits = 15; digits <= 17; digits++) {
+        n = snprintf(text, sizeof text, "%.*g", digits, value);
+        if (strtod(text, NULL) == value) break;
+    }
+    if (n < 0) n = 0;
+    memcpy(out, text, (size_t)n);
+    return (size_t)n;
+}
+
+/* The float written in `length` bytes, already checked by std.text (digits, a dot, an exponent). */
+double sosu_parse_f64(const uint8_t *bytes, size_t length) {
+    char small[128];
+    char *text = length < sizeof small ? small : malloc(length + 1);
+    if (!text) return 0.0;
+    memcpy(text, bytes, length);
+    text[length] = '\0';
+    double value = strtod(text, NULL);
+    if (text != small) free(text);
+    return value;
+}
+
+/* ---- std.os and std.fs: the program, its environment, other programs, folders and files ----
+   Texts cross as UTF-8 C strings. A text given back is kept in `scratch`: the function gives
+   its length (or a negative number on failure), and std copies it with `sosu_os_take` into a
+   place of length + 1 bytes. On Windows, the wide functions of the system take and give
+   UTF-16, converted here. Errors of std.fs are 0 (none), 1 not found, 2 permission denied,
+   3 already exists, 4 folder not empty, 5 other. */
+
+static SOSU_THREAD uint8_t *scratch;
+static SOSU_THREAD size_t scratch_length;
+
+static int64_t keep(uint8_t *bytes, size_t length) {
+    free(scratch);
+    scratch = bytes;
+    scratch_length = length;
+    return (int64_t)length;
+}
+
+static int64_t keep_copy(const char *text, size_t length) {
+    uint8_t *bytes = malloc(length + 1);
+    if (!bytes) return -2;
+    memcpy(bytes, text, length);
+    return keep(bytes, length);
+}
+
+void sosu_os_take(uint8_t *out) {
+    if (scratch_length) memcpy(out, scratch, scratch_length);
+    free(scratch);
+    scratch = NULL;
+    scratch_length = 0;
+}
+
+static int sosu_argc;
+static char **sosu_argv;
+
+void sosu_set_args(int argc, char **argv) {
+    sosu_argc = argc;
+    sosu_argv = argv;
+}
+
+#ifdef _WIN32
+
+static wchar_t *wide(const uint8_t *utf8) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, (const char *)utf8, -1, NULL, 0);
+    wchar_t *w = malloc((size_t)(n > 0 ? n : 1) * sizeof *w);
+    if (!w) return NULL;
+    if (n <= 0 || !MultiByteToWideChar(CP_UTF8, 0, (const char *)utf8, -1, w, n)) w[0] = 0;
+    return w;
+}
+
+/* UTF-16 of `length` units (-1: up to its NUL) to UTF-8, malloc'd; its length in `*out`. */
+static char *narrow(const wchar_t *w, int length, size_t *out) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, length, NULL, 0, NULL, NULL);
+    char *text = malloc((size_t)(n > 0 ? n : 0) + 1);
+    if (!text) return NULL;
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w, length, text, n, NULL, NULL);
+    size_t size = n > 0 ? (size_t)n : 0;
+    if (length < 0 && size > 0) size--; /* the NUL */
+    text[size] = '\0';
+    *out = size;
+    return text;
+}
+
+static int32_t fs_error(DWORD code) {
+    switch (code) {
+    case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_NAME: return 1;
+    case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: return 2;
+    case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: return 3;
+    case ERROR_DIR_NOT_EMPTY: return 4;
+    default: return 5;
+    }
+}
+
+/* The arguments of the command line, in UTF-8, cut by the rules of the C library of
+   Microsoft: the program as written, then arguments between spaces, with quotes and the
+   backslashes before them. */
+static char **windows_args;
+static int windows_argc;
+
+static void read_command_line(void) {
+    if (windows_args) return;
+    const wchar_t *line = GetCommandLineW();
+    size_t cap = 8;
+    windows_args = malloc(cap * sizeof *windows_args);
+    wchar_t *arg = malloc((wcslen(line) + 1) * sizeof *arg);
+    if (!windows_args || !arg) abort();
+    const wchar_t *p = line;
+    bool first = true;
+    for (;;) {
+        while (!first && (*p == L' ' || *p == L'\t')) p++;
+        if (!*p) break;
+        size_t n = 0;
+        if (first) {
+            if (*p == L'"') {
+                for (p++; *p && *p != L'"'; p++) arg[n++] = *p;
+                if (*p) p++;
+            } else {
+                for (; *p && *p != L' ' && *p != L'\t'; p++) arg[n++] = *p;
+            }
+            first = false;
+        } else {
+            bool quoted = false;
+            while (*p && (quoted || (*p != L' ' && *p != L'\t'))) {
+                size_t slashes = 0;
+                while (*p == L'\\') {
+                    slashes++;
+                    p++;
+                }
+                if (*p == L'"') {
+                    for (size_t k = 0; k < slashes / 2; k++) arg[n++] = L'\\';
+                    if (slashes % 2) {
+                        arg[n++] = L'"';
+                    } else if (quoted && p[1] == L'"') {
+                        arg[n++] = L'"'; /* "" in quotes: a quote */
+                        p++;
+                    } else {
+                        quoted = !quoted;
+                    }
+                    p++;
+                } else {
+                    for (size_t k = 0; k < slashes; k++) arg[n++] = L'\\';
+                    if (*p && (quoted || (*p != L' ' && *p != L'\t'))) arg[n++] = *p++;
+                }
+            }
+        }
+        if ((size_t)windows_argc == cap) {
+            windows_args = realloc(windows_args, (cap *= 2) * sizeof *windows_args);
+            if (!windows_args) abort();
+        }
+        size_t size;
+        windows_args[windows_argc++] = narrow(arg, (int)n, &size);
+    }
+    free(arg);
+}
+
+size_t sosu_os_arg_count(void) {
+    read_command_line();
+    return (size_t)windows_argc;
+}
+
+int64_t sosu_os_arg(size_t index) {
+    read_command_line();
+    if (index >= (size_t)windows_argc || !windows_args[index]) return -1;
+    return keep_copy(windows_args[index], strlen(windows_args[index]));
+}
+
+int64_t sosu_os_env(const uint8_t *name) {
+    wchar_t *w = wide(name);
+    if (!w) return -2;
+    DWORD n = GetEnvironmentVariableW(w, NULL, 0);
+    if (n == 0) {
+        free(w);
+        return -1;
+    }
+    wchar_t *value = malloc(n * sizeof *value);
+    DWORD got = value ? GetEnvironmentVariableW(w, value, n) : 0;
+    free(w);
+    if (!value || got >= n) {
+        free(value);
+        return -2;
+    }
+    size_t size;
+    char *text = narrow(value, (int)got, &size);
+    free(value);
+    return text ? keep((uint8_t *)text, size) : -2;
+}
+
+/* `value` NULL removes the variable. */
+bool sosu_os_set_env(const uint8_t *name, const uint8_t *value) {
+    wchar_t *w = wide(name), *v = value ? wide(value) : NULL;
+    bool done = w && (!value || v) && SetEnvironmentVariableW(w, v);
+    free(w);
+    free(v);
+    return done;
+}
+
+static void quote_wide(wchar_t **line, size_t *size, size_t *cap, const wchar_t *arg) {
+    size_t length = wcslen(arg);
+    if (*size + 2 * length + 4 > *cap) {
+        *cap = 2 * (*size + 2 * length + 4);
+        *line = realloc(*line, *cap * sizeof **line);
+        if (!*line) abort();
+    }
+    wchar_t *out = *line;
+    if (*size) out[(*size)++] = L' ';
+    out[(*size)++] = L'"';
+    for (size_t i = 0; i < length; i++) {
+        if (arg[i] == L'"') {
+            for (size_t k = i; k > 0 && arg[k - 1] == L'\\'; k--) out[(*size)++] = L'\\';
+            out[(*size)++] = L'\\';
+        }
+        out[(*size)++] = arg[i];
+    }
+    for (size_t k = length; k > 0 && arg[k - 1] == L'\\'; k--) out[(*size)++] = L'\\';
+    out[(*size)++] = L'"';
+    out[*size] = 0;
+}
+
+/* Runs the program `args[0]` (looked for in PATH) with the others, and keeps what it writes
+   to its output; its errors go to those of this program. -1: not found, -2: other failure. */
+int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code) {
+    wchar_t *line = NULL;
+    size_t size = 0, cap = 0;
+    for (size_t i = 0; i < count; i++) {
+        wchar_t *w = wide(args[i]);
+        if (!w) return -2;
+        quote_wide(&line, &size, &cap, w);
+        free(w);
+    }
+    SECURITY_ATTRIBUTES inherit = { sizeof inherit, NULL, TRUE };
+    HANDLE read_end, write_end;
+    if (!line || !CreatePipe(&read_end, &write_end, &inherit, 0)) {
+        free(line);
+        return -2;
+    }
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW start;
+    memset(&start, 0, sizeof start);
+    start.cb = sizeof start;
+    start.dwFlags = STARTF_USESTDHANDLES;
+    start.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    start.hStdOutput = write_end;
+    start.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION process;
+    BOOL started = CreateProcessW(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &start, &process);
+    DWORD failure = GetLastError();
+    free(line);
+    CloseHandle(write_end);
+    if (!started) {
+        CloseHandle(read_end);
+        return failure == ERROR_FILE_NOT_FOUND || failure == ERROR_PATH_NOT_FOUND ? -1 : -2;
+    }
+    size_t length = 0, room = 4096;
+    uint8_t *output = malloc(room + 1);
+    DWORD got;
+    while (output && ReadFile(read_end, output + length, (DWORD)(room - length), &got, NULL) && got > 0) {
+        length += got;
+        if (length == room) output = realloc(output, (room *= 2) + 1);
+    }
+    CloseHandle(read_end);
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    if (!output) return -2;
+    *code = (int32_t)exit_code;
+    return keep(output, length);
+}
+
+int32_t sosu_fs_create_dir(const uint8_t *path) {
+    wchar_t *w = wide(path);
+    int32_t error = !w ? 5 : CreateDirectoryW(w, NULL) ? 0 : fs_error(GetLastError());
+    free(w);
+    return error;
+}
+
+int32_t sosu_fs_remove_dir(const uint8_t *path) {
+    wchar_t *w = wide(path);
+    int32_t error = !w ? 5 : RemoveDirectoryW(w) ? 0 : fs_error(GetLastError());
+    free(w);
+    return error;
+}
+
+int32_t sosu_fs_remove_file(const uint8_t *path) {
+    wchar_t *w = wide(path);
+    int32_t error = !w ? 5 : DeleteFileW(w) ? 0 : fs_error(GetLastError());
+    free(w);
+    return error;
+}
+
+int32_t sosu_fs_rename(const uint8_t *from, const uint8_t *to) {
+    wchar_t *a = wide(from), *b = wide(to);
+    int32_t error = !a || !b ? 5 : MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING) ? 0 : fs_error(GetLastError());
+    free(a);
+    free(b);
+    return error;
+}
+
+int32_t sosu_fs_copy(const uint8_t *from, const uint8_t *to) {
+    wchar_t *a = wide(from), *b = wide(to);
+    int32_t error = !a || !b ? 5 : CopyFileW(a, b, FALSE) ? 0 : fs_error(GetLastError());
+    free(a);
+    free(b);
+    return error;
+}
+
+/* kind: 0 a file, 1 a folder, 2 something else; modified: seconds since 1970. */
+int32_t sosu_fs_info(const uint8_t *path, int64_t *size, int64_t *modified, int32_t *kind) {
+    wchar_t *w = wide(path);
+    WIN32_FILE_ATTRIBUTE_DATA data = { 0 };
+    BOOL found = w && GetFileAttributesExW(w, GetFileExInfoStandard, &data);
+    DWORD failure = GetLastError();
+    free(w);
+    if (!found) return fs_error(failure);
+    *size = (int64_t)(((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow);
+    uint64_t ticks = ((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
+    *modified = (int64_t)(ticks / 10000000) - 11644473600; /* from 1601, in 100 ns */
+    *kind = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? 1 : 0;
+    return 0;
+}
+
+/* The names in a folder, each followed by a NUL, without "." and "..". */
+int64_t sosu_fs_list(const uint8_t *path, int32_t *error) {
+    size_t length = strlen((const char *)path);
+    uint8_t *pattern = malloc(length + 3);
+    if (!pattern) return -2;
+    memcpy(pattern, path, length);
+    memcpy(pattern + length, "/*", 3);
+    wchar_t *w = wide(pattern);
+    free(pattern);
+    WIN32_FIND_DATAW entry;
+    HANDLE find = w ? FindFirstFileW(w, &entry) : INVALID_HANDLE_VALUE;
+    free(w);
+    if (find == INVALID_HANDLE_VALUE) {
+        DWORD failure = GetLastError();
+        if (failure == ERROR_FILE_NOT_FOUND) return keep(malloc(1), 0); /* an empty folder of a drive */
+        *error = fs_error(failure);
+        return -1;
+    }
+    size_t size = 0, room = 256;
+    uint8_t *names = malloc(room);
+    do {
+        if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) continue;
+        size_t n;
+        char *name = narrow(entry.cFileName, -1, &n);
+        if (!name || !names) break;
+        while (size + n + 1 > room) names = realloc(names, room *= 2);
+        if (!names) break;
+        memcpy(names + size, name, n + 1);
+        size += n + 1;
+        free(name);
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+    if (!names) return -2;
+    return keep(names, size);
+}
+
+int64_t sosu_fs_current_dir(void) {
+    DWORD n = GetCurrentDirectoryW(0, NULL);
+    wchar_t *w = n ? malloc(n * sizeof *w) : NULL;
+    if (!w || !GetCurrentDirectoryW(n, w)) {
+        free(w);
+        return -2;
+    }
+    size_t size;
+    char *text = narrow(w, -1, &size);
+    free(w);
+    for (size_t i = 0; text && i < size; i++) {
+        if (text[i] == '\\') text[i] = '/';
+    }
+    return text ? keep((uint8_t *)text, size) : -2;
+}
+
+void *sosu_fs_open(const uint8_t *path, const uint8_t *mode) {
+    wchar_t *p = wide(path), *m = wide(mode);
+    FILE *file = p && m ? _wfopen(p, m) : NULL;
+    free(p);
+    free(m);
+    return file;
+}
+
+int32_t sosu_fs_seek(void *file, int64_t offset, int32_t whence) {
+    return _fseeki64(file, offset, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+}
+
+int64_t sosu_fs_tell(void *file) { return _ftelli64(file); }
+
+#else /* POSIX */
+
+static int32_t fs_error(int code) {
+    switch (code) {
+    case ENOENT: case ENOTDIR: return 1;
+    case EACCES: case EPERM: case EROFS: return 2;
+    case EEXIST: return 3;
+    case ENOTEMPTY: return 4;
+    default: return 5;
+    }
+}
+
+size_t sosu_os_arg_count(void) { return sosu_argc > 0 ? (size_t)sosu_argc : 0; }
+
+int64_t sosu_os_arg(size_t index) {
+    if (index >= sosu_os_arg_count() || !sosu_argv[index]) return -1;
+    return keep_copy(sosu_argv[index], strlen(sosu_argv[index]));
+}
+
+int64_t sosu_os_env(const uint8_t *name) {
+    const char *value = getenv((const char *)name);
+    return value ? keep_copy(value, strlen(value)) : -1;
+}
+
+bool sosu_os_set_env(const uint8_t *name, const uint8_t *value) {
+    return (value ? setenv((const char *)name, (const char *)value, 1) : unsetenv((const char *)name)) == 0;
+}
+
+int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    (void)args;
+    (void)count;
+    (void)code;
+    return -2; /* iOS runs no other program */
+#else
+    char **argv = malloc((count + 1) * sizeof *argv);
+    int out[2], report[2];
+    if (!argv || count == 0) {
+        free(argv);
+        return -2;
+    }
+    for (size_t i = 0; i < count; i++) argv[i] = (char *)args[i];
+    argv[count] = NULL;
+    if (pipe(out) != 0) {
+        free(argv);
+        return -2;
+    }
+    if (pipe(report) != 0) {
+        close(out[0]);
+        close(out[1]);
+        free(argv);
+        return -2;
+    }
+    fcntl(report[1], F_SETFD, FD_CLOEXEC); /* closed by a successful exec */
+    pid_t child = fork();
+    if (child == 0) {
+        close(out[0]);
+        close(report[0]);
+        dup2(out[1], 1);
+        close(out[1]);
+        execvp(argv[0], argv);
+        int failure = errno;
+        ssize_t written = write(report[1], &failure, sizeof failure);
+        (void)written;
+        _exit(127);
+    }
+    free(argv);
+    close(out[1]);
+    close(report[1]);
+    if (child < 0) {
+        close(out[0]);
+        close(report[0]);
+        return -2;
+    }
+    size_t length = 0, room = 4096;
+    uint8_t *output = malloc(room + 1);
+    ssize_t got;
+    while (output && (got = read(out[0], output + length, room - length)) != 0) {
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        length += (size_t)got;
+        if (length == room) output = realloc(output, (room *= 2) + 1);
+    }
+    close(out[0]);
+    int failure = 0;
+    ssize_t reported = read(report[0], &failure, sizeof failure);
+    close(report[0]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (reported == (ssize_t)sizeof failure) {
+        free(output);
+        return failure == ENOENT ? -1 : -2;
+    }
+    if (!output) return -2;
+    *code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    return keep(output, length);
+#endif
+}
+
+int32_t sosu_fs_create_dir(const uint8_t *path) { return mkdir((const char *)path, 0777) == 0 ? 0 : fs_error(errno); }
+int32_t sosu_fs_remove_dir(const uint8_t *path) { return rmdir((const char *)path) == 0 ? 0 : fs_error(errno); }
+int32_t sosu_fs_remove_file(const uint8_t *path) { return unlink((const char *)path) == 0 ? 0 : fs_error(errno); }
+
+int32_t sosu_fs_rename(const uint8_t *from, const uint8_t *to) {
+    return rename((const char *)from, (const char *)to) == 0 ? 0 : fs_error(errno);
+}
+
+int32_t sosu_fs_copy(const uint8_t *from, const uint8_t *to) {
+    FILE *in = fopen((const char *)from, "rb");
+    if (!in) return fs_error(errno);
+    FILE *out = fopen((const char *)to, "wb");
+    if (!out) {
+        int32_t error = fs_error(errno);
+        fclose(in);
+        return error;
+    }
+    char buffer[16384];
+    size_t n;
+    int32_t error = 0;
+    while ((n = fread(buffer, 1, sizeof buffer, in)) > 0) {
+        if (fwrite(buffer, 1, n, out) != n) {
+            error = 5;
+            break;
+        }
+    }
+    if (ferror(in)) error = 5;
+    fclose(in);
+    if (fclose(out) != 0) error = 5;
+    return error;
+}
+
+int32_t sosu_fs_info(const uint8_t *path, int64_t *size, int64_t *modified, int32_t *kind) {
+    struct stat info;
+    if (stat((const char *)path, &info) != 0) return fs_error(errno);
+    *size = (int64_t)info.st_size;
+    *modified = (int64_t)info.st_mtime;
+    *kind = S_ISREG(info.st_mode) ? 0 : S_ISDIR(info.st_mode) ? 1 : 2;
+    return 0;
+}
+
+int64_t sosu_fs_list(const uint8_t *path, int32_t *error) {
+    DIR *dir = opendir((const char *)path);
+    if (!dir) {
+        *error = fs_error(errno);
+        return -1;
+    }
+    size_t size = 0, room = 256;
+    uint8_t *names = malloc(room);
+    struct dirent *entry;
+    while (names && (entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        size_t n = strlen(entry->d_name);
+        while (names && size + n + 1 > room) names = realloc(names, room *= 2);
+        if (!names) break;
+        memcpy(names + size, entry->d_name, n + 1);
+        size += n + 1;
+    }
+    closedir(dir);
+    if (!names) return -2;
+    return keep(names, size);
+}
+
+int64_t sosu_fs_current_dir(void) {
+    size_t room = 256;
+    char *text = malloc(room);
+    while (text && !getcwd(text, room)) {
+        if (errno != ERANGE) {
+            free(text);
+            return -2;
+        }
+        text = realloc(text, room *= 2);
+    }
+    return text ? keep((uint8_t *)text, strlen(text)) : -2;
+}
+
+void *sosu_fs_open(const uint8_t *path, const uint8_t *mode) { return fopen((const char *)path, (const char *)mode); }
+
+int32_t sosu_fs_seek(void *file, int64_t offset, int32_t whence) {
+    return fseeko(file, (off_t)offset, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+}
+
+int64_t sosu_fs_tell(void *file) { return (int64_t)ftello(file); }
+
+#endif
+
+/* std.log: a line to the error output (on Android, the log of the system, below). */
+void sosu_write_stderr(const uint8_t *bytes, size_t length) {
+    fwrite(bytes, 1, length, stderr);
+    fflush(stderr);
+}
+
+void sosu_os_exit(int32_t code) {
+    fflush(stdout);
+    exit(code);
 }
 
 /* ---- Classes ---- */

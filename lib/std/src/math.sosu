@@ -1,0 +1,318 @@
+// std.math: the usual functions of floats, on the C library (`libm`), and a few of integers
+// (spec §8.2). The runtime gives the C functions under names of its own, so that they do not
+// take the names of this module. Without effect: the same arguments give the same result.
+
+extern "C" {
+    f64 sosu_math_sqrt(f64 x);
+    f64 sosu_math_cbrt(f64 x);
+    f64 sosu_math_exp(f64 x);
+    f64 sosu_math_exp2(f64 x);
+    f64 sosu_math_log(f64 x);
+    f64 sosu_math_log2(f64 x);
+    f64 sosu_math_log10(f64 x);
+    f64 sosu_math_sin(f64 x);
+    f64 sosu_math_cos(f64 x);
+    f64 sosu_math_tan(f64 x);
+    f64 sosu_math_asin(f64 x);
+    f64 sosu_math_acos(f64 x);
+    f64 sosu_math_atan(f64 x);
+    f64 sosu_math_sinh(f64 x);
+    f64 sosu_math_cosh(f64 x);
+    f64 sosu_math_tanh(f64 x);
+    f64 sosu_math_floor(f64 x);
+    f64 sosu_math_ceil(f64 x);
+    f64 sosu_math_round(f64 x);
+    f64 sosu_math_trunc(f64 x);
+    f64 sosu_math_pow(f64 x, f64 y);
+    f64 sosu_math_atan2(f64 y, f64 x);
+    f64 sosu_math_hypot(f64 x, f64 y);
+    f64 sosu_math_fmod(f64 x, f64 y);
+    f64 sosu_math_infinity();
+    f64 sosu_math_nan();
+}
+
+pub f64 PI = 3.141592653589793;
+pub f64 TAU = 6.283185307179586;
+pub f64 E = 2.718281828459045;
+pub f64 SQRT2 = 1.4142135623730951;
+pub f64 LN2 = 0.6931471805599453;
+pub f64 LN10 = 2.302585092994046;
+
+// Powers and logarithms. Out of their domain (`sqrt(-1.0)`, `log(0.0)`), they give NaN or an
+// infinity, as in C.
+
+pub f64 sqrt(f64 x) {
+    unsafe {
+        return sosu_math_sqrt(x);
+    }
+}
+
+// The cube root, negative for a negative `x`.
+pub f64 cbrt(f64 x) {
+    unsafe {
+        return sosu_math_cbrt(x);
+    }
+}
+
+pub f64 pow(f64 x, f64 y) {
+    unsafe {
+        return sosu_math_pow(x, y);
+    }
+}
+
+pub f64 exp(f64 x) {
+    unsafe {
+        return sosu_math_exp(x);
+    }
+}
+
+// 2 to the power `x`.
+pub f64 exp2(f64 x) {
+    unsafe {
+        return sosu_math_exp2(x);
+    }
+}
+
+// The natural logarithm (base e).
+pub f64 log(f64 x) {
+    unsafe {
+        return sosu_math_log(x);
+    }
+}
+
+pub f64 log2(f64 x) {
+    unsafe {
+        return sosu_math_log2(x);
+    }
+}
+
+pub f64 log10(f64 x) {
+    unsafe {
+        return sosu_math_log10(x);
+    }
+}
+
+// The length of the hypotenuse, sqrt(x * x + y * y), without overflow on the way.
+pub f64 hypot(f64 x, f64 y) {
+    unsafe {
+        return sosu_math_hypot(x, y);
+    }
+}
+
+// Trigonometry, in radians.
+
+pub f64 sin(f64 x) {
+    unsafe {
+        return sosu_math_sin(x);
+    }
+}
+
+pub f64 cos(f64 x) {
+    unsafe {
+        return sosu_math_cos(x);
+    }
+}
+
+pub f64 tan(f64 x) {
+    unsafe {
+        return sosu_math_tan(x);
+    }
+}
+
+pub f64 asin(f64 x) {
+    unsafe {
+        return sosu_math_asin(x);
+    }
+}
+
+pub f64 acos(f64 x) {
+    unsafe {
+        return sosu_math_acos(x);
+    }
+}
+
+pub f64 atan(f64 x) {
+    unsafe {
+        return sosu_math_atan(x);
+    }
+}
+
+// The angle of the point (x, y), from -PI to PI: the quadrant comes from the signs of both.
+pub f64 atan2(f64 y, f64 x) {
+    unsafe {
+        return sosu_math_atan2(y, x);
+    }
+}
+
+pub f64 sinh(f64 x) {
+    unsafe {
+        return sosu_math_sinh(x);
+    }
+}
+
+pub f64 cosh(f64 x) {
+    unsafe {
+        return sosu_math_cosh(x);
+    }
+}
+
+pub f64 tanh(f64 x) {
+    unsafe {
+        return sosu_math_tanh(x);
+    }
+}
+
+pub f64 to_radians(f64 degrees) {
+    return degrees * PI / 180.0;
+}
+
+pub f64 to_degrees(f64 radians) {
+    return radians * 180.0 / PI;
+}
+
+// Rounding, to a float: convert with `as` afterwards.
+
+pub f64 floor(f64 x) {
+    unsafe {
+        return sosu_math_floor(x);
+    }
+}
+
+pub f64 ceil(f64 x) {
+    unsafe {
+        return sosu_math_ceil(x);
+    }
+}
+
+// The nearest integer; halves go away from zero (`round(2.5)` is 3.0, `round(-2.5)` is -3.0).
+pub f64 round(f64 x) {
+    unsafe {
+        return sosu_math_round(x);
+    }
+}
+
+// Towards zero.
+pub f64 trunc(f64 x) {
+    unsafe {
+        return sosu_math_trunc(x);
+    }
+}
+
+// The remainder of `x / y`, with the sign of `x` (`%` is for integers).
+pub f64 fmod(f64 x, f64 y) {
+    unsafe {
+        return sosu_math_fmod(x, y);
+    }
+}
+
+// Infinities and NaN.
+
+pub f64 infinity() {
+    unsafe {
+        return sosu_math_infinity();
+    }
+}
+
+// A NaN ("not a number"): never equal to anything, itself included.
+pub f64 nan() {
+    unsafe {
+        return sosu_math_nan();
+    }
+}
+
+pub bool is_nan(f64 x) {
+    return x != x;
+}
+
+pub bool is_infinite(f64 x) {
+    return x == infinity() || x == -infinity();
+}
+
+// Neither infinite nor NaN.
+pub bool is_finite(f64 x) {
+    return !is_nan(x) && !is_infinite(x);
+}
+
+pub f64 clamp(f64 x, f64 low, f64 high)
+    requires low <= high
+{
+    return min(max(x, low), high);
+}
+
+// The value at `t` from `a` (t = 0.0) to `b` (t = 1.0).
+pub f64 lerp(f64 a, f64 b, f64 t) {
+    return a + (b - a) * t;
+}
+
+// Integers.
+
+// The greatest common divisor, never negative; gcd(0, 0) is 0.
+pub i64 gcd(i64 a, i64 b) {
+    mut i64 x = abs(a);
+    mut i64 y = abs(b);
+    while (y != 0) {
+        i64 r = x % y;
+        x = y;
+        y = r;
+    }
+    return x;
+}
+
+// The least common multiple, never negative; none if it does not fit in an i64.
+pub i64? lcm(i64 a, i64 b) {
+    if (a == 0 || b == 0) {
+        return some(0 as i64);
+    }
+    return checked_mul(abs(a) / gcd(a, b), abs(b));
+}
+
+// `value` to the power `exponent`, or none if it does not fit in an i64.
+pub i64? pow_i64(i64 value, ui32 exponent) {
+    mut i64 result = 1;
+    mut i64 factor = value;  // value to the power 2^k
+    mut ui32 rest = exponent;
+    while (rest != 0) {
+        if (rest & 1 == 1) {
+            result = match (checked_mul(result, factor)) {
+                some(product) => product,
+                none => {
+                    return none;
+                },
+            };
+        }
+        rest >>= 1;
+        if (rest != 0) {  // the result will be a multiple of factor * factor: it must fit
+            factor = match (checked_mul(factor, factor)) {
+                some(square) => square,
+                none => {
+                    return none;
+                },
+            };
+        }
+    }
+    return some(result);
+}
+
+i64 I64_MIN = -9223372036854775807 - 1;
+
+// a * b, or none if it does not fit in an i64.
+i64? checked_mul(i64 a, i64 b) {
+    if (a == 0 || b == 0) {
+        return some(0 as i64);
+    }
+    if (a == -1 || b == -1) {
+        mut i64 other = a;  // the other factor
+        if (a == -1) {
+            other = b;
+        }
+        if (other == I64_MIN) {  // -(i64 minimum) does not fit
+            return none;
+        }
+        return some(-other);
+    }
+    i64 product = wrapping_mul(a, b);
+    if (product / b != a) {  // |b| >= 2: the division cannot overflow
+        return none;
+    }
+    return some(product);
+}

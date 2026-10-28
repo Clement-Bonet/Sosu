@@ -53,7 +53,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 |---|---|---|
 | E0301 | name already declared, or a built-in type | `struct A {}` twice, `struct i32 {}` |
 | E0302 | name already used by an import | `import a.util; import b.util;`, `import std.io; struct io {}` |
-| E0303 | unknown type or module | `Pont p;` (did you mean `Point`?), `io.File f;`, `u8 b;` (now `ui8`) |
+| E0303 | unknown type or module | `Pont p;` (did you mean `Point`?), `io.Socket s;`, `u8 b;` (now `ui8`) |
 | E0304 | not a type | a function or a module used as a type |
 | E0305 | private to its module | `shapes.Secret` without `pub struct Secret` |
 | E0306 | `void` can only be a return type | `void x;`, `void f(void x)` |

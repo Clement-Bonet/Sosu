@@ -1,0 +1,65 @@
+at 0
+at 15
+at 20
+none
+at 0
+true true true
+3 2
+cat 5 3
+false true
+[a b] [x ] [  x]
+[]
+1.2
+no suffix
+4 pieces
+[]
+[x]
+[]
+[y]
+2 pieces
+[a]
+[b]
+4 pieces
+[one]
+[two]
+[]
+[four]
+1 pieces
+[last without end]
+3 pieces
+[several]
+[words]
+[here]
+1 + 2 + 3
+the cog sog on the mog
+bbbbbb
+ababab
+HELLO, WÖRLD! Ÿ Ç ß Ł
+école łódź i ÿ
+ΑΒΓ Σ Ά σοφια ώ
+ПРИВЕТ Ё москва ё
+Q q 7
+true false true true
+ok 42
+ok -17
+ok 5
+ok 9223372036854775807
+ok -9223372036854775808
+error out of range
+error invalid
+error invalid
+error empty
+ok 18446744073709551615
+error out of range
+ok 3.25
+ok -0.5
+ok 6.02e+23
+error out of range
+error invalid
+error invalid
+error invalid
+-9223372036854775808 0 18446744073709551615
+3.14 -2 0.12500
+33 -inf
+200 100
+total: -12 €😀 0.667

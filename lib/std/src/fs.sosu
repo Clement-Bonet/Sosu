@@ -1,0 +1,371 @@
+// std.fs: folders (list, create, remove), files moved, copied and described, and paths
+// (spec §8.2). The contents of files are read and written by std.io (whole, or by parts with
+// `io.File`). Paths are UTF-8 on every system; `/` separates their parts everywhere, and `\`
+// too, so that the paths of Windows are read as written.
+
+import std.io;
+import std.sort;
+import std.text;
+
+extern "C" {
+    i32 sosu_fs_create_dir(ui8* path) uses io;
+    i32 sosu_fs_remove_dir(ui8* path) uses io;
+    i32 sosu_fs_remove_file(ui8* path) uses io;
+    i32 sosu_fs_rename(ui8* from, ui8* to) uses io;
+    i32 sosu_fs_copy(ui8* from, ui8* to) uses io;
+    i32 sosu_fs_info(ui8* path, i64* size, i64* modified, i32* kind) uses io;
+    i64 sosu_fs_list(ui8* path, i32* error) uses io;
+    i64 sosu_fs_current_dir() uses io;
+    void sosu_os_take(ui8* out) uses io;
+}
+
+pub enum Kind {
+    File,
+    Folder,
+    Other,  // a device, a pipe...
+}
+
+// What the system knows of a file or a folder.
+pub struct Info {
+    pub Kind kind;
+    pub i64 size;  // in bytes; for a folder, what the system says
+    pub i64 modified;  // the last change, in seconds since 1970-01-01 UTC (time.from_unix)
+}
+
+// Folders
+
+// The names of the files and folders in the folder `path` (not their paths), in the order of
+// their bytes, without "." and "..".
+pub str[]!io.IoError list(Arena* arena, str path) uses io {
+    ui8* c_path = path.to_cstr(arena);
+    mut i32 error = 0;
+    mut i64 length = 0;
+    unsafe {
+        length = sosu_fs_list(c_path, &error);
+    }
+    if (length == -1) {
+        return err(to_error(error));
+    }
+    if (length < 0) {
+        return err(io.IoError.Other);
+    }
+    ui8[] bytes = arena.alloc_slice(ui8, length as usize + 1);
+    unsafe {
+        sosu_os_take(&bytes[0]);
+    }
+    // Names, each ended by a NUL byte.
+    mut usize count = 0;
+    for (ui8 b in bytes[0..length as usize]) {
+        if (b == 0) {
+            count += 1;
+        }
+    }
+    mut str[] names = arena.alloc_slice(str, 0);
+    unsafe {
+        names = arena.alloc_slice(str, count);  // each written before it is read
+    }
+    mut usize start = 0;
+    mut usize k = 0;
+    for (usize i in 0..length as usize) {
+        if (bytes[i] == 0) {
+            names[k] = match (str.from_bytes(bytes[start..i])) {
+                ok(name) => name,
+                err(e) => "",  // the runtime gives UTF-8
+            };
+            k += 1;
+            start = i + 1;
+        }
+    }
+    sort.sort(names);
+    return ok(names);
+}
+
+// Creates the folder `path`; its parent must exist. AlreadyExists if it is there.
+pub void!io.IoError create_dir(Arena* arena, str path) uses io {
+    mut i32 error = 0;
+    ui8* c_path = path.to_cstr(arena);
+    unsafe {
+        error = sosu_fs_create_dir(c_path);
+    }
+    return result(error);
+}
+
+// Creates the folder `path` and those above it that are missing; nothing if it is there.
+pub void!io.IoError create_dirs(Arena* arena, str path) uses io {
+    if (is_dir(arena, path)) {
+        return ok();
+    }
+    match (parent(path)) {
+        some(above) => {
+            if (above.len > 0 && !is_root(above)) {
+                try create_dirs(arena, above);
+            }
+        },
+        none => { },
+    }
+    return match (create_dir(arena, path)) {
+        ok => ok(),
+        err(e) => {
+            if (e == io.IoError.AlreadyExists && is_dir(arena, path)) {
+                return ok();
+            }
+            return err(e);
+        },
+    };
+}
+
+// Removes the folder `path`, which must be empty (NotEmpty otherwise).
+pub void!io.IoError remove_dir(Arena* arena, str path) uses io {
+    mut i32 error = 0;
+    ui8* c_path = path.to_cstr(arena);
+    unsafe {
+        error = sosu_fs_remove_dir(c_path);
+    }
+    return result(error);
+}
+
+// Removes the file `path`.
+pub void!io.IoError remove_file(Arena* arena, str path) uses io {
+    mut i32 error = 0;
+    ui8* c_path = path.to_cstr(arena);
+    unsafe {
+        error = sosu_fs_remove_file(c_path);
+    }
+    return result(error);
+}
+
+// Removes `path`: a file, or a folder with everything in it. NotFound if it is not there.
+pub void!io.IoError remove_all(Arena* arena, str path) uses io {
+    Info found = try info(arena, path);
+    if (found.kind != Folder) {
+        return remove_file(arena, path);
+    }
+    str[] names = try list(arena, path);
+    for (str name in names) {
+        try remove_all(arena, join(arena, path, name));
+    }
+    return remove_dir(arena, path);
+}
+
+// Files
+
+// Moves or renames `from` to `to`, replacing the file `to` if there is one.
+pub void!io.IoError rename(Arena* arena, str from, str to) uses io {
+    mut i32 error = 0;
+    ui8* c_from = from.to_cstr(arena);
+    ui8* c_to = to.to_cstr(arena);
+    unsafe {
+        error = sosu_fs_rename(c_from, c_to);
+    }
+    return result(error);
+}
+
+// Copies the file `from` to `to`, replacing the file `to` if there is one.
+pub void!io.IoError copy(Arena* arena, str from, str to) uses io {
+    mut i32 error = 0;
+    ui8* c_from = from.to_cstr(arena);
+    ui8* c_to = to.to_cstr(arena);
+    unsafe {
+        error = sosu_fs_copy(c_from, c_to);
+    }
+    return result(error);
+}
+
+pub Info!io.IoError info(Arena* arena, str path) uses io {
+    ui8* c_path = path.to_cstr(arena);
+    mut i64 size = 0;
+    mut i64 modified = 0;
+    mut i32 kind = 0;
+    mut i32 error = 0;
+    unsafe {
+        error = sosu_fs_info(c_path, &size, &modified, &kind);
+    }
+    if (error != 0) {
+        return err(to_error(error));
+    }
+    mut Kind k = Other;
+    if (kind == 0) {
+        k = File;
+    } else if (kind == 1) {
+        k = Folder;
+    }
+    return ok(Info{ kind: k, size: size, modified: modified });
+}
+
+// Whether there is a file or a folder at `path`.
+pub bool exists(Arena* arena, str path) uses io {
+    return match (info(arena, path)) {
+        ok(i) => true,
+        err(e) => false,
+    };
+}
+
+pub bool is_dir(Arena* arena, str path) uses io {
+    return match (info(arena, path)) {
+        ok(i) => i.kind == Folder,
+        err(e) => false,
+    };
+}
+
+pub bool is_file(Arena* arena, str path) uses io {
+    return match (info(arena, path)) {
+        ok(i) => i.kind == File,
+        err(e) => false,
+    };
+}
+
+// The folder the program runs in, with `/` between its parts on every system.
+pub str current_dir(Arena* arena) uses io {
+    mut i64 length = 0;
+    unsafe {
+        length = sosu_fs_current_dir();
+    }
+    if (length < 0) {
+        return ".";
+    }
+    ui8[] bytes = arena.alloc_slice(ui8, length as usize + 1);
+    unsafe {
+        sosu_os_take(&bytes[0]);
+    }
+    return match (str.from_bytes(bytes[0..length as usize])) {
+        ok(path) => path,
+        err(e) => ".",
+    };
+}
+
+// Paths: computed from the text alone, without asking the system.
+
+// `a` and `b` with one `/` between them; `b` alone if it is absolute (`/x`, `C:/x`).
+pub str join(Arena* arena, str a, str b) {
+    if (a.len == 0 || is_absolute(b)) {
+        return b;
+    }
+    text.TextBuilder* builder = text.builder(arena);
+    builder.push(a);
+    if (!is_separator(a.bytes[a.len - 1])) {
+        builder.push("/");
+    }
+    builder.push(b);
+    return builder.text();
+}
+
+// Whether `path` starts at a root: `/`, `\`, or a drive (`C:/`, `C:\`).
+pub bool is_absolute(str path) {
+    if (path.len > 0 && is_separator(path.bytes[0])) {
+        return true;
+    }
+    return path.len >= 3 && is_drive_letter(path.bytes[0]) && path.bytes[1] == 58 && is_separator(path.bytes[2]);
+}
+
+// The folder that holds `path`: "a/b" for "a/b/c.txt", "" for "c.txt", "/" for "/c"; none for a
+// root ("/", "C:/") and for "".
+pub str? parent(str path) {
+    str trimmed = without_trailing(path);
+    if (trimmed.len == 0 || is_root(trimmed)) {
+        return none;
+    }
+    match (last_separator(trimmed)) {
+        some(i) => {
+            str above = text.slice(trimmed, 0, i);
+            if (above.len == 0 || above.len == 2 && above.bytes[1] == 58) {  // "/c", "C:/c"
+                return some(text.slice(trimmed, 0, i + 1));
+            }
+            return some(above);
+        },
+        none => {
+            return some("");
+        },
+    }
+    return none;
+}
+
+// The last part of `path`: "c.txt" for "a/b/c.txt", "b" for "a/b/", "" for a root.
+pub str file_name(str path) {
+    str trimmed = without_trailing(path);
+    return match (last_separator(trimmed)) {
+        some(i) => text.slice(trimmed, i + 1, trimmed.len),
+        none => trimmed,
+    };
+}
+
+// The extension of the file name, without its dot: "txt" for "a/c.txt", "gz" for "x.tar.gz";
+// none without one (".profile" has none).
+pub str? extension(str path) {
+    str name = file_name(path);
+    return match (text.find_last(name, ".")) {
+        some(i) => {
+            if (i == 0) {
+                return none;
+            }
+            return some(text.slice(name, i + 1, name.len));
+        },
+        none => none,
+    };
+}
+
+// The file name without its extension: "c" for "a/c.txt".
+pub str stem(str path) {
+    str name = file_name(path);
+    return match (text.find_last(name, ".")) {
+        some(i) => {
+            if (i == 0) {
+                return name;
+            }
+            return text.slice(name, 0, i);
+        },
+        none => name,
+    };
+}
+
+bool is_separator(ui8 b) {
+    return b == 47 || b == 92;  // '/', '\'
+}
+
+bool is_drive_letter(ui8 b) {
+    return b >= 65 && b <= 90 || b >= 97 && b <= 122;
+}
+
+bool is_root(str path) {
+    return path.len == 1 && is_separator(path.bytes[0]) || path.len == 3 && is_absolute(path);
+}
+
+// `path` without the separators at its end, unless it is a root.
+str without_trailing(str path) {
+    mut usize end = path.len;
+    while (end > 1 && is_separator(path.bytes[end - 1]) && !is_root(text.slice(path, 0, end))) {
+        end -= 1;
+    }
+    return text.slice(path, 0, end);
+}
+
+usize? last_separator(str path) {
+    for (mut usize i = path.len; i > 0; i -= 1) {
+        if (is_separator(path.bytes[i - 1])) {
+            return some(i - 1);
+        }
+    }
+    return none;
+}
+
+io.IoError to_error(i32 code) {
+    if (code == 1) {
+        return io.IoError.NotFound;
+    }
+    if (code == 2) {
+        return io.IoError.PermissionDenied;
+    }
+    if (code == 3) {
+        return io.IoError.AlreadyExists;
+    }
+    if (code == 4) {
+        return io.IoError.NotEmpty;
+    }
+    return io.IoError.Other;
+}
+
+void!io.IoError result(i32 code) {
+    if (code == 0) {
+        return ok();
+    }
+    return err(to_error(code));
+}

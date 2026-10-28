@@ -175,6 +175,7 @@ typedef struct {
     int lib;      /* --lib: 1 a static library, 2 a shared one (spec §9.2); 0 a program */
     const Target *target; /* --target: a phone, or this desktop */
     CodegenOptions checks;
+    char *run_args; /* `sosuc run ... -- args`: given to the program, quoted (spec §8.2, std.os) */
 } BuildOptions;
 
 static bool write_file(const char *path, const char *text) {
@@ -437,6 +438,34 @@ static void append(char **text, const char *fmt, const char *value) {
     *text = joined;
 }
 
+/* ` "value"`, quoted for the shell of `shell_run`: cmd and the C library of Windows, or sh. */
+static void append_quoted(char **text, const char *value) {
+    size_t length = strlen(value), size = 0;
+    char *quoted = sosu_alloc(2 * length + 4);
+    quoted[size++] = ' ';
+    quoted[size++] = '"';
+    for (size_t i = 0; i < length; i++) {
+#ifdef _WIN32
+        if (value[i] == '"') {
+            for (size_t k = i; k > 0 && value[k - 1] == '\\'; k--) quoted[size++] = '\\'; /* doubled before a quote */
+            quoted[size++] = '\\';
+        }
+#else
+        if (strchr("\"\\$`", value[i])) quoted[size++] = '\\';
+#endif
+        quoted[size++] = value[i];
+    }
+#ifdef _WIN32
+    for (size_t k = length; k > 0 && value[k - 1] == '\\'; k--) quoted[size++] = '\\'; /* before the closing quote */
+#endif
+    quoted[size++] = '"';
+    quoted[size] = '\0';
+    char *joined = sosu_format("%s%s", *text, quoted);
+    free(*text);
+    free(quoted);
+    *text = joined;
+}
+
 /* The arguments that make the C compiler link the libraries. */
 /* The C files of the packages ([link] c), after their folders and defines: ` -I"inc" -DX "a.c"`. */
 static char *source_arguments(const Links *links, bool msvc) {
@@ -660,7 +689,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         }
         char *link_args = link_arguments(links, false);
         if (optimize && links->window && for_windows) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
-        if (!for_windows) append(&link_args, "%s", " -pthread"); /* std.thread (spec §5.6) */
+        if (!for_windows) append(&link_args, "%s", " -pthread -lm"); /* std.thread (spec §5.6), std.math */
         char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
         char *sources = source_arguments(links, false);
         command = sosu_format("\"%s\"%s -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s%s -o \"%s\"%s", compiler, flags,
@@ -1089,7 +1118,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
         if (shared) {
             char *link_args = link_arguments(links, false);
 #ifndef _WIN32
-            append(&link_args, "%s", " -pthread"); /* std.thread (spec §5.6) */
+            append(&link_args, "%s", " -pthread -lm"); /* std.thread (spec §5.6), std.math */
 #endif
 #ifdef __APPLE__
             const char *kind = "-dynamiclib";
@@ -1854,7 +1883,12 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
             status = 0;
         } else {
             char *native_exe = shell_path(exe);
-            char *command = sosu_format("\"%s\"", native_exe);
+#ifdef _WIN32
+            /* cmd takes away the first and the last quote of a line that has more than two */
+            char *command = sosu_format("\"\"%s\"%s\"", native_exe, options->run_args ? options->run_args : "");
+#else
+            char *command = sosu_format("\"%s\"%s", native_exe, options->run_args ? options->run_args : "");
+#endif
             status = shell_run(command);
             free(command);
             free(native_exe);
@@ -2354,6 +2388,11 @@ int main(int argc, char **argv) {
     const char **paths = sosu_alloc((size_t)argc * sizeof *paths); /* fmt takes several */
     int path_count = 0;
     for (int i = 2; i < argc; i++) {
+        if (strcmp(command, "run") == 0 && strcmp(argv[i], "--") == 0) {
+            options.run_args = sosu_strdup("");
+            for (int j = i + 1; j < argc; j++) append_quoted(&options.run_args, argv[j]);
+            break;
+        }
         if (is_fmt && strcmp(argv[i], "--check") == 0) {
             fmt_check = true;
         } else if (is_fmt && argv[i][0] != '-') {

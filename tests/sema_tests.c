@@ -103,8 +103,8 @@ static void test_names(void) {
     expect_codes("void f(uf64 a) { uf64 b = -a; }", "E0334");
     expect_help("void f(f32 a) { uf32 b = a; }", "E0331", "conversions are explicit: write `... as uf32`");
     expect_codes("void f(uf32 a) { f32 b = a; }", "E0331");
-    expect_codes("import std.io;\nstruct A { io.File f; }", "E0303");
-    expect_codes("import std.io;\nstruct A { std.io.File f; }", "E0303");
+    expect_codes("import std.io;\nstruct A { io.Socket f; }", "E0303");
+    expect_codes("import std.io;\nstruct A { std.io.Socket f; }", "E0303");
     expect_codes("void f() { }\nstruct A { f x; }", "E0304");
     expect_codes("import std.io;\nstruct A { io x; }", "E0304");
 }

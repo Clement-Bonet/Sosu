@@ -13,6 +13,7 @@ typedef struct {
     const char *program;
     const char *expected; /* file in the program folder */
     int exit_code;
+    const char *args; /* after `--`, for the program; NULL: none */
 } Case;
 
 static const Case cases[] = {
@@ -38,6 +39,12 @@ static const Case cases[] = {
     { "run", "iterators", "expected.txt", 0 },
     { "run", "csources", "expected.txt", 0 },
     { "run", "threads", "expected.txt", 0 },
+    { "run", "mathematics", "expected.txt", 0 },
+    { "run", "sorting", "expected.txt", 0 },
+    { "run", "texts", "expected.txt", 0 },
+    { "run", "calendar", "expected.txt", 0 },
+    { "run", "system", "expected.txt", 3, "first \"two words\" 3" },
+    { "run", "formats", "expected.txt", 0 },
     { "run --release", "overflow", "expected_release.txt", 0 },
     { "run --release", "unsigned_floats", "expected_release.txt", 0 },
     { "test", "testing", "expected.txt", 1 },
@@ -211,8 +218,8 @@ int main(int argc, char **argv) {
 #endif
         char command[512], output[256], expected_path[256];
         snprintf(output, sizeof output, "build%s%s.out", sep, c->program);
-        snprintf(command, sizeof command, "%s %s tests/programs/%s > %s 2> build%s%s.err", argv[1], c->command,
-                 c->program, output, sep, c->program);
+        snprintf(command, sizeof command, "%s %s tests/programs/%s%s%s > %s 2> build%s%s.err", argv[1], c->command,
+                 c->program, c->args ? " -- " : "", c->args ? c->args : "", output, sep, c->program);
         int status = run(command);
         CHECK(status == c->exit_code, "%s %s: exit code %d, expected %d (see build/%s.err)", c->command, c->program,
               status, c->exit_code, c->program);
