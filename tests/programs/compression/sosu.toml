@@ -1,0 +1,9 @@
+# The package compress (spec §8.2): deflate, zlib and gzip, written and read back, and streams
+# written by zlib and by the gzip command.
+[package]
+name = "compression"
+version = "0.1.0"
+
+[dependencies]
+compress = { path = "../../../packages/compress" }
+crypto = { path = "../../../packages/crypto" }

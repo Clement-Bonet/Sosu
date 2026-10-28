@@ -224,7 +224,7 @@ static char *join_names(Path path, size_t from, const char *prefix, char separat
         memcpy(out, path.items[i].text, path.items[i].length);
         out += path.items[i].length;
     }
-    strcpy(out, suffix);
+    memcpy(out, suffix, strlen(suffix) + 1); /* with its NUL: counted in `size` */
     return result;
 }
 

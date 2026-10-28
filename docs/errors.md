@@ -46,6 +46,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0216 | not supported yet in a `.ui.sosu` file | not given any more: `style`, `theme`, `align:` and the grids it was given for are supported (spec §10.7, §10.8) |
 | E0217 | generic declaration not supported yet | a virtual method or a method of an interface with type parameters of its own, a generic class with a parent class, an interface or a `virtual` method, an effect parameter outside a function, a generic C function (spec §5.4) |
 | E0218 | invalid `export` | `export "Rust" ...`, `export "C"` before something that is not a function (spec §9.2) |
+| E0219 | too deeply nested (more than 512 levels in the parser: a parenthesis counts two, a term of a sum one) | 20 000 nested parentheses, a sum of 1 000 terms, `ui8*` with 600 stars (spec §12) |
 
 ## Semantic analysis
 
@@ -109,6 +110,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0368 | a constant of a type other than a number, `bool`, `char` or `str` | `i32[2] PAIR = [1, 2];` (spec §11.6) |
 | E0369 | invalid lambda | `auto g = (x) => x;` (the type of `x` is unknown), `n = x` in a lambda that captured `n`, a captured `Arena` (spec §5.5) |
 | E0370 | a lambda that captures variables leaves its function | `return (i32 x) => x + k;`, `S{ h: (x) => x + k }`, `g = (x) => x + k;`, a C function that takes a function used as a value (spec §5.5) |
+| E0371 | a returned pointer or view would point into the function | `return &x;` on a local or a parameter, `return &p.v;` on a local struct, `return a[0..2];` on a local array, also in `some(...)`, a literal or `?:` (spec §7.7); a pointer first kept in a variable is not followed |
 
 ## Code generation
 
@@ -136,3 +138,4 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0413 | two different packages have the same name | two dependencies both named `shared` |
 | E0414 | the standard library was not found | `lib/std` missing, `SOSU_HOME` wrong |
 | E0415 | no package at the dependency path | `x = { path = "../nowhere" }` |
+| E0416 | a value of sosu.toml has a character it cannot have | a quote, `` ` ``, `$`, `%` or a control character, which would end the quotes of a command or be expanded in them: `libs = ["m\" & calc"]` (the `name` of [app], a text shown, may have them) |

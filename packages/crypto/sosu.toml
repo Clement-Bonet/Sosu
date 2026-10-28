@@ -1,0 +1,11 @@
+# Hashes, HMAC, base64 and hexadecimal in Sosu, and random bytes from the system (spec §8.2).
+# Not cryptography itself (ciphers, signatures), which should come from a reviewed library.
+[package]
+name = "crypto"
+version = "0.1.0"
+
+[link]
+c = ["native/secure.c"]  # the random bytes of the system
+
+[link.windows]
+libs = ["bcrypt"]

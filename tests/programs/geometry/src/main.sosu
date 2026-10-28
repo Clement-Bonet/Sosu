@@ -1,0 +1,104 @@
+// The package math (spec §8.2): math.linear, printed with 3 decimals.
+import std.io;
+import std.text;
+import std.math;
+import math.linear;
+
+// `x` with 3 decimals, without "-0.000".
+str num(Arena* arena, f32 x) {
+    f64 v = x as f64;
+    return text.format_f64(arena, abs(v) < 0.0005 ? 0.0 : v, 3);
+}
+
+str v2(Arena* arena, linear.Vec2 v) {
+    mut str[2] parts = [num(arena, v.x), num(arena, v.y)];
+    return text.join(arena, parts[0..2], " ");
+}
+
+str v3(Arena* arena, linear.Vec3 v) {
+    mut str[3] parts = [num(arena, v.x), num(arena, v.y), num(arena, v.z)];
+    return text.join(arena, parts[0..3], " ");
+}
+
+str v4(Arena* arena, linear.Vec4 v) {
+    mut str[4] parts = [num(arena, v.x), num(arena, v.y), num(arena, v.z), num(arena, v.w)];
+    return text.join(arena, parts[0..4], " ");
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    f32 quarter = (math.PI / 2.0) as f32;
+
+    // vectors
+    linear.Vec2 a = linear.vec2(3.0, 4.0);
+    linear.Vec2 b = linear.vec2(1.0, -2.0);
+    io.print("vec2: {} | {} | dot {} cross {} length {}", v2(&arena, a.add(b)), v2(&arena, a.normalized()), num(&arena, a.dot(b)), num(&arena, a.cross(b)), num(&arena, a.length()));
+    io.print("vec2: perpendicular {} | lerp {} | distance {}", v2(&arena, a.perpendicular()), v2(&arena, a.lerp(b, 0.25)), num(&arena, a.distance(b)));
+    linear.Vec3 x = linear.vec3(1.0, 0.0, 0.0);
+    linear.Vec3 y = linear.vec3(0.0, 1.0, 0.0);
+    linear.Vec3 p = linear.vec3(1.0, 2.0, 3.0);
+    io.print("vec3: x cross y {} | {} | {} | dot {} | length {}", v3(&arena, x.cross(y)), v3(&arena, p.scale(2.0).sub(x)), v3(&arena, p.normalized()), num(&arena, p.dot(linear.vec3(4.0, 5.0, 6.0))), num(&arena, p.length()));
+    io.print("vec3: zero normalized {} | mul {} | neg {}", v3(&arena, linear.vec3(0.0, 0.0, 0.0).normalized()), v3(&arena, p.mul(p)), v3(&arena, p.neg()));
+    linear.Vec4 h = linear.vec4(2.0, 4.0, 6.0, 2.0);
+    io.print("vec4: {} | projected {} | dot {}", v4(&arena, h.lerp(linear.vec4(0.0, 0.0, 0.0, 0.0), 0.5)), v3(&arena, h.project()), num(&arena, h.dot(h)));
+
+    // the plane: a point scaled, turned a quarter, moved
+    linear.Mat3 m2 = linear.translation2(linear.vec2(10.0, 0.0)).mul(linear.rotation2(quarter)).mul(linear.scaling2(linear.vec2(2.0, 2.0)));
+    io.print("mat3: point {} | vector {} | determinant {}", v2(&arena, m2.transform_point(linear.vec2(1.0, 0.0))), v2(&arena, m2.transform_vector(linear.vec2(1.0, 0.0))), num(&arena, m2.determinant()));
+    match (m2.inverse()) {
+        some(inv) => io.print("mat3: inverse back {} | m * inverse = identity {}", v2(&arena, inv.transform_point(linear.vec2(10.0, 2.0))), m2.mul(inv).near(linear.identity3(), 0.0001)),
+        none => io.print("mat3: no inverse"),
+    }
+    mut linear.Mat3 flat = linear.identity3();
+    flat.set(1, 1, 0.0);
+    bool singular = match (flat.inverse()) {
+        some(inv) => false,
+        none => true,
+    };
+    io.print("mat3: singular has no inverse {} | transposed twice {}", singular, m2.transposed().transposed().near(m2, 0.0));
+
+    // 3D: rotations, a transform and its inverse
+    io.print("rotations: z {} | x {} | y {}", v3(&arena, linear.rotation_z(quarter).transform_point(x)), v3(&arena, linear.rotation_x(quarter).transform_point(y)), v3(&arena, linear.rotation_y(quarter).transform_point(x)));
+    linear.Mat4 model = linear.translation(linear.vec3(1.0, 2.0, 3.0)).mul(linear.rotation(linear.vec3(1.0, 1.0, 0.0), 0.7)).mul(linear.scaling(linear.vec3(2.0, 3.0, 4.0)));
+    linear.Vec3 moved = model.transform_point(p);
+    io.print("mat4: point {} | vector {} | determinant {}", v3(&arena, moved), v3(&arena, model.transform_vector(x)), num(&arena, model.determinant()));
+    match (model.inverse()) {
+        some(inv) => io.print("mat4: inverse back {} | m * inverse = identity {} | transposed m[3] {}", v3(&arena, inv.transform_point(moved)), model.mul(inv).near(linear.identity4(), 0.0001), num(&arena, model.transposed().m[3])),
+        none => io.print("mat4: no inverse"),
+    }
+    bool zero_inverse = match (linear.scaling(linear.vec3(1.0, 0.0, 1.0)).inverse()) {
+        some(inv) => false,
+        none => true,
+    };
+    io.print("mat4: a flat scaling has no inverse {} | upper3 determinant {}", zero_inverse, num(&arena, model.upper3().determinant()));
+
+    // the camera and the projections
+    linear.Mat4 view = linear.look_at(linear.vec3(0.0, 0.0, 5.0), linear.vec3(0.0, 0.0, 0.0), y);
+    io.print("look_at: origin {} | right {}", v3(&arena, view.transform_point(linear.vec3(0.0, 0.0, 0.0))), v3(&arena, view.transform_point(x)));
+    linear.Mat4 proj = linear.perspective(quarter, 2.0, 1.0, 100.0);
+    io.print("perspective: near {} | far {} | corner {}", v3(&arena, proj.transform_point(linear.vec3(0.0, 0.0, -1.0))), v3(&arena, proj.transform_point(linear.vec3(0.0, 0.0, -100.0))), v3(&arena, proj.transform_point(linear.vec3(20.0, 10.0, -10.0))));
+    linear.Mat4 ortho = linear.orthographic(0.0, 800.0, 0.0, 600.0, 0.0, 10.0);
+    io.print("orthographic: {} | {}", v3(&arena, ortho.transform_point(linear.vec3(0.0, 0.0, 0.0))), v3(&arena, ortho.transform_point(linear.vec3(800.0, 600.0, -10.0))));
+
+    // quaternions
+    linear.Quat qz = linear.from_axis_angle(linear.vec3(0.0, 0.0, 2.0), quarter);
+    linear.Quat qx = linear.from_axis_angle(x, quarter);
+    io.print("quat: rotate {} | composed {} | back {}", v3(&arena, qz.rotate(x)), v3(&arena, qx.mul(qz).rotate(x)), v3(&arena, qz.conjugate().rotate(qz.rotate(p))));
+    io.print("quat: as matrix {} | same as rotation {}", v3(&arena, qx.mul(qz).to_mat4().transform_point(x)), qz.to_mat4().near(linear.rotation_z(quarter), 0.0001));
+    linear.Quat half = linear.identity_quat().slerp(qz, 0.5);
+    io.print("slerp: halfway {} | end {} | near the start {} | length {}", v3(&arena, half.rotate(x)), qz.near(linear.identity_quat().slerp(qz, 1.0), 0.0001), v3(&arena, linear.identity_quat().slerp(linear.from_axis_angle(y, 0.001), 0.5).rotate(x)), num(&arena, half.length()));
+    linear.Quat minus = linear.Quat{ x: -qz.x, y: -qz.y, z: -qz.z, w: -qz.w };
+    io.print("slerp: the short way {} | q and -q the same {}", v3(&arena, linear.identity_quat().slerp(minus, 0.5).rotate(x)), qz.near(minus, 0.0001));
+
+    // transforms
+    mut linear.Transform t = linear.transform();
+    t.position = linear.vec3(0.0, 0.0, -2.0);
+    t.rotation = qz;
+    t.scale = linear.vec3(2.0, 2.0, 2.0);
+    io.print("transform: apply {} | matrix {}", v3(&arena, t.apply(x)), v3(&arena, t.to_mat4().transform_point(x)));
+    mut linear.Transform child = linear.transform();
+    child.position = x;
+    io.print("transform: child {} | as matrices {}", v3(&arena, t.then(child).apply(y)), v3(&arena, t.to_mat4().mul(child.to_mat4()).transform_point(y)));
+    return 0;
+}

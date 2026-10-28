@@ -29,6 +29,9 @@ typedef struct {
     bool has_package;
     size_t package_offset; /* `[package]` header */
     size_t errors_before;
+    /* the value read is not checked for commands here: the `name` of [app] is a text shown, and
+       `git`, `tag` and `rev` have a stricter check of their own (git.c, E0404) */
+    bool free_text;
 } Toml;
 
 typedef struct {
@@ -119,6 +122,23 @@ static char *parse_string(Toml *t) {
         SOSU_VEC_PUSH(&text, c);
     }
     SOSU_VEC_PUSH(&text, '\0');
+    /* The values reach the commands of the C compiler and of the tools, between quotes: what
+       would end the quotes or be expanded inside them (by cmd or sh) is refused, so that a
+       dependency cannot run a command while it is built. */
+    for (size_t i = 0; !t->free_text && text.items[i]; i++) {
+        unsigned char b = (unsigned char)text.items[i];
+        if (b < 32 || b == 127 || strchr("\"`$%", b)) {
+            Diagnostic *d = error_at(t, "E0416", start, t->pos - start, "a value of sosu.toml cannot contain %s",
+                                     b < 32 || b == 127 ? "a control character"
+                                     : b == '"'         ? "a quote"
+                                     : b == '`'         ? "`` ` ``"
+                                     : b == '$'         ? "`$`"
+                                                        : "`%`");
+            diag_help(d, "its values become arguments of the commands that build the program (spec §8.1)");
+            free(text.items);
+            return NULL;
+        }
+    }
     return text.items;
 }
 
@@ -197,7 +217,10 @@ static void parse_dependency(Toml *t, size_t key_start, size_t key_length) {
                 ok = false;
                 break;
             }
-            if (!set_string(t, slot, start, length)) { ok = false; break; }
+            t->free_text = slot != &dep.path;
+            bool read = set_string(t, slot, start, length);
+            t->free_text = false;
+            if (!read) { ok = false; break; }
             skip_spaces(t);
             if (cur(t) == ',') {
                 t->pos++;
@@ -367,7 +390,9 @@ static void parse_app_entry(Toml *t, size_t key_start, size_t key_length) {
         error_at(t, "E0408", key_start, key_length, "duplicate key `%.*s`", (int)key_length, t->s + key_start);
         return;
     }
+    t->free_text = field == &app->name;  /* shown under the icon */
     *field = parse_string(t);
+    t->free_text = false;
 }
 
 static void parse_line(Toml *t) {

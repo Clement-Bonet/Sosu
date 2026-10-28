@@ -2,3 +2,6 @@
 [package]
 name = "render"
 version = "0.1.0"
+
+[dependencies]
+compress = { path = "../compress" }  # PNG images hold their pixels in a zlib stream

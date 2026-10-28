@@ -1,0 +1,8 @@
+// crypto: hashes (SHA-256, SHA-1), HMAC, base64, hexadecimal, and random bytes from the system
+// (spec §8.2). Programs import `crypto.sha256`, `crypto.hmac`...
+import crypto.sha256;
+import crypto.sha1;
+import crypto.hmac;
+import crypto.base64;
+import crypto.hex;
+import crypto.secure;

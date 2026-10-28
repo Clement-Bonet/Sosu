@@ -1,0 +1,112 @@
+// crypto.sha1: the SHA-1 hash (FIPS 180-4), for the formats that still name it (Git, WebSocket,
+// HMAC-SHA1 of older protocols). It is broken against collisions: SHA-256 for anything new.
+
+ui32 rotl(ui32 x, ui32 n) {
+    return x << n | x >> 32 - n;
+}
+
+// A hash being computed: 64 bytes at a time.
+pub struct Sha1 {
+    mut ui32[5] state = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+    mut ui8[64] block = [0; 64];
+    mut usize filled = 0;
+    mut ui64 length = 0;  // in bytes
+
+    void compress() {
+        mut ui32[80] w = [0; 80];
+        for (usize i in 0..16) {
+            w[i] = block[4 * i] as ui32 << 24 | block[4 * i + 1] as ui32 << 16 | block[4 * i + 2] as ui32 << 8 | block[4 * i + 3] as ui32;
+        }
+        for (usize i in 16..80) {
+            w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        }
+        mut ui32 a = state[0];
+        mut ui32 b = state[1];
+        mut ui32 c = state[2];
+        mut ui32 d = state[3];
+        mut ui32 e = state[4];
+        for (usize i in 0..80) {
+            mut ui32 f = 0;
+            mut ui32 k = 0;
+            if (i < 20) {
+                f = b & c | ~b & d;
+                k = 0x5A827999;
+            } else if (i < 40) {
+                f = b ^ c ^ d;
+                k = 0x6ED9EBA1;
+            } else if (i < 60) {
+                f = b & c | b & d | c & d;
+                k = 0x8F1BBCDC;
+            } else {
+                f = b ^ c ^ d;
+                k = 0xCA62C1D6;
+            }
+            ui32 t = wrapping_add(wrapping_add(rotl(a, 5), f), wrapping_add(wrapping_add(e, k), w[i]));
+            e = d;
+            d = c;
+            c = rotl(b, 30);
+            b = a;
+            a = t;
+        }
+        state[0] = wrapping_add(state[0], a);
+        state[1] = wrapping_add(state[1], b);
+        state[2] = wrapping_add(state[2], c);
+        state[3] = wrapping_add(state[3], d);
+        state[4] = wrapping_add(state[4], e);
+    }
+
+    // Adds `data` to what is hashed.
+    pub void update(ui8[] data) {
+        for (ui8 x in data) {
+            block[filled] = x;
+            filled += 1;
+            if (filled == 64) {
+                compress();
+                filled = 0;
+            }
+        }
+        length = wrapping_add(length, data.len as ui64);
+    }
+
+    // The hash of all that was added: 20 bytes. The `Sha1` is not used afterwards.
+    pub ui8[20] finish() {
+        ui64 bits = wrapping_mul(length, 8);
+        block[filled] = 0x80;
+        filled += 1;
+        if (filled > 56) {
+            while (filled < 64) {
+                block[filled] = 0;
+                filled += 1;
+            }
+            compress();
+            filled = 0;
+        }
+        while (filled < 56) {
+            block[filled] = 0;
+            filled += 1;
+        }
+        for (usize i in 0..8) {
+            block[56 + i] = (bits >> (56 - 8 * i) as ui64 & 0xFF) as ui8;
+        }
+        compress();
+        mut ui8[20] out = [0; 20];
+        for (usize i in 0..5) {
+            for (usize j in 0..4) {
+                out[4 * i + j] = (state[i] >> (24 - 8 * j) as ui32 & 0xFF) as ui8;
+            }
+        }
+        return out;
+    }
+}
+
+// A hash to feed by parts.
+pub Sha1 start() {
+    return Sha1{ };
+}
+
+// The SHA-1 hash of `data`.
+pub ui8[20] sum(ui8[] data) {
+    mut Sha1 h = Sha1{ };
+    h.update(data);
+    return h.finish();
+}
