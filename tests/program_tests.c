@@ -100,7 +100,7 @@ static void test_library(const char *sosuc) {
 #endif
         char libs[256];
         if (shared) snprintf(libs, sizeof libs, "%s/%s", dir, shared_lib);
-        else snprintf(libs, sizeof libs, "%s/libgeom.a %s/libsosu_rt.a", dir, dir);
+        else snprintf(libs, sizeof libs, "%s/libgeom.a %s/libsosu_rt.a -lm -pthread", dir, dir); /* its .links */
         snprintf(command, sizeof command, "cc -std=c99 -I%s tests/programs/library/host/host.c %s -o %s/host%d > build/host.log 2>&1",
                  dir, libs, dir, shared);
         CHECK(run(command) == 0, "the host of the library does not compile (see build/host.log)");

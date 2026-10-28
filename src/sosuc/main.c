@@ -1172,15 +1172,21 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
     return status == 0;
 }
 
-/* The libraries a host must link with a static library: its [link] sections. */
+/* The libraries a host must link with a static library: its [link] sections, and outside Windows
+   those of the runtime (std.math, std.thread). */
 static bool write_link_list(const char *build_dir, const char *name, const Links *links) {
+#ifdef _WIN32
     if (links->libs.count == 0 && links->paths.count == 0 && links->frameworks.count == 0) return true;
+#endif
     char *file = sosu_format("%s.links", name);
     char *path = path_join(build_dir, file);
     char *text = sosu_strdup("# what a host links with this static library (spec 9.2)\n");
     for (size_t i = 0; i < links->paths.count; i++) append(&text, "path %s\n", links->paths.items[i]);
     for (size_t i = 0; i < links->libs.count; i++) append(&text, "lib %s\n", links->libs.items[i]);
     for (size_t i = 0; i < links->frameworks.count; i++) append(&text, "framework %s\n", links->frameworks.items[i]);
+#ifndef _WIN32
+    append(&text, "%s", "lib m\nlib pthread\n");
+#endif
     bool ok = write_file(path, text);
     if (!ok) fprintf(stderr, "sosuc: cannot write `%s`\n", path);
     free(text);

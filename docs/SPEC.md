@@ -860,7 +860,7 @@ Building:
 - `sosuc build --lib` compiles the package (entry `src/lib.sosu`, no `main`) into a static library (`build/lib<name>.a`, or `build/<name>.lib` with MSVC), and the runtime into a library of its own (`build/libsosu_rt.a`, `build/sosu_rt.lib`) that the host links once, however many Sosu libraries it uses; `--lib=shared` into a shared one with the runtime inside (`lib<name>.so`, `lib<name>.dylib`, or `<name>.dll` with its import library `<name>.dll.lib`). Both come with `build/<name>.h`.
 - The header is plain C99 (`stdint.h`, `stdbool.h`, `stddef.h`), usable from C++ (`extern "C"` guards). It declares the exports, and the types they use under the name `<package>_<Type>`. The `#line` directives stay in the C code of the library: a debugger shows the `.sosu` files.
 - The runtime (`sosu_rt.c`) is compiled into the library. In a shared library, its symbols, and those of the generated code, are hidden: only the exports are visible.
-- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list in `build/<name>.links` (`lib`, `path` and `framework` lines), since the host links them.
+- The C libraries of the package and of its dependencies (`[link]`, §9.1) are linked into a shared library. For a static library, `sosuc` writes their list in `build/<name>.links` (`lib`, `path` and `framework` lines), since the host links them; outside Windows, it ends with `lib m` and `lib pthread`, which the runtime needs (`std.math`, `std.thread`).
 - Mobile (§11.2) uses the same output: the Android activity loads a shared library, the Xcode project links a static one.
 
 Run-time errors:
