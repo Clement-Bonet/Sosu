@@ -1,0 +1,17 @@
+twice: 7
+closure: 21
+block: 100 7
+function: 20
+item 1
+item 2
+item 3
+item 4
+fold: 200
+fold str: one
+nested: 18
+counter: 15
+field: 9
+methods: big 42 true x
+notes: 2
+array: 9
+kept: 81

@@ -18,7 +18,18 @@ typedef struct {
     bool moved;          /* a value owning a resource that was moved away (spec §6) */
     size_t moved_offset; /* where */
     int loop_depth;      /* loops around its declaration */
+    bool closure;        /* holds a lambda of this function that captures variables (spec §5.5) */
 } Local;
+
+/* A lambda being checked (spec §5.5): its own locals start at `base`; those below it, and
+   `self`, are captured. Its effects are inferred when no type gives them. */
+typedef struct LambdaScope {
+    struct LambdaScope *outer;
+    size_t base;
+    VEC(Capture) captures;
+    bool inferring;
+    unsigned used;
+} LambdaScope;
 
 typedef struct {
     Sema *s;
@@ -36,6 +47,7 @@ typedef struct {
     bool taking_address; /* `&x`: the checks of assignment apply */
     bool assigning;      /* the target of `=`: a moved variable may receive a new value */
     VEC(Local) locals;
+    LambdaScope *lambda; /* the innermost lambda being checked, or NULL */
 } Body;
 
 static Type *check_expr(Body *b, Expr *e, Type *expected);
@@ -43,9 +55,10 @@ static void check_assignable(Body *b, Expr *target);
 static void check_stmt(Body *b, Stmt *stmt);
 static void check_block(Body *b, Stmt *block);
 static Type *named_instance(Body *b, const Expr *named, Type *type, Type *expected);
+static Type *type_argument(Body *b, Expr *arg);
 
 static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB",
-                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash" };
+                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash", "size_of" };
 
 /* ---- Helpers ---- */
 
@@ -170,8 +183,67 @@ static void declare_local(Body *b, Name name, Type *type, bool is_mut) {
                                  NAME_ARGS(name));
         diag_help(d, "the first declaration is on line %zu: choose another name", sema_line_of(b->unit, existing->name.offset));
     }
-    Local local = { name, type, is_mut, false, 0, b->loop_depth };
+    Local local = { name, type, is_mut, false, 0, b->loop_depth, false };
     SOSU_VEC_PUSH(&b->locals, local);
+}
+
+/* ---- Captures of lambdas (spec §5.5) ---- */
+
+static void add_capture(Body *b, LambdaScope *scope, Name name, Type *type, bool is_self) {
+    for (size_t i = 0; i < scope->captures.count; i++) {
+        const Capture *c = &scope->captures.items[i];
+        if (c->is_self == is_self && (is_self || sema_name_eq(c->name, name))) return;
+    }
+    Capture capture = { name, type, is_self };
+    SOSU_VEC_PUSH(&scope->captures, capture);
+    if (!is_self && type_owns_resource(type)) {
+        Diagnostic *d = error_at(b, "E0369", name.offset, name.length,
+                                 "a lambda cannot capture `%.*s`, which owns a resource", NAME_ARGS(name));
+        diag_help(d, "a lambda copies what it captures: capture a pointer to it instead");
+    }
+}
+
+/* `local` is used: the lambdas between it and here capture it. */
+static void capture_local(Body *b, const Local *local) {
+    size_t index = (size_t)(local - b->locals.items);
+    for (LambdaScope *scope = b->lambda; scope && index < scope->base; scope = scope->outer) {
+        add_capture(b, scope, local->name, local->type, false);
+    }
+}
+
+/* `self` is used, written or not: every lambda being checked captures it. */
+static void capture_self(Body *b) {
+    for (LambdaScope *scope = b->lambda; scope; scope = scope->outer) {
+        Name self = { "self", 4, 0 };
+        add_capture(b, scope, self, b->self_info ? b->self_info->type : NULL, true);
+    }
+}
+
+/* True if `e` is a lambda of this function that captures variables, or a variable holding
+   one: it lives as long as the function, and stays in its variables and arguments. */
+static bool is_closure(Body *b, const Expr *e) {
+    switch (e->kind) {
+    case EXPR_LAMBDA: return e->as.lambda.capture_count > 0;
+    case EXPR_TERNARY: return is_closure(b, e->as.ternary.then_expr) || is_closure(b, e->as.ternary.else_expr);
+    case EXPR_NAME: {
+        if (e->resolution != RESOLVED_LOCAL) return false;
+        const Local *local = find_local(b, e->as.name);
+        return local && local->closure;
+    }
+    default: return false;
+    }
+}
+
+/* `e` goes where it outlives the function (`where`: "returned", "stored in a field"...). */
+static void check_escape(Body *b, const Expr *e, const char *where) {
+    if (!e->type || e->type->tag != T_FN || !is_closure(b, e)) return;
+    Diagnostic *d = error_expr(b, "E0370", e, "a lambda that captures variables cannot be %s", where);
+    diag_help(d, "it lives as long as the function that creates it: call it, or pass it as an argument (spec §5.5)");
+}
+
+/* True if `local` is a copy held by the innermost lambda being checked. */
+static bool is_captured(Body *b, const Local *local) {
+    return b->lambda && (size_t)(local - b->locals.items) < b->lambda->base;
 }
 
 static FieldInfo *find_field(TypeInfo *info, Name name) {
@@ -235,15 +307,18 @@ static Ref lookup_name(Body *b, Name name, Type *expected) {
     Ref ref = {0};
     if ((ref.local = find_local(b, name))) {
         ref.kind = REF_LOCAL;
+        capture_local(b, ref.local);
         return ref;
     }
     if (b->self_info) {
         if ((ref.field = find_field(b->self_info, name))) {
             ref.kind = REF_FIELD;
+            capture_self(b);
             return ref;
         }
         if ((ref.method = find_method(b->self_info, name))) {
             ref.kind = REF_METHOD;
+            capture_self(b);
             return ref;
         }
     }
@@ -437,6 +512,15 @@ static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
             diag_help(d, "wrap the call in a function of its own, with the types it needs (spec §5.4)");
             return error_type(b);
         }
+        if (ref.fn->is_extern && ref.fn->type->tag == T_FN) { /* a C function takes C function pointers, which a value of `fn` type does not give */
+            for (size_t i = 0; i < ref.fn->type->as.fn.param_count; i++) {
+                if (ref.fn->type->as.fn.params[i]->tag != T_FN) continue;
+                Diagnostic *d = error_expr(b, "E0370", e, "`%.*s` is a C function that takes a function: it is called, "
+                                           "not used as a value", NAME_ARGS(ref.fn->decl->name));
+                diag_help(d, "wrap the call in a function of Sosu (spec §5.5)");
+                return error_type(b);
+            }
+        }
         return ref.fn->type;
     case REF_VARIANT: return variant_value(b, e, ref.info, ref.variant);
     case REF_ERROR: return error_type(b);
@@ -518,11 +602,16 @@ static void check_pair(Body *b, Expr *left, Expr *right, Type *hint, Type **lt, 
 /* ---- Calls ---- */
 
 static void report_missing_effects(Body *b, const Expr *callee, unsigned effects, const char *what) {
+    if (b->lambda && b->lambda->inferring) { /* a lambda has the effects of its body */
+        b->lambda->used |= effects;
+        return;
+    }
     unsigned missing = effects & ~b->effects;
     if (!missing) return;
     unsigned bit = missing & (~missing + 1);
     Diagnostic *d = error_expr(b, "E0340", callee, "%s needs the effect `%s`", what, effect_name(bit));
-    diag_help(d, "add `uses %s` to the signature of `%.*s` (spec §7.4)", effect_name(bit), NAME_ARGS(b->fn_name));
+    if (b->lambda) diag_help(d, "the type of this lambda does not allow it: add `uses %s` to its type", effect_name(bit));
+    else diag_help(d, "add `uses %s` to the signature of `%.*s` (spec §7.4)", effect_name(bit), NAME_ARGS(b->fn_name));
 }
 
 static void check_args_loosely(Body *b, Expr *e) {
@@ -574,6 +663,7 @@ static Type *call_variant(Body *b, Expr *e, const TypeInfo *info, size_t index) 
     for (size_t i = 0; i < count; i++) {
         check_expect(b, e->as.call.args[i], variant->fields[i]);
         consume(b, e->as.call.args[i]);
+        check_escape(b, e->as.call.args[i], "stored in an enum");
     }
     return info->type;
 }
@@ -619,6 +709,17 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         }
         return builtin(b, "Arena");
     }
+    if (strcmp(name, "size_of") == 0) { /* size_of(T): its size in bytes, as C counts it (spec §5.6) */
+        Type *type = count == 1 ? type_argument(b, args[0]) : NULL;
+        if (!type) {
+            Diagnostic *d = error_expr(b, "E0336", callee, "`size_of` takes a type");
+            diag_help(d, "e.g. `size_of(Point)`, `size_of(T)`");
+            check_args_loosely(b, e);
+        } else {
+            args[0]->type = type;
+        }
+        return builtin(b, "usize");
+    }
     bool is_ok = strcmp(name, "ok") == 0;
     bool void_ok = is_ok && expected && expected->tag == T_RESULT && expected->as.result.value->tag == T_VOID;
     bool two = strcmp(name, "min") == 0 || strcmp(name, "max") == 0 || strncmp(name, "wrapping_", 9) == 0;
@@ -634,6 +735,7 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         if (expected && expected->tag == T_OPTION) {
             check_expect(b, args[0], expected->as.inner);
             consume(b, args[0]);
+            check_escape(b, args[0], "stored in an option");
             return expected;
         }
         Type *type = check_expr(b, args[0], NULL);
@@ -641,6 +743,7 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
             error_expr(b, "E0331", args[0], "this expression has no value");
             return error_type(b);
         }
+        check_escape(b, args[0], "stored in an option");
         return type_option(&b->s->types, type);
     }
     if (is_ok || strcmp(name, "err") == 0) {
@@ -655,6 +758,7 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         if (count == 1) {
             check_expect(b, args[0], is_ok ? expected->as.result.value : expected->as.result.error);
             consume(b, args[0]);
+            check_escape(b, args[0], "stored in a result");
         }
         return expected;
     }
@@ -842,6 +946,8 @@ static bool all_bound(FnInfo *fn, const Type *type, Type **bound, const unsigned
     }
 }
 
+static Type *check_lambda(Body *b, Expr *e, Type *expected, FnInfo *generic, Type **bound, unsigned *effects);
+
 /* An argument whose type comes from the type expected for it: checked once the parameters
    it depends on are known. */
 static bool is_contextual(const Expr *e) {
@@ -905,8 +1011,13 @@ static Type *call_generic(Body *b, Expr *e, FnInfo *fn, Name name, Type *expecte
                 checked[i] = true;
                 continue;
             }
-            if (pass == 0 && is_contextual(arg)) continue;
-            Type *found = check_expr(b, arg, NULL);
+            if (pass == 0 && (is_contextual(arg) || arg->kind == EXPR_LAMBDA)) continue;
+            Type *found;
+            if (arg->kind == EXPR_LAMBDA) { /* it takes the types known, and gives the others */
+                found = arg->type = check_lambda(b, arg, param, fn, bound, effects);
+            } else {
+                found = check_expr(b, arg, NULL);
+            }
             checked[i] = true;
             if (!unify(fn, param, found, bound, effects)) report_mismatch(b, arg, bind(b, fn, param, bound, effects), found);
         }
@@ -1157,6 +1268,7 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
             callee->type = method->type;
             callee->resolution = RESOLVED_METHOD;
             callee->target = method;
+            if (method->generic) return call_generic(b, e, method->generic, name, expected);
             return call_with(b, e, method->type, name, method->decl->is_unsafe);
         }
         FieldInfo *field = find_field(info, name);
@@ -1236,9 +1348,15 @@ static Type *check_call(Body *b, Expr *e, Type *expected) {
             error_expr(b, "E0361", callee, "`%.*s` is not generic: it takes no type arguments", NAME_ARGS(name));
         }
         callee->type = ref.fn->type;
-        return call_with(b, e, ref.fn->type, name, ref.fn->decl->is_unsafe || ref.fn->is_extern);
+        if (ref.fn->is_extern) {
+            Type *ret = call_with(b, e, ref.fn->type, name, true);
+            for (size_t i = 0; i < e->as.call.arg_count; i++) check_escape(b, e->as.call.args[i], "given to a C function");
+            return ret;
+        }
+        return call_with(b, e, ref.fn->type, name, ref.fn->decl->is_unsafe);
     case REF_METHOD:
         callee->type = ref.method->type;
+        if (ref.method->generic) return call_generic(b, e, ref.method->generic, name, expected);
         return call_with(b, e, ref.method->type, name, ref.method->decl->is_unsafe);
     case REF_LOCAL:
     case REF_FIELD: {
@@ -1336,6 +1454,11 @@ static Type *check_cast(Body *b, Expr *e) {
         allowed = needs_unsafe = true;
     } else if ((from->tag == T_POINTER && target->tag == T_INT) || (from->tag == T_INT && target->tag == T_POINTER)) {
         allowed = needs_unsafe = true;
+    } else if (from->tag == T_FN && target->tag == T_FN && from->as.fn.param_count == target->as.fn.param_count &&
+               from->as.fn.ret == target->as.fn.ret) {
+        /* the same function with other effects: what a library gives to C, which does not know them */
+        allowed = needs_unsafe = true;
+        for (size_t i = 0; i < from->as.fn.param_count; i++) allowed &= from->as.fn.params[i] == target->as.fn.params[i];
     }
     if (!allowed) {
         error_expr(b, "E0339", e, "cannot convert `%s` to `%s`", tn(&n, from), tn(&n, target));
@@ -1485,6 +1608,10 @@ static Type *check_unary(Body *b, Expr *e, Type *expected) {
         if (!is_place(operand)) {
             error_expr(b, "E0353", e, "cannot take the address of a temporary value");
             type = error_type(b);
+        } else if (type->tag == T_FN && (operand->kind == EXPR_FIELD || operand->resolution == RESOLVED_SELF_FIELD)) {
+            Diagnostic *d = error_expr(b, "E0353", e, "cannot take the address of a field of function type");
+            diag_help(d, "a field holds a C function pointer (spec §5.5): copy it into a variable first");
+            type = error_type(b);
         } else if (!is_error(type)) {
             /* the pointer allows writing: the value must be mutable (spec §5.3) */
             b->taking_address = true;
@@ -1623,6 +1750,7 @@ static Type *check_array(Body *b, Expr *e, Type *expected) {
             if (element) check_expect(b, item, element);
             else element = check_expr(b, item, NULL);
             consume(b, item);
+            check_escape(b, item, "stored in an array");
         }
         size = e->as.array.count;
     }
@@ -1684,6 +1812,7 @@ static Type *check_struct_literal(Body *b, Expr *e, Type *expected) {
         given[index] = true;
         check_expect(b, inits[i].value, info->fields[index].type);
         consume(b, inits[i].value);
+        check_escape(b, inits[i].value, "stored in a field");
     }
     for (size_t j = 0; j < info->field_count; j++) {
         if (given[j] || info->fields[j].decl->init) continue;
@@ -1825,10 +1954,130 @@ static Type *check_match(Body *b, Expr *e, Type *expected, bool statement) {
     return result ? result : error_type(b);
 }
 
+/* ---- Lambdas (spec §5.5) ---- */
+
+static void check_expr_stmt(Body *b, Expr *e);
+static bool always_returns(const Stmt *stmt);
+
+/* The type `pattern` of a parameter of `generic` once its parameters are bound, or NULL if
+   some are not yet (without `generic`, `pattern` itself). */
+static Type *hinted(Body *b, Type *pattern, FnInfo *generic, Type **bound, unsigned *effects) {
+    if (!generic) return pattern;
+    return all_bound(generic, pattern, bound, effects) ? bind(b, generic, pattern, bound, effects) : NULL;
+}
+
+/* Checks a lambda against the function type expected for it, if any. Given to a parameter
+   of the generic function `generic` (whose parameters are in `bound` and `effects`), it takes
+   the types that are known, and gives the others. */
+static Type *check_lambda(Body *b, Expr *e, Type *expected, FnInfo *generic, Type **bound, unsigned *effects) {
+    size_t count = e->as.lambda.param_count;
+    Type *pattern = expected && expected->tag == T_FN ? expected : NULL;
+    bool wrong_count = pattern && pattern->as.fn.param_count != count;
+    if (wrong_count) {
+        TypeNames n = {0};
+        error_expr(b, "E0336", e, "the lambda takes %zu parameter%s, but `%s` takes %zu", count, count == 1 ? "" : "s",
+                   tn(&n, pattern), pattern->as.fn.param_count);
+        release_names(&n);
+        pattern = NULL;
+    }
+
+    Type **params = arena_alloc(&b->s->arena, (count + 1) * sizeof *params);
+    for (size_t i = 0; i < count; i++) {
+        const Param *param = &e->as.lambda.params[i];
+        Type *known = pattern ? hinted(b, pattern->as.fn.params[i], generic, bound, effects) : NULL;
+        if (param->type) {
+            params[i] = sema_resolve_type(b->s, b->unit, param->type, POSITION_VALUE);
+        } else if (known) {
+            params[i] = known;
+        } else if (wrong_count) {
+            params[i] = error_type(b);
+        } else {
+            Diagnostic *d = error_at(b, "E0369", param->name.offset, param->name.length,
+                                     "the type of the parameter `%.*s` is unknown here", NAME_ARGS(param->name));
+            diag_help(d, "write it, `(i32 %.*s) => ...`, or give the lambda a type: `fn(i32) -> i32 f = ...`",
+                      NAME_ARGS(param->name));
+            params[i] = error_type(b);
+        }
+    }
+    Type *ret = pattern ? hinted(b, pattern->as.fn.ret, generic, bound, effects) : NULL;
+
+    /* its effects: those of its type, or of its body when no type says them */
+    bool inferring = !pattern;
+    unsigned allowed = pattern ? pattern->as.fn.effects : 0;
+    if (pattern && generic) {
+        allowed &= ~EFFECT_PARAMS;
+        for (size_t k = 0; k < generic->effect_param_count; k++) {
+            if (!(pattern->as.fn.effects & (EFFECT_PARAM << k))) continue;
+            if (effects[k] == EFFECT_UNBOUND) inferring = true;
+            else allowed |= effects[k];
+        }
+    }
+
+    Body saved = *b;
+    LambdaScope scope = {0};
+    scope.outer = b->lambda;
+    scope.base = b->locals.count;
+    scope.inferring = inferring;
+    b->lambda = &scope;
+    b->ret = ret;
+    b->effects = allowed;
+    b->fn_name = (Name){ "lambda", 6, e->offset };
+    b->in_init = false;
+    b->in_ensures = false;
+    b->unsafe_depth = 0;
+    b->loop_depth = 0;
+    b->defer_depth = 0;
+    for (size_t i = 0; i < count; i++) declare_local(b, e->as.lambda.params[i].name, params[i], false);
+
+    if (e->as.lambda.block) {
+        check_block(b, e->as.lambda.block);
+        if (!b->ret) b->ret = void_type(b);
+        if (b->ret->tag != T_VOID && !is_error(b->ret) && !always_returns(e->as.lambda.block)) {
+            Diagnostic *d = error_at(b, "E0346", e->offset, e->length, "the lambda does not return a value on every path");
+            diag_help(d, "end each path with `return ...;`");
+        }
+    } else {
+        Expr *body = e->as.lambda.body;
+        if (b->ret && b->ret->tag == T_VOID) {
+            check_expr_stmt(b, body);
+        } else {
+            if (b->ret) check_expect(b, body, b->ret);
+            else b->ret = check_expr(b, body, NULL);
+            consume(b, body);
+            check_escape(b, body, "returned");
+        }
+    }
+    ret = b->ret;
+    unsigned fx = inferring ? scope.used : allowed;
+
+    b->locals.count = scope.base;
+    b->lambda = saved.lambda;
+    b->ret = saved.ret;
+    b->effects = saved.effects;
+    b->fn_name = saved.fn_name;
+    b->in_init = saved.in_init;
+    b->in_ensures = saved.in_ensures;
+    b->unsafe_depth = saved.unsafe_depth;
+    b->loop_depth = saved.loop_depth;
+    b->defer_depth = saved.defer_depth;
+
+    e->as.lambda.capture_count = scope.captures.count;
+    e->as.lambda.captures = NULL;
+    if (scope.captures.count) {
+        e->as.lambda.captures = arena_alloc(&b->s->arena, scope.captures.count * sizeof *e->as.lambda.captures);
+        memcpy(e->as.lambda.captures, scope.captures.items, scope.captures.count * sizeof *e->as.lambda.captures);
+    }
+    free(scope.captures.items);
+    if (wrong_count) return error_type(b); /* already reported */
+    return type_fn(&b->s->types, params, count, ret, fx);
+}
+
 /* ---- Expressions ---- */
 
 static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
     switch (e->kind) {
+    case EXPR_LAMBDA:
+        return check_lambda(b, e, expected, NULL, NULL, NULL);
     case EXPR_ERROR:
         return error_type(b);
     case EXPR_INT:
@@ -1854,6 +2103,7 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
             error_expr(b, "E0349", e, "`%s` can only be used in a method", word);
             return error_type(b);
         }
+        capture_self(b);
         if (e->kind == EXPR_BASE) {
             if (!b->self_info->parent) {
                 error_expr(b, "E0349", e, "`%.*s` has no parent class", NAME_ARGS(b->self_info->name));
@@ -1951,7 +2201,11 @@ static void check_assignable(Body *b, Expr *target) {
     case EXPR_NAME: {
         Ref ref = lookup_name(b, target->as.name, NULL);
         if (ref.kind == REF_LOCAL) {
-            if (!ref.local->is_mut) {
+            if (is_captured(b, ref.local)) {
+                Diagnostic *d = error_expr(b, "E0369", target, "`%.*s` is captured by the lambda: it cannot be changed",
+                                           NAME_ARGS(target->as.name));
+                diag_help(d, "a lambda copies the variables it uses; to change one, capture a pointer to it (spec §5.5)");
+            } else if (!ref.local->is_mut) {
                 Diagnostic *d = error_expr(b, "E0335", target, "`%.*s` is not mutable", NAME_ARGS(target->as.name));
                 if (b->taking_address) diag_help(d, "declare it with `mut`: through its address, it can be changed");
                 else diag_help(d, "declare it with `mut` to change it");
@@ -2016,6 +2270,9 @@ static void check_assign(Body *b, Stmt *stmt) {
     if (op == TOK_EQ) {
         check_expect(b, value, tt);
         consume(b, value);
+        check_escape(b, value, target->kind == EXPR_NAME && target->resolution == RESOLVED_LOCAL
+                                   ? "assigned with `=`: give it to a new variable"
+                                   : "stored there");
         if (target->kind == EXPR_NAME && target->resolution == RESOLVED_LOCAL) {
             Local *local = find_local(b, target->as.name);
             if (local) local->moved = false;
@@ -2128,7 +2385,9 @@ static void check_var(Body *b, Stmt *stmt) {
         }
     }
     consume(b, init);
+    bool closure = type->tag == T_FN && is_closure(b, init);
     declare_local(b, stmt->as.var.name, type, stmt->as.var.is_mut);
+    if (closure && !name_is(stmt->as.var.name, "_")) b->locals.items[b->locals.count - 1].closure = true;
 }
 
 static void check_expr_stmt(Body *b, Expr *e) {
@@ -2220,6 +2479,14 @@ static void check_return(Body *b, Stmt *stmt) {
         return;
     }
     Expr *value = stmt->as.expr;
+    if (!b->ret) { /* a lambda whose type is not given: its first `return` says it */
+        b->ret = value ? check_expr(b, value, NULL) : void_type(b);
+        if (value) {
+            consume(b, value);
+            check_escape(b, value, "returned");
+        }
+        return;
+    }
     if (value) {
         if (b->ret->tag == T_VOID) {
             check_expr(b, value, NULL);
@@ -2229,6 +2496,7 @@ static void check_return(Body *b, Stmt *stmt) {
         }
         check_expect(b, value, b->ret);
         consume(b, value);
+        check_escape(b, value, "returned");
     } else if (b->ret->tag != T_VOID && !is_error(b->ret)) {
         TypeNames n = {0};
         Diagnostic *d = error_at(b, "E0346", stmt->offset, stmt->length, "`%.*s` must return a `%s`",
@@ -2355,6 +2623,18 @@ void sema_check_instance_method(Sema *s, TypeInfo *instance, MethodInfo *method)
     s->env = saved;
 }
 
+Type *sema_check_generic_method(Sema *s, TypeInfo *owner, MethodInfo *method, Type **args, const unsigned *effects) {
+    const TypeEnv *saved = s->env;
+    FnInfo *generic = method->generic;
+    const TypeEnv *outer = owner->generic ? sema_info_env(s, owner->generic, owner->type->type_args) : NULL;
+    s->env = sema_method_env(s, outer, generic, args, effects);
+    Type *type = sema_subst(s, method->type, generic->params, args, generic->param_count, effects,
+                            generic->effect_param_count);
+    check_function(s, owner->unit, method->decl, owner, type);
+    s->env = saved;
+    return type;
+}
+
 void sema_check_instance_field(Sema *s, TypeInfo *instance, const FieldInfo *field) {
     const TypeEnv *saved = s->env;
     s->env = sema_info_env(s, instance->generic, instance->type->type_args);
@@ -2431,8 +2711,12 @@ void sema_check_bodies(Sema *s) {
             check_expect(&b, field->decl->init, field->type);
             free(b.locals.items);
         }
+        const TypeEnv *env = s->env;
         for (size_t j = 0; j < info->method_count; j++) {
+            FnInfo *generic = info->methods[j].generic;
+            if (generic) s->env = sema_method_env(s, env, generic, generic->params, NULL);
             check_function(s, info->unit, info->methods[j].decl, info, info->methods[j].type);
+            s->env = env;
         }
         s->env = NULL;
     }

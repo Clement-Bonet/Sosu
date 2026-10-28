@@ -101,6 +101,30 @@ static inline void sosu_check(bool condition, const char *loc, const char *messa
     if (!condition) sosu_fail(loc, message);
 }
 
+/* Values of function type (spec §5.5): the code, and the variables a lambda captured (NULL
+   for a function, or a lambda that captures nothing, whose code is then a plain C function).
+   A field and a C function hold the code alone, a C function pointer. */
+typedef void (*sosu_code)(void);
+typedef struct {
+    sosu_code code;
+    void *env;
+} sosu_fn;
+
+static inline sosu_fn sosu_fn_of(sosu_code code) {
+    sosu_fn f = { code, NULL };
+    return f;
+}
+
+/* A value that leaves its function (returned, stored...) must not have captured variables. */
+static inline sosu_fn sosu_fn_check(sosu_fn f, const char *loc) {
+    if (f.env) sosu_fail(loc, "a lambda that captures variables cannot leave the function that creates it");
+    return f;
+}
+
+static inline sosu_code sosu_fn_code(sosu_fn f, const char *loc) {
+    return sosu_fn_check(f, loc).code;
+}
+
 static inline size_t sosu_index(int64_t index, size_t length, const char *loc) {
     if (index < 0 || (uint64_t)index >= length) sosu_fail(loc, "index out of bounds");
     return (size_t)index;

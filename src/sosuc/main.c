@@ -332,6 +332,9 @@ typedef struct {
     StringList paths; /* relative to the current folder */
     StringList frameworks;
     StringList copy;
+    StringList sources;  /* C files compiled with the program ([link] c), and their folders and defines */
+    StringList includes;
+    StringList defines;
     bool window; /* a package is for programs with windows: no console in release (Windows) */
     char *resource; /* Windows: the icon of the program, compiled (sosuc package), or NULL */
 } Links;
@@ -406,6 +409,11 @@ static void collect_links(const Program *program, Links *links, const Target *ta
                 add_unique(&links->frameworks, sosu_strdup(link->frameworks.items[j]));
             }
             for (size_t j = 0; j < link->copy.count; j++) add_unique(&links->copy, link_path(package, link->copy.items[j], target));
+            for (size_t j = 0; j < link->c.count; j++) add_unique(&links->sources, link_path(package, link->c.items[j], target));
+            for (size_t j = 0; j < link->include.count; j++) {
+                add_unique(&links->includes, link_path(package, link->include.items[j], target));
+            }
+            for (size_t j = 0; j < link->defines.count; j++) add_unique(&links->defines, sosu_strdup(link->defines.items[j]));
             if (link->subsystem && strcmp(link->subsystem, "window") == 0) links->window = true;
         }
     }
@@ -413,8 +421,9 @@ static void collect_links(const Program *program, Links *links, const Target *ta
 
 static void free_links(Links *links) {
     free(links->resource);
-    StringList *lists[] = { &links->libs, &links->paths, &links->frameworks, &links->copy };
-    for (size_t i = 0; i < 4; i++) {
+    StringList *lists[] = { &links->libs, &links->paths, &links->frameworks, &links->copy, &links->sources,
+                            &links->includes, &links->defines };
+    for (size_t i = 0; i < sizeof lists / sizeof *lists; i++) {
         for (size_t j = 0; j < lists[i]->count; j++) free(lists[i]->items[j]);
         free(lists[i]->items);
     }
@@ -429,6 +438,41 @@ static void append(char **text, const char *fmt, const char *value) {
 }
 
 /* The arguments that make the C compiler link the libraries. */
+/* The C files of the packages ([link] c), after their folders and defines: ` -I"inc" -DX "a.c"`. */
+static char *source_arguments(const Links *links, bool msvc) {
+    char *args = sosu_strdup("");
+    for (size_t i = 0; i < links->includes.count; i++) {
+        char *native = shell_path(links->includes.items[i]);
+        append(&args, msvc ? " /I\"%s\"" : " -I\"%s\"", native);
+        free(native);
+    }
+    for (size_t i = 0; i < links->defines.count; i++) append(&args, msvc ? " /D%s" : " -D%s", links->defines.items[i]);
+    for (size_t i = 0; i < links->sources.count; i++) {
+        char *native = shell_path(links->sources.items[i]);
+        append(&args, " \"%s\"", native);
+        free(native);
+    }
+    return args;
+}
+
+/* Their objects in `dir`, for a static library: ` "dir/a.obj"`. */
+static char *source_objects(const Links *links, const char *dir, const char *extension) {
+    char *args = sosu_strdup("");
+    for (size_t i = 0; i < links->sources.count; i++) {
+        const char *path = links->sources.items[i];
+        const char *slash = strrchr(path, '/');
+        const char *back = strrchr(path, '\\');
+        const char *base = back && (!slash || back > slash) ? back + 1 : slash ? slash + 1 : path;
+        const char *dot = strrchr(base, '.');
+        char *object = sosu_format("%s/%.*s%s", dir, (int)(dot ? (size_t)(dot - base) : strlen(base)), base, extension);
+        char *native = shell_path(object);
+        append(&args, " \"%s\"", native);
+        free(native);
+        free(object);
+    }
+    return args;
+}
+
 static char *link_arguments(const Links *links, bool msvc) {
     char *args = sosu_strdup("");
     if (msvc) {
@@ -572,10 +616,12 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
                                                    : " /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup");
         }
         char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
+        char *sources = source_arguments(links, true);
         char *commands = sosu_format(
-            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\" \"%s\" \"%s\"%s%s "
+            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\"%s \"%s\" \"%s\"%s%s "
             ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n",
-            optimize ? "/O2" : "/Od", rt, dir, dir, out, c, rt_c, resource, link_args, dir, dir);
+            optimize ? "/O2" : "/Od", rt, dir, dir, out, sources, c, rt_c, resource, link_args, dir, dir);
+        free(sources);
         free(resource);
         /* another architecture: the tools of MSVC that build for it, from this one */
         bool arm64 = strcmp(target_arch(target), "arm64") == 0;
@@ -614,9 +660,12 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         }
         char *link_args = link_arguments(links, false);
         if (optimize && links->window && for_windows) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
+        if (!for_windows) append(&link_args, "%s", " -pthread"); /* std.thread (spec §5.6) */
         char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
-        command = sosu_format("\"%s\"%s -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s -o \"%s\"%s", compiler, flags,
-                              optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, resource, exe, link_args);
+        char *sources = source_arguments(links, false);
+        command = sosu_format("\"%s\"%s -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s%s -o \"%s\"%s", compiler, flags,
+                              optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, sources, resource, exe, link_args);
+        free(sources);
         free(resource);
         free(link_args);
         free(flags);
@@ -992,24 +1041,28 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
         char *flags = sosu_format("/nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\"",
                                   optimize ? "/O2" : "/Od", rt, dir, dir);
         char *log = sosu_format(">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)", dir, dir);
+        char *sources = source_arguments(links, true);
         char *commands;
         if (shared) {
             char *import = shell_path(files->import);
             char *link_args = link_arguments(links, true);
             if (!link_args[0]) append(&link_args, "%s", " /link");
             append(&link_args, " /IMPLIB:\"%s\"", import);
-            commands = sosu_format("cl %s /LD /DSOSU_SHARED /Fe\"%s\" \"%s\" \"%s\"%s %s\r\n", flags, out, c, rt_c,
-                                   link_args, log);
+            commands = sosu_format("cl %s /LD /DSOSU_SHARED /Fe\"%s\"%s \"%s\" \"%s\"%s %s\r\n", flags, out, sources, c,
+                                   rt_c, link_args, log);
             free(import);
             free(link_args);
         } else {
             char *runtime_lib = shell_path(files->runtime);
-            commands = sosu_format("cl %s /c \"%s\" \"%s\" %s\r\n"
-                                   "lib /nologo /OUT:\"%s\" \"%s\\%s.obj\" %s\r\n"
+            char *objects = source_objects(links, build_dir, ".obj"); /* the C files of the packages, in the library */
+            commands = sosu_format("cl %s /c%s \"%s\" \"%s\" %s\r\n"
+                                   "lib /nologo /OUT:\"%s\" \"%s\\%s.obj\"%s %s\r\n"
                                    "lib /nologo /OUT:\"%s\" \"%s\\sosu_rt.obj\" %s\r\n",
-                                   flags, c, rt_c, log, out, dir, name, log, runtime_lib, dir, log);
+                                   flags, sources, c, rt_c, log, out, dir, name, objects, log, runtime_lib, dir, log);
+            free(objects);
             free(runtime_lib);
         }
+        free(sources);
         char *script = msvc_script(commands);
         if (write_file(bat, script)) {
             char *native_bat = shell_path(bat);
@@ -1035,23 +1088,50 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
         const char *level = optimize ? "-O2" : "-O0";
         if (shared) {
             char *link_args = link_arguments(links, false);
+#ifndef _WIN32
+            append(&link_args, "%s", " -pthread"); /* std.thread (spec §5.6) */
+#endif
 #ifdef __APPLE__
             const char *kind = "-dynamiclib";
 #else
             const char *kind = "-shared";
 #endif
-            command = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC %s -fvisibility=hidden -DSOSU_SHARED -I\"%s\" \"%s\" \"%s\" "
+            char *sources = source_arguments(links, false);
+            command = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC %s -fvisibility=hidden -DSOSU_SHARED -I\"%s\" \"%s\" \"%s\"%s "
                                   "-o \"%s\"%s",
-                                  compiler, level, kind, runtime, c_file, runtime_c, files->library, link_args);
+                                  compiler, level, kind, runtime, c_file, runtime_c, sources, files->library, link_args);
+            free(sources);
             free(link_args);
         } else {
             char *object = sosu_format("%s/%s.o", build_dir, name);
             char *rt_object = sosu_format("%s/sosu_rt.o", build_dir);
-            command = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
+            /* the C files of the packages: one object each, in the library */
+            Links flags_only = *links;
+            flags_only.sources.count = 0;
+            char *flags = source_arguments(&flags_only, false);
+            char *compile_sources = sosu_strdup("");
+            for (size_t i = 0; i < links->sources.count; i++) {
+                Links one = flags_only;
+                one.sources.items = &links->sources.items[i];
+                one.sources.count = 1;
+                char *source = source_arguments(&one, false);
+                char *output = source_objects(&one, build_dir, ".o");
+                char *step = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC%s -c%s -o%s && ", compiler, level, flags, source + strlen(flags),
+                                         output);
+                append(&compile_sources, "%s", step);
+                free(step);
+                free(output);
+                free(source);
+            }
+            char *objects = source_objects(links, build_dir, ".o");
+            command = sosu_format("%s\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
                                   "\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
-                                  "ar rcs \"%s\" \"%s\" && ar rcs \"%s\" \"%s\"",
-                                  compiler, level, runtime, c_file, object, compiler, level, runtime, runtime_c, rt_object,
-                                  files->library, object, files->runtime, rt_object);
+                                  "ar rcs \"%s\" \"%s\"%s && ar rcs \"%s\" \"%s\"",
+                                  compile_sources, compiler, level, runtime, c_file, object, compiler, level, runtime,
+                                  runtime_c, rt_object, files->library, object, objects, files->runtime, rt_object);
+            free(objects);
+            free(compile_sources);
+            free(flags);
             free(object);
             free(rt_object);
         }
@@ -1178,9 +1258,11 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
         if (clang) {
             *built = sosu_format("%s/libmain.so", out_dir);
             char *link_args = link_arguments(links, false);
-            char *inner = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC -shared -fvisibility=hidden -DSOSU_SDL_MAIN -I\"%s\" \"%s\" \"%s\" -o \"%s\"%s "
+            char *sources = source_arguments(links, false);
+            char *inner = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC -shared -fvisibility=hidden -DSOSU_SDL_MAIN -I\"%s\" \"%s\" \"%s\"%s -o \"%s\"%s "
                                       "-llog",
-                                      clang, level, runtime, c_file, runtime_c, *built, link_args);
+                                      clang, level, runtime, c_file, runtime_c, sources, *built, link_args);
+            free(sources);
 #ifdef _WIN32
             command = sosu_format("\"%s\"", inner); /* cmd keeps the inner quotes when the whole is quoted */
             free(inner);

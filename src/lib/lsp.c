@@ -585,6 +585,14 @@ static void find_expr(Find *f, const Expr *e) {
         for (size_t i = 0; i < e->as.array.count; i++) find_expr(f, e->as.array.items[i]);
         find_expr(f, e->as.array.repeat);
         break;
+    case EXPR_LAMBDA:
+        for (size_t i = 0; i < e->as.lambda.param_count; i++) {
+            find_type(f, e->as.lambda.params[i].type);
+            find_name(f, e->as.lambda.params[i].name, NULL, NULL);
+        }
+        find_expr(f, e->as.lambda.body);
+        find_stmt(f, e->as.lambda.block);
+        break;
     default: break;
     }
 }
@@ -656,7 +664,12 @@ static void find_decl(Find *f, const Decl *d) {
         break;
     case DECL_STRUCT: case DECL_CLASS: case DECL_INTERFACE:
         find_name(f, d->as.type.name, NULL, d);
-        for (size_t i = 0; i < d->as.type.base_count; i++) find_path(f, &d->as.type.bases[i]);
+        for (size_t i = 0; i < d->as.type.base_count; i++) {
+            find_path(f, &d->as.type.bases[i]);
+            for (size_t j = 0; d->as.type.base_args && j < d->as.type.base_arg_counts[i]; j++) {
+                find_type(f, d->as.type.base_args[i][j]);
+            }
+        }
         for (size_t i = 0; i < d->as.type.field_count; i++) {
             const Field *field = &d->as.type.fields[i];
             find_type(f, field->type);

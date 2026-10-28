@@ -78,12 +78,23 @@ typedef enum {
     EXPR_MATCH,
     EXPR_TRY,
     EXPR_ARRAY, /* [1, 2, 3] or [0; 64] */
+    EXPR_LAMBDA, /* (i32 a) => a + 1, (a) => { ... } */
 } ExprKind;
 
 typedef struct {
     Name name;
     Expr *value;
 } FieldInit;
+
+/* A variable of the enclosing function that a lambda copies (spec §5.5), recorded by semantic
+   analysis; `self` is captured as a pointer, with `is_self`. */
+typedef struct {
+    Name name;
+    struct Type *type;
+    bool is_self;
+} Capture;
+
+typedef struct Param Param;
 
 typedef enum {
     PATTERN_WILDCARD, /* _ */
@@ -152,6 +163,16 @@ struct Expr {
         struct { Expr *subject; MatchArm *arms; size_t arm_count; } match;
         /* [items...], or [repeat; repeat_count] when `repeat` is not NULL */
         struct { Expr **items; size_t count; Expr *repeat; uint64_t repeat_count; } array;
+        /* the body is an expression or a block; a parameter without a type takes the one
+           expected (its `type` is NULL) */
+        struct {
+            Param *params;
+            size_t param_count;
+            Expr *body;
+            Stmt *block;
+            Capture *captures; /* set by semantic analysis */
+            size_t capture_count;
+        } lambda;
     } as;
 };
 
@@ -192,11 +213,11 @@ struct Stmt {
 
 /* ---- Declarations ---- */
 
-typedef struct {
+struct Param {
     bool is_mut;
     TypeExpr *type;
     Name name;
-} Param;
+};
 
 /* A type parameter `T: Ordered + Hash`, or an effect parameter `uses E` (spec §5.4). */
 typedef struct {
@@ -284,6 +305,8 @@ typedef struct {
         struct {
             Name name;
             Path *bases; /* class: parent class first, then interfaces */
+            TypeExpr ***base_args; /* the type arguments of each base (`Iterator<i32>`), NULL without */
+            size_t *base_arg_counts;
             size_t base_count;
             Field *fields;
             size_t field_count;

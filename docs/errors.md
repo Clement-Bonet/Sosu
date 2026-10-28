@@ -35,7 +35,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0205 | assignment is a statement, not an expression | `if (x = 1)`, `a = b = c;` |
 | E0206 | braces are required | `if (c) x += 1;` |
 | E0207 | variable has no initial value | `i32 x;` |
-| E0208 | lambdas are not available in v0 | `(i32 a) => a + 1` |
+| E0208 | lambdas are not available in v0 | not given any more: lambdas are available (spec §5.5) |
 | E0209 | only one variable can be declared at a time | `i32 a, b = 0;` |
 | E0210 | `->` is not used to access members | `p->x` |
 | E0211 | the array size belongs to the type | `i32 a[4]` instead of `i32[4] a` |
@@ -44,7 +44,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0214 | expected a node in a `.ui.sosu` file | `42` among the nodes of a window |
 | E0215 | invalid node or property in a `.ui.sosu` file | `Button("OK", on_tap: f)`, `TextField()` without `bind:`, `Text("a") { }`, a property after the nodes, a `TitleBar` that is not the first node of a window, an `Option` outside a `Dropdown`, a `MenuItem` outside a menu, `row:` outside a `Grid`, a cell given twice, a `Tab` outside `Tabs`, a `Leaf` outside a `Tree`, a `Dialog` inside another node or without `open:`, `List(count:)` without `item:`, a style property or state that does not exist, a theme that starts from no theme |
 | E0216 | not supported yet in a `.ui.sosu` file | not given any more: `style`, `theme`, `align:` and the grids it was given for are supported (spec §10.7, §10.8) |
-| E0217 | generic declaration not supported yet | a method with type parameters of its own, a generic interface, a generic class with a parent class, an interface or a `virtual` method, an effect parameter outside a function, a generic C function (spec §5.4) |
+| E0217 | generic declaration not supported yet | a virtual method or a method of an interface with type parameters of its own, a generic class with a parent class, an interface or a `virtual` method, an effect parameter outside a function, a generic C function (spec §5.4) |
 | E0218 | invalid `export` | `export "Rust" ...`, `export "C"` before something that is not a function (spec §9.2) |
 
 ## Semantic analysis
@@ -78,11 +78,11 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0333 | not a value | a type, a module or a method used as a value |
 | E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing or slicing a `str`, `-x` on a `ui32` or a `uf32` |
 | E0335 | cannot assign | a variable or a field that is not `mut`, `&a` or `a[0..2]` of an array that is not `mut`, `v[0..2] = w` |
-| E0336 | wrong number of arguments or variant fields | `g(1, 2)` for `g(i32 a)` |
+| E0336 | wrong number of arguments or variant fields | `g(1, 2)` for `g(i32 a)`, `(x, y) => x` given to a `fn(i32) -> i32` |
 | E0337 | no such field, method or variant | `p.y` on a struct without `y`, `.copy()` on a value without an `Arena` |
 | E0338 | not a function | `x()` with `x: i32`, `Point(...)` |
 | E0339 | invalid conversion | `3.0 as bool`, `as?` to a type that is not a subclass |
-| E0340 | missing effect | calling a `uses io` function from a function without `uses io` |
+| E0340 | missing effect | calling a `uses io` function from a function without `uses io`, `fn(i32) -> void g = (x) => io.print("{}", x);` |
 | E0341 | unsafe operation outside `unsafe` | calling C, pointer arithmetic, `p as ui8*` |
 | E0342 | type cannot be inferred | `auto x = none;`, `auto r = ok(1);` |
 | E0343 | invalid `match` | unknown case, case matched twice, unreachable arm, wrong number of bindings |
@@ -95,18 +95,20 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0350 | invalid struct literal | missing or unknown field |
 | E0351 | invalid `io.print` | format and values do not match, value that cannot be printed |
 | E0352 | invalid range or loop | `auto r = 0..10;`, `for (char c in s)`, `v[0..=2]` |
-| E0353 | address or view of a temporary value | `&g()`, `g()[0..2]` when `g` returns an array |
+| E0353 | address or view of a temporary value | `&g()`, `g()[0..2]` when `g` returns an array, `&s.f` for a field of function type (spec §5.5) |
 | E0354 | invalid arena allocation | `a.alloc(3)`, `a.alloc(Node)` with a pointer inside, `a.alloc(SomeClass)` |
 | E0355 | wrong number of elements in an array literal | `i32[3] a = [1, 2];` |
 | E0356 | use of a moved value, or invalid move | `Arena b = a;` then `a.free()`, a move inside a loop, out of a field |
 | E0360 | generic function: arguments not inferred, or used as a value | `auto x = zero();` (write `zero<i32>()`), `auto g = largest;` (spec §5.4) |
 | E0361 | wrong type arguments | `Pair p` for a `Pair<A, B>`, `Pair<i32>`, `Point<i32>` for a type that is not generic |
-| E0362 | a type argument does not fit its parameter | `largest(flags)` with `bool` for `<T: Ordered>`, `Vec<Arena>` (a resource), `greet(3)` for `<T: Named>` |
-| E0364 | unknown constraint | `<T: Sortable>`; the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash` and interfaces |
+| E0362 | a type argument does not fit its parameter | `largest(flags)` with `bool` for `<T: Ordered>`, `Vec<Arena>` (a resource), `greet(3)` for `<T: Named>`, `channel.new<str>(4)` (a `str` is not `Send`, spec §5.6) |
+| E0364 | unknown constraint | `<T: Sortable>`; the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash`, `Send` and interfaces |
 | E0365 | invalid C name of an export | two exports named `lib_open`, `export "C" void int()`, a name starting with `sosu_`, a generic export (spec §9.2) |
 | E0366 | a type that cannot cross to C in an export | `i32?`, `T!E`, an enum with data, `Arena` by value, an interface, an array by value (spec §9.2) |
 | E0367 | the value of a constant is not computed when the program is compiled | `i32 A = f();`, `ui8 A = 200 + 100;` (does not fit), `i32 A = B;` and `i32 B = A;` (a cycle), a division by zero (spec §11.6) |
 | E0368 | a constant of a type other than a number, `bool`, `char` or `str` | `i32[2] PAIR = [1, 2];` (spec §11.6) |
+| E0369 | invalid lambda | `auto g = (x) => x;` (the type of `x` is unknown), `n = x` in a lambda that captured `n`, a captured `Arena` (spec §5.5) |
+| E0370 | a lambda that captures variables leaves its function | `return (i32 x) => x + k;`, `S{ h: (x) => x + k }`, `g = (x) => x + k;`, a C function that takes a function used as a value (spec §5.5) |
 
 ## Code generation
 

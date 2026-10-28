@@ -426,7 +426,18 @@ static void resolve_bases(Sema *s, TypeInfo *info) {
         Path path = decl->as.type.bases[i];
         size_t offset, length;
         path_span(path, &offset, &length);
-        Type *base = resolve_named(s, info->unit, path, offset, length);
+        TypeExpr te = {0}; /* the base with its type arguments: `Iterator<i32>` */
+        te.kind = TYPE_NAME;
+        te.as.name = path;
+        te.offset = offset;
+        te.length = length;
+        if (decl->as.type.base_args && decl->as.type.base_args[i]) {
+            te.args = decl->as.type.base_args[i];
+            te.arg_count = decl->as.type.base_arg_counts[i];
+            const TypeExpr *last = te.args[te.arg_count - 1];
+            te.length = last->offset + last->length + 1 - offset;
+        }
+        Type *base = resolve_type(s, info->unit, &te, POSITION_POINTEE);
         if (base->tag == T_ERROR) continue;
         if (base->tag == T_CLASS) {
             if (i != 0) {
@@ -503,6 +514,9 @@ static Type *function_type(Sema *s, Unit *unit, const FnDecl *fn) {
     return type;
 }
 
+static void resolve_type_params(Sema *s, Unit *unit, TypeParams params, Type ***out, size_t *count, Name **effects,
+                                size_t *effect_count);
+
 static void resolve_fields_and_methods(Sema *s, TypeInfo *info) {
     const Decl *decl = info->decl;
     Unit *unit = info->unit;
@@ -532,10 +546,11 @@ static void resolve_fields_and_methods(Sema *s, TypeInfo *info) {
     for (size_t i = 0; i < decl->as.type.method_count; i++) {
         const FnDecl *fn = &decl->as.type.methods[i];
         check_unique(s, unit, names.items, names.count, fn->name, "the member");
-        if (fn->type_params.count) {
+        if (fn->type_params.count && (fn->method_kind != METHOD_PLAIN || decl->kind == DECL_INTERFACE)) {
             Diagnostic *d = error_at(s, unit, "E0217", fn->name.offset, fn->name.length,
-                                     "a method has no type parameters of its own in this step");
-            diag_help(d, "give the parameters to the type: `struct %.*s<T>` (spec §5.4)", NAME_ARGS(info->name));
+                                     "a virtual method or a method of an interface has no type parameters of its own");
+            diag_help(d, "each instance would need a slot in the table of the class: give the parameters to the "
+                         "type (spec §5.4)");
         }
         if ((info->param_count || info->generic) && fn->method_kind != METHOD_PLAIN) {
             error_at(s, unit, "E0217", fn->name.offset, fn->name.length,
@@ -545,7 +560,26 @@ static void resolve_fields_and_methods(Sema *s, TypeInfo *info) {
         MethodInfo mi = {0};
         mi.decl = fn;
         mi.owner = info;
-        mi.type = function_type(s, unit, fn);
+        if (fn->type_params.count) {
+            /* `U map<U>(fn(T) -> U f)`: its own parameters, with those of the type around them; they are
+               the same in every instance, so that `Box<U>` in its signature is one instance */
+            FnInfo *params = NULL;
+            for (size_t k = 0; k < s->method_params.count && !params; k++) {
+                if (s->method_params.items[k]->decl == fn) params = s->method_params.items[k];
+            }
+            FnInfo *generic = arena_alloc(&s->arena, sizeof *generic);
+            if (params) *generic = *params;
+            generic->decl = fn;
+            generic->unit = unit;
+            const TypeEnv *saved = s->env;
+            s->env = sema_method_env(s, saved, generic, generic->params, NULL);
+            generic->type = function_type(s, unit, fn);
+            s->env = saved;
+            mi.type = generic->type;
+            if (fn->method_kind == METHOD_PLAIN && decl->kind != DECL_INTERFACE) mi.generic = generic; /* else reported */
+        } else {
+            mi.type = function_type(s, unit, fn);
+        }
         SOSU_VEC_PUSH(&methods, mi);
     }
     info->field_count = fields.count;
@@ -793,10 +827,44 @@ static const struct {
     { "Number", CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_NUMBER },
     { "Integer", CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_NUMBER | CONSTRAINT_INTEGER },
     { "Hash", CONSTRAINT_EQUAL | CONSTRAINT_HASH },
+    { "Send", CONSTRAINT_SEND },
 };
 
-/* The built-in constraints a type satisfies. */
+/* True if a value of `type` holds no pointer (nor a view, a text, a function, an arena), so that a copy
+   of it can go to another thread: it shares no memory with the one that sent it (spec §5.6). */
+static bool is_send(const Type *type) {
+    switch (type->tag) {
+    case T_ERROR: case T_VOID: case T_INT: case T_FLOAT: case T_BOOL: case T_CHAR: return true;
+    case T_OPTION: return is_send(type->as.inner);
+    case T_ARRAY: return is_send(type->as.array.element);
+    case T_RESULT: return is_send(type->as.result.value) && is_send(type->as.result.error);
+    case T_PARAM: return type->as.param.constraints & CONSTRAINT_SEND;
+    case T_STRUCT:
+        for (size_t i = 0; i < type->as.info->field_count; i++) {
+            if (!is_send(type->as.info->fields[i].type)) return false;
+        }
+        return true;
+    case T_ENUM:
+        for (size_t i = 0; i < type->as.info->variant_count; i++) {
+            const VariantInfo *variant = &type->as.info->variants[i];
+            for (size_t j = 0; j < variant->field_count; j++) {
+                if (!is_send(variant->fields[j])) return false;
+            }
+        }
+        return true;
+    default: return false;
+    }
+}
+
+static uint32_t own_constraints(const Type *type);
+
 static uint32_t constraints_of(const Type *type) {
+    uint32_t send = type->tag != T_PARAM && is_send(type) ? CONSTRAINT_SEND : 0;
+    return own_constraints(type) | send;
+}
+
+/* The built-in constraints a type satisfies, but `Send`. */
+static uint32_t own_constraints(const Type *type) {
     uint32_t all = CONSTRAINT_EQUAL | CONSTRAINT_ORDERED | CONSTRAINT_NUMBER | CONSTRAINT_INTEGER | CONSTRAINT_HASH;
     switch (type->tag) {
     case T_ERROR: return all;
@@ -932,6 +1000,29 @@ const TypeEnv *sema_fn_env(Sema *s, FnInfo *fn, Type **args, const unsigned *eff
     return env;
 }
 
+/* The names of `outer` (the parameters of a generic type, or NULL), then those of the generic
+   method `fn`, standing for `args` and `effects` (NULL: for themselves). */
+const TypeEnv *sema_method_env(Sema *s, const TypeEnv *outer, FnInfo *fn, Type **args, const unsigned *effects) {
+    const TypeEnv *own = sema_fn_env(s, fn, args, effects);
+    if (!outer) return own;
+    TypeEnv *env = arena_alloc(&s->arena, sizeof *env);
+    env->count = outer->count + own->count;
+    env->names = arena_alloc(&s->arena, (env->count + 1) * sizeof *env->names);
+    env->types = arena_alloc(&s->arena, (env->count + 1) * sizeof *env->types);
+    for (size_t i = 0; i < outer->count; i++) {
+        env->names[i] = outer->names[i];
+        env->types[i] = outer->types[i];
+    }
+    for (size_t i = 0; i < own->count; i++) {
+        env->names[outer->count + i] = own->names[i];
+        env->types[outer->count + i] = own->types[i];
+    }
+    env->effect_count = own->effect_count;
+    env->effect_names = own->effect_names;
+    env->effects = own->effects;
+    return env;
+}
+
 static void resolve_fields_and_methods(Sema *s, TypeInfo *info);
 static void resolve_variants(Sema *s, TypeInfo *info);
 
@@ -978,6 +1069,7 @@ TypeInfo *sema_instance(Sema *s, TypeInfo *generic, Type **args) {
 /* The built-in constraint of `param` that `arg` lacks, or NULL. */
 static const char *missing_constraint(const Type *arg, const Type *param) {
     uint32_t missing = param->as.param.constraints & ~constraints_of(arg);
+    if (missing & CONSTRAINT_SEND) return "Send";
     if (missing & CONSTRAINT_HASH) return "Hash";
     if (missing & CONSTRAINT_INTEGER) return "Integer";
     if (missing & CONSTRAINT_NUMBER) return "Number";
@@ -1126,7 +1218,7 @@ static void resolve_type_params(Sema *s, Unit *unit, TypeParams params, Type ***
             } else if (!found || found->tag != T_ERROR) {
                 Diagnostic *d = error_at(s, unit, "E0364", offset, length, "`%.*s` is not a constraint", (int)length,
                                          unit->file.text + offset);
-                diag_help(d, "the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash`, and interfaces");
+                diag_help(d, "the constraints are `Equal`, `Ordered`, `Number`, `Integer`, `Hash`, `Send`, and interfaces");
             }
         }
         SOSU_VEC_PUSH(&types, type);
@@ -1150,14 +1242,25 @@ static void resolve_generics(Sema *s) {
         resolve_type_params(s, info->unit, decl->type_params, &info->params, &info->param_count, NULL, NULL);
         info->type->type_args = info->params;
         info->type->type_arg_count = info->param_count;
-        if (decl->kind == DECL_INTERFACE) {
-            Diagnostic *d = error_at(s, info->unit, "E0217", info->name.offset, info->name.length,
-                                     "an interface is not generic in this step");
-            diag_help(d, "give the parameters to the functions or the classes that use it (spec §5.4)");
-        } else if (decl->kind == DECL_CLASS && decl->as.type.base_count) {
+        if (decl->kind == DECL_CLASS && decl->as.type.base_count) {
             Diagnostic *d = error_at(s, info->unit, "E0217", info->name.offset, info->name.length,
                                      "a generic class has no parent class and no interface in this step");
             diag_help(d, "keep the generic class on its own (spec §5.4)");
+        }
+    }
+    for (size_t i = 0; i < s->type_infos.count; i++) {
+        TypeInfo *info = s->type_infos.items[i];
+        const Decl *decl = info->decl;
+        if (decl->kind != DECL_STRUCT && decl->kind != DECL_CLASS && decl->kind != DECL_INTERFACE) continue;
+        for (size_t j = 0; j < decl->as.type.method_count; j++) {
+            const FnDecl *fn = &decl->as.type.methods[j];
+            if (fn->type_params.count == 0) continue;
+            FnInfo *params = arena_alloc(&s->arena, sizeof *params);
+            params->decl = fn;
+            params->unit = info->unit;
+            resolve_type_params(s, info->unit, fn->type_params, &params->params, &params->param_count,
+                                &params->effect_params, &params->effect_param_count);
+            SOSU_VEC_PUSH(&s->method_params, params);
         }
     }
     for (size_t i = 0; i < s->fns.count; i++) {
@@ -1650,6 +1753,7 @@ void sema_free(Sema *s) {
     free(s->type_infos.items);
     free(s->fns.items);
     free(s->consts.items);
+    free(s->method_params.items);
     types_free(&s->types);
     arena_free(&s->arena);
     memset(s, 0, sizeof *s);

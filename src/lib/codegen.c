@@ -62,6 +62,7 @@ typedef struct {
     unsigned *effects;
     char *name;
     bool done;
+    MethodInfo *method; /* a method with type parameters of its own (`fn` is its `generic`) */
 } FnInstance;
 
 typedef struct {
@@ -75,6 +76,7 @@ typedef struct {
     VEC(FnInstance) fn_instances;
     size_t instances_done; /* the instances of generic types generated, in sema->instances */
     CodegenOptions options;
+    int lambdas; /* lambdas generated: `L_<n>` */
 } Gen;
 
 typedef struct {
@@ -100,6 +102,8 @@ typedef struct {
     int depth;
     VEC(Deferred) defers;
     VEC(Loop) loops;
+    Buf locals;     /* the variables of the function, declared at its start: what its lambdas capture */
+    bool raw_field; /* generating the target of `=`: a field of function type stays a C pointer */
 } Fn;
 
 static char *gen_expr(Fn *f, Expr *e);
@@ -153,22 +157,37 @@ static char *fn_c_name(const FnInfo *fn) {
 
 /* The C name of the function a name or a callee designates. An instance of a generic function
    is requested here, and generated after the rest of the program (spec §5.4). */
+static char *method_c_name(Gen *g, const MethodInfo *method);
+
+static char *instance_name(Gen *g, const Expr *e, FnInfo *fn, MethodInfo *method);
+
 static char *fn_name_of(Gen *g, const Expr *e) {
     FnInfo *fn = (FnInfo *)e->target;
     if (!fn->param_count && !fn->effect_param_count) return fn_c_name(fn);
+    return instance_name(g, e, fn, NULL);
+}
+
+/* The C name of a method with type parameters of its own, for the arguments of the call `e`. */
+static char *generic_method_name(Gen *g, const Expr *e, MethodInfo *method) {
+    return instance_name(g, e, method->generic, method);
+}
+
+/* The instance of the generic function `fn` (of `method`, if not NULL) for the arguments
+   recorded in the callee `e`, requested once. */
+static char *instance_name(Gen *g, const Expr *e, FnInfo *fn, MethodInfo *method) {
     for (size_t i = 0; i < g->fn_instances.count; i++) {
         const FnInstance *inst = &g->fn_instances.items[i];
-        if (inst->fn != fn) continue;
+        if (inst->fn != fn || inst->method != method) continue;
         bool same = true;
         for (size_t k = 0; k < fn->param_count; k++) same &= inst->args[k] == e->type_values[k];
         for (size_t k = 0; k < fn->effect_param_count; k++) same &= inst->effects[k] == e->effect_values[k];
         if (same) return sosu_strdup(inst->name);
     }
-    FnInstance inst = { fn, NULL, NULL, NULL, false };
+    FnInstance inst = { fn, NULL, NULL, NULL, false, method };
     inst.args = sosu_alloc((fn->param_count + 1) * sizeof *inst.args);
     inst.effects = sosu_alloc((fn->effect_param_count + 1) * sizeof *inst.effects);
     Buf name = {0};
-    char *base = fn_c_name(fn);
+    char *base = method ? method_c_name(g, method) : fn_c_name(fn);
     buf_puts(&name, base);
     free(base);
     for (size_t k = 0; k < fn->param_count; k++) {
@@ -287,6 +306,7 @@ static const char *c_type(Gen *g, const Type *type) {
     case T_INT: return int_c_type(type);
     case T_FLOAT: return type->as.floating.bits == 32 ? "float" : "double";
     case T_PARAM: return "void"; /* never generated: instances are checked again with their arguments */
+    case T_FN: return "sosu_fn"; /* a field holds a C function pointer instead: field_type */
     case T_POINTER: {
         TypeEntry *entry = find_type(g, type);
         if (entry) return entry->name;
@@ -304,6 +324,13 @@ static const char *c_type(Gen *g, const Type *type) {
 static const char *value_type(Gen *g, const Type *type) {
     define_type(g, type);
     return c_type(g, type);
+}
+
+/* The type of a field of a struct or a class, and of a parameter or a result of a C function:
+   a value of function type is a C function pointer there (spec §5.5), so that the structs
+   given to C keep their layout. */
+static const char *field_type(Gen *g, const Type *type) {
+    return type->tag == T_FN ? struct_name(g, type) : value_type(g, type);
 }
 
 /* ---- Classes ----
@@ -396,7 +423,7 @@ static void define_type(Gen *g, const Type *type) {
     case T_STRUCT: {
         const TypeInfo *info = type->as.info;
         for (size_t i = 0; i < info->field_count; i++) {
-            buf_printf(&body, "    %s f_%.*s;\n", value_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
+            buf_printf(&body, "    %s f_%.*s;\n", field_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
         }
         if (info->field_count == 0) buf_puts(&body, "    char unused;\n");
         break;
@@ -451,7 +478,7 @@ static void define_type(Gen *g, const Type *type) {
         buf_printf(&g->defs, "struct %s__vt {\n%s};\n\n", name, table.items);
         free(table.items);
         for (size_t i = 0; i < info->field_count; i++) {
-            buf_printf(&body, "    %s f_%.*s;\n", value_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
+            buf_printf(&body, "    %s f_%.*s;\n", field_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
         }
         break;
     }
@@ -672,6 +699,55 @@ static void free_values(char **values, size_t count) {
     free(values);
 }
 
+/* ---- Values of function type (spec §5.5) ----
+   A value is a `sosu_fn`: the code, and what a lambda captured, which lives in the variables of
+   the function that creates it. A field, and a C function, hold the code alone. */
+
+/* True if `e` may hold a lambda that captured variables: a variable, or a lambda. */
+static bool may_capture(const Expr *e) {
+    if (e->type->tag != T_FN) return false;
+    switch (e->kind) {
+    case EXPR_NAME: return e->resolution == RESOLVED_LOCAL;
+    case EXPR_LAMBDA: return e->as.lambda.capture_count > 0;
+    case EXPR_TERNARY: return may_capture(e->as.ternary.then_expr) || may_capture(e->as.ternary.else_expr);
+    default: return false;
+    }
+}
+
+/* The value of `e` stored where it outlives its function (returned, in an array, an option...):
+   it stops the program if it captured variables. */
+static char *leaving(Fn *f, const Expr *e, char *value) {
+    if (!value || !may_capture(e)) return value;
+    char *where = loc(f, e->offset);
+    char *result = sosu_format("sosu_fn_check(%s, %s)", value, where);
+    free(where);
+    free(value);
+    return result;
+}
+
+/* A `sosu_fn` as the C function pointer of a field or of a C function. */
+static char *to_pointer(Fn *f, const Expr *e, char *value) {
+    char *where = loc(f, e->offset);
+    char *result = sosu_format("((%s)sosu_fn_code(%s, %s))", struct_name(f->g, e->type), value, where);
+    free(where);
+    free(value);
+    return result;
+}
+
+/* A C function pointer as a `sosu_fn`. */
+static char *from_pointer(char *value) {
+    char *result = sosu_format("sosu_fn_of((sosu_code)%s)", value);
+    free(value);
+    return result;
+}
+
+/* A field of function type: `x.f`, or `f` in a method. */
+static bool is_fn_field(const Expr *e) {
+    if (!e->type || e->type->tag != T_FN) return false;
+    return (e->kind == EXPR_FIELD && e->resolution == RESOLVED_NONE) ||
+           (e->kind == EXPR_NAME && e->resolution == RESOLVED_SELF_FIELD);
+}
+
 /* ---- Literals ---- */
 
 static void utf8_append(Buf *out, uint32_t c) {
@@ -810,9 +886,9 @@ static char *gen_name(Fn *f, Expr *e) {
         char *path = f->self_info->type->tag == T_CLASS ? field_path(f->self_info, e->as.name) : sosu_strdup("");
         char *result = sosu_format("v_self->%sf_%.*s", path, NAME_ARGS(e->as.name));
         free(path);
-        return result;
+        return e->type->tag == T_FN && !f->raw_field ? from_pointer(result) : result;
     }
-    case RESOLVED_FN: return fn_name_of(f->g, e);
+    case RESOLVED_FN: return from_pointer(fn_name_of(f->g, e));
     case RESOLVED_VARIANT: return gen_variant(f, e, e->target, e->target_index, NULL);
     case RESOLVED_BUILTIN: {
         const char *name = e->target;
@@ -1028,7 +1104,7 @@ static char *gen_cast(Fn *f, Expr *e) {
     const Type *to = e->type;
     char *value = gen_expr(f, e->as.cast.value);
     char *result;
-    if (from == to) {
+    if (from == to || to->tag == T_FN) { /* a function with other effects: the same value */
         return value;
     } else if (from->tag == T_FLOAT && to->tag == T_INT) {
         char *where = loc(f, e->offset);
@@ -1135,11 +1211,14 @@ static char *gen_index(Fn *f, Expr *e) {
 
 static char *gen_field(Fn *f, Expr *e) {
     if (e->resolution == RESOLVED_CONST) return gen_const(f, e->target);
-    if (e->resolution == RESOLVED_FN) return fn_name_of(f->g, e);
+    if (e->resolution == RESOLVED_FN) return from_pointer(fn_name_of(f->g, e));
     if (e->resolution == RESOLVED_VARIANT) return gen_variant(f, e, e->target, e->target_index, NULL);
     Expr *object = e->as.field.object;
     Name name = e->as.field.name;
+    bool raw = f->raw_field; /* for the field itself, not for what its object reads */
+    f->raw_field = false;
     char *value = gen_expr(f, object);
+    f->raw_field = raw;
     const Type *type = object->type;
     bool through_pointer = type->tag == T_POINTER;
     const Type *base = through_pointer ? type->as.inner : type;
@@ -1161,6 +1240,7 @@ static char *gen_field(Fn *f, Expr *e) {
         char *path = base->tag == T_CLASS ? field_path(base->as.info, name) : sosu_strdup("");
         result = sosu_format("%s%s%sf_%.*s", value, access, path, NAME_ARGS(name));
         free(path);
+        if (e->type->tag == T_FN && !f->raw_field) result = from_pointer(result);
     }
     free(value);
     return result;
@@ -1182,6 +1262,7 @@ static char *gen_array(Fn *f, Expr *e) {
         return result;
     }
     char **values = gen_operands(f, e->as.array.items, e->as.array.count);
+    for (size_t i = 0; i < e->as.array.count; i++) values[i] = leaving(f, e->as.array.items[i], values[i]);
     Buf items = {0};
     for (size_t i = 0; i < e->as.array.count; i++) buf_printf(&items, "%s%s", i ? ", " : "", values[i]);
     char *result = sosu_format("((%s){ { %s } })", type, items.items);
@@ -1202,7 +1283,9 @@ static char *gen_struct_literal(Fn *f, Expr *e) {
         Name name = info->fields[j].name;
         char *value = NULL;
         for (size_t i = 0; i < count; i++) {
-            if (name_eq(e->as.struct_lit.fields[i].name, name)) value = values[i];
+            if (!name_eq(e->as.struct_lit.fields[i].name, name)) continue;
+            if (info->fields[j].type->tag == T_FN) values[i] = to_pointer(f, exprs[i], values[i]);
+            value = values[i];
         }
         char *fallback = NULL;
         if (!value) {
@@ -1210,7 +1293,9 @@ static char *gen_struct_literal(Fn *f, Expr *e) {
             Unit *here = f->unit;
             f->unit = info->unit;
             if (info->generic) sema_check_instance_field(f->g->s, (TypeInfo *)info, &info->fields[j]);
-            fallback = gen_expr(f, info->fields[j].decl->init);
+            Expr *init = info->fields[j].decl->init;
+            fallback = gen_expr(f, init);
+            if (init->type->tag == T_FN) fallback = to_pointer(f, init, fallback);
             f->unit = here;
         }
         buf_printf(&fields, "%s.f_%.*s = %s", j ? ", " : "", NAME_ARGS(name), value ? value : fallback);
@@ -1265,9 +1350,12 @@ static void gen_print(Fn *f, Expr *e) {
 static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
+    if (strcmp(name, "size_of") == 0) return sosu_format("((uint64_t)sizeof(%s))", value_type(f->g, args[0]->type));
     char **values = gen_operands(f, args, count);
     const char *type = e->type->tag == T_VOID ? "void" : value_type(f->g, e->type);
     char *result = NULL;
+    bool wraps = strcmp(name, "some") == 0 || strcmp(name, "ok") == 0 || strcmp(name, "err") == 0;
+    if (wraps && count) values[0] = leaving(f, args[0], values[0]);
     if (strcmp(name, "some") == 0) {
         result = sosu_format("((%s){ true, %s })", type, values[0]);
     } else if (strcmp(name, "ok") == 0) {
@@ -1438,6 +1526,124 @@ static bool is_object(const Type *type) {
     return type->tag == T_CLASS || type->tag == T_INTERFACE;
 }
 
+/* A call of a value of function type: with what its lambda captured, or as a plain function. */
+static char *gen_value_call(Fn *f, Expr *e) {
+    Expr *callee = e->as.call.callee;
+    const Type *type = callee->type;
+    size_t count = e->as.call.arg_count;
+    char *function = materialize(f, type, gen_expr(f, callee));
+    char **values = gen_operands(f, e->as.call.args, count);
+    Buf params = {0};
+    Buf args = {0};
+    for (size_t i = 0; i < count; i++) {
+        buf_printf(&params, ", %s", value_type(f->g, type->as.fn.params[i]));
+        buf_printf(&args, ", %s", values[i]);
+    }
+    const char *ret = type->as.fn.ret->tag == T_VOID ? "void" : value_type(f->g, type->as.fn.ret);
+    const char *rest = args.items ? args.items : "";
+    char *call = sosu_format("(%s.env ? ((%s (*)(void *%s))%s.code)(%s.env%s) : ((%s (*)(%s))%s.code)(%s))", function, ret,
+                             params.items ? params.items : "", function, function, rest, ret,
+                             params.items ? params.items + 2 : "void", function, args.items ? args.items + 2 : "");
+    free(params.items);
+    free(args.items);
+    free_values(values, count);
+    free(function);
+    if (type->as.fn.ret->tag == T_VOID) {
+        emit(f, "%s;", call);
+        free(call);
+        return NULL;
+    }
+    return materialize(f, e->type, call);
+}
+
+static void gen_block(Fn *f, const Stmt *block);
+static void gen_return(Fn *f, char *value, size_t offset);
+static void finish_function(Gen *g, Fn *f, Buf *code, size_t body_start);
+
+/* A lambda (spec §5.5): a C function of its own. When it captures variables, they are copied
+   into a struct declared at the start of the enclosing function, whose address the value
+   holds; the function starts by copying them back into variables of the same names. */
+static char *gen_lambda(Fn *f, Expr *e) {
+    Gen *g = f->g;
+    int id = ++g->lambdas;
+    const Type *type = e->type;
+    size_t captures = e->as.lambda.capture_count;
+    const char *self_type = f->self_info ? value_type(g, f->self_info->type) : "void";
+
+    Buf env = {0};
+    for (size_t i = 0; i < captures; i++) {
+        const Capture *c = &e->as.lambda.captures[i];
+        if (c->is_self) buf_printf(&env, "    %s *v_self;\n", self_type);
+        else buf_printf(&env, "    %s v_%.*s;\n", value_type(g, c->type), NAME_ARGS(c->name));
+    }
+    if (captures) {
+        buf_printf(&g->defs, "struct L_%d_env {\n%s};\n\n", id, env.items);
+    }
+    free(env.items);
+
+    Buf params = {0};
+    if (captures) buf_puts(&params, "void *env");
+    for (size_t i = 0; i < e->as.lambda.param_count; i++) {
+        buf_printf(&params, "%s%s v_%.*s", params.items ? ", " : "", value_type(g, type->as.fn.params[i]),
+                   NAME_ARGS(e->as.lambda.params[i].name));
+    }
+    Type *ret = type->as.fn.ret;
+    char *header = sosu_format("static %s L_%d(%s)", ret->tag == T_VOID ? "void" : value_type(g, ret), id,
+                               params.items ? params.items : "void");
+    free(params.items);
+    buf_printf(&g->protos, "%s;\n", header);
+
+    Fn inner = {0};
+    Buf code = {0};
+    inner.g = g;
+    inner.unit = f->unit;
+    inner.out = &code;
+    inner.ret = ret;
+    inner.self_info = f->self_info;
+    buf_printf(&code, "%s {\n", header);
+    size_t body_start = code.count;
+    inner.indent = 1;
+    if (captures) emit(&inner, "struct L_%d_env *captured = env;", id);
+    for (size_t i = 0; i < captures; i++) {
+        const Capture *c = &e->as.lambda.captures[i];
+        if (c->is_self) {
+            emit(&inner, "%s *v_self = captured->v_self;", self_type);
+        } else {
+            emit(&inner, "%s v_%.*s = captured->v_%.*s;", value_type(g, c->type), NAME_ARGS(c->name), NAME_ARGS(c->name));
+        }
+    }
+    if (e->as.lambda.block) {
+        inner.indent = 0;
+        gen_block(&inner, e->as.lambda.block);
+        inner.indent = 1;
+        if (ret->tag == T_VOID) gen_return(&inner, NULL, e->offset + e->length);
+    } else {
+        Expr *body = e->as.lambda.body;
+        emit_line(&inner, body->offset);
+        char *value = gen_expr(&inner, body);
+        if (ret->tag == T_VOID) {
+            if (value && body->kind != EXPR_CALL) emit(&inner, "(void)%s;", value);
+            gen_return(&inner, NULL, e->offset + e->length);
+        } else {
+            value = leaving(&inner, body, value);
+            gen_return(&inner, value, body->offset);
+        }
+        free(value);
+    }
+    buf_puts(&code, "}\n\n");
+    finish_function(g, &inner, &code, body_start);
+    free(header);
+
+    if (!captures) return sosu_format("sosu_fn_of((sosu_code)L_%d)", id);
+    buf_printf(&f->locals, "    struct L_%d_env e_%d;\n", id, id);
+    for (size_t i = 0; i < captures; i++) {
+        const Capture *c = &e->as.lambda.captures[i];
+        if (c->is_self) emit(f, "e_%d.v_self = v_self;", id);
+        else emit(f, "e_%d.v_%.*s = v_%.*s;", id, NAME_ARGS(c->name), NAME_ARGS(c->name));
+    }
+    return sosu_format("((sosu_fn){ (sosu_code)L_%d, &e_%d })", id, id);
+}
+
 static char *gen_call(Fn *f, Expr *e) {
     Expr *callee = e->as.call.callee;
     if (callee->resolution == RESOLVED_PRINT) {
@@ -1455,8 +1661,12 @@ static char *gen_call(Fn *f, Expr *e) {
     size_t count = e->as.call.arg_count;
     char *function;
     char *self = NULL;
+    bool extern_c = false; /* a C function: values of function type cross as C pointers */
     switch (callee->resolution) {
-    case RESOLVED_FN: function = fn_name_of(f->g, callee); break;
+    case RESOLVED_FN:
+        function = fn_name_of(f->g, callee);
+        extern_c = ((const FnInfo *)callee->target)->is_extern;
+        break;
     case RESOLVED_SELF_METHOD:
         if (f->self_info->type->tag == T_CLASS) {
             class_call(f, callee->target, "v_self", false, &function, &self);
@@ -1483,20 +1693,30 @@ static char *gen_call(Fn *f, Expr *e) {
     }
     case RESOLVED_VARIANT: {
         char **values = gen_operands(f, e->as.call.args, count);
+        for (size_t i = 0; i < count; i++) values[i] = leaving(f, e->as.call.args[i], values[i]);
         char *result = gen_variant(f, e, callee->target, callee->target_index, values);
         free_values(values, count);
         return result;
     }
     default:
-        function = gen_expr(f, callee); /* a function value */
-        if (has_call(callee) || count > 0) function = materialize(f, callee->type, function);
-        break;
+        return gen_value_call(f, e);
+    }
+    if (callee->resolution == RESOLVED_METHOD || callee->resolution == RESOLVED_SELF_METHOD) {
+        MethodInfo *method = (MethodInfo *)callee->target;
+        if (method->generic) { /* never virtual: a direct call of its instance */
+            free(function);
+            function = generic_method_name(f->g, callee, method);
+        }
     }
 
     char **values = gen_operands(f, e->as.call.args, count);
     Buf args = {0};
     if (self) buf_puts(&args, self);
-    for (size_t i = 0; i < count; i++) buf_printf(&args, "%s%s", self || i ? ", " : "", values[i]);
+    for (size_t i = 0; i < count; i++) {
+        Expr *arg = e->as.call.args[i];
+        if (extern_c && arg->type->tag == T_FN) values[i] = to_pointer(f, arg, values[i]);
+        buf_printf(&args, "%s%s", self || i ? ", " : "", values[i]);
+    }
     char *call = sosu_format("%s(%s)", function, args.items ? args.items : "");
     free(args.items);
     free_values(values, count);
@@ -1508,6 +1728,7 @@ static char *gen_call(Fn *f, Expr *e) {
         free(call);
         return NULL;
     }
+    if (extern_c && e->type->tag == T_FN) call = from_pointer(call);
     return materialize(f, e->type, call);
 }
 
@@ -1687,6 +1908,7 @@ static char *gen_expr(Fn *f, Expr *e) {
     case EXPR_MATCH: return gen_match(f, e, false);
     case EXPR_TRY: return gen_try(f, e);
     case EXPR_TRY_CAST: return gen_try_cast(f, e);
+    case EXPR_LAMBDA: return gen_lambda(f, e);
     default: return sosu_strdup("0"); /* rejected earlier: ranges outside `for` */
     }
 }
@@ -1707,16 +1929,21 @@ static void gen_assign(Fn *f, const Stmt *stmt) {
     Expr *target = stmt->as.assign.target;
     Expr *value_expr = stmt->as.assign.value;
     TokenKind op = stmt->as.assign.op;
+    bool field = is_fn_field(target); /* a C function pointer */
+    f->raw_field = field;
     char *place = gen_expr(f, target);
+    f->raw_field = false;
     bool simple = target->kind == EXPR_NAME;
     if (!simple && (has_call(value_expr) || op != TOK_EQ)) {
         char *pointer = new_temp(f);
-        emit(f, "%s *%s = &%s;", value_type(f->g, target->type), pointer, place);
+        emit(f, "%s *%s = &%s;", field ? field_type(f->g, target->type) : value_type(f->g, target->type), pointer, place);
         free(place);
         place = sosu_format("(*%s)", pointer);
         free(pointer);
     }
     char *value = gen_expr(f, value_expr);
+    if (field) value = to_pointer(f, value_expr, value);
+    else if (!(target->kind == EXPR_NAME && target->resolution == RESOLVED_LOCAL)) value = leaving(f, value_expr, value);
     if (op == TOK_EQ) {
         emit(f, "%s = %s;", place, value);
     } else if (target->type->tag == T_POINTER) {
@@ -1915,7 +2142,7 @@ static void gen_stmt(Fn *f, const Stmt *stmt) {
         gen_for_in(f, stmt);
         break;
     case STMT_RETURN: {
-        char *value = stmt->as.expr ? gen_expr(f, stmt->as.expr) : NULL;
+        char *value = stmt->as.expr ? leaving(f, stmt->as.expr, gen_expr(f, stmt->as.expr)) : NULL;
         if (value) value = materialize(f, f->ret, value);
         gen_return(f, value, stmt->offset);
         free(value);
@@ -1983,6 +2210,7 @@ static void gen_body(Gen *g, Unit *unit, const char *header, const FnDecl *fn, T
     f.ret = ret;
     f.self_info = self_info;
     buf_printf(&code, "%s {\n", header);
+    size_t body_start = code.count;
     if (fn && g->options.contracts) {
         for (size_t i = 0; i < fn->contract_count; i++) {
             const Contract *contract = &fn->contracts[i];
@@ -2005,10 +2233,19 @@ static void gen_body(Gen *g, Unit *unit, const char *header, const FnDecl *fn, T
         gen_return(&f, NULL, body->offset + body->length);
     }
     buf_puts(&code, "}\n\n");
-    buf_puts(&g->code, code.items);
-    free(code.items);
-    free(f.defers.items);
-    free(f.loops.items);
+    finish_function(g, &f, &code, body_start);
+}
+
+/* Adds a generated function to the program, with the variables its lambdas capture declared
+   at its start (`body_start`, after its opening brace). */
+static void finish_function(Gen *g, Fn *f, Buf *code, size_t body_start) {
+    if (f->locals.items) buf_add(&g->code, code->items, body_start);
+    if (f->locals.items) buf_puts(&g->code, f->locals.items);
+    buf_puts(&g->code, code->items + (f->locals.items ? body_start : 0));
+    free(code->items);
+    free(f->locals.items);
+    free(f->defers.items);
+    free(f->loops.items);
 }
 
 static void gen_function(Gen *g, FnInfo *fn) {
@@ -2022,6 +2259,7 @@ static void gen_function(Gen *g, FnInfo *fn) {
 
 static void gen_method(Gen *g, TypeInfo *info, MethodInfo *method) {
     if (!method->decl->body) return; /* interface signatures: see gen_tables */
+    if (method->generic) return;     /* its instances, as they are called */
     char *name = method_c_name(g, method);
     char *header = signature(g, name, method->type, method->decl, info);
     buf_printf(&g->protos, "%s;\n", header);
@@ -2040,6 +2278,16 @@ static void gen_instances(Gen *g) {
             g->fn_instances.items[i].done = true;
             FnInstance inst = g->fn_instances.items[i]; /* the list may grow while it is generated */
             FnInfo *fn = inst.fn;
+            if (inst.method) {
+                TypeInfo *owner = inst.method->owner;
+                Type *type = sema_check_generic_method(g->s, owner, inst.method, inst.args, inst.effects);
+                char *header = signature(g, inst.name, type, fn->decl, owner);
+                buf_printf(&g->protos, "%s;\n", header);
+                gen_body(g, owner->unit, header, fn->decl, type->as.fn.ret, owner, fn->decl->body);
+                free(header);
+                progress = true;
+                continue;
+            }
             sema_check_instance_fn(g->s, fn, inst.args, inst.effects);
             Type *type = sema_subst(g->s, fn->type, fn->params, inst.args, fn->param_count, inst.effects,
                                     fn->effect_param_count);
@@ -2055,7 +2303,7 @@ static void gen_instances(Gen *g) {
             if (info->open) continue;
             define_type(g, info->type);
             for (size_t j = 0; j < info->method_count; j++) {
-                if (!info->methods[j].decl->body) continue;
+                if (!info->methods[j].decl->body || info->methods[j].generic) continue; /* generic: per call */
                 sema_check_instance_method(g->s, info, &info->methods[j]);
                 gen_method(g, info, &info->methods[j]);
             }
@@ -2217,17 +2465,27 @@ static void gen_exports(Gen *g, Buf *out) {
         Buf params = {0};
         Buf args = {0};
         for (size_t j = 0; j < type->as.fn.param_count; j++) {
-            buf_printf(&params, "%s%s a%zu", j ? ", " : "", value_type(g, type->as.fn.params[j]), j);
-            buf_printf(&args, "%sa%zu", j ? ", " : "", j);
+            /* a function of the host: a C function pointer, called as a function of Sosu */
+            bool function = type->as.fn.params[j]->tag == T_FN;
+            buf_printf(&params, "%s%s a%zu", j ? ", " : "", field_type(g, type->as.fn.params[j]), j);
+            buf_printf(&args, function ? "%ssosu_fn_of((sosu_code)a%zu)" : "%sa%zu", j ? ", " : "", j);
         }
         bool returns = type->as.fn.ret->tag != T_VOID;
-        const char *ret = returns ? value_type(g, type->as.fn.ret) : "void";
+        bool returns_fn = type->as.fn.ret->tag == T_FN;
+        const char *ret = returns ? field_type(g, type->as.fn.ret) : "void";
         char *inner = fn_c_name(fn);
         buf_printf(out, "SOSU_EXPORT %s %.*s(%s) {\n    jmp_buf here;\n    jmp_buf *outer = sosu_guard_enter(&here);\n", ret,
                    NAME_ARGS(fn->decl->name), params.items ? params.items : "void");
         if (returns) buf_printf(out, "    %s result = {0};\n", ret);
-        buf_printf(out, "    if (setjmp(here) == 0) %s%s(%s);\n    sosu_guard_leave(outer);\n%s}\n\n", returns ? "result = " : "",
-                   inner, args.items ? args.items : "", returns ? "    return result;\n" : "");
+        char *call = sosu_format("%s(%s)", inner, args.items ? args.items : "");
+        if (returns_fn) { /* a function returned leaves Sosu: it captured nothing (checked at its `return`) */
+            char *code = sosu_format("(%s)%s.code", ret, call);
+            free(call);
+            call = code;
+        }
+        buf_printf(out, "    if (setjmp(here) == 0) %s%s;\n    sosu_guard_leave(outer);\n%s}\n\n", returns ? "result = " : "",
+                   call, returns ? "    return result;\n" : "");
+        free(call);
         free(inner);
         free(params.items);
         free(args.items);
@@ -2279,10 +2537,10 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
         if (fn->is_extern) {
             Buf params = {0};
             for (size_t j = 0; j < fn->decl->param_count; j++) {
-                buf_printf(&params, "%s%s", j ? ", " : "", value_type(&g, fn->type->as.fn.params[j]));
+                buf_printf(&params, "%s%s", j ? ", " : "", field_type(&g, fn->type->as.fn.params[j]));
             }
             Type *ret = fn->type->as.fn.ret;
-            buf_printf(&g.protos, "%s %.*s(%s);\n", ret->tag == T_VOID ? "void" : value_type(&g, ret),
+            buf_printf(&g.protos, "%s %.*s(%s);\n", ret->tag == T_VOID ? "void" : field_type(&g, ret),
                        NAME_ARGS(fn->decl->name), params.items ? params.items : "void");
             free(params.items);
         } else {

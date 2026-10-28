@@ -14,6 +14,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <pthread.h>
 #endif
 
 /* Variables of each thread: a library is called from several threads at once (spec §9.2). */
@@ -86,6 +88,172 @@ void sosu_fail(const char *loc, const char *message) {
     }
     fprintf(stderr, "sosu: %s: %s\n", loc, message);
     exit(101);
+}
+
+/* ---- For std.thread and std.channel (spec §5.6) ----
+   Declared by std itself with `extern "C"`. A thread shares no memory with the others: it runs
+   a function on a copy of a value, and threads talk through channels, which copy what they
+   carry. A run-time error in a thread stops the program, as in the main thread. */
+
+#ifdef _WIN32
+typedef SRWLOCK sosu_lock;
+typedef CONDITION_VARIABLE sosu_cond;
+#define LOCK_INIT(l) InitializeSRWLock(l)
+#define LOCK(l) AcquireSRWLockExclusive(l)
+#define UNLOCK(l) ReleaseSRWLockExclusive(l)
+#define COND_INIT(c) InitializeConditionVariable(c)
+#define COND_WAIT(c, l) SleepConditionVariableSRW((c), (l), INFINITE, 0)
+#define COND_WAKE_ALL(c) WakeAllConditionVariable(c)
+#define LOCK_FREE(l) ((void)(l))
+#define COND_FREE(c) ((void)(c))
+#else
+typedef pthread_mutex_t sosu_lock;
+typedef pthread_cond_t sosu_cond;
+#define LOCK_INIT(l) pthread_mutex_init((l), NULL)
+#define LOCK(l) pthread_mutex_lock(l)
+#define UNLOCK(l) pthread_mutex_unlock(l)
+#define COND_INIT(c) pthread_cond_init((c), NULL)
+#define COND_WAIT(c, l) pthread_cond_wait((c), (l))
+#define COND_WAKE_ALL(c) pthread_cond_broadcast(c)
+#define LOCK_FREE(l) pthread_mutex_destroy(l)
+#define COND_FREE(c) pthread_cond_destroy(c)
+#endif
+
+/* Where `sosu_channel_receive` copies a value for this thread, until its next call. */
+static SOSU_THREAD uint8_t *staging;
+static SOSU_THREAD size_t staging_size;
+
+typedef struct {
+    void (*entry)(uint8_t *);
+    uint8_t *data;
+#ifdef _WIN32
+    HANDLE handle;
+#else
+    pthread_t handle;
+#endif
+} sosu_thread;
+
+#ifdef _WIN32
+static DWORD WINAPI thread_main(LPVOID argument) {
+#else
+static void *thread_main(void *argument) {
+#endif
+    sosu_thread *thread = argument;
+    thread->entry(thread->data);
+    free(staging);
+    staging = NULL;
+    staging_size = 0;
+    return 0;
+}
+
+/* Starts `entry(data)` on a new thread; its handle, for sosu_thread_join. */
+void *sosu_thread_start(void (*entry)(uint8_t *), uint8_t *data) {
+    sosu_thread *thread = malloc(sizeof *thread);
+    if (!thread) sosu_fail("std.thread", "out of memory");
+    thread->entry = entry;
+    thread->data = data;
+#ifdef _WIN32
+    thread->handle = CreateThread(NULL, 0, thread_main, thread, 0, NULL);
+    bool started = thread->handle != NULL;
+#else
+    bool started = pthread_create(&thread->handle, NULL, thread_main, thread) == 0;
+#endif
+    if (!started) sosu_fail("std.thread", "the system cannot start another thread");
+    return thread;
+}
+
+/* Waits for the end of a thread, and releases it. */
+void sosu_thread_join(void *handle) {
+    sosu_thread *thread = handle;
+#ifdef _WIN32
+    WaitForSingleObject(thread->handle, INFINITE);
+    CloseHandle(thread->handle);
+#else
+    pthread_join(thread->handle, NULL);
+#endif
+    free(thread);
+}
+
+/* A queue of `capacity` values of `size` bytes, in a ring. */
+typedef struct {
+    sosu_lock lock;
+    sosu_cond changed; /* a value sent or received, or the channel closed */
+    uint8_t *items;
+    size_t size;
+    size_t capacity;
+    size_t head;
+    size_t count;
+    bool closed;
+} sosu_channel;
+
+/* A channel, as a number: its handle is a value without pointer (`Send`), given to threads. */
+uint64_t sosu_channel_new(uint64_t size, uint64_t capacity) {
+    sosu_channel *channel = calloc(1, sizeof *channel);
+    uint8_t *items = channel && size && capacity ? malloc((size_t)(size * capacity)) : NULL;
+    if (!channel || (size && capacity && !items)) sosu_fail("std.channel", "out of memory");
+    channel->items = items;
+    channel->size = (size_t)size;
+    channel->capacity = (size_t)capacity;
+    LOCK_INIT(&channel->lock);
+    COND_INIT(&channel->changed);
+    return (uint64_t)(uintptr_t)channel;
+}
+
+/* Copies `value` in, waiting while the channel is full. False if it is closed. */
+bool sosu_channel_send(uint64_t id, const uint8_t *value) {
+    sosu_channel *channel = (sosu_channel *)(uintptr_t)id;
+    LOCK(&channel->lock);
+    while (channel->count == channel->capacity && !channel->closed) COND_WAIT(&channel->changed, &channel->lock);
+    bool sent = !channel->closed;
+    if (sent) {
+        size_t at = (channel->head + channel->count) % channel->capacity;
+        memcpy(channel->items + at * channel->size, value, channel->size);
+        channel->count++;
+        COND_WAKE_ALL(&channel->changed);
+    }
+    UNLOCK(&channel->lock);
+    return sent;
+}
+
+/* The address of a copy of the next value, waiting while the channel is empty and open; 0 when it
+   is closed and empty. The copy stays until the next call of this thread. */
+uint64_t sosu_channel_receive(uint64_t id) {
+    sosu_channel *channel = (sosu_channel *)(uintptr_t)id;
+    if (staging_size < channel->size || !staging) {
+        free(staging);
+        staging_size = channel->size ? channel->size : 1;
+        staging = malloc(staging_size);
+        if (!staging) sosu_fail("std.channel", "out of memory");
+    }
+    LOCK(&channel->lock);
+    while (channel->count == 0 && !channel->closed) COND_WAIT(&channel->changed, &channel->lock);
+    bool received = channel->count > 0;
+    if (received) {
+        memcpy(staging, channel->items + channel->head * channel->size, channel->size);
+        channel->head = (channel->head + 1) % channel->capacity;
+        channel->count--;
+        COND_WAKE_ALL(&channel->changed);
+    }
+    UNLOCK(&channel->lock);
+    return received ? (uint64_t)(uintptr_t)staging : 0;
+}
+
+/* No more values: the receivers get those left, then none; senders get false. */
+void sosu_channel_close(uint64_t id) {
+    sosu_channel *channel = (sosu_channel *)(uintptr_t)id;
+    LOCK(&channel->lock);
+    channel->closed = true;
+    COND_WAKE_ALL(&channel->changed);
+    UNLOCK(&channel->lock);
+}
+
+/* Releases the channel, once no thread uses it. */
+void sosu_channel_free(uint64_t id) {
+    sosu_channel *channel = (sosu_channel *)(uintptr_t)id;
+    LOCK_FREE(&channel->lock);
+    COND_FREE(&channel->changed);
+    free(channel->items);
+    free(channel);
 }
 
 /* ---- Arenas ---- */

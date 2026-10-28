@@ -59,6 +59,11 @@ static void test_canonical(void) {
                   "void f() {\n    auto t = [\n        1,\n        2,\n    ];\n    auto u = [[1, 2], [3, 4]];\n}\n");
     expect_format("class B : A, I { override void f() uses io { } }",
                   "class B : A, I {\n    override void f() uses io { }\n}\n");
+    /* lambdas (spec §5.5) */
+    expect_format("void f() { auto g=(i32 a,b)=>a+b; h((x)=>{return x;}); auto k=((x)=>x)(3); }",
+                  "void f() {\n    auto g = (i32 a, b) => a + b;\n    h((x) => {\n        return x;\n    });\n"
+                  "    auto k = ((x) => x)(3);\n}\n");
+    expect_format("void f((fn(i32)->i32)[] fs, (fn()->void)? g) { }", "void f((fn(i32) -> i32)[] fs, (fn() -> void)? g) { }\n");
 }
 
 static void test_comments_and_blank_lines(void) {
@@ -125,7 +130,9 @@ static const char *const files[] = {
     "tests/programs/screens/src/state.sosu", "tests/packages/bad_ui/src/main.sosu",
     "tests/programs/files/src/main.sosu", "tests/programs/clock_random/src/main.sosu",
     "tests/programs/arrays/src/main.sosu", "tests/programs/copies/src/main.sosu",
-    "tests/programs/linking/src/main.sosu", "tests/programs/testing/src/lib.sosu",
+    "tests/programs/linking/src/main.sosu", "tests/programs/testing/src/lib.sosu", "tests/programs/lambdas/src/main.sosu",
+    "tests/programs/iterators/src/main.sosu", "tests/programs/threads/src/main.sosu", "lib/std/src/thread.sosu",
+    "lib/std/src/channel.sosu",
     "packages/platform/src/app.sosu", "packages/platform/src/sdl.sosu", "packages/render/src/canvas.sosu",
     "packages/render/src/font.sosu", "packages/render/src/truetype.sosu", "packages/render/src/lib.sosu",
     "examples/window/src/main.sosu",
