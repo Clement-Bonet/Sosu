@@ -1,0 +1,117 @@
+// compress.gzip: the gzip format (RFC 1952) of `.gz` files and of HTTP: a header, a deflate
+// stream, its CRC-32 and its size. Several members one after the other are read as one.
+import compress.deflate;
+import compress.checksum;
+
+// `data` compressed at `level` (0 to 9), as a gzip file, in `arena`. Without name nor date.
+pub ui8[] compress_level(Arena* arena, ui8[] data, i32 level)
+    requires level >= 0 && level <= 9
+{
+    ui8[] stream = deflate.deflate_level(arena, data, level);
+    mut ui8[] out = arena.alloc_slice(ui8, stream.len + 18);
+    out[0] = 0x1F;
+    out[1] = 0x8B;
+    out[2] = 8;  // deflate; then no flags, no date (0)
+    out[8] = level == 9 ? 2 : level == 1 ? 4 : 0;
+    out[9] = 255;  // the system is not known
+    for (usize i in 0..stream.len) {
+        out[10 + i] = stream[i];
+    }
+    ui32 crc = checksum.crc32(data);
+    ui32 size = (data.len as ui64 & 0xFFFFFFFF) as ui32;
+    for (usize i in 0..4) {
+        out[stream.len + 10 + i] = (crc >> (8 * i) as ui32 & 0xFF) as ui8;
+        out[stream.len + 14 + i] = (size >> (8 * i) as ui32 & 0xFF) as ui8;
+    }
+    return out;
+}
+
+// `data` compressed (level 6), as a gzip file, in `arena`.
+pub ui8[] compress(Arena* arena, ui8[] data) {
+    return compress_level(arena, data, 6);
+}
+
+ui32 le32(ui8[] data, usize at) {
+    return data[at] as ui32 | data[at + 1] as ui32 << 8 | data[at + 2] as ui32 << 16 | data[at + 3] as ui32 << 24;
+}
+
+// The place after the next 0 from `p` (the end of a text of the header).
+usize after_zero(ui8[] data, usize p) {
+    mut usize at = p;
+    while (at < data.len && data[at] != 0) {
+        at += 1;
+    }
+    return at + 1;
+}
+
+// Where the deflate stream of the member at `at` starts, or none if its header is damaged.
+usize? skip_header(ui8[] data, usize at) {
+    if (at + 10 > data.len || data[at] != 0x1F || data[at + 1] != 0x8B || data[at + 2] != 8) {
+        return none;
+    }
+    ui8 flags = data[at + 3];
+    if (flags & 0xE0 != 0) {
+        return none;  // reserved
+    }
+    mut usize p = at + 10;
+    if (flags & 4 != 0) {  // extra fields
+        if (p + 2 > data.len) {
+            return none;
+        }
+        p += 2 + (data[p] as usize | data[p + 1] as usize << 8);
+    }
+    if (flags & 8 != 0) {  // a name
+        p = after_zero(data, p);
+    }
+    if (flags & 16 != 0) {  // a comment
+        p = after_zero(data, p);
+    }
+    if (flags & 2 != 0) {  // a CRC of the header
+        p += 2;
+    }
+    if (p > data.len) {
+        return none;
+    }
+    return some(p);
+}
+
+// The bytes held by the gzip file `data`, in `arena`.
+pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
+    mut checksum.Crc32Table table = checksum.crc32_table();
+    mut ui8[] all = arena.alloc_slice(ui8, 0);
+    mut usize at = 0;
+    while (true) {
+        usize start = match (skip_header(data, at)) {
+            some(p) => p,
+            none => {
+                return err(deflate.CompressError.Damaged);
+            },
+        };
+        deflate.Inflated done = try deflate.inflate_stream(arena, data[start..data.len]);
+        usize end = start + done.read;
+        if (end + 8 > data.len) {
+            return err(deflate.CompressError.Damaged);
+        }
+        ui32 crc = checksum.crc32_from(&table, 0, done.bytes);
+        if (crc != le32(data, end) || (done.bytes.len as ui64 & 0xFFFFFFFF) as ui32 != le32(data, end + 4)) {
+            return err(deflate.CompressError.WrongChecksum);
+        }
+        if (all.len == 0) {
+            all = done.bytes;
+        } else {
+            mut ui8[] joined = arena.alloc_slice(ui8, all.len + done.bytes.len);
+            for (usize i in 0..all.len) {
+                joined[i] = all[i];
+            }
+            for (usize i in 0..done.bytes.len) {
+                joined[all.len + i] = done.bytes[i];
+            }
+            all = joined;
+        }
+        at = end + 8;
+        if (at >= data.len) {
+            break;
+        }
+    }
+    return ok(all);
+}

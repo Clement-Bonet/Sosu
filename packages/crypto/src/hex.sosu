@@ -1,0 +1,52 @@
+// crypto.hex: bytes written as hexadecimal text, two digits each, and read back.
+
+// `bytes` as lowercase hexadecimal, in `arena`.
+pub str encode(Arena* arena, ui8[] bytes) {
+    str digits = "0123456789abcdef";
+    mut ui8[] out = arena.alloc_slice(ui8, 2 * bytes.len);
+    for (usize i in 0..bytes.len) {
+        out[2 * i] = digits.bytes[(bytes[i] >> 4) as usize];
+        out[2 * i + 1] = digits.bytes[(bytes[i] & 15) as usize];
+    }
+    return ascii(out);
+}
+
+// The value of a hexadecimal digit, or -1.
+i32 digit(ui8 c) {
+    if (c >= '0' as ui8 && c <= '9' as ui8) {
+        return (c - '0' as ui8) as i32;
+    }
+    if (c >= 'a' as ui8 && c <= 'f' as ui8) {
+        return (c - 'a' as ui8) as i32 + 10;
+    }
+    if (c >= 'A' as ui8 && c <= 'F' as ui8) {
+        return (c - 'A' as ui8) as i32 + 10;
+    }
+    return -1;
+}
+
+// The bytes of hexadecimal `text` (upper or lower case), or none if it is not hexadecimal or
+// has an odd number of digits.
+pub ui8[]? decode(Arena* arena, str text) {
+    if (text.len % 2 != 0) {
+        return none;
+    }
+    mut ui8[] out = arena.alloc_slice(ui8, text.len / 2);
+    for (usize i in 0..out.len) {
+        i32 high = digit(text.bytes[2 * i]);
+        i32 low = digit(text.bytes[2 * i + 1]);
+        if (high < 0 || low < 0) {
+            return none;
+        }
+        out[i] = (high * 16 + low) as ui8;
+    }
+    return some(out);
+}
+
+// Bytes known to be ASCII seen as a `str`: a view and a `str` are both a pointer and a length.
+str ascii(ui8[] bytes) {
+    mut ui8[] view = bytes;
+    unsafe {
+        return *(&view as str*);
+    }
+}

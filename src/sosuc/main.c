@@ -138,6 +138,19 @@ static char *library_dir(const char *argv0) {
     return lib;
 }
 
+/* Whether `path` can go into the commands of the build, between quotes: the rule of the values
+   of sosu.toml (spec §8.1, E0416), for the folders given to sosuc. */
+static bool path_fits_commands(const char *what, const char *path) {
+    for (const unsigned char *c = (const unsigned char *)path; *c; c++) {
+        if (*c < 32 || *c == 127 || strchr("\"`$%", *c)) {
+            fprintf(stderr, "sosuc: the path of %s, `%s`, has a character that the commands of the build cannot take "
+                            "(a quote, `, $, %% or a control character): rename or move it\n", what, path);
+            return false;
+        }
+    }
+    return true;
+}
+
 static int command_check(const char *dir, const char *argv0, DiagFormat format) {
     char *lib = library_dir(argv0);
     Program program;
@@ -388,6 +401,17 @@ static int link_section_of(const char *system, const char *arch, bool with_arch)
     return -1;
 }
 
+/* `path`, a folder or a file of the [link] of `package`, resolved: if it is missing, say so before the
+   C compiler fails on it with a message about something else (a library not found). */
+static char *checked(const Package *package, char *path, const char *key, bool folder) {
+    if (folder ? shell_dir_exists(path) : shell_file_exists(path)) return path;
+    fprintf(stderr, "sosuc: the %s `%s` of the [link] `%s` of the package `%s` does not exist",
+            folder ? "folder" : "file", path, key, package->name);
+    if (strstr(path, "vendor")) fputs(" (the comments of its sosu.toml say how to fetch what goes in vendor/)", stderr);
+    fputs("\n", stderr);
+    return path;
+}
+
 /* [link] and [link.<target>] of every package (the host, or `android`, `ios`): a dependency's
    libraries reach the program. */
 static void collect_links(const Program *program, Links *links, const Target *target) {
@@ -404,13 +428,20 @@ static void collect_links(const Program *program, Links *links, const Target *ta
             const LinkSection *link = &package->manifest.link[sections[s]];
             for (size_t j = 0; j < link->libs.count; j++) add_unique(&links->libs, sosu_strdup(link->libs.items[j]));
             for (size_t j = 0; j < link->paths.count; j++) {
-                add_unique(&links->paths, link_path(package, link->paths.items[j], target));
+                char *path = link_path(package, link->paths.items[j], target);
+                add_unique(&links->paths, checked(package, path, "paths", true));
             }
             for (size_t j = 0; j < link->frameworks.count; j++) {
                 add_unique(&links->frameworks, sosu_strdup(link->frameworks.items[j]));
             }
-            for (size_t j = 0; j < link->copy.count; j++) add_unique(&links->copy, link_path(package, link->copy.items[j], target));
-            for (size_t j = 0; j < link->c.count; j++) add_unique(&links->sources, link_path(package, link->c.items[j], target));
+            for (size_t j = 0; j < link->copy.count; j++) {
+                char *file = link_path(package, link->copy.items[j], target);
+                add_unique(&links->copy, checked(package, file, "copy", false));
+            }
+            for (size_t j = 0; j < link->c.count; j++) {
+                char *file = link_path(package, link->c.items[j], target);
+                add_unique(&links->sources, checked(package, file, "c", false));
+            }
             for (size_t j = 0; j < link->include.count; j++) {
                 add_unique(&links->includes, link_path(package, link->include.items[j], target));
             }
@@ -2448,6 +2479,15 @@ int main(int argc, char **argv) {
             return 2;
         }
         return command[0] == 'l' ? command_lex(path, format) : command_parse(path, format);
+    }
+    /* the commands below run the C compiler and other tools on these folders */
+    char *lib_dir = library_dir(argv[0]);
+    bool fits = is_fmt || (path_fits_commands("the package", path ? path : ".") &&
+                           path_fits_commands("the library", lib_dir));
+    free(lib_dir);
+    if (!fits) {
+        free(paths);
+        return 2;
     }
     if (strcmp(command, "package") == 0) {
         if (options.target->os == TARGET_ANDROID) return command_package_android(path ? path : ".", argv[0], format, &options);

@@ -1,0 +1,66 @@
+// compress.zlib: the zlib container (RFC 1950): two bytes of header, a deflate stream, and the
+// Adler-32 of what it holds, checked when read. PNG images hold their pixels so.
+import compress.deflate;
+import compress.checksum;
+
+// `data` compressed at `level` (0 to 9), in a zlib container, in `arena`.
+pub ui8[] compress_level(Arena* arena, ui8[] data, i32 level)
+    requires level >= 0 && level <= 9
+{
+    ui8[] stream = deflate.deflate_level(arena, data, level);
+    mut ui8[] out = arena.alloc_slice(ui8, stream.len + 6);
+    out[0] = 0x78;  // deflate, a window of 32 KB
+    out[1] = level < 2 ? 0x01 : level < 6 ? 0x5E : level == 6 ? 0x9C : 0xDA;
+    for (usize i in 0..stream.len) {
+        out[2 + i] = stream[i];
+    }
+    ui32 sum = checksum.adler32(data);
+    for (usize i in 0..4) {
+        out[stream.len + 2 + i] = (sum >> (24 - 8 * i) as ui32 & 0xFF) as ui8;
+    }
+    return out;
+}
+
+// `data` compressed (level 6), in a zlib container, in `arena`.
+pub ui8[] compress(Arena* arena, ui8[] data) {
+    return compress_level(arena, data, 6);
+}
+
+// Whether `data` starts with a zlib header without preset dictionary.
+bool header(ui8[] data) {
+    return data.len >= 2 && data[0] & 0x0F == 8 && data[0] >> 4 <= 7 && (data[0] as ui32 * 256 + data[1] as ui32) % 31 == 0 && data[1] & 0x20 == 0;
+}
+
+// Checks the Adler-32 that follows the stream (`read` bytes after the header).
+deflate.Inflated!deflate.CompressError checked(ui8[] data, deflate.Inflated done) {
+    usize at = 2 + done.read;
+    if (at + 4 > data.len) {
+        return err(deflate.CompressError.Damaged);
+    }
+    ui32 expected = data[at] as ui32 << 24 | data[at + 1] as ui32 << 16 | data[at + 2] as ui32 << 8 | data[at + 3] as ui32;
+    if (checksum.adler32(done.bytes) != expected) {
+        return err(deflate.CompressError.WrongChecksum);
+    }
+    return ok(done);
+}
+
+// The bytes held by the zlib container `data`, in `arena`.
+pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
+    if (!header(data)) {
+        return err(deflate.CompressError.Damaged);
+    }
+    deflate.Inflated done = try deflate.inflate_stream(arena, data[2..data.len]);
+    deflate.Inflated good = try checked(data, done);
+    return ok(good.bytes);
+}
+
+// The bytes held by the zlib container `data`, into `out`: how many were written. For a size
+// known before (the rows of a PNG image).
+pub usize!deflate.CompressError decompress_into(ui8[] data, ui8[] out) {
+    if (!header(data)) {
+        return err(deflate.CompressError.Damaged);
+    }
+    deflate.Inflated done = try deflate.inflate_stream_into(data[2..data.len], out);
+    deflate.Inflated good = try checked(data, done);
+    return ok(good.bytes.len);
+}

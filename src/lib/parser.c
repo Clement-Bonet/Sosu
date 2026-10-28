@@ -17,6 +17,11 @@ typedef struct {
     Arena *arena;
     DiagList *diags;
     bool panic;
+    /* The height of the tree being built, and whether it went beyond MAX_NESTING: the passes
+       after the parser walk the tree by recursion, so a deeper one would exhaust the stack
+       (spec §12). Then the rest of the file is skipped, without other errors. */
+    size_t depth;
+    bool too_deep;
     bool no_struct_literal; /* `Name {` starts a body, not a literal (contracts) */
     bool half_gt;           /* the current token is `>>`, and its first `>` closed a list of type arguments */
     /* .ui.sosu files: the `bind:` and `on_change:` of the `Dropdown` whose options are being
@@ -117,7 +122,7 @@ static size_t span_from(const Parser *p, size_t start) {
 /* ---- Diagnostics ---- */
 
 static Diagnostic *error_at(Parser *p, const char *code, size_t offset, size_t length, const char *fmt, ...) {
-    if (p->panic) return NULL;
+    if (p->panic || p->too_deep) return NULL;
     p->panic = true;
     va_list args;
     va_start(args, fmt);
@@ -411,6 +416,26 @@ static bool at_function(const Parser *p) {
 
 /* ---- Names and types ---- */
 
+/* Levels counted by the parser: a parenthesis counts two (an expression, then its operand), a
+   term of a sum one. Deeper than any program written by hand, and three times below what the
+   passes after it hold on the stack of Windows (1 MB: about 1 500 terms of a sum). */
+#define MAX_NESTING 512
+
+/* One level more in the tree; false when there are too many, after the error (once) and a
+   jump to the end of the file. */
+static bool deeper(Parser *p) {
+    if (p->too_deep) return false;
+    if (++p->depth <= MAX_NESTING) return true;
+    const Token *token = cur(p);
+    Diagnostic *d = diag_error(p->diags, "E0219", p->file, token->offset, token->length,
+                               "too deeply nested: more than %d levels", MAX_NESTING);
+    diag_help(d, "split the expression or the block, with variables or functions");
+    p->too_deep = true;
+    p->panic = true;
+    p->pos = p->count - 1; /* the end of the file */
+    return false;
+}
+
 static Path parse_path(Parser *p) {
     NameVec names = {0};
     Name name;
@@ -561,9 +586,10 @@ static bool suffix_is_operator(const Parser *p) {
     return starts_operand(kind_at(p, ahead));
 }
 
-static TypeExpr *parse_type(Parser *p, bool in_cast) {
+static TypeExpr *parse_type_inner(Parser *p, bool in_cast) {
     size_t start = cur(p)->offset;
     TypeExpr *type = parse_base_type(p);
+    size_t added = 0; /* a level per suffix: `ui8**` is two pointers */
     for (;;) {
         TokenKind kind = cur(p)->kind;
         TypeExpr *outer = NULL;
@@ -597,7 +623,19 @@ static TypeExpr *parse_type(Parser *p, bool in_cast) {
         }
         outer->length = span_from(p, start);
         type = outer;
+        if (!deeper(p)) break;
+        added++;
     }
+    p->depth -= added;
+    return type;
+}
+
+/* The wrappers count a level of the tree, then parse; when it is too deep, the parser is at
+   the end of the file, where they give an error node at once. */
+static TypeExpr *parse_type(Parser *p, bool in_cast) {
+    bool counted = deeper(p);
+    TypeExpr *type = parse_type_inner(p, in_cast);
+    if (counted) p->depth--;
     return type;
 }
 
@@ -931,7 +969,13 @@ static bool type_args_follow(const Parser *p) {
 
 static Expr *parse_postfix(Parser *p) {
     Expr *expr = parse_primary(p);
+    size_t added = 0; /* a level per suffix: `a.b.c` leans to the left */
     for (;;) {
+        if (!deeper(p)) {
+            p->depth -= added;
+            return expr;
+        }
+        added++;
         if (check(p, TOK_LPAREN)) {
             expr = parse_call(p, expr);
         } else if (check(p, TOK_LBRACKET)) {
@@ -960,12 +1004,15 @@ static Expr *parse_postfix(Parser *p) {
             expr->type_args = parse_type_args(p, &expr->type_arg_count);
             expr->length = span_from(p, expr->offset);
         } else {
+            p->depth -= added;
             return expr;
         }
     }
 }
 
-static Expr *parse_prefix(Parser *p) {
+static Expr *parse_prefix(Parser *p);
+
+static Expr *parse_unary(Parser *p) {
     const Token *token = cur(p);
     switch (token->kind) {
     case TOK_MINUS: case TOK_BANG: case TOK_TILDE: case TOK_AMP: case TOK_STAR: {
@@ -986,26 +1033,42 @@ static Expr *parse_prefix(Parser *p) {
     }
 }
 
+static Expr *parse_prefix(Parser *p) {
+    bool counted = deeper(p);
+    Expr *expr = parse_unary(p);
+    if (counted) p->depth--;
+    return expr;
+}
+
 /* `as` has the precedence of the unary operators and applies to their result:
    `-x as f32` is `(-x) as f32`. */
 static Expr *parse_cast(Parser *p) {
     Expr *expr = parse_prefix(p);
-    while (accept(p, TOK_KW_AS)) {
+    size_t added = 0; /* the loops below build trees leaning to the left: a level per turn */
+    while (check(p, TOK_KW_AS) && deeper(p)) {
+        advance(p);
+        added++;
         Expr *cast = new_expr(p, accept(p, TOK_QUESTION) ? EXPR_TRY_CAST : EXPR_CAST, expr->offset);
         cast->as.cast.value = expr;
         cast->as.cast.type = parse_type(p, true);
         expr = close_expr(p, cast);
     }
+    p->depth -= added;
     return expr;
 }
 
 static Expr *parse_binary(Parser *p, int min_precedence) {
     Expr *left = parse_cast(p);
     bool left_is_comparison = false;
+    size_t added = 0;
     for (;;) {
         TokenKind op = cur(p)->kind;
         int precedence = binary_precedence(op);
-        if (precedence == PREC_NONE || precedence < min_precedence) return left;
+        if (precedence == PREC_NONE || precedence < min_precedence || !deeper(p)) {
+            p->depth -= added;
+            return left;
+        }
+        added++;
         const Token *op_token = advance(p);
         if (precedence == PREC_COMPARE && left_is_comparison) {
             Diagnostic *d = error_at(p, "E0204", op_token->offset, op_token->length,
@@ -1031,7 +1094,7 @@ static Expr *parse_range(Parser *p) {
     return close_expr(p, expr);
 }
 
-static Expr *parse_expr(Parser *p) {
+static Expr *parse_ternary(Parser *p) {
     Expr *cond = parse_range(p);
     if (!accept(p, TOK_QUESTION)) return cond;
     Expr *expr = new_expr(p, EXPR_TERNARY, cond->offset);
@@ -1040,6 +1103,13 @@ static Expr *parse_expr(Parser *p) {
     expect(p, TOK_COLON);
     expr->as.ternary.else_expr = parse_expr(p);
     return close_expr(p, expr);
+}
+
+static Expr *parse_expr(Parser *p) {
+    bool counted = deeper(p);
+    Expr *expr = parse_ternary(p);
+    if (counted) p->depth--;
+    return expr;
 }
 
 /* ---- Statements ---- */
@@ -1144,12 +1214,14 @@ static Stmt *parse_variable(Parser *p) {
 }
 
 static Stmt *parse_if(Parser *p) {
+    bool counted = deeper(p); /* `else if` chains are nested */
     Stmt *stmt = new_stmt(p, STMT_IF, advance(p)->offset);
     stmt->as.if_.cond = parse_condition(p);
     stmt->as.if_.then_block = parse_body(p, "if");
     if (accept(p, TOK_KW_ELSE)) {
         stmt->as.if_.else_stmt = check(p, TOK_KW_IF) ? parse_if(p) : parse_body(p, "else");
     }
+    if (counted) p->depth--;
     return close_stmt(p, stmt);
 }
 
@@ -1200,7 +1272,7 @@ static Stmt *parse_for(Parser *p) {
     return close_stmt(p, stmt);
 }
 
-static Stmt *parse_statement(Parser *p) {
+static Stmt *parse_one_statement(Parser *p) {
     skip_error_tokens(p);
     size_t start = cur(p)->offset;
     Stmt *stmt;
@@ -1250,6 +1322,13 @@ static Stmt *parse_statement(Parser *p) {
     }
     expect(p, TOK_SEMICOLON);
     return close_stmt(p, stmt);
+}
+
+static Stmt *parse_statement(Parser *p) {
+    bool counted = deeper(p);
+    Stmt *stmt = parse_one_statement(p);
+    if (counted) p->depth--;
+    return stmt;
 }
 
 /* ---- Declarations ---- */
@@ -1957,10 +2036,12 @@ static bool ui_check_args(Parser *p, const UiNodeKind *kind, Name node, const Ui
         }
         Diagnostic *d = error_at(p, "E0215", prop.offset, prop.length, "`%s` has no property `%.*s`", kind->name,
                                  (int)prop.length, prop.text);
-        char list[128] = "";
-        for (size_t j = 0; kind->props[j]; j++) {
-            if (j) strcat(list, ", ");
-            strcat(list, kind->props[j]);
+        char list[512] = ""; /* 15 names at most (props[16]): cut, never overflowed, if they were longer */
+        size_t used = 0;
+        for (size_t j = 0; kind->props[j] && used < sizeof list; j++) {
+            int n = snprintf(list + used, sizeof list - used, "%s%s", j ? ", " : "", kind->props[j]);
+            if (n < 0) break;
+            used += (size_t)n;
         }
         if (list[0]) diag_help(d, "its properties are: %s", list);
         else diag_help(d, "it has no properties");
@@ -3114,6 +3195,7 @@ static void ui_sync(Parser *p, size_t line) {
 /* `{ items }` */
 static void ui_parse_children(Parser *p, StmtVec *out) {
     if (!expect(p, TOK_LBRACE)) return;
+    bool counted = deeper(p); /* nodes inside nodes */
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
         size_t before = p->pos;
         size_t line = line_of(p, cur(p)->offset);
@@ -3122,6 +3204,7 @@ static void ui_parse_children(Parser *p, StmtVec *out) {
         if (p->pos == before) advance(p);
     }
     expect(p, TOK_RBRACE);
+    if (counted) p->depth--;
 }
 
 /* `name: value` in the body of a window. Returns false if it is not one of its properties. */

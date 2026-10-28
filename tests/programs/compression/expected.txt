@@ -1,0 +1,19 @@
+adler32: true, crc32: true
+crc32 by parts: true, adler32 by parts: true
+empty: 0 bytes -> 5 2 2 2; read back: true, zlib true (8), gzip true (20)
+one byte: 1 bytes -> 6 3 3 3; read back: true, zlib true (9), gzip true (21)
+a sentence: 43 bytes -> 48 43 43 43; read back: true, zlib true (49), gzip true (61)
+repeated: 90000 bytes -> 90010 322 322 322; read back: true, zlib true (328), gzip true (340)
+noise: 100000 bytes -> 100010 100035 100035 100035; read back: true, zlib true (100041), gzip true (100053)
+mixed: 300000 bytes -> 300025 31319 25053 24698; read back: true, zlib true (25059), gzip true (25071)
+zlib: "hello"
+gzip: "hello"
+gzip with a name: "hello hello hello hello"
+two members: "abcdef"
+cut: damaged data
+wrong Adler-32: wrong checksum
+not zlib: damaged data
+wrong CRC-32: wrong checksum
+wrong size: wrong checksum
+into 4 bytes: too large for the room given
+into 5 bytes: 5 "hello"

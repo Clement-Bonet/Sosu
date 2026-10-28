@@ -3,6 +3,55 @@
 A native, low-level, statically typed language, and its compiler `sosuc` (C99, libc only).
 The specification is in [docs/SPEC.md](docs/SPEC.md).
 
+```sosu
+import std.io;
+import std.text;
+
+enum Shape {
+    Circle(f64 radius),
+    Rect(f64 width, f64 height),
+}
+
+f64 area(Shape s) {
+    return match (s) {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+    };
+}
+
+// No exceptions and no null: failure is in the type (`T!E`), absence too (`T?`). What allocates
+// receives an arena.
+i64!text.ParseError total(Arena* arena, str line) {
+    mut i64 sum = 0;
+    for (str word in text.words(arena, line)) {
+        sum += try text.parse_i64(word);
+    }
+    return ok(sum);
+}
+
+// Effects are written in the signature: `main` prints, so it `uses io`.
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);  // no hidden allocation: memory comes from arenas
+    defer arena.free();
+    io.print("{}", area(Rect(3.0, 4.0)));
+    match (total(&arena, "1 2 39")) {
+        ok(n) => io.print("total: {}", n),
+        err(e) => io.print("not a number"),
+    }
+    return 0;
+}
+```
+
+This program prints `12.0` and `total: 42`; it is tested as `tests/programs/readme`.
+
+## Why Sosu
+
+- **Native through C.** `sosuc` writes C99 and calls the C compiler of the system: a program runs wherever there is one, phones included, and calls C libraries directly (`extern "C"`, `sosuc bindgen`).
+- **No surprises in the code you read.** No implicit conversion, no overloading, no macros, no exceptions, no null pointer; integer overflow, bounds and contracts are checked (in debug, bounds in release too); `match` is exhaustive.
+- **What a function does is in its signature.** Its effects (`uses io`, `time`, `random`, `threads`), its failures (`T!E`) and its allocations (an `Arena*` parameter).
+- **Memory without a garbage collector.** Arenas, `defer` and moves. There is no borrow checker as in Rust: some dangling pointers are not caught yet (spec §7.7).
+- **Close to Zig and Odin in spirit** (explicit memory, C interop, a small core), Sosu adds effects in the types, contracts, classes with interfaces, and its own interface toolkit (`platform`, `render`, `ui`, `.ui.sosu` files).
+
 English is the working language of the project: code, comments, compiler messages and documentation.
 
 ## Status
@@ -17,10 +66,10 @@ English is the working language of the project: code, comments, compiler message
 | 6. Arenas, defer, move, unsafe, checks | done (moves of `Arena` and what contains it, `.copy()`) |
 | 7. Tooling | done: `run`, `test`, `fmt`, JSON diagnostics, contracts, `--release`, a language server (`sosuc lsp`) |
 | 8. `platform` / `render` / `ui` / `i18n` | done on the desktop: window, keyboard, mouse, touch and text events, drawing in a canvas of pixels, text (TrueType fonts read and drawn in Sosu, and a built-in 8 by 8 font with the Latin accented letters), widgets in immediate mode (`ui`), `.ui.sosu` interface files with themes, styles and translations; touch and mobile events written, Android and iOS builds are step 9 |
-| 9. Libraries for other languages, then mobile | done: `export "C"` and `sosuc build --lib` (static) or `--lib=shared`, with a C header and errors returned to the host (spec §9.2); `--target android-*` and `ios-*`, `sosuc package --target android` (an APK) and `ios-sim` (spec §11.5) |
+| 9. Libraries for other languages, then mobile | done: `export "C"` and `sosuc build --lib` (static) or `--lib=shared`, with a C header and errors returned to the host (spec §9.2); `--target android-*` and `ios-*`, `sosuc package --target android` (an APK) and `ios-sim` (spec §11.5). The CI builds the APK and the application for the simulator; running them on an emulator, a simulator or a phone is done by hand, and iOS stays a preview until it has run on an iPhone (spec §13.1) |
 | 10. Generics | done: functions, structs, enums and classes with type parameters and constraints, effects as parameters, `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (spec §5.4) |
 | 11. `sosuc bindgen`, `sosuc package`, cross-compilation | done: constants of modules; the declarations of C headers as Sosu modules, checked by the C compiler (`platform` binds SDL3 so); desktop packages with their archive; `--target windows-arm64`, `linux-arm64`, `macos-universal`..., another system with clang and a sysroot (spec §11.6) |
-| Version 1.0 | planned: its content, its order and an estimate of each work in spec §13.1; the libraries to come (mathematics, databases, images, sound, text, files, network...) in spec §8.2 |
+| Version 1.0 | in progress: works 1 to 3 done (lambdas, generic interfaces, threads and channels, C sources in a package), and the modules of `std` of work 4 (spec §8.0); its content and order in spec §13.1, the estimates in [docs/ROADMAP.md](docs/ROADMAP.md), the libraries to come in spec §8.2 |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -37,7 +86,7 @@ build.bat        :: builds build\sosuc.exe and the test programs
 build.bat test   :: builds, then runs the tests
 ```
 
-Linux / macOS (gcc or clang; checked on every push by GitHub Actions, see `.github/workflows/ci.yml`):
+Linux / macOS (gcc or clang). Every push is checked by GitHub Actions on Linux (gcc and clang), Windows (MSVC) and macOS (clang), with the Android build (`.github/workflows/ci.yml`):
 
 ```sh
 make

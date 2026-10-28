@@ -1,0 +1,7 @@
+# The package crypto (spec §8.2): the vectors of FIPS 180-4, RFC 4231, RFC 2202 and RFC 4648.
+[package]
+name = "hashes"
+version = "0.1.0"
+
+[dependencies]
+crypto = { path = "../../../packages/crypto" }

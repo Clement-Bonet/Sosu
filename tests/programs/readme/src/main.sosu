@@ -1,0 +1,36 @@
+import std.io;
+import std.text;
+
+enum Shape {
+    Circle(f64 radius),
+    Rect(f64 width, f64 height),
+}
+
+f64 area(Shape s) {
+    return match (s) {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+    };
+}
+
+// No exceptions and no null: failure is in the type (`T!E`), absence too (`T?`). What allocates
+// receives an arena.
+i64!text.ParseError total(Arena* arena, str line) {
+    mut i64 sum = 0;
+    for (str word in text.words(arena, line)) {
+        sum += try text.parse_i64(word);
+    }
+    return ok(sum);
+}
+
+// Effects are written in the signature: `main` prints, so it `uses io`.
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);  // no hidden allocation: memory comes from arenas
+    defer arena.free();
+    io.print("{}", area(Rect(3.0, 4.0)));
+    match (total(&arena, "1 2 39")) {
+        ok(n) => io.print("total: {}", n),
+        err(e) => io.print("not a number"),
+    }
+    return 0;
+}

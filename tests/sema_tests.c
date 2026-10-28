@@ -539,6 +539,26 @@ static void test_packages(void) {
 }
 
 /* Lambdas and closures (spec §5.5). */
+/* Spec §7.7: a returned pointer or view cannot point into the function that ends (E0371). */
+static void test_dangling(void) {
+    expect_codes("i32* f() { mut i32 x = 1; return &x; }", "E0371");
+    expect_codes("i32* f(mut i32 x) { return &x; }", "E0371");
+    expect_codes("struct P { mut i32 v; }\ni32* f() { mut P p = P{ v: 1 }; return &p.v; }", "E0371");
+    expect_codes("i32* f() { mut i32[3] a = [1, 2, 3]; return &a[1]; }", "E0371");
+    expect_codes("i32[] f() { mut i32[3] a = [1, 2, 3]; return a[0..2]; }", "E0371");
+    expect_codes("i32*? f() { mut i32 x = 1; return some(&x); }", "E0371");
+    expect_codes("struct H { i32* p; }\nH f() { mut i32 x = 1; return H{ p: &x }; }", "E0371");
+    expect_codes("i32* f(bool c, i32* q) { mut i32 x = 1; return c ? q : &x; }", "E0371");
+    expect_codes("fn() -> i32* f() { return () => { mut i32 y = 2; return &y; }; }", "E0371");
+    /* memory that outlives the function */
+    expect_codes("struct P { mut i32 v; }\ni32* f(P* p) { return &p.v; }", "");
+    expect_codes("i32[] f(i32[] s) { return s[0..1]; }", "");
+    expect_codes("i32* f(i32[] s) { return &s[0]; }", "");
+    expect_codes("i32* f(Arena* a) { i32* p = a.alloc(i32); return p; }", "");
+    expect_codes("i32[3] f() { mut i32[3] a = [1, 2, 3]; return a; }", "");
+    expect_codes("struct P { mut i32 v; i32* at() { return &v; } }", "");
+}
+
 static void test_lambdas(void) {
     const char *twice = "i32 twice(fn(i32) -> i32 f, i32 x) { return f(f(x)); }\n";
     char text[1024];
@@ -592,6 +612,7 @@ int main(void) {
     test_body_errors();
     test_generics();
     test_lambdas();
+    test_dangling();
     test_constants();
     test_packages();
     return test_summary("sema tests");

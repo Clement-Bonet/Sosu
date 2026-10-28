@@ -241,6 +241,81 @@ static void check_escape(Body *b, const Expr *e, const char *where) {
     diag_help(d, "it lives as long as the function that creates it: call it, or pass it as an argument (spec §5.5)");
 }
 
+/* True if the place `e` is in a variable or a parameter of the function: the variable itself,
+   or a field or an element of it, reached without going through a pointer or a view. */
+static bool in_local_storage(Body *b, const Expr *e) {
+    switch (e->kind) {
+    case EXPR_NAME:
+        return find_local(b, e->as.name) != NULL;
+    case EXPR_FIELD: {
+        const Type *object = e->as.field.object->type;
+        return object && object->tag != T_POINTER && in_local_storage(b, e->as.field.object);
+    }
+    case EXPR_INDEX: {
+        const Type *object = e->as.index.object->type;
+        return object && object->tag == T_ARRAY && in_local_storage(b, e->as.index.object);
+    }
+    default:
+        return false;
+    }
+}
+
+/* The first part of `e` that would leave a pointer into the function once it returns: `&x`,
+   `&x.f`, `&a[i]`, `a[i..j]` of a local array, also inside `some`, `ok`, `err`, a literal or
+   `?:`. Pointers kept in variables first are not followed: the regions after 1.0 will. */
+static const Expr *dangling_part(Body *b, const Expr *e) {
+    switch (e->kind) {
+    case EXPR_UNARY:
+        return e->as.unary.op == TOK_AMP && in_local_storage(b, e->as.unary.operand) ? e : NULL;
+    case EXPR_INDEX: {
+        const Type *object = e->as.index.object->type;
+        bool view = e->as.index.index->kind == EXPR_RANGE;
+        return view && object && object->tag == T_ARRAY && in_local_storage(b, e->as.index.object) ? e : NULL;
+    }
+    case EXPR_CALL: {
+        const Expr *callee = e->as.call.callee;
+        if (callee->kind != EXPR_NAME || find_local(b, callee->as.name)) return NULL;
+        if (!name_is(callee->as.name, "some") && !name_is(callee->as.name, "ok") && !name_is(callee->as.name, "err")) {
+            return NULL;
+        }
+        for (size_t i = 0; i < e->as.call.arg_count; i++) {
+            const Expr *part = dangling_part(b, e->as.call.args[i]);
+            if (part) return part;
+        }
+        return NULL;
+    }
+    case EXPR_STRUCT_LIT:
+        for (size_t i = 0; i < e->as.struct_lit.field_count; i++) {
+            const Expr *part = dangling_part(b, e->as.struct_lit.fields[i].value);
+            if (part) return part;
+        }
+        return NULL;
+    case EXPR_ARRAY:
+        for (size_t i = 0; !e->as.array.repeat && i < e->as.array.count; i++) {
+            const Expr *part = dangling_part(b, e->as.array.items[i]);
+            if (part) return part;
+        }
+        return e->as.array.repeat ? dangling_part(b, e->as.array.repeat) : NULL;
+    case EXPR_TERNARY: {
+        const Expr *part = dangling_part(b, e->as.ternary.then_expr);
+        return part ? part : dangling_part(b, e->as.ternary.else_expr);
+    }
+    default:
+        return NULL;
+    }
+}
+
+/* A returned value must not point into the function (spec §7.7, E0371). */
+static void check_dangling(Body *b, const Expr *e) {
+    const Expr *part = dangling_part(b, e);
+    if (!part) return;
+    bool view = part->kind == EXPR_INDEX;
+    Diagnostic *d = error_expr(b, "E0371", part, "%s returned would point into this function, which ends",
+                               view ? "a view of a local array" : "the address of a local variable");
+    diag_help(d, view ? "return the array itself, or a view of memory from an arena (`arena.alloc_slice`)"
+                      : "return the value itself, or a pointer to memory from an arena (`arena.alloc`)");
+}
+
 /* True if `local` is a copy held by the innermost lambda being checked. */
 static bool is_captured(Body *b, const Local *local) {
     return b->lambda && (size_t)(local - b->locals.items) < b->lambda->base;
@@ -2484,6 +2559,7 @@ static void check_return(Body *b, Stmt *stmt) {
         if (value) {
             consume(b, value);
             check_escape(b, value, "returned");
+            check_dangling(b, value);
         }
         return;
     }
@@ -2497,6 +2573,7 @@ static void check_return(Body *b, Stmt *stmt) {
         check_expect(b, value, b->ret);
         consume(b, value);
         check_escape(b, value, "returned");
+        check_dangling(b, value);
     } else if (b->ret->tag != T_VOID && !is_error(b->ret)) {
         TypeNames n = {0};
         Diagnostic *d = error_at(b, "E0346", stmt->offset, stmt->length, "`%.*s` must return a `%s`",

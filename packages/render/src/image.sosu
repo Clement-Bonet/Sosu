@@ -1,9 +1,11 @@
 // render.image: PNG images, read in Sosu (spec §10.4), for window icons and the `Image`
-// widget. The compressed data is inflated (RFC 1950 and 1951), its rows unfiltered, and its
-// pixels made 0xAARRGGBB, whatever their kind: gray, RGB, palette, with or without alpha,
-// 1 to 16 bits, interlaced or not. Every read is checked: a damaged file gives `Damaged`,
-// never a read outside of its bytes. The checksums (CRC, Adler-32) are not verified.
+// widget. The compressed data is inflated by `compress.zlib` (its Adler-32 checked), its rows
+// unfiltered, and its pixels made 0xAARRGGBB, whatever their kind: gray, RGB, palette, with or
+// without alpha, 1 to 16 bits, interlaced or not. Every read is checked: a damaged file gives
+// `Damaged`, never a read outside of its bytes. The CRC of the chunks is not verified.
 import std.io;
+import compress.zlib;
+import compress.checksum;
 
 pub enum ImageError {
     Unreadable,  // the file cannot be read
@@ -24,274 +26,6 @@ pub struct Image {
         }
         return pixels[(y * width + x) as usize];
     }
-}
-
-// ---- Inflate: the bits of a deflate stream, least significant first ----
-
-struct Bits {
-    ui8[] data;
-    mut ui64 at = 0;  // in bits
-    mut bool past = false;  // a read went past the end
-
-    // `count` bits (at most 16), the first one lowest.
-    ui32 take(ui32 count) {
-        mut ui32 value = 0;
-        for (ui32 i in 0..count) {
-            ui64 index = at >> 3;
-            if (index >= data.len as ui64) {
-                past = true;
-                return 0;
-            }
-            ui32 bit = data[index as usize] as ui32 >> (at & 7) as ui32 & 1;
-            value = value | bit << i;
-            at += 1;
-        }
-        return value;
-    }
-
-    // Skips to the next whole byte (stored blocks start there).
-    void align() {
-        at = at + 7 & ~(7 as ui64);
-    }
-}
-
-// A canonical Huffman code: how many codes of each length, and the symbols in code order.
-struct Huffman {
-    mut ui16[16] count = [0; 16];
-    mut ui16[320] symbol = [0; 320];
-
-    // The code of `lengths` (0: a symbol without code). False if it is over-subscribed.
-    bool build(ui8[] lengths) {
-        count = [0; 16];
-        for (ui8 l in lengths) {
-            count[l as usize] += 1;
-        }
-        mut i32 left = 1;
-        for (usize l in 1..16) {
-            left = left * 2 - count[l] as i32;
-            if (left < 0) {
-                return false;
-            }
-        }
-        mut ui16[16] offset = [0; 16];
-        for (usize l in 1..15) {
-            offset[l + 1] = offset[l] + count[l];
-        }
-        for (usize s in 0..lengths.len) {
-            usize l = lengths[s] as usize;
-            if (l != 0) {
-                symbol[offset[l] as usize] = s as ui16;
-                offset[l] += 1;
-            }
-        }
-        return true;
-    }
-
-    // The next symbol of `bits`, or -1 if no code matches.
-    i32 decode(Bits* bits) {
-        mut i32 code = 0;
-        mut i32 first = 0;
-        mut i32 index = 0;
-        for (usize l in 1..16) {
-            code = code | bits.take(1) as i32;
-            i32 n = count[l] as i32;
-            if (code - n < first) {
-                return symbol[(index + code - first) as usize] as i32;
-            }
-            index += n;
-            first = first + n << 1;
-            code = code << 1;
-        }
-        return -1;
-    }
-}
-
-// The lengths and distances of the codes 257 to 285 and 0 to 29: base and extra bits.
-ui32[29] length_base() {
-    return [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-}
-
-ui32[29] length_extra() {
-    return [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-}
-
-ui32[30] distance_base() {
-    return [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
-}
-
-ui32[30] distance_extra() {
-    return [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
-}
-
-// What is being inflated into: `out`, filled up to `len`.
-struct Output {
-    ui8[] out;
-    mut usize len = 0;
-
-    bool put(ui8 b) {
-        if (len >= out.len) {
-            return false;
-        }
-        out[len] = b;
-        len += 1;
-        return true;
-    }
-}
-
-// The codes of a block with fixed codes (RFC 1951, 3.2.6).
-bool fixed_codes(Huffman* lengths, Huffman* distances) {
-    mut ui8[288] l = [8; 288];
-    for (usize i in 144..256) {
-        l[i] = 9;
-    }
-    for (usize i in 256..280) {
-        l[i] = 7;
-    }
-    mut ui8[30] d = [5; 30];
-    return lengths.build(l[0..288]) && distances.build(d[0..30]);
-}
-
-// The codes of a block with dynamic codes, read from `bits` (RFC 1951, 3.2.7).
-bool dynamic_codes(Bits* bits, Huffman* lengths, Huffman* distances) {
-    ui32 nlen = bits.take(5) + 257;
-    ui32 ndist = bits.take(5) + 1;
-    ui32 ncode = bits.take(4) + 4;
-    if (nlen > 286 || ndist > 30) {
-        return false;
-    }
-    ui32[19] order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-    mut ui8[19] code_lengths = [0; 19];
-    for (ui32 i in 0..ncode) {
-        code_lengths[order[i as usize] as usize] = bits.take(3) as ui8;
-    }
-    mut Huffman codes = Huffman{ };
-    if (!codes.build(code_lengths[0..19])) {
-        return false;
-    }
-    mut ui8[316] l = [0; 316];
-    ui32 total = nlen + ndist;
-    mut ui32 i = 0;
-    while (i < total) {
-        i32 s = codes.decode(bits);
-        if (s < 0 || bits.past) {
-            return false;
-        }
-        if (s < 16) {
-            l[i as usize] = s as ui8;
-            i += 1;
-            continue;
-        }
-        mut ui8 repeated = 0;
-        mut ui32 times = 0;
-        if (s == 16) {
-            if (i == 0) {
-                return false;
-            }
-            repeated = l[(i - 1) as usize];
-            times = 3 + bits.take(2);
-        } else if (s == 17) {
-            times = 3 + bits.take(3);
-        } else {
-            times = 11 + bits.take(7);
-        }
-        if (i + times > total) {
-            return false;
-        }
-        for (ui32 k in 0..times) {
-            l[(i + k) as usize] = repeated;
-        }
-        i += times;
-    }
-    if (l[256] == 0) {
-        return false;  // no end of block
-    }
-    return lengths.build(l[0..nlen as usize]) && distances.build(l[nlen as usize..total as usize]);
-}
-
-// The symbols of a compressed block, until its end. False if the data is damaged.
-bool inflate_block(Bits* bits, Output* output, Huffman* lengths, Huffman* distances) {
-    ui32[29] lbase = length_base();
-    ui32[29] lextra = length_extra();
-    ui32[30] dbase = distance_base();
-    ui32[30] dextra = distance_extra();
-    while (true) {
-        i32 s = lengths.decode(bits);
-        if (s < 0 || bits.past) {
-            return false;
-        }
-        if (s < 256) {
-            if (!output.put(s as ui8)) {
-                return false;
-            }
-        } else if (s == 256) {
-            return true;
-        } else {
-            usize code = (s - 257) as usize;
-            if (code >= 29) {
-                return false;
-            }
-            ui32 length = lbase[code] + bits.take(lextra[code]);
-            i32 d = distances.decode(bits);
-            if (d < 0 || d >= 30) {
-                return false;
-            }
-            usize distance = (dbase[d as usize] + bits.take(dextra[d as usize])) as usize;
-            if (distance > output.len || bits.past) {
-                return false;
-            }
-            for (ui32 k in 0..length) {
-                if (!output.put(output.out[output.len - distance])) {
-                    return false;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-// Inflates the zlib stream `data` into `out`; the number of bytes written, or none if the
-// stream is damaged.
-usize? inflate(ui8[] data, ui8[] out) {
-    if (data.len < 2 || data[0] & 0x0F != 8 || (data[0] as ui32 * 256 + data[1] as ui32) % 31 != 0 || data[1] & 0x20 != 0) {
-        return none;  // not deflate, or a preset dictionary (never in a PNG file)
-    }
-    mut Bits bits = Bits{ data: data[2..data.len] };
-    mut Output output = Output{ out: out };
-    mut Huffman lengths = Huffman{ };
-    mut Huffman distances = Huffman{ };
-    mut bool last = false;
-    while (!last) {
-        last = bits.take(1) == 1;
-        ui32 kind = bits.take(2);
-        if (kind == 0) {  // stored
-            bits.align();
-            ui32 length = bits.take(16);
-            ui32 complement = bits.take(16);
-            if (length != ~complement & 0xFFFF) {
-                return none;
-            }
-            for (ui32 k in 0..length) {
-                ui32 b = bits.take(8);
-                if (bits.past || !output.put(b as ui8)) {
-                    return none;
-                }
-            }
-        } else if (kind == 1) {
-            if (!fixed_codes(&lengths, &distances) || !inflate_block(&bits, &output, &lengths, &distances)) {
-                return none;
-            }
-        } else if (kind == 2) {
-            if (!dynamic_codes(&bits, &lengths, &distances) || !inflate_block(&bits, &output, &lengths, &distances)) {
-                return none;
-            }
-        } else {
-            return none;
-        }
-        if (bits.past) {
-            return none;
-        }
-    }
-    return some(output.len);
 }
 
 // ---- PNG: chunks, filters, interlacing and pixels ----
@@ -526,13 +260,13 @@ pub Image!ImageError decode(Arena* arena, ui8[] data) {
         }
     }
     mut ui8[] raw = arena.alloc_slice(ui8, expected);
-    match (inflate(stream, raw)) {
-        some(written) => {
+    match (zlib.decompress_into(stream, raw)) {
+        ok(written) => {
             if (written != expected) {
                 return err(Damaged);
             }
         },
-        none => {
+        err(e) => {
             return err(Damaged);
         },
     }
@@ -622,7 +356,7 @@ struct Builder {
         for (ui8 b in raw) {
             put(b as ui32);
         }
-        put32(0);  // Adler-32, not checked
+        put32(checksum.adler32(raw));
         put32(0);  // CRC
     }
 

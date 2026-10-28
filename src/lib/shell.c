@@ -95,3 +95,21 @@ char *shell_last_entry(const char *dir) {
 #endif
     return last;
 }
+
+bool shell_dir_exists(const char *path) {
+#ifdef _WIN32
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    DIR *folder = opendir(path);
+    if (!folder) return false;
+    closedir(folder);
+    return true;
+#endif
+}
+
+#ifdef _WIN32
+void shell_wait_second(void) {
+    Sleep(1000);
+}
+#endif

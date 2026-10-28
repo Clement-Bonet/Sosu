@@ -1,0 +1,4 @@
+# Deflate, zlib and gzip in Sosu (spec §8.2): compression and decompression.
+[package]
+name = "compress"
+version = "0.1.0"

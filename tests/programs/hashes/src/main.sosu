@@ -1,0 +1,142 @@
+// The package crypto (spec §8.2): hashes, HMAC, base64, hexadecimal, random bytes.
+import std.io;
+import std.text;
+import crypto.sha256;
+import crypto.sha1;
+import crypto.hmac;
+import crypto.base64;
+import crypto.hex;
+import crypto.secure;
+
+void hashes(Arena* arena, str message) uses io {
+    mut ui8[32] long = sha256.sum(message.bytes);
+    mut ui8[20] short = sha1.sum(message.bytes);
+    io.print("\"{}\"", message);
+    io.print("  sha256 {}", hex.encode(arena, long[0..32]));
+    io.print("  sha1   {}", hex.encode(arena, short[0..20]));
+}
+
+void round_trip(Arena* arena, str message) uses io {
+    str standard = base64.encode(arena, message.bytes);
+    str url = base64.encode_url(arena, message.bytes);
+    str back = match (base64.decode(arena, standard)) {
+        some(bytes) => as_text(bytes),
+        none => "(none)",
+    };
+    str url_back = match (base64.decode_url(arena, url)) {
+        some(bytes) => as_text(bytes),
+        none => "(none)",
+    };
+    io.print("\"{}\" -> {} {} -> \"{}\" \"{}\"", message, standard, url, back, url_back);
+}
+
+void bad_base64(Arena* arena, str s) uses io {
+    bool refused = match (base64.decode(arena, s)) {
+        some(bytes) => false,
+        none => true,
+    };
+    io.print("base64 \"{}\" refused: {}", s, refused);
+}
+
+// `count` bytes of `value`.
+ui8[] bytes_of(Arena* arena, ui8 value, usize count) {
+    mut ui8[] bytes = arena.alloc_slice(ui8, count);
+    for (usize i in 0..count) {
+        bytes[i] = value;
+    }
+    return bytes;
+}
+
+i32 main() uses io, random {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+
+    hashes(&arena, "");
+    hashes(&arena, "abc");
+    hashes(&arena, "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+    // a million times "a", fed by parts that do not fall on the blocks of 64 bytes
+    str many = text.repeat(&arena, "a", 1000);
+    mut sha256.Sha256 h = sha256.start();
+    mut sha1.Sha1 h1 = sha1.start();
+    for (i32 i in 0..1000) {
+        h.update(many.bytes[0..300]);
+        h.update(many.bytes[300..1000]);
+        h1.update(many.bytes);
+    }
+    mut ui8[32] million = h.finish();
+    mut ui8[20] million1 = h1.finish();
+    io.print("a million a: {} {}", hex.encode(&arena, million[0..32]), hex.encode(&arena, million1[0..20]));
+
+    // HMAC: RFC 4231 cases 1 and 2, a key longer than a block (case 6), RFC 2202 case 2
+    ui8[] key = bytes_of(&arena, 0x0B, 20);
+    mut ui8[32] m1 = hmac.with_sha256(key, "Hi There".bytes);
+    mut ui8[32] m2 = hmac.with_sha256("Jefe".bytes, "what do ya want for nothing?".bytes);
+    ui8[] long_key = bytes_of(&arena, 0xAA, 131);
+    mut ui8[32] m6 = hmac.with_sha256(long_key, "Test Using Larger Than Block-Size Key - Hash Key First".bytes);
+    mut ui8[20] s2 = hmac.with_sha1("Jefe".bytes, "what do ya want for nothing?".bytes);
+    io.print("hmac-sha256 {}", hex.encode(&arena, m1[0..32]));
+    io.print("hmac-sha256 {}", hex.encode(&arena, m2[0..32]));
+    io.print("hmac-sha256 {}", hex.encode(&arena, m6[0..32]));
+    io.print("hmac-sha1   {}", hex.encode(&arena, s2[0..20]));
+    mut ui8[32] again = hmac.with_sha256("Jefe".bytes, "what do ya want for nothing?".bytes);
+    io.print("equal {} {} {}", hmac.equal(m2[0..32], again[0..32]), hmac.equal(m1[0..32], m2[0..32]), hmac.equal(m1[0..32], m1[0..31]));
+
+    // base64: RFC 4648, section 10
+    round_trip(&arena, "");
+    round_trip(&arena, "f");
+    round_trip(&arena, "fo");
+    round_trip(&arena, "foo");
+    round_trip(&arena, "foob");
+    round_trip(&arena, "fooba");
+    round_trip(&arena, "foobar");
+    mut ui8[3] high = [0xFB, 0xFF, 0xBF];
+    io.print("{} {}", base64.encode(&arena, high[0..3]), base64.encode_url(&arena, high[0..3]));
+    bad_base64(&arena, "Zm9");
+    bad_base64(&arena, "Zm=v");
+    bad_base64(&arena, "Zm9v!A==");
+    bad_base64(&arena, "Zh==");
+
+    // hexadecimal
+    match (hex.decode(&arena, "00ff7Fa0")) {
+        some(bytes) => io.print("hex: {} bytes, {}", bytes.len, hex.encode(&arena, bytes)),
+        none => io.print("hex: none"),
+    }
+    bool odd = match (hex.decode(&arena, "abc")) {
+        some(bytes) => false,
+        none => true,
+    };
+    bool bad = match (hex.decode(&arena, "zz")) {
+        some(bytes) => false,
+        none => true,
+    };
+    io.print("hex refused: {} {}", odd, bad);
+
+    // random bytes: their values change on each run, so only their shape is printed
+    match (secure.token(&arena, 16)) {
+        some(t) => io.print("token of {} digits", t.len),
+        none => io.print("no random bytes"),
+    }
+    mut bool in_range = true;
+    for (i32 i in 0..1000) {
+        match (secure.below(6)) {
+            some(n) => {
+                in_range = in_range && n < 6;
+            },
+            none => {
+                in_range = false;
+            },
+        }
+    }
+    mut ui8[64] a = [0; 64];
+    mut ui8[64] b = [0; 64];
+    bool filled = secure.fill(a[0..64]) && secure.fill(b[0..64]);
+    io.print("below in range: {}; two fills differ: {}", in_range, filled && !hmac.equal(a[0..64], b[0..64]));
+    return 0;
+}
+
+str as_text(ui8[] bytes) {
+    return match (str.from_bytes(bytes)) {
+        ok(s) => s,
+        err(e) => "(not UTF-8)",
+    };
+}
