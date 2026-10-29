@@ -54,6 +54,11 @@ This program prints `12.0` and `total: 42`; it is tested as `tests/programs/read
 
 English is the working language of the project: code, comments, compiler messages and documentation.
 
+## How Sosu is made
+
+Sosu is designed by Clément Bonet. Much of the compiler, the standard library and the documentation was written with an AI coding assistant (Claude), under my direction:
+I define the language, review the changes, and the CI tests every change on Windows, Linux and macOS.
+
 ## Status
 
 | Step (roadmap §13) | Status |
