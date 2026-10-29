@@ -1,5 +1,6 @@
 @echo off
-rem Builds sosuc with MSVC. Usage: build.bat [test]
+rem Builds sosuc with MSVC. Usage: build.bat [test | release]
+rem release: sosuc alone, optimized, for the archives of a release (.github/workflows/release.yml)
 setlocal
 cd /d "%~dp0"
 
@@ -12,6 +13,12 @@ set "PATH=%PATH%;%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || goto :no_cl
 
 :have_cl
+if /i not "%1"=="release" goto :debug
+if not exist build\obj\release mkdir build\obj\release
+cl /nologo /std:c11 /W4 /WX /utf-8 /O2 /D_CRT_SECURE_NO_WARNINGS /Isrc\lib /Fobuild\obj\release\ /Febuild\sosuc.exe src\lib\*.c src\sosuc\main.c || exit /b 1
+exit /b 0
+
+:debug
 if not exist build\obj\sosuc mkdir build\obj\sosuc
 if not exist build\obj\tests mkdir build\obj\tests
 set CFLAGS=/nologo /std:c11 /W4 /WX /utf-8 /Zi /Od /D_CRT_SECURE_NO_WARNINGS /Isrc\lib

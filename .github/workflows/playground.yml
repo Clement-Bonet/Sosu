@@ -1,0 +1,61 @@
+name: Playground
+
+# The compiler in a web page, on GitHub Pages: rebuilt when main changes what it is made of.
+# Settings > Pages > Source must be "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths: ['src/lib/**', 'src/playground/**', 'lib/**', 'playground/**', 'Makefile', '.github/workflows/playground.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push replaces the one waiting.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Emscripten
+        timeout-minutes: 10
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 4.0.10
+          "$RUNNER_TEMP/emsdk/emsdk" activate 4.0.10
+      - name: Build the playground
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          make playground
+      # The module loads and compiles the program of the README, as the page does.
+      - name: Smoke test
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          node -e '
+            const fs = require("fs");
+            const text = fs.readFileSync("tests/programs/readme/src/main.sosu", "utf8");
+            require("./build/playground/sosuc.js")().then(m => {
+              const out = m.UTF8ToString(m.ccall("sosu_playground_compile", "number", ["string"], [text]));
+              if (out[0] !== "c") { console.error(out.slice(1)); process.exit(1); }
+              console.log("C: " + out.length + " bytes");
+            });'
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/playground
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

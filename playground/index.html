@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sosu Playground</title>
+<meta name="description" content="Write Sosu in the browser: sosuc checks it and shows the C99 it generates.">
+<style>
+:root {
+    --bg: #f7f7f5;
+    --panel: #ffffff;
+    --border: #dcdcd6;
+    --text: #1d1d1b;
+    --muted: #6b6b66;
+    --accent: #b5462f;
+    --accent-text: #ffffff;
+    --error: #b3261e;
+    --code: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #161615;
+        --panel: #1f1f1d;
+        --border: #3a3a36;
+        --text: #e8e8e3;
+        --muted: #9a9a93;
+        --accent: #e07a5f;
+        --accent-text: #161615;
+        --error: #f2867c;
+    }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+}
+header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+header h1 span { color: var(--accent); }
+.spacer { flex: 1; }
+header a { color: var(--muted); text-decoration: none; }
+header a:hover { color: var(--text); }
+button, select {
+    font: inherit;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+main {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+}
+section { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+section + section { border-left: 1px solid var(--border); }
+.bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+}
+textarea, pre {
+    flex: 1;
+    margin: 0;
+    padding: 12px 16px;
+    border: 0;
+    background: var(--panel);
+    color: var(--text);
+    font: 13px/1.55 var(--code);
+    tab-size: 4;
+    overflow: auto;
+    white-space: pre;
+}
+textarea { resize: none; outline: none; }
+pre.error { color: var(--error); }
+footer { padding: 6px 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+footer a { color: inherit; }
+@media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    section + section { border-left: 0; border-top: 1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+<header>
+    <h1><span>Sosu</span> Playground</h1>
+    <select id="example" aria-label="Example"></select>
+    <button id="compile" class="primary" disabled title="Ctrl+Enter">Compile</button>
+    <button id="format" disabled>Format</button>
+    <button id="share">Share</button>
+    <div class="spacer"></div>
+    <a href="https://github.com/Clement-Bonet/Sosu">GitHub</a>
+    <a href="https://github.com/Clement-Bonet/Sosu/blob/main/docs/SPEC.md">Spec</a>
+    <a href="https://github.com/Clement-Bonet/Sosu/releases">Download</a>
+</header>
+<main>
+    <section>
+        <div class="bar">main.sosu</div>
+        <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Sosu source"></textarea>
+    </section>
+    <section>
+        <div class="bar"><span id="status">Loading the compiler…</span><div class="spacer"></div><button id="copy" disabled>Copy</button></div>
+        <pre id="output" aria-live="polite"></pre>
+    </section>
+</main>
+<footer>
+    sosuc runs in your browser (WebAssembly): it checks the program and shows the C99 it generates.
+    To run it, <a href="https://github.com/Clement-Bonet/Sosu/releases">install sosuc</a> and use <code>sosuc run</code>.
+</footer>
+<script src="sosuc.js"></script>
+<script src="playground.js"></script>
+</body>
+</html>
