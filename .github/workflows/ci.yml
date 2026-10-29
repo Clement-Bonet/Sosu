@@ -39,6 +39,11 @@ jobs:
           sudo ldconfig
       - name: Build and test
         run: make test
+      - name: docs/REFERENCE.md is up to date
+        if: matrix.cc == 'gcc'
+        run: |
+          make doc
+          git diff --exit-code docs/REFERENCE.md || { echo "::error::run make doc and commit docs/REFERENCE.md"; exit 1; }
       # The dummy video driver needs no screen: the window opens, draws a frame and closes itself.
       - name: Window test (platform)
         timeout-minutes: 3
