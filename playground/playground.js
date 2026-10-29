@@ -9,12 +9,14 @@ import std.text;
 enum Shape {
     Circle(f64 radius),
     Rect(f64 width, f64 height),
+    Square(f64 side),
 }
 
-f64 area(Shape s) {
-    return match (s) {
+f64 area(Shape shape) {
+    return match (shape) {
         Circle(r) => 3.14159 * r * r,
         Rect(w, h) => w * h,
+        Square(s) => s * s,
     };
 }
 
@@ -30,9 +32,11 @@ i64!text.ParseError total(Arena* arena, str line) {
 
 // Effects are written in the signature: \`main\` prints, so it \`uses io\`.
 i32 main() uses io {
-    mut Arena arena = Arena.new(4 * KB);  // no hidden allocation: memory comes from arenas
+    mut Arena arena = Arena.new(6 * KB);  // no hidden allocation: memory comes from arenas
     defer arena.free();
+    io.print("{}", area(Circle(2.0)));
     io.print("{}", area(Rect(3.0, 4.0)));
+    io.print("{}", area(Square(5.0)));
     match (total(&arena, "1 2 39")) {
         ok(n) => io.print("total: {}", n),
         err(e) => io.print("not a number"),
