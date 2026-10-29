@@ -1,6 +1,13 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L /* symlink with -std=c99 */
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "path.h"
 #include "program.h"
@@ -280,6 +287,25 @@ static char *read_lock(void) {
     return text;
 }
 
+#ifndef _WIN32
+/* A link to a folder is removed itself: the folder it points to keeps its content. */
+static void test_remove_link(void) {
+    shell_remove_dir("build/link_test");
+    shell_make_dir("build/link_test/target");
+    shell_make_dir("build/link_test/tree");
+    write_text("build/link_test/target/file", "kept");
+    bool linked = symlink("../target", "build/link_test/tree/link") == 0;
+    CHECK(linked, "cannot create a symbolic link");
+    if (linked) {
+        shell_remove_dir("build/link_test/tree");
+        FILE *file = fopen("build/link_test/target/file", "rb");
+        CHECK(file != NULL, "removing a folder followed a link into its target");
+        if (file) fclose(file);
+    }
+    shell_remove_dir("build/link_test");
+}
+#endif
+
 static void test_git(void) {
     shell_remove_dir("build/git_test");
     shell_make_dir("build/git_test/shapes/src");
@@ -339,6 +365,9 @@ int main(void) {
     test_paths();
     test_manifest();
     test_program();
+#ifndef _WIN32
+    test_remove_link();
+#endif
     test_git();
     return test_summary("package tests");
 }

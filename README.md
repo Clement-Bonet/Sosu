@@ -47,9 +47,10 @@ This program prints `12.0` and `total: 42`; it is tested as `tests/programs/read
 ## Why Sosu
 
 - **Native through C.** `sosuc` writes C99 and calls the C compiler of the system: a program runs wherever there is one, phones included, and calls C libraries directly (`extern "C"`, `sosuc bindgen`).
-- **No surprises in the code you read.** No implicit conversion, no overloading, no macros, no exceptions, no null pointer; integer overflow, bounds and contracts are checked (in debug, bounds in release too); `match` is exhaustive.
+- **Few surprises in the code you read.** No implicit conversion, no overloading, no macros, no exceptions, no null pointer; integer overflow, bounds and contracts are checked (in debug, bounds in release too); `match` is exhaustive.
 - **What a function does is in its signature.** Its effects (`uses io`, `time`, `random`, `threads`), its failures (`T!E`) and its allocations (an `Arena*` parameter).
-- **Memory without a garbage collector.** Arenas, `defer` and moves. There is no borrow checker as in Rust: some dangling pointers are not caught yet (spec §7.7).
+- **Memory without a garbage collector.** Arenas, `defer` and moves. **Not memory safe yet:** there is no borrow checker as in Rust, so some dangling pointers (to a freed arena or a dead local, kept in a variable) are not caught, and using one is undefined behaviour ([docs/SPEC.md](docs/SPEC.md) §7.7).
+- **Safe by design.** Safety is a design rule: what is not checked yet is listed in spec §7.7, and memory safety is a goal for 1.0.
 - **Close to Zig and Odin in spirit** (explicit memory, C interop, a small core), Sosu adds effects in the types, contracts, classes with interfaces, and its own interface toolkit (`platform`, `render`, `ui`, `.ui.sosu` files).
 
 English is the working language of the project: code, comments, compiler messages and documentation.
