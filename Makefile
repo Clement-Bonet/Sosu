@@ -59,7 +59,17 @@ build/playground/sosuc.js: $(LIB_SRC) $(LIB_HDR) src/playground/playground.c pla
 	$(EMCC) $(CPPFLAGS) -std=c99 -Wall -O2 $(PLAYGROUND_FLAGS) --embed-file lib@/lib -o $@ $(LIB_SRC) src/playground/playground.c
 	cp playground/index.html playground/playground.js build/playground/
 
+# The reference of the public API of `core` and `std`, from the comments of lib/ (src/docgen).
+# Committed; the CI checks that it is up to date.
+DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu))
+
+doc: build/docgen
+	./build/docgen docs/REFERENCE.md $(DOC_SOURCES)
+
+build/docgen: src/docgen/docgen.c | build
+	$(CC) $(CFLAGS) -o $@ src/docgen/docgen.c
+
 clean:
 	rm -rf build
 
-.PHONY: all test clean playground
+.PHONY: all test clean playground doc
