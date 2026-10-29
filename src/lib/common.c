@@ -4,20 +4,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void out_of_memory(void) {
+void sosu_out_of_memory(void) {
     fputs("sosuc: out of memory\n", stderr);
     exit(3);
 }
 
 void *sosu_alloc(size_t size) {
     void *ptr = malloc(size ? size : 1);
-    if (!ptr) out_of_memory();
+    if (!ptr) sosu_out_of_memory();
     return ptr;
 }
 
 void *sosu_realloc(void *ptr, size_t size) {
     void *result = realloc(ptr, size ? size : 1);
-    if (!result) out_of_memory();
+    if (!result) sosu_out_of_memory();
     return result;
 }
 

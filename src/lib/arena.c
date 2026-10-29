@@ -22,6 +22,8 @@ struct ArenaBlock {
 
 void *arena_alloc(Arena *arena, size_t size) {
     size_t align = sizeof(MaxAlign);
+    /* the sums below would wrap around and allocate too little: no machine has that memory */
+    if (size > SIZE_MAX - sizeof(ArenaBlock) - align) sosu_out_of_memory();
     size = (size + align - 1) / align * align;
     if (!arena->head || arena->head->cap - arena->head->used < size) {
         size_t cap = size > BLOCK_SIZE ? size : BLOCK_SIZE;
