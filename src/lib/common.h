@@ -8,6 +8,8 @@
 
 #define SOSU_VERSION "0.0.1"
 
+/* Stops sosuc with a message: memory could not be had (exit code 3). */
+void sosu_out_of_memory(void);
 /* Allocation helpers: they never return NULL (the compiler exits on out of memory). */
 void *sosu_alloc(size_t size);
 void *sosu_realloc(void *ptr, size_t size);
