@@ -131,6 +131,6 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           prerelease=""
-          case "$VERSION" in 0.*) prerelease="--prerelease" ;; esac
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
             --title "Sosu $VERSION" --generate-notes --verify-tag $prerelease
