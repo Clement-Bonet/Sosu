@@ -45,7 +45,21 @@ test: all
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@echo "samples: ok"
 
+# The compiler in a web page, with Emscripten: playground/ and the module it loads, the library
+# embedded at /lib. The compiler recurses on the syntax trees: the default stack (64 KB) is too
+# small. Published by .github/workflows/playground.yml.
+EMCC ?= emcc
+PLAYGROUND_FLAGS := -sMODULARIZE=1 -sEXPORT_NAME=createSosu -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=8MB \
+	-sEXPORTED_FUNCTIONS=_sosu_playground_compile,_sosu_playground_format,_free -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString
+
+playground: build/playground/sosuc.js
+
+build/playground/sosuc.js: $(LIB_SRC) $(LIB_HDR) src/playground/playground.c playground/index.html playground/playground.js $(shell find lib -type f)
+	mkdir -p build/playground
+	$(EMCC) $(CPPFLAGS) -std=c99 -Wall -O2 $(PLAYGROUND_FLAGS) --embed-file lib@/lib -o $@ $(LIB_SRC) src/playground/playground.c
+	cp playground/index.html playground/playground.js build/playground/
+
 clean:
 	rm -rf build
 
-.PHONY: all test clean
+.PHONY: all test clean playground
