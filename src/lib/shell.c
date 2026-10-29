@@ -90,7 +90,12 @@ static void remove_tree(const char *path) {
     }
     RemoveDirectoryA(path);
 #else
-    if (unlink(path) == 0) return; /* a file or a link */
+    struct stat info;
+    if (lstat(path, &info) != 0) return;
+    if (!S_ISDIR(info.st_mode)) { /* a file or a link: removed itself, even to a folder */
+        unlink(path);
+        return;
+    }
     DIR *folder = opendir(path);
     if (!folder) return;
     struct dirent *entry;
