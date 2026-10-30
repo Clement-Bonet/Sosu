@@ -1,0 +1,8 @@
+# The promotional poster, drawn by Sosu: a render.Canvas written to build/poster.png.
+# Run it from the root of the repository: sosuc run examples/poster
+[package]
+name = "poster"
+version = "0.1.0"
+
+[dependencies]
+render = { path = "../../packages/render" }

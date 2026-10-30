@@ -1,0 +1,551 @@
+// The promotional poster of Sosu, drawn by a Sosu program into a render.Canvas and written as
+// examples/poster/build/poster.png (1536 by 1024). Run it from the root of the repository.
+import std.io;
+import std.fs;
+import std.text;
+import render.canvas;
+import render.image;
+import render.png;
+import render.truetype;
+
+i32 W = 1536;
+i32 H = 1024;
+i32 HORIZON = 620;
+
+struct Fonts {
+    truetype.Font* logo;
+    truetype.Font* bold;
+    truetype.Font* mono;
+    truetype.Font* body;
+    bool faux_logo;
+    bool faux_bold;
+}
+
+canvas.Color rgb(i32 r, i32 g, i32 b) {
+    return canvas.Color{ r: r as ui8, g: g as ui8, b: b as ui8 };
+}
+
+canvas.Color rgba(i32 r, i32 g, i32 b, i32 a) {
+    return canvas.Color{ r: r as ui8, g: g as ui8, b: b as ui8, a: a as ui8 };
+}
+
+i32 lerp(i32 a, i32 b, f32 t) {
+    return a + ((b - a) as f32 * t) as i32;
+}
+
+canvas.Rect box(f32 x, f32 y, f32 w, f32 h) {
+    return canvas.Rect{ x: x, y: y, w: w, h: h };
+}
+
+// ---- Noise: a smooth, deterministic landscape ----
+
+f32 random(i32 cell, ui64 seed) {
+    mut ui64 n = (cell + 100000) as ui64 * 7919 + seed * 104729 + 13;
+    n = (n * 1103515245 + 12345) % 2147483648;
+    n = (n * 1103515245 + 12345) % 2147483648;
+    return (n % 10000) as f32 / 10000.0;
+}
+
+f32 noise(i32 x, i32 period, ui64 seed) {
+    i32 cell = x / period;
+    mut f32 t = (x - cell * period) as f32 / period as f32;
+    t = t * t * (3.0 - 2.0 * t);
+    return random(cell, seed) * (1.0 - t) + random(cell + 1, seed) * t;
+}
+
+f32 ridge(i32 x, ui64 seed) {
+    return noise(x, 260, seed) * 0.6 + noise(x, 90, seed + 1) * 0.28 + noise(x, 31, seed + 2) * 0.12;
+}
+
+// ---- Shapes ----
+
+// A triangle, filled row by row between the edges that cross the row.
+void triangle(canvas.Canvas* cv, f32 x0, f32 y0, f32 x1, f32 y1, f32 x2, f32 y2, canvas.Color color) {
+    f32 top = min(y0, min(y1, y2));
+    f32 bottom = max(y0, max(y1, y2));
+    for (i32 y in (top as i32)..(bottom as i32 + 1)) {
+        f32 row = y as f32 + 0.5;
+        mut f32 left = 100000.0;
+        mut f32 right = -100000.0;
+        f32[3] xs = [x0, x1, x2];
+        f32[3] ys = [y0, y1, y2];
+        for (usize e in 0..3) {
+            usize n = (e + 1) % 3;
+            f32 ay = ys[e];
+            f32 by = ys[n];
+            if ((ay <= row && by > row) || (by <= row && ay > row)) {
+                f32 x = xs[e] + (row - ay) / (by - ay) * (xs[n] - xs[e]);
+                left = min(left, x);
+                right = max(right, x);
+            }
+        }
+        if (right > left) {
+            cv.fill(box(left, y as f32, right - left, 1.0), color);
+        }
+    }
+}
+
+void thick_line(canvas.Canvas* cv, f32 x0, f32 y0, f32 x1, f32 y1, canvas.Color color) {
+    for (i32 d in 0..3) {
+        cv.line(x0 as i32 + d % 2, y0 as i32 + d / 2, x1 as i32 + d % 2, y1 as i32 + d / 2, color);
+    }
+}
+
+void pine(canvas.Canvas* cv, f32 cx, f32 ground, f32 height, f32 width, canvas.Color color) {
+    cv.fill(box(cx - width * 0.05, ground - height * 0.1, width * 0.1, height * 0.1), color);
+    for (i32 k in 0..5) {
+        f32 top = ground - height + height * 0.17 * k as f32;
+        f32 reach = width * (0.38 + 0.15 * k as f32) * 0.5;
+        triangle(cv, cx, top, cx - reach, top + height * 0.3, cx + reach, top + height * 0.3, color);
+    }
+}
+
+// ---- Background ----
+
+canvas.Color sky(f32 t) {
+    if (t < 0.3) {
+        f32 u = t / 0.3;
+        return rgb(lerp(8, 30, u), lerp(16, 38, u), lerp(60, 110, u));
+    }
+    if (t < 0.55) {
+        f32 u = (t - 0.3) / 0.25;
+        return rgb(lerp(30, 150, u), lerp(38, 70, u), lerp(110, 130, u));
+    }
+    f32 u = (t - 0.55) / 0.45;
+    return rgb(lerp(150, 255, u), lerp(70, 150, u), lerp(130, 60, u));
+}
+
+void landscape(canvas.Canvas* cv) {
+    for (i32 y in 0..HORIZON) {
+        cv.fill(box(0.0, y as f32, W as f32, 1.0), sky(y as f32 / HORIZON as f32));
+    }
+    // three ridges, darker and taller toward the front
+    for (i32 layer in 0..3) {
+        f32 shade = layer as f32 / 2.0;
+        f32 ground = (HORIZON - 70 + layer * 22) as f32;
+        f32 amp = (150 - layer * 35) as f32;
+        canvas.Color color = rgb(lerp(70, 8, shade), lerp(60, 14, shade), lerp(120, 34, shade));
+        for (i32 x in 0..W) {
+            f32 lift = x as f32 / W as f32 * 70.0;
+            f32 top = ground - amp * ridge(x + layer * 400, (11 + layer) as ui64) - lift * (1.0 - layer as f32 * 0.3) + 20.0;
+            cv.fill(box(x as f32, top, 1.0, HORIZON as f32 - top), color);
+        }
+    }
+    // the sun, rising over the lake
+    cv.push_clip(box(0.0, 0.0, W as f32, HORIZON as f32));
+    for (i32 k in 0..14) {
+        cv.fill_circle(465.0, HORIZON as f32 + 18.0, 260.0 - k as f32 * 17.0, rgba(255, 170, 70, 9));
+    }
+    cv.fill_circle(465.0, HORIZON as f32 + 18.0, 34.0, rgb(255, 214, 120));
+    cv.pop_clip();
+    // the lake: the sky and the ridges upside down, darker and bluer
+    for (i32 d in 0..(H - HORIZON)) {
+        i32 src = HORIZON - 1 - d;
+        if (src < 0) {
+            break;
+        }
+        i32 wave = ((d / 6) % 5 - 2) * (1 + d / 120);
+        for (i32 x in 0..W) {
+            ui32 p = cv.at(x + wave, src);
+            i32 r = lerp((p >> 16 & 0xFF) as i32, 12, 0.45);
+            i32 g = lerp((p >> 8 & 0xFF) as i32, 22, 0.45);
+            i32 b = lerp((p & 0xFF) as i32, 60, 0.45);
+            cv.fill(box(x as f32, (HORIZON + d) as f32, 1.0, 1.0), rgb(r, g, b));
+        }
+    }
+    for (i32 k in 0..26) {
+        f32 y = (HORIZON + 6 + k * 9) as f32;
+        f32 half = 14.0 + k as f32 * 6.5 + random(k, 5) * 30.0;
+        cv.fill(box(465.0 - half, y, half * 2.0, 2.0), rgba(255, 190, 110, 150 - k * 4));
+    }
+    // light at the horizon line
+    cv.fill(box(0.0, HORIZON as f32 - 1.0, W as f32, 2.0), rgba(255, 200, 140, 40));
+    // pines along the bottom, on a strip of dark ground
+    cv.fill(box(0.0, (H - 36) as f32, W as f32, 36.0), rgb(10, 18, 38));
+    for (i32 row in 0..2) {
+        canvas.Color color = row == 0 ? rgb(14, 24, 48) : rgb(5, 10, 22);
+        i32 n = row == 0 ? 46 : 34;
+        for (i32 k in 0..n) {
+            f32 x = (k * W / n) as f32 + random(k, 31 + row as ui64) * 40.0;
+            f32 edge = x < 380.0 ? 1.0 : x > 1150.0 ? 0.8 : 0.35;
+            f32 height = (120.0 + random(k + 50, 3) * 120.0) * (0.55 + edge * 0.5) * (row == 0 ? 0.8 : 1.15);
+            pine(cv, x, (H - 30 + row * 38) as f32, height, height * 0.5, color);
+        }
+    }
+    // shade where the text goes
+    for (i32 x in 0..640) {
+        i32 a = ((1.0 - x as f32 / 640.0) * 120.0) as i32;
+        cv.fill(box(x as f32, 0.0, 1.0, H as f32), rgba(3, 6, 20, a));
+    }
+    for (i32 x in 1000..W) {
+        i32 a = min((x - 1000) / 5, 80);
+        cv.fill(box(x as f32, 0.0, 1.0, H as f32), rgba(3, 6, 24, a));
+    }
+}
+
+// ---- Text ----
+
+void put(canvas.Canvas* cv, truetype.Font* font, f32 size, f32 x, f32 ground, str s, canvas.Color color) {
+    cv.text_with(font, size, x, ground - font.ascent(size), s, color);
+}
+
+void put_bold(canvas.Canvas* cv, truetype.Font* font, bool faux, f32 size, f32 x, f32 ground, str s, canvas.Color color) {
+    put(cv, font, size, x, ground, s, color);
+    if (faux) {
+        put(cv, font, size, x + size * 0.035, ground, s, color);
+    }
+}
+
+// `s` with `gap` pixels more between its letters.
+void spaced(canvas.Canvas* cv, truetype.Font* font, f32 size, f32 x, f32 ground, str s, f32 gap, canvas.Color color) {
+    mut f32 pen = x;
+    for (usize i in 0..s.len) {
+        str piece = text.slice(s, i, i + 1);
+        if (s.bytes[i] != 32) {
+            put(cv, font, size, pen, ground, piece, color);
+        }
+        pen += font.measure(piece, size) + gap;
+    }
+}
+
+// ---- Icons ----
+
+// A closed polygon of lines, around (cx, cy).
+void outline(canvas.Canvas* cv, f32 cx, f32 cy, f32[6] xs, f32[6] ys, canvas.Color color) {
+    for (usize i in 0..6) {
+        usize j = (i + 1) % 6;
+        thick_line(cv, cx + xs[i], cy + ys[i], cx + xs[j], cy + ys[j], color);
+    }
+}
+
+void glyph(canvas.Canvas* cv, i32 kind, f32 cx, f32 cy, canvas.Color color) {
+    if (kind == 0) {
+        triangle(cv, cx + 5.0, cy - 19.0, cx - 11.0, cy + 3.0, cx + 1.0, cy + 3.0, color);
+        triangle(cv, cx - 5.0, cy + 19.0, cx + 11.0, cy - 3.0, cx - 1.0, cy - 3.0, color);
+    } else if (kind == 1) {
+        outline(cv, cx, cy, [0.0, 14.0, 14.0, 0.0, -14.0, -14.0], [-19.0, -12.0, 3.0, 19.0, 3.0, -12.0], color);
+        thick_line(cv, cx - 6.0, cy + 1.0, cx - 1.0, cy + 7.0, color);
+        thick_line(cv, cx - 1.0, cy + 7.0, cx + 7.0, cy - 6.0, color);
+    } else if (kind == 2) {
+        outline(cv, cx, cy, [-14.0, -14.0, 0.0, 15.0, 15.0, 0.0], [14.0, -2.0, -15.0, -15.0, 0.0, 14.0], color);
+        thick_line(cv, cx - 15.0, cy + 18.0, cx + 6.0, cy - 6.0, color);
+    } else if (kind == 3) {
+        cv.stroke_rounded(box(cx - 17.0, cy - 17.0, 34.0, 34.0), 4.0, color, 2.0);
+        cv.fill(box(cx - 17.0, cy - 8.0, 34.0, 2.0), color);
+        cv.fill(box(cx - 6.0, cy - 8.0, 2.0, 25.0), color);
+    } else if (kind == 4) {
+        outline(cv, cx, cy, [0.0, 16.0, 16.0, 0.0, -16.0, -16.0], [-19.0, -9.0, 9.0, 19.0, 9.0, -9.0], color);
+        thick_line(cv, cx - 16.0, cy - 9.0, cx, cy + 1.0, color);
+        thick_line(cv, cx + 16.0, cy - 9.0, cx, cy + 1.0, color);
+        thick_line(cv, cx, cy + 1.0, cx, cy + 19.0, color);
+    } else if (kind == 5) {
+        thick_line(cv, cx - 7.0, cy - 12.0, cx - 17.0, cy, color);
+        thick_line(cv, cx - 17.0, cy, cx - 7.0, cy + 12.0, color);
+        thick_line(cv, cx + 7.0, cy - 12.0, cx + 17.0, cy, color);
+        thick_line(cv, cx + 17.0, cy, cx + 7.0, cy + 12.0, color);
+        thick_line(cv, cx + 4.0, cy - 14.0, cx - 4.0, cy + 14.0, color);
+    } else {
+        cv.stroke_rounded(box(cx - 12.0, cy - 12.0, 24.0, 24.0), 12.0, color, 3.0);
+        cv.fill_circle(cx, cy, 4.0, color);
+        f32[8] dx = [0.0, 12.0, 17.0, 12.0, 0.0, -12.0, -17.0, -12.0];
+        f32[8] dy = [-17.0, -12.0, 0.0, 12.0, 17.0, 12.0, 0.0, -12.0];
+        for (usize k in 0..8) {
+            cv.fill_circle(cx + dx[k], cy + dy[k], 2.5, color);
+        }
+    }
+}
+
+void badge_icon(canvas.Canvas* cv, i32 kind, f32 x, f32 y, f32 size, canvas.Color color) {
+    cv.fill_rounded(box(x, y, size, size), size * 0.24, rgba(8, 14, 40, 150));
+    cv.stroke_rounded(box(x, y, size, size), size * 0.24, color, 3.0);
+    glyph(cv, kind, x + size / 2.0, y + size / 2.0, color);
+}
+
+// ---- The code window ----
+
+bool is_word(ui8 b) {
+    return (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+}
+
+bool is_keyword(str w) {
+    str[10] words = ["import", "enum", "return", "match", "mut", "for", "in", "defer", "try", "uses"];
+    for (usize k in 0..10) {
+        if (words[k] == w) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_type(str w) {
+    str[6] words = ["f64", "i64", "i32", "str", "Arena", "Shape"];
+    for (usize k in 0..6) {
+        if (words[k] == w) {
+            return true;
+        }
+    }
+    return w.bytes[0] >= 65 && w.bytes[0] <= 90;
+}
+
+// One line of code, cut into tokens (words, numbers, strings, single signs) and drawn by kind.
+void code_line(canvas.Canvas* cv, truetype.Font* font, f32 size, f32 x, f32 ground, str line) {
+    canvas.Color blue = rgb(86, 156, 255);
+    canvas.Color teal = rgb(64, 214, 200);
+    canvas.Color orange = rgb(255, 160, 80);
+    canvas.Color green = rgb(120, 220, 110);
+    canvas.Color gray = rgb(214, 222, 235);
+    mut f32 pen = x;
+    mut usize i = 0;
+    while (i < line.len) {
+        ui8 b = line.bytes[i];
+        mut usize j = i + 1;
+        mut canvas.Color color = gray;
+        if (b >= 48 && b <= 57) {
+            while (j < line.len && (is_word(line.bytes[j]) || (line.bytes[j] == 46 && j + 1 < line.len && line.bytes[j + 1] >= 48 && line.bytes[j + 1] <= 57))) {
+                j += 1;
+            }
+            color = green;
+        } else if (is_word(b)) {
+            while (j < line.len && is_word(line.bytes[j])) {
+                j += 1;
+            }
+            str word = text.slice(line, i, j);
+            if (is_keyword(word)) {
+                color = blue;
+            } else if (is_type(word)) {
+                color = teal;
+            }
+        } else if (b == 34) {
+            while (j < line.len && line.bytes[j] != 34) {
+                j += 1;
+            }
+            j = min(j + 1, line.len);
+            color = orange;
+        }
+        str token = text.slice(line, i, j);
+        if (b != 32) {
+            put(cv, font, size, pen, ground, token, color);
+        }
+        pen += font.measure(token, size);
+        i = j;
+    }
+}
+
+void code_window(canvas.Canvas* cv, Fonts* f) {
+    f32 x = 545.0;
+    f32 y = 90.0;
+    f32 w = 460.0;
+    f32 h = 760.0;
+    cv.fill_rounded(box(x, y, w, h), 14.0, rgba(6, 12, 32, 222));
+    cv.stroke_rounded(box(x, y, w, h), 14.0, rgba(70, 96, 160, 200), 2.0);
+    cv.fill_circle(x + 24.0, y + 22.0, 6.5, rgb(240, 84, 78));
+    cv.fill_circle(x + 45.0, y + 22.0, 6.5, rgb(244, 190, 52));
+    cv.fill_circle(x + 66.0, y + 22.0, 6.5, rgb(52, 202, 96));
+    cv.fill_rounded(box(x + 90.0, y + 10.0, 108.0, 34.0), 8.0, rgba(24, 36, 74, 230));
+    put(cv, f.body, 15.0, x + 106.0, y + 33.0, "main.sosu", rgb(225, 232, 245));
+    str[33] code = [
+        "import std.io;",
+        "import std.text;",
+        "",
+        "enum Shape {",
+        "    Circle(f64 radius),",
+        "    Rect(f64 width, f64 height),",
+        "}",
+        "",
+        "f64 area(Shape s) {",
+        "    return match (s) {",
+        "        Circle(r) => 3.14159 * r * r,",
+        "        Rect(w, h) => w * h,",
+        "    };",
+        "}",
+        "",
+        "i64!text.ParseError total(Arena* arena, str line) {",
+        "    mut i64 sum = 0;",
+        "    for (str word in text.words(arena, line)) {",
+        "        sum += try text.parse_i64(word);",
+        "    }",
+        "    return ok(sum);",
+        "}",
+        "",
+        "i32 main() uses io {",
+        "    mut Arena arena = Arena.new(4 * KB);",
+        "    defer arena.free();",
+        "    io.print(\"{}\", area(Rect(3.0, 4.0)));",
+        "    match (total(&arena, \"1 2 39\")) {",
+        "        ok(n) => io.print(\"total: {}\", n),",
+        "        err(e) => io.print(\"not a number\"),",
+        "    }",
+        "    return 0;",
+        "}",
+    ];
+    for (usize k in 0..33) {
+        code_line(cv, f.mono, 13.6, x + 18.0, y + 66.0 + k as f32 * 21.0, code[k]);
+    }
+}
+
+// ---- Panels ----
+
+void header(canvas.Canvas* cv, Fonts* f, image.Image icon) {
+    f32 icon_h = 100.0;
+    f32 icon_w = icon_h * icon.width as f32 / icon.height as f32;
+    cv.draw_image(icon, box(66.0, 62.0, icon_w, icon_h));
+    put_bold(cv, f.logo, f.faux_logo, 118.0, 66.0 + icon_w + 12.0, 158.0, "Sosu", rgb(255, 255, 255));
+    cv.stroke_rounded(box(490.0, 90.0, 56.0, 28.0), 6.0, rgb(60, 150, 255), 2.0);
+    put(cv, f.body, 14.0, 497.0, 110.0, "v0.1.1", rgb(120, 190, 255));
+    put_bold(cv, f.bold, f.faux_bold, 38.0, 108.0, 212.0, "Simple. Safe. Native.", rgb(255, 255, 255));
+    put(cv, f.body, 26.0, 70.0, 255.0, "A modern systems language", rgb(238, 242, 255));
+    put(cv, f.body, 26.0, 70.0, 284.0, "for real-world applications.", rgb(238, 242, 255));
+}
+
+void features(canvas.Canvas* cv, Fonts* f) {
+    str[6] titles = ["Native & low-level", "Safe by design", "Memory frugal", "Declarative UI", "Cross-platform", "Simple core"];
+    str[6] first = ["Compiles to C99. Direct control,", "No null, no exceptions. Overflow,", "Arenas, defer and moves.", "Interfaces described in .ui.sosu files,", "Windows, Linux, macOS,", "Generics, no macros,"];
+    str[6] second = ["no VM, no GC.", "bounds and contracts checked.", "No garbage collector.", "provided by packages.", "Android, iOS.", "no preprocessor, no overloading."];
+    str[6] third = ["", "Full memory safety is the 1.0 goal.", "", "", "", ""];
+    f32[6] tops = [320.0, 412.0, 510.0, 603.0, 704.0, 804.0];
+    canvas.Color[6] colors = [rgb(40, 130, 255), rgb(30, 214, 240), rgb(70, 214, 110), rgb(150, 120, 255), rgb(255, 170, 40), rgb(50, 140, 255)];
+    for (usize k in 0..6) {
+        badge_icon(cv, k as i32, 66.0, tops[k], 66.0, colors[k]);
+        put_bold(cv, f.bold, f.faux_bold, 21.0, 161.0, tops[k] + 24.0, titles[k], rgb(255, 255, 255));
+        canvas.Color body = rgb(226, 232, 248);
+        put(cv, f.body, 16.5, 161.0, tops[k] + 46.0, first[k], body);
+        put(cv, f.body, 16.5, 161.0, tops[k] + 66.0, second[k], body);
+        if (third[k].len > 0) {
+            put(cv, f.body, 16.5, 161.0, tops[k] + 86.0, third[k], body);
+        }
+    }
+}
+
+void bullet(canvas.Canvas* cv, Fonts* f, f32 x, f32 ground, str s, f32 size) {
+    cv.fill_circle(x, ground - size * 0.34, 2.6, rgb(235, 240, 255));
+    put(cv, f.body, size, x + 19.0, ground, s, rgb(235, 240, 255));
+}
+
+void right_column(canvas.Canvas* cv, Fonts* f) {
+    canvas.Color white = rgb(255, 255, 255);
+    canvas.Color pale = rgb(228, 234, 250);
+    // 1. Language
+    badge_icon(cv, 3, 1026.0, 62.0, 44.0, white);
+    put_bold(cv, f.bold, f.faux_bold, 22.0, 1089.0, 84.0, "1. Language", white);
+    bullet(cv, f, 1094.0, 111.0, "Extension: .sosu", 15.5);
+    bullet(cv, f, 1094.0, 135.0, "Compiler:  sosuc (C99, libc only)", 15.5);
+    bullet(cv, f, 1094.0, 159.0, "Cross-platform: Windows, Linux,", 15.5);
+    put(cv, f.body, 15.5, 1113.0, 182.0, "macOS, Android, iOS", pale);
+    // 2. Types
+    badge_icon(cv, 4, 1026.0, 208.0, 44.0, white);
+    put_bold(cv, f.bold, f.faux_bold, 22.0, 1089.0, 232.0, "2. Types", white);
+    str[9] names = ["Integers", "Floats", "Others", "String", "Pointer", "Option", "Result", "Array", "User-defined"];
+    str[9] values = ["i8  i16  i32  i64  ui8  ui16  ui32  ui64", "f32  f64", "bool  char  void", "str  (UTF-8)", "T*  (never null)", "T?  (some / none)", "T!E  (ok / err)", "T[N]  T[]", "struct, class, enum, interface"];
+    f32[9] rows = [271.0, 303.0, 325.0, 347.0, 369.0, 391.0, 413.0, 435.0, 457.0];
+    for (usize k in 0..9) {
+        put_bold(cv, f.bold, f.faux_bold, 14.0, 1094.0, rows[k], names[k], white);
+        put(cv, f.body, 14.5, 1208.0, k == 0 ? 265.0 : rows[k], values[k], pale);
+    }
+    put(cv, f.body, 14.5, 1208.0, 286.0, "isize  usize", pale);
+    // 3. Key features
+    badge_icon(cv, 6, 1026.0, 484.0, 44.0, white);
+    put_bold(cv, f.bold, f.faux_bold, 22.0, 1089.0, 508.0, "3. Key features", white);
+    str[5] key = ["Immutable by default (mut to modify)", "Effects visible in signatures (uses io)", "Errors in the type: T!E and try", "Explicit conversions (as)", "Contracts and tests built in"];
+    for (usize k in 0..5) {
+        bullet(cv, f, 1094.0, 532.0 + k as f32 * 22.0, key[k], 15.0);
+    }
+    // 4. Syntax
+    badge_icon(cv, 5, 1026.0, 650.0, 44.0, white);
+    put_bold(cv, f.bold, f.faux_bold, 22.0, 1089.0, 678.0, "4. Syntax", white);
+    bullet(cv, f, 1094.0, 706.0, "C-style, type first", 14.5);
+    bullet(cv, f, 1094.0, 728.0, "Exhaustive match", 14.5);
+    cv.fill_circle(1094.0, 745.0, 2.6, pale);
+    put(cv, f.body, 14.5, 1113.0, 750.0, "Generics:", pale);
+    put(cv, f.mono, 10.5, 1113.0 + f.body.measure("Generics:", 14.5) + 6.0, 750.0, "Vec<T>, HashMap<K, V>", pale);
+    bullet(cv, f, 1094.0, 772.0, "Lambdas", 14.5);
+    // 5. Operators
+    badge_icon(cv, 3, 1306.0, 650.0, 40.0, white);
+    put_bold(cv, f.bold, f.faux_bold, 20.0, 1356.0, 676.0, "5. Operators", white);
+    str[5] kinds = ["Arithmetic", "Comparison", "Logical", "Bitwise", "Assignment"];
+    str[5] signs = ["+ - * / %", "== != < <= > >=", "&& || !", "& | ^ ~ << >>", "= += -= *= /= %="];
+    for (usize k in 0..5) {
+        cv.fill_circle(1318.0, 702.0 + k as f32 * 22.0, 2.2, pale);
+        put(cv, f.body, 12.5, 1328.0, 706.0 + k as f32 * 22.0, kinds[k], pale);
+        put(cv, f.mono, 11.0, 1424.0, 706.0 + k as f32 * 22.0, signs[k], pale);
+    }
+    // the motto and the platforms
+    canvas.Color line = rgba(200, 215, 255, 110);
+    cv.fill(box(1026.0, 830.0, 479.0, 1.5), line);
+    cv.fill(box(1026.0, 878.0, 479.0, 1.5), line);
+    spaced(cv, f.body, 15.0, 1090.0, 861.0, "SMALLER   /   SAFER   /   STRONGER", 3.2, pale);
+    str[5] platforms = ["Windows", "Linux", "macOS", "Android", "iOS"];
+    f32[5] centers = [1073.0, 1177.0, 1276.0, 1376.0, 1471.0];
+    for (usize k in 0..5) {
+        f32 w = f.body.measure(platforms[k], 15.0);
+        put(cv, f.body, 15.0, centers[k] - w / 2.0, 958.0, platforms[k], pale);
+    }
+}
+
+truetype.Font* load_font(Arena* arena, str name, truetype.Font* fallback) uses io {
+    str path = fs.join(arena, "examples/poster/fonts", name);
+    match (truetype.load(arena, path)) {
+        ok(font) => {
+            return font;
+        },
+        err(e) => {
+            io.print("{} not found: Noto Sans is used instead", name);
+        },
+    }
+    return fallback;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    truetype.Font* noto = match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(font) => font,
+        err(e) => {
+            io.print("packages/render/fonts/NotoSans-Regular.ttf not found: run from the root of the repository");
+            return 1;
+        },
+    };
+    truetype.Font* logo = load_font(&arena, "Montserrat-ExtraBold.ttf", noto);
+    truetype.Font* bold = load_font(&arena, "Montserrat-Bold.ttf", noto);
+    truetype.Font* mono = load_font(&arena, "JetBrainsMono-Regular.ttf", noto);
+    mut Fonts fonts = Fonts{ logo: logo, bold: bold, mono: mono, body: noto, faux_logo: logo == noto, faux_bold: bold == noto };
+    image.Image icon = match (image.load(&arena, "examples/poster/sosu-icon.png")) {
+        ok(img) => img,
+        err(e) => {
+            io.print("examples/poster/sosu-icon.png not readable");
+            return 1;
+        },
+    };
+    mut canvas.Canvas cv = canvas.create(&arena, W, H);
+    landscape(&cv);
+    header(&cv, &fonts, icon);
+    features(&cv, &fonts);
+    code_window(&cv, &fonts);
+    right_column(&cv, &fonts);
+    ui8[] bytes = png.encode(&arena, &cv);
+    match (fs.create_dirs(&arena, "examples/poster/build")) {
+        ok => { },
+        err(e) => {
+            io.print("cannot create examples/poster/build");
+            return 1;
+        },
+    }
+    match (io.open(&arena, "examples/poster/build/sosu-poster.png", io.Mode.Write)) {
+        ok(file) => {
+            defer file.close();
+            match (file.write(bytes)) {
+                ok => {
+                    io.print("wrote examples/poster/build/sosu-poster.png");
+                },
+                err(e) => {
+                    io.print("cannot write the poster");
+                    return 1;
+                },
+            }
+        },
+        err(e) => {
+            io.print("cannot open examples/poster/build/sosu-poster.png");
+            return 1;
+        },
+    }
+    return 0;
+}
