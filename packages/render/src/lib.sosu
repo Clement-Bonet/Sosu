@@ -2,4 +2,5 @@
 // `render.truetype` for TrueType fonts and `render.image` for PNG images.
 import render.canvas;
 import render.truetype;
+import render.png;
 import render.image;
