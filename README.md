@@ -44,6 +44,12 @@ i32 main() uses io {
 
 This program prints `12.0` and `total: 42`; it is tested as `tests/programs/readme`.
 
+## Try it
+
+- In the browser: the [playground](https://clement-bonet.github.io/Sosu/) checks a program and shows the C it generates (the compiler built to WebAssembly; it does not run the program).
+- Installed: the [releases](https://github.com/Clement-Bonet/Sosu/releases) have `sosuc` for Windows, Linux (x64, ARM64) and macOS, with the library. Unpack the archive, put its `bin/` in the `PATH`, and run `sosuc run` in a package folder. A C compiler is needed: MSVC on Windows, `cc` (gcc or clang) elsewhere.
+- From the sources: see [Building](#building).
+
 ## Why Sosu
 
 - **Native through C.** `sosuc` writes C99 and calls the C compiler of the system: a program runs wherever there is one, phones included, and calls C libraries directly (`extern "C"`, `sosuc bindgen`).
@@ -97,7 +103,13 @@ Linux / macOS (gcc or clang). Every push is checked by GitHub Actions on Linux (
 ```sh
 make
 make test
+make doc          # docs/REFERENCE.md from the comments of lib/ (checked by the CI)
+make playground   # the playground, with Emscripten (emcc): build/playground/
 ```
+
+A tag `vX.Y.Z` matching `SOSU_VERSION` (`src/lib/common.h`) publishes a release
+(`.github/workflows/release.yml`); a push to `main` publishes the playground on GitHub Pages
+(`.github/workflows/playground.yml`).
 
 ## Usage
 
@@ -144,7 +156,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   ast         syntax tree and its printer
   parser      syntax analysis (recursive descent)
   path        file path helpers
-  shell       commands run through the system shell (C compiler, git)
+  shell       folders (native calls) and the commands run through the system shell (C compiler, git)
   manifest    sosu.toml parser
   git         git dependencies and sosu.lock
   program     loading of packages, dependencies and imported modules
@@ -156,15 +168,17 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   lsp         the language server: diagnostics while typing, hover, definition, completion
   i18n        the texts to translate of a package, for its catalogs (`sosuc i18n extract`)
 src/sosuc/    command-line driver
+src/playground/  the entry points of the compiler in WebAssembly, for playground/ (the page)
+src/docgen/   the generator of docs/REFERENCE.md
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 packages/     platform (window and events, on SDL3), render (pixels, shapes, text, PNG images), ui (widgets),
               i18n (catalogs of translations)
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
-              trees, inputs)
+              trees, inputs), poster (the poster of the project, drawn with `render` into a BMP)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
-docs/         specification and error codes
+docs/         specification, error codes, library reference, roadmap
 ```
 
 `sosuc` looks for `core` and `std` in `$SOSU_HOME/lib`, or else in `../lib` next to the executable
@@ -254,7 +268,7 @@ program.
 The tests of `render`, `ui` and `i18n` need no screen (`sosuc test packages/ui`), and
 `tests/programs` drives screens of `.ui.sosu` files without a window. `tests/window` opens a window,
 draws one frame and closes itself: the CI runs it on Linux and Windows with
-`SDL_VIDEO_DRIVER=dummy`, which needs no screen. macOS is not checked yet.
+`SDL_VIDEO_DRIVER=dummy`, which needs no screen, and on macOS.
 
 ## Branches
 
@@ -264,8 +278,8 @@ draws one frame and closes itself: the CI runs it on Linux and Windows with
   through a pull request.
 
 The CI (`.github/workflows/ci.yml`) checks every pull request into `dev` or `main` on Linux
-(gcc and clang) and Windows (MSVC), so that a branch is merged only once it builds and passes the
-tests everywhere.
+(gcc and clang), Windows (MSVC) and macOS (clang), with the Android build, so that a branch is
+merged only once it builds and passes the tests everywhere.
 
 ## Documentation
 
@@ -277,6 +291,11 @@ tests everywhere.
   widgets, input methods and touch screens (§10.9), the full grammar (§12), decisions and open
   questions (§14).
 - [docs/errors.md](docs/errors.md): every error code, with an example.
+- [docs/REFERENCE.md](docs/REFERENCE.md): the public API of `core` and `std`, generated from their
+  comments (`make doc`).
+- [docs/ROADMAP.md](docs/ROADMAP.md): the works left before 1.0, and their estimates.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to propose a change.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability, and what to know before using Sosu.
 
 ## Compiler notes
 
