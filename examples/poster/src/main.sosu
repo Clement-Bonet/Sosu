@@ -536,12 +536,12 @@ i32 main() uses io {
             return 1;
         },
     }
-    match (io.open(&arena, "examples/poster/build/sosu-poster.png", io.Mode.Write)) {
+    match (io.open(&arena, "examples/poster/build/poster.png", io.Mode.Write)) {
         ok(file) => {
             defer file.close();
             match (file.write(bytes)) {
                 ok => {
-                    io.print("wrote examples/poster/build/sosu-poster.png");
+                    io.print("wrote examples/poster/build/poster.png");
                 },
                 err(e) => {
                     io.print("cannot write the poster");
@@ -550,7 +550,7 @@ i32 main() uses io {
             }
         },
         err(e) => {
-            io.print("cannot open examples/poster/build/sosu-poster.png");
+            io.print("cannot open examples/poster/build/poster.png");
             return 1;
         },
     }
