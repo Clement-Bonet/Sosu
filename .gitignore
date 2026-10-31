@@ -1,3 +1,8 @@
 build/
 packages/*/vendor/
 .gradle/
+graphify-out/
+.claude/settings.json
+.claude/skills/
+CLAUDE.md
+.claude/CLAUDE.md
