@@ -13,6 +13,20 @@ under their own licenses.
   be used, embedded and redistributed with programs; it may not be sold by itself, and a modified
   version must not use the name "Noto".
 
+## Montserrat
+
+- Files: `examples/poster/fonts/Montserrat-ExtraBold.ttf`, `examples/poster/fonts/Montserrat-Bold.ttf`
+- Source: <https://github.com/JulietaUla/Montserrat> (static TrueType, through Google Fonts)
+- Copyright 2024 The Montserrat.Git Project Authors (<https://github.com/JulietaUla/Montserrat.git>)
+- License: SIL Open Font License, Version 1.1, in `examples/poster/fonts/OFL-Montserrat.txt`
+
+## JetBrains Mono
+
+- Files: `examples/poster/fonts/JetBrainsMono-Regular.ttf`
+- Source: <https://github.com/JetBrains/JetBrainsMono> (static TrueType)
+- Copyright 2020 The JetBrains Mono Project Authors (<https://github.com/JetBrains/JetBrainsMono>)
+- License: SIL Open Font License, Version 1.1, in `examples/poster/fonts/OFL-JetBrainsMono.txt`
+
 ## font8x8
 
 - Files: the glyph table of `packages/render/src/font.sosu`

@@ -1,2 +1,2 @@
 // core.arena: the arena allocator (spec §6).
-// Empty until code generation exists (roadmap step 4).
+// Empty: `Arena` and its methods are built into the compiler and the C runtime (lib/runtime).

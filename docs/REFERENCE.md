@@ -26,7 +26,7 @@ in [SPEC.md](SPEC.md).
 
 ## core.arena
 
-The arena allocator (spec §6). Empty until code generation exists (roadmap step 4).
+The arena allocator (spec §6). Empty: `Arena` and its methods are built into the compiler and the C runtime (lib/runtime).
 
 ## core.prelude
 
