@@ -65,12 +65,24 @@ jobs:
           "$DIST/bin/sosuc" --version
           "$DIST/bin/sosuc" run "$RUNNER_TEMP/readme" > out.txt
           diff -u "$RUNNER_TEMP/readme/expected.txt" out.txt
+      # The poster of the release, drawn by the sosuc of the archive with the version in its badge
+      # (examples/poster); once, on linux-x64.
+      - name: Poster
+        if: matrix.target == 'linux-x64'
+        env:
+          SOSU_CC: ${{ matrix.cc }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          "$DIST/bin/sosuc" run examples/poster -- "v$VERSION"
+          cp examples/poster/build/sosu-poster.png "sosu-$VERSION-poster.png"
       - name: Archive
         run: tar -czf "$DIST.tar.gz" "$DIST"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.DIST }}.tar.gz
+          path: |
+            ${{ env.DIST }}.tar.gz
+            sosu-*-poster.png
 
   windows:
     name: windows-x64
