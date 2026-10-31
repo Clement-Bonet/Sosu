@@ -385,7 +385,10 @@ pub Rect text_size(str text, i32 scale) {
 
 // A canvas of `width * height` pixels in `arena`, transparent black.
 pub Canvas create(Arena* arena, i32 width, i32 height) {
-    usize count = (max(width, 0) * max(height, 0)) as usize;
+    i32 w = max(width, 0);
+    i32 h = max(height, 0);
+    assert(h == 0 || w <= 2147483647 / h);  // pixel indexes (`at`, `set`) are `y * width + x` in i32
+    usize count = (w * h) as usize;
     Clip all = Clip{ x0: 0, y0: 0, x1: max(width, 0), y1: max(height, 0) };
     return Canvas{ width: max(width, 0), height: max(height, 0), pixels: arena.alloc_slice(ui32, count), clip: all };
 }

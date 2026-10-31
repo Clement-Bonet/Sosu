@@ -175,7 +175,7 @@ packages/     platform (window and events, on SDL3), render (pixels, shapes, tex
               i18n (catalogs of translations)
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
-              trees, inputs), poster (the poster of the project, drawn with `render` into a BMP)
+              trees, inputs), poster (the poster of the project, drawn with `render` into a PNG)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification, error codes, library reference, roadmap

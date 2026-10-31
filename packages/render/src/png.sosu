@@ -37,9 +37,9 @@ struct Builder {
 
 // The bytes of the PNG file holding `cv`; the alpha of the pixels is kept.
 pub ui8[] encode(Arena* arena, canvas.Canvas* cv) {
-    usize width = cv.width as usize;
-    usize height = cv.height as usize;
-    ui8[] raw = arena.alloc_slice(ui8, (width * 4 + 1) * height);
+    // 4 bytes a pixel and a filter byte a row; `pixels.len * 4` is the size of memory already
+    // allocated, so it cannot wrap around, even where usize has 32 bits.
+    ui8[] raw = arena.alloc_slice(ui8, cv.pixels.len * 4 + cv.height as usize);
     mut usize at = 0;
     for (i32 y in 0..cv.height) {
         raw[at] = 0;  // no filter
@@ -72,6 +72,17 @@ pub ui8[] encode(Arena* arena, canvas.Canvas* cv) {
     b.chunk("IDAT", packed);
     b.chunk("IEND", packed[0..0]);
     return b.bytes[0..b.len];
+}
+
+// Wider than 65 535 pixels: the width takes 3 bytes of its 4 in the header. The reader stops at
+// 16 384 pixels (image.decode), so the header is checked byte by byte.
+test "a canvas wider than 65 535 pixels is written whole" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    mut canvas.Canvas c = canvas.create(&arena, 70000, 2);
+    ui8[] file = encode(&arena, &c);
+    assert(file[16] == 0 && file[17] == 1 && file[18] == 0x11 && file[19] == 0x70);  // 70 000
+    assert(file[20] == 0 && file[21] == 0 && file[22] == 0 && file[23] == 2);
 }
 
 test "a canvas written is read back" {
