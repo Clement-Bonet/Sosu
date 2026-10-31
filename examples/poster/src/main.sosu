@@ -2,6 +2,7 @@
 // examples/poster/build/poster.png (1536 by 1024). Run it from the root of the repository.
 import std.io;
 import std.fs;
+import std.os;
 import std.text;
 import render.canvas;
 import render.image;
@@ -385,13 +386,13 @@ void code_window(canvas.Canvas* cv, Fonts* f) {
 
 // ---- Panels ----
 
-void header(canvas.Canvas* cv, Fonts* f, image.Image icon) {
+void header(canvas.Canvas* cv, Fonts* f, image.Image icon, str version) {
     f32 icon_h = 100.0;
     f32 icon_w = icon_h * icon.width as f32 / icon.height as f32;
     cv.draw_image(icon, box(66.0, 62.0, icon_w, icon_h));
     put_bold(cv, f.logo, f.faux_logo, 118.0, 66.0 + icon_w + 12.0, 158.0, "Sosu", rgb(255, 255, 255));
     cv.stroke_rounded(box(490.0, 90.0, 56.0, 28.0), 6.0, rgb(60, 150, 255), 2.0);
-    put(cv, f.body, 14.0, 497.0, 110.0, "v0.1.2", rgb(120, 190, 255));
+    put(cv, f.body, 14.0, 497.0, 110.0, version, rgb(120, 190, 255));
     put_bold(cv, f.bold, f.faux_bold, 38.0, 108.0, 212.0, "Simple. Safe. Native.", rgb(255, 255, 255));
     put(cv, f.body, 26.0, 70.0, 255.0, "A modern systems language", rgb(238, 242, 255));
     put(cv, f.body, 26.0, 70.0, 284.0, "for real-world applications.", rgb(238, 242, 255));
@@ -517,7 +518,13 @@ i32 main() uses io {
     };
     mut canvas.Canvas cv = canvas.create(&arena, W, H);
     landscape(&cv);
-    header(&cv, &fonts, icon);
+    // The version in the badge: `sosuc run examples/poster -- v0.1.2` (the release workflow gives it).
+    str[] args = os.args(&arena);
+    mut str version = "dev";
+    if (args.len > 0) {
+        version = args[0];
+    }
+    header(&cv, &fonts, icon, version);
     features(&cv, &fonts);
     code_window(&cv, &fonts);
     right_column(&cv, &fonts);
