@@ -1,5 +1,6 @@
-# The promotional poster, drawn by Sosu: a render.Canvas written to build/poster.png.
-# Run it from the root of the repository: sosuc run examples/poster
+# The promotional poster, drawn by Sosu: a render.Canvas written to build/sosu-poster.png.
+# Run it from the root of the repository: sosuc run examples/poster -- v0.1.2 (the version in the
+# badge; "dev" without it). The release workflow attaches it to each release.
 [package]
 name = "poster"
 version = "0.1.0"
