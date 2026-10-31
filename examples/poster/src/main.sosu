@@ -391,7 +391,7 @@ void header(canvas.Canvas* cv, Fonts* f, image.Image icon) {
     cv.draw_image(icon, box(66.0, 62.0, icon_w, icon_h));
     put_bold(cv, f.logo, f.faux_logo, 118.0, 66.0 + icon_w + 12.0, 158.0, "Sosu", rgb(255, 255, 255));
     cv.stroke_rounded(box(490.0, 90.0, 56.0, 28.0), 6.0, rgb(60, 150, 255), 2.0);
-    put(cv, f.body, 14.0, 497.0, 110.0, "v0.1.1", rgb(120, 190, 255));
+    put(cv, f.body, 14.0, 497.0, 110.0, "v0.1.2", rgb(120, 190, 255));
     put_bold(cv, f.bold, f.faux_bold, 38.0, 108.0, 212.0, "Simple. Safe. Native.", rgb(255, 255, 255));
     put(cv, f.body, 26.0, 70.0, 255.0, "A modern systems language", rgb(238, 242, 255));
     put(cv, f.body, 26.0, 70.0, 284.0, "for real-world applications.", rgb(238, 242, 255));
