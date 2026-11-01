@@ -1,0 +1,98 @@
+// audio.ogg: Ogg Vorbis files, read by stb_vorbis 1.22 (public domain), a C file of the package
+// (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the
+// arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at
+// `audio.MAX_SAMPLES`. stb_vorbis 1.22 has known faults on hostile files (GitHub Security Lab,
+// 2023): those of its comment header (CVE-2023-45675, 45676) are fixed in the copy of the package
+// (see THIRD_PARTY_NOTICES.md), the others are not, so a file from an unknown source is better
+// read in a process of its own. The CRC of the pages is not checked. One logical stream only: chained streams stop after the first.
+import std.io;
+import audio.audio;
+
+extern "C" {
+    ui8* sosu_audio_ogg_open(ui8* data, i32 size, ui8* memory, i32 memory_size, i32* error);
+    i32 sosu_audio_ogg_channels(ui8* decoder);
+    i32 sosu_audio_ogg_rate(ui8* decoder);
+    i32 sosu_audio_ogg_read(ui8* decoder, i32 channels, f32* out, i32 floats);
+    void sosu_audio_ogg_close(ui8* decoder);
+}
+
+// The memory the decoder may take: its tables (some hundreds of KB for the usual files) and the
+// buffers of a frame.
+pub i32 MEMORY = 4194304;
+
+// Whether `data` starts as an Ogg file (a page).
+pub bool is_ogg(ui8[] data) {
+    return data.len >= 27 && data[0] == 0x4F && data[1] == 0x67 && data[2] == 0x67 && data[3] == 0x53;
+}
+
+// The sound of the Ogg Vorbis file `data`.
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data) {
+    if (!is_ogg(data)) {
+        return err(audio.AudioError.UnknownFormat);
+    }
+    if (data.len > 0x7FFFFFFF) {
+        return err(audio.AudioError.TooLarge);
+    }
+    mut ui8[] memory = arena.alloc_slice(ui8, MEMORY as usize);
+    mut i32 error = 0;
+    mut ui8* decoder = &memory[0];
+    unsafe {
+        decoder = sosu_audio_ogg_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error);
+        if (decoder as ui64 == 0) {
+            return err(error == 1 ? audio.AudioError.TooLarge : audio.AudioError.Damaged);
+        }
+    }
+    defer close(decoder);
+    mut i32 channels = 0;
+    mut i32 rate = 0;
+    unsafe {
+        channels = sosu_audio_ogg_channels(decoder);
+        rate = sosu_audio_ogg_rate(decoder);
+    }
+    if (!audio.fits(rate as i64, channels as i64, 0)) {
+        return err(audio.AudioError.Unsupported);
+    }
+    usize c = channels as usize;
+    usize limit = audio.MAX_SAMPLES as usize / c * c;
+    mut f32[] samples = arena.alloc_slice(f32, 16384 * c);
+    mut usize length = 0;  // the samples decoded
+    while (true) {
+        if (length == samples.len) {
+            if (length >= limit) {
+                return err(audio.AudioError.TooLarge);
+            }
+            mut f32[] larger = arena.alloc_slice(f32, min(samples.len * 2, limit));
+            for (usize i in 0..length) {
+                larger[i] = samples[i];
+            }
+            samples = larger;
+        }
+        usize room = min(samples.len - length, 65536 * c);  // whole frames
+        mut i32 frames = 0;
+        unsafe {
+            frames = sosu_audio_ogg_read(decoder, channels, &samples[length], room as i32);
+        }
+        if (frames <= 0) {
+            break;
+        }
+        length += frames as usize * c;
+    }
+    return ok(audio.Sound{ rate: rate, channels: channels, samples: samples[0..length] });
+}
+
+void close(ui8* decoder) {
+    unsafe {
+        sosu_audio_ogg_close(decoder);
+    }
+}
+
+// The sound of the Ogg Vorbis file at `path`.
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(audio.AudioError.Unreadable);
+        },
+    };
+    return decode(arena, data);
+}

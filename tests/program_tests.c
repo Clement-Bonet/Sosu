@@ -54,6 +54,7 @@ static const Case cases[] = {
     { "test", "testing", "expected.txt", 1, NULL },
     { "test", "checks", "expected.txt", 1, NULL }, /* the package testing (spec §8.3) */
     { "test", "images", "expected.txt", 0, NULL }, /* the package image (spec §8.2) */
+    { "test", "sounds", "expected.txt", 0, NULL }, /* the package audio (spec §8.2) */
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */

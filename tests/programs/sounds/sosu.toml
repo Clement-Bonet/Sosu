@@ -1,0 +1,11 @@
+# The package audio (spec §8.2), run by `sosuc test`: WAV files of Python's `wave` module, read
+# and written byte for byte the same, an Ogg Vorbis file and what the specification decodes from
+# it, damaged and hostile files, the mixer and resampling. No sound card: the files are made by
+# tests/make_data.py.
+[package]
+name = "sounds"
+version = "0.1.0"
+
+[dependencies]
+audio = { path = "../../../packages/audio" }
+testing = { path = "../../../packages/testing" }

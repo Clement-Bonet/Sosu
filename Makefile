@@ -41,6 +41,8 @@ test: all
 	./build/sosuc check examples/workspace
 	./build/sosuc check examples/themes
 	./build/sosuc check examples/containers
+	./build/sosuc check packages/audio
+	./build/sosuc check examples/sound
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done

@@ -58,6 +58,8 @@ build\sosuc.exe check examples\editor || exit /b 1
 build\sosuc.exe check examples\workspace || exit /b 1
 build\sosuc.exe check examples\themes || exit /b 1
 build\sosuc.exe check examples\containers || exit /b 1
+build\sosuc.exe check packages\audio || exit /b 1
+build\sosuc.exe check examples\sound || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

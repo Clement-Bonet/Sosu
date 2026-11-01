@@ -1,0 +1,149 @@
+// audio.audio: a sound in memory, its samples as floats of -1 to 1, interleaved by frame (the
+// left sample, then the right one, for stereo), and the errors of the readers. The readers of
+// `audio.wav` and `audio.ogg` give a `Sound`; `MAX_SAMPLES` and `fits` bound what they accept, so
+// that a small hostile file cannot ask for gigabytes.
+import std.math;
+
+pub enum AudioError {
+    Unreadable,  // the file cannot be read
+    UnknownFormat,  // not a file of the format read
+    Damaged,  // a file of the format, but damaged, or of a kind that does not exist
+    TooLarge,  // more samples than `MAX_SAMPLES`, or more memory than the decoder may take
+    Unsupported,  // a kind of the format not read (more than `MAX_CHANNELS` channels...)
+}
+
+// A short description of `e`, in English.
+pub str message(AudioError e) {
+    return match (e) {
+        Unreadable => "the file cannot be read",
+        UnknownFormat => "not a file of this format",
+        Damaged => "damaged sound",
+        TooLarge => "sound too large",
+        Unsupported => "a kind of sound not supported",
+    };
+}
+
+// The bounds of a sound read: its channels, its rate (frames per second) and its samples (2^26,
+// 256 MB of floats: 12 minutes of stereo at 48 kHz).
+pub i32 MAX_CHANNELS = 8;
+pub i32 MIN_RATE = 1000;
+pub i32 MAX_RATE = 384000;
+pub i64 MAX_SAMPLES = 67108864;
+
+// Whether a sound of `rate`, `channels` and `frames` is within the bounds of the readers.
+pub bool fits(i64 rate, i64 channels, i64 frames) {
+    bool shape = channels >= 1 && channels <= MAX_CHANNELS as i64 && rate >= MIN_RATE as i64 && rate <= MAX_RATE as i64;
+    return shape && frames >= 0 && frames <= MAX_SAMPLES / channels;
+}
+
+// `frames()` frames of `channels` samples each, `rate` frames per second.
+pub struct Sound {
+    pub i32 rate;
+    pub i32 channels;
+    pub f32[] samples;
+
+    pub usize frames() {
+        return samples.len / channels as usize;
+    }
+
+    // The length in seconds.
+    pub f64 seconds() {
+        return frames() as f64 / rate as f64;
+    }
+
+    // The sample of `channel` at `frame`, or 0 outside of the sound.
+    pub f32 at(usize frame, i32 channel) {
+        if (frame >= frames() || channel < 0 || channel >= channels) {
+            return 0.0;
+        }
+        return samples[frame * channels as usize + channel as usize];
+    }
+
+    // The largest absolute sample (1 at full scale).
+    pub f32 peak() {
+        mut f32 most = 0.0;
+        for (f32 s in samples) {
+            most = max(most, abs(s));
+        }
+        return most;
+    }
+}
+
+// A silent sound of `frames` frames, in `arena`.
+pub Sound create(Arena* arena, i32 rate, i32 channels, usize frames)
+    requires fits(rate as i64, channels as i64, frames as i64)
+{
+    return Sound{ rate: rate, channels: channels, samples: arena.alloc_slice(f32, frames * channels as usize) };
+}
+
+// A sine of `frequency` Hz, `seconds` long, mono, of the amplitude given (1: full scale).
+pub Sound tone(Arena* arena, i32 rate, f64 frequency, f64 seconds, f32 amplitude)
+    requires seconds >= 0.0 && seconds * rate as f64 <= MAX_SAMPLES as f64
+{
+    Sound s = create(arena, rate, 1, math.round(seconds * rate as f64) as usize);
+    for (usize i in 0..s.samples.len) {
+        s.samples[i] = amplitude * math.sin(math.TAU * frequency * i as f64 / rate as f64) as f32;
+    }
+    return s;
+}
+
+// `s` with its first `fade` frames rising from silence and its last `fade` falling to it, so
+// that it starts and stops without a click.
+pub Sound faded(Arena* arena, Sound s, usize fade) {
+    Sound out = copy_of(arena, s);
+    usize n = s.frames();
+    usize ramp = min(fade, n / 2);
+    for (usize i in 0..ramp) {
+        f32 gain = i as f32 / ramp as f32;
+        for (usize c in 0..s.channels as usize) {
+            out.samples[i * s.channels as usize + c] *= gain;
+            out.samples[(n - 1 - i) * s.channels as usize + c] *= gain;
+        }
+    }
+    return out;
+}
+
+pub Sound copy_of(Arena* arena, Sound s) {
+    mut f32[] samples = arena.alloc_slice(f32, s.samples.len);
+    for (usize i in 0..s.samples.len) {
+        samples[i] = s.samples[i];
+    }
+    return Sound{ rate: s.rate, channels: s.channels, samples: samples };
+}
+
+// `s` with `channels` channels: mono copied to each channel, several channels averaged to mono;
+// otherwise the channels of `s` kept in their order, the missing ones silent.
+pub Sound with_channels(Arena* arena, Sound s, i32 channels)
+    requires channels >= 1 && channels <= MAX_CHANNELS
+{
+    usize n = s.frames();
+    usize from = s.channels as usize;
+    usize to = channels as usize;
+    Sound out = Sound{ rate: s.rate, channels: channels, samples: arena.alloc_slice(f32, n * to) };
+    for (usize i in 0..n) {
+        if (from == 1) {
+            for (usize c in 0..to) {
+                out.samples[i * to + c] = s.samples[i];
+            }
+        } else if (to == 1) {
+            mut f32 sum = 0.0;
+            for (usize c in 0..from) {
+                sum += s.samples[i * from + c];
+            }
+            out.samples[i] = sum / from as f32;
+        } else {
+            for (usize c in 0..min(from, to)) {
+                out.samples[i * to + c] = s.samples[i * from + c];
+            }
+        }
+    }
+    return out;
+}
+
+// The part of `s` from frame `start` to `end` (cut to the sound), sharing its samples.
+pub Sound part(Sound s, usize start, usize end) {
+    usize last = min(end, s.frames());
+    usize first = min(start, last);
+    usize c = s.channels as usize;
+    return Sound{ rate: s.rate, channels: s.channels, samples: s.samples[first * c..last * c] };
+}
