@@ -1,0 +1,43 @@
+name: Fuzzing (nightly)
+
+# The fuzzing of the CI (ci.yml) runs a few minutes on each push; this one runs each target half an
+# hour, once a night, from the same corpus (the cache), which it grows for the next runs. Also run
+# by hand from the Actions tab (Run workflow).
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzzing (libFuzzer, 30 minutes a target)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            build/fuzz_corpus
+            build/fuzz_ogg_corpus
+            build/fuzz_manifest_corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz the compiler
+        timeout-minutes: 40
+        run: make fuzz FUZZ_TIME=1800
+      - name: Fuzz the Ogg decoder
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-ogg FUZZ_TIME=1800
+      - name: Fuzz sosu.toml
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-manifest FUZZ_TIME=1800
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: build/fuzz_crashes

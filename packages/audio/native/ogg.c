@@ -5,6 +5,7 @@
 
 #define STB_VORBIS_NO_STDIO
 #define STB_VORBIS_NO_PUSHDATA_API
+#define STB_VORBIS_NO_COMMENTS /* never read by Sosu: the comment header is skipped unread */
 #include "vendor/stb_vorbis.c"
 
 /* The decoder of the Ogg Vorbis file of `size` bytes at `data`, or NULL with `*error` set:

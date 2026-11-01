@@ -10,6 +10,7 @@ zlib: "hello"
 gzip: "hello"
 gzip with a name: "hello hello hello hello"
 two members: "abcdef"
+1000 members: 3000 bytes, the same: true
 cut: damaged data
 wrong Adler-32: wrong checksum
 not zlib: damaged data
