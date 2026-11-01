@@ -1,0 +1,337 @@
+// The package audio (spec §8.2), without a sound card: WAV files of Python's `wave` module read,
+// and written byte for byte the same; an Ogg Vorbis file, as the Vorbis I specification decodes
+// it (tests/make_data.py writes both, and what to expect); damaged and hostile files; the mixer
+// and resampling, on buffers of samples.
+import std.io;
+import std.math;
+import std.text;
+import audio.audio;
+import audio.mixer;
+import audio.resample;
+import audio.wav;
+import audio.ogg;
+import testing.check;
+import testing.fixture;
+
+// The floats written in `values`, separated by spaces.
+f32[] list(Arena* arena, str values) {
+    str[] words = text.words(arena, values);
+    mut f32[] out = arena.alloc_slice(f32, words.len);
+    for (usize i in 0..words.len) {
+        out[i] = match (text.parse_f64(words[i])) {
+            ok(v) => v as f32,
+            err(e) => 1000.0,
+        };
+    }
+    return out;
+}
+
+str join(Arena* arena, str a, str b) {
+    text.TextBuilder* t = text.builder(arena);
+    t.push(a);
+    t.push(b);
+    return t.text();
+}
+
+audio.Sound empty(Arena* arena) {
+    return audio.Sound{ rate: 8000, channels: 1, samples: arena.alloc_slice(f32, 0) };
+}
+
+audio.Sound read_wav(Arena* arena, str relative) uses io {
+    return match (wav.decode(arena, fixture.read_bytes(arena, relative))) {
+        ok(s) => s,
+        err(e) => empty(arena),
+    };
+}
+
+audio.Sound read_ogg(Arena* arena, str relative) uses io {
+    return match (ogg.decode(arena, fixture.read_bytes(arena, relative))) {
+        ok(s) => s,
+        err(e) => empty(arena),
+    };
+}
+
+// The largest difference between two buffers of samples (1000 if their lengths differ).
+f64 largest_difference(f32[] a, f32[] b) {
+    if (a.len != b.len) {
+        return 1000.0;
+    }
+    mut f64 most = 0.0;
+    for (usize i in 0..a.len) {
+        most = max(most, abs(a[i] as f64 - b[i] as f64));
+    }
+    return most;
+}
+
+// The root mean square of the samples.
+f64 rms(f32[] samples) {
+    mut f64 total = 0.0;
+    for (f32 s in samples) {
+        total += s as f64 * s as f64;
+    }
+    return math.sqrt(total / max(samples.len, 1) as f64);
+}
+
+// A mono sound of the samples given.
+audio.Sound mono(Arena* arena, i32 rate, f32[] samples) {
+    audio.Sound s = audio.create(arena, rate, 1, samples.len);
+    for (usize i in 0..samples.len) {
+        s.samples[i] = samples[i];
+    }
+    return s;
+}
+
+test "WAV files of Python's wave module, read and written byte for byte the same" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    audio.Sound pcm16 = read_wav(&arena, "tests/data/pcm16.wav");
+    assert(pcm16.rate == 8000 && pcm16.channels == 2 && pcm16.frames() == 2000);
+    // the same samples as floats of 32 bits (after a fact chunk and a LIST chunk of an odd size),
+    // and as integers of 24 bits in the extensible header
+    assert(check.same_items(pcm16.samples, read_wav(&arena, "tests/data/float32.wav").samples));
+    assert(check.same_items(pcm16.samples, read_wav(&arena, "tests/data/extensible24.wav").samples));
+    // floats of 64 bits, mono: the left channel
+    audio.Sound left = read_wav(&arena, "tests/data/float64.wav");
+    mut f32[] lefts = arena.alloc_slice(f32, pcm16.frames());
+    for (usize i in 0..lefts.len) {
+        lefts[i] = pcm16.at(i, 0);
+    }
+    assert(left.channels == 1 && check.same_items(left.samples, lefts));
+    // 8 bits (the high byte) and 24 bits (a low byte added), within their step
+    audio.Sound pcm8 = read_wav(&arena, "tests/data/pcm8.wav");
+    audio.Sound pcm24 = read_wav(&arena, "tests/data/pcm24.wav");
+    assert(check.near(largest_difference(pcm8.samples, pcm16.samples), 0.0, 1.0 / 128.0));
+    assert(check.near(largest_difference(pcm24.samples, pcm16.samples), 0.0, 128.0 / 8388608.0));
+    // written by Sosu: the bytes of `wave`
+    assert(check.same_bytes(wav.encode(&arena, pcm16), fixture.read_bytes(&arena, "tests/data/pcm16.wav")));
+    assert(check.same_bytes(wav.encode_as(&arena, pcm8, wav.Encoding.Pcm8), fixture.read_bytes(&arena, "tests/data/pcm8.wav")));
+    assert(check.same_bytes(wav.encode_as(&arena, pcm24, wav.Encoding.Pcm24), fixture.read_bytes(&arena, "tests/data/pcm24.wav")));
+    // floats read back as they were, and out of range cut
+    audio.Sound loud = mono(&arena, 8000, list(&arena, "0.25 -1.5 2.0 -0.125"));
+    audio.Sound floats = match (wav.decode(&arena, wav.encode_as(&arena, loud, wav.Encoding.Float32))) {
+        ok(s) => s,
+        err(e) => empty(&arena),
+    };
+    assert(check.same_items(floats.samples, loud.samples));
+    audio.Sound cut = match (wav.decode(&arena, wav.encode(&arena, loud))) {
+        ok(s) => s,
+        err(e) => empty(&arena),
+    };
+    mut f32[4] expected = [0.25, -1.0, 32767.0 / 32768.0, -0.125];
+    assert(check.same_items(cut.samples, expected[0..4]));
+    // floats of every kind, through their bits: small, subnormal, the largest, infinite
+    audio.Sound odd = mono(&arena, 8000, list(&arena, "0.1 -3e38 1e-40 -1e-45 3.4028234663852886e38 0 1e39 -1e39"));
+    audio.Sound kept = match (wav.decode(&arena, wav.encode_as(&arena, odd, wav.Encoding.Float32))) {
+        ok(s) => s,
+        err(e) => empty(&arena),
+    };
+    assert(check.same_items(kept.samples, odd.samples));
+    // saved and loaded
+    str dir = fixture.temp_dir(&arena, "sounds");
+    defer fixture.remove(dir);
+    str path = join(&arena, dir, "/saved.wav");
+    match (wav.save(&arena, path, pcm16)) {
+        ok => { },
+        err(e) => assert(false),
+    }
+    audio.Sound loaded = match (wav.load(&arena, path)) {
+        ok(s) => s,
+        err(e) => empty(&arena),
+    };
+    assert(check.same_items(loaded.samples, pcm16.samples));
+}
+
+test "an Ogg Vorbis file, as the specification decodes it" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    audio.Sound tone = read_ogg(&arena, "tests/data/tone.ogg");
+    audio.Sound expected = read_wav(&arena, "tests/data/tone_decoded.wav");
+    // 39 blocks of 128 frames, the last cut by 50 frames by the granule position of its page
+    assert(tone.rate == 8000 && tone.channels == 2 && tone.frames() == 4942);
+    assert(check.near(largest_difference(tone.samples, expected.samples), 0.0, 0.0001));
+    assert(check.near(tone.peak() as f64, expected.peak() as f64, 0.0001));
+    match (ogg.load(&arena, "tests/data/none.ogg")) {
+        ok(s) => assert(false),
+        err(e) => assert(audio.message(e) == "the file cannot be read"),
+    }
+}
+
+// What reading a file gives: its rate, channels and frames, or the error.
+str outcome(Arena* arena, str name) uses io {
+    ui8[] data = fixture.read_bytes(arena, join(arena, "tests/data/", name));
+    audio.Sound!audio.AudioError read = text.ends_with(name, ".ogg") ? ogg.decode(arena, data) : wav.decode(arena, data);
+    text.TextBuilder* b = text.builder(arena);
+    b.push(name);
+    b.push(": ");
+    match (read) {
+        ok(s) => {
+            b.push_i64(s.rate as i64);
+            b.push(" Hz, ");
+            b.push_i64(s.channels as i64);
+            b.push(" channels, ");
+            b.push_u64(s.frames() as ui64);
+            b.push(" frames");
+        },
+        err(e) => b.push(audio.message(e)),
+    }
+    b.push("\n");
+    return b.text();
+}
+
+test "damaged and hostile files" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    text.TextBuilder* report = text.builder(&arena);
+    str[22] names = [
+        "pcm16.wav",
+        "float32.wav",
+        "bad_huge_data.wav",
+        "bad_truncated.wav",
+        "bad_no_format.wav",
+        "bad_channels.wav",
+        "bad_many_channels.wav",
+        "bad_block.wav",
+        "bad_adpcm.wav",
+        "bad_chunk_size.wav",
+        "bad_rate.wav",
+        "tone.ogg",
+        "bad_truncated.ogg",
+        "bad_vendor.ogg",
+        "bad_huge_codebook.ogg",
+        "bad_crc.ogg",
+        "bad_not_vorbis.ogg",
+        "tone_decoded.wav",
+        "pcm8.wav",
+        "pcm24.wav",
+        "extensible24.wav",
+        "float64.wav",
+    ];
+    for (str name in names) {
+        report.push(outcome(&arena, name));
+    }
+    // a WAV file read as Ogg, and the other way
+    ui8[] pcm16 = fixture.read_bytes(&arena, "tests/data/pcm16.wav");
+    bool unknown_ogg = match (ogg.decode(&arena, pcm16)) {
+        ok(s) => false,
+        err(e) => e == audio.AudioError.UnknownFormat,
+    };
+    bool unknown_wav = match (wav.decode(&arena, fixture.read_bytes(&arena, "tests/data/tone.ogg"))) {
+        ok(s) => false,
+        err(e) => e == audio.AudioError.UnknownFormat,
+    };
+    assert(unknown_ogg && unknown_wav && wav.is_wav(pcm16) && !ogg.is_ogg(pcm16));
+    assert(fixture.golden(&arena, "tests/data/report.txt", report.text()));
+}
+
+test "the mixer: volume, panning, loops, rates and clipping" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 8000, 2);
+    mut f32[16] out = [0.0; 16];
+    // a mono sound in the middle: -3 dB each side; then silence, and the voice is gone
+    audio.Sound ones = mono(&arena, 8000, list(&arena, "1.0 1.0 1.0 1.0"));
+    ui32 id = m.play(ones);
+    assert(m.playing(id) && m.active() == 1);
+    m.mix(out[0..12]);
+    f32 middle = math.cos(math.PI / 4.0) as f32;
+    mut f32[12] centered = [middle, middle, middle, middle, middle, middle, middle, middle, 0.0, 0.0, 0.0, 0.0];
+    assert(check.same_items(out[0..12], centered[0..12]));
+    assert(!m.playing(id) && m.active() == 0);
+    // on the left, looping; its volume then moves to 0 over the next buffer
+    ui32 looped = m.play_with(ones, mixer.Play{ pan: -1.0, looping: true });
+    m.mix(out[0..8]);
+    mut f32[8] left = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+    assert(check.same_items(out[0..8], left[0..8]));
+    m.set_volume(looped, 0.0);
+    m.mix(out[0..8]);
+    mut f32[8] falling = [0.75, 0.0, 0.5, 0.0, 0.25, 0.0, 0.0, 0.0];
+    assert(check.same_items(out[0..8], falling[0..8]));
+    m.stop(looped);
+    assert(m.active() == 0);
+    // a loop of 3 frames, on the right
+    audio.Sound three = mono(&arena, 8000, list(&arena, "0.125 0.25 0.5"));
+    ui32 loop = m.play_with(three, mixer.Play{ pan: 1.0, looping: true });
+    m.mix(out[0..14]);
+    mut f32[14] right = [0.0, 0.125, 0.0, 0.25, 0.0, 0.5, 0.0, 0.125, 0.0, 0.25, 0.0, 0.5, 0.0, 0.125];
+    assert(check.same_items(out[0..14], right[0..14]));
+    m.set_looping(loop, false);
+    m.mix(out[0..8]);
+    assert(check.same_items(out[0..8], list(&arena, "0.0 0.25 0.0 0.5 0.0 0.0 0.0 0.0")) && m.active() == 0);
+    // a sound at half the rate of the mixer: each frame twice as long, joined by lines
+    audio.Sound slow = mono(&arena, 4000, list(&arena, "0.0 1.0"));
+    ui32 half = m.play_with(slow, mixer.Play{ pan: -1.0 });
+    m.mix(out[0..12]);
+    mut f32[12] stretched = [0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    assert(check.same_items(out[0..12], stretched[0..12]) && !m.playing(half));
+    // twice as fast: every other frame
+    audio.Sound steps = mono(&arena, 8000, list(&arena, "0.125 0.25 0.375 0.5"));
+    ui32 fast = m.play_with(steps, mixer.Play{ pan: -1.0, speed: 2.0 });
+    m.mix(out[0..6]);
+    assert(check.same_items(out[0..6], list(&arena, "0.125 0.0 0.375 0.0 0.0 0.0")) && !m.playing(fast));
+    // two loud sounds on the left: cut to 1; a stereo sound balanced to the right
+    ui32 a = m.play_with(mono(&arena, 8000, list(&arena, "0.75 -0.75")), mixer.Play{ pan: -1.0 });
+    ui32 b = m.play_with(mono(&arena, 8000, list(&arena, "0.75 -0.75")), mixer.Play{ pan: -1.0 });
+    m.mix(out[0..4]);
+    assert(check.same_items(out[0..4], list(&arena, "1.0 0.0 -1.0 0.0")) && m.active() == 0);
+    audio.Sound pair = audio.Sound{ rate: 8000, channels: 2, samples: list(&arena, "0.5 0.5 0.25 0.25") };
+    ui32 balanced = m.play_with(pair, mixer.Play{ pan: 0.5, volume: 0.5 });
+    m.mix(out[0..4]);
+    assert(check.same_items(out[0..4], list(&arena, "0.125 0.25 0.0625 0.125")));
+    // the volume of everything; stop_all
+    m.volume = 0.5;
+    m.play(ones);
+    m.play_with(ones, mixer.Play{ looping: true });
+    m.mix(out[0..2]);
+    assert(check.near(out[0] as f64, middle as f64, 0.000001) && m.active() == 2);
+    m.stop_all();
+    assert(m.active() == 0);
+    // into one channel: a mono sound as it is, a stereo one averaged
+    mixer.Mixer* one = mixer.create(&arena, 8000, 1);
+    one.play(mono(&arena, 8000, list(&arena, "0.5 0.5")));
+    one.play(audio.Sound{ rate: 8000, channels: 2, samples: list(&arena, "0.25 0.125 0.0 0.5") });
+    one.mix(out[0..3]);
+    assert(check.same_items(out[0..3], list(&arena, "0.6875 0.75 0.0")));
+}
+
+test "resampling, by sinc and by lines" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    // 1 kHz from 44 100 to 48 000 Hz: the tone at 48 000, but at the two ends
+    audio.Sound source = audio.tone(&arena, 44100, 1000.0, 0.1, 0.5);
+    audio.Sound ideal = audio.tone(&arena, 48000, 1000.0, 0.1, 0.5);
+    audio.Sound sinc = resample.to_rate(&arena, source, 48000);
+    audio.Sound linear = resample.to_rate_with(&arena, source, 48000, resample.Quality.Linear);
+    assert(sinc.rate == 48000 && sinc.frames() == 4800 && linear.frames() == 4800);
+    assert(check.near(largest_difference(sinc.samples[64..4736], ideal.samples[64..4736]), 0.0, 0.0005));
+    assert(check.near(largest_difference(linear.samples[64..4736], ideal.samples[64..4736]), 0.0, 0.002));
+    // down to 8 000 Hz: 1 kHz kept, 6 kHz (above the new half rate) removed instead of folded to 2 kHz
+    audio.Sound low = resample.to_rate(&arena, audio.tone(&arena, 48000, 1000.0, 0.1, 0.5), 8000);
+    assert(low.frames() == 800 && check.near(rms(low.samples[100..700]), 0.5 / math.SQRT2, 0.005));
+    audio.Sound high = audio.tone(&arena, 48000, 6000.0, 0.1, 0.5);
+    assert(check.near(rms(resample.to_rate(&arena, high, 8000).samples[100..700]), 0.0, 0.002));
+    assert(rms(resample.to_rate_with(&arena, high, 8000, resample.Quality.Linear).samples[100..700]) > 0.3);
+    // stereo, the channels apart; the same rate: a copy
+    audio.Sound stereo = audio.with_channels(&arena, source, 2);
+    audio.Sound both = resample.to_rate(&arena, stereo, 22050);
+    assert(both.channels == 2 && both.frames() == 2205 && both.at(1000, 0) == both.at(1000, 1));
+    assert(check.same_items(resample.to_rate(&arena, source, 44100).samples, source.samples));
+    assert(resample.frames_at(3, 44100, 48000) == 3 && resample.to_rate(&arena, empty(&arena), 16000).frames() == 0);
+}
+
+test "sounds: channels, parts, fades and tones" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    audio.Sound pair = audio.Sound{ rate: 8000, channels: 2, samples: list(&arena, "0.5 0.25 -1.0 0.0 0.75 0.75") };
+    assert(pair.frames() == 3 && check.near(pair.seconds(), 3.0 / 8000.0, 0.0000001) && pair.peak() == 1.0);
+    assert(check.same_items(audio.with_channels(&arena, pair, 1).samples, list(&arena, "0.375 -0.5 0.75")));
+    audio.Sound wide = audio.with_channels(&arena, audio.with_channels(&arena, pair, 1), 2);
+    assert(check.same_items(wide.samples, list(&arena, "0.375 0.375 -0.5 -0.5 0.75 0.75")));
+    assert(check.same_items(audio.with_channels(&arena, pair, 3).samples, list(&arena, "0.5 0.25 0.0 -1.0 0.0 0.0 0.75 0.75 0.0")));
+    assert(check.same_items(audio.part(pair, 1, 9).samples, list(&arena, "-1.0 0.0 0.75 0.75")) && audio.part(pair, 5, 2).frames() == 0);
+    assert(pair.at(2, 1) == 0.75 && pair.at(3, 0) == 0.0 && pair.at(0, 2) == 0.0);
+    audio.Sound a = audio.tone(&arena, 8000, 1000.0, 0.01, 0.5);
+    assert(a.frames() == 80 && a.samples[0] == 0.0 && check.near(a.samples[2] as f64, 0.5, 0.000001));
+    audio.Sound soft = audio.faded(&arena, mono(&arena, 8000, list(&arena, "1.0 1.0 1.0 1.0 1.0 1.0")), 2);
+    assert(check.same_items(soft.samples, list(&arena, "0.0 0.5 1.0 1.0 0.5 0.0")));
+    assert(audio.fits(48000, 2, 1000) && !audio.fits(48000, 9, 1) && !audio.fits(500, 1, 1) && !audio.fits(48000, 2, audio.MAX_SAMPLES));
+}

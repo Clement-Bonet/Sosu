@@ -1,0 +1,1116 @@
+// image.jpeg: JPEG files (ITU T.81), read and written in Sosu. Read: baseline and extended
+// sequential files of 8 bits, with Huffman codes: gray or YCbCr (or RGB, as Adobe marks it), any
+// sampling of the colors (4:4:4, 4:2:2, 4:2:0...), interleaved scans or one per component,
+// restart markers. The colors sampled less are interpolated (as libjpeg does). Every read is
+// checked: a damaged file gives `Damaged`, never a read outside of its bytes; an image beyond
+// `image.fits`, or with more blocks than its bytes could hold, is refused before its pixels are
+// allocated. Not read yet: progressive and arithmetic coded files, 12 bits, CMYK (`Unsupported`).
+// Written: baseline, the tables of the standard (Annex K) scaled by a quality of 1 to 100 as
+// libjpeg does, the colors sampled by half each way (4:2:0) below a quality of 90; alpha is
+// dropped.
+import std.io;
+import std.math;
+import image.image;
+
+// The natural index (row by row) of each coefficient in the order of the file (zigzag).
+ui8[64] zigzag() {
+    return [0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63];
+}
+
+// The cosines of the DCT, scaled for both ways: `t[x * 8 + u]` is C(u) / 2 * cos((2x + 1)uπ/16),
+// with C(0) = 1/√2 and C(u) = 1 otherwise. The 2D transform and its inverse apply it on each axis.
+f32[64] cosines() {
+    mut f32[64] t = [0.0; 64];
+    for (i32 x in 0..8) {
+        for (i32 u in 0..8) {
+            f64 c = u == 0 ? 1.0 / math.SQRT2 : 1.0;
+            t[(x * 8 + u) as usize] = (c / 2.0 * math.cos((2 * x + 1) as f64 * u as f64 * math.PI / 16.0)) as f32;
+        }
+    }
+    return t;
+}
+
+// Whether `data` starts as a JPEG file (a start of image, then a marker).
+pub bool is_jpeg(ui8[] data) {
+    return data.len >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
+}
+
+// ---- Read: Huffman codes, bits, blocks ----
+
+// A Huffman table of a file: how many codes of each length (1 to 16) and their symbols, with what
+// decodes them (T.81, F.2.2.3): the first and the last code of each length.
+struct Table {
+    mut ui8[17] counts = [0; 17];
+    mut ui8[256] symbols = [0; 256];
+    mut i32[18] maxcode = [-1; 18];
+    mut i32[17] mincode = [0; 17];
+    mut i32[17] valptr = [0; 17];
+    mut bool defined = false;
+
+    // Builds the decoding tables from `counts`; false if the codes do not fit in their lengths.
+    bool build() {
+        mut i32 code = 0;
+        mut i32 k = 0;
+        for (usize l in 1..17) {
+            valptr[l] = k;
+            mincode[l] = code;
+            code += counts[l] as i32;
+            k += counts[l] as i32;
+            if (code > 1 << l as i32) {
+                return false;
+            }
+            maxcode[l] = counts[l] > 0 ? code - 1 : -1;
+            code = code << 1;
+        }
+        defined = true;
+        return true;
+    }
+
+    // The next symbol of `bits`, or -1 if no code matches.
+    i32 decode(Reader* bits) {
+        mut i32 code = bits.bit() as i32;
+        for (usize l in 1..17) {
+            if (code <= maxcode[l]) {
+                return symbols[(valptr[l] + code - mincode[l]) as usize] as i32;
+            }
+            code = code << 1 | bits.bit() as i32;
+        }
+        return -1;
+    }
+}
+
+// The bits of the entropy-coded data, most significant first. A 0xFF byte is followed by a 0
+// that is not data; any other byte after 0xFF is a marker, where the data ends: past it, or past
+// the end of the file, the bits read are 0 and counted.
+struct Reader {
+    ui8[] data;
+    mut usize at;
+    mut ui32 byte = 0;
+    mut ui32 left = 0;  // bits of `byte` not read yet
+    mut usize past = 0;  // bytes read past the data
+
+    ui32 bit() {
+        if (left == 0) {
+            byte = 0;
+            if (at + 1 < data.len && data[at] == 0xFF && data[at + 1] == 0) {
+                byte = 0xFF;
+                at += 2;
+            } else if (at < data.len && data[at] != 0xFF) {
+                byte = data[at] as ui32;
+                at += 1;
+            } else {
+                past += 1;
+            }
+            left = 8;
+        }
+        left -= 1;
+        return byte >> left & 1;
+    }
+
+    // `count` bits (at most 16) as a number.
+    ui32 take(ui32 count) {
+        mut ui32 value = 0;
+        for (ui32 i in 0..count) {
+            value = value << 1 | bit();
+        }
+        return value;
+    }
+
+    // At a restart: the bits left of the byte are dropped, and the marker RSTn skipped.
+    void restart() {
+        left = 0;
+        while (at < data.len && data[at] == 0xFF && at + 1 < data.len && data[at + 1] == 0xFF) {
+            at += 1;  // fill bytes
+        }
+        if (at + 1 < data.len && data[at] == 0xFF && data[at + 1] >= 0xD0 && data[at + 1] <= 0xD7) {
+            at += 2;
+        }
+    }
+}
+
+// A value of `size` bits read as the JPEG codes it: the low half negative (T.81, F.2.2.1).
+i32 extend(ui32 value, ui32 size) {
+    if (size == 0) {
+        return 0;
+    }
+    return value < 1 << size - 1 ? value as i32 - (1 << size as i32) + 1 : value as i32;
+}
+
+// A component of the frame: its sampling, its tables, and where its samples are.
+struct Component {
+    mut i32 id = 0;
+    mut i32 h = 1;  // horizontal and vertical sampling factors, 1 to 4
+    mut i32 v = 1;
+    mut usize tq = 0;  // the quantization table
+    mut usize td = 0;  // the Huffman tables of the scan: DC and AC
+    mut usize ta = 0;
+    mut i32 width = 0;  // in samples, before the padding of the blocks
+    mut i32 height = 0;
+    mut i32 stride = 0;  // the plane is padded to whole MCUs: `stride` samples a row
+    mut usize offset = 0;  // where its plane starts in `planes`
+    mut i32 pred = 0;  // the DC of the last block
+}
+
+struct Decoder {
+    ui8[] data;
+    mut ui16[256] quant = [0; 256];  // 4 tables of 64, in the order of the file
+    mut Table[4] dc = [Table{ }; 4];
+    mut Table[4] ac = [Table{ }; 4];
+    mut Component[4] comps = [Component{ }; 4];
+    mut usize count = 0;  // components
+    mut i32 width = 0;
+    mut i32 height = 0;
+    mut i32 hmax = 1;
+    mut i32 vmax = 1;
+    mut i32 mcux = 0;  // MCUs across and down
+    mut i32 mcuy = 0;
+    mut i32 restart = 0;  // MCUs between restart markers, 0: none
+    mut bool frame = false;
+    mut bool scanned = false;
+    mut i32 transform = -1;  // Adobe's color transform: 0 RGB, 1 YCbCr; -1 no Adobe marker
+    mut ui8[] planes;
+    mut f32[64] t = [0.0; 64];
+    mut ui8[64] zz = [0; 64];
+
+    // Decodes a block of component `c` into its plane at block (bx, by); false if damaged.
+    bool block(Reader* bits, usize c, i32 bx, i32 by) {
+        Component* comp = &comps[c];
+        Table* dct = &dc[comp.td];
+        Table* act = &ac[comp.ta];
+        if (!dct.defined || !act.defined) {
+            return false;
+        }
+        usize q = comp.tq * 64;
+        mut f32[64] coef = [0.0; 64];
+        i32 s = dct.decode(bits);
+        if (s < 0 || s > 11) {
+            return false;
+        }
+        comp.pred += extend(bits.take(s as ui32), s as ui32);
+        if (abs(comp.pred) > 32767) {
+            return false;  // far beyond what 8 bits give: a hostile file adding up differences
+        }
+        coef[0] = comp.pred as f32 * quant[q] as f32;
+        mut i32 k = 1;
+        while (k < 64) {
+            i32 rs = act.decode(bits);
+            if (rs < 0) {
+                return false;
+            }
+            i32 run = rs >> 4;
+            i32 size = rs & 15;
+            if (size == 0) {
+                if (run != 15) {
+                    break;  // the end of the block
+                }
+                k += 16;
+                continue;
+            }
+            k += run;
+            if (k > 63 || size > 10) {
+                return false;
+            }
+            coef[zz[k as usize] as usize] = (extend(bits.take(size as ui32), size as ui32) * quant[q + k as usize] as i32) as f32;
+            k += 1;
+        }
+        if (k > 64) {
+            return false;
+        }
+        // the inverse DCT: the rows, then the columns
+        mut f32[64] rows = [0.0; 64];
+        for (usize v in 0..8) {
+            for (usize x in 0..8) {
+                mut f32 sum = 0.0;
+                for (usize u in 0..8) {
+                    sum += t[x * 8 + u] * coef[v * 8 + u];
+                }
+                rows[v * 8 + x] = sum;
+            }
+        }
+        usize origin = comp.offset + (by * 8) as usize * comp.stride as usize + (bx * 8) as usize;
+        for (usize y in 0..8) {
+            for (usize x in 0..8) {
+                mut f32 sum = 0.0;
+                for (usize v in 0..8) {
+                    sum += t[y * 8 + v] * rows[v * 8 + x];
+                }
+                f32 value = sum + 128.5;
+                planes[origin + y * comp.stride as usize + x] = value <= 0.0 ? 0 : value >= 255.0 ? 255 : value as ui8;
+            }
+        }
+        return true;
+    }
+
+    // Reads the frame header (SOF0 or SOF1) at `body`, of `length` bytes.
+    image.ImageError? frame_header(Arena* arena, usize body, usize length, usize end) {
+        if (frame || length < 6) {
+            return some(image.ImageError.Damaged);
+        }
+        if (data[body] != 8) {
+            return some(image.ImageError.Unsupported);  // 12 bits
+        }
+        height = data[body + 1] as i32 << 8 | data[body + 2] as i32;
+        width = data[body + 3] as i32 << 8 | data[body + 4] as i32;
+        count = data[body + 5] as usize;
+        if (width == 0 || height == 0) {
+            return some(image.ImageError.Damaged);  // a height given by a later marker (DNL) is not read
+        }
+        if (count == 4) {
+            return some(image.ImageError.Unsupported);  // CMYK
+        }
+        if (count != 1 && count != 3 || length < 6 + 3 * count) {
+            return some(image.ImageError.Damaged);
+        }
+        if (!image.fits(width as i64, height as i64)) {
+            return some(image.ImageError.TooLarge);
+        }
+        mut i32 units = 0;
+        for (usize i in 0..count) {
+            usize at = body + 6 + 3 * i;
+            comps[i] = Component{ id: data[at] as i32, h: (data[at + 1] >> 4) as i32, v: (data[at + 1] & 15) as i32, tq: data[at + 2] as usize };
+            if (comps[i].h < 1 || comps[i].h > 4 || comps[i].v < 1 || comps[i].v > 4 || comps[i].tq > 3) {
+                return some(image.ImageError.Damaged);
+            }
+            hmax = max(hmax, comps[i].h);
+            vmax = max(vmax, comps[i].v);
+            units += comps[i].h * comps[i].v;
+        }
+        if (units > 10 && count > 1) {
+            return some(image.ImageError.Damaged);
+        }
+        mcux = (width + 8 * hmax - 1) / (8 * hmax);
+        mcuy = (height + 8 * vmax - 1) / (8 * vmax);
+        // Each block takes 2 bits at least (a DC code, an end of block): the bytes left bound how
+        // many blocks a scan can have, before any plane is allocated.
+        mut i64 blocks = 0;
+        mut usize size = 0;
+        for (usize i in 0..count) {
+            mut Component* c = &comps[i];
+            c.width = (width * c.h + hmax - 1) / hmax;
+            c.height = (height * c.v + vmax - 1) / vmax;
+            c.stride = mcux * c.h * 8;
+            c.offset = size;
+            size += c.stride as usize * (mcuy * c.v * 8) as usize;
+            blocks += ((c.width + 7) / 8) as i64 * ((c.height + 7) / 8) as i64;
+        }
+        if (blocks > 4 * (end - body) as i64 + 64) {
+            return some(image.ImageError.Damaged);
+        }
+        planes = arena.alloc_slice(ui8, size);
+        frame = true;
+        return none;
+    }
+
+    // Reads a scan: its header at `body`, then its data; gives where the data ended.
+    usize!image.ImageError scan(usize body, usize length) {
+        if (!frame || length < 1) {
+            return err(image.ImageError.Damaged);
+        }
+        usize n = data[body] as usize;
+        if (n < 1 || n > count || length != 4 + 2 * n) {
+            return err(image.ImageError.Damaged);
+        }
+        mut usize[4] which = [0; 4];
+        for (usize i in 0..n) {
+            i32 id = data[body + 1 + 2 * i] as i32;
+            mut bool found = false;
+            for (usize c in 0..count) {
+                if (comps[c].id == id && !found) {
+                    which[i] = c;
+                    found = true;
+                }
+            }
+            ui8 tables = data[body + 2 + 2 * i];
+            if (!found || tables >> 4 > 3 || tables & 15 > 3) {
+                return err(image.ImageError.Damaged);
+            }
+            comps[which[i]].td = (tables >> 4) as usize;
+            comps[which[i]].ta = (tables & 15) as usize;
+            comps[which[i]].pred = 0;
+        }
+        usize spectral = body + 1 + 2 * n;
+        if (data[spectral] != 0 || data[spectral + 1] != 63 || data[spectral + 2] != 0) {
+            return err(image.ImageError.Damaged);  // what a progressive scan has, in a baseline frame
+        }
+        mut Reader bits = Reader{ data: data, at: body + length };
+        mut i32 done = 0;  // MCUs, for the restarts
+        if (n == 1) {
+            // one component: its blocks in order, each its own MCU, without the padding
+            usize c = which[0];
+            i32 across = (comps[c].width + 7) / 8;
+            i32 down = (comps[c].height + 7) / 8;
+            for (i32 by in 0..down) {
+                for (i32 bx in 0..across) {
+                    if (restart > 0 && done > 0 && done % restart == 0) {
+                        bits.restart();
+                        comps[c].pred = 0;
+                    }
+                    if (!block(&bits, c, bx, by)) {
+                        return err(image.ImageError.Damaged);
+                    }
+                    done += 1;
+                }
+            }
+        } else {
+            for (i32 my in 0..mcuy) {
+                for (i32 mx in 0..mcux) {
+                    if (restart > 0 && done > 0 && done % restart == 0) {
+                        bits.restart();
+                        for (usize i in 0..n) {
+                            comps[which[i]].pred = 0;
+                        }
+                    }
+                    for (usize i in 0..n) {
+                        usize c = which[i];
+                        for (i32 v in 0..comps[c].v) {
+                            for (i32 h in 0..comps[c].h) {
+                                if (!block(&bits, c, mx * comps[c].h + h, my * comps[c].v + v)) {
+                                    return err(image.ImageError.Damaged);
+                                }
+                            }
+                        }
+                    }
+                    done += 1;
+                }
+            }
+        }
+        if (bits.past > 2) {
+            return err(image.ImageError.Damaged);  // the data was cut
+        }
+        scanned = true;
+        return ok(bits.at);
+    }
+
+    // The sample of component `c` at the pixel (x, y) of the image, interpolated between its
+    // nearest samples when it is sampled less (centered, as libjpeg's "fancy" upsampling).
+    i32 sample(usize c, i32 x, i32 y) {
+        Component* comp = &comps[c];
+        if (comp.h == hmax && comp.v == vmax) {
+            return planes[comp.offset + y as usize * comp.stride as usize + x as usize] as i32;
+        }
+        f32 fx = max((x as f32 + 0.5) * comp.h as f32 / hmax as f32 - 0.5, 0.0);
+        f32 fy = max((y as f32 + 0.5) * comp.v as f32 / vmax as f32 - 0.5, 0.0);
+        i32 x0 = min(fx as i32, comp.width - 1);
+        i32 y0 = min(fy as i32, comp.height - 1);
+        i32 x1 = min(x0 + 1, comp.width - 1);
+        i32 y1 = min(y0 + 1, comp.height - 1);
+        f32 tx = min(fx - x0 as f32, 1.0);
+        f32 ty = min(fy - y0 as f32, 1.0);
+        usize row0 = comp.offset + y0 as usize * comp.stride as usize;
+        usize row1 = comp.offset + y1 as usize * comp.stride as usize;
+        f32 top = planes[row0 + x0 as usize] as f32 * (1.0 - tx) + planes[row0 + x1 as usize] as f32 * tx;
+        f32 bottom = planes[row1 + x0 as usize] as f32 * (1.0 - tx) + planes[row1 + x1 as usize] as f32 * tx;
+        return (top * (1.0 - ty) + bottom * ty + 0.5) as i32;
+    }
+
+    // The pixels of the image, from the planes.
+    image.Image pixels(Arena* arena) {
+        mut image.Image img = image.create(arena, width, height);
+        // RGB when Adobe says so, or when the components are named R, G, B without Adobe marker
+        bool rgb = transform == 0 || transform < 0 && count == 3 && comps[0].id == 82 && comps[1].id == 71 && comps[2].id == 66;
+        for (i32 y in 0..height) {
+            for (i32 x in 0..width) {
+                mut ui32 p = 0;
+                if (count == 1) {
+                    ui32 v = sample(0, x, y) as ui32;
+                    p = 0xFF000000 | v << 16 | v << 8 | v;
+                } else if (rgb) {
+                    p = image.rgba(sample(0, x, y) as ui32, sample(1, x, y) as ui32, sample(2, x, y) as ui32, 255);
+                } else {
+                    // YCbCr to RGB (JFIF), in fixed point of 16 bits
+                    i32 luma = sample(0, x, y) << 16;
+                    i32 cb = sample(1, x, y) - 128;
+                    i32 cr = sample(2, x, y) - 128;
+                    i32 r = luma + 91881 * cr + 32768 >> 16;
+                    i32 g = luma - 22554 * cb - 46802 * cr + 32768 >> 16;
+                    i32 b = luma + 116130 * cb + 32768 >> 16;
+                    p = image.rgba(clamp_byte(r), clamp_byte(g), clamp_byte(b), 255);
+                }
+                img.pixels[(y * width + x) as usize] = p;
+            }
+        }
+        return img;
+    }
+}
+
+ui32 clamp_byte(i32 v) {
+    return v < 0 ? 0 : v > 255 ? 255 : v as ui32;
+}
+
+ui32 u16_at(ui8[] data, usize at) {
+    return data[at] as ui32 << 8 | data[at + 1] as ui32;
+}
+
+// Decodes the JPEG file `data`; the pixels are allocated in `arena`.
+pub image.Image!image.ImageError decode(Arena* arena, ui8[] data) {
+    if (!is_jpeg(data)) {
+        return err(image.ImageError.UnknownFormat);
+    }
+    mut Decoder d = Decoder{ data: data, planes: data[0..0], t: cosines(), zz: zigzag() };
+    mut usize at = 2;
+    while (true) {
+        // the next marker: 0xFF, perhaps several, then its code
+        while (at < data.len && data[at] != 0xFF) {
+            at += 1;
+        }
+        while (at < data.len && data[at] == 0xFF) {
+            at += 1;
+        }
+        if (at >= data.len) {
+            break;  // no end of image: what was read is kept if a scan was
+        }
+        ui8 marker = data[at];
+        at += 1;
+        if (marker == 0xD9) {
+            break;  // EOI
+        }
+        if (marker >= 0xD0 && marker <= 0xD7 || marker == 0x01) {
+            continue;  // without length
+        }
+        if (at + 2 > data.len) {
+            return err(image.ImageError.Damaged);
+        }
+        usize length = u16_at(data, at) as usize;
+        if (length < 2 || length > data.len - at) {
+            return err(image.ImageError.Damaged);
+        }
+        usize body = at + 2;
+        usize size = length - 2;
+        if (marker == 0xC0 || marker == 0xC1) {
+            match (d.frame_header(arena, body, size, data.len)) {
+                some(e) => {
+                    return err(e);
+                },
+                none => { },
+            }
+        } else if (marker == 0xC2 || marker == 0xC3 || marker >= 0xC5 && marker <= 0xC7 || marker >= 0xC9 && marker <= 0xCB || marker >= 0xCD && marker <= 0xCF) {
+            return err(image.ImageError.Unsupported);  // progressive, lossless, hierarchical, arithmetic
+        } else if (marker == 0xC4) {
+            // Huffman tables, one or several
+            mut usize p = body;
+            while (p < body + size) {
+                if (p + 17 > body + size) {
+                    return err(image.ImageError.Damaged);
+                }
+                ui8 kind = data[p] >> 4;
+                usize slot = (data[p] & 15) as usize;
+                if (kind > 1 || slot > 3) {
+                    return err(image.ImageError.Damaged);
+                }
+                mut Table table = Table{ };
+                mut usize total = 0;
+                for (usize l in 1..17) {
+                    table.counts[l] = data[p + l];
+                    total += data[p + l] as usize;
+                }
+                if (total > 256 || p + 17 + total > body + size) {
+                    return err(image.ImageError.Damaged);
+                }
+                for (usize i in 0..total) {
+                    table.symbols[i] = data[p + 17 + i];
+                }
+                if (!table.build()) {
+                    return err(image.ImageError.Damaged);
+                }
+                if (kind == 0) {
+                    d.dc[slot] = table;
+                } else {
+                    d.ac[slot] = table;
+                }
+                p += 17 + total;
+            }
+        } else if (marker == 0xDB) {
+            // quantization tables, of 8 or 16 bits each
+            mut usize p = body;
+            while (p < body + size) {
+                usize precision = (data[p] >> 4) as usize;
+                usize slot = (data[p] & 15) as usize;
+                usize bytes = precision == 0 ? 64 : 128;
+                if (precision > 1 || slot > 3 || p + 1 + bytes > body + size) {
+                    return err(image.ImageError.Damaged);
+                }
+                for (usize k in 0..64) {
+                    d.quant[slot * 64 + k] = precision == 0 ? data[p + 1 + k] as ui16 : u16_at(data, p + 1 + 2 * k) as ui16;
+                }
+                p += 1 + bytes;
+            }
+        } else if (marker == 0xDD) {
+            if (size < 2) {
+                return err(image.ImageError.Damaged);
+            }
+            d.restart = u16_at(data, body) as i32;
+        } else if (marker == 0xEE) {
+            // Adobe: its color transform says whether 3 components are RGB or YCbCr
+            if (size >= 12 && data[body] == 65 && data[body + 1] == 100 && data[body + 2] == 111 && data[body + 3] == 98 && data[body + 4] == 101) {
+                d.transform = data[body + 11] as i32;
+            }
+        } else if (marker == 0xDA) {
+            match (d.scan(body, size)) {
+                ok(end) => {
+                    at = end;
+                },
+                err(e) => {
+                    return err(e);
+                },
+            }
+            continue;
+        }
+        at = body + size;  // the other markers (APPn, COM, DNL...) are skipped
+    }
+    if (!d.scanned) {
+        return err(image.ImageError.Damaged);
+    }
+    return ok(d.pixels(arena));
+}
+
+// Reads and decodes the JPEG file at `path`.
+pub image.Image!image.ImageError load(Arena* arena, str path) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(image.ImageError.Unreadable);
+        },
+    };
+    return decode(arena, data);
+}
+
+// ---- Write: the tables of the standard, the forward DCT, Huffman codes ----
+
+ui8[64] luma_quant() {
+    return [16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99];
+}
+
+ui8[64] chroma_quant() {
+    return [17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99];
+}
+
+// The Huffman tables of Annex K: the number of codes of each length 1 to 16, then the symbols.
+ui8[28] dc_luma() {
+    return [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+}
+
+ui8[28] dc_chroma() {
+    return [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+}
+
+ui8[178] ac_luma() {
+    return [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA];
+}
+
+ui8[178] ac_chroma() {
+    return [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77, 0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71, 0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xA1, 0xB1, 0xC1, 0x09, 0x23, 0x33, 0x52, 0xF0, 0x15, 0x62, 0x72, 0xD1, 0x0A, 0x16, 0x24, 0x34, 0xE1, 0x25, 0xF1, 0x17, 0x18, 0x19, 0x1A, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA];
+}
+
+// The code of each symbol of a table (counts then symbols): its bits and its length.
+struct Codes {
+    mut ui16[256] code = [0; 256];
+    mut ui8[256] size = [0; 256];
+}
+
+Codes codes_of(ui8[] spec) {
+    mut Codes c = Codes{ };
+    mut ui32 code = 0;
+    mut usize k = 16;
+    for (usize l in 0..16) {
+        for (usize i in 0..spec[l] as usize) {
+            ui8 symbol = spec[k];
+            c.code[symbol as usize] = code as ui16;
+            c.size[symbol as usize] = (l + 1) as ui8;
+            code += 1;
+            k += 1;
+        }
+        code = code << 1;
+    }
+    return c;
+}
+
+// What is written: bytes that grow in an arena, and the bits of the entropy-coded data.
+struct Writer {
+    Arena* arena;
+    mut ui8[] bytes;
+    mut usize len = 0;
+    mut ui32 acc = 0;
+    mut ui32 bits = 0;
+
+    void put(ui32 b) {
+        if (len == bytes.len) {
+            mut ui8[] more = arena.alloc_slice(ui8, bytes.len * 2);
+            for (usize i in 0..len) {
+                more[i] = bytes[i];
+            }
+            bytes = more;
+        }
+        bytes[len] = (b & 0xFF) as ui8;
+        len += 1;
+    }
+
+    void put16(ui32 v) {
+        put(v >> 8);
+        put(v);
+    }
+
+    // `size` bits of `value`, the first most significant; 0xFF is followed by a 0.
+    void emit(ui32 value, ui32 size) {
+        for (ui32 i in 0..size) {
+            acc = acc << 1 | value >> size - 1 - i & 1;
+            bits += 1;
+            if (bits == 8) {
+                put(acc);
+                if (acc == 0xFF) {
+                    put(0);
+                }
+                acc = 0;
+                bits = 0;
+            }
+        }
+    }
+
+    // The last byte completed with 1 bits.
+    void flush() {
+        while (bits != 0) {
+            emit(1, 1);
+        }
+    }
+
+    void table(ui32 kind, ui8[] spec) {
+        put(0xFF);
+        put(0xC4);
+        put16((3 + spec.len) as ui32);
+        put(kind);
+        for (ui8 b in spec) {
+            put(b as ui32);
+        }
+    }
+}
+
+// The size in bits of `v`, positive or negative (its category in T.81).
+ui32 category(i32 v) {
+    mut ui32 a = abs(v) as ui32;
+    mut ui32 n = 0;
+    while (a > 0) {
+        a = a >> 1;
+        n += 1;
+    }
+    return n;
+}
+
+// What the encoder of a component keeps: its quantization table (natural order), its codes and
+// its last DC.
+struct Channel {
+    mut f32[64] quant = [1.0; 64];
+    mut i32 pred = 0;
+    bool chroma;
+}
+
+struct Encoder {
+    mut Writer out;
+    mut f32[64] t = [0.0; 64];
+    mut ui8[64] zz = [0; 64];
+    mut Codes dc0 = Codes{ };
+    mut Codes ac0 = Codes{ };
+    mut Codes dc1 = Codes{ };
+    mut Codes ac1 = Codes{ };
+
+    // Transforms, quantizes and writes the block of 64 samples (0 to 255) of `ch`.
+    void block(f32[] samples, Channel* ch) {
+        mut f32[64] rows = [0.0; 64];
+        for (usize y in 0..8) {
+            for (usize u in 0..8) {
+                mut f32 sum = 0.0;
+                for (usize x in 0..8) {
+                    sum += t[x * 8 + u] * (samples[y * 8 + x] - 128.0);
+                }
+                rows[y * 8 + u] = sum;
+            }
+        }
+        mut i32[64] q = [0; 64];  // in zigzag order
+        for (usize k in 0..64) {
+            usize n = zz[k] as usize;
+            usize v = n / 8;
+            usize u = n % 8;
+            mut f32 sum = 0.0;
+            for (usize y in 0..8) {
+                sum += t[y * 8 + v] * rows[y * 8 + u];
+            }
+            f32 scaled = sum / ch.quant[n];
+            q[k] = (scaled < 0.0 ? scaled - 0.5 : scaled + 0.5) as i32;
+        }
+        Codes* dc = ch.chroma ? &dc1 : &dc0;
+        Codes* ac = ch.chroma ? &ac1 : &ac0;
+        i32 diff = q[0] - ch.pred;
+        ch.pred = q[0];
+        ui32 s = category(diff);
+        out.emit(dc.code[s] as ui32, dc.size[s] as ui32);
+        out.emit((diff < 0 ? diff - 1 : diff) as ui32, s);
+        mut ui32 run = 0;
+        for (usize k in 1..64) {
+            if (q[k] == 0) {
+                run += 1;
+                continue;
+            }
+            while (run > 15) {
+                out.emit(ac.code[0xF0] as ui32, ac.size[0xF0] as ui32);
+                run -= 16;
+            }
+            ui32 size = category(q[k]);
+            ui32 rs = run << 4 | size;
+            out.emit(ac.code[rs] as ui32, ac.size[rs] as ui32);
+            out.emit((q[k] < 0 ? q[k] - 1 : q[k]) as ui32, size);
+            run = 0;
+        }
+        if (run > 0) {
+            out.emit(ac.code[0] as ui32, ac.size[0] as ui32);  // end of block
+        }
+    }
+}
+
+// A table of the standard scaled by `quality` as libjpeg scales it, in natural order.
+f32[64] scaled(ui8[64] standard, i32 quality) {
+    i32 scale = quality < 50 ? 5000 / quality : 200 - 2 * quality;
+    mut f32[64] q = [0.0; 64];
+    for (usize i in 0..64) {
+        q[i] = min(max((standard[i] as i32 * scale + 50) / 100, 1), 255) as f32;
+    }
+    return q;
+}
+
+// The bytes of a JPEG file of `width` by `height` pixels: `rgb` when color, else `levels`.
+// `restart` puts a restart marker every so many MCUs (0: none).
+ui8[] write(Arena* arena, ui32[] rgb, ui8[] levels, i32 width, i32 height, bool color, i32 quality, i32 restart) {
+    mut ui8[28] dl = dc_luma();
+    mut ui8[178] al = ac_luma();
+    mut ui8[28] dcc = dc_chroma();
+    mut ui8[178] acc = ac_chroma();
+    mut Encoder e = Encoder{ out: Writer{ arena: arena, bytes: arena.alloc_slice(ui8, 1024 + (width * height) as usize / 2) }, t: cosines(), zz: zigzag(), dc0: codes_of(dl[0..28]), ac0: codes_of(al[0..178]), dc1: codes_of(dcc[0..28]), ac1: codes_of(acc[0..178]) };
+    i32 sub = color && quality < 90 ? 2 : 1;  // the colors sampled by half each way (4:2:0), or not
+    mut Channel luma = Channel{ quant: scaled(luma_quant(), quality), chroma: false };
+    mut Channel cb = Channel{ quant: scaled(chroma_quant(), quality), chroma: true };
+    mut Channel cr = Channel{ quant: scaled(chroma_quant(), quality), chroma: true };
+    ui8[64] zz = zigzag();
+    // SOI, then JFIF 1.1 without thumbnail, square pixels
+    e.out.put16(0xFFD8);
+    e.out.put16(0xFFE0);
+    e.out.put16(16);
+    mut ui8[14] jfif = [74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+    for (ui8 b in jfif) {
+        e.out.put(b as ui32);
+    }
+    // the quantization tables, in zigzag order
+    for (i32 table in 0..(color ? 2 : 1)) {
+        e.out.put16(0xFFDB);
+        e.out.put16(67);
+        e.out.put(table as ui32);
+        for (usize k in 0..64) {
+            e.out.put((table == 0 ? luma.quant[zz[k] as usize] : cb.quant[zz[k] as usize]) as ui32);
+        }
+    }
+    // SOF0: 8 bits, the size, the components and their sampling
+    ui32 n = color ? 3 : 1;
+    e.out.put16(0xFFC0);
+    e.out.put16(8 + 3 * n);
+    e.out.put(8);
+    e.out.put16(height as ui32);
+    e.out.put16(width as ui32);
+    e.out.put(n);
+    for (ui32 c in 0..n) {
+        e.out.put(c + 1);
+        e.out.put(c == 0 ? (sub * 16 + sub) as ui32 : 0x11);
+        e.out.put(c == 0 ? 0 : 1);
+    }
+    e.out.table(0x00, dl[0..28]);
+    e.out.table(0x10, al[0..178]);
+    if (color) {
+        e.out.table(0x01, dcc[0..28]);
+        e.out.table(0x11, acc[0..178]);
+    }
+    if (restart > 0) {
+        e.out.put16(0xFFDD);
+        e.out.put16(4);
+        e.out.put16(restart as ui32);
+    }
+    // SOS: every component, interleaved
+    e.out.put16(0xFFDA);
+    e.out.put16(6 + 2 * n);
+    e.out.put(n);
+    for (ui32 c in 0..n) {
+        e.out.put(c + 1);
+        e.out.put(c == 0 ? 0x00 : 0x11);
+    }
+    e.out.put(0);
+    e.out.put(63);
+    e.out.put(0);
+    i32 mcu = 8 * sub;
+    mut f32[64] samples = [0.0; 64];
+    mut i32 done = 0;
+    mut ui32 marker = 0;
+    for (mut i32 my = 0; my < height; my += mcu) {
+        for (mut i32 mx = 0; mx < width; mx += mcu) {
+            if (restart > 0 && done > 0 && done % restart == 0) {
+                e.out.flush();
+                e.out.put(0xFF);
+                e.out.put(0xD0 + marker);
+                marker = (marker + 1) % 8;
+                luma.pred = 0;
+                cb.pred = 0;
+                cr.pred = 0;
+            }
+            for (i32 by in 0..sub) {
+                for (i32 bx in 0..sub) {
+                    for (i32 y in 0..8) {
+                        for (i32 x in 0..8) {
+                            // the pixels past the edge repeat the last ones
+                            i32 px = min(mx + bx * 8 + x, width - 1);
+                            i32 py = min(my + by * 8 + y, height - 1);
+                            usize i = (py * width + px) as usize;
+                            samples[(y * 8 + x) as usize] = color ? luma_of(rgb[i]) : levels[i] as f32;
+                        }
+                    }
+                    e.block(samples[0..64], &luma);
+                }
+            }
+            if (color) {
+                for (i32 which in 0..2) {
+                    for (i32 y in 0..8) {
+                        for (i32 x in 0..8) {
+                            // the average of the `sub` by `sub` pixels each sample covers
+                            mut f32 sum = 0.0;
+                            for (i32 dy in 0..sub) {
+                                for (i32 dx in 0..sub) {
+                                    i32 px = min(mx + x * sub + dx, width - 1);
+                                    i32 py = min(my + y * sub + dy, height - 1);
+                                    ui32 p = rgb[(py * width + px) as usize];
+                                    sum += which == 0 ? blue_of(p) : red_of(p);
+                                }
+                            }
+                            samples[(y * 8 + x) as usize] = sum / (sub * sub) as f32;
+                        }
+                    }
+                    e.block(samples[0..64], which == 0 ? &cb : &cr);
+                }
+            }
+            done += 1;
+        }
+    }
+    e.out.flush();
+    e.out.put16(0xFFD9);
+    return e.out.bytes[0..e.out.len];
+}
+
+f32 luma_of(ui32 p) {
+    return 0.299 * (p >> 16 & 0xFF) as f32 + 0.587 * (p >> 8 & 0xFF) as f32 + 0.114 * (p & 0xFF) as f32;
+}
+
+f32 blue_of(ui32 p) {
+    return -0.168736 * (p >> 16 & 0xFF) as f32 - 0.331264 * (p >> 8 & 0xFF) as f32 + 0.5 * (p & 0xFF) as f32 + 128.0;
+}
+
+f32 red_of(ui32 p) {
+    return 0.5 * (p >> 16 & 0xFF) as f32 - 0.418688 * (p >> 8 & 0xFF) as f32 - 0.081312 * (p & 0xFF) as f32 + 128.0;
+}
+
+// The bytes of the JPEG file holding `img` at `quality` (1 to 100; 90 and above keep every
+// color sample). Its alpha is dropped.
+pub ui8[] encode(Arena* arena, image.Image img, i32 quality)
+    requires quality >= 1 && quality <= 100 && img.width >= 1 && img.height >= 1 && img.width <= 65535 && img.height <= 65535 && img.pixels.len == img.width as usize * img.height as usize
+{
+    return write(arena, img.pixels, arena.alloc_slice(ui8, 0), img.width, img.height, true, quality, 0);
+}
+
+// The bytes of the JPEG file holding the gray image `g` at `quality` (1 to 100).
+pub ui8[] encode_gray(Arena* arena, image.Gray g, i32 quality)
+    requires quality >= 1 && quality <= 100 && g.width >= 1 && g.height >= 1 && g.width <= 65535 && g.height <= 65535 && g.pixels.len == g.width as usize * g.height as usize
+{
+    return write(arena, arena.alloc_slice(ui32, 0), g.pixels, g.width, g.height, false, quality, 0);
+}
+
+// Writes `img` as a JPEG file at `path`, at `quality` (1 to 100).
+pub void!io.IoError save(Arena* arena, str path, image.Image img, i32 quality) uses io {
+    ui8[] bytes = encode(arena, img, quality);
+    io.File file = match (io.open(arena, path, io.Mode.Write)) {
+        ok(f) => f,
+        err(e) => {
+            return err(e);
+        },
+    };
+    defer file.close();
+    return file.write(bytes);
+}
+
+// ---- Tests: files written here and read back; files of other encoders are in tests/programs ----
+
+image.Image none_image(Arena* arena) {
+    return image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) };
+}
+
+image.Image decoded(Arena* arena, ui8[] data) {
+    return match (decode(arena, data)) {
+        ok(img) => img,
+        err(e) => none_image(arena),
+    };
+}
+
+image.ImageError failure(Arena* arena, ui8[] data) {
+    return match (decode(arena, data)) {
+        ok(img) => image.ImageError.Unreadable,  // not expected
+        err(e) => e,
+    };
+}
+
+// A picture with gradients, a disc and sharp edges, `w` by `h`.
+image.Image picture(Arena* arena, i32 w, i32 h) {
+    mut image.Image img = image.create(arena, w, h);
+    for (i32 y in 0..h) {
+        for (i32 x in 0..w) {
+            i32 dx = x - w / 2;
+            i32 dy = y - h / 2;
+            bool disc = dx * dx + dy * dy < w * h / 10;
+            ui32 r = disc ? 230 : (x * 255 / w) as ui32;
+            ui32 g = disc ? 200 : (y * 255 / h) as ui32;
+            ui32 b = x / 8 % 2 == 0 ? 60 : 160;
+            img.set(x, y, image.rgba(r, g, b, 255));
+        }
+    }
+    return img;
+}
+
+// The mean and the largest difference of the channels of two images of the same size.
+f64 mean_difference(image.Image a, image.Image b) {
+    mut ui64 total = 0;
+    for (usize i in 0..a.pixels.len) {
+        for (i32 bits in [16, 8, 0]) {
+            i32 x = (a.pixels[i] >> bits as ui32 & 0xFF) as i32;
+            i32 y = (b.pixels[i] >> bits as ui32 & 0xFF) as i32;
+            total += abs(x - y) as ui64;
+        }
+    }
+    return total as f64 / (a.pixels.len * 3) as f64;
+}
+
+test "the tables of Annex K hold as many symbols as their counts say" {
+    mut ui8[28] dl = dc_luma();
+    mut ui8[178] al = ac_luma();
+    mut ui8[28] dcc = dc_chroma();
+    mut ui8[178] acc = ac_chroma();
+    mut usize n0 = 0;
+    mut usize n1 = 0;
+    mut usize n2 = 0;
+    mut usize n3 = 0;
+    for (usize l in 0..16) {
+        n0 += dl[l] as usize;
+        n1 += al[l] as usize;
+        n2 += dcc[l] as usize;
+        n3 += acc[l] as usize;
+    }
+    assert(n0 == 12 && n1 == 162 && n2 == 12 && n3 == 162);
+    // every symbol an encoder may need has a code: 16 zeros, the end of a block, and each run
+    // of 0 to 15 zeros followed by a value of 1 to 10 bits
+    Codes l = codes_of(al[0..178]);
+    Codes c = codes_of(acc[0..178]);
+    mut bool all = l.size[0] > 0 && l.size[0xF0] > 0 && c.size[0] > 0 && c.size[0xF0] > 0;
+    for (usize run in 0..16) {
+        for (usize size in 1..11) {
+            all = all && l.size[run << 4 | size] > 0 && c.size[run << 4 | size] > 0;
+        }
+    }
+    assert(all);
+}
+
+test "a picture written is read back, close to what it was" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    image.Image img = picture(&arena, 61, 37);  // not a multiple of the MCUs
+    ui8[] good = encode(&arena, img, 95);
+    image.Image back = decoded(&arena, good);
+    assert(back.width == 61 && back.height == 37 && back.opaque());
+    assert(mean_difference(img, back) < 2.5);
+    ui8[] small = encode(&arena, img, 50);  // 4:2:0
+    image.Image rough = decoded(&arena, small);
+    assert(small.len < good.len && rough.width == 61 && mean_difference(img, rough) < 10.0);
+    ui8[] tiny = encode(&arena, img, 1);
+    assert(decoded(&arena, tiny).width == 61);
+}
+
+test "gray, restart markers, and a single pixel" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    image.Gray g = image.to_gray(&arena, picture(&arena, 40, 24));
+    ui8[] file = encode_gray(&arena, g, 90);
+    image.Image back = decoded(&arena, file);
+    assert(back.width == 40 && mean_difference(image.from_gray(&arena, g), back) < 2.0);
+    image.Image img = picture(&arena, 50, 50);
+    ui8[] marked = write(&arena, img.pixels, arena.alloc_slice(ui8, 0), 50, 50, true, 75, 2);
+    ui8[] plain = encode(&arena, img, 75);
+    image.Image a = decoded(&arena, marked);
+    image.Image b = decoded(&arena, plain);
+    mut bool same = a.width == 50 && b.width == 50;
+    for (usize i in 0..a.pixels.len) {
+        same = same && a.pixels[i] == b.pixels[i];
+    }
+    assert(same && marked.len > plain.len);
+    mut image.Image one = image.create(&arena, 1, 1);
+    one.set(0, 0, 0xFF808080);
+    assert(decoded(&arena, encode(&arena, one, 100)).at(0, 0) == 0xFF808080);
+}
+
+test "what is not a JPEG file, a damaged one, or a hostile one" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    assert(failure(&arena, arena.alloc_slice(ui8, 10)) == image.ImageError.UnknownFormat);
+    bool missing = match (load(&arena, "packages/image/images/none.jpg")) {
+        ok(img) => false,
+        err(e) => e == image.ImageError.Unreadable,
+    };
+    assert(missing);
+    ui8[] file = encode(&arena, picture(&arena, 64, 64), 80);
+    assert(failure(&arena, file[0..file.len / 2]) == image.ImageError.Damaged);
+    assert(failure(&arena, file[0..200]) == image.ImageError.Damaged);  // its tables, no scan
+    // every byte of the file changed in turn: an error or an image, never a read outside
+    mut ui8[] copy = arena.alloc_slice(ui8, file.len);
+    for (usize i in 0..file.len) {
+        copy[i] = file[i];
+    }
+    mut usize errors = 0;
+    for (mut usize i = 2; i < copy.len; i += 7) {
+        ui8 kept = copy[i];
+        copy[i] = kept ^ 0x5A;
+        mut Arena scratch = Arena.new(64 * KB);
+        bool failed = match (decode(&scratch, copy)) {
+            ok(img) => img.width != 64,
+            err(e) => true,
+        };
+        scratch.free();
+        errors += failed ? 1 : 0;
+        copy[i] = kept;
+    }
+    assert(errors > 0);
+    // a frame of 16 000 by 4 000 pixels in a file of a few hundred bytes: refused unallocated
+    mut ui8[] huge = arena.alloc_slice(ui8, file.len);
+    for (usize i in 0..file.len) {
+        huge[i] = file[i];
+    }
+    for (usize i in 0..file.len - 9) {
+        if (huge[i] == 0xFF && huge[i + 1] == 0xC0) {
+            huge[i + 5] = 0x0F;  // height 4 000
+            huge[i + 6] = 0xA0;
+            huge[i + 7] = 0x3E;  // width 16 000
+            huge[i + 8] = 0x80;
+        }
+    }
+    assert(failure(&arena, huge[0..400]) == image.ImageError.Damaged);
+    for (usize i in 0..file.len - 9) {
+        if (huge[i] == 0xFF && huge[i + 1] == 0xC0) {
+            huge[i + 5] = 0xFF;  // 65 535 by 65 535
+            huge[i + 6] = 0xFF;
+            huge[i + 7] = 0xFF;
+            huge[i + 8] = 0xFF;
+        }
+    }
+    assert(failure(&arena, huge) == image.ImageError.TooLarge);
+    // a progressive frame (SOF2) is not read yet
+    for (usize i in 0..file.len - 1) {
+        if (huge[i] == 0xFF && huge[i + 1] == 0xC0) {
+            huge[i + 1] = 0xC2;
+        }
+    }
+    assert(failure(&arena, huge) == image.ImageError.Unsupported);
+}

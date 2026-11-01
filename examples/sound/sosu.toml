@@ -1,0 +1,10 @@
+# Sound on the devices of the system (spec §8.2): a chord that moves from left to right, a file or
+# a melody, then 3 seconds recorded from the microphone and played back. No window.
+# Run it from the root of the repository: sosuc run examples/sound (or -- music.ogg, any WAV or
+# Ogg Vorbis file). On Windows, run packages/platform/fetch-sdl3.ps1 once before.
+[package]
+name = "sound"
+version = "0.1.0"
+
+[dependencies]
+audio = { path = "../../packages/audio" }

@@ -1,0 +1,7 @@
+# Images in Sosu (spec §8.2): pixels, PNG and JPEG read and written, and transformed.
+[package]
+name = "image"
+version = "0.1.0"
+
+[dependencies]
+compress = { path = "../compress" }  # PNG images hold their pixels in a zlib stream

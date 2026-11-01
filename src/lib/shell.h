@@ -10,6 +10,8 @@
 char *shell_path(const char *path);
 /* Runs a command; returns its exit code. */
 int shell_run(const char *command);
+/* Sets a variable of the environment, which the commands run after it inherit. */
+void shell_set_env(const char *name, const char *value);
 /* Creates a folder and its parents, if they do not exist. */
 void shell_make_dir(const char *path);
 /* Deletes a folder and everything in it, if it exists. */

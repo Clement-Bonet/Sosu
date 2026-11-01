@@ -1,0 +1,218 @@
+// db.db: the interface of the databases (spec §8.2), implemented by each driver. A statement
+// takes its values as parameters (`?` in SQL), never as text joined to it: no SQL injection.
+// Rows are read by column, as typed values. Everything a driver allocates comes from the arena
+// given to it; `close` gives back what the database itself holds.
+//
+//     db.Connection* c = try sqlite.open(&arena, "app.db");
+//     defer c.close();
+//     mut db.Value[2] p = [db.Value.Text("Ada"), db.Value.Integer(1815)];
+//     i64 changed = try c.execute("INSERT INTO people (name, born) VALUES (?, ?)", p[0..2]);
+import std.text;
+
+// A value of a column or of a parameter. A text that is not UTF-8 is read as `Bytes`.
+pub enum Value {
+    Null,
+    Integer(i64 value),
+    Float(f64 value),
+    Text(str value),
+    Bytes(ui8[] value),
+}
+
+pub enum DbError {
+    CannotOpen,  // the database cannot be opened or reached
+    Invalid,  // the statement is wrong: its syntax, a table or a column that is not there
+    Constraint,  // a constraint refused it: unique, not null, a foreign key, a check
+    Busy,  // another connection holds the lock for longer than the driver waits
+    ReadOnly,  // the database cannot be written
+    Mismatch,  // not as many parameters as the statement has, or a value it cannot take
+    Closed,  // the connection, the statement, the rows or the pool are closed
+    Other,  // what the database said is in `message`
+}
+
+// A connection to a database, opened by a driver.
+pub interface Connection {
+    // Runs a statement that gives no rows; gives the number of rows it changed.
+    i64!DbError execute(str sql, Value[] params) uses io;
+    // Runs a statement that gives rows, read one by one by `Rows.next`.
+    Rows*!DbError query(Arena* arena, str sql, Value[] params) uses io;
+    // A statement read once, then run many times with other parameters.
+    Statement*!DbError prepare(Arena* arena, str sql) uses io;
+    // Statements without parameters, separated by `;` (a schema).
+    void!DbError script(str sql) uses io;
+    // A transaction: what runs until `commit` is kept all together, or not at all (`rollback`).
+    void!DbError begin() uses io;
+    void!DbError commit() uses io;
+    void!DbError rollback() uses io;
+    // The key of the last row inserted (SQLite's rowid), 0 before any.
+    i64 last_insert_id() uses io;
+    // What the database said of the last error, for a person.
+    str message(Arena* arena) uses io;
+    // Closes the connection, its statements first.
+    void close() uses io;
+}
+
+// A statement prepared by `Connection.prepare`.
+pub interface Statement {
+    i64!DbError execute(Value[] params) uses io;
+    // The rows of the statement, which it gives until they are closed or it runs again.
+    Rows*!DbError query(Arena* arena, Value[] params) uses io;
+    void close() uses io;
+}
+
+// The rows a query gives: `next` moves to each in turn, then `value` reads its columns.
+pub interface Rows {
+    // Moves to the next row; false after the last one.
+    bool!DbError next() uses io;
+    usize columns();
+    // The name of a column, as the query names it ("" beyond the last one).
+    str name(usize column);
+    // A column of the current row, its texts and bytes copied into `arena` (a scratch arena
+    // reset at each row reads many rows without growing).
+    Value value(Arena* arena, usize column) uses io;
+    // Ends the rows before the last one (after it, they are already ended).
+    void close() uses io;
+}
+
+// Runs a statement without parameters that gives no rows.
+pub i64!DbError run(Connection* c, str sql) uses io {
+    mut Value[1] nothing = [Null];
+    return c.execute(sql, nothing[0..0]);
+}
+
+// The rows of a query without parameters.
+pub Rows*!DbError select(Arena* arena, Connection* c, str sql) uses io {
+    mut Value[1] nothing = [Null];
+    return c.query(arena, sql, nothing[0..0]);
+}
+
+// The first column of the first row of a query (`SELECT count(*) ...`), none without rows.
+pub Value?!DbError scalar(Arena* arena, Connection* c, str sql, Value[] params) uses io {
+    Rows* rows = try c.query(arena, sql, params);
+    defer rows.close();
+    if (!try rows.next() || rows.columns() == 0) {
+        return ok(none);
+    }
+    return ok(some(rows.value(arena, 0)));
+}
+
+// The place of the column named `name` (as the query names it), none if there is none.
+pub usize? column(Rows* rows, str name) {
+    for (usize i in 0..rows.columns()) {
+        if (rows.name(i) == name) {
+            return some(i);
+        }
+    }
+    return none;
+}
+
+// The column named `name` of the current row, none if there is none.
+pub Value? get(Arena* arena, Rows* rows, str name) uses io {
+    return match (column(rows, name)) {
+        some(i) => some(rows.value(arena, i)),
+        none => none,
+    };
+}
+
+// Values read as one type: none for another type (`Null` included). Enums have no methods, so
+// these are functions.
+
+pub i64? as_i64(Value v) {
+    return match (v) {
+        Integer(n) => some(n),
+        _ => none,
+    };
+}
+
+// A float, or an integer as a float.
+pub f64? as_f64(Value v) {
+    return match (v) {
+        Float(x) => some(x),
+        Integer(n) => some(n as f64),
+        _ => none,
+    };
+}
+
+pub str? as_str(Value v) {
+    return match (v) {
+        Text(s) => some(s),
+        _ => none,
+    };
+}
+
+// Bytes, or the bytes of a text.
+pub ui8[]? as_bytes(Value v) {
+    return match (v) {
+        Bytes(b) => some(b),
+        Text(s) => some(s.bytes[0..s.len]),
+        _ => none,
+    };
+}
+
+// An integer as a truth value (SQL has none of its own): 0 is false, the others true.
+pub bool? as_bool(Value v) {
+    return match (v) {
+        Integer(n) => some(n != 0),
+        _ => none,
+    };
+}
+
+pub bool is_null(Value v) {
+    return match (v) {
+        Null => true,
+        _ => false,
+    };
+}
+
+// A truth value as an integer, for a parameter.
+pub Value boolean(bool b) {
+    return Integer(b ? 1 : 0);
+}
+
+// A value as SQL would write it, for a person or a test: NULL, 42, 2.5, 'it''s', x'00ff'.
+pub str describe(Arena* arena, Value v) {
+    text.TextBuilder* b = text.builder(arena);
+    match (v) {
+        Null => {
+            b.push("NULL");
+        },
+        Integer(n) => {
+            b.push_i64(n);
+        },
+        Float(x) => {
+            str digits = text.format_f64_shortest(arena, x);
+            b.push(digits);
+            if (!text.contains(digits, ".") && !text.contains(digits, "e") && !text.contains(digits, "n")) {
+                b.push(".0");  // 1.0, not the integer 1 (but inf and nan stay as they are)
+            }
+        },
+        Text(s) => {
+            b.push("'");
+            b.push(text.replace(arena, s, "'", "''"));
+            b.push("'");
+        },
+        Bytes(bytes) => {
+            b.push("x'");
+            str digits = "0123456789abcdef";
+            for (ui8 byte in bytes) {
+                b.push_char(digits.bytes[(byte >> 4) as usize] as char);
+                b.push_char(digits.bytes[(byte & 15) as usize] as char);
+            }
+            b.push("'");
+        },
+    }
+    return b.text();
+}
+
+// What went wrong, for a person; `Connection.message` says what the database said.
+pub str message(DbError e) {
+    return match (e) {
+        CannotOpen => "the database cannot be opened",
+        Invalid => "the statement is not valid",
+        Constraint => "a constraint refused the statement",
+        Busy => "the database is locked by another connection",
+        ReadOnly => "the database cannot be written",
+        Mismatch => "the parameters do not match the statement",
+        Closed => "already closed",
+        Other => "the database gave an error",
+    };
+}

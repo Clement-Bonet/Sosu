@@ -1,0 +1,11 @@
+photo.jpg: 96 by 64
+photo.jpg as PNG: not a file of this format
+photo.jpg cut in half: damaged image
+photo.jpg, its tables only: damaged image
+photo.jpg, a SOF2 marker: a kind of image not supported
+source_sosu.png: 96 by 64
+source_sosu.png as JPEG: not a file of this format
+source_sosu.png cut: damaged image
+source_sosu.png, 4096 by 16384: damaged image
+source_sosu.png, 65536 by 64: image too large
+source_sosu.png, 0 by 64: damaged image

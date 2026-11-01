@@ -1,0 +1,32 @@
+test texts, bytes, items, near ... ok
+test fixtures ... ok
+test benchmark run once ... ok
+    texts differ at line 2, column 9:
+      actual:   "mean: 2.0"
+      expected: "mean: 2.5"
+test fails: texts ... FAILED
+    texts differ at line 3: actual has 2 lines, expected 3
+      expected: "c"
+test fails: lines ... FAILED
+    bytes differ at 2 (of 4)
+      actual:   00 10 [ff] 07
+      expected: 00 10 [fe] 07
+test fails: bytes ... FAILED
+    items differ at index 2: actual 8, expected 9
+test fails: items ... FAILED
+    not near: actual 3.25, expected 3.0, apart by 0.25 (tolerance 0.125)
+test fails: near ... FAILED
+    "world" not found in:
+      "hello"
+test fails: contains ... FAILED
+    texts differ at line 1, column 8:
+      actual:   "total: 7"
+      expected: "total: 6"
+    golden file: tests/programs/checks/tests/data/report.txt (sosuc test --update writes it again)
+test fails: golden ... FAILED
+test fails: missing file ... FAILED
+test fails: assert shows both sides ... FAILED
+test fails: assert shows texts ... FAILED
+test fails: assert shows floats ... FAILED
+
+14 tests, 3 passed, 11 failed

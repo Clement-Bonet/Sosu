@@ -1,0 +1,8 @@
+test WAV files of Python's wave module, read and written byte for byte the same ... ok
+test an Ogg Vorbis file, as the specification decodes it ... ok
+test damaged and hostile files ... ok
+test the mixer: volume, panning, loops, rates and clipping ... ok
+test resampling, by sinc and by lines ... ok
+test sounds: channels, parts, fades and tones ... ok
+
+6 tests, 6 passed, 0 failed

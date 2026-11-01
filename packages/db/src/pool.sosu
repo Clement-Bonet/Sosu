@@ -1,0 +1,166 @@
+// db.pool: connections shared out between threads (spec §5.6). Threads share no memory, so a
+// connection belongs to the thread that opened it: the `Pool`, a value without pointers given to
+// each thread, bounds how many are open at once in all of them, and keeps the address of the
+// database; in each thread, a `Local` opens them through the driver and keeps those given back,
+// for the next `take`.
+//
+//     // the main thread makes the pool with `pool.create("app.db", 4)`, and gives it to each
+//     // thread in its value; there:
+//     pool.Local* conns = pool.local(arena, job.pool, sqlite.connect);
+//     defer conns.close();
+//     db.Connection* c = try conns.take();
+//     defer conns.give(c);
+import std.channel;
+import std.vec;
+import db.db;
+
+// The longest address a pool keeps, in bytes.
+pub usize MAX_ADDRESS = 1024;
+
+// A bound on the connections open at once, and the address of their database.
+pub struct Pool {
+    channel.Channel<i32> slots;  // a token for each connection that may still be opened
+    ui8[1024] bytes;  // the address
+    usize length;
+    pub i32 size;
+
+    // The address of the database, copied into `arena`.
+    pub str address(Arena* arena) {
+        mut ui8[] copy = arena.alloc_slice(ui8, length);
+        for (usize i in 0..length) {
+            copy[i] = bytes[i];
+        }
+        return match (str.from_bytes(copy)) {
+            ok(s) => s,
+            err(e) => "",  // copied from a str
+        };
+    }
+
+    // No more connections: the `take`s that wait, and those after, give `Closed`.
+    pub void close() uses threads {
+        slots.close();
+        while (true) {  // the tokens left: none to take after
+            match (slots.receive()) {
+                some(slot) => { },
+                none => {
+                    return;
+                },
+            }
+        }
+    }
+
+    // Releases the pool, once the threads that use it are joined.
+    pub void free() uses threads {
+        slots.free();
+    }
+}
+
+// A pool of `size` connections at most to the database at `address` (a path for SQLite), none
+// if the address is longer than `MAX_ADDRESS`.
+pub Pool? create(str address, i32 size) uses threads
+    requires size > 0
+{
+    if (address.len > MAX_ADDRESS) {
+        return none;
+    }
+    mut ui8[1024] bytes = [0; 1024];
+    for (usize i in 0..address.len) {
+        bytes[i] = address.bytes[i];
+    }
+    channel.Channel<i32> slots = channel.new<i32>(size as ui64);
+    for (i32 i in 0..size) {
+        bool sent = slots.send(i);
+    }
+    return some(Pool{ slots: slots, bytes: bytes, length: address.len, size: size });
+}
+
+// A connection kept by a `Local` (a type argument cannot be a pointer).
+struct Held {
+    db.Connection* connection;
+}
+
+// The connections of a pool in one thread.
+pub class Local {
+    Pool pool;
+    Arena* arena;
+    fn(Arena*, str) -> db.Connection*!db.DbError uses io open;
+    vec.Vec<Held>* idle;
+    mut i32 opened;  // by this thread, idle or taken
+
+    void init(Pool pool, Arena* arena, fn(Arena*, str) -> db.Connection*!db.DbError uses io open) {
+        self.pool = pool;
+        self.arena = arena;
+        self.open = open;
+        idle = vec.new<Held>(arena);
+        opened = 0;
+    }
+
+    // A connection given back before, or else a new one, once the pool allows it (waiting while
+    // all of them are open in the threads). `Closed` once the pool is closed.
+    pub db.Connection*!db.DbError take() uses io, threads {
+        match (idle.pop()) {
+            some(h) => {
+                return ok(h.connection);
+            },
+            none => { },
+        }
+        match (pool.slots.receive()) {
+            some(slot) => { },
+            none => {
+                return err(db.DbError.Closed);
+            },
+        }
+        return match (open(arena, pool.address(arena))) {
+            ok(c) => opened_one(c),
+            err(e) => gave_back(e),
+        };
+    }
+
+    db.Connection*!db.DbError opened_one(db.Connection* c) {
+        opened += 1;
+        return ok(c);
+    }
+
+    db.Connection*!db.DbError gave_back(db.DbError e) uses threads {
+        bool sent = pool.slots.send(0);
+        return err(e);
+    }
+
+    // Gives back a connection taken from this `Local`, kept open for the next `take`. A
+    // transaction left open is rolled back.
+    pub void give(db.Connection* c) uses io {
+        match (c.rollback()) {
+            ok => { },
+            err(e) => { },  // none was open
+        }
+        idle.push(Held{ connection: c });
+    }
+
+    // Closes the connections given back, and lets the pool open as many in other threads. Those
+    // still taken stay open, and keep their place in the pool.
+    pub void close() uses io, threads {
+        while (true) {
+            match (idle.pop()) {
+                some(h) => {
+                    h.connection.close();
+                    opened -= 1;
+                    bool sent = pool.slots.send(0);
+                },
+                none => {
+                    return;
+                },
+            }
+        }
+    }
+
+    // How many connections this thread has open, taken or given back.
+    pub i32 open_count() {
+        return opened;
+    }
+}
+
+// The connections of `pool` in this thread, opened by `open` (a driver's, as `sqlite.connect`)
+// in `arena`.
+pub Local* local(Arena* arena, Pool pool, fn(Arena*, str) -> db.Connection*!db.DbError uses io open) {
+    return arena.new(Local, pool, arena, open);
+}

@@ -1,0 +1,22 @@
+pcm16.wav: 8000 Hz, 2 channels, 2000 frames
+float32.wav: 8000 Hz, 2 channels, 2000 frames
+bad_huge_data.wav: 8000 Hz, 2 channels, 250 frames
+bad_truncated.wav: damaged sound
+bad_no_format.wav: damaged sound
+bad_channels.wav: damaged sound
+bad_many_channels.wav: a kind of sound not supported
+bad_block.wav: damaged sound
+bad_adpcm.wav: a kind of sound not supported
+bad_chunk_size.wav: damaged sound
+bad_rate.wav: damaged sound
+tone.ogg: 8000 Hz, 2 channels, 4942 frames
+bad_truncated.ogg: 8000 Hz, 2 channels, 2304 frames
+bad_vendor.ogg: damaged sound
+bad_huge_codebook.ogg: sound too large
+bad_crc.ogg: 8000 Hz, 2 channels, 4942 frames
+bad_not_vorbis.ogg: damaged sound
+tone_decoded.wav: 8000 Hz, 2 channels, 4942 frames
+pcm8.wav: 8000 Hz, 2 channels, 2000 frames
+pcm24.wav: 8000 Hz, 2 channels, 2000 frames
+extensible24.wav: 8000 Hz, 2 channels, 2000 frames
+float64.wav: 8000 Hz, 1 channels, 2000 frames

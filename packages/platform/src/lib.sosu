@@ -1,3 +1,4 @@
 // platform: a window, its events and drawing (spec §10.1), on SDL3.
-// Programs import `platform.app`; `platform.sdl` holds the SDL3 declarations.
+// Programs import `platform.app`, and `platform.dialogs` for the dialogs of the system (spec
+// §10.11); `platform.sdl` holds the SDL3 declarations.
 import platform.app;

@@ -1,0 +1,8 @@
+# Tests beyond `assert` (spec §8.2): comparisons that show what differs, benchmarks, and the
+# files of a test (its data, golden files, temporary folders). Run by `sosuc test`.
+[package]
+name = "testing"
+version = "0.1.0"
+
+[link]
+c = ["native/keep.c"]  # a value the C compiler cannot prove unused, for the benchmarks

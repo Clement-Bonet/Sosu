@@ -4,7 +4,7 @@ CFLAGS ?= -std=c99 -Wall -Wextra -pedantic -Werror -g
 CPPFLAGS += -Isrc/lib
 
 LIB_SRC := $(wildcard src/lib/*.c)
-LIB_HDR := $(wildcard src/lib/*.h)
+LIB_HDR := $(wildcard src/lib/*.h src/lib/*.inc)
 TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/fmt_tests build/json_tests build/lsp_tests build/i18n_tests build/program_tests
 
 all: build/sosuc $(TESTS)
@@ -30,8 +30,10 @@ test: all
 	./build/program_tests ./build/sosuc
 	./build/sosuc check tests/packages/app
 	./build/sosuc check packages/platform
+	./build/sosuc test packages/platform
 	./build/sosuc check examples/window
 	./build/sosuc check tests/window
+	./build/sosuc test packages/image
 	./build/sosuc test packages/render
 	./build/sosuc test packages/ui
 	./build/sosuc test packages/i18n
@@ -40,6 +42,9 @@ test: all
 	./build/sosuc check examples/workspace
 	./build/sosuc check examples/themes
 	./build/sosuc check examples/containers
+	./build/sosuc check packages/audio
+	./build/sosuc check examples/sound
+	./build/sosuc check examples/dialogs
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
@@ -59,9 +64,12 @@ build/playground/sosuc.js: $(LIB_SRC) $(LIB_HDR) src/playground/playground.c pla
 	$(EMCC) $(CPPFLAGS) -std=c99 -Wall -O2 $(PLAYGROUND_FLAGS) --embed-file lib@/lib -o $@ $(LIB_SRC) src/playground/playground.c
 	cp playground/index.html playground/playground.js build/playground/
 
-# The reference of the public API of `core` and `std`, from the comments of lib/ (src/docgen).
-# Committed; the CI checks that it is up to date.
-DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu))
+# The reference of the public API of `core`, `std` and the packages of spec §8.3, from their
+# comments (src/docgen); the lib.sosu of a package only imports its modules. Committed; the CI
+# checks that it is up to date.
+DOC_PACKAGES := audio compress crypto db image math sqlite testing
+DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu) packages/platform/src/dialogs.sosu \
+	$(filter-out %/lib.sosu,$(foreach p,$(DOC_PACKAGES),$(wildcard packages/$(p)/src/*.sosu))))
 
 doc: build/docgen
 	./build/docgen docs/REFERENCE.md $(DOC_SOURCES)

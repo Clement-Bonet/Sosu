@@ -1,0 +1,11 @@
+# The packages db and sqlite (spec §8.2), run by `sosuc test`: a database in a temporary file,
+# its values of each type read back, statements prepared and run again, transactions, the
+# errors of SQLite, and a pool of connections shared out between threads.
+[package]
+name = "databases"
+version = "0.1.0"
+
+[dependencies]
+db = { path = "../../../packages/db" }
+sqlite = { path = "../../../packages/sqlite" }
+testing = { path = "../../../packages/testing" }

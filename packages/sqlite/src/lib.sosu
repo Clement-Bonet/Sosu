@@ -1,0 +1,3 @@
+// sqlite: the driver of `db` for SQLite (spec §8.2). Programs import `sqlite.sqlite` to open a
+// database, then use it through `db.db`.
+import sqlite.sqlite;

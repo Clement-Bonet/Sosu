@@ -1,0 +1,8 @@
+test values of each type, written and read again ... ok
+test statements prepared once, run again ... ok
+test transactions: committed, rolled back ... ok
+test the errors of SQLite ... ok
+test a database in memory ... ok
+test a pool of connections, shared out between threads ... ok
+
+6 tests, 6 passed, 0 failed

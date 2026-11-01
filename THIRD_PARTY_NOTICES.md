@@ -42,3 +42,33 @@ under their own licenses.
 - Copyright (C) 1997-2026 Sam Lantinga
 - License: zlib license (<https://www.libsdl.org/license.php>): free use, including in
   commercial programs, without having to publish their source.
+
+## stb_vorbis
+
+- Files: `packages/audio/native/vendor/stb_vorbis.c` (version 1.22), compiled into the programs
+  that use the `audio` package (through `packages/audio/native/ogg.c`)
+- Source: <https://github.com/nothings/stb>, file `stb_vorbis.c` at commit
+  `1ee679ca2ef753a528db5ba6801e1067b40481b8` (192 790 bytes, SHA-256
+  `4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636`)
+- Written by Sean Barrett (2007) and its contributors, named in the file
+- License: public domain (the Unlicense), or the MIT license (Copyright (c) 2017 Sean Barrett),
+  at your option; both are at the end of the file
+- Changed by Sosu: five lines, each marked `// Sosu:`. `setup_malloc` and `setup_temp_malloc`
+  refuse a negative size (a size that overflowed), and the comment header refuses a negative
+  length or more than 2^24 comments (CVE-2023-45675 and CVE-2023-45676). The other faults
+  reported against 1.22 on hostile files, by the same review of GitHub Security Lab (2023), are
+  not fixed: the decoder's memory is bounded, but a hostile file can still crash it.
+
+## SQLite
+
+- Files: `packages/sqlite/native/vendor/sqlite3.c` and `sqlite3.h` (version 3.54.1), compiled
+  into the programs that use the `sqlite` package (through `packages/sqlite/native/sqlite.c`)
+- Source: <https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip> (2 990 966 bytes,
+  SHA3-256 `92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30`, as
+  <https://www.sqlite.org/download.html> gives it); the other files of the archive (`shell.c`,
+  `sqlite3ext.h`) are not kept
+- Written by D. Richard Hipp and the developers of SQLite
+- License: public domain (<https://www.sqlite.org/copyright.html>), with no condition
+- Not changed: its options are set by `native/sqlite.c` before it includes the file
+  (`SQLITE_THREADSAFE=2`, `SQLITE_DQS=0`, `SQLITE_DEFAULT_FOREIGN_KEYS=1`,
+  `SQLITE_OMIT_LOAD_EXTENSION`...)

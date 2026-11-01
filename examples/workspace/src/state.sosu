@@ -1,6 +1,6 @@
 // The state of the workspace: a few files, the one chosen, its details being edited, and what
 // the buttons of the title bar did. Its interface is in screen.ui.sosu.
-import render.image;
+import image.image;
 import ui.widgets;
 
 pub enum Kind {

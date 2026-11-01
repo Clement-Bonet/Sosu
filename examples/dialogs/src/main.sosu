@@ -1,0 +1,138 @@
+// The dialogs of the system (spec §10.11), each opened by a key: O opens a file (images or texts),
+// M several, S saves one, F chooses a folder, I shows a message, Q asks a question. The file
+// dialogs do not stop the window, which goes on drawing (the line turns): their answer comes
+// later to `on_event`, as `Dialog`. The message boxes wait for the user. Escape quits.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/dialogs`.
+import std.math;
+import std.text;
+import platform.app;
+import platform.dialogs;
+import render.canvas;
+
+// The tags of the dialogs, to tell their answers apart.
+ui32 OPEN = 1;
+ui32 OPEN_MANY = 2;
+ui32 SAVE = 3;
+ui32 FOLDER = 4;
+
+class Demo : app.Handler {
+    mut Arena kept;  // the text shown, kept from one answer to the next
+    mut str report;
+    mut f32 angle;
+
+    void init() {
+        kept = Arena.new(4 * KB);
+        report = "No dialog yet.";
+        angle = 0.0;
+    }
+
+    // Shows `lines` from now on.
+    void show(str lines) {
+        kept.free();
+        kept = Arena.new(4 * KB + lines.len);
+        text.TextBuilder* t = text.builder(&kept);
+        t.push(lines);
+        report = t.text();
+    }
+
+    // The filters of the file dialogs, in `arena`.
+    dialogs.Filter[] filters(Arena* arena) {
+        mut dialogs.Filter[] list = arena.alloc_slice(dialogs.Filter, 3);
+        list[0] = dialogs.Filter{ name: "Images", extensions: text.split(arena, "png,jpg,jpeg", ",") };
+        list[1] = dialogs.Filter{ name: "Texts", extensions: text.split(arena, "txt,md,sosu", ",") };
+        list[2] = dialogs.Filter{ name: "All files", extensions: text.split(arena, "*", ",") };
+        return list;
+    }
+
+    // What a file dialog answered.
+    void answered(dialogs.Answer answer) {
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        text.TextBuilder* t = text.builder(&scratch);
+        match (answer) {
+            Chosen(tag, paths, filter) => {
+                t.push(tag == OPEN ? "Opened" : tag == OPEN_MANY ? "Opened together" : tag == SAVE ? "To save" : "Folder");
+                t.push(" (filter ");
+                t.push_i64(filter as i64);
+                t.push("):");
+                for (str path in paths) {
+                    t.push("\n  ");
+                    t.push(path);
+                }
+            },
+            Cancelled(tag) => {
+                t.push("Cancelled.");
+            },
+            Failed(tag, message) => {
+                t.push("Failed: ");
+                t.push(message);
+            },
+        }
+        show(t.text());
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Dialog(answer) => {
+                answered(answer);
+            },
+            Key(code, down, mods) => {
+                if (!down) {
+                    return true;
+                }
+                if (code == 27) {
+                    return false;
+                }
+                mut Arena scratch = Arena.new(4 * KB);
+                defer scratch.free();
+                if (code == 111) {  // o
+                    dialogs.open_file(OPEN, filters(&scratch), "");
+                } else if (code == 109) {  // m
+                    dialogs.open_files(OPEN_MANY, filters(&scratch), "");
+                } else if (code == 115) {  // s
+                    dialogs.save_file(SAVE, filters(&scratch), "");
+                } else if (code == 102) {  // f
+                    dialogs.choose_folder(FOLDER, "");
+                } else if (code == 105) {  // i
+                    bool shown = dialogs.message(dialogs.Level.Information, "Sosu", "A message of the system.\nThe window waits for OK.");
+                    show(shown ? "The message was read." : "No message box on this system.");
+                } else if (code == 113) {  // q
+                    dialogs.Question question = dialogs.Question{ title: "Quit", text: "Save the changes?", buttons: text.split(&scratch, "Save,Don't save,Cancel", ","), level: dialogs.Level.Warning, escape: some(2) };
+                    usize? chosen = dialogs.ask(question);
+                    show(match (chosen) {
+                        some(i) => i == 0 ? "Answer: Save" : i == 1 ? "Answer: Don't save" : "Answer: Cancel",
+                        none => "No answer.",
+                    });
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        angle += 0.05;
+        surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
+        canvas.Color light = canvas.Color{ r: 205, g: 214, b: 244 };
+        surface.text(16.0, 16.0, "O: open a file   M: several   S: save   F: a folder\nI: a message   Q: a question   Escape: quit", light, 2);
+        surface.text(16.0, 80.0, report, canvas.Color{ r: 249, g: 226, b: 175 }, 2);
+        // turns while a file dialog is open: the window is not stopped
+        f32 cx = surface.width as f32 - 60.0;
+        f32 cy = 60.0;
+        i32 x = (cx + 30.0 * math.cos(angle as f64) as f32) as i32;
+        i32 y = (cy + 30.0 * math.sin(angle as f64) as f32) as i32;
+        surface.line(cx as i32, cy as i32, x, y, canvas.Color{ r: 255, g: 140, b: 0 });
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    Demo* demo = arena.new(Demo);
+    i32 status = app.run(app.Config{ title: "Dialogs", width: 900, height: 480 }, demo as app.Handler*);
+    demo.kept.free();
+    return status;
+}

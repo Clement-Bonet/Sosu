@@ -114,7 +114,7 @@ struct CString {
 }
 
 // A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
-unsafe str copy_cstring(Arena* arena, ui8* text, usize limit) {
+pub unsafe str copy_cstring(Arena* arena, ui8* text, usize limit) {
     mut usize length = 0;
     mut ui8[] bytes = arena.alloc_slice(ui8, 0);
     unsafe {
@@ -601,6 +601,37 @@ pub void push_request(ui32 code) uses io {
     mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: code, word6: 0, word7: 0, rest: [0; 96] };
     unsafe {
         sdl_c.SDL_PushEvent(&event as sdl_c.SDL_Event*);
+    }
+}
+
+// SDL_UserEvent: a request of the program, or the answer of a dialog with its block.
+struct User {
+    ui32 kind;
+    ui32 reserved;
+    ui64 timestamp;
+    ui32 window;
+    i32 code;
+    mut ui8* data1;
+    ui8* data2;
+}
+
+// Queues an SDL_EVENT_USER with `code` and `data`, from any thread (SDL_PushEvent is safe there);
+// false if SDL did not queue it.
+pub bool push_user(ui32 code, ui8* data) uses io {
+    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: code, word6: 0, word7: 0, rest: [0; 96] };
+    mut bool pushed = false;
+    unsafe {
+        User* user = &event as User*;
+        user.data1 = data;
+        pushed = sdl_c.SDL_PushEvent(&event as sdl_c.SDL_Event*);
+    }
+    return pushed;
+}
+
+// The data of an event of `push_user`.
+pub ui8* user_data(Event* event) {
+    unsafe {
+        return (event as User*).data1;
     }
 }
 

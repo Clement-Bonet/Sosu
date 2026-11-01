@@ -1,0 +1,12 @@
+# Sound (spec §8.2): play and record on the devices of the system (SDL3, through `platform`),
+# a mixer of several sounds, resampling, WAV read and written in Sosu, and Ogg Vorbis read by
+# stb_vorbis, given as C sources.
+[package]
+name = "audio"
+version = "0.1.0"
+
+[link]
+c = ["native/ogg.c"]  # includes native/vendor/stb_vorbis.c
+
+[dependencies]
+platform = { path = "../platform" }  # SDL3 and its declarations (platform.sdl_c)

@@ -1,0 +1,110 @@
+// audio.resample: a sound at another rate (44 100 Hz to 48 000, for the device or the mixer).
+// `Sinc`, by default, sums the samples around each new one through a sinc kernel of 16 zero
+// crossings each side, in a Blackman window, its weights adding up to 1; when the rate goes down,
+// the kernel widens, so that the frequencies above the new half rate are removed, not folded
+// back (aliased). `Linear` joins the samples by lines: cheaper, and duller.
+import std.math;
+import audio.audio;
+
+pub enum Quality {
+    Linear,
+    Sinc,
+}
+
+// The zero crossings of the kernel on each side.
+i32 HALF_WIDTH = 16;
+
+// The number of frames of `frames` frames at `from` once at `to`, rounded.
+pub usize frames_at(usize frames, i32 from, i32 to) {
+    return ((frames as i64 * to as i64 + from as i64 / 2) / from as i64) as usize;
+}
+
+// `s` at `rate` frames per second, with the sinc kernel.
+pub audio.Sound to_rate(Arena* arena, audio.Sound s, i32 rate) {
+    return to_rate_with(arena, s, rate, Sinc);
+}
+
+pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality quality)
+    requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && audio.fits(rate as i64, s.channels as i64, frames_at(s.frames(), s.rate, rate) as i64)
+{
+    usize frames = frames_at(s.frames(), s.rate, rate);
+    audio.Sound out = audio.create(arena, rate, s.channels, frames);
+    if (rate == s.rate) {
+        for (usize i in 0..s.samples.len) {
+            out.samples[i] = s.samples[i];
+        }
+        return out;
+    }
+    f64 ratio = s.rate as f64 / rate as f64;  // frames of `s` per frame of `out`
+    if (s.frames() == 0) {
+        return out;
+    }
+    match (quality) {
+        Linear => {
+            linear(s, out, ratio);
+        },
+        Sinc => {
+            sinc(s, out, ratio);
+        },
+    }
+    return out;
+}
+
+void linear(audio.Sound s, audio.Sound out, f64 ratio) {
+    usize c = s.channels as usize;
+    usize last = s.frames() - 1;
+    for (usize j in 0..out.frames()) {
+        f64 t = j as f64 * ratio;
+        usize at = min(t as usize, last);
+        usize next = min(at + 1, last);
+        f32 frac = (t - at as f64) as f32;
+        for (usize ch in 0..c) {
+            f32 a = s.samples[at * c + ch];
+            out.samples[j * c + ch] = a + (s.samples[next * c + ch] - a) * frac;
+        }
+    }
+}
+
+// sin(pi x) / (pi x).
+f64 sinc_of(f64 x) {
+    if (abs(x) < 0.000000001) {
+        return 1.0;
+    }
+    f64 a = math.PI * x;
+    return math.sin(a) / a;
+}
+
+// The Blackman window at `x`, from -1 to 1.
+f64 blackman(f64 x) {
+    return 0.42 + 0.5 * math.cos(math.PI * x) + 0.08 * math.cos(2.0 * math.PI * x);
+}
+
+void sinc(audio.Sound s, audio.Sound out, f64 ratio) {
+    usize c = s.channels as usize;
+    i64 n = s.frames() as i64;
+    f64 cutoff = min(1.0, 1.0 / ratio);  // of the half rate of `s`
+    f64 half = HALF_WIDTH as f64 / cutoff;  // the half width of the kernel, in frames of `s`
+    mut f64[8] sums = [0.0; 8];  // audio.MAX_CHANNELS
+    for (usize j in 0..out.frames()) {
+        f64 t = j as f64 * ratio;
+        i64 first = max(math.ceil(t - half) as i64, 0);
+        i64 last = min(math.floor(t + half) as i64, n - 1);
+        mut f64 total = 0.0;
+        for (usize ch in 0..c) {
+            sums[ch] = 0.0;
+        }
+        for (i64 i in first..last + 1) {
+            f64 d = t - i as f64;
+            f64 w = sinc_of(d * cutoff) * blackman(d / half);
+            total += w;
+            usize at = i as usize * c;
+            for (usize ch in 0..c) {
+                sums[ch] += w * s.samples[at + ch] as f64;
+            }
+        }
+        f64 scale = total > 0.000001 ? 1.0 / total : 0.0;
+        for (usize ch in 0..c) {
+            out.samples[j * c + ch] = (sums[ch] * scale) as f32;
+        }
+    }
+}

@@ -1,0 +1,9 @@
+# The package testing (spec §8.3), run by `sosuc test`: its comparisons, which show what differs
+# (some tests fail on purpose), its fixtures and its benchmarks; and `assert(a == b)`, which shows
+# both sides (on the error output).
+[package]
+name = "checks"
+version = "0.1.0"
+
+[dependencies]
+testing = { path = "../../../packages/testing" }

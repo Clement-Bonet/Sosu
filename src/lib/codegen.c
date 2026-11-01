@@ -1043,6 +1043,22 @@ static char *gen_ternary(Fn *f, Expr *e) {
     return result;
 }
 
+static bool is_comparison(TokenKind op) {
+    return op == TOK_EQ_EQ || op == TOK_BANG_EQ || op == TOK_LT || op == TOK_LT_EQ || op == TOK_GT || op == TOK_GT_EQ;
+}
+
+/* `a op b` for a comparison, the operands being of type `type`. */
+static char *compare(TokenKind op, const Type *type, const char *a, const char *b) {
+    if (op == TOK_EQ_EQ || op == TOK_BANG_EQ) {
+        const char *negate = op == TOK_BANG_EQ ? "!" : "";
+        if (type->tag == T_STR) return sosu_format("%ssosu_str_eq(%s, %s)", negate, a, b);
+        if (type->tag == T_ENUM) return sosu_format("%s(%s.tag == %s.tag)", negate, a, b);
+        return sosu_format("(%s %s %s)", a, op == TOK_EQ_EQ ? "==" : "!=", b);
+    }
+    if (type->tag == T_STR) return sosu_format("(sosu_str_cmp(%s, %s) %s 0)", a, b, token_kind_spelling(op));
+    return sosu_format("(%s %s %s)", a, token_kind_spelling(op), b);
+}
+
 static char *gen_binary(Fn *f, Expr *e) {
     TokenKind op = e->as.binary.op;
     if (op == TOK_AMP_AMP || op == TOK_PIPE_PIPE) return gen_logical(f, e);
@@ -1051,20 +1067,8 @@ static char *gen_binary(Fn *f, Expr *e) {
     const Type *lt = operands[0]->type;
     char *result;
     switch (op) {
-    case TOK_EQ_EQ:
-    case TOK_BANG_EQ: {
-        const char *negate = op == TOK_BANG_EQ ? "!" : "";
-        if (lt->tag == T_STR) result = sosu_format("%ssosu_str_eq(%s, %s)", negate, values[0], values[1]);
-        else if (lt->tag == T_ENUM) result = sosu_format("%s(%s.tag == %s.tag)", negate, values[0], values[1]);
-        else result = sosu_format("(%s %s %s)", values[0], op == TOK_EQ_EQ ? "==" : "!=", values[1]);
-        break;
-    }
-    case TOK_LT: case TOK_LT_EQ: case TOK_GT: case TOK_GT_EQ:
-        if (lt->tag == T_STR) {
-            result = sosu_format("(sosu_str_cmp(%s, %s) %s 0)", values[0], values[1], token_kind_spelling(op));
-            break;
-        }
-        result = sosu_format("(%s %s %s)", values[0], token_kind_spelling(op), values[1]);
+    case TOK_EQ_EQ: case TOK_BANG_EQ: case TOK_LT: case TOK_LT_EQ: case TOK_GT: case TOK_GT_EQ:
+        result = compare(op, lt, values[0], values[1]);
         break;
     default:
         if (lt->tag == T_POINTER) result = sosu_format("(%s %s %s)", values[0], c_operator(op), values[1]);
@@ -1347,10 +1351,49 @@ static void gen_print(Fn *f, Expr *e) {
     free_values(values, count - 1);
 }
 
+/* The runtime function that shows the two sides of a failed `assert(a op b)`, or NULL when the
+   values of `type` are not shown (spec §7.3). */
+static const char *assert_shower(const Type *type) {
+    switch (type->tag) {
+    case T_INT: return type->as.integer.is_signed ? "sosu_assert_i64" : "sosu_assert_u64";
+    case T_FLOAT: return "sosu_assert_f64";
+    case T_BOOL: return "sosu_assert_bool";
+    case T_CHAR: return "sosu_assert_char";
+    case T_STR: return "sosu_assert_str";
+    default: return NULL;
+    }
+}
+
+/* assert(a op b) of values that can be shown: each side evaluated once, and both shown when it fails. */
+static bool gen_assert_comparison(Fn *f, Expr *e) {
+    Expr *cond = e->as.call.args[0];
+    if (cond->kind != EXPR_BINARY || !is_comparison(cond->as.binary.op)) return false;
+    const Type *type = cond->as.binary.left->type;
+    const char *shower = assert_shower(type);
+    if (!shower) return false;
+    Expr *operands[2] = { cond->as.binary.left, cond->as.binary.right };
+    char **values = gen_operands(f, operands, 2);
+    char *left = materialize(f, type, values[0]);
+    char *right = materialize(f, type, values[1]);
+    values[0] = values[1] = NULL;
+    char *test = compare(cond->as.binary.op, type, left, right);
+    char *where = loc(f, e->offset);
+    char *text = source_text(f, cond);
+    emit(f, "if (!%s) %s(%s, \"assertion failed: \" %s, %s, %s);", test, shower, where, text, left, right);
+    free(text);
+    free(where);
+    free(test);
+    free(left);
+    free(right);
+    free_values(values, 2);
+    return true;
+}
+
 static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
     if (strcmp(name, "size_of") == 0) return sosu_format("((uint64_t)sizeof(%s))", value_type(f->g, args[0]->type));
+    if (strcmp(name, "assert") == 0 && gen_assert_comparison(f, e)) return NULL;
     char **values = gen_operands(f, args, count);
     const char *type = e->type->tag == T_VOID ? "void" : value_type(f->g, e->type);
     char *result = NULL;

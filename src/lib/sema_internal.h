@@ -1,7 +1,7 @@
 #ifndef SOSU_SEMA_INTERNAL_H
 #define SOSU_SEMA_INTERNAL_H
 
-/* Shared between sema.c (declarations) and sema_body.c (function bodies). */
+/* Shared between sema.c (declarations) and the checks of function bodies (sema_body.h). */
 
 #include "sema.h"
 

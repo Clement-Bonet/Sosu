@@ -1,0 +1,464 @@
+// sqlite.sqlite: SQLite databases through `db.Connection` (spec §8.2), on SQLite 3.54.1, a C
+// file of the package (native/sqlite.c, spec §9.1). A database is a file, created when it is not
+// there; ":memory:" is one that lives as long as its connection. Foreign keys are checked
+// (SQLite's default leaves them off), a text between double quotes is a name, never a text, and
+// a lock held by another connection is waited for up to 5 seconds before `Busy`. A text column
+// that is not UTF-8 is read as bytes.
+//
+//     db.Connection* c = try sqlite.open(&arena, "app.db");
+//     defer c.close();
+import db.db;
+
+extern "C" {
+    ui8* sosu_sqlite_open(ui8* path, i32 read_only, i32* code) uses io;
+    void sosu_sqlite_close(ui8* handle) uses io;
+    i32 sosu_sqlite_exec(ui8* handle, ui8* sql) uses io;
+    ui8* sosu_sqlite_prepare(ui8* handle, ui8* sql, i32 size, i32* code) uses io;
+    i32 sosu_sqlite_parameters(ui8* stmt);
+    i32 sosu_sqlite_bind_null(ui8* stmt, i32 i);
+    i32 sosu_sqlite_bind_integer(ui8* stmt, i32 i, i64 value);
+    i32 sosu_sqlite_bind_float(ui8* stmt, i32 i, f64 value);
+    i32 sosu_sqlite_bind_text(ui8* stmt, i32 i, ui8* data, i64 size);
+    i32 sosu_sqlite_bind_bytes(ui8* stmt, i32 i, ui8* data, i64 size);
+    i64 sosu_sqlite_run(ui8* handle, ui8* stmt, i32* code) uses io;
+    i32 sosu_sqlite_step(ui8* stmt) uses io;
+    void sosu_sqlite_reset(ui8* stmt);
+    void sosu_sqlite_finalize(ui8* stmt);
+    i32 sosu_sqlite_columns(ui8* stmt);
+    i32 sosu_sqlite_column_type(ui8* stmt, i32 i);
+    i64 sosu_sqlite_column_integer(ui8* stmt, i32 i);
+    f64 sosu_sqlite_column_float(ui8* stmt, i32 i);
+    i64 sosu_sqlite_column_size(ui8* stmt, i32 i, i32 text);
+    void sosu_sqlite_column_copy(ui8* stmt, i32 i, i32 text, ui8* out);
+    ui8* sosu_sqlite_column_name(ui8* stmt, i32 i);
+    i64 sosu_sqlite_last_insert_id(ui8* handle);
+    i32 sosu_sqlite_autocommit(ui8* handle);
+    ui8* sosu_sqlite_error(ui8* handle);
+    i64 sosu_sqlite_length(ui8* s);
+    void sosu_sqlite_copy(ui8* s, ui8* out, i64 size);
+    ui8* sosu_sqlite_version();
+}
+
+// The database in the file at `path` (UTF-8), created if it is not there; `file:` starts a URI
+// (`file:data.db?mode=ro`). `CannotOpen` if the file cannot be opened or is not a database.
+pub db.Connection*!db.DbError open(Arena* arena, str path) uses io {
+    return opened(arena, path, 0);
+}
+
+// The database at `path`, which must be there, without writing to it.
+pub db.Connection*!db.DbError open_read_only(Arena* arena, str path) uses io {
+    return opened(arena, path, 1);
+}
+
+// A database in memory, gone when it is closed.
+pub db.Connection*!db.DbError memory(Arena* arena) uses io {
+    return opened(arena, ":memory:", 0);
+}
+
+// The version of SQLite: "3.54.1".
+pub str version(Arena* arena) {
+    unsafe {
+        return copied(arena, sosu_sqlite_version());
+    }
+}
+
+db.Connection*!db.DbError opened(Arena* arena, str path, i32 read_only) uses io {
+    mut i32 code = 0;
+    unsafe {
+        ui8* handle = sosu_sqlite_open(path.to_cstr(arena), read_only, &code);
+        if (code != 0) {
+            return err(db.DbError.CannotOpen);
+        }
+        return ok(arena.new(Database, handle) as db.Connection*);
+    }
+}
+
+// What a code of SQLite means (its primary code: the low byte of an extended one).
+db.DbError error_of(i32 code) {
+    i32 primary = code & 255;
+    if (primary == 1) {  // SQLITE_ERROR: the syntax, a table or a column that is not there
+        return db.DbError.Invalid;
+    }
+    if (primary == 5 || primary == 6) {  // SQLITE_BUSY, SQLITE_LOCKED
+        return db.DbError.Busy;
+    }
+    if (primary == 8) {  // SQLITE_READONLY
+        return db.DbError.ReadOnly;
+    }
+    if (primary == 14 || primary == 26) {  // SQLITE_CANTOPEN, SQLITE_NOTADB
+        return db.DbError.CannotOpen;
+    }
+    if (primary == 19) {  // SQLITE_CONSTRAINT
+        return db.DbError.Constraint;
+    }
+    if (primary == 20 || primary == 25) {  // SQLITE_MISMATCH, SQLITE_RANGE
+        return db.DbError.Mismatch;
+    }
+    return db.DbError.Other;
+}
+
+// A NUL-ended text of C, copied into `arena` ("" if it is not UTF-8).
+str copied(Arena* arena, ui8* s) {
+    mut i64 size = 0;
+    unsafe {
+        size = sosu_sqlite_length(s);
+    }
+    mut ui8[] bytes = arena.alloc_slice(ui8, size as usize + 1);
+    unsafe {
+        sosu_sqlite_copy(s, &bytes[0], size);
+    }
+    return match (str.from_bytes(bytes[0..size as usize])) {
+        ok(t) => t,
+        err(e) => "",
+    };
+}
+
+// `params` given to the parameters of `stmt`: `Mismatch` if they are not as many.
+void!db.DbError bind(ui8* stmt, db.Value[] params) {
+    mut i32 count = 0;
+    unsafe {
+        count = sosu_sqlite_parameters(stmt);
+    }
+    if (count as usize != params.len) {
+        return err(db.DbError.Mismatch);
+    }
+    for (usize i in 0..params.len) {
+        i32 at = i as i32 + 1;
+        mut i32 code = 0;
+        unsafe {
+            code = match (params[i]) {
+                Null => sosu_sqlite_bind_null(stmt, at),
+                Integer(n) => sosu_sqlite_bind_integer(stmt, at, n),
+                Float(x) => sosu_sqlite_bind_float(stmt, at, x),
+                Text(s) => sosu_sqlite_bind_text(stmt, at, s.len == 0 ? stmt : &s.bytes[0], s.len as i64),
+                Bytes(b) => sosu_sqlite_bind_bytes(stmt, at, b.len == 0 ? stmt : &b[0], b.len as i64),
+            };
+        }
+        if (code != 0) {
+            return err(error_of(code));
+        }
+    }
+    return ok();
+}
+
+// A connection to a database.
+class Database : db.Connection {
+    ui8* handle;
+    mut bool open;
+
+    void init(ui8* handle) {
+        self.handle = handle;
+        open = true;
+    }
+
+    ui8*!db.DbError prepared(str sql) uses io {
+        if (!open) {
+            return err(db.DbError.Closed);
+        }
+        mut i32 code = 0;
+        mut str text = sql;
+        if (text.len == 0) {
+            text = " ";  // SQLite reads an empty statement as none
+        }
+        if (text.len > 0x7FFFFFFF) {
+            return err(db.DbError.Invalid);
+        }
+        unsafe {
+            ui8* stmt = sosu_sqlite_prepare(handle, &text.bytes[0], text.len as i32, &code);
+            if (code != 0) {
+                return err(error_of(code));
+            }
+            return ok(stmt);
+        }
+    }
+
+    override i64!db.DbError execute(str sql, db.Value[] params) uses io {
+        ui8* stmt = try prepared(sql);
+        defer finalize(stmt);
+        try bind(stmt, params);
+        return run(handle, stmt);
+    }
+
+    override db.Rows*!db.DbError query(Arena* arena, str sql, db.Value[] params) uses io {
+        ui8* stmt = try prepared(sql);
+        match (bind(stmt, params)) {
+            ok => { },
+            err(e) => {
+                finalize(stmt);
+                return err(e);
+            },
+        }
+        return ok(arena.new(Cursor, arena, self, stmt, true, none, 0) as db.Rows*);
+    }
+
+    override db.Statement*!db.DbError prepare(Arena* arena, str sql) uses io {
+        ui8* stmt = try prepared(sql);
+        return ok(arena.new(Prepared, self, stmt) as db.Statement*);
+    }
+
+    override void!db.DbError script(str sql) uses io {
+        if (!open) {
+            return err(db.DbError.Closed);
+        }
+        mut Arena scratch = Arena.new(sql.len + 64);
+        defer scratch.free();
+        mut i32 code = 0;
+        unsafe {
+            code = sosu_sqlite_exec(handle, sql.to_cstr(&scratch));
+        }
+        if (code != 0) {
+            return err(error_of(code));
+        }
+        return ok();
+    }
+
+    override void!db.DbError begin() uses io {
+        return script("BEGIN");
+    }
+
+    override void!db.DbError commit() uses io {
+        return script("COMMIT");
+    }
+
+    // Nothing when no transaction is open.
+    override void!db.DbError rollback() uses io {
+        if (!open) {
+            return err(db.DbError.Closed);
+        }
+        mut i32 outside = 1;
+        unsafe {
+            outside = sosu_sqlite_autocommit(handle);
+        }
+        if (outside != 0) {
+            return ok();
+        }
+        return script("ROLLBACK");
+    }
+
+    override i64 last_insert_id() uses io {
+        if (!open) {
+            return 0;
+        }
+        unsafe {
+            return sosu_sqlite_last_insert_id(handle);
+        }
+    }
+
+    override str message(Arena* arena) uses io {
+        if (!open) {
+            return "the connection is closed";
+        }
+        unsafe {
+            return copied(arena, sosu_sqlite_error(handle));
+        }
+    }
+
+    // Its statements and rows still open are ended with it.
+    override void close() uses io {
+        if (open) {
+            open = false;
+            unsafe {
+                sosu_sqlite_close(handle);
+            }
+        }
+    }
+}
+
+void finalize(ui8* stmt) {
+    unsafe {
+        sosu_sqlite_finalize(stmt);
+    }
+}
+
+i64!db.DbError run(ui8* handle, ui8* stmt) uses io {
+    mut i32 code = 0;
+    mut i64 changed = 0;
+    unsafe {
+        changed = sosu_sqlite_run(handle, stmt, &code);
+    }
+    if (code != 0) {
+        return err(error_of(code));
+    }
+    return ok(changed);
+}
+
+// A statement prepared once, run again with other parameters.
+class Prepared : db.Statement {
+    Database* database;
+    ui8* stmt;
+    mut bool open;
+    mut ui64 runs;  // the rows of an earlier run end when it runs again
+
+    void init(Database* database, ui8* stmt) {
+        self.database = database;
+        self.stmt = stmt;
+        open = true;
+        runs = 0;
+    }
+
+    void!db.DbError ready(db.Value[] params) {
+        if (!open || !database.open) {
+            return err(db.DbError.Closed);
+        }
+        runs += 1;
+        unsafe {
+            sosu_sqlite_reset(stmt);
+        }
+        return bind(stmt, params);
+    }
+
+    override i64!db.DbError execute(db.Value[] params) uses io {
+        try ready(params);
+        return run(database.handle, stmt);
+    }
+
+    override db.Rows*!db.DbError query(Arena* arena, db.Value[] params) uses io {
+        try ready(params);
+        return ok(arena.new(Cursor, arena, database, stmt, false, some(self), runs) as db.Rows*);
+    }
+
+    override void close() uses io {
+        if (open) {
+            open = false;
+            if (database.open) {
+                finalize(stmt);
+            }
+        }
+    }
+}
+
+// The rows of a query, read from its statement step by step.
+class Cursor : db.Rows {
+    Arena* arena;  // for the names of the columns
+    Database* database;
+    ui8* stmt;
+    bool owned;  // a statement of its own, ended with the rows; else one of `statement`
+    Prepared*? statement;
+    ui64 run;
+    mut bool done;
+    mut bool row;  // on a row
+
+    void init(Arena* arena, Database* database, ui8* stmt, bool owned, Prepared*? statement, ui64 run) {
+        self.arena = arena;
+        self.database = database;
+        self.stmt = stmt;
+        self.owned = owned;
+        self.statement = statement;
+        self.run = run;
+        done = false;
+        row = false;
+    }
+
+    // Whether the statement is still this one's to read.
+    bool live() {
+        if (done || !database.open) {
+            return false;
+        }
+        return match (statement) {
+            some(p) => p.open && p.runs == run,
+            none => true,
+        };
+    }
+
+    override bool!db.DbError next() uses io {
+        if (!live()) {
+            row = false;
+            return done ? ok(false) : err(db.DbError.Closed);
+        }
+        mut i32 code = 0;
+        unsafe {
+            code = sosu_sqlite_step(stmt);
+        }
+        if (code == 100) {  // SQLITE_ROW
+            row = true;
+            return ok(true);
+        }
+        row = false;
+        end();
+        if (code == 101) {  // SQLITE_DONE
+            return ok(false);
+        }
+        return err(error_of(code));
+    }
+
+    override usize columns() {
+        if (!live()) {
+            return 0;
+        }
+        unsafe {
+            return sosu_sqlite_columns(stmt) as usize;
+        }
+    }
+
+    override str name(usize column) {
+        if (column >= columns()) {
+            return "";
+        }
+        unsafe {
+            return copied(arena, sosu_sqlite_column_name(stmt, column as i32));
+        }
+    }
+
+    override db.Value value(Arena* arena, usize column) uses io {
+        if (!row || !live() || column >= columns()) {
+            return db.Value.Null;
+        }
+        i32 i = column as i32;
+        mut i32 kind = 5;
+        unsafe {
+            kind = sosu_sqlite_column_type(stmt, i);
+        }
+        if (kind == 1) {
+            unsafe {
+                return db.Value.Integer(sosu_sqlite_column_integer(stmt, i));
+            }
+        }
+        if (kind == 2) {
+            unsafe {
+                return db.Value.Float(sosu_sqlite_column_float(stmt, i));
+            }
+        }
+        if (kind != 3 && kind != 4) {
+            return db.Value.Null;
+        }
+        i32 text = kind == 3 ? 1 : 0;
+        mut i64 size = 0;
+        unsafe {
+            size = sosu_sqlite_column_size(stmt, i, text);
+        }
+        mut ui8[] bytes = arena.alloc_slice(ui8, size as usize + 1);
+        unsafe {
+            sosu_sqlite_column_copy(stmt, i, text, &bytes[0]);
+        }
+        ui8[] data = bytes[0..size as usize];
+        if (text == 0) {
+            return db.Value.Bytes(data);
+        }
+        return match (str.from_bytes(data)) {
+            ok(s) => db.Value.Text(s),
+            err(e) => db.Value.Bytes(data),
+        };
+    }
+
+    void end() {
+        if (!done) {
+            done = true;
+            if (database.open) {
+                if (owned) {
+                    finalize(stmt);
+                } else {
+                    unsafe {
+                        sosu_sqlite_reset(stmt);
+                    }
+                }
+            }
+        }
+    }
+
+    override void close() uses io {
+        if (live()) {
+            end();
+        }
+        done = true;
+    }
+}
