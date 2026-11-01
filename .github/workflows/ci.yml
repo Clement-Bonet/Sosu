@@ -74,7 +74,7 @@ jobs:
       - name: Archive of examples/workspace
         if: matrix.cc == 'gcc'
         run: ./build/sosuc package examples/workspace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: matrix.cc == 'gcc'
         with:
           name: workspace-linux-x64
@@ -112,7 +112,7 @@ jobs:
       - name: Archive of examples/workspace
         shell: cmd
         run: build\sosuc.exe package examples\workspace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: workspace-windows-x64
           path: examples/workspace/build/package/workspace-windows-x64.zip
@@ -146,7 +146,7 @@ jobs:
           lipo -info tests/programs/basics/build/macos-universal/basics | grep -q "x86_64 arm64"
       - name: Archive of examples/workspace
         run: ./build/sosuc package examples/workspace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: workspace-macos
           path: examples/workspace/build/package/workspace-macos-*.zip
@@ -188,7 +188,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: build/fuzz_corpus
           key: fuzz-corpus-${{ github.run_id }}
@@ -196,7 +196,7 @@ jobs:
       - name: Fuzz
         timeout-minutes: 10
         run: make fuzz FUZZ_TIME=180
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: fuzz-crashes

@@ -77,7 +77,7 @@ jobs:
           cp examples/poster/build/poster.png "sosu-$VERSION-poster.png"
       - name: Archive
         run: tar -czf "$DIST.tar.gz" "$DIST"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -116,7 +116,7 @@ jobs:
       - name: Archive
         shell: pwsh
         run: Compress-Archive -Path "$env:DIST" -DestinationPath "$env:DIST.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x64
           path: ${{ env.DIST }}.zip
@@ -128,7 +128,7 @@ jobs:
     permissions:
       contents: write  # creates the release and uploads its archives
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

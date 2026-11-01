@@ -1780,6 +1780,8 @@ void sema_free(Sema *s) {
         }
     }
     free(s->scopes);
+    for (size_t i = 0; i < s->type_infos.count; i++) free(s->type_infos.items[i]->instances.items);
+    free(s->instances.items);
     free(s->type_infos.items);
     free(s->fns.items);
     free(s->consts.items);
