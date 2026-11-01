@@ -1,0 +1,217 @@
+// image.image: an image of pixels, RGBA of 8 bits (`Image`) or gray (`Gray`), and the
+// conversions between them, premultiplied alpha included. The readers of `image.png` and
+// `image.jpeg` give an `Image`; `MAX_SIDE` and `MAX_PIXELS` bound what they accept, so that a
+// small hostile file cannot ask for gigabytes.
+
+pub enum ImageError {
+    Unreadable,  // the file cannot be read
+    UnknownFormat,  // not a file of the format read
+    Damaged,  // a file of the format, but damaged, or of a kind that does not exist
+    TooLarge,  // wider or higher than `MAX_SIDE`, or more pixels than `MAX_PIXELS`
+    Unsupported,  // a kind of the format not read yet (a progressive JPEG...)
+}
+
+// A short description of `e`, in English.
+pub str message(ImageError e) {
+    return match (e) {
+        Unreadable => "the file cannot be read",
+        UnknownFormat => "not a file of this format",
+        Damaged => "damaged image",
+        TooLarge => "image too large",
+        Unsupported => "a kind of image not supported",
+    };
+}
+
+// The largest side of an image read, and its largest number of pixels (256 MB of RGBA).
+pub i32 MAX_SIDE = 16384;
+pub i32 MAX_PIXELS = 67108864;
+
+// Whether an image of `width` by `height` pixels is within the bounds of the readers.
+pub bool fits(i64 width, i64 height) {
+    return width >= 0 && height >= 0 && width <= MAX_SIDE as i64 && height <= MAX_SIDE as i64 && width * height <= MAX_PIXELS as i64;
+}
+
+// `width * height` pixels, row by row, each 0xAARRGGBB (alpha not premultiplied, except in what
+// `premultiplied` gives).
+pub struct Image {
+    pub i32 width;
+    pub i32 height;
+    pub ui32[] pixels;
+
+    // The pixel at (x, y), or 0 (transparent) outside of the image.
+    pub ui32 at(i32 x, i32 y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return 0;
+        }
+        return pixels[(y * width + x) as usize];
+    }
+
+    // Sets the pixel at (x, y); nothing outside of the image.
+    pub void set(i32 x, i32 y, ui32 pixel) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        pixels[(y * width + x) as usize] = pixel;
+    }
+
+    // Whether every pixel is opaque.
+    pub bool opaque() {
+        for (ui32 p in pixels) {
+            if (p >> 24 != 255) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// `width * height` levels of gray, row by row, 0 black to 255 white.
+pub struct Gray {
+    pub i32 width;
+    pub i32 height;
+    pub ui8[] pixels;
+
+    // The level at (x, y), or 0 outside of the image.
+    pub ui8 at(i32 x, i32 y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return 0;
+        }
+        return pixels[(y * width + x) as usize];
+    }
+
+    pub void set(i32 x, i32 y, ui8 level) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        pixels[(y * width + x) as usize] = level;
+    }
+}
+
+// A pixel of `r`, `g`, `b` and `a` (0 to 255 each).
+pub ui32 rgba(ui32 r, ui32 g, ui32 b, ui32 a) {
+    return (a & 0xFF) << 24 | (r & 0xFF) << 16 | (g & 0xFF) << 8 | b & 0xFF;
+}
+
+// A transparent image of `width` by `height` pixels, in `arena`.
+pub Image create(Arena* arena, i32 width, i32 height)
+    requires fits(width as i64, height as i64)
+{
+    return Image{ width: width, height: height, pixels: arena.alloc_slice(ui32, (width * height) as usize) };
+}
+
+// A black gray image of `width` by `height` pixels, in `arena`.
+pub Gray create_gray(Arena* arena, i32 width, i32 height)
+    requires fits(width as i64, height as i64)
+{
+    return Gray{ width: width, height: height, pixels: arena.alloc_slice(ui8, (width * height) as usize) };
+}
+
+// The luma of a pixel (ITU-R BT.601, as JPEG): 0.299 R + 0.587 G + 0.114 B, rounded.
+pub ui8 luma(ui32 pixel) {
+    ui32 r = pixel >> 16 & 0xFF;
+    ui32 g = pixel >> 8 & 0xFF;
+    ui32 b = pixel & 0xFF;
+    return (19595 * r + 38470 * g + 7471 * b + 32768 >> 16) as ui8;
+}
+
+// `img` in gray, by the luma of its pixels; their alpha is dropped.
+pub Gray to_gray(Arena* arena, Image img) {
+    mut ui8[] levels = arena.alloc_slice(ui8, img.pixels.len);
+    for (usize i in 0..img.pixels.len) {
+        levels[i] = luma(img.pixels[i]);
+    }
+    return Gray{ width: img.width, height: img.height, pixels: levels };
+}
+
+// `g` as opaque RGBA pixels.
+pub Image from_gray(Arena* arena, Gray g) {
+    mut ui32[] pixels = arena.alloc_slice(ui32, g.pixels.len);
+    for (usize i in 0..g.pixels.len) {
+        ui32 v = g.pixels[i] as ui32;
+        pixels[i] = 0xFF000000 | v << 16 | v << 8 | v;
+    }
+    return Image{ width: g.width, height: g.height, pixels: pixels };
+}
+
+// A pixel with its color multiplied by its alpha, rounded (what blending and resizing add up).
+pub ui32 premultiply(ui32 pixel) {
+    ui32 a = pixel >> 24;
+    ui32 r = ((pixel >> 16 & 0xFF) * a + 127) / 255;
+    ui32 g = ((pixel >> 8 & 0xFF) * a + 127) / 255;
+    ui32 b = ((pixel & 0xFF) * a + 127) / 255;
+    return a << 24 | r << 16 | g << 8 | b;
+}
+
+// The pixel whose premultiplied form is `pixel` (transparent stays 0; a color above its alpha,
+// which premultiplying does not give, is brought down to it).
+pub ui32 unpremultiply(ui32 pixel) {
+    ui32 a = pixel >> 24;
+    if (a == 0) {
+        return 0;
+    }
+    ui32 r = (min(pixel >> 16 & 0xFF, a) * 255 + a / 2) / a;
+    ui32 g = (min(pixel >> 8 & 0xFF, a) * 255 + a / 2) / a;
+    ui32 b = (min(pixel & 0xFF, a) * 255 + a / 2) / a;
+    return a << 24 | r << 16 | g << 8 | b;
+}
+
+// `img` with its pixels premultiplied by their alpha, in `arena`.
+pub Image premultiplied(Arena* arena, Image img) {
+    mut ui32[] pixels = arena.alloc_slice(ui32, img.pixels.len);
+    for (usize i in 0..img.pixels.len) {
+        pixels[i] = premultiply(img.pixels[i]);
+    }
+    return Image{ width: img.width, height: img.height, pixels: pixels };
+}
+
+// The image whose premultiplied form is `img`, in `arena`.
+pub Image unpremultiplied(Arena* arena, Image img) {
+    mut ui32[] pixels = arena.alloc_slice(ui32, img.pixels.len);
+    for (usize i in 0..img.pixels.len) {
+        pixels[i] = unpremultiply(img.pixels[i]);
+    }
+    return Image{ width: img.width, height: img.height, pixels: pixels };
+}
+
+// A copy of `img`, in `arena`.
+pub Image copy_of(Arena* arena, Image img) {
+    mut ui32[] pixels = arena.alloc_slice(ui32, img.pixels.len);
+    for (usize i in 0..img.pixels.len) {
+        pixels[i] = img.pixels[i];
+    }
+    return Image{ width: img.width, height: img.height, pixels: pixels };
+}
+
+test "pixels, bounds and gray" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut Image img = create(&arena, 3, 2);
+    assert(img.at(0, 0) == 0 && !img.opaque());
+    img.set(2, 1, rgba(255, 128, 0, 255));
+    img.set(3, 1, 0xFFFFFFFF);  // outside: nothing
+    assert(img.at(2, 1) == 0xFFFF8000 && img.at(3, 1) == 0 && img.at(-1, 0) == 0);
+    assert(fits(16384, 4096) && !fits(16385, 1) && !fits(16384, 16384) && !fits(-1, 1));
+    assert(luma(0xFFFFFFFF) == 255 && luma(0xFF000000) == 0 && luma(0xFFFF0000) == 76 && luma(0xFF00FF00) == 150);
+    Gray g = to_gray(&arena, img);
+    assert(g.width == 3 && g.at(2, 1) == luma(0xFFFF8000) && g.at(0, 0) == 0);
+    Image back = from_gray(&arena, g);
+    assert(back.opaque() && back.at(2, 1) == 0xFF000000 | 0x010101 * g.at(2, 1) as ui32);
+}
+
+test "premultiplied alpha" {
+    assert(premultiply(0x80FF8000) == 0x80804000);
+    assert(unpremultiply(0x80804000) == 0x80FF8000);
+    assert(premultiply(0xFF123456) == 0xFF123456 && unpremultiply(0xFF123456) == 0xFF123456);
+    assert(premultiply(0x00FFFFFF) == 0 && unpremultiply(0) == 0);
+    assert(unpremultiply(0x10FFFFFF) == 0x10FFFFFF);  // a color above its alpha, brought down
+    // every opaque or half transparent pixel comes back within one step
+    mut bool near = true;
+    for (i32 alpha in [255, 200, 128, 64]) {
+        ui32 a = alpha as ui32;
+        for (ui32 v in 0..256) {
+            ui32 back = unpremultiply(premultiply(a << 24 | v << 16 | v << 8 | v)) & 0xFF;
+            near = near && (back >= v ? back - v : v - back) <= 255 / a + 1;
+        }
+    }
+    assert(near);
+}

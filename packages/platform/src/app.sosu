@@ -4,7 +4,7 @@
 import platform.sdl;
 import platform.sdl_c;
 import render.canvas;
-import render.image;
+import image.image;
 
 pub struct Config {
     pub str title;

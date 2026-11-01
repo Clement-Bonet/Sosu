@@ -1157,6 +1157,103 @@ void sosu_print_char(uint32_t c) {
     fwrite(bytes, 1, (size_t)n, stdout);
 }
 
+/* ---- A failed `assert(a op b)` (spec §7.3) ----
+   The message, then the two sides on lines of their own:
+       assertion failed: square(2) == 5
+             left: 4
+            right: 5 */
+
+#define ASSERT_SIDES(format, left, right) \
+    do { \
+        char text[512]; \
+        snprintf(text, sizeof text, "%s\n      left: " format "\n     right: " format, message, left, right); \
+        sosu_fail(loc, text); \
+    } while (0)
+
+void sosu_assert_i64(const char *loc, const char *message, int64_t left, int64_t right) {
+    ASSERT_SIDES("%lld", (long long)left, (long long)right);
+}
+
+void sosu_assert_u64(const char *loc, const char *message, uint64_t left, uint64_t right) {
+    ASSERT_SIDES("%llu", (unsigned long long)left, (unsigned long long)right);
+}
+
+void sosu_assert_bool(const char *loc, const char *message, bool left, bool right) {
+    ASSERT_SIDES("%s", left ? "true" : "false", right ? "true" : "false");
+}
+
+/* The fewest digits that read back the same, with a dot: 0.30000000000000004, 25.0. */
+static void shortest_f64(char *out, size_t size, double value) {
+    for (int digits = 15; digits <= 17; digits++) {
+        snprintf(out, size, "%.*g", digits, value);
+        if (value != value || strtod(out, NULL) == value) break;
+    }
+    if (!strpbrk(out, ".eni")) strncat(out, ".0", size - strlen(out) - 1);
+}
+
+void sosu_assert_f64(const char *loc, const char *message, double left, double right) {
+    char a[40], b[40];
+    shortest_f64(a, sizeof a, left);
+    shortest_f64(b, sizeof b, right);
+    ASSERT_SIDES("%s", a, b);
+}
+
+/* A character or a text between quotes, its control characters, quotes and backslashes escaped;
+   a text longer than `limit` bytes is cut, and ends with `...`. */
+static void quoted(char *out, size_t size, const uint8_t *bytes, size_t length, char quote, size_t limit) {
+    size_t used = 0;
+    out[used++] = quote;
+    for (size_t i = 0; i < length && used + 8 < size; i++) {
+        if (i == limit) {
+            used += (size_t)snprintf(out + used, size - used, "...");
+            break;
+        }
+        uint8_t c = bytes[i];
+        if (c == '\n') used += (size_t)snprintf(out + used, size - used, "\\n");
+        else if (c == '\r') used += (size_t)snprintf(out + used, size - used, "\\r");
+        else if (c == '\t') used += (size_t)snprintf(out + used, size - used, "\\t");
+        else if (c == (uint8_t)quote || c == '\\') used += (size_t)snprintf(out + used, size - used, "\\%c", c);
+        else if (c < 0x20 || c == 0x7F) used += (size_t)snprintf(out + used, size - used, "\\x%02X", c);
+        else out[used++] = (char)c;
+    }
+    out[used++] = quote;
+    out[used] = '\0';
+}
+
+void sosu_assert_char(const char *loc, const char *message, uint32_t left, uint32_t right) {
+    char a[24], b[24];
+    uint32_t sides[2] = { left, right };
+    char *outs[2] = { a, b };
+    for (int i = 0; i < 2; i++) {
+        uint32_t c = sides[i];
+        uint8_t bytes[4];
+        size_t n;
+        if (c < 0x80) { bytes[0] = (uint8_t)c; n = 1; }
+        else if (c < 0x800) { bytes[0] = (uint8_t)(0xC0 | (c >> 6)); bytes[1] = (uint8_t)(0x80 | (c & 0x3F)); n = 2; }
+        else if (c < 0x10000) {
+            bytes[0] = (uint8_t)(0xE0 | (c >> 12));
+            bytes[1] = (uint8_t)(0x80 | ((c >> 6) & 0x3F));
+            bytes[2] = (uint8_t)(0x80 | (c & 0x3F));
+            n = 3;
+        } else {
+            bytes[0] = (uint8_t)(0xF0 | (c >> 18));
+            bytes[1] = (uint8_t)(0x80 | ((c >> 12) & 0x3F));
+            bytes[2] = (uint8_t)(0x80 | ((c >> 6) & 0x3F));
+            bytes[3] = (uint8_t)(0x80 | (c & 0x3F));
+            n = 4;
+        }
+        quoted(outs[i], sizeof a, bytes, n, '\'', n);
+    }
+    ASSERT_SIDES("%s", a, b);
+}
+
+void sosu_assert_str(const char *loc, const char *message, sosu_str left, sosu_str right) {
+    char a[200], b[200];
+    quoted(a, sizeof a, left.ptr, left.len, '"', 120);
+    quoted(b, sizeof b, right.ptr, right.len, '"', 120);
+    ASSERT_SIDES("%s", a, b);
+}
+
 /* ---- Android (spec §11.5) ----
    An application has no console: what the program prints (io.print, the run-time errors) goes
    to the log of the system, read with `adb logcat -s sosu`. A thread reads standard output and

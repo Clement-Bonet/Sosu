@@ -4,7 +4,7 @@ CFLAGS ?= -std=c99 -Wall -Wextra -pedantic -Werror -g
 CPPFLAGS += -Isrc/lib
 
 LIB_SRC := $(wildcard src/lib/*.c)
-LIB_HDR := $(wildcard src/lib/*.h)
+LIB_HDR := $(wildcard src/lib/*.h src/lib/*.inc)
 TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/fmt_tests build/json_tests build/lsp_tests build/i18n_tests build/program_tests
 
 all: build/sosuc $(TESTS)
@@ -32,6 +32,7 @@ test: all
 	./build/sosuc check packages/platform
 	./build/sosuc check examples/window
 	./build/sosuc check tests/window
+	./build/sosuc test packages/image
 	./build/sosuc test packages/render
 	./build/sosuc test packages/ui
 	./build/sosuc test packages/i18n

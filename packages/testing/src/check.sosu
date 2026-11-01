@@ -1,0 +1,141 @@
+// testing.check: comparisons that show what differs (spec §8.3). Each says whether its values
+// agree, and prints what differs when they do not. Written in an `assert`, a failure stops the
+// test at the line of the `assert`, which the message names:
+//     assert(check.same_text(report, expected));
+// `assert(a == b)` already shows both sides for numbers, `bool`, `char` and short texts.
+
+import std.io;
+import std.text;
+
+// True if `actual` and `expected` are the same text; otherwise prints the first line where
+// they differ, both versions of it, and the column of the first byte that differs.
+pub bool same_text(str actual, str expected) uses io {
+    if (actual == expected) {
+        return true;
+    }
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str[] a = text.lines(&arena, actual);
+    str[] e = text.lines(&arena, expected);
+    usize common = min(a.len, e.len);
+    for (usize i in 0..common) {
+        if (a[i] != e[i]) {
+            io.print("    texts differ at line {}, column {}:", i + 1, first_difference(a[i].bytes, e[i].bytes) + 1);
+            io.print("      actual:   \"{}\"", a[i]);
+            io.print("      expected: \"{}\"", e[i]);
+            return false;
+        }
+    }
+    if (a.len != e.len) {
+        io.print("    texts differ at line {}: actual has {} lines, expected {}", common + 1, a.len, e.len);
+        if (a.len > common) {
+            io.print("      actual:   \"{}\"", a[common]);
+        } else {
+            io.print("      expected: \"{}\"", e[common]);
+        }
+        return false;
+    }
+    io.print("    texts differ only by their line ends (\\r\\n or a last \\n): {} bytes, expected {}", actual.len, expected.len);
+    return false;
+}
+
+// True if `actual` and `expected` hold the same bytes; otherwise prints the first place where
+// they differ, and the bytes around it in hexadecimal.
+pub bool same_bytes(ui8[] actual, ui8[] expected) uses io {
+    usize at = first_difference(actual, expected);
+    if (at == actual.len && at == expected.len) {
+        return true;
+    }
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    if (actual.len != expected.len) {
+        io.print("    bytes differ at {}: {} bytes, expected {}", at, actual.len, expected.len);
+    } else {
+        io.print("    bytes differ at {} (of {})", at, actual.len);
+    }
+    io.print("      actual:   {}", around(&arena, actual, at));
+    io.print("      expected: {}", around(&arena, expected, at));
+    return false;
+}
+
+// True if `actual` and `expected` hold the same numbers; otherwise prints the first index where
+// they differ.
+pub bool same_items<T: Number>(T[] actual, T[] expected) uses io {
+    usize common = min(actual.len, expected.len);
+    for (usize i in 0..common) {
+        if (actual[i] != expected[i]) {
+            io.print("    items differ at index {}: actual {}, expected {}", i, actual[i], expected[i]);
+            return false;
+        }
+    }
+    if (actual.len != expected.len) {
+        io.print("    items differ at index {}: actual has {} items, expected {}", common, actual.len, expected.len);
+        return false;
+    }
+    return true;
+}
+
+// True if `actual` is within `tolerance` of `expected` (NaN is never near); otherwise prints
+// both, and how far apart they are.
+pub bool near(f64 actual, f64 expected, f64 tolerance) uses io {
+    f64 distance = actual > expected ? actual - expected : expected - actual;
+    if (distance <= tolerance) {
+        return true;
+    }
+    io.print("    not near: actual {}, expected {}, apart by {} (tolerance {})", actual, expected, distance, tolerance);
+    return false;
+}
+
+// True if `part` is found in `s`; otherwise prints both.
+pub bool contains(str s, str part) uses io {
+    if (text.contains(s, part)) {
+        return true;
+    }
+    io.print("    \"{}\" not found in:", part);
+    io.print("      \"{}\"", s);
+    return false;
+}
+
+// The index of the first byte that differs, or the length of the shorter when one begins the other.
+usize first_difference(ui8[] a, ui8[] b) {
+    usize common = min(a.len, b.len);
+    for (usize i in 0..common) {
+        if (a[i] != b[i]) {
+            return i;
+        }
+    }
+    return common;
+}
+
+// The bytes from 8 before `at` to 8 after it, in hexadecimal, the one at `at` between brackets.
+str around(Arena* arena, ui8[] bytes, usize at) {
+    text.TextBuilder* b = text.builder(arena);
+    usize start = at > 8 ? at - 8 : 0;
+    usize end = min(bytes.len, at + 9);
+    if (start > 0) {
+        b.push("... ");
+    }
+    for (usize i in start..end) {
+        if (i > start) {
+            b.push(" ");
+        }
+        if (i == at) {
+            b.push("[");
+        }
+        b.push_char(digit(bytes[i] >> 4));
+        b.push_char(digit(bytes[i] & 15));
+        if (i == at) {
+            b.push("]");
+        }
+    }
+    if (at >= bytes.len) {
+        b.push(start < end ? " [end]" : "[end]");
+    } else if (end < bytes.len) {
+        b.push(" ...");
+    }
+    return b.text();
+}
+
+char digit(ui8 d) {
+    return d < 10 ? (48 + d) as char : (87 + d) as char;
+}

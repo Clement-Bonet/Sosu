@@ -5,8 +5,8 @@ import std.fs;
 import std.os;
 import std.text;
 import render.canvas;
-import render.image;
-import render.png;
+import image.image;
+import image.png;
 import render.truetype;
 
 i32 W = 1536;
@@ -509,7 +509,7 @@ i32 main() uses io {
     truetype.Font* bold = load_font(&arena, "Montserrat-Bold.ttf", noto);
     truetype.Font* mono = load_font(&arena, "JetBrainsMono-Regular.ttf", noto);
     mut Fonts fonts = Fonts{ logo: logo, bold: bold, mono: mono, body: noto, faux_logo: logo == noto, faux_bold: bold == noto };
-    image.Image icon = match (image.load(&arena, "examples/poster/sosu-icon.png")) {
+    image.Image icon = match (png.load(&arena, "examples/poster/sosu-icon.png")) {
         ok(img) => img,
         err(e) => {
             io.print("examples/poster/sosu-icon.png not readable");
@@ -528,7 +528,7 @@ i32 main() uses io {
     features(&cv, &fonts);
     code_window(&cv, &fonts);
     right_column(&cv, &fonts);
-    ui8[] bytes = png.encode(&arena, &cv);
+    ui8[] bytes = png.encode(&arena, cv.image());
     match (fs.create_dirs(&arena, "examples/poster/build")) {
         ok => { },
         err(e) => {

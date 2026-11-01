@@ -36,7 +36,8 @@ static void usage(FILE *out) {
           "  parse   print the syntax tree of a file (debugging)\n"
           "  build   compile a package into build/<name> (through C)\n"
           "  run     compile and run a package\n"
-          "  test    compile and run the test blocks of a package\n"
+          "  test    compile and run the test blocks of a package; --bench: measure the benchmarks,\n"
+          "          --update: write the golden files again (package testing, spec 8.3)\n"
           "  package a release of a program in build/package, with its files, and its archive (spec 11.6);\n"
           "          --target android (an APK) or ios-sim (an application for the simulator, on a Mac) (11.5)\n"
           "  fmt     format files or packages in place (--check: only report)\n"
@@ -189,6 +190,8 @@ typedef struct {
     const Target *target; /* --target: a phone, or this desktop */
     CodegenOptions checks;
     char *run_args; /* `sosuc run ... -- args`: given to the program, quoted (spec §8.2, std.os) */
+    bool bench;     /* sosuc test --bench: the benchmarks of `testing.bench` are measured (spec §8.3) */
+    bool update;    /* sosuc test --update: the golden files of `testing.fixture` are written again */
 } BuildOptions;
 
 static bool write_file(const char *path, const char *text) {
@@ -1926,6 +1929,12 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
 #else
             char *command = sosu_format("\"%s\"%s", native_exe, options->run_args ? options->run_args : "");
 #endif
+            if (mode == MODE_TEST) {
+                /* for the package testing (spec §8.3): its folder, and what to do besides the tests */
+                shell_set_env("SOSU_PACKAGE", root->root);
+                shell_set_env("SOSU_BENCH", options->bench ? "1" : "0");
+                shell_set_env("SOSU_UPDATE", options->update ? "1" : "0");
+            }
             status = shell_run(command);
             free(command);
             free(native_exe);
@@ -2417,7 +2426,7 @@ int main(int argc, char **argv) {
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
-    BuildOptions options = { false, 0, &host_target, { true, true, true }, NULL };
+    BuildOptions options = { false, 0, &host_target, { true, true, true }, NULL, false, false };
     int checks = -1;    /* --checks: -1 when not given */
     int contracts = -1; /* --contracts */
     bool is_fmt = strcmp(command, "fmt") == 0;
@@ -2432,6 +2441,10 @@ int main(int argc, char **argv) {
         }
         if (is_fmt && strcmp(argv[i], "--check") == 0) {
             fmt_check = true;
+        } else if (strcmp(command, "test") == 0 && strcmp(argv[i], "--bench") == 0) {
+            options.bench = true;
+        } else if (strcmp(command, "test") == 0 && strcmp(argv[i], "--update") == 0) {
+            options.update = true;
         } else if (is_fmt && argv[i][0] != '-') {
             paths[path_count++] = argv[i];
         } else if (strcmp(argv[i], "--format=text") == 0) {

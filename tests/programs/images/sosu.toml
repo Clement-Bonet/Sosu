@@ -1,0 +1,10 @@
+# The package image (spec §8.2), run by `sosuc test`: JPEG files of another encoder (WIC) and the
+# pixels it reads from them, PNG files written byte for byte as before, damaged and hostile files,
+# and the transformations of a photo.
+[package]
+name = "images"
+version = "0.1.0"
+
+[dependencies]
+image = { path = "../../../packages/image" }
+testing = { path = "../../../packages/testing" }

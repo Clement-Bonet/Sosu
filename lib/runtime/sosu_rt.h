@@ -105,6 +105,14 @@ static inline void sosu_check(bool condition, const char *loc, const char *messa
     if (!condition) sosu_fail(loc, message);
 }
 
+/* A failed `assert(a op b)`: the message, and the two sides (spec §7.3). */
+void sosu_assert_i64(const char *loc, const char *message, int64_t left, int64_t right);
+void sosu_assert_u64(const char *loc, const char *message, uint64_t left, uint64_t right);
+void sosu_assert_f64(const char *loc, const char *message, double left, double right);
+void sosu_assert_bool(const char *loc, const char *message, bool left, bool right);
+void sosu_assert_char(const char *loc, const char *message, uint32_t left, uint32_t right);
+void sosu_assert_str(const char *loc, const char *message, sosu_str left, sosu_str right);
+
 /* Values of function type (spec §5.5): the code, and the variables a lambda captured (NULL
    for a function, or a lambda that captures nothing, whose code is then a plain C function).
    A field and a C function hold the code alone, a C function pointer. */

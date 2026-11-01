@@ -155,6 +155,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   arena       arena allocator for compiler data
   ast         syntax tree and its printer
   parser      syntax analysis (recursive descent)
+  ui_parser   the .ui.sosu files (spec §10.2): uses the helpers of parser.c (parser_internal.h)
   path        file path helpers
   shell       folders (native calls) and the commands run through the system shell (C compiler, git)
   manifest    sosu.toml parser
@@ -162,7 +163,9 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   program     loading of packages, dependencies and imported modules
   types       semantic types (interned)
   sema        semantic analysis of declarations
-  sema_body   semantic analysis of function bodies
+  sema_body   semantic analysis of function bodies: statements, expressions, names (shared types in sema_body.h)
+  sema_call   calls, generics and arenas, in function bodies
+  sema_lambda lambdas and the variables they capture
   codegen     C code generation
   json        JSON reader and writer (for the language server)
   lsp         the language server: diagnostics while typing, hover, definition, completion
@@ -207,7 +210,8 @@ Four packages, written in Sosu:
   draw its own title bar (spec §10.5), and a program linked with `--release` has no console on
   Windows.
 - `packages/render` draws in that canvas: rectangles (with rounded corners), borders, lines,
-  transparency, PNG images, text in a TrueType font or a built-in 8 by 8 font.
+  transparency, images (PNG and JPEG, from `packages/image`), text in a TrueType font or a built-in
+  8 by 8 font.
 - `packages/ui` adds widgets in immediate mode: at each frame, the program describes its interface
   from its state (`if (f.button("Greet")) { ... }`). Most programs describe it in `.ui.sosu`
   files, which `sosuc` turns into those calls.

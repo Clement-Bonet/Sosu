@@ -37,6 +37,14 @@ int shell_run(const char *command) {
     return status;
 }
 
+void shell_set_env(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 /* Folders are made and removed by the system itself, not by a command: a path never goes
    through a shell. */
 static void make_one_dir(const char *path) {

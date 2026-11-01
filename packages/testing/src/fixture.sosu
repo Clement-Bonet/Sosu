@@ -1,0 +1,184 @@
+// testing.fixture: the files of a test (spec §8.3). The data of the package under test, found
+// from its folder, which `sosuc test` gives; golden files, which hold the output a test expects
+// and which `sosuc test --update` writes again; and temporary folders.
+
+import std.fs;
+import std.io;
+import std.os;
+import std.random;
+import std.text;
+import testing.check;
+
+extern "C" {
+    void sosu_fail(ui8* place, ui8* message);
+}
+
+// The folder of the package under test, as `sosuc test` gives it; "." for a program started otherwise.
+pub str package_dir(Arena* arena) uses io {
+    return match (os.env(arena, "SOSU_PACKAGE")) {
+        some(dir) => dir.len > 0 ? dir : ".",
+        none => ".",
+    };
+}
+
+// The path of `relative` in the package under test: `fixture.path(&arena, "tests/data/input.txt")`.
+pub str path(Arena* arena, str relative) uses io {
+    return fs.join(arena, package_dir(arena), relative);
+}
+
+// The text of the file `relative` of the package under test; stops the test, saying why, when it
+// cannot be read.
+pub str read(Arena* arena, str relative) uses io {
+    str file = path(arena, relative);
+    match (io.read_file(arena, file)) {
+        ok(s) => {
+            return s;
+        },
+        err(e) => stop(arena, "cannot read the file", file, e),
+    }
+    return "";
+}
+
+// The bytes of the file `relative` of the package under test; stops the test when it cannot be read.
+pub ui8[] read_bytes(Arena* arena, str relative) uses io {
+    str file = path(arena, relative);
+    match (io.read_bytes(arena, file)) {
+        ok(bytes) => {
+            return bytes;
+        },
+        err(e) => stop(arena, "cannot read the file", file, e),
+    }
+    return arena.alloc_slice(ui8, 0);
+}
+
+// True if `actual` is the text of the golden file `relative` of the package under test (its
+// `\r\n` read as `\n`, as Git may write them on Windows); otherwise prints what differs, as
+// `check.same_text`. `sosuc test --update` writes `actual` into the file instead, and a file that
+// does not exist yet is an error until it does.
+pub bool golden(Arena* arena, str relative, str actual) uses io {
+    str file = path(arena, relative);
+    if (updating(arena)) {
+        match (fs.parent(file)) {
+            some(dir) => {
+                match (fs.create_dirs(arena, dir)) {
+                    ok => { },
+                    err(e) => stop(arena, "cannot create the folder", dir, e),
+                }
+            },
+            none => { },
+        }
+        match (io.write_file(arena, file, actual)) {
+            ok => io.print("    golden file written: {}", file),
+            err(e) => stop(arena, "cannot write the golden file", file, e),
+        }
+        return true;
+    }
+    match (io.read_file(arena, file)) {
+        ok(expected) => {
+            if (check.same_text(actual, text.replace(arena, expected, "\r\n", "\n"))) {
+                return true;
+            }
+            io.print("    golden file: {} (sosuc test --update writes it again)", file);
+            return false;
+        },
+        err(e) => {
+            io.print("    golden file {} cannot be read ({}): sosuc test --update writes it", file, describe(e));
+            return false;
+        },
+    }
+    return false;
+}
+
+// A new empty folder in the temporary folder of the system, named after `name`, for the files of
+// a test: `str dir = fixture.temp_dir(&arena, "export"); defer fixture.remove(dir);`.
+pub str temp_dir(Arena* arena, str name) uses io, random {
+    str folder = system_temp(arena);
+    mut random.Rng rng = random.from_system();
+    for (i32 attempt in 0..16) {
+        text.TextBuilder* b = text.builder(arena);
+        b.push("sosu-");
+        b.push(name);
+        b.push("-");
+        b.push_u64(rng.next() % 1000000000);
+        str dir = fs.join(arena, folder, b.text());
+        match (fs.create_dir(arena, dir)) {
+            ok => {
+                return dir;
+            },
+            err(e) => {
+                if (!already_exists(e)) {
+                    stop(arena, "cannot create the temporary folder", dir, e);
+                }
+            },
+        }
+    }
+    stop(arena, "cannot create a temporary folder in", folder, io.IoError.AlreadyExists);
+    return "";
+}
+
+// Removes `dir` and everything in it, if it is there: the end of `temp_dir`.
+pub void remove(str dir) uses io {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    if (fs.exists(&arena, dir)) {
+        match (fs.remove_all(&arena, dir)) {
+            ok => { },
+            err(e) => io.print("    cannot remove {} ({})", dir, describe(e)),
+        }
+    }
+}
+
+// True when `sosuc test --update` runs the tests.
+bool updating(Arena* arena) uses io {
+    return match (os.env(arena, "SOSU_UPDATE")) {
+        some(v) => v == "1",
+        none => false,
+    };
+}
+
+// The temporary folder of the system: TMPDIR, TEMP or TMP, or else /tmp.
+str system_temp(Arena* arena) uses io {
+    str[3] names = ["TMPDIR", "TEMP", "TMP"];
+    for (str name in names) {
+        match (os.env(arena, name)) {
+            some(dir) => {
+                if (dir.len > 0) {
+                    return dir;
+                }
+            },
+            none => { },
+        }
+    }
+    return "/tmp";
+}
+
+// Stops the current test with `what`, the path, and the error.
+void stop(Arena* arena, str what, str file, io.IoError e) uses io {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(what);
+    b.push(" ");
+    b.push(file);
+    b.push(": ");
+    b.push(describe(e));
+    unsafe {
+        sosu_fail("testing.fixture".to_cstr(arena), b.text().to_cstr(arena));
+    }
+}
+
+bool already_exists(io.IoError e) {
+    return match (e) {
+        AlreadyExists => true,
+        _ => false,
+    };
+}
+
+str describe(io.IoError e) {
+    return match (e) {
+        NotFound => "not found",
+        PermissionDenied => "permission denied",
+        AlreadyExists => "already exists",
+        NotEmpty => "not empty",
+        InvalidUtf8 => "not UTF-8",
+        Other => "error of the system",
+    };
+}

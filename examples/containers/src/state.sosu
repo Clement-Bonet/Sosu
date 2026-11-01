@@ -1,6 +1,6 @@
 // The state of the example: the tab shown, a form, the options of the groups, and a tree of
 // folders and files. Its interface is in screen.ui.sosu.
-import render.image;
+import image.image;
 import std.vec;
 import ui.widgets;
 

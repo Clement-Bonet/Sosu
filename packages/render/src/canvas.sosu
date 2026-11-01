@@ -1,7 +1,8 @@
 // render.canvas: a buffer of pixels and what draws in it: rectangles, lines, text, blending.
 // Coordinates are in pixels, from the top left corner; what falls outside is clipped.
 import render.font;
-import render.image;
+import image.image;
+import image.png;
 import render.truetype;
 
 pub struct Color {
@@ -326,6 +327,12 @@ pub struct Canvas {
         return pixels[(y * width + x) as usize];
     }
 
+    // What the canvas holds, as an image (its pixels, not a copy): to write it with `image.png`,
+    // or transform it with `image.ops`.
+    pub image.Image image() {
+        return image.Image{ width: width, height: height, pixels: pixels };
+    }
+
     // A square of `size` pixels.
     void dot(i32 x, i32 y, i32 size, Color color) {
         for (mut i32 dy = 0; dy < size; dy += 1) {
@@ -599,5 +606,27 @@ test "rounded rectangles: the pixels sampled alone are those of every pixel samp
                 }
             }
         }
+    }
+}
+
+test "a canvas written as a PNG file is read back" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    mut Canvas c = create(&arena, 5, 3);
+    c.clear(Color{ r: 10, g: 20, b: 30 });
+    c.fill(Rect{ x: 1.0, y: 1.0, w: 2.0, h: 1.0 }, Color{ r: 255, g: 0, b: 7, a: 128 });
+    ui8[] file = png.encode(&arena, c.image());
+    match (png.decode(&arena, file)) {
+        ok(img) => {
+            assert(img.width == 5 && img.height == 3);
+            for (i32 y in 0..3) {
+                for (i32 x in 0..5) {
+                    assert(img.at(x, y) == c.at(x, y));
+                }
+            }
+        },
+        err(e) => {
+            assert(false);
+        },
     }
 }

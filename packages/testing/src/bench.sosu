@@ -1,0 +1,104 @@
+// testing.bench: benchmarks, written in `test` blocks (spec §8.3). `sosuc test` runs each once,
+// as a test; `sosuc test --bench` measures them, and `--release` measures the optimized code:
+//     test "sum of a million" {
+//         bench.run("sum", () => { bench.keep(sum(numbers)); });
+//     }
+// prints `bench sum ... 412.5 us per run (512 runs)`.
+
+import std.io;
+import std.os;
+import std.text;
+import std.time;
+
+extern "C" {
+    void sosu_testing_keep(f64 value);
+}
+
+// What a benchmark measured: `runs` calls of its function, which took `total_ns` in all.
+pub struct Measure {
+    pub str name;
+    pub ui64 runs;
+    pub ui64 total_ns;
+
+    // The time of one run, in nanoseconds.
+    pub f64 ns_per_run() {
+        return runs == 0 ? 0.0 : total_ns as f64 / runs as f64;
+    }
+}
+
+// Measures `f` for about 200 milliseconds, then prints the time of one run.
+pub Measure run<uses E>(str name, fn() -> void uses E f) uses io, time, E {
+    return run_for(name, 200, f);
+}
+
+// Measures `f` for about `ms` milliseconds: the number of runs doubles, or more, until they take
+// that long; then prints the time of one run. Without `--bench`, runs `f` once and prints nothing.
+pub Measure run_for<uses E>(str name, ui64 ms, fn() -> void uses E f) uses io, time, E {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    if (!measuring(&arena)) {
+        return Measure{ name: name, runs: 1, total_ns: timed(1, f) };
+    }
+    ui64 target = ms * 1000000;
+    mut ui64 runs = 1;
+    mut ui64 took = timed(runs, f);
+    while (took < target && runs < 1099511627776) {
+        // aim a little past the target from what the last runs took
+        mut ui64 next = took == 0 ? runs * 100 : (runs as f64 * target as f64 * 1.2 / took as f64) as ui64;
+        next = max(next, runs * 2);
+        runs = min(next, runs * 100);
+        took = timed(runs, f);
+    }
+    Measure m = Measure{ name: name, runs: runs, total_ns: took };
+    io.print("bench {} ... {} per run ({} runs)", name, duration(&arena, m.ns_per_run()), runs);
+    return m;
+}
+
+// Gives `value` to a C function the compiler cannot see into: the work that computed it is kept,
+// even in an optimized build where nothing else reads it.
+pub void keep<T: Number>(T value) {
+    unsafe {
+        sosu_testing_keep(value as f64);
+    }
+}
+
+// True when `sosuc test --bench` runs the tests.
+bool measuring(Arena* arena) uses io {
+    return match (os.env(arena, "SOSU_BENCH")) {
+        some(v) => v == "1",
+        none => false,
+    };
+}
+
+// The nanoseconds that `runs` calls of `f` take.
+ui64 timed<uses E>(ui64 runs, fn() -> void uses E f) uses time, E {
+    ui64 start = time.monotonic_ns();
+    for (ui64 i in 0..runs) {
+        f();
+    }
+    return time.monotonic_ns() - start;
+}
+
+// A duration read easily: "12.3 ns", "412.5 us", "3.21 ms", "1.50 s".
+str duration(Arena* arena, f64 ns) {
+    if (ns < 1000.0) {
+        return with_unit(arena, ns, "ns");
+    }
+    if (ns < 1000000.0) {
+        return with_unit(arena, ns / 1000.0, "us");
+    }
+    if (ns < 1000000000.0) {
+        return with_unit(arena, ns / 1000000.0, "ms");
+    }
+    return with_unit(arena, ns / 1000000000.0, "s");
+}
+
+// Three significant digits, or more for 100 and above: 1.23, 12.3, 123.
+str with_unit(Arena* arena, f64 x, str unit) {
+    ui32 decimals = x < 10.0 ? 2 : x < 100.0 ? 1 : 0;
+    text.TextBuilder* b = text.builder(arena);
+    b.push_f64(x, decimals);
+    b.push(" ");
+    b.push(unit);
+    return b.text();
+}

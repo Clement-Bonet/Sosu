@@ -18,7 +18,8 @@ import std.io;
 import i18n.catalog;
 import platform.app;
 import render.canvas;
-import render.image;
+import image.image;
+import image.png;
 import render.truetype;
 import ui.widgets;
 import workspace.screen;
@@ -233,7 +234,7 @@ i32 main() uses io {
     mut image.Image icon = image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) };
     match (app.read_asset(&arena, window.icon)) {
         some(bytes) => {
-            match (image.decode(&arena, bytes)) {
+            match (png.decode(&arena, bytes)) {
                 ok(found) => {
                     icon = found;
                 },

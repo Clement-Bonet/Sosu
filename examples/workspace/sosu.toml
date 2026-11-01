@@ -7,6 +7,7 @@ version = "0.1.0"
 [dependencies]
 platform = { path = "../../packages/platform" }
 render = { path = "../../packages/render" }
+image = { path = "../../packages/image" }
 ui = { path = "../../packages/ui" }
 i18n = { path = "../../packages/i18n" }
 

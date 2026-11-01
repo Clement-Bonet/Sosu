@@ -1,0 +1,117 @@
+// The package testing in `test` blocks; the tests named "fails:" fail on purpose.
+import std.fs;
+import std.io;
+import std.text;
+import testing.bench;
+import testing.check;
+import testing.fixture;
+
+i32 square(i32 x) {
+    return x * x;
+}
+
+str report(Arena* arena, i64[] values) {
+    mut i64 total = 0;
+    for (i64 v in values) {
+        total += v;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    b.push("total: ");
+    b.push_i64(total);
+    b.push("\nmean: ");
+    b.push_f64(total as f64 / values.len as f64, 1);
+    b.push("\n");
+    return b.text();
+}
+
+test "texts, bytes, items, near" {
+    assert(check.same_text("a\nb\n", "a\nb\n"));
+    mut ui8[3] bytes = [1, 2, 3];
+    assert(check.same_bytes(bytes[0..3], bytes[0..3]));
+    mut i32[3] items = [1, 4, 9];
+    mut i32[3] squares = [square(1), square(2), square(3)];
+    assert(check.same_items(squares[0..3], items[0..3]));
+    assert(check.near(0.1 + 0.2, 0.3, 0.000000001));
+    assert(check.contains("hello, world", "world"));
+}
+
+test "fixtures" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    assert(check.same_text(fixture.read(&arena, "tests/data/input.txt"), "first line\nsecond line\n"));
+    assert(fixture.read_bytes(&arena, "tests/data/input.txt").len == 23);
+    mut i64[3] values = [1, 2, 3];
+    assert(fixture.golden(&arena, "tests/data/report.txt", report(&arena, values[0..3])));
+    str dir = fixture.temp_dir(&arena, "checks");
+    defer fixture.remove(dir);
+    assert(fs.is_dir(&arena, dir));
+    str note = fs.join(&arena, dir, "note.txt");
+    match (io.write_file(&arena, note, "kept until the end of the test")) {
+        ok => assert(fs.is_file(&arena, note)),
+        err(e) => assert(false),
+    }
+}
+
+test "benchmark run once" {
+    bench.Measure m = bench.run("squares", () => {
+        for (i32 i in 0..1000) {
+            bench.keep(square(i));
+        }
+    });
+    assert(m.runs >= 1);
+}
+
+test "fails: texts" {
+    assert(check.same_text("total: 3\nmean: 2.0\n", "total: 3\nmean: 2.5\n"));
+}
+
+test "fails: lines" {
+    assert(check.same_text("a\nb\n", "a\nb\nc\n"));
+}
+
+test "fails: bytes" {
+    mut ui8[4] actual = [0, 16, 255, 7];
+    mut ui8[4] expected = [0, 16, 254, 7];
+    assert(check.same_bytes(actual[0..4], expected[0..4]));
+}
+
+test "fails: items" {
+    mut i32[3] actual = [1, 4, 8];
+    mut i32[3] expected = [1, 4, 9];
+    assert(check.same_items(actual[0..3], expected[0..3]));
+}
+
+test "fails: near" {
+    assert(check.near(3.25, 3.0, 0.125));
+}
+
+test "fails: contains" {
+    assert(check.contains("hello", "world"));
+}
+
+test "fails: golden" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut i64[3] values = [1, 2, 4];
+    assert(fixture.golden(&arena, "tests/data/report.txt", report(&arena, values[0..3])));
+}
+
+test "fails: missing file" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    str s = fixture.read(&arena, "tests/data/missing.txt");
+    io.print("not reached: {}", s);
+}
+
+test "fails: assert shows both sides" {
+    assert(square(2) == 5);
+}
+
+test "fails: assert shows texts" {
+    str name = "Ada\tLovelace";
+    assert(name == "Ada Lovelace");
+}
+
+test "fails: assert shows floats" {
+    assert(0.1 + 0.2 == 0.3);
+}
