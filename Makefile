@@ -83,6 +83,27 @@ build/fuzz: $(LIB_SRC) $(LIB_HDR) tests/fuzz.c | build
 	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
 		-o $@ $(LIB_SRC) tests/fuzz.c
 
+# The Ogg Vorbis decoder of the package audio (tests/fuzz_ogg.c, stb_vorbis), from the Ogg files
+# of tests/programs/sounds: its inputs kept in build/fuzz_ogg_corpus, a crash in build/fuzz_crashes/.
+fuzz-ogg: build/fuzz_ogg
+	mkdir -p build/fuzz_ogg_corpus build/fuzz_crashes
+	./build/fuzz_ogg -max_total_time=$(FUZZ_TIME) -max_len=65536 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-print_final_stats=1 -artifact_prefix=build/fuzz_crashes/ogg- build/fuzz_ogg_corpus tests/programs/sounds/tests/data
+
+build/fuzz_ogg: packages/audio/native/ogg.c packages/audio/native/vendor/stb_vorbis.c tests/fuzz_ogg.c | build
+	$(FUZZ_CC) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -o $@ tests/fuzz_ogg.c -lm
+
+# sosu.toml (tests/fuzz_manifest.c), from every sosu.toml of the repository.
+fuzz-manifest: build/fuzz_manifest
+	mkdir -p build/fuzz_manifest_corpus build/fuzz_manifest_seeds build/fuzz_crashes
+	n=0; for f in $$(git ls-files '*sosu.toml'); do n=$$((n + 1)); cp "$$f" build/fuzz_manifest_seeds/$$n.toml; done
+	./build/fuzz_manifest -max_total_time=$(FUZZ_TIME) -max_len=4096 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-print_final_stats=1 -artifact_prefix=build/fuzz_crashes/manifest- build/fuzz_manifest_corpus build/fuzz_manifest_seeds
+
+build/fuzz_manifest: $(LIB_SRC) $(LIB_HDR) tests/fuzz_manifest.c | build
+	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+		-o $@ $(LIB_SRC) tests/fuzz_manifest.c
+
 build/fuzz_replay: $(LIB_SRC) $(LIB_HDR) tests/fuzz.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DSOSU_FUZZ_MAIN -o $@ $(LIB_SRC) tests/fuzz.c
 
@@ -116,4 +137,4 @@ build/docgen: src/docgen/docgen.c | build
 clean:
 	rm -rf build
 
-.PHONY: all test clean playground doc
+.PHONY: all test clean playground doc fuzz-ogg fuzz-manifest

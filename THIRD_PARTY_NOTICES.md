@@ -45,19 +45,21 @@ under their own licenses.
 
 ## stb_vorbis
 
-- Files: `packages/audio/native/vendor/stb_vorbis.c` (version 1.22), compiled into the programs
-  that use the `audio` package (through `packages/audio/native/ogg.c`)
-- Source: <https://github.com/nothings/stb>, file `stb_vorbis.c` at commit
-  `1ee679ca2ef753a528db5ba6801e1067b40481b8` (192 790 bytes, SHA-256
-  `4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636`)
+- Files: `packages/audio/native/vendor/stb_vorbis.c` (version 1.22 with the fixes of SDL),
+  compiled into the programs that use the `audio` package (through `packages/audio/native/ogg.c`)
+- Source: <https://github.com/sezero/stb>, branch `stb_vorbis-sezero`, file `stb_vorbis.c` at
+  commit `dd0c5eccaf092012b531d69d595fb587ece79571` (198 352 bytes, SHA-256
+  `6f4805310469cd087e771c30866d5259a0725905a8eff06cfcb406c0ce41e68c`): the copy kept by a
+  developer of SDL for SDL_sound and SDL_mixer, since <https://github.com/nothings/stb> has not
+  changed it since 1.22 (2021). It fixes the eight faults that GitHub Security Lab reported against
+  1.22 on hostile files in 2023 (CVE-2023-45675 to CVE-2023-45682, among them writes outside of
+  a buffer and the free of a pointer never set, not only crashes), and others found since.
 - Written by Sean Barrett (2007) and its contributors, named in the file
 - License: public domain (the Unlicense), or the MIT license (Copyright (c) 2017 Sean Barrett),
   at your option; both are at the end of the file
-- Changed by Sosu: five lines, each marked `// Sosu:`. `setup_malloc` and `setup_temp_malloc`
-  refuse a negative size (a size that overflowed), and the comment header refuses a negative
-  length or more than 2^24 comments (CVE-2023-45675 and CVE-2023-45676). The other faults
-  reported against 1.22 on hostile files, by the same review of GitHub Security Lab (2023), are
-  not fixed: the decoder's memory is bounded, but a hostile file can still crash it.
+- Not changed. `ogg.c` bounds its memory and compiles it without the comment header
+  (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read; the CI fuzzes it (`make fuzz-ogg`). A
+  fault found later in it is fixed by taking the new commit of that branch (`SECURITY.md`).
 
 ## SQLite
 

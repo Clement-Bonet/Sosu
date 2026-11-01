@@ -1,10 +1,9 @@
-// audio.ogg: Ogg Vorbis files, read by stb_vorbis 1.22 (public domain), a C file of the package
-// (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the
-// arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at
-// `audio.MAX_SAMPLES`. stb_vorbis 1.22 has known faults on hostile files (GitHub Security Lab,
-// 2023): those of its comment header (CVE-2023-45675, 45676) are fixed in the copy of the package
-// (see THIRD_PARTY_NOTICES.md), the others are not, so a file from an unknown source is better
-// read in a process of its own. The CRC of the pages is not checked. One logical stream only: chained streams stop after the first.
+// audio.ogg: Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C
+// file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from
+// `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples
+// decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on
+// hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md),
+// its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. One logical stream only: chained streams stop after the first.
 import std.io;
 import audio.audio;
 

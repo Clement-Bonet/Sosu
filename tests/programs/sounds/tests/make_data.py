@@ -341,7 +341,7 @@ def ogg_files():
     floats = b"".join(struct.pack("<ff", *f) for f in decoded())
     write("tone_decoded.wav", riff([chunk(b"fmt ", fmt(3, 2, 32)), chunk(b"data", floats)]))
     write("bad_truncated.ogg", tone[:len(tone) // 2])
-    write("bad_vendor.ogg", ogg(comment_packet=comment(b"", 0xFFFFFFFF)))  # CVE-2023-45675
+    write("bad_vendor.ogg", ogg(comment_packet=comment(b"", 0xFFFFFFFF)))  # CVE-2023-45675: the comment header is skipped unread
     write("bad_huge_codebook.ogg", ogg(setup_packet=setup(0xFFFFFF)))  # 16 MB of lengths
     damaged = bytearray(tone)
     damaged[len(tone) // 3] ^= 0xFF

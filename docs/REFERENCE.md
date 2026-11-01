@@ -26,7 +26,7 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [audio.audio](#audioaudio) | A sound in memory, its samples as floats of -1 to 1, interleaved by frame (the left sample, then the right one, for stereo), and the errors of the readers |
 | [audio.device](#audiodevice) | The sound devices of the system, through SDL3 (`SDL_AudioStream`, the C declarations of platform.sdl_c) |
 | [audio.mixer](#audiomixer) | Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly |
-| [audio.ogg](#audioogg) | Ogg Vorbis files, read by stb_vorbis 1.22 (public domain), a C file of the package (native/ogg.c, spec §9.1) |
+| [audio.ogg](#audioogg) | Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1) |
 | [audio.resample](#audioresample) | A sound at another rate (44 100 Hz to 48 000, for the device or the mixer) |
 | [audio.wav](#audiowav) | WAV files (RIFF), read and written in Sosu |
 | [compress.checksum](#compresschecksum) | The checksums of the containers, Adler-32 (zlib) and CRC-32 (gzip, PNG, zip) |
@@ -1983,7 +1983,7 @@ pub Mixer* create(Arena* arena, i32 rate, i32 channels)
 
 ## audio.ogg
 
-Ogg Vorbis files, read by stb_vorbis 1.22 (public domain), a C file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. stb_vorbis 1.22 has known faults on hostile files (GitHub Security Lab, 2023): those of its comment header (CVE-2023-45675, 45676) are fixed in the copy of the package (see THIRD_PARTY_NOTICES.md), the others are not, so a file from an unknown source is better read in a process of its own. The CRC of the pages is not checked. One logical stream only: chained streams stop after the first.
+Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md), its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. One logical stream only: chained streams stop after the first.
 
 ### `MEMORY`
 

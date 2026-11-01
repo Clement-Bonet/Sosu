@@ -10,8 +10,8 @@ bad_adpcm.wav: a kind of sound not supported
 bad_chunk_size.wav: damaged sound
 bad_rate.wav: damaged sound
 tone.ogg: 8000 Hz, 2 channels, 4942 frames
-bad_truncated.ogg: 8000 Hz, 2 channels, 2304 frames
-bad_vendor.ogg: damaged sound
+bad_truncated.ogg: 8000 Hz, 2 channels, 1152 frames
+bad_vendor.ogg: 8000 Hz, 2 channels, 4942 frames
 bad_huge_codebook.ogg: sound too large
 bad_crc.ogg: 8000 Hz, 2 channels, 4942 frames
 bad_not_vorbis.ogg: damaged sound
