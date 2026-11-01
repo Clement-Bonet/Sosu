@@ -1,12 +1,12 @@
 /* sqlite: SQLite 3.54.1 (vendor/sqlite3.c, its amalgamation, public domain, see
    THIRD_PARTY_NOTICES.md) behind small functions of plain C types, for the declarations of
    src/sqlite.sosu. Texts come with their length in bytes, never ended by a NUL. */
-#include <stdint.h>
-#include <string.h>
-
+/* Before any #include: glibc reads it at the first one. */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE /* -std=c99 hides the POSIX functions SQLite calls (pread, fsync...) */
 #endif
+#include <stdint.h>
+#include <string.h>
 /* A connection belongs to one thread (spec §5.6): SQLite's mutexes per connection are not
    needed, only those of its shared state. */
 #define SQLITE_THREADSAFE 2
