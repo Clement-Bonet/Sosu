@@ -1,0 +1,519 @@
+// platform.dialogs: the dialogs of the system (spec §10.11), on SDL3. A file dialog does not
+// wait: the program goes on drawing, and the answer comes later to `on_event`, as
+// `app.Event.Dialog(answer)` with the tag the program gave, on the thread of `app.run`. A message
+// box waits for the user, and gives the button chosen. Both open over the window of the program.
+import std.text;
+import std.thread;  // for the tests: an answer from another thread
+import platform.sdl;
+import platform.sdl_c;
+
+// A filter of the file dialogs: a name for the user, and the extensions it keeps ("png", "jpg";
+// "*.png" and ".png" are read as "png"); no extension, or "*", keeps every file.
+pub struct Filter {
+    pub str name;
+    pub str[] extensions;
+}
+
+// What a file dialog answers, with the tag of `open_file`, `save_file`...
+pub enum Answer {
+    // The paths chosen (one, but for `open_files`), valid until the end of the frame as the text
+    // of the events; `filter`, the index of the filter the user chose, or -1 when the system does
+    // not say. On Android, the paths are `content://` URIs, read by `sdl.load_file`.
+    Chosen(ui32 tag, str[] paths, i32 filter),
+    Cancelled(ui32 tag),
+    Failed(ui32 tag, str message),  // what SDL said: no such dialog on this system, no memory
+}
+
+// The longest path an answer carries, in bytes.
+usize LONGEST = 65536;
+
+// Shows the dialog of the system to choose a file to open; `location` is the folder (or the file)
+// it starts at, "" for the system's choice. The answer comes later (`Answer`).
+pub void open_file(ui32 tag, Filter[] filters, str location) uses io {
+    show(0, tag, filters, location, false);  // SDL_FILEDIALOG_OPENFILE
+}
+
+// The same, for several files at once.
+pub void open_files(ui32 tag, Filter[] filters, str location) uses io {
+    show(0, tag, filters, location, true);
+}
+
+// Shows the dialog of the system to choose where to save a file, a new one or one that exists
+// (the system asks before replacing it).
+pub void save_file(ui32 tag, Filter[] filters, str location) uses io {
+    show(1, tag, filters, location, false);  // SDL_FILEDIALOG_SAVEFILE
+}
+
+// Shows the dialog of the system to choose a folder.
+pub void choose_folder(ui32 tag, str location) uses io {
+    mut Arena scratch = Arena.new(256);
+    defer scratch.free();
+    show(2, tag, scratch.alloc_slice(Filter, 0), location, false);  // SDL_FILEDIALOG_OPENFOLDER
+}
+
+// The extensions of a filter as SDL takes them: "png;jpg", or "*" for every file. An extension of
+// other characters than ASCII letters, digits, "-", "_" and "." is left out: SDL would refuse
+// the whole dialog.
+pub str pattern(Arena* arena, Filter f) {
+    text.TextBuilder* t = text.builder(arena);
+    for (str written in f.extensions) {
+        str e = extension(written);
+        if (e == "*") {
+            return "*";
+        }
+        if (e.len == 0 || !valid(e)) {
+            continue;
+        }
+        if (t.len() > 0) {
+            t.push(";");
+        }
+        t.push(e);
+    }
+    return t.len() == 0 ? "*" : t.text();
+}
+
+// An extension as written ("*.png", ".png", " png "), as SDL takes it: "png".
+str extension(str written) {
+    str e = text.trim(written);
+    str bare = match (text.strip_prefix(e, "*.")) {
+        some(rest) => rest,
+        none => e,
+    };
+    return match (text.strip_prefix(bare, ".")) {
+        some(rest) => rest,
+        none => bare,
+    };
+}
+
+bool valid(str e) {
+    for (ui8 b in e.bytes) {
+        bool letter = b >= 97 && b <= 122 || b >= 65 && b <= 90;
+        bool digit = b >= 48 && b <= 57;
+        if (!letter && !digit && b != 45 && b != 95 && b != 46) {  // - _ .
+            return false;
+        }
+    }
+    return true;
+}
+
+// What a file dialog keeps until it answers, in one block of SDL_malloc that `answered` frees:
+// this header, the filters in SDL's form (they must live until the answer), then their texts
+// and the location, as C strings.
+struct Request {
+    mut ui32 tag;
+    mut i32 count;  // of filters
+    mut sdl_c.SDL_DialogFileFilter* filters;  // in the block, or 0 without filters
+    mut ui8* location;  // in the block, or 0 for the system's choice
+}
+
+// The request of a dialog, or none when there is no memory.
+ui8*? prepare(Arena* arena, ui32 tag, Filter[] filters, str location) uses io {
+    mut str[] patterns = arena.alloc_slice(str, filters.len);
+    usize head = size_of(Request) + filters.len * size_of(sdl_c.SDL_DialogFileFilter);
+    mut usize size = head + location.len + 1;
+    for (usize i in 0..filters.len) {
+        patterns[i] = pattern(arena, filters[i]);
+        size += filters[i].name.len + 1 + patterns[i].len + 1;
+    }
+    unsafe {
+        ui8* block = sdl_c.SDL_malloc(size);
+        if (block as ui64 == 0) {
+            return none;
+        }
+        Request* r = block as Request*;
+        r.tag = tag;
+        r.count = filters.len as i32;
+        r.filters = filters.len == 0 ? 0 as sdl_c.SDL_DialogFileFilter* : (block + size_of(Request)) as sdl_c.SDL_DialogFileFilter*;
+        mut ui8* at = block + head;
+        for (usize i in 0..filters.len) {
+            sdl_c.SDL_DialogFileFilter* f = r.filters + i;
+            f.name = at;
+            at = put(at, filters[i].name);
+            f.pattern = at;
+            at = put(at, patterns[i]);
+        }
+        r.location = location.len == 0 ? 0 as ui8* : at;
+        at = put(at, location);
+        return some(block);
+    }
+}
+
+// Writes `s` and a NUL at `at`; gives what follows.
+unsafe ui8* put(ui8* at, str s) {
+    unsafe {
+        for (usize i in 0..s.len) {
+            ui8* b = at + i;
+            *b = s.bytes[i];
+        }
+        ui8* end = at + s.len;
+        *end = 0;
+        return end + 1;
+    }
+}
+
+// The length of the C string `s`, `limit` at most.
+unsafe usize c_length(ui8* s, usize limit) {
+    mut usize n = 0;
+    unsafe {
+        while (n < limit && *(s + n) != 0) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// The window of the program, the parent of the dialogs: the first one SDL has, or 0.
+sdl_c.SDL_Window* parent() uses io {
+    unsafe {
+        mut i32 count = 0;
+        sdl_c.SDL_Window** list = sdl_c.SDL_GetWindows(&count);
+        if (list as ui64 == 0) {
+            return 0 as sdl_c.SDL_Window*;
+        }
+        sdl_c.SDL_Window* first = count > 0 ? *list : 0 as sdl_c.SDL_Window*;
+        sdl_c.SDL_free(list as ui8*);
+        return first;
+    }
+}
+
+// Shows the file dialog `kind` (SDL_FileDialogType) over the window of the program: SDL calls
+// `answered` when the user is done. SDL wants it called on the main thread, where `on_event` is.
+void show(i32 kind, ui32 tag, Filter[] filters, str location, bool many) uses io {
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    ui8*? made = prepare(&scratch, tag, filters, location);
+    match (made) {
+        some(block) => {
+            unsafe {
+                Request* r = block as Request*;
+                sdl_c.SDL_Window* window = parent();
+                if (kind == 0) {
+                    sdl_c.SDL_ShowOpenFileDialog(answered, block, window, r.filters, r.count, r.location, many);
+                } else if (kind == 1) {
+                    sdl_c.SDL_ShowSaveFileDialog(answered, block, window, r.filters, r.count, r.location);
+                } else {
+                    sdl_c.SDL_ShowOpenFolderDialog(answered, block, window, r.location, many);
+                }
+            }
+        },
+        none => {
+            unsafe {
+                post(tag, 0 as ui8**, -1);  // no memory: SDL_GetError says so
+            }
+        },
+    }
+}
+
+// The answer of a dialog, in a block of SDL_malloc that `receive` frees: this header, then the
+// paths (or the message of an error) as C strings, one after the other.
+struct Reply {
+    mut ui32 tag;
+    mut i32 count;  // of paths; -1: an error, whose message follows
+    mut i32 filter;
+    mut ui32 size;  // the bytes after the header
+}
+
+// Called by SDL when the user is done, maybe on a thread of its own (Windows, the portals of
+// Linux): `list` (0 on an error, empty when cancelled) is freed by SDL when this returns, so it
+// is copied out and queued. No arena here: an arena belongs to one thread (§5.6).
+void answered(ui8* data, ui8** list, i32 filter) uses io {
+    unsafe {
+        ui32 tag = (data as Request*).tag;
+        post(tag, list, filter);
+        sdl_c.SDL_free(data);  // the filters lived until now
+    }
+}
+
+// Queues the answer `list` of the dialog `tag` as an SDL_EVENT_USER. SDL_PushEvent may be
+// called from any thread; its queue hands the block over to the thread of `app.run`, the only
+// one that reads it from then on: nothing is shared.
+unsafe void post(ui32 tag, ui8** list, i32 filter) uses io {
+    unsafe {
+        bool failed = list as ui64 == 0;
+        ui8* error = failed ? sdl_c.SDL_GetError() : 0 as ui8*;
+        mut usize count = 0;
+        mut usize size = 0;
+        if (failed) {
+            size = c_length(error, LONGEST) + 1;
+        } else {
+            while (*(list + count) as ui64 != 0) {
+                size += c_length(*(list + count), LONGEST) + 1;
+                count += 1;
+            }
+        }
+        ui8* block = sdl_c.SDL_malloc(size_of(Reply) + size);
+        if (block as ui64 == 0) {
+            return;  // no memory: the answer is lost
+        }
+        Reply* r = block as Reply*;
+        r.tag = tag;
+        r.count = failed ? -1 : count as i32;
+        r.filter = filter;
+        r.size = size as ui32;
+        mut ui8* at = block + size_of(Reply);
+        if (failed) {
+            at = copy(at, error);
+        }
+        for (usize i in 0..count) {
+            at = copy(at, *(list + i));
+        }
+        if (!sdl.push_user(6, block)) {  // the code of an answer in the loop of `app.run`
+            sdl_c.SDL_free(block);
+        }
+    }
+}
+
+// Copies the C string `s` (LONGEST bytes at most) and a NUL at `at`; gives what follows.
+unsafe ui8* copy(ui8* at, ui8* s) {
+    unsafe {
+        usize n = c_length(s, LONGEST);
+        for (usize i in 0..n) {
+            ui8* b = at + i;
+            *b = *(s + i);
+        }
+        ui8* end = at + n;
+        *end = 0;
+        return end + 1;
+    }
+}
+
+// Whether an event of SDL is the answer of a dialog.
+pub bool is_answer(sdl.Event* event) {
+    return event.kind == 0x8000 && event.word5 == 6;  // SDL_EVENT_USER of `post`
+}
+
+// The answer an event of `post` carries, copied into `arena`; its block is freed.
+pub Answer receive(Arena* arena, sdl.Event* event) uses io {
+    unsafe {
+        ui8* block = sdl.user_data(event);
+        Reply* r = block as Reply*;
+        ui32 tag = r.tag;
+        ui8* first = block + size_of(Reply);
+        mut Answer answer = Cancelled(tag);
+        if (r.count < 0) {
+            answer = Failed(tag, sdl.copy_cstring(arena, first, r.size as usize));
+        } else if (r.count > 0) {
+            mut str[] paths = arena.alloc_slice(str, r.count as usize);
+            mut ui8* at = first;
+            for (usize i in 0..paths.len) {
+                paths[i] = sdl.copy_cstring(arena, at, LONGEST);
+                at = at + c_length(at, LONGEST) + 1;
+            }
+            answer = Chosen(tag, paths, r.filter);
+        }
+        sdl_c.SDL_free(block);
+        return answer;
+    }
+}
+
+// The icon of a message box.
+pub enum Level {
+    Information,
+    Warning,
+    Error,
+}
+
+ui32 flags_of(Level level) {
+    return match (level) {
+        Information => sdl_c.SDL_MESSAGEBOX_INFORMATION,
+        Warning => sdl_c.SDL_MESSAGEBOX_WARNING,
+        Error => sdl_c.SDL_MESSAGEBOX_ERROR,
+    };
+}
+
+// A question of a message box: its buttons, left to right; the one of Enter, and the one of
+// Escape (none: Escape closes the box without an answer).
+pub struct Question {
+    pub str title;
+    pub str text;
+    pub str[] buttons;
+    pub Level level = Information;
+    pub usize enter = 0;
+    pub usize? escape = none;
+}
+
+// Shows `text` with an OK button over the window of the program, and waits for the user. False
+// when the system could not show it.
+pub bool message(Level level, str title, str text) uses io {
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    ui8* c_title = title.to_cstr(&scratch);
+    ui8* c_text = text.to_cstr(&scratch);
+    mut bool shown = false;
+    unsafe {
+        shown = sdl_c.SDL_ShowSimpleMessageBox(flags_of(level), c_title, c_text, parent());
+    }
+    return shown;
+}
+
+// Asks `q` and waits for the answer: the index of the button chosen; none when the box was
+// closed without one, could not be shown, or has no button.
+pub usize? ask(Question q) uses io {
+    if (q.buttons.len == 0) {
+        return none;
+    }
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    mut sdl_c.SDL_MessageBoxButtonData[] buttons = buttons_of(&scratch, q);
+    ui8* c_title = q.title.to_cstr(&scratch);
+    ui8* c_text = q.text.to_cstr(&scratch);
+    mut i32 chosen = -1;
+    mut bool shown = false;
+    unsafe {
+        mut sdl_c.SDL_MessageBoxData data = sdl_c.SDL_MessageBoxData{ flags: flags_of(q.level) | sdl_c.SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, window: parent(), title: c_title, message: c_text, numbuttons: buttons.len as i32, buttons: &buttons[0], colorScheme: 0 as sdl_c.SDL_MessageBoxColorScheme* };
+        shown = sdl_c.SDL_ShowMessageBox(&data, &chosen);
+    }
+    if (!shown || chosen < 0 || chosen as usize >= q.buttons.len) {
+        return none;
+    }
+    return some(chosen as usize);
+}
+
+// The buttons of `q` in SDL's form, in `arena`: the id of each is its index.
+sdl_c.SDL_MessageBoxButtonData[] buttons_of(Arena* arena, Question q) {
+    usize escape = match (q.escape) {
+        some(i) => i,
+        none => q.buttons.len,
+    };
+    unsafe {
+        mut sdl_c.SDL_MessageBoxButtonData[] buttons = arena.alloc_slice(sdl_c.SDL_MessageBoxButtonData, q.buttons.len);  // each filled below
+        for (usize i in 0..q.buttons.len) {
+            mut ui32 flags = 0;
+            if (i == q.enter) {
+                flags = flags | sdl_c.SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT;
+            }
+            if (i == escape) {
+                flags = flags | sdl_c.SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT;
+            }
+            buttons[i].flags = flags;
+            buttons[i].buttonID = i as i32;
+            buttons[i].text = q.buttons[i].to_cstr(arena);
+        }
+        return buttons;
+    }
+}
+
+test "filters, in the form SDL takes" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    assert(pattern(&arena, Filter{ name: "Images", extensions: text.split(&arena, "png,*.JPG, .jpeg ", ",") }) == "png;JPG;jpeg");
+    assert(pattern(&arena, Filter{ name: "Archives", extensions: text.split(&arena, "tar.gz,bad/ext,été,my-ext_2", ",") }) == "tar.gz;my-ext_2");
+    assert(pattern(&arena, Filter{ name: "All", extensions: text.split(&arena, "txt,*", ",") }) == "*");
+    assert(pattern(&arena, Filter{ name: "All", extensions: text.split(&arena, "", ",") }) == "*");
+    assert(pattern(&arena, Filter{ name: "None valid", extensions: text.split(&arena, "a b", ",") }) == "*");
+
+    mut Filter[2] filters = [Filter{ name: "Images", extensions: text.split(&arena, "png,jpg", ",") }, Filter{ name: "Texte écrit", extensions: text.split(&arena, "*.txt", ",") }];
+    match (prepare(&arena, 5, filters[0..2], "C:\\Users\\été")) {
+        some(block) => {
+            unsafe {
+                Request* r = block as Request*;
+                assert(r.tag == 5 && r.count == 2);
+                sdl_c.SDL_DialogFileFilter* first = r.filters;
+                sdl_c.SDL_DialogFileFilter* second = r.filters + 1;
+                assert(sdl.copy_cstring(&arena, first.name, 100) == "Images");
+                assert(sdl.copy_cstring(&arena, first.pattern, 100) == "png;jpg");
+                assert(sdl.copy_cstring(&arena, second.name, 100) == "Texte écrit");
+                assert(sdl.copy_cstring(&arena, second.pattern, 100) == "txt");
+                assert(sdl.copy_cstring(&arena, r.location, 100) == "C:\\Users\\été");
+                sdl_c.SDL_free(block);
+            }
+        },
+        none => {
+            assert(false);
+        },
+    }
+    // no filter and no location: both null, as SDL reads them
+    match (prepare(&arena, 6, filters[0..0], "")) {
+        some(block) => {
+            unsafe {
+                Request* r = block as Request*;
+                assert(r.tag == 6 && r.count == 0 && r.filters as ui64 == 0 && r.location as ui64 == 0);
+                sdl_c.SDL_free(block);
+            }
+        },
+        none => {
+            assert(false);
+        },
+    }
+}
+
+// What SDL does on Windows: it calls `answered` on a thread of its own.
+struct Answering {
+    ui32 tag;
+    i32 paths;  // 2 paths, 0: cancelled, -1: an error
+}
+
+bool answer_from_thread(Arena* arena, Answering job) uses io {
+    match (prepare(arena, job.tag, arena.alloc_slice(Filter, 0), "")) {
+        some(block) => {
+            unsafe {
+                mut ui8*[3] list = ["C:\\Users\\été\\a.png".to_cstr(arena), "/home/b c/ü.jpg".to_cstr(arena), 0 as ui8*];
+                if (job.paths < 0) {
+                    answered(block, 0 as ui8**, -1);
+                } else {
+                    if (job.paths == 0) {
+                        list[0] = 0 as ui8*;
+                    }
+                    answered(block, &list[0], 1);
+                }
+            }
+            return true;
+        },
+        none => {
+            return false;
+        },
+    }
+}
+
+test "answers, from the thread of a dialog to the loop of events" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut bool ready = false;
+    unsafe {
+        ready = sdl_c.SDL_Init(sdl_c.SDL_INIT_EVENTS);  // no window: the queue is enough
+    }
+    assert(ready);
+    defer sdl.quit();
+    assert(thread.spawn(&arena, answer_from_thread, Answering{ tag: 7, paths: 2 }).join());
+    assert(thread.spawn(&arena, answer_from_thread, Answering{ tag: 8, paths: 0 }).join());
+    assert(thread.spawn(&arena, answer_from_thread, Answering{ tag: 9, paths: -1 }).join());
+    sdl.Event* event = arena.alloc(sdl.Event);
+    mut usize seen = 0;
+    while (sdl.poll(event)) {
+        if (!is_answer(event)) {
+            continue;
+        }
+        match (receive(&arena, event)) {
+            Chosen(tag, paths, filter) => {
+                assert(seen == 0 && tag == 7 && filter == 1 && paths.len == 2);
+                assert(paths[0] == "C:\\Users\\été\\a.png");
+                assert(paths[1] == "/home/b c/ü.jpg");
+            },
+            Cancelled(tag) => {
+                assert(seen == 1 && tag == 8);
+            },
+            Failed(tag, message) => {
+                assert(seen == 2 && tag == 9);
+            },
+        }
+        seen += 1;
+    }
+    assert(seen == 3);
+}
+
+test "message boxes: buttons, Enter and Escape" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Question q = Question{ title: "Quit", text: "Save the changes?", buttons: text.split(&arena, "Save,Don't save,Cancel", ","), escape: some(2) };
+    sdl_c.SDL_MessageBoxButtonData[] b = buttons_of(&arena, q);
+    assert(b.len == 3);
+    assert(b[0].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT && b[1].flags == 0 && b[2].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT);
+    assert(b[0].buttonID == 0 && b[1].buttonID == 1 && b[2].buttonID == 2);
+    unsafe {
+        assert(sdl.copy_cstring(&arena, b[1].text, 100) == "Don't save");
+    }
+    // without Escape, and Enter on the last button
+    sdl_c.SDL_MessageBoxButtonData[] two = buttons_of(&arena, Question{ title: "", text: "", buttons: text.split(&arena, "No,Yes", ","), enter: 1 });
+    assert(two[0].flags == 0 && two[1].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT);
+    assert(flags_of(Warning) == 0x20 && flags_of(Error) == 0x10 && flags_of(Information) == 0x40);
+}

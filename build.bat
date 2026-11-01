@@ -47,6 +47,7 @@ build\i18n_tests.exe || exit /b 1
 build\program_tests.exe build\sosuc.exe || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 build\sosuc.exe check packages\platform || exit /b 1
+build\sosuc.exe test packages\platform || exit /b 1
 build\sosuc.exe check examples\window || exit /b 1
 build\sosuc.exe check tests\window || exit /b 1
 build\sosuc.exe test packages\image || exit /b 1
@@ -60,6 +61,7 @@ build\sosuc.exe check examples\themes || exit /b 1
 build\sosuc.exe check examples\containers || exit /b 1
 build\sosuc.exe check packages\audio || exit /b 1
 build\sosuc.exe check examples\sound || exit /b 1
+build\sosuc.exe check examples\dialogs || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

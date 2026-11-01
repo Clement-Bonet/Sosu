@@ -778,14 +778,14 @@ SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`):
 | `net` | TCP and UDP sockets, names resolved (DNS) | the system | after |
 | `net.http` | HTTP client and server, WebSocket; HTTPS with the TLS of the system (Schannel, Secure Transport) or OpenSSL | Sosu, the system | after |
 | `regex` | regular expressions (RE2-like: linear time) | Sosu | after |
-| `platform.dialogs` | open and save files, choose a folder, message boxes of the system (SDL3 has them) | SDL3 | 1.0 |
+| `platform.dialogs` | open and save files, choose a folder, message boxes of the system (SDL3 has them) | SDL3 | 1.0 (done, §10.11) |
 | `platform.notify`, `platform.tray` | notifications, the icon of the tray | the system | after |
 | `gpu` | 3D drawing and compute with SDL_GPU (Vulkan, Metal, Direct3D 12) | SDL3 | after |
 | `testing` | benchmarks, test fixtures, values compared with their difference shown | Sosu, `sosuc test` | 1.0 (done, §8.3) |
 
 ### 8.3 The packages of 1.0
 
-The packages of §8.2 written so far (`crypto`, `compress`, `math`, `testing`, `image`, `audio`, `db`, `sqlite`), each a folder of `packages/` that a program names in its `[dependencies]` (`crypto = { path = "..." }`, §8.1), tested by a program of `tests/programs`:
+The packages of §8.2 written so far (`crypto`, `compress`, `math`, `testing`, `image`, `audio`, `db`, `sqlite`), each a folder of `packages/` that a program names in its `[dependencies]` (`crypto = { path = "..." }`, §8.1), tested by a program of `tests/programs`; `platform.dialogs`, a module of `platform`, is described with the interface (§10.11):
 
 - `crypto` (tested by `tests/programs/hashes`, with the vectors of FIPS 180-4, RFC 4231, RFC 2202 and RFC 4648): `crypto.sha256` and `crypto.sha1`, `sum(data)` at once (`ui8[32]`, `ui8[20]`), or `start()` then `update(data)` by parts and `finish()`; SHA-1 only for the formats that still name it. `crypto.hmac`: `with_sha256(key, message)`, `with_sha1`, and `equal(a, b)`, which compares two codes in a time that does not depend on where they differ. `crypto.base64`: `encode(arena, bytes)` and `decode(arena, text) -> ui8[]?` (the standard alphabet, padded), `encode_url` and `decode_url` (`-` and `_`, without padding); a decoder refuses what an encoder would not write. `crypto.hex`: `encode` (lowercase) and `decode` (either case). `crypto.secure` (effect `random`): `fill(buffer) -> bool`, `next() -> ui64?`, `below(bound)` (without bias), `token(arena, size)` (random bytes as hexadecimal), from the generator of the system: `BCryptGenRandom` on Windows, `arc4random_buf` on macOS and iOS, `/dev/urandom` on Linux and Android, in a C file of the package (§9.1). Ciphers and signatures are not there: they should come from a reviewed library.
 - `math` (tested by `tests/programs/geometry`): `math.linear`, of `f32`, for `render` and 3D. Column vectors (a matrix applies on the left), matrices stored by columns as the GPU APIs read them, right-handed axes, angles in radians, a depth of 0 to 1 after projection (SDL_GPU, Vulkan, Metal, Direct3D). `Vec2`, `Vec3`, `Vec4` (`vec2(x, y)`...): `add`, `sub`, `scale`, `mul` (by component), `neg`, `dot`, `cross` (a number for `Vec2`), `length`, `distance`, `normalized` (zero stays zero), `lerp`, `near(o, eps)`; `Vec2.perpendicular`, `Vec4.project` (divided by w), `xyz`. `Mat3` and `Mat4` (the identity by default, `identity3()`, `identity4()`): `at(row, col)`, `set`, `mul` (`a.mul(b)` applies `b` first), `mul_vec`, `transform_point` (divided by w), `transform_vector`, `transposed`, `determinant`, `inverse() -> Mat3?` (none when the determinant is 0), `near`; `Mat4.upper3`. The plane: `translation2`, `rotation2`, `scaling2`. 3D: `translation`, `scaling`, `rotation(axis, angle)`, `rotation_x`, `rotation_y`, `rotation_z`, `look_at(eye, target, up)`, `perspective(fov_y, aspect, near, far)`, `orthographic(left, right, bottom, top, near, far)`. `Quat` (`from_axis_angle`, `identity_quat()`): `mul`, `conjugate`, `dot`, `length`, `normalized`, `rotate(v)`, `to_mat4`, `slerp` (the short way), `near` (q and -q are the same rotation). `Transform` (`transform()`: `position`, `rotation`, `scale`, applied scale first, then rotation, then position): `to_mat4`, `apply(p)`, `then(child)` (exact when the scale of the parent is the same on its three axes). Operators are methods: Sosu has no operator overloading.
@@ -1096,6 +1096,7 @@ state        = IDENT "{" property { [ "," ] property } "}" ;        (* hover, fo
 - Safe areas (notches, system bars): `SafeAreaChanged`.
 - Orientation, virtual keyboard and varying screen sizes: adaptive layout in `ui`.
 - Lifecycle: `Suspend` / `Resume` / `LowMemory`; on iOS, rendering must stop in the background.
+- The dialogs of the system (§10.11): on Android, files opened and saved through its Storage Access Framework, as `content://` URIs, and no folder dialog; on iOS, no file dialog; message boxes on both.
 
 ### 10.4 Milestones
 
@@ -1653,6 +1654,74 @@ style FileItem {
 - `FileDropped`, one event per file, with where it was dropped, not `FilesDropped` with a slice of paths.
 - In a flat tree, Left on a row that is not an open branch does not go to its parent: `ui` does not know the parents of the rows.
 
+### 10.11 The dialogs of the system
+
+Status: done (version 1.0, §13.1, work 4): `platform.dialogs`, on SDL3, tested by `sosuc test packages/platform` and tried by hand with `examples/dialogs`. These are the windows of the system, with its look, its language and its places; the `Dialog` of §10.9 is a widget drawn by `ui` inside the window.
+
+```sosu
+import std.text;
+import platform.app;
+import platform.dialogs;
+
+ui32 OPEN = 1;  // a tag of the program, to tell its dialogs apart
+
+class Viewer : app.Handler {
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Key(code, down, mods) => {
+                if (down && code == 111) {  // o
+                    mut Arena scratch = Arena.new(1 * KB);
+                    defer scratch.free();
+                    mut dialogs.Filter[1] images = [dialogs.Filter{ name: "Images", extensions: text.split(&scratch, "png,jpg", ",") }];
+                    dialogs.open_file(OPEN, images[0..1], "");  // returns at once
+                }
+            },
+            Dialog(answer) => {
+                match (answer) {
+                    Chosen(tag, paths, filter) => { self.load(paths[0]); },
+                    Cancelled(tag) => { },
+                    Failed(tag, message) => { self.status = "no dialog here"; },
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+}
+```
+
+#### Files and folders
+
+- `open_file(tag, filters, location)`, `open_files` (several at once), `save_file` (a new file or one that exists, the system asking before it is replaced) and `choose_folder(tag, location)`: `SDL_ShowOpenFileDialog`, `SDL_ShowSaveFileDialog`, `SDL_ShowOpenFolderDialog`. They return at once and the window goes on drawing; the answer comes later to `on_event` as `app.Event.Dialog(answer)`, a `dialogs.Answer`: `Chosen(tag, paths, filter)` (the paths valid until the end of the frame, as the text of the events; `filter` the index of the filter the user chose, or -1 when the system does not say), `Cancelled(tag)` or `Failed(tag, message)` (what SDL said). `location` is the folder or the file the dialog starts at, `""` for the system's choice. They are called from `on_event`: SDL wants the main thread.
+- `Filter { name, extensions }`: `"png"`, `"*.png"` and `".png"` are the same extension; `"*"`, or no extension, keeps every file. `pattern(arena, filter)` gives SDL's form (`"png;jpg"`); an extension of other characters than ASCII letters, digits, `-`, `_` and `.` is left out, since SDL would refuse the whole dialog.
+- The parent of a dialog is the window of `app.run` (the first window SDL has): the dialog is modal for it where the system allows it.
+- A file dialog belongs to a program of `app.run`, whose loop receives its answer (and, on Linux, pumps the D-Bus of the portals): a program that ends while one is open loses its answer.
+
+#### Message boxes
+
+- `message(level, title, text) -> bool` (with an OK button; false when the system could not show it) and `ask(question) -> usize?`: `Question { title, text, buttons, level = Information, enter = 0, escape = none }`, the buttons left to right, `enter` and `escape` the buttons of those keys; it gives the index of the button chosen, none when the box was closed without one, could not be shown, or has no button. `Level` is `Information`, `Warning` or `Error`.
+- They wait for the user (`SDL_ShowMessageBox` is modal): `on_event` returns with the answer, and the window is not drawn meanwhile. They need no window: a console program shows them too.
+
+#### Threads
+
+SDL calls the answer of a file dialog back "possibly on another thread": on Windows, a thread of its own. The callback, in Sosu, touches no arena (an arena belongs to one thread, §5.6): it copies the paths, or the message of SDL, into one block of `SDL_malloc`, and queues it with `SDL_PushEvent`, which any thread may call, as an `SDL_EVENT_USER`. The loop of `app.run`, on the main thread, copies the block into the arena of the frame, frees it and calls `on_event`. The block passes from one thread to the other through the queue of SDL, behind its lock, and only one of them reads it at a time: nothing is shared, as with a channel. The request (the filters in SDL's form, which must live until the answer, and the location) is another block of `SDL_malloc`, freed by the callback.
+
+#### Android and iOS (§10.3, §11.5)
+
+- Android: files are opened and saved through the Storage Access Framework of the system (`ACTION_OPEN_DOCUMENT`, `ACTION_CREATE_DOCUMENT`), the extensions of the filters turned into MIME types; one file dialog at a time. The paths are `content://` URIs, which the C files of `std.io` cannot open: SDL reads them (`sdl.load_file`, on `SDL_IOFromFile`). SDL has no folder dialog there: `choose_folder` answers `Failed`. The message boxes are Android's.
+- iOS: SDL 3.4 has no file dialog there: they answer `Failed` with SDL's message. The message boxes are the system's (`UIAlertController`). Not tried on a device yet (§13.1).
+
+#### Tests
+
+- `sosuc test packages/platform`, without a screen: filters turned into SDL's form, and the request read back as SDL reads it (texts outside ASCII, no filter nor location as null pointers); three answers (two paths outside ASCII, a cancel, an error) given by the callback on threads of `std.thread`, then read from the queue of SDL by the main thread, with SDL started for its events only; the buttons of a message box, Enter and Escape.
+- By hand (`examples/dialogs`): each dialog opened from a key, the window drawing while a file dialog is open, what it answered shown.
+
+#### Decisions, and what differs from the design
+
+- The answer of a file dialog is an event, not a value the program polls: it arrives where the other events do, on the main thread, and an asynchronous dialog needs nothing else from the program. The message boxes wait, as the system's do.
+- The program names its dialogs by a tag, not by a value returned: the answers need no state kept by `platform`.
+- Not yet: the title and the texts of the buttons of a file dialog (`SDL_ShowFileDialogWithProperties`), several folders at once, the colors of a message box.
+
 ## 11. Targets and compilation
 
 ### 11.1 Targets
@@ -1943,7 +2012,7 @@ What 1.0 holds, in the proposed order; how long each work may take is estimated 
 | 1 | Language | Lambdas and closures (§5.5, done), which let `ui` call the program back and `std` have `map`, `filter`, `sort_by`; methods with type parameters and generic interfaces (`Iterator<T>`, §5.4, done); the open points of §14.2 that change the language (types in parentheses, done) |
 | 2 | Concurrency | done (§5.6): threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` |
 | 3 | C sources in a package | done (§9.1), in [link] rather than a [build] section, so that a file can belong to one target: `c = ["vendor/sqlite3.c"]` in `sosu.toml`, C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it |
-| 4 | Standard library | The modules of `std` of §8.2 marked 1.0: done (§8.0), `std.math`, `std.sort`, `std.text`, the dates of `std.time`, `std.os`, `std.fs`, `std.cli`, `std.log`, `std.json`. The packages of §8.2 marked 1.0 come next (§8.3): `crypto`, `compress`, `math.linear`, `testing`, `image`, `audio`, `db` and `db.sqlite` (the package `sqlite`) done; `platform.dialogs` to come |
+| 4 | Standard library | The modules of `std` of §8.2 marked 1.0: done (§8.0), `std.math`, `std.sort`, `std.text`, the dates of `std.time`, `std.os`, `std.fs`, `std.cli`, `std.log`, `std.json`. The packages of §8.2 marked 1.0 come next (§8.3): `crypto`, `compress`, `math.linear`, `testing`, `image`, `audio`, `db` and `db.sqlite` (the package `sqlite`), `platform.dialogs` (§10.11): done |
 | 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured. Begun: the depth of the tree bounded (E0219, §12), the values of `sosu.toml` checked before they reach a command (E0416, §8.1), the pointers returned into a function refused (E0371, §7.7) |
 | 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished |
 | 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 |

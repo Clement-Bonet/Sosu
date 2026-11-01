@@ -31,6 +31,7 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 - November 1, in another session of its own: the package `image` (about 2,400 lines of Sosu, and the test program `images`): the PNG reader moved out of `render`, a PNG writer, JPEG read and written (baseline, checked against the Windows Imaging Component both ways), crop, resize (bilinear, Lanczos), rotate and flip; `render` uses it.
 - November 1, in a third session of its own: the package `audio` (about 1,200 lines of Sosu, the test program `sounds` and `examples/sound`): the mixer, resampling, WAV read and written, Ogg Vorbis read by stb_vorbis (given as C sources, five lines changed against two faults of its comment header), playing and recording on SDL3 without a callback. Nothing to hear in the tests: their files are made by a script of Python, the Ogg file by a minimal encoder checked against the Vorbis I specification.
 - November 1, in a fourth session of its own: the packages `db` (the interface, prepared statements, transactions, a pool of connections between threads) and `sqlite` (`db.sqlite` of §8.2, on the amalgamation of SQLite 3.54.1 given as C sources): about 850 lines of Sosu and 190 of C around the vendored sources, and the test program `databases` (about 450 lines).
+- November 1, in a fifth session of its own: `platform.dialogs` (about 400 lines of Sosu and 120 of tests in the package, and `examples/dialogs`): open one file or several, save, choose a folder, message boxes, on SDL3; the answer of a file dialog, given by SDL on a thread of its own, comes back to the loop of `app.run` as an event. Work 4 is done; the dialogs are still to be tried by hand.
 
 ## What remains (November 1, 2026)
 
@@ -38,14 +39,14 @@ Estimated again from the pace above. The planned versions: `0.2.0` when work 5 i
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
-| 4 | Standard library | The packages of §8.2 marked 1.0 not written yet (`crypto`, `compress`, `math.linear`, `testing`, `image`, `audio`, `db` and `db.sqlite` are done, §8.3): `platform.dialogs` | 60 to 120 k |
+| 4 | Standard library | Done (§8.0, §8.3, §10.11). Remains: the dialogs and the sound tried by hand (below) | 0 |
 | 5 | Quality | Begun (E0219, E0416, E0371, the review fixes above); the fuzzing of the parser and of the semantic analysis, in the CI; the time of `sosuc` on large programs, measured in the CI; the two limits found while writing `std` (`void!E` as the type of a parameter or a variable, a pointer as a type argument); `git` and the C compiler run without the shell; the grammar and the error codes frozen, a compatibility policy | 200 to 350 k |
 | 6 | Tooling | Begun: the reference of `core` and `std` is generated (`src/docgen`, not yet `sosuc doc` for any package); the rest unchanged | 200 to 350 k |
 | 7 | Documentation | Done: the reference of `std` (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
 
-In all, about 0.8 to 1.5 million output tokens: 0.4 to 0.7 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work.
+In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work.
 
 What tokens do not buy, and sets the pace as much:
 

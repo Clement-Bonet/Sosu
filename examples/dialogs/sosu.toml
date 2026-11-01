@@ -1,0 +1,10 @@
+# The dialogs of the system (spec §10.11): open one file or several, save a file, choose a folder,
+# a message and a question, each from a key; the window shows what they answered.
+# On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/dialogs`.
+[package]
+name = "dialogs"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
