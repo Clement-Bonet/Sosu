@@ -10,7 +10,7 @@ import std.text;
 import testing.check;
 
 extern "C" {
-    void sosu_fail(ui8* place, ui8* message);
+    void sosu_testing_fail(ui8* place, ui8* message);
 }
 
 // The folder of the package under test, as `sosuc test` gives it; "." for a program started otherwise.
@@ -161,7 +161,7 @@ void stop(Arena* arena, str what, str file, io.IoError e) uses io {
     b.push(": ");
     b.push(describe(e));
     unsafe {
-        sosu_fail("testing.fixture".to_cstr(arena), b.text().to_cstr(arena));
+        sosu_testing_fail("testing.fixture".to_cstr(arena), b.text().to_cstr(arena));
     }
 }
 
