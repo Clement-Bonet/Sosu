@@ -361,7 +361,26 @@ static void test_git(void) {
     free(first);
 }
 
-int main(void) {
+/* A size whose block would wrap around size_t stops the compiler (exit code 3) before any
+   allocation. Checked in a child process, since it exits: this program run with --huge-alloc. */
+static void test_huge_alloc(const char *self) {
+#ifdef _WIN32
+    char *command = sosu_format("%s --huge-alloc 2>nul", self);
+#else
+    char *command = sosu_format("%s --huge-alloc 2>/dev/null", self);
+#endif
+    int status = shell_run(command);
+    CHECK(status == 3, "arena_alloc(SIZE_MAX - 8): exit code %d, expected 3 (out of memory)", status);
+    free(command);
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--huge-alloc") == 0) {
+        Arena arena = {0};
+        arena_alloc(&arena, SIZE_MAX - 8);
+        return 0; /* not reached */
+    }
+    test_huge_alloc(argv[0]);
     test_paths();
     test_manifest();
     test_program();

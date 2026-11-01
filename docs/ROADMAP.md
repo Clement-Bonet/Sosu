@@ -26,21 +26,27 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 - The session of October 28 wrote the modules of `std` (about 5,300 lines), then the hardening that a review asked for (the depth of the parser, the values of `sosu.toml`, the pointers returned into a function, §7.7, §8.1, §12) and its smaller points (about 420 lines). Its context reached about 490,000 tokens per call, and the weekly quota of the Pro plan reached 86 %. Its output tokens are not known exactly: the tools show the share of the quota and the size of the context, not the tokens written.
 - The packages `crypto` and `compress` (about 1,600 lines of Sosu, and a test program each) were written on the evening of October 28, in a session of their own: about 2 % of the weekly quota (86 % to 88 %), much less than estimated, since the session started fresh.
 - `math.linear` (about 660 lines) followed in the same session, on October 28.
+- October 29 to 31, in one long session and a few short ones, with the weekly quota between 93 % and 96 %: the releases (`v0.1.0` to `v0.1.3`, built and published from a tag), the playground (the compiler in WebAssembly, on GitHub Pages), the reference of `core` and `std` generated from their comments (`make doc`), `CONTRIBUTING.md` and `SECURITY.md`, the poster drawn by Sosu (`examples/poster`, with `render.png` writing PNG files), and the points of two external reviews: links never followed when a folder is removed, the size of a canvas and of a PNG bounded, the size guard of the compiler's arena tested, `parser.c` and `sema_body.c` split by domain.
+- November 1, in a session of its own: the package `testing` (comparisons that show what differs, benchmarks measured by `sosuc test --bench`, data files, golden files and temporary folders), and `assert(a == b)` showing both sides.
+- November 1, in another session of its own: the package `image` (about 2,400 lines of Sosu, and the test program `images`): the PNG reader moved out of `render`, a PNG writer, JPEG read and written (baseline, checked against the Windows Imaging Component both ways), crop, resize (bilinear, Lanczos), rotate and flip; `render` uses it.
+- November 1, in a third session of its own: the package `audio` (about 1,200 lines of Sosu, the test program `sounds` and `examples/sound`): the mixer, resampling, WAV read and written, Ogg Vorbis read by stb_vorbis (given as C sources, five lines changed against two faults of its comment header), playing and recording on SDL3 without a callback. Nothing to hear in the tests: their files are made by a script of Python, the Ogg file by a minimal encoder checked against the Vorbis I specification.
+- November 1, in a fourth session of its own: the packages `db` (the interface, prepared statements, transactions, a pool of connections between threads) and `sqlite` (`db.sqlite` of §8.2, on the amalgamation of SQLite 3.54.1 given as C sources): about 850 lines of Sosu and 190 of C around the vendored sources, and the test program `databases` (about 450 lines).
+- November 1, in a fifth session of its own: `platform.dialogs` (about 400 lines of Sosu and 120 of tests in the package, and `examples/dialogs`): open one file or several, save, choose a folder, message boxes, on SDL3; the answer of a file dialog, given by SDL on a thread of its own, comes back to the loop of `app.run` as an event. Work 4 is done; the dialogs are still to be tried by hand.
 
-## What remains (October 28, 2026)
+## What remains (November 1, 2026)
 
-Estimated again from the pace above: the modules of `std` took about the time planned, about 10 of the 25 of work 4.
+Estimated again from the pace above. The versions: `0.2.0` with the packages of work 4, which was done first (`render.image` moved to the package `image`); `0.3.0` when work 5 is done (it changes the language: the two limits below); `0.2.x` for fixes in between.
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
-| 4 | Standard library | The packages of §8.2 marked 1.0 not written yet (`crypto`, `compress` and `math.linear` are done, §8.3): `testing`, `image` (PNG written, JPEG, resize, crop, rotate), `audio` (SDL3, mixer, WAV, Ogg), `db` and `db.sqlite`, `platform.dialogs` | 350 to 650 k |
-| 5 | Quality | Begun (E0219, E0416, E0371); the fuzzing of the parser and of the semantic analysis, the grammar and the error codes frozen, a compatibility policy, the time of `sosuc` on large programs, the two limits found while writing `std` (`void!E` as the type of a parameter or a variable, a pointer as a type argument) | 250 to 400 k |
-| 6 | Tooling | unchanged | 250 to 400 k |
-| 7 | Documentation | unchanged | 200 to 400 k |
+| 4 | Standard library | Done (§8.0, §8.3, §10.11). Remains: the dialogs and the sound tried by hand (below) | 0 |
+| 5 | Quality | Begun (E0219, E0416, E0371, the review fixes above); the fuzzing of the parser and of the semantic analysis, in the CI; the time of `sosuc` on large programs, measured in the CI; the two limits found while writing `std` (`void!E` as the type of a parameter or a variable, a pointer as a type argument); `git` and the C compiler run without the shell; the grammar and the error codes frozen, a compatibility policy | 200 to 350 k |
+| 6 | Tooling | Begun: the reference of `core`, `std` and the packages of `packages/` is generated (`src/docgen`, not yet `sosuc doc` for any package); the rest unchanged | 200 to 350 k |
+| 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
-| 9 | Distribution | unchanged | 120 to 250 k |
+| 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
 
-In all, about 1.35 to 2.35 million output tokens: 0.6 to 1.1 weeks of the Pro quota. With about 10 % of the quota left until October 31 (`testing`, in a session of its own), the works would end around mid-November, if each week of quota is used.
+In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work.
 
 What tokens do not buy, and sets the pace as much:
 

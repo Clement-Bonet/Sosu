@@ -1,0 +1,454 @@
+// The packages db and sqlite (spec §8.2): a database in a temporary file (testing.fixture),
+// written and read again through `db.Connection`. Each test runs a function that returns a
+// result, so that it can use `try`, and fails on its error with what SQLite said.
+import std.fs;
+import std.io;
+import std.text;
+import std.thread;
+import db.db;
+import db.pool;
+import sqlite.sqlite;
+import testing.check;
+import testing.fixture;
+
+str SCHEMA = "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, born INTEGER, height REAL, photo BLOB); CREATE TABLE pets (id INTEGER PRIMARY KEY, owner INTEGER NOT NULL REFERENCES people (id), name TEXT);";
+
+str INSERT = "INSERT INTO people (name, born, height, photo) VALUES (?, ?, ?, ?)";
+
+// A new database in a temporary folder, with the schema.
+db.Connection* created(Arena* arena, str dir) uses io {
+    db.Connection* c = match (sqlite.open(arena, fs.join(arena, dir, "people.db"))) {
+        ok(c) => c,
+        err(e) => stopped(arena, e),
+    };
+    match (c.script(SCHEMA)) {
+        ok => { },
+        err(e) => {
+            failed(arena, c, e);
+        },
+    }
+    return c;
+}
+
+db.Connection* stopped(Arena* arena, db.DbError e) uses io {
+    io.print("cannot open: {}", db.message(e));
+    assert(false);
+    return stopped(arena, e);  // never reached
+}
+
+// Whether an option holds `expected`, or holds nothing.
+bool holds<T: Equal>(T? x, T expected) {
+    return match (x) {
+        some(v) => v == expected,
+        none => false,
+    };
+}
+
+bool absent<T>(T? x) {
+    return match (x) {
+        some(v) => false,
+        none => true,
+    };
+}
+
+// Stops the test on an error, with what the database said.
+void failed(Arena* arena, db.Connection* c, db.DbError e) uses io {
+    io.print("error: {} ({})", db.message(e), c.message(arena));
+    assert(false);
+}
+
+void succeeded(Arena* arena, db.Connection* c, bool!db.DbError r) uses io {
+    match (r) {
+        ok(b) => assert(b),
+        err(e) => {
+            failed(arena, c, e);
+        },
+    }
+}
+
+bool refused(i64!db.DbError r, db.DbError expected) {
+    return match (r) {
+        ok(n) => false,
+        err(e) => e == expected,
+    };
+}
+
+// The rows of a query, one line each, the values as SQL writes them.
+str listed(Arena* arena, db.Connection* c, str sql) uses io {
+    text.TextBuilder* b = text.builder(arena);
+    match (db.select(arena, c, sql)) {
+        ok(rows) => {
+            defer rows.close();
+            while (more(arena, c, rows)) {
+                for (usize i in 0..rows.columns()) {
+                    if (i > 0) {
+                        b.push(" | ");
+                    }
+                    b.push(db.describe(arena, rows.value(arena, i)));
+                }
+                b.push("\n");
+            }
+        },
+        err(e) => {
+            failed(arena, c, e);
+        },
+    }
+    return b.text();
+}
+
+bool more(Arena* arena, db.Connection* c, db.Rows* rows) uses io {
+    return match (rows.next()) {
+        ok(m) => m,
+        err(e) => stop_rows(arena, c, e),
+    };
+}
+
+bool stop_rows(Arena* arena, db.Connection* c, db.DbError e) uses io {
+    failed(arena, c, e);
+    return false;
+}
+
+// The number of rows of `table` (-1 on an error).
+i64 count(Arena* arena, db.Connection* c, str table) uses io {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("SELECT count(*) FROM ");
+    b.push(table);
+    mut db.Value[1] nothing = [db.Value.Null];
+    return match (db.scalar(arena, c, b.text(), nothing[0..0])) {
+        ok(v) => match (v) {
+            some(n) => match (db.as_i64(n)) {
+                some(k) => k,
+                none => -1,
+            },
+            none => -1,
+        },
+        err(e) => -1,
+    };
+}
+
+bool!db.DbError values_of_each_type(Arena* arena, db.Connection* c) uses io {
+    mut ui8[4] photo = [0, 1, 254, 255];
+    // a quote and a statement in a parameter stay a text: nothing is joined to the query
+    mut db.Value[4] ada = [
+        db.Value.Text("Ada O'Brien'); DROP TABLE people; --"),
+        db.Value.Integer(1815),
+        db.Value.Float(1.65),
+        db.Value.Bytes(photo[0..4]),
+    ];
+    assert(try c.execute(INSERT, ada[0..4]) == 1);
+    assert(c.last_insert_id() == 1);
+    mut db.Value[4] grace = [
+        db.Value.Text("Grace Hopper, née Murray"),
+        db.Value.Integer(-9223372036854775807 - 1),
+        db.Value.Float(-0.5),
+        db.Value.Bytes(photo[0..0]),
+    ];
+    assert(try c.execute(INSERT, grace[0..4]) == 1);
+    assert(c.last_insert_id() == 2);
+    mut db.Value[4] empty = [db.Value.Text(""), db.Value.Null, db.boolean(true), db.Value.Null];
+    assert(try c.execute(INSERT, empty[0..4]) == 1);
+    mut str[4] lines = [
+        "1 | 'Ada O''Brien''); DROP TABLE people; --' | 1815 | 1.65 | x'0001feff'",
+        "2 | 'Grace Hopper, née Murray' | -9223372036854775808 | -0.5 | x''",
+        "3 | '' | NULL | 1.0 | NULL",
+        "",
+    ];
+    str expected = text.join(arena, lines[0..4], "\n");
+    assert(check.same_text(listed(arena, c, "SELECT * FROM people ORDER BY id"), expected));
+    // read by name, as their types
+    mut db.Value[1] two = [db.Value.Integer(2)];
+    db.Rows* rows = try c.query(arena, "SELECT name AS who, born, height, photo, born IS NULL FROM people WHERE id = ?", two[0..1]);
+    defer rows.close();
+    assert(rows.columns() == 5 && rows.name(0) == "who" && rows.name(3) == "photo" && rows.name(9) == "");
+    assert(try rows.next());
+    match (db.get(arena, rows, "who")) {
+        some(v) => assert(check.contains(match (db.as_str(v)) {
+            some(s) => s,
+            none => "",
+        }, "Hopper")),
+        none => assert(false),
+    }
+    assert(holds(db.as_i64(rows.value(arena, 1)), -9223372036854775807 - 1));
+    assert(holds(db.as_f64(rows.value(arena, 2)), -0.5) && !absent(db.as_f64(rows.value(arena, 1))));
+    assert(absent(db.as_str(rows.value(arena, 1))));
+    match (db.as_bytes(rows.value(arena, 3))) {
+        some(b) => assert(b.len == 0),  // empty bytes are not NULL
+        none => assert(false),
+    }
+    assert(holds(db.as_bool(rows.value(arena, 4)), false));
+    assert(holds(db.column(rows, "height"), 2) && absent(db.column(rows, "nobody")));
+    assert(db.is_null(rows.value(arena, 7)));  // beyond the last column
+    assert(!try rows.next());
+    assert(!try rows.next());  // after the last row, still none
+    assert(db.is_null(rows.value(arena, 0)));
+    // a text that is not UTF-8 is read as bytes
+    db.Rows* odd = try db.select(arena, c, "SELECT CAST(x'ff41' AS TEXT)");
+    defer odd.close();
+    assert(try odd.next());
+    assert(absent(db.as_str(odd.value(arena, 0))) && !absent(db.as_bytes(odd.value(arena, 0))));
+    assert(count(arena, c, "people") == 3);
+    assert(try db.run(c, "UPDATE people SET born = born + 1 WHERE born IS NOT NULL") == 2);
+    assert(try db.run(c, "CREATE INDEX born ON people (born)") == 0);  // changes no row
+    return ok(true);
+}
+
+test "values of each type, written and read again" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str dir = fixture.temp_dir(&arena, "databases");
+    defer fixture.remove(dir);
+    db.Connection* c = created(&arena, dir);
+    succeeded(&arena, c, values_of_each_type(&arena, c));
+    c.close();
+    // the file keeps them
+    db.Connection* again = match (sqlite.open_read_only(&arena, fs.join(&arena, dir, "people.db"))) {
+        ok(conn) => conn,
+        err(e) => stopped(&arena, e),
+    };
+    defer again.close();
+    assert(count(&arena, again, "people") == 3);
+    assert(refused(db.run(again, "DELETE FROM people"), db.DbError.ReadOnly));
+    assert(sqlite.version(&arena) == "3.54.1");
+}
+
+bool!db.DbError statements_run_again(Arena* arena, db.Connection* c) uses io {
+    db.Statement* insert = try c.prepare(arena, INSERT);
+    defer insert.close();
+    for (i64 i in 0..50) {
+        text.TextBuilder* name = text.builder(arena);
+        name.push("person ");
+        name.push_i64(i);
+        mut db.Value[4] p = [db.Value.Text(name.text()), db.Value.Integer(1900 + i), db.Value.Null, db.Value.Null];
+        assert(try insert.execute(p[0..4]) == 1);
+    }
+    assert(count(arena, c, "people") == 50);
+    db.Statement* born = try c.prepare(arena, "SELECT name FROM people WHERE born >= ? ORDER BY born");
+    defer born.close();
+    mut db.Value[1] from = [db.Value.Integer(1947)];
+    db.Rows* last = try born.query(arena, from[0..1]);
+    mut i32 rows = 0;
+    while (try last.next()) {
+        mut Arena scratch = Arena.new(1 * KB);  // the texts of a row, freed before the next one
+        defer scratch.free();
+        rows += 1;
+        assert(check.contains(match (db.as_str(last.value(&scratch, 0))) {
+            some(s) => s,
+            none => "",
+        }, "person 4"));
+    }
+    assert(rows == 3);
+    // run again: the rows of the earlier run are closed
+    mut db.Value[1] later = [db.Value.Integer(1940)];
+    db.Rows* first = try born.query(arena, from[0..1]);
+    db.Rows* second = try born.query(arena, later[0..1]);
+    match (first.next()) {
+        ok(b) => assert(false),
+        err(e) => assert(e == db.DbError.Closed),
+    }
+    mut i32 counted = 0;
+    while (try second.next()) {
+        counted += 1;
+    }
+    assert(counted == 10);
+    born.close();
+    match (born.query(arena, later[0..1])) {
+        ok(r) => assert(false),
+        err(e) => assert(e == db.DbError.Closed),
+    }
+    return ok(true);
+}
+
+test "statements prepared once, run again" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str dir = fixture.temp_dir(&arena, "databases");
+    defer fixture.remove(dir);
+    db.Connection* c = created(&arena, dir);
+    defer c.close();
+    succeeded(&arena, c, statements_run_again(&arena, c));
+}
+
+bool!db.DbError transactions(Arena* arena, db.Connection* c) uses io {
+    mut db.Value[4] ada = [db.Value.Text("Ada"), db.Value.Integer(1815), db.Value.Null, db.Value.Null];
+    mut db.Value[4] alan = [db.Value.Text("Alan"), db.Value.Integer(1912), db.Value.Null, db.Value.Null];
+    try c.begin();
+    assert(try c.execute(INSERT, ada[0..4]) == 1);
+    try c.commit();
+    try c.begin();
+    assert(try c.execute(INSERT, alan[0..4]) == 1);
+    assert(count(arena, c, "people") == 2);
+    try c.rollback();
+    assert(count(arena, c, "people") == 1);
+    try c.rollback();  // none open: nothing to do
+    // a constraint refuses, and the transaction is kept or rolled back by the program
+    try c.begin();
+    assert(try c.execute(INSERT, alan[0..4]) == 1);
+    assert(refused(c.execute(INSERT, ada[0..4]), db.DbError.Constraint));  // UNIQUE
+    try c.commit();
+    assert(check.same_text(listed(arena, c, "SELECT name FROM people ORDER BY name"), "'Ada'\n'Alan'\n"));
+    return ok(true);
+}
+
+test "transactions: committed, rolled back" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str dir = fixture.temp_dir(&arena, "databases");
+    defer fixture.remove(dir);
+    db.Connection* c = created(&arena, dir);
+    defer c.close();
+    succeeded(&arena, c, transactions(&arena, c));
+}
+
+test "the errors of SQLite" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str dir = fixture.temp_dir(&arena, "databases");
+    defer fixture.remove(dir);
+    db.Connection* c = created(&arena, dir);
+    mut db.Value[4] p = [db.Value.Text("Ada"), db.Value.Null, db.Value.Null, db.Value.Null];
+    assert(refused(db.run(c, "SELEKT 1"), db.DbError.Invalid));
+    assert(check.contains(c.message(&arena), "syntax error"));
+    assert(refused(db.run(c, "SELECT * FROM nowhere"), db.DbError.Invalid));
+    assert(check.contains(c.message(&arena), "no such table: nowhere"));
+    assert(refused(db.run(c, ""), db.DbError.Invalid));
+    assert(refused(db.run(c, "SELECT 1; SELECT 2"), db.DbError.Invalid));  // one statement at a time
+    assert(refused(c.execute(INSERT, p[0..3]), db.DbError.Mismatch));  // 3 parameters for 4
+    mut db.Value[4] nameless = [db.Value.Null, db.Value.Null, db.Value.Null, db.Value.Null];
+    assert(refused(c.execute(INSERT, nameless[0..4]), db.DbError.Constraint));  // name NOT NULL
+    mut db.Value[2] pet = [db.Value.Integer(99), db.Value.Text("Rex")];
+    assert(refused(c.execute("INSERT INTO pets (owner, name) VALUES (?, ?)", pet[0..2]), db.DbError.Constraint));
+    assert(check.contains(c.message(&arena), "FOREIGN KEY"));  // checked by default
+    match (c.script("CREATE TABLE a (x); CREATE TABLE a (x)")) {
+        ok => assert(false),
+        err(e) => assert(e == db.DbError.Invalid),
+    }
+    c.close();
+    assert(refused(db.run(c, "SELECT 1"), db.DbError.Closed));
+    c.close();  // twice: nothing
+    // a file that is not a database, a folder that is not there
+    str text_file = fs.join(&arena, dir, "notes.txt");
+    match (io.write_file(&arena, text_file, "these are not the pages of a database, but they are long enough to be read as a header of one")) {
+        ok => { },
+        err(e) => assert(false),
+    }
+    match (sqlite.open(&arena, text_file)) {
+        ok(other) => {
+            assert(refused(db.run(other, "SELECT * FROM sqlite_master"), db.DbError.CannotOpen));  // SQLITE_NOTADB
+            other.close();
+        },
+        err(e) => assert(e == db.DbError.CannotOpen),
+    }
+    match (sqlite.open(&arena, fs.join(&arena, dir, "no/such/folder.db"))) {
+        ok(other) => assert(false),
+        err(e) => assert(e == db.DbError.CannotOpen),
+    }
+}
+
+test "a database in memory" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    match (sqlite.memory(&arena)) {
+        ok(c) => {
+            defer c.close();
+            mut db.Value[2] p = [db.Value.Integer(6), db.Value.Integer(7)];
+            match (db.scalar(&arena, c, "SELECT ? * ?", p[0..2])) {
+                ok(v) => assert(match (v) {
+                    some(n) => db.describe(&arena, n) == "42",
+                    none => false,
+                }),
+                err(e) => assert(false),
+            }
+            match (db.scalar(&arena, c, "SELECT 1 WHERE 0", p[0..0])) {
+                ok(v) => assert(absent(v)),
+                err(e) => assert(false),
+            }
+        },
+        err(e) => assert(false),
+    }
+}
+
+pool.Pool no_pool() {
+    assert(false);
+    return no_pool();  // never reached
+}
+
+// What a thread of the pool does: `rows` inserts, each with a connection taken and given back.
+struct Job {
+    pool.Pool pool;
+    i32 worker;
+    i32 rows;
+}
+
+i32 insert_rows(Arena* arena, Job job) uses io, threads {
+    pool.Local* conns = pool.local(arena, job.pool, sqlite.open);
+    defer conns.close();
+    mut i32 done = 0;
+    for (i32 i in 0..job.rows) {
+        match (conns.take()) {
+            ok(c) => {
+                mut db.Value[2] p = [db.Value.Integer(job.worker as i64), db.Value.Integer(i as i64)];
+                match (c.execute("INSERT INTO work (worker, step) VALUES (?, ?)", p[0..2])) {
+                    ok(n) => {
+                        done += n as i32;
+                    },
+                    err(e) => {
+                        io.print("worker {}: {} ({})", job.worker, db.message(e), c.message(arena));
+                    },
+                }
+                conns.give(c);
+            },
+            err(e) => {
+                io.print("worker {}: {}", job.worker, db.message(e));
+            },
+        }
+    }
+    assert(conns.open_count() == 1);  // the same connection, taken again
+    return done;
+}
+
+test "a pool of connections, shared out between threads" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str dir = fixture.temp_dir(&arena, "databases");
+    defer fixture.remove(dir);
+    str path = fs.join(&arena, dir, "work.db");
+    match (sqlite.open(&arena, path)) {
+        ok(c) => {
+            match (c.script("PRAGMA journal_mode = WAL; CREATE TABLE work (worker INTEGER, step INTEGER)")) {
+                ok => { },
+                err(e) => {
+                    failed(&arena, c, e);
+                },
+            }
+            c.close();
+        },
+        err(e) => assert(false),
+    }
+    pool.Pool shared = match (pool.create(path, 2)) {
+        some(p) => p,
+        none => no_pool(),
+    };
+    assert(shared.size == 2 && shared.address(&arena) == path);
+    auto a = thread.spawn(&arena, insert_rows, Job{ pool: shared, worker: 1, rows: 40 });
+    auto b = thread.spawn(&arena, insert_rows, Job{ pool: shared, worker: 2, rows: 40 });
+    auto c = thread.spawn(&arena, insert_rows, Job{ pool: shared, worker: 3, rows: 40 });
+    assert(a.join() + b.join() + c.join() == 120);
+    // all given back: the pool lends them again, until it is closed
+    pool.Local* conns = pool.local(&arena, shared, sqlite.open);
+    match (conns.take()) {
+        ok(conn) => {
+            assert(count(&arena, conn, "work") == 120);
+            assert(check.same_text(listed(&arena, conn, "SELECT worker, count(*), sum(step) FROM work GROUP BY worker"), "1 | 40 | 780\n2 | 40 | 780\n3 | 40 | 780\n"));
+            conns.give(conn);
+        },
+        err(e) => assert(false),
+    }
+    conns.close();
+    shared.close();
+    match (conns.take()) {
+        ok(conn) => assert(false),
+        err(e) => assert(e == db.DbError.Closed),
+    }
+    shared.free();
+    assert(absent(pool.create(text.repeat(&arena, "x", 1025), 1)));
+}

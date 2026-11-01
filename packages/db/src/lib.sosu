@@ -1,0 +1,5 @@
+// db: databases, the interface common to their drivers (spec §8.2). Programs import `db.db`
+// (a `Connection`, its statements, rows and values) and `db.pool` (connections shared out
+// between threads); a driver opens the connections (`sqlite.open`).
+import db.db;
+import db.pool;

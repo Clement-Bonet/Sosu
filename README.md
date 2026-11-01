@@ -81,7 +81,7 @@ I define the language, review the changes, and the CI tests every change on Wind
 | 9. Libraries for other languages, then mobile | done: `export "C"` and `sosuc build --lib` (static) or `--lib=shared`, with a C header and errors returned to the host (spec §9.2); `--target android-*` and `ios-*`, `sosuc package --target android` (an APK) and `ios-sim` (spec §11.5). The CI builds the APK and the application for the simulator; running them on an emulator, a simulator or a phone is done by hand, and iOS stays a preview until it has run on an iPhone (spec §13.1) |
 | 10. Generics | done: functions, structs, enums and classes with type parameters and constraints, effects as parameters, `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (spec §5.4) |
 | 11. `sosuc bindgen`, `sosuc package`, cross-compilation | done: constants of modules; the declarations of C headers as Sosu modules, checked by the C compiler (`platform` binds SDL3 so); desktop packages with their archive; `--target windows-arm64`, `linux-arm64`, `macos-universal`..., another system with clang and a sysroot (spec §11.6) |
-| Version 1.0 | in progress: works 1 to 3 done (lambdas, generic interfaces, threads and channels, C sources in a package), and the modules of `std` of work 4 (spec §8.0); its content and order in spec §13.1, the estimates in [docs/ROADMAP.md](docs/ROADMAP.md), the libraries to come in spec §8.2 |
+| Version 1.0 | in progress: works 1 to 4 done (lambdas, generic interfaces, threads and channels, C sources in a package; the modules of `std`, spec §8.0, and the packages `crypto`, `compress`, `math`, `testing`, `image`, `audio`, `db`, `sqlite` and `platform.dialogs`, spec §8.3, in [docs/REFERENCE.md](docs/REFERENCE.md)); its content and order in spec §13.1, the estimates in [docs/ROADMAP.md](docs/ROADMAP.md), the libraries to come in spec §8.2 |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -155,6 +155,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   arena       arena allocator for compiler data
   ast         syntax tree and its printer
   parser      syntax analysis (recursive descent)
+  ui_parser   the .ui.sosu files (spec §10.2): uses the helpers of parser.c (parser_internal.h)
   path        file path helpers
   shell       folders (native calls) and the commands run through the system shell (C compiler, git)
   manifest    sosu.toml parser
@@ -162,7 +163,9 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   program     loading of packages, dependencies and imported modules
   types       semantic types (interned)
   sema        semantic analysis of declarations
-  sema_body   semantic analysis of function bodies
+  sema_body   semantic analysis of function bodies: statements, expressions, names (shared types in sema_body.h)
+  sema_call   calls, generics and arenas, in function bodies
+  sema_lambda lambdas and the variables they capture
   codegen     C code generation
   json        JSON reader and writer (for the language server)
   lsp         the language server: diagnostics while typing, hover, definition, completion
@@ -175,7 +178,7 @@ packages/     platform (window and events, on SDL3), render (pixels, shapes, tex
               i18n (catalogs of translations)
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
-              trees, inputs), poster (the poster of the project, drawn with `render` into a BMP)
+              trees, inputs), poster (the poster of the project, drawn with `render` into a PNG)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification, error codes, library reference, roadmap
@@ -207,7 +210,8 @@ Four packages, written in Sosu:
   draw its own title bar (spec §10.5), and a program linked with `--release` has no console on
   Windows.
 - `packages/render` draws in that canvas: rectangles (with rounded corners), borders, lines,
-  transparency, PNG images, text in a TrueType font or a built-in 8 by 8 font.
+  transparency, images (PNG and JPEG, from `packages/image`), text in a TrueType font or a built-in
+  8 by 8 font.
 - `packages/ui` adds widgets in immediate mode: at each frame, the program describes its interface
   from its state (`if (f.button("Greet")) { ... }`). Most programs describe it in `.ui.sosu`
   files, which `sosuc` turns into those calls.

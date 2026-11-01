@@ -1,0 +1,7 @@
+// image: images of pixels, in Sosu (spec §8.2). Programs import `image.image` (the `Image` and
+// its conversions), `image.png` and `image.jpeg` (files read and written) and `image.ops`
+// (crop, resize, rotate, flip).
+import image.image;
+import image.png;
+import image.jpeg;
+import image.ops;

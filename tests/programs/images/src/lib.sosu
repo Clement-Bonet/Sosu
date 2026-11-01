@@ -1,0 +1,188 @@
+// The package image (spec §8.2), on files of other programs: JPEG files written by the Windows
+// Imaging Component (WIC) and the pixels WIC reads from them, a JPEG file written by Sosu as WIC
+// reads it, PNG files written byte for byte as before, damaged files, and the transformations.
+import std.io;
+import std.text;
+import image.image;
+import image.png;
+import image.jpeg;
+import image.ops;
+import testing.check;
+import testing.fixture;
+
+image.Image read_png(Arena* arena, str relative) uses io {
+    return match (png.decode(arena, fixture.read_bytes(arena, relative))) {
+        ok(img) => img,
+        err(e) => image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
+    };
+}
+
+image.Image read_jpeg(Arena* arena, str relative) uses io {
+    return match (jpeg.decode(arena, fixture.read_bytes(arena, relative))) {
+        ok(img) => img,
+        err(e) => image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
+    };
+}
+
+// The largest difference of a channel between two images of the same size (256 if their sizes
+// differ).
+i32 largest_difference(image.Image a, image.Image b) {
+    if (a.width != b.width || a.height != b.height) {
+        return 256;
+    }
+    mut i32 most = 0;
+    for (usize i in 0..a.pixels.len) {
+        for (i32 bits in [24, 16, 8, 0]) {
+            i32 x = (a.pixels[i] >> bits as ui32 & 0xFF) as i32;
+            i32 y = (b.pixels[i] >> bits as ui32 & 0xFF) as i32;
+            most = max(most, abs(x - y));
+        }
+    }
+    return most;
+}
+
+// The mean difference of the color channels.
+f64 mean_difference(image.Image a, image.Image b) {
+    mut ui64 total = 0;
+    for (usize i in 0..a.pixels.len) {
+        for (i32 bits in [16, 8, 0]) {
+            i32 x = (a.pixels[i] >> bits as ui32 & 0xFF) as i32;
+            i32 y = (b.pixels[i] >> bits as ui32 & 0xFF) as i32;
+            total += abs(x - y) as ui64;
+        }
+    }
+    return total as f64 / (a.pixels.len * 3) as f64;
+}
+
+test "JPEG files of WIC read as WIC reads them" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    // 4:2:0 color, and gray; rounding apart (an IDCT of floats, WIC's of integers), the same pixels
+    image.Image photo = read_jpeg(&arena, "tests/data/photo.jpg");
+    image.Image expected = read_png(&arena, "tests/data/photo_wic.png");
+    assert(photo.width == 96 && photo.height == 64 && photo.opaque());
+    assert(largest_difference(photo, expected) <= 3);
+    assert(check.near(mean_difference(photo, expected), 0.0, 0.5));
+    image.Image gray = read_jpeg(&arena, "tests/data/gray.jpg");
+    assert(largest_difference(gray, read_png(&arena, "tests/data/gray_wic.png")) <= 2);
+    // and the source WIC compressed, at its quality of 85
+    assert(check.near(mean_difference(photo, read_png(&arena, "tests/data/source.png")), 4.0, 1.5));
+}
+
+test "a JPEG file written by Sosu, as WIC reads it" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    image.Image source = read_png(&arena, "tests/data/source.png");
+    ui8[] file = jpeg.encode(&arena, source, 85);
+    image.Image back = match (jpeg.decode(&arena, file)) {
+        ok(img) => img,
+        err(e) => source,
+    };
+    // sosu_wic.png: what WIC read from this file, when it was written
+    assert(largest_difference(back, read_png(&arena, "tests/data/sosu_wic.png")) <= 3);
+    assert(check.near(mean_difference(back, source), 4.0, 1.5));
+}
+
+test "PNG files written byte for byte as before" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    image.Image source = read_png(&arena, "tests/data/source.png");
+    ui8[] file = png.encode(&arena, source);
+    assert(check.same_bytes(file, fixture.read_bytes(&arena, "tests/data/source_sosu.png")));
+    image.Image back = read_png(&arena, "tests/data/source_sosu.png");
+    assert(largest_difference(back, source) == 0);
+    // gray, and with alpha
+    image.Gray gray = image.to_gray(&arena, source);
+    image.Image from_gray = match (png.decode(&arena, png.encode_gray(&arena, gray))) {
+        ok(img) => img,
+        err(e) => source,
+    };
+    assert(largest_difference(from_gray, image.from_gray(&arena, gray)) == 0);
+    image.Image clear = image.unpremultiplied(&arena, image.premultiplied(&arena, ops.rotate(&arena, source, 30.0)));
+    image.Image kept = match (png.decode(&arena, png.encode(&arena, clear))) {
+        ok(img) => img,
+        err(e) => source,
+    };
+    assert(!clear.opaque() && largest_difference(kept, clear) == 0);
+}
+
+// What reading each file gives: its size, or the error.
+str outcome(Arena* arena, str name, ui8[] data, bool is_png) {
+    image.Image!image.ImageError read = is_png ? png.decode(arena, data) : jpeg.decode(arena, data);
+    text.TextBuilder* b = text.builder(arena);
+    b.push(name);
+    b.push(": ");
+    match (read) {
+        ok(img) => {
+            b.push_i64(img.width as i64);
+            b.push(" by ");
+            b.push_i64(img.height as i64);
+        },
+        err(e) => b.push(image.message(e)),
+    }
+    b.push("\n");
+    return b.text();
+}
+
+// A copy of `data` with the byte at `at` replaced.
+ui8[] changed(Arena* arena, ui8[] data, usize at, ui8 value) {
+    mut ui8[] copy = arena.alloc_slice(ui8, data.len);
+    for (usize i in 0..data.len) {
+        copy[i] = data[i];
+    }
+    copy[at] = value;
+    return copy;
+}
+
+// A copy of the PNG file `data` whose header says `width` by `height` pixels.
+ui8[] resized(Arena* arena, ui8[] data, ui32 width, ui32 height) {
+    mut ui8[] copy = changed(arena, data, 0, data[0]);
+    for (usize i in 0..4) {
+        copy[16 + i] = (width >> (24 - 8 * i) as ui32 & 0xFF) as ui8;
+        copy[20 + i] = (height >> (24 - 8 * i) as ui32 & 0xFF) as ui8;
+    }
+    return copy;
+}
+
+test "damaged and hostile files" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    ui8[] photo = fixture.read_bytes(&arena, "tests/data/photo.jpg");
+    ui8[] source = fixture.read_bytes(&arena, "tests/data/source_sosu.png");
+    text.TextBuilder* report = text.builder(&arena);
+    report.push(outcome(&arena, "photo.jpg", photo, false));
+    report.push(outcome(&arena, "photo.jpg as PNG", photo, true));
+    report.push(outcome(&arena, "photo.jpg cut in half", photo[0..photo.len / 2], false));
+    report.push(outcome(&arena, "photo.jpg, its tables only", photo[0..600], false));
+    report.push(outcome(&arena, "photo.jpg, a SOF2 marker", changed(&arena, photo, 159, 0xC2), false));
+    report.push(outcome(&arena, "source_sosu.png", source, true));
+    report.push(outcome(&arena, "source_sosu.png as JPEG", source, false));
+    report.push(outcome(&arena, "source_sosu.png cut", source[0..source.len - 20], true));
+    // within the bounds, but not what its few bytes can hold; then beyond the bounds
+    report.push(outcome(&arena, "source_sosu.png, 4096 by 16384", resized(&arena, source, 4096, 16384), true));
+    report.push(outcome(&arena, "source_sosu.png, 65536 by 64", resized(&arena, source, 65536, 64), true));
+    report.push(outcome(&arena, "source_sosu.png, 0 by 64", resized(&arena, source, 0, 64), true));
+    assert(fixture.golden(&arena, "tests/data/report.txt", report.text()));
+}
+
+test "crop, rotate, flip and resize a photo" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    image.Image photo = read_png(&arena, "tests/data/source.png");
+    image.Image part = ops.crop(&arena, photo, 50, 10, 30, 40);
+    assert(part.width == 30 && part.height == 40 && part.at(0, 0) == photo.at(50, 10) && part.at(29, 39) == photo.at(79, 49));
+    image.Image round = ops.rotate_270(&arena, ops.rotate_90(&arena, photo));
+    assert(largest_difference(round, photo) == 0);
+    image.Image mirrored = ops.flip_vertical(&arena, ops.flip_horizontal(&arena, photo));
+    assert(largest_difference(mirrored, ops.rotate_180(&arena, photo)) == 0);
+    // half the size, then back: both filters keep the picture
+    for (ops.Filter f in [ops.Filter.Bilinear, ops.Filter.Lanczos]) {
+        image.Image half = ops.resize(&arena, photo, 48, 32, f);
+        image.Image again = ops.resize(&arena, half, 96, 64, f);
+        assert(half.width == 48 && again.width == 96 && mean_difference(again, photo) < 6.0);
+    }
+    // turned by 10 degrees and back, the middle is kept
+    image.Image turned = ops.rotate(&arena, ops.rotate(&arena, photo, 10.0), -10.0);
+    image.Image middle = ops.crop(&arena, turned, (turned.width - 40) / 2, (turned.height - 30) / 2, 40, 30);
+    assert(mean_difference(middle, ops.crop(&arena, photo, 28, 17, 40, 30)) < 8.0);
+}

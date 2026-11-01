@@ -1,34 +1,16 @@
-// render.image: PNG images, read in Sosu (spec §10.4), for window icons and the `Image`
-// widget. The compressed data is inflated by `compress.zlib` (its Adler-32 checked), its rows
-// unfiltered, and its pixels made 0xAARRGGBB, whatever their kind: gray, RGB, palette, with or
-// without alpha, 1 to 16 bits, interlaced or not. Every read is checked: a damaged file gives
-// `Damaged`, never a read outside of its bytes. The CRC of the chunks is not verified.
+// image.png: PNG files, read and written in Sosu. Read: the compressed data is inflated by
+// `compress.zlib` (its Adler-32 checked), its rows unfiltered, and its pixels made 0xAARRGGBB,
+// whatever their kind: gray, RGB, palette, with or without alpha, 1 to 16 bits, interlaced or
+// not. Every read is checked: a damaged file gives `Damaged`, never a read outside of its bytes;
+// an image beyond `image.fits`, or larger than its data could hold, is refused before its pixels
+// are allocated. The CRC of the chunks is not verified. Written: 8 bits, RGB, RGBA or gray, each
+// row with the filter that suits it best, deflated by `compress.zlib`.
 import std.io;
 import compress.zlib;
 import compress.checksum;
+import image.image;
 
-pub enum ImageError {
-    Unreadable,  // the file cannot be read
-    NotPng,  // not a PNG file
-    Damaged,  // a PNG file, but damaged, or of a kind that does not exist
-}
-
-// `width * height` pixels, row by row, each 0xAARRGGBB (alpha not premultiplied).
-pub struct Image {
-    pub i32 width;
-    pub i32 height;
-    pub ui32[] pixels;
-
-    // The pixel at (x, y), or 0 (transparent) outside of the image.
-    pub ui32 at(i32 x, i32 y) {
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-            return 0;
-        }
-        return pixels[(y * width + x) as usize];
-    }
-}
-
-// ---- PNG: chunks, filters, interlacing and pixels ----
+// ---- Read: chunks, filters, interlacing and pixels ----
 
 ui32 u32_at(ui8[] data, usize at) {
     if (at + 4 > data.len) {
@@ -178,23 +160,34 @@ ui32 pixel(Header h, Extras* e, ui8[] data, usize row, ui32 x) {
     return a << 24 | to8(r, d) << 16 | to8(g, d) << 8 | to8(b, d);
 }
 
-// Decodes the PNG file `data`; the pixels are allocated in `arena`.
-pub Image!ImageError decode(Arena* arena, ui8[] data) {
+// Whether `data` starts with the signature of a PNG file.
+pub bool is_png(ui8[] data) {
     ui8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
-    if (data.len < 33) {
-        return err(NotPng);
+    if (data.len < 8) {
+        return false;
     }
     for (usize i in 0..8) {
         if (data[i] != signature[i]) {
-            return err(NotPng);
+            return false;
         }
     }
-    if (!is_tag(data, 12, "IHDR") || u32_at(data, 8) != 13) {
-        return err(Damaged);
+    return true;
+}
+
+// Decodes the PNG file `data`; the pixels are allocated in `arena`.
+pub image.Image!image.ImageError decode(Arena* arena, ui8[] data) {
+    if (!is_png(data)) {
+        return err(image.ImageError.UnknownFormat);
+    }
+    if (data.len < 33 || !is_tag(data, 12, "IHDR") || u32_at(data, 8) != 13) {
+        return err(image.ImageError.Damaged);
     }
     Header h = Header{ width: u32_at(data, 16), height: u32_at(data, 20), depth: data[24] as ui32, color: data[25] as ui32, interlaced: data[28] == 1 };
-    if (!h.valid() || h.width == 0 || h.height == 0 || h.width > 16384 || h.height > 16384 || data[26] != 0 || data[27] != 0 || data[28] > 1) {
-        return err(Damaged);
+    if (!h.valid() || h.width == 0 || h.height == 0 || data[26] != 0 || data[27] != 0 || data[28] > 1) {
+        return err(image.ImageError.Damaged);
+    }
+    if (!image.fits(h.width as i64, h.height as i64)) {
+        return err(image.ImageError.TooLarge);
     }
 
     // The chunks: the palette, the transparency, and the compressed data, gathered.
@@ -205,7 +198,7 @@ pub Image!ImageError decode(Arena* arena, ui8[] data) {
         usize length = u32_at(data, at) as usize;
         usize body = at + 8;
         if (length > data.len - body - 4) {  // the CRC must fit too
-            return err(Damaged);
+            return err(image.ImageError.Damaged);
         }
         if (is_tag(data, at + 4, "IDAT")) {
             compressed += length;
@@ -230,6 +223,26 @@ pub Image!ImageError decode(Arena* arena, ui8[] data) {
         }
         at = body + length + 4;
     }
+
+    // The rows of each pass (one pass when not interlaced), their filter bytes included.
+    usize passes = h.interlaced ? 7 : 1;
+    ui32[7] px = pass_x();
+    ui32[7] py = pass_y();
+    ui32[7] pdx = pass_dx();
+    ui32[7] pdy = pass_dy();
+    mut ui64 expected = 0;
+    for (usize p in 0..passes) {
+        ui32 w = h.interlaced ? pass_size(h.width, px[p], pdx[p]) : h.width;
+        ui32 rows = h.interlaced ? pass_size(h.height, py[p], pdy[p]) : h.height;
+        if (w > 0) {
+            expected += h.row_bytes(w) as ui64 * rows as ui64;
+        }
+    }
+    // Deflate makes at most 258 bytes of 2 bits (a length and a distance of one-bit codes): what
+    // `compressed` bytes cannot hold is refused before it is allocated.
+    if (expected > compressed as ui64 * 1032 + 1024) {
+        return err(image.ImageError.Damaged);
+    }
     mut ui8[] stream = arena.alloc_slice(ui8, compressed);
     mut usize filled = 0;
     at = 8;
@@ -244,30 +257,15 @@ pub Image!ImageError decode(Arena* arena, ui8[] data) {
         }
         at = body + length + 4;
     }
-
-    // The rows of each pass (one pass when not interlaced), their filter bytes included.
-    usize passes = h.interlaced ? 7 : 1;
-    ui32[7] px = pass_x();
-    ui32[7] py = pass_y();
-    ui32[7] pdx = pass_dx();
-    ui32[7] pdy = pass_dy();
-    mut usize expected = 0;
-    for (usize p in 0..passes) {
-        ui32 w = h.interlaced ? pass_size(h.width, px[p], pdx[p]) : h.width;
-        ui32 rows = h.interlaced ? pass_size(h.height, py[p], pdy[p]) : h.height;
-        if (w > 0) {
-            expected += h.row_bytes(w) * rows as usize;
-        }
-    }
-    mut ui8[] raw = arena.alloc_slice(ui8, expected);
+    mut ui8[] raw = arena.alloc_slice(ui8, expected as usize);
     match (zlib.decompress_into(stream, raw)) {
         ok(written) => {
-            if (written != expected) {
-                return err(Damaged);
+            if (written != expected as usize) {
+                return err(image.ImageError.Damaged);
             }
         },
         err(e) => {
-            return err(Damaged);
+            return err(image.ImageError.Damaged);
         },
     }
 
@@ -281,7 +279,7 @@ pub Image!ImageError decode(Arena* arena, ui8[] data) {
         }
         usize stride = h.row_bytes(w);
         if (!unfilter(raw[start..start + stride * rows as usize], rows as usize, stride, h.filter_step())) {
-            return err(Damaged);
+            return err(image.ImageError.Damaged);
         }
         for (ui32 y in 0..rows) {
             usize row = start + y as usize * stride + 1;
@@ -293,24 +291,173 @@ pub Image!ImageError decode(Arena* arena, ui8[] data) {
         }
         start += stride * rows as usize;
     }
-    return ok(Image{ width: h.width as i32, height: h.height as i32, pixels: pixels });
+    return ok(image.Image{ width: h.width as i32, height: h.height as i32, pixels: pixels });
 }
 
 // Reads and decodes the PNG file at `path`.
-pub Image!ImageError load(Arena* arena, str path) uses io {
+pub image.Image!image.ImageError load(Arena* arena, str path) uses io {
     ui8[] data = match (io.read_bytes(arena, path)) {
         ok(bytes) => bytes,
         err(e) => {
-            return err(Unreadable);
+            return err(image.ImageError.Unreadable);
         },
     };
     return decode(arena, data);
 }
 
+// ---- Write: filters, chunks ----
+
+// A PNG file being built: its bytes, in a slice sized for all of it.
+struct Builder {
+    mut ui8[] bytes;
+    mut usize len = 0;
+
+    void put(ui32 b) {
+        bytes[len] = (b & 0xFF) as ui8;
+        len += 1;
+    }
+
+    void put32(ui32 v) {
+        put(v >> 24);
+        put(v >> 16);
+        put(v >> 8);
+        put(v);
+    }
+
+    // A chunk: length, name, `body`, and the CRC of the name and the body.
+    void chunk(str name, ui8[] body) {
+        put32(body.len as ui32);
+        usize start = len;
+        for (ui8 b in name.bytes) {
+            put(b as ui32);
+        }
+        for (ui8 b in body) {
+            put(b as ui32);
+        }
+        put32(checksum.crc32(bytes[start..len]));
+    }
+}
+
+// The byte `i` of a row filtered by `kind`: `row` and `above` (empty for the first row) hold
+// the samples, `step` bytes a pixel.
+ui8 filtered(ui8[] row, ui8[] above, usize i, usize step, ui32 kind) {
+    i32 x = row[i] as i32;
+    i32 a = i >= step ? row[i - step] as i32 : 0;
+    i32 b = above.len > 0 ? above[i] as i32 : 0;
+    i32 c = above.len > 0 && i >= step ? above[i - step] as i32 : 0;
+    i32 predicted = kind == 0 ? 0 : kind == 1 ? a : kind == 2 ? b : kind == 3 ? (a + b) / 2 : paeth(a, b, c);
+    return (x - predicted & 0xFF) as ui8;
+}
+
+// The bytes of a PNG file of `width` by `height` pixels of `channels` samples of 8 bits
+// (`color`: 0 gray, 2 RGB, 6 RGBA) held row by row in `samples`. Each row takes the filter whose
+// bytes, read as signed, add up to the least (the heuristic of the PNG specification), then the
+// whole is deflated at `level`.
+ui8[] write(Arena* arena, ui8[] samples, ui32 width, ui32 height, ui32 channels, ui32 color, i32 level) {
+    usize stride = width as usize * channels as usize;
+    usize step = channels as usize;
+    // `samples.len` is memory already allocated: adding a byte a row cannot wrap around.
+    mut ui8[] raw = arena.alloc_slice(ui8, samples.len + height as usize);
+    for (usize y in 0..height as usize) {
+        ui8[] row = samples[y * stride..(y + 1) * stride];
+        ui8[] above = y > 0 ? samples[(y - 1) * stride..y * stride] : samples[0..0];
+        mut ui32 best = 0;
+        mut ui64 least = 0xFFFFFFFFFFFFFFFF;
+        for (ui32 kind in 0..5) {
+            mut ui64 sum = 0;
+            for (usize i in 0..stride) {
+                ui32 v = filtered(row, above, i, step, kind) as ui32;
+                sum += (v < 128 ? v : 256 - v) as ui64;
+            }
+            if (sum < least) {
+                least = sum;
+                best = kind;
+            }
+        }
+        usize out = y * (stride + 1);
+        raw[out] = best as ui8;
+        for (usize i in 0..stride) {
+            raw[out + 1 + i] = filtered(row, above, i, step, best);
+        }
+    }
+    ui8[] packed = zlib.compress_level(arena, raw, level);
+    // The data in chunks of at most 1 MB, so that each length stays far from 2^31.
+    usize chunk = 1048576;
+    usize chunks = (packed.len + chunk - 1) / chunk;
+    mut Builder b = Builder{ bytes: arena.alloc_slice(ui8, 8 + 25 + 12 * chunks + packed.len + 12) };
+    ui8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    for (ui8 s in signature) {
+        b.put(s as ui32);
+    }
+    mut ui8[13] header = [0; 13];
+    for (usize i in 0..4) {
+        header[i] = (width >> (24 - 8 * i) as ui32 & 0xFF) as ui8;
+        header[4 + i] = (height >> (24 - 8 * i) as ui32 & 0xFF) as ui8;
+    }
+    header[8] = 8;
+    header[9] = color as ui8;
+    b.chunk("IHDR", header[0..13]);
+    mut usize at = 0;
+    while (at < packed.len) {  // a zlib stream is never empty
+        usize end = min(at + chunk, packed.len);
+        b.chunk("IDAT", packed[at..end]);
+        at = end;
+    }
+    b.chunk("IEND", packed[0..0]);
+    return b.bytes[0..b.len];
+}
+
+// The bytes of the PNG file holding `img`, deflated at `level` (0 to 9): RGB when every pixel
+// is opaque, RGBA otherwise.
+pub ui8[] encode_level(Arena* arena, image.Image img, i32 level)
+    requires level >= 0 && level <= 9 && img.width >= 0 && img.height >= 0 && img.pixels.len == img.width as usize * img.height as usize
+{
+    bool opaque = img.opaque();
+    ui32 channels = opaque ? 3 : 4;
+    // `pixels.len * 4` is the size of memory already allocated: it cannot wrap around.
+    mut ui8[] samples = arena.alloc_slice(ui8, img.pixels.len * channels as usize);
+    mut usize at = 0;
+    for (ui32 p in img.pixels) {
+        samples[at] = (p >> 16 & 0xFF) as ui8;
+        samples[at + 1] = (p >> 8 & 0xFF) as ui8;
+        samples[at + 2] = (p & 0xFF) as ui8;
+        if (!opaque) {
+            samples[at + 3] = (p >> 24) as ui8;
+        }
+        at += channels as usize;
+    }
+    return write(arena, samples, img.width as ui32, img.height as ui32, channels, opaque ? 2 : 6, level);
+}
+
+// The bytes of the PNG file holding `img` (level 6).
+pub ui8[] encode(Arena* arena, image.Image img) {
+    return encode_level(arena, img, 6);
+}
+
+// The bytes of the PNG file holding the gray image `g` (level 6).
+pub ui8[] encode_gray(Arena* arena, image.Gray g)
+    requires g.width >= 0 && g.height >= 0 && g.pixels.len == g.width as usize * g.height as usize
+{
+    return write(arena, g.pixels, g.width as ui32, g.height as ui32, 1, 0, 6);
+}
+
+// Writes `img` as a PNG file at `path`.
+pub void!io.IoError save(Arena* arena, str path, image.Image img) uses io {
+    ui8[] bytes = encode(arena, img);
+    io.File file = match (io.open(arena, path, io.Mode.Write)) {
+        ok(f) => f,
+        err(e) => {
+            return err(e);
+        },
+    };
+    defer file.close();
+    return file.write(bytes);
+}
+
 // ---- Tests: real files (dynamic codes, filters), and files built here (stored blocks) ----
 
-// A PNG file being built: its bytes, in an arena.
-struct Builder {
+// A PNG file being built for a test; its CRCs are left 0, since they are not checked.
+struct Maker {
     mut ui8[] bytes;
     mut usize len = 0;
 
@@ -332,7 +479,6 @@ struct Builder {
         }
     }
 
-    // A chunk; its CRC is left 0, since it is not checked.
     void chunk(str name, ui8[] body) {
         put32(body.len as ui32);
         tag(name);
@@ -365,8 +511,8 @@ struct Builder {
     }
 }
 
-Builder png(Arena* arena, ui32 w, ui32 h, ui32 depth, ui32 color, ui32 interlace) {
-    mut Builder b = Builder{ bytes: arena.alloc_slice(ui8, 4096) };
+Maker png(Arena* arena, ui32 w, ui32 h, ui32 depth, ui32 color, ui32 interlace) {
+    mut Maker b = Maker{ bytes: arena.alloc_slice(ui8, 4096) };
     ui8[8] signature = [137, 80, 78, 71, 13, 10, 26, 10];
     for (ui8 s in signature) {
         b.put(s as ui32);
@@ -384,19 +530,30 @@ Builder png(Arena* arena, ui32 w, ui32 h, ui32 depth, ui32 color, ui32 interlace
     return b;
 }
 
-Image decoded(Arena* arena, ui8[] data) {
+image.Image none_image(Arena* arena) {
+    return image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) };
+}
+
+image.Image decoded(Arena* arena, ui8[] data) {
     return match (decode(arena, data)) {
         ok(img) => img,
-        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
+        err(e) => none_image(arena),
+    };
+}
+
+image.ImageError failure(Arena* arena, ui8[] data) {
+    return match (decode(arena, data)) {
+        ok(img) => image.ImageError.Unreadable,  // not expected
+        err(e) => e,
     };
 }
 
 test "a PNG file with alpha, compressed with dynamic codes" {
     mut Arena arena = Arena.new(256 * KB);
     defer arena.free();
-    Image img = match (load(&arena, "packages/render/images/rgba.png")) {
+    image.Image img = match (load(&arena, "packages/image/images/rgba.png")) {
         ok(found) => found,
-        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
+        err(e) => none_image(&arena),
     };
     assert(img.width == 48 && img.height == 40);
     mut bool all = true;
@@ -413,9 +570,9 @@ test "a PNG file with alpha, compressed with dynamic codes" {
 test "a palette, with a transparent entry" {
     mut Arena arena = Arena.new(256 * KB);
     defer arena.free();
-    Image img = match (load(&arena, "packages/render/images/palette.png")) {
+    image.Image img = match (load(&arena, "packages/image/images/palette.png")) {
         ok(found) => found,
-        err(e) => Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) },
+        err(e) => none_image(&arena),
     };
     assert(img.width == 30 && img.height == 20);
     assert(img.at(5, 5) == 0xFFFF0000 && img.at(15, 5) == 0xFF00FF00 && img.at(15, 15) == 0xFF0000FF);
@@ -426,11 +583,11 @@ test "gray of 1 bit, and of 16 bits with a transparent value" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
     // 10 pixels of 1 bit: 2 bytes a row, the last 6 bits unused
-    mut Builder b = png(&arena, 10, 2, 1, 0, 0);
+    mut Maker b = png(&arena, 10, 2, 1, 0, 0);
     mut ui8[6] rows = [0, 0b10100000, 0b10000000, 0, 0xFF, 0b11000000];
     b.stored(rows[0..6]);
     b.chunk("IEND", rows[0..0]);
-    Image one = decoded(&arena, b.done());
+    image.Image one = decoded(&arena, b.done());
     assert(one.width == 10 && one.at(0, 0) == 0xFFFFFFFF && one.at(1, 0) == 0xFF000000 && one.at(2, 0) == 0xFFFFFFFF);
     assert(one.at(8, 0) == 0xFFFFFFFF && one.at(9, 0) == 0xFF000000 && one.at(9, 1) == 0xFFFFFFFF);
 
@@ -439,17 +596,17 @@ test "gray of 1 bit, and of 16 bits with a transparent value" {
     b.chunk("tRNS", key[0..2]);
     mut ui8[5] wide = [0, 0x12, 0x34, 0xAB, 0xCD];
     b.stored(wide[0..5]);
-    Image sixteen = decoded(&arena, b.done());
+    image.Image sixteen = decoded(&arena, b.done());
     assert(sixteen.at(0, 0) == 0x00121212 && sixteen.at(1, 0) == 0xFFABABAB);
 }
 
 test "gray and alpha, RGB of 16 bits, and the filters" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
-    mut Builder b = png(&arena, 2, 1, 8, 4, 0);
+    mut Maker b = png(&arena, 2, 1, 8, 4, 0);
     mut ui8[5] ga = [0, 200, 128, 50, 255];
     b.stored(ga[0..5]);
-    Image gray = decoded(&arena, b.done());
+    image.Image gray = decoded(&arena, b.done());
     assert(gray.at(0, 0) == 0x80C8C8C8 && gray.at(1, 0) == 0xFF323232);
 
     b = png(&arena, 1, 1, 16, 2, 0);
@@ -459,9 +616,9 @@ test "gray and alpha, RGB of 16 bits, and the filters" {
 
     // 3 gray pixels on 2 rows: Sub on the first, Up then Average and Paeth on the second
     b = png(&arena, 3, 3, 8, 0, 0);
-    mut ui8[12] filtered = [1, 10, 5, 5, 2, 1, 1, 1, 3, 10, 0, 0];
-    b.stored(filtered[0..12]);
-    Image f = decoded(&arena, b.done());
+    mut ui8[12] filters = [1, 10, 5, 5, 2, 1, 1, 1, 3, 10, 0, 0];
+    b.stored(filters[0..12]);
+    image.Image f = decoded(&arena, b.done());
     assert(f.at(0, 0) == 0xFF0A0A0A && f.at(1, 0) == 0xFF0F0F0F && f.at(2, 0) == 0xFF141414);
     assert(f.at(0, 1) == 0xFF0B0B0B && f.at(1, 1) == 0xFF101010 && f.at(2, 1) == 0xFF151515);
     // Average: 10 + (0 + 11) / 2 = 15, then 0 + (15 + 16) / 2 = 15, then 0 + (15 + 21) / 2 = 18
@@ -472,10 +629,10 @@ test "an interlaced image (Adam7)" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
     // 3 by 3, gray, pixel (x, y) = 10 * y + x: passes 1, 4, 5, 6 and 7 hold pixels
-    mut Builder b = png(&arena, 3, 3, 8, 0, 1);
+    mut Maker b = png(&arena, 3, 3, 8, 0, 1);
     mut ui8[17] passes = [0, 0, 0, 2, 0, 20, 22, 0, 1, 0, 21, 0, 10, 11, 12, 0, 0];
     b.stored(passes[0..15]);
-    Image img = decoded(&arena, b.done());
+    image.Image img = decoded(&arena, b.done());
     mut bool all = img.width == 3;
     for (i32 y in 0..3) {
         for (i32 x in 0..3) {
@@ -486,34 +643,92 @@ test "an interlaced image (Adam7)" {
     assert(all);
 }
 
-test "what is not a PNG file, or a damaged one" {
+test "what is not a PNG file, a damaged one, or a hostile one" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
-    bool not_png = match (load(&arena, "packages/render/fonts/OFL.txt")) {
+    bool unknown = match (load(&arena, "packages/image/sosu.toml")) {
         ok(img) => false,
-        err(e) => e == NotPng,
+        err(e) => e == image.ImageError.UnknownFormat,
     };
-    assert(not_png);
-    bool missing = match (load(&arena, "packages/render/images/none.png")) {
+    assert(unknown);
+    bool missing = match (load(&arena, "packages/image/images/none.png")) {
         ok(img) => false,
-        err(e) => e == Unreadable,
+        err(e) => e == image.ImageError.Unreadable,
     };
     assert(missing);
-    mut Builder b = png(&arena, 4, 4, 8, 0, 0);
+    mut Maker b = png(&arena, 4, 4, 8, 0, 0);
     mut ui8[5] short = [0, 1, 2, 3, 4];  // one row of the four
     b.stored(short[0..5]);
-    bool damaged = match (decode(&arena, b.done())) {
-        ok(img) => false,
-        err(e) => e == Damaged,
-    };
-    assert(damaged);
-    ui8[] real = match (io.read_bytes(&arena, "packages/render/images/rgba.png")) {
+    assert(failure(&arena, b.done()) == image.ImageError.Damaged);
+    ui8[] real = match (io.read_bytes(&arena, "packages/image/images/rgba.png")) {
         ok(bytes) => bytes,
         err(e) => arena.alloc_slice(ui8, 0),
     };
-    bool truncated = match (decode(&arena, real[0..real.len / 2])) {
-        ok(img) => false,
-        err(e) => e == Damaged,
-    };
-    assert(truncated);
+    assert(failure(&arena, real[0..real.len / 2]) == image.ImageError.Damaged);
+    // 16 384 by 16 384 is beyond the bounds; 16 000 by 4 000 is not, but 5 bytes of data
+    // cannot hold its 256 MB: both are refused before anything is allocated
+    b = png(&arena, 16384, 16384, 8, 6, 0);
+    b.stored(short[0..5]);
+    assert(failure(&arena, b.done()) == image.ImageError.TooLarge);
+    b = png(&arena, 16000, 4000, 8, 6, 0);
+    b.stored(short[0..5]);
+    assert(failure(&arena, b.done()) == image.ImageError.Damaged);
+}
+
+// ---- Tests of the writer ----
+
+test "an image written is read back, RGB when opaque, RGBA otherwise" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut image.Image img = image.create(&arena, 37, 23);
+    for (i32 y in 0..23) {
+        for (i32 x in 0..37) {
+            img.set(x, y, image.rgba((x * 7) as ui32, (y * 11) as ui32, (x * y) as ui32, 255));
+        }
+    }
+    ui8[] opaque = encode(&arena, img);
+    assert(opaque[25] == 2);  // RGB
+    mut image.Image back = decoded(&arena, opaque);
+    mut bool same = back.width == 37 && back.height == 23;
+    for (usize i in 0..img.pixels.len) {
+        same = same && back.pixels[i] == img.pixels[i];
+    }
+    assert(same);
+    img.set(3, 4, 0x80102030);
+    ui8[] alpha = encode_level(&arena, img, 9);
+    assert(alpha[25] == 6);  // RGBA
+    back = decoded(&arena, alpha);
+    same = back.width == 37;
+    for (usize i in 0..img.pixels.len) {
+        same = same && back.pixels[i] == img.pixels[i];
+    }
+    assert(same);
+    // smooth gradients: the filters leave little to compress
+    assert(opaque.len < 37 * 23 * 3 / 4);
+}
+
+test "a gray image, and an empty one" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    mut image.Gray g = image.create_gray(&arena, 5, 4);
+    for (i32 i in 0..20) {
+        g.pixels[i as usize] = (i * 13) as ui8;
+    }
+    ui8[] file = encode_gray(&arena, g);
+    assert(file[25] == 0);
+    image.Image back = decoded(&arena, file);
+    assert(back.width == 5 && back.at(4, 3) == 0xFF000000 | 0x010101 * (19 * 13) as ui32);
+    ui8[] empty = encode(&arena, image.create(&arena, 0, 0));
+    assert(is_png(empty) && failure(&arena, empty) == image.ImageError.Damaged);  // 0 by 0: no PNG reader takes it
+}
+
+// Wider than 65 535 pixels: the width takes 3 bytes of its 4 in the header (the reader stops at
+// `MAX_SIDE`, so the header is checked byte by byte).
+test "an image wider than 65 535 pixels is written whole" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    image.Image wide = image.Image{ width: 70000, height: 2, pixels: arena.alloc_slice(ui32, 140000) };
+    ui8[] file = encode(&arena, wide);
+    assert(file[16] == 0 && file[17] == 1 && file[18] == 0x11 && file[19] == 0x70);  // 70 000
+    assert(file[20] == 0 && file[21] == 0 && file[22] == 0 && file[23] == 2);
 }

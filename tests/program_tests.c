@@ -52,6 +52,10 @@ static const Case cases[] = {
     { "run --release", "overflow", "expected_release.txt", 0, NULL },
     { "run --release", "unsigned_floats", "expected_release.txt", 0, NULL },
     { "test", "testing", "expected.txt", 1, NULL },
+    { "test", "checks", "expected.txt", 1, NULL }, /* the package testing (spec §8.3) */
+    { "test", "images", "expected.txt", 0, NULL }, /* the package image (spec §8.2) */
+    { "test", "sounds", "expected.txt", 0, NULL }, /* the package audio (spec §8.2) */
+    { "test", "databases", "expected.txt", 0, NULL }, /* the packages db and sqlite (spec §8.2) */
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */
@@ -241,6 +245,13 @@ int main(int argc, char **argv) {
     test_bindgen(argv[1]);
     test_package(argv[1]);
     test_android(argv[1]);
+
+    /* `assert(a == b)` shows both sides, on the error output (spec §7.3) */
+    char *sides = read_text("build/checks.err");
+    CHECK(sides && strstr(sides, "assertion failed: square(2) == 5\n      left: 4\n     right: 5\n") &&
+              strstr(sides, "      left: \"Ada\\tLovelace\"\n") && strstr(sides, "      left: 0.30000000000000004\n"),
+          "checks: assert does not show both sides: %s", sides ? sides : "(nothing)");
+    free(sides);
 
     /* `copy` of the [link] section of tests/programs/linking */
     char *copied = read_text("tests/programs/linking/build/message.txt");

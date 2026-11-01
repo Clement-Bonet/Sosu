@@ -1,0 +1,298 @@
+// audio.device: the sound devices of the system, through SDL3 (`SDL_AudioStream`, the C
+// declarations of platform.sdl_c). A `Player` plays the sounds of its mixer, `sounds`: the
+// program calls `update()` often (each frame of a window, or every few milliseconds), which mixes
+// what the device will need next, `ahead_ms` in advance. A `Recorder` gives what a microphone
+// heard since its last `read`. SDL converts the samples to the format, rate and channels of the device; no
+// callback runs on the thread of the sound, so everything stays in the thread of the program.
+import std.io;
+import platform.sdl_c;
+import audio.audio;
+import audio.mixer;
+
+// The default device of the system, which follows the one the user chooses.
+pub ui32 DEFAULT_PLAYBACK = 0xFFFFFFFF;
+pub ui32 DEFAULT_RECORDING = 0xFFFFFFFE;
+
+// A device: its id, for `Output` and `Input`, and its name, as the system shows it.
+pub struct Device {
+    pub ui32 id;
+    pub str name;
+}
+
+// A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
+str copy_cstring(Arena* arena, ui8* text, usize limit) {
+    mut usize length = 0;
+    mut ui8[] bytes = arena.alloc_slice(ui8, 0);
+    unsafe {
+        while (length < limit && *(text + length) != 0) {
+            length += 1;
+        }
+        bytes = arena.alloc_slice(ui8, length);
+        for (usize i in 0..length) {
+            bytes[i] = *(text + i);
+        }
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
+}
+
+// What SDL said of its last failure (a device that does not open...), in `arena`.
+pub str last_error(Arena* arena) uses io {
+    unsafe {
+        return copy_cstring(arena, sdl_c.SDL_GetError(), 1024);
+    }
+}
+
+Device[] devices(Arena* arena, bool recording) uses io {
+    mut Device[] found = arena.alloc_slice(Device, 0);
+    unsafe {
+        if (!sdl_c.SDL_InitSubSystem(sdl_c.SDL_INIT_AUDIO)) {
+            return found;
+        }
+        mut i32 count = 0;
+        ui32* ids = recording ? sdl_c.SDL_GetAudioRecordingDevices(&count) : sdl_c.SDL_GetAudioPlaybackDevices(&count);
+        if (ids as ui64 != 0) {
+            found = arena.alloc_slice(Device, max(count, 0) as usize);
+            for (usize i in 0..found.len) {
+                ui32 id = *(ids + i);
+                ui8* name = sdl_c.SDL_GetAudioDeviceName(id);  // owned by SDL
+                found[i] = Device{ id: id, name: name as ui64 == 0 ? "" : copy_cstring(arena, name, 1024) };
+            }
+            sdl_c.SDL_free(ids as ui8*);
+        }
+        sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_AUDIO);
+    }
+    return found;
+}
+
+// The devices that play sound (speakers, headphones), and those that record it.
+pub Device[] playback_devices(Arena* arena) uses io {
+    return devices(arena, false);
+}
+
+pub Device[] recording_devices(Arena* arena) uses io {
+    return devices(arena, true);
+}
+
+// A device opened, with its stream: SDL converts between the stream and the device.
+struct Opened {
+    ui32 device;
+    sdl_c.SDL_AudioStream* stream;
+}
+
+Opened? open_stream(ui32 device, i32 rate, i32 channels) uses io {
+    mut sdl_c.SDL_AudioSpec spec = sdl_c.SDL_AudioSpec{ format: sdl_c.SDL_AUDIO_F32, channels: channels, freq: rate };
+    unsafe {
+        if (!sdl_c.SDL_InitSubSystem(sdl_c.SDL_INIT_AUDIO)) {
+            return none;
+        }
+        ui32 id = sdl_c.SDL_OpenAudioDevice(device, &spec);
+        if (id == 0) {
+            sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_AUDIO);
+            return none;
+        }
+        sdl_c.SDL_AudioStream* stream = sdl_c.SDL_CreateAudioStream(&spec, &spec);
+        if (stream as ui64 == 0) {
+            sdl_c.SDL_CloseAudioDevice(id);
+            sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_AUDIO);
+            return none;
+        }
+        if (!sdl_c.SDL_BindAudioStream(id, stream)) {
+            sdl_c.SDL_DestroyAudioStream(stream);
+            sdl_c.SDL_CloseAudioDevice(id);
+            sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_AUDIO);
+            return none;
+        }
+        sdl_c.SDL_ResumeAudioDevice(id);
+        return some(Opened{ device: id, stream: stream });
+    }
+}
+
+void close_stream(Opened o) uses io {
+    unsafe {
+        sdl_c.SDL_DestroyAudioStream(o.stream);
+        sdl_c.SDL_CloseAudioDevice(o.device);
+        sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_AUDIO);
+    }
+}
+
+// ---- Play ----
+
+// How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps
+// `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner).
+pub struct Output {
+    pub ui32 device = 0xFFFFFFFF;  // DEFAULT_PLAYBACK
+    pub i32 rate = 48000;
+    pub i32 channels = 2;
+    pub i32 ahead_ms = 60;
+}
+
+// The frames mixed at a time: about 10 ms, the steps of the changes of volume.
+usize BLOCK = 512;
+
+// A device that plays the sounds of its mixer, `sounds`.
+pub class Player {
+    pub mixer.Mixer* sounds;  // what it plays
+    Opened opened;
+    f32[] buffer;
+    i32 ahead;  // bytes kept queued
+    mut bool closed;
+
+    void init(Arena* arena, Opened opened, Output output) {
+        sounds = mixer.create(arena, output.rate, output.channels);
+        self.opened = opened;
+        buffer = arena.alloc_slice(f32, BLOCK * output.channels as usize);
+        ahead = (output.rate as i64 * output.ahead_ms as i64 / 1000) as i32 * output.channels * 4;
+        closed = false;
+    }
+
+    // Mixes what the device needs next; to call often.
+    pub void update() uses io {
+        if (closed) {
+            return;
+        }
+        unsafe {
+            mut i32 queued = sdl_c.SDL_GetAudioStreamQueued(opened.stream);
+            while (queued >= 0 && queued < ahead) {
+                sounds.mix(buffer);
+                i32 bytes = (buffer.len * 4) as i32;
+                if (!sdl_c.SDL_PutAudioStreamData(opened.stream, &buffer[0] as ui8*, bytes)) {
+                    return;
+                }
+                queued += bytes;
+            }
+        }
+    }
+
+    // The sound stops where it is (`resume` goes on from there).
+    pub void pause() uses io {
+        if (!closed) {
+            unsafe {
+                sdl_c.SDL_PauseAudioDevice(opened.device);
+            }
+        }
+    }
+
+    pub void resume() uses io {
+        if (!closed) {
+            unsafe {
+                sdl_c.SDL_ResumeAudioDevice(opened.device);
+            }
+        }
+    }
+
+    // Whether the device still has sound queued, mixed but not yet played.
+    pub bool pending() uses io {
+        if (closed) {
+            return false;
+        }
+        mut i32 queued = 0;
+        unsafe {
+            queued = sdl_c.SDL_GetAudioStreamQueued(opened.stream);
+        }
+        return queued > 0;
+    }
+
+    pub void close() uses io {
+        if (!closed) {
+            close_stream(opened);
+            closed = true;
+        }
+    }
+}
+
+// A player on the device of `output`, or none if it cannot be opened (`last_error` says why).
+pub Player*? open_player(Arena* arena, Output output) uses io
+    requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE && (output.channels == 1 || output.channels == 2) && output.ahead_ms > 0 && output.ahead_ms <= 2000
+{
+    return match (open_stream(output.device, output.rate, output.channels)) {
+        some(o) => some(arena.new(Player, arena, o, output)),
+        none => none,
+    };
+}
+
+// ---- Record ----
+
+// How a `Recorder` opens its device: the samples it gives are at `rate`, with `channels`.
+pub struct Input {
+    pub ui32 device = 0xFFFFFFFE;  // DEFAULT_RECORDING
+    pub i32 rate = 48000;
+    pub i32 channels = 1;
+}
+
+// A device that records, from the moment it is opened.
+pub class Recorder {
+    pub i32 rate;
+    pub i32 channels;
+    Opened opened;
+    mut bool closed;
+
+    void init(Opened opened, Input input) {
+        self.opened = opened;
+        rate = input.rate;
+        channels = input.channels;
+        closed = false;
+    }
+
+    // Fills `out` with what was recorded since the last read, as much as there is room for;
+    // gives the frames read (0 when nothing new came).
+    pub usize read(f32[] out) uses io
+        requires out.len % channels as usize == 0
+    {
+        if (closed || out.len == 0) {
+            return 0;
+        }
+        mut i32 bytes = 0;
+        unsafe {
+            bytes = sdl_c.SDL_GetAudioStreamData(opened.stream, &out[0] as ui8*, min(out.len * 4, 0x7FFFFFF0) as i32);
+        }
+        return bytes <= 0 ? 0 : bytes as usize / 4 / channels as usize;
+    }
+
+    // What was recorded since the last read, as a sound in `arena`.
+    pub audio.Sound take(Arena* arena) uses io {
+        mut i32 available = 0;
+        unsafe {
+            available = closed ? 0 : sdl_c.SDL_GetAudioStreamAvailable(opened.stream);
+        }
+        usize frames = max(available, 0) as usize / 4 / channels as usize;
+        audio.Sound s = audio.create(arena, rate, channels, frames);
+        usize got = read(s.samples);
+        return audio.part(s, 0, got);
+    }
+
+    pub void pause() uses io {
+        if (!closed) {
+            unsafe {
+                sdl_c.SDL_PauseAudioDevice(opened.device);
+            }
+        }
+    }
+
+    pub void resume() uses io {
+        if (!closed) {
+            unsafe {
+                sdl_c.SDL_ResumeAudioDevice(opened.device);
+            }
+        }
+    }
+
+    pub void close() uses io {
+        if (!closed) {
+            close_stream(opened);
+            closed = true;
+        }
+    }
+}
+
+// A recorder on the device of `input`, or none if it cannot be opened (`last_error` says why).
+pub Recorder*? open_recorder(Arena* arena, Input input) uses io
+    requires input.rate >= audio.MIN_RATE && input.rate <= audio.MAX_RATE && input.channels >= 1 && input.channels <= audio.MAX_CHANNELS
+{
+    return match (open_stream(input.device, input.rate, input.channels)) {
+        some(o) => some(arena.new(Recorder, o, input)),
+        none => none,
+    };
+}

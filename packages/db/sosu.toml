@@ -1,0 +1,6 @@
+# Databases (spec §8.2): the interface common to their drivers, as Go's `database/sql` or JDBC,
+# in Sosu. A driver is a package of its own (`sqlite`...), so that a program compiles and links
+# only those it uses.
+[package]
+name = "db"
+version = "0.1.0"

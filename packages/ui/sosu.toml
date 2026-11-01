@@ -6,4 +6,5 @@ version = "0.1.0"
 
 [dependencies]
 render = { path = "../render" }
+image = { path = "../image" }
 i18n = { path = "../i18n" }

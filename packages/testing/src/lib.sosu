@@ -1,0 +1,6 @@
+// testing: tests beyond `assert` (spec §8.3). Programs import `testing.check` (comparisons that
+// show what differs), `testing.bench` (benchmarks, measured by `sosuc test --bench`) and
+// `testing.fixture` (the files of a test).
+import testing.bench;
+import testing.check;
+import testing.fixture;

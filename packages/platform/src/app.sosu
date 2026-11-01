@@ -3,8 +3,9 @@
 // `render.canvas.Canvas` the size of the window.
 import platform.sdl;
 import platform.sdl_c;
+import platform.dialogs;
 import render.canvas;
-import render.image;
+import image.image;
 
 pub struct Config {
     pub str title;
@@ -69,6 +70,7 @@ pub enum Event {
     Maximized(bool on),  // the window was maximized, or restored
     LocaleChanged,  // the languages the user prefers changed: see `locales`
     SystemThemeChanged(bool dark),  // the user chose a light or a dark theme for the system
+    Dialog(dialogs.Answer answer),  // the answer of a file dialog (`platform.dialogs`)
 }
 
 // What a finger does.
@@ -481,6 +483,12 @@ pub i32 run(Config config, Handler* handler) uses io {
         frame.free();
         frame = Arena.new(4 * KB);
         while (sdl.poll(event)) {
+            if (dialogs.is_answer(event)) {  // from the thread of a dialog, maybe
+                if (!handler.on_event(Dialog(dialogs.receive(&frame, event)))) {
+                    running = false;
+                }
+                continue;
+            }
             if (event.kind == 0x8000) {  // SDL_EVENT_USER: a request of `minimize` or `toggle_maximize`
                 if (event.word5 == 1) {
                     sdl.minimize(window);

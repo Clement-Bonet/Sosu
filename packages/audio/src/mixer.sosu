@@ -1,0 +1,232 @@
+// audio.mixer: several sounds played together, each with its volume, panning, speed and loop,
+// into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads
+// directly. A sound of another rate than the mixer is read at its own speed, by linear
+// interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before.
+// A change of volume or panning moves over one buffer, so that it does not click. A mixer of one
+// channel ignores the panning, and averages the two channels of a stereo sound.
+import std.math;
+import std.vec;
+import audio.audio;
+
+// How a sound is played: `volume` 0 (silent) to 1 (as it is) and above; `pan` -1 (left) to 1
+// (right); `speed` 1 at its rate (2: an octave higher, and twice as short); `looping` from its
+// end to its start until it is stopped.
+pub struct Play {
+    pub f32 volume = 1.0;
+    pub f32 pan = 0.0;
+    pub f32 speed = 1.0;
+    pub bool looping = false;
+}
+
+// A sound being played.
+struct Voice {
+    ui32 id;
+    audio.Sound sound;
+    mut f64 position;  // in frames of the sound
+    mut f64 step;  // frames of the sound per frame of the mixer
+    mut f32 volume;
+    mut f32 pan;
+    mut bool looping;
+    mut f32 left;  // the gains of the last frame mixed
+    mut f32 right;
+    mut bool started;
+}
+
+// The gains of the left and right channels for `pan` and `volume`. A mono sound is placed with
+// equal power (cos and sin: -3 dB each in the middle); a sound of two channels is balanced (the
+// side it goes away from is lowered, the other kept).
+f32[2] gains(i32 channels, f32 volume, f32 pan) {
+    f32 p = max(-1.0, min(1.0, pan));
+    if (channels == 1) {
+        if (p == -1.0 || p == 1.0) {
+            return p < 0.0 ? [volume, 0.0] : [0.0, volume];  // cos(pi / 2) is not 0 in floats
+        }
+        f64 angle = (p as f64 + 1.0) * math.PI / 4.0;
+        return [volume * math.cos(angle) as f32, volume * math.sin(angle) as f32];
+    }
+    return [volume * min(1.0, 1.0 - p), volume * min(1.0, 1.0 + p)];
+}
+
+// The sound of `channels` channels (1 or 2) at `rate` frames per second, from its voices.
+pub class Mixer {
+    pub i32 rate;
+    pub i32 channels;
+    pub mut f32 volume;  // of everything, 1 by default
+    vec.Vec<Voice>* voices;
+    mut ui32 next_id;
+
+    void init(Arena* arena, i32 rate, i32 channels)
+        requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2)
+    {
+        self.rate = rate;
+        self.channels = channels;
+        volume = 1.0;
+        voices = vec.new(arena);
+        next_id = 1;
+    }
+
+    // Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
+    pub ui32 play(audio.Sound sound) {
+        return play_with(sound, Play{ });
+    }
+
+    pub ui32 play_with(audio.Sound sound, Play how)
+        requires how.speed > 0.0
+    {
+        ui32 id = next_id;
+        next_id = next_id == 0xFFFFFFFF ? 1 : next_id + 1;
+        f64 step = how.speed as f64 * sound.rate as f64 / rate as f64;
+        voices.push(Voice{ id: id, sound: sound, position: 0.0, step: step, volume: how.volume, pan: how.pan, looping: how.looping, left: 0.0, right: 0.0, started: false });
+        return id;
+    }
+
+    Voice*? find(ui32 id) {
+        for (usize i in 0..voices.len()) {
+            Voice* v = voices.at(i);
+            if (v.id == id) {
+                return some(v);
+            }
+        }
+        return none;
+    }
+
+    // Whether the sound `id` is still playing.
+    pub bool playing(ui32 id) {
+        return match (find(id)) {
+            some(v) => true,
+            none => false,
+        };
+    }
+
+    pub void set_volume(ui32 id, f32 v) {
+        match (find(id)) {
+            some(voice) => {
+                voice.volume = v;
+            },
+            none => { },
+        }
+    }
+
+    pub void set_pan(ui32 id, f32 pan) {
+        match (find(id)) {
+            some(voice) => {
+                voice.pan = pan;
+            },
+            none => { },
+        }
+    }
+
+    pub void set_speed(ui32 id, f32 speed)
+        requires speed > 0.0
+    {
+        match (find(id)) {
+            some(voice) => {
+                voice.step = speed as f64 * voice.sound.rate as f64 / rate as f64;
+            },
+            none => { },
+        }
+    }
+
+    pub void set_looping(ui32 id, bool looping) {
+        match (find(id)) {
+            some(voice) => {
+                voice.looping = looping;
+            },
+            none => { },
+        }
+    }
+
+    pub void stop(ui32 id) {
+        for (usize i in 0..voices.len()) {
+            if (voices.at(i).id == id) {
+                voices.remove(i);
+                return;
+            }
+        }
+    }
+
+    pub void stop_all() {
+        voices.clear();
+    }
+
+    // The number of sounds playing.
+    pub usize active() {
+        return voices.len();
+    }
+
+    // Fills `out` (`out.len / channels` frames) with the voices mixed, each sample cut to -1..1;
+    // the voices that end are removed.
+    pub void mix(f32[] out)
+        requires out.len % channels as usize == 0
+    {
+        for (usize i in 0..out.len) {
+            out[i] = 0.0;
+        }
+        usize frames = out.len / channels as usize;
+        mut usize i = 0;
+        while (i < voices.len()) {
+            if (add(voices.at(i), out, frames)) {
+                i += 1;
+            } else {
+                voices.remove(i);
+            }
+        }
+        for (usize j in 0..out.len) {
+            out[j] = max(-1.0, min(1.0, out[j] * volume));
+        }
+    }
+
+    // Adds `v` to the `frames` frames of `out`; false once it has ended.
+    bool add(Voice* v, f32[] out, usize frames) {
+        audio.Sound s = v.sound;
+        usize length = s.frames();
+        if (length == 0) {
+            return false;
+        }
+        f32[2] target = channels == 1 ? [v.volume, v.volume] : gains(s.channels, v.volume, v.pan);
+        f32 left0 = v.started ? v.left : target[0];
+        f32 right0 = v.started ? v.right : target[1];
+        v.started = true;
+        for (usize f in 0..frames) {
+            if (v.position >= length as f64) {
+                if (!v.looping) {
+                    return false;
+                }
+                v.position = math.fmod(v.position, length as f64);
+            }
+            f32 t = (f + 1) as f32 / frames as f32;
+            f32 gl = left0 + (target[0] - left0) * t;
+            f32 gr = right0 + (target[1] - right0) * t;
+            usize at = v.position as usize;
+            f32 frac = (v.position - at as f64) as f32;
+            usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
+            f32 l = sample(s, at, next, frac, 0);
+            f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
+            if (channels == 1) {
+                out[f] += (gl * l + gr * r) * 0.5;
+            } else {
+                out[2 * f] += gl * l;
+                out[2 * f + 1] += gr * r;
+            }
+            v.position += v.step;
+        }
+        v.left = target[0];
+        v.right = target[1];
+        return v.looping || v.position < length as f64;
+    }
+}
+
+// The sample of `channel` between the frames `at` and `next` of `s`, `frac` of the way.
+f32 sample(audio.Sound s, usize at, usize next, f32 frac, usize channel) {
+    usize c = s.channels as usize;
+    f32 a = s.samples[at * c + channel];
+    if (frac == 0.0) {
+        return a;
+    }
+    return a + (s.samples[next * c + channel] - a) * frac;
+}
+
+// A mixer of `channels` channels at `rate`, in `arena`.
+pub Mixer* create(Arena* arena, i32 rate, i32 channels) {
+    return arena.new(Mixer, arena, rate, channels);
+}

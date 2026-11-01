@@ -1,0 +1,362 @@
+// image.ops: images transformed: cropped, resized (bilinear or Lanczos), rotated by quarter
+// turns or by any angle, flipped. Each gives a new image in an arena. What blends pixels (resize,
+// rotate) works on premultiplied alpha, so that a transparent pixel lends no color to its
+// neighbors.
+import std.math;
+import image.image;
+
+// How `resize` weighs the pixels around each point: a triangle of one pixel each way (bilinear),
+// or the Lanczos window of three, sharper, which may ring a little at the edges of contrast.
+pub enum Filter {
+    Bilinear,
+    Lanczos,
+}
+
+// The part of `img` in the rectangle of `width` by `height` pixels at (x, y), cut to the image.
+pub image.Image crop(Arena* arena, image.Image img, i32 x, i32 y, i32 width, i32 height) {
+    i32 x0 = min(max(x, 0), img.width);
+    i32 y0 = min(max(y, 0), img.height);
+    i32 x1 = max(min(x as i64 + max(width, 0) as i64, img.width as i64) as i32, x0);
+    i32 y1 = max(min(y as i64 + max(height, 0) as i64, img.height as i64) as i32, y0);
+    mut image.Image out = image.create(arena, x1 - x0, y1 - y0);
+    for (i32 row in y0..y1) {
+        for (i32 col in x0..x1) {
+            out.pixels[((row - y0) * out.width + col - x0) as usize] = img.pixels[(row * img.width + col) as usize];
+        }
+    }
+    return out;
+}
+
+// `img` mirrored left to right.
+pub image.Image flip_horizontal(Arena* arena, image.Image img) {
+    mut image.Image out = image.create(arena, img.width, img.height);
+    for (i32 y in 0..img.height) {
+        for (i32 x in 0..img.width) {
+            out.pixels[(y * img.width + x) as usize] = img.pixels[(y * img.width + img.width - 1 - x) as usize];
+        }
+    }
+    return out;
+}
+
+// `img` mirrored top to bottom.
+pub image.Image flip_vertical(Arena* arena, image.Image img) {
+    mut image.Image out = image.create(arena, img.width, img.height);
+    for (i32 y in 0..img.height) {
+        for (i32 x in 0..img.width) {
+            out.pixels[(y * img.width + x) as usize] = img.pixels[((img.height - 1 - y) * img.width + x) as usize];
+        }
+    }
+    return out;
+}
+
+// `img` turned a quarter clockwise: its height becomes its width.
+pub image.Image rotate_90(Arena* arena, image.Image img) {
+    mut image.Image out = image.create(arena, img.height, img.width);
+    for (i32 y in 0..img.height) {
+        for (i32 x in 0..img.width) {
+            out.pixels[(x * out.width + img.height - 1 - y) as usize] = img.pixels[(y * img.width + x) as usize];
+        }
+    }
+    return out;
+}
+
+// `img` turned upside down.
+pub image.Image rotate_180(Arena* arena, image.Image img) {
+    mut image.Image out = image.create(arena, img.width, img.height);
+    usize n = img.pixels.len;
+    for (usize i in 0..n) {
+        out.pixels[i] = img.pixels[n - 1 - i];
+    }
+    return out;
+}
+
+// `img` turned a quarter counterclockwise.
+pub image.Image rotate_270(Arena* arena, image.Image img) {
+    mut image.Image out = image.create(arena, img.height, img.width);
+    for (i32 y in 0..img.height) {
+        for (i32 x in 0..img.width) {
+            out.pixels[((img.width - 1 - x) * out.width + y) as usize] = img.pixels[(y * img.width + x) as usize];
+        }
+    }
+    return out;
+}
+
+// `img` turned by `degrees` clockwise, in an image grown to hold all of it; the corners it does
+// not cover are transparent. Each pixel is the bilinear blend of the four pixels around the
+// point it comes from. Quarter turns are exact (`rotate_90`...). The grown image must be within
+// `image.fits`, as every image created (`image.create`).
+pub image.Image rotate(Arena* arena, image.Image img, f64 degrees) {
+    f64 turn = math.fmod(degrees, 360.0) + (degrees < 0.0 ? 360.0 : 0.0);
+    if (turn == 0.0 || turn == 360.0) {
+        return image.copy_of(arena, img);
+    }
+    if (turn == 90.0) {
+        return rotate_90(arena, img);
+    }
+    if (turn == 180.0) {
+        return rotate_180(arena, img);
+    }
+    if (turn == 270.0) {
+        return rotate_270(arena, img);
+    }
+    f64 angle = math.to_radians(turn);
+    f64 c = math.cos(angle);
+    f64 s = math.sin(angle);
+    f64 w = img.width as f64;
+    f64 h = img.height as f64;
+    // the size of the turned image, without the error of rounding that adds a pixel
+    i32 ow = math.ceil(abs(w * c) + abs(h * s) - 0.000001) as i32;
+    i32 oh = math.ceil(abs(w * s) + abs(h * c) - 0.000001) as i32;
+    mut image.Image out = image.create(arena, max(ow, 0), max(oh, 0));
+    image.Image p = image.premultiplied(arena, img);
+    for (i32 y in 0..out.height) {
+        f64 dy = y as f64 + 0.5 - out.height as f64 / 2.0;
+        for (i32 x in 0..out.width) {
+            f64 dx = x as f64 + 0.5 - out.width as f64 / 2.0;
+            // the point of `img` that comes here, turned back, in pixel coordinates
+            f64 sx = c * dx + s * dy + w / 2.0 - 0.5;
+            f64 sy = c * dy - s * dx + h / 2.0 - 0.5;
+            f64 fx = math.floor(sx);
+            f64 fy = math.floor(sy);
+            i32 ix = fx as i32;
+            i32 iy = fy as i32;
+            if (ix < -1 || iy < -1 || ix >= img.width || iy >= img.height) {
+                continue;
+            }
+            f64 tx = sx - fx;
+            f64 ty = sy - fy;
+            mut ui32 pixel = 0;
+            for (i32 bits in [24, 16, 8, 0]) {
+                ui32 shift = bits as ui32;
+                f64 top = channel(p.at(ix, iy), shift) * (1.0 - tx) + channel(p.at(ix + 1, iy), shift) * tx;
+                f64 bottom = channel(p.at(ix, iy + 1), shift) * (1.0 - tx) + channel(p.at(ix + 1, iy + 1), shift) * tx;
+                pixel = pixel | to_byte(top * (1.0 - ty) + bottom * ty) << shift;
+            }
+            out.pixels[(y * out.width + x) as usize] = image.unpremultiply(pixel);
+        }
+    }
+    return out;
+}
+
+f64 channel(ui32 pixel, ui32 shift) {
+    return (pixel >> shift & 0xFF) as f64;
+}
+
+// A value rounded to a byte, 0 to 255.
+ui32 to_byte(f64 v) {
+    return v <= 0.0 ? 0 : v >= 255.0 ? 255 : (v + 0.5) as ui32;
+}
+
+// ---- Resize: separable filters ----
+
+f64 kernel(Filter filter, f64 x) {
+    f64 d = abs(x);
+    return match (filter) {
+        Bilinear => d < 1.0 ? 1.0 - d : 0.0,
+        Lanczos => d < 0.0000001 ? 1.0 : d < 3.0 ? 3.0 * math.sin(math.PI * d) * math.sin(math.PI * d / 3.0) / (math.PI * math.PI * d * d) : 0.0,
+    };
+}
+
+f64 radius(Filter filter) {
+    return match (filter) {
+        Bilinear => 1.0,
+        Lanczos => 3.0,
+    };
+}
+
+// The weights that make each of `size` points of a row (or column) from `source` points: point
+// `i` takes `count[i]` source points from `first[i]`, weighted by `w[i * taps..]`, adding up
+// to 1. Shrinking widens the filter by as much, so that every source point counts.
+struct Weights {
+    mut i32[] first;
+    mut i32[] count;
+    mut f32[] w;
+    i32 taps;
+}
+
+Weights weights(Arena* arena, i32 source, i32 size, Filter filter) {
+    f64 scale = source as f64 / size as f64;
+    f64 stretch = max(scale, 1.0);
+    f64 support = radius(filter) * stretch;
+    i32 taps = math.ceil(support) as i32 * 2 + 1;
+    mut Weights ws = Weights{ first: arena.alloc_slice(i32, size as usize), count: arena.alloc_slice(i32, size as usize), w: arena.alloc_slice(f32, size as usize * taps as usize), taps: taps };
+    for (i32 i in 0..size) {
+        f64 center = (i as f64 + 0.5) * scale;
+        i32 left = max(math.floor(center - support + 0.5) as i32, 0);
+        i32 right = min(math.floor(center + support + 0.5) as i32, source);
+        i32 n = min(right - left, taps);
+        usize start = i as usize * taps as usize;
+        mut f64 total = 0.0;
+        for (i32 j in 0..n) {
+            f64 k = kernel(filter, ((left + j) as f64 + 0.5 - center) / stretch);
+            ws.w[start + j as usize] = k as f32;
+            total += k;
+        }
+        if (total != 0.0) {
+            for (i32 j in 0..n) {
+                ws.w[start + j as usize] = (ws.w[start + j as usize] as f64 / total) as f32;
+            }
+        }
+        ws.first[i] = left;
+        ws.count[i] = n;
+    }
+    return ws;
+}
+
+// `img` resized to `width` by `height` pixels with `filter`, its rows then its columns.
+pub image.Image resize(Arena* arena, image.Image img, i32 width, i32 height, Filter filter)
+    requires image.fits(width as i64, height as i64)
+{
+    mut image.Image out = image.create(arena, width, height);
+    if (width == 0 || height == 0 || img.width <= 0 || img.height <= 0) {
+        return out;
+    }
+    image.Image p = image.premultiplied(arena, img);
+    Weights across = weights(arena, img.width, width, filter);
+    Weights down = weights(arena, img.height, height, filter);
+    // the rows resized, 4 channels of f32 a pixel: A, R, G, B
+    mut f32[] rows = arena.alloc_slice(f32, img.height as usize * width as usize * 4);
+    for (i32 y in 0..img.height) {
+        for (i32 x in 0..width) {
+            mut f32[4] sum = [0.0; 4];
+            usize start = x as usize * across.taps as usize;
+            for (i32 j in 0..across.count[x]) {
+                ui32 px = p.pixels[(y * img.width + across.first[x] + j) as usize];
+                f32 k = across.w[start + j as usize];
+                sum[0] += (px >> 24) as f32 * k;
+                sum[1] += (px >> 16 & 0xFF) as f32 * k;
+                sum[2] += (px >> 8 & 0xFF) as f32 * k;
+                sum[3] += (px & 0xFF) as f32 * k;
+            }
+            usize at = (y as usize * width as usize + x as usize) * 4;
+            for (usize c in 0..4) {
+                rows[at + c] = sum[c];
+            }
+        }
+    }
+    for (i32 y in 0..height) {
+        usize start = y as usize * down.taps as usize;
+        for (i32 x in 0..width) {
+            mut f32[4] sum = [0.0; 4];
+            for (i32 j in 0..down.count[y]) {
+                usize at = ((down.first[y] + j) as usize * width as usize + x as usize) * 4;
+                f32 k = down.w[start + j as usize];
+                for (usize c in 0..4) {
+                    sum[c] += rows[at + c] * k;
+                }
+            }
+            ui32 a = to_byte(sum[0] as f64);
+            ui32 r = min(to_byte(sum[1] as f64), a);
+            ui32 g = min(to_byte(sum[2] as f64), a);
+            ui32 b = min(to_byte(sum[3] as f64), a);
+            out.pixels[(y * width + x) as usize] = image.unpremultiply(a << 24 | r << 16 | g << 8 | b);
+        }
+    }
+    return out;
+}
+
+// ---- Tests ----
+
+// An image of 4 by 3 whose pixel (x, y) is opaque, of red x and green y.
+image.Image numbered(Arena* arena, i32 w, i32 h) {
+    mut image.Image img = image.create(arena, w, h);
+    for (i32 y in 0..h) {
+        for (i32 x in 0..w) {
+            img.set(x, y, image.rgba(x as ui32, y as ui32, 0, 255));
+        }
+    }
+    return img;
+}
+
+test "crop, cut to the image" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    image.Image img = numbered(&arena, 4, 3);
+    image.Image part = crop(&arena, img, 1, 1, 2, 5);
+    assert(part.width == 2 && part.height == 2 && part.at(0, 0) == image.rgba(1, 1, 0, 255) && part.at(1, 1) == image.rgba(2, 2, 0, 255));
+    image.Image none = crop(&arena, img, 9, -4, 3, 3);
+    assert(none.width == 0 && none.height == 0 && none.pixels.len == 0);
+    image.Image all = crop(&arena, img, -2, -2, 100, 100);
+    assert(all.width == 4 && all.height == 3 && all.at(3, 2) == img.at(3, 2));
+}
+
+test "flips and quarter turns" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    image.Image img = numbered(&arena, 4, 3);
+    assert(flip_horizontal(&arena, img).at(0, 1) == img.at(3, 1));
+    assert(flip_vertical(&arena, img).at(1, 0) == img.at(1, 2));
+    image.Image right = rotate_90(&arena, img);
+    // clockwise: the top left corner goes to the top right, the bottom left to the top left
+    assert(right.width == 3 && right.height == 4 && right.at(2, 0) == img.at(0, 0) && right.at(0, 0) == img.at(0, 2));
+    image.Image left = rotate_270(&arena, img);
+    assert(left.width == 3 && left.at(0, 3) == img.at(0, 0) && left.at(0, 0) == img.at(3, 0));
+    assert(rotate_180(&arena, img).at(0, 0) == img.at(3, 2));
+    image.Image twice = rotate_90(&arena, right);
+    mut bool same = true;
+    image.Image half = rotate_180(&arena, img);
+    for (usize i in 0..img.pixels.len) {
+        same = same && twice.pixels[i] == half.pixels[i];
+    }
+    assert(same);
+    assert(rotate(&arena, img, 90.0).at(2, 0) == right.at(2, 0) && rotate(&arena, img, -90.0).at(0, 0) == left.at(0, 0));
+    assert(rotate(&arena, img, 720.0).at(3, 2) == img.at(3, 2));
+}
+
+test "rotate by an angle" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    mut image.Image img = image.create(&arena, 10, 10);
+    for (usize i in 0..img.pixels.len) {
+        img.pixels[i] = 0xFF2040FF;
+    }
+    image.Image turned = rotate(&arena, img, 45.0);
+    // a square turned by 45 degrees: as wide as its diagonal, its corners transparent
+    assert(turned.width == 15 && turned.height == 15);
+    assert(turned.at(0, 0) == 0 && turned.at(14, 14) == 0);
+    assert(turned.at(7, 7) == 0xFF2040FF && turned.at(7, 1) >> 24 > 0 && turned.at(7, 0) >> 24 < 255);
+}
+
+test "resize, bilinear and Lanczos" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    image.Image img = numbered(&arena, 4, 3);
+    // the same size: the same pixels, with either filter
+    for (Filter f in [Filter.Bilinear, Filter.Lanczos]) {
+        image.Image same = resize(&arena, img, 4, 3, f);
+        mut bool all = true;
+        for (usize i in 0..img.pixels.len) {
+            all = all && same.pixels[i] == img.pixels[i];
+        }
+        assert(all);
+    }
+    // a flat image stays flat, shrunk or enlarged
+    mut image.Image flat = image.create(&arena, 9, 7);
+    for (usize i in 0..flat.pixels.len) {
+        flat.pixels[i] = 0xC0608040;
+    }
+    for (Filter f in [Filter.Bilinear, Filter.Lanczos]) {
+        image.Image small = resize(&arena, flat, 4, 3, f);
+        image.Image big = resize(&arena, flat, 20, 15, f);
+        mut bool all = small.width == 4 && big.height == 15;
+        for (ui32 p in small.pixels) {
+            all = all && p == 0xC0608040;
+        }
+        for (ui32 p in big.pixels) {
+            all = all && p == 0xC0608040;
+        }
+        assert(all);
+    }
+    // two pixels made four: bilinear goes from one to the other in steps
+    mut image.Image two = image.create(&arena, 2, 1);
+    two.set(0, 0, 0xFF000000);
+    two.set(1, 0, 0xFFC80000);
+    image.Image four = resize(&arena, two, 4, 1, Filter.Bilinear);
+    assert(four.at(0, 0) == 0xFF000000 && four.at(1, 0) == 0xFF320000 && four.at(2, 0) == 0xFF960000 && four.at(3, 0) == 0xFFC80000);
+    // a transparent pixel lends no color: half of white, half of transparent black, shrunk
+    two.set(0, 0, 0xFFFFFFFF);
+    two.set(1, 0, 0x00000000);
+    ui32 one = resize(&arena, two, 1, 1, Filter.Bilinear).at(0, 0);
+    assert(one == 0x80FFFFFF);
+    assert(resize(&arena, img, 0, 5, Filter.Lanczos).pixels.len == 0);
+}

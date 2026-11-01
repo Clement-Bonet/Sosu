@@ -1,0 +1,2 @@
+# Third-party C sources given with the packages (SQLite, stb_vorbis): not code of Sosu.
+packages/*/native/vendor/

@@ -7,7 +7,7 @@
 // one under the other, or side by side between `row()` and `end_row()`.
 import i18n.catalog;
 import render.canvas;
-import render.image;
+import image.image;
 import render.truetype;
 
 // Text typed or edited: at most 256 bytes of UTF-8.

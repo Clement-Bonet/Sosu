@@ -1,0 +1,142 @@
+// Sound on the default devices of the system (spec §8.2): the devices listed, a chord that moves
+// from the left to the right, a file given (WAV or Ogg Vorbis) or else a melody, then 3 seconds
+// recorded from the microphone, played back and written to build/recording.wav.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/sound`, or
+// `sosuc run examples/sound -- C:\Windows\Media\Alarm01.wav`.
+import std.io;
+import std.math;
+import std.os;
+import std.text;
+import std.time;
+import audio.audio;
+import audio.mixer;
+import audio.device;
+import audio.wav;
+import audio.ogg;
+
+i32 RATE = 48000;
+
+// Keeps the device fed for `ms` milliseconds.
+void wait_ms(device.Player* player, ui64 ms) uses io, time {
+    ui64 end = time.monotonic_ms() + ms;
+    while (time.monotonic_ms() < end) {
+        player.update();
+        time.sleep_ms(5);
+    }
+}
+
+// Until every sound has ended, and the device has played what was mixed.
+void wait_end(device.Player* player) uses io, time {
+    while (player.sounds.active() > 0) {
+        player.update();
+        time.sleep_ms(5);
+    }
+    while (player.pending()) {
+        time.sleep_ms(5);
+    }
+}
+
+// The frequency of the note `semitones` above A 440.
+f64 note(i32 semitones) {
+    return 440.0 * math.pow(2.0, semitones as f64 / 12.0);
+}
+
+// A note of `seconds`, starting and stopping without a click.
+audio.Sound soft_tone(Arena* arena, f64 frequency, f64 seconds) {
+    return audio.faded(arena, audio.tone(arena, RATE, frequency, seconds, 0.2), 1200);
+}
+
+void list_devices(Arena* arena) uses io {
+    for (device.Device d in device.playback_devices(arena)) {
+        io.print("playback: {} ({})", d.name, d.id);
+    }
+    for (device.Device d in device.recording_devices(arena)) {
+        io.print("recording: {} ({})", d.name, d.id);
+    }
+}
+
+void play_chord(Arena* arena, device.Player* player) uses io, time {
+    io.print("a chord, from the left to the right");
+    mut ui32[3] ids = [0, 0, 0];
+    mut i32[3] notes = [0, 4, 7];  // A major
+    for (usize i in 0..3) {
+        ids[i] = player.sounds.play_with(soft_tone(arena, note(notes[i]), 3.2), mixer.Play{ pan: -1.0 });
+    }
+    for (i32 step in 0..=60) {
+        for (ui32 id in ids) {
+            player.sounds.set_pan(id, -1.0 + step as f32 / 30.0);
+        }
+        wait_ms(player, 50);
+    }
+    wait_end(player);
+}
+
+void play_file(Arena* arena, device.Player* player, str path) uses io, time {
+    audio.Sound!audio.AudioError read = text.ends_with(text.to_lower(arena, path), ".ogg") ? ogg.load(arena, path) : wav.load(arena, path);
+    match (read) {
+        ok(s) => {
+            io.print("{}: {} Hz, {} channels, {} s", path, s.rate, s.channels, s.seconds());
+            player.sounds.play(s);  // read at its own rate by the mixer
+            wait_end(player);
+        },
+        err(e) => io.print("{}: {}", path, audio.message(e)),
+    }
+}
+
+void play_melody(Arena* arena, device.Player* player) uses io, time {
+    io.print("a melody");
+    mut i32[8] notes = [0, 4, 7, 12, 7, 4, 0, -12];
+    for (i32 n in notes) {
+        player.sounds.play(soft_tone(arena, note(n), 0.3));
+        wait_ms(player, 250);
+    }
+    wait_end(player);
+}
+
+void record(Arena* arena, device.Player* player) uses io, time {
+    device.Recorder* recorder = match (device.open_recorder(arena, device.Input{ rate: RATE })) {
+        some(r) => r,
+        none => {
+            io.print("no microphone: {}", device.last_error(arena));
+            return;
+        },
+    };
+    io.print("recording 3 seconds: speak");
+    audio.Sound room = audio.create(arena, RATE, 1, 3 * RATE as usize);
+    mut usize got = 0;
+    while (got < room.frames()) {
+        got += recorder.read(room.samples[got..room.samples.len]);
+        time.sleep_ms(10);
+    }
+    recorder.close();
+    io.print("recorded: peak {}; played back", room.peak());
+    match (wav.save(arena, "build/recording.wav", room)) {
+        ok => io.print("written to build/recording.wav"),
+        err(e) => io.print("build/recording.wav cannot be written"),
+    }
+    player.sounds.play(room);
+    wait_end(player);
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    list_devices(&arena);
+    device.Player* player = match (device.open_player(&arena, device.Output{ rate: RATE })) {
+        some(p) => p,
+        none => {
+            io.print("no sound device: {}", device.last_error(&arena));
+            return 1;
+        },
+    };
+    defer player.close();
+    play_chord(&arena, player);
+    str[] args = os.args(&arena);
+    if (args.len > 0) {
+        play_file(&arena, player, args[0]);
+    } else {
+        play_melody(&arena, player);
+    }
+    record(&arena, player);
+    return 0;
+}

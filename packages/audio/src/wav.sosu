@@ -1,0 +1,318 @@
+// audio.wav: WAV files (RIFF), read and written in Sosu. Read: integers of 8 (unsigned), 16, 24
+// and 32 bits and floats of 32 and 64 bits, in the plain header or the extensible one
+// (WAVE_FORMAT_EXTENSIBLE), 1 to `audio.MAX_CHANNELS` channels; the chunks it does not know are
+// skipped. Every read is checked: a damaged file gives `Damaged`, never a read outside of its
+// bytes; a data chunk longer than the file is cut to it (as a recording stopped before its header
+// was finished), and a sound beyond `audio.fits` is refused before its samples are allocated.
+// Written: the 44 bytes of the plain header, then the samples, integers rounded and cut to their
+// range.
+import std.io;
+import std.math;
+import audio.audio;
+
+// How the samples of a file are written.
+pub enum Encoding {
+    Pcm8,  // unsigned, 128 for silence
+    Pcm16,
+    Pcm24,
+    Float32,
+}
+
+ui32 le32(ui8[] data, usize at) {
+    if (at + 4 > data.len) {
+        return 0;
+    }
+    return data[at] as ui32 | data[at + 1] as ui32 << 8 | data[at + 2] as ui32 << 16 | data[at + 3] as ui32 << 24;
+}
+
+ui32 le16(ui8[] data, usize at) {
+    if (at + 2 > data.len) {
+        return 0;
+    }
+    return data[at] as ui32 | data[at + 1] as ui32 << 8;
+}
+
+bool is_tag(ui8[] data, usize at, str tag) {
+    if (at + 4 > data.len) {
+        return false;
+    }
+    for (usize i in 0..4) {
+        if (data[at + i] != tag.bytes[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether `data` starts as a WAV file.
+pub bool is_wav(ui8[] data) {
+    return is_tag(data, 0, "RIFF") && is_tag(data, 8, "WAVE");
+}
+
+// What the fmt chunk says.
+struct Format {
+    ui32 tag;  // 1 integers, 3 floats (the subformat of the extensible header)
+    ui32 channels;
+    ui32 rate;
+    ui32 block;  // bytes per frame
+    ui32 bits;  // per sample
+}
+
+// The format of the fmt chunk of `size` bytes at `at`, or none if it is not one Sosu reads.
+Format!audio.AudioError format_of(ui8[] data, usize at, usize size) {
+    if (size < 16) {
+        return err(audio.AudioError.Damaged);
+    }
+    mut ui32 tag = le16(data, at);
+    ui32 bits = le16(data, at + 14);
+    if (tag == 0xFFFE) {  // WAVE_FORMAT_EXTENSIBLE: the tag is the start of the GUID of the subformat
+        if (size < 40 || le16(data, at + 16) < 22) {
+            return err(audio.AudioError.Damaged);
+        }
+        tag = le16(data, at + 24);
+    }
+    Format f = Format{ tag: tag, channels: le16(data, at + 2), rate: le32(data, at + 4), block: le16(data, at + 12), bits: bits };
+    if (f.tag != 1 && f.tag != 3) {
+        return err(audio.AudioError.Unsupported);  // compressed: ADPCM, mu-law...
+    }
+    bool ints = f.tag == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+    bool floats = f.tag == 3 && (bits == 32 || bits == 64);
+    if (!ints && !floats) {
+        return err(audio.AudioError.Unsupported);
+    }
+    if (f.channels == 0 || f.rate == 0 || f.block != f.channels * (bits / 8)) {
+        return err(audio.AudioError.Damaged);
+    }
+    if (f.channels > audio.MAX_CHANNELS as ui32 || f.rate < audio.MIN_RATE as ui32 || f.rate > audio.MAX_RATE as ui32) {
+        return err(audio.AudioError.Unsupported);
+    }
+    return ok(f);
+}
+
+// The sample at `at` of `f`, from -1 to 1.
+f32 sample_at(ui8[] data, usize at, Format f) {
+    if (f.tag == 3) {
+        if (f.bits == 32) {
+            return f32_of(le32(data, at));
+        }
+        ui64 bits = le32(data, at) as ui64 | le32(data, at + 4) as ui64 << 32;
+        return f64_of(bits) as f32;
+    }
+    if (f.bits == 8) {
+        return (data[at] as i32 - 128) as f32 / 128.0;
+    }
+    if (f.bits == 16) {
+        return le16(data, at) as i16 as f32 / 32768.0;
+    }
+    if (f.bits == 24) {
+        return ((le32_of3(data, at) << 8) as i32 >> 8) as f32 / 8388608.0;
+    }
+    return (le32(data, at) as i32 as f64 / 2147483648.0) as f32;
+}
+
+// The float of the bits `bits` (IEEE 754), and back: computed, exactly, rather than read through
+// a pointer of another type, which the C compiler may reorder (strict aliasing).
+f32 f32_of(ui32 bits) {
+    f64 sign = bits >> 31 != 0 ? -1.0 : 1.0;
+    i32 e = (bits >> 23 & 0xFF) as i32;
+    f64 m = (bits & 0x7FFFFF) as f64;
+    if (e == 255) {
+        return (m == 0.0 ? sign * math.infinity() : math.nan()) as f32;
+    }
+    if (e == 0) {
+        return (sign * m * math.exp2(-149.0)) as f32;
+    }
+    return (sign * (m + 8388608.0) * math.exp2((e - 150) as f64)) as f32;
+}
+
+f64 f64_of(ui64 bits) {
+    f64 sign = bits >> 63 != 0 ? -1.0 : 1.0;
+    i32 e = (bits >> 52 & 0x7FF) as i32;
+    f64 m = (bits & 0xFFFFFFFFFFFFF) as f64;
+    if (e == 2047) {
+        return m == 0.0 ? sign * math.infinity() : math.nan();
+    }
+    if (e == 0) {
+        return sign * m * math.exp2(-1074.0);
+    }
+    return sign * (m + 4503599627370496.0) * math.exp2((e - 1075) as f64);
+}
+
+ui32 bits_of(f32 x) {
+    f64 v = x as f64;
+    if (math.is_nan(v)) {
+        return 0x7FC00000;
+    }
+    ui32 sign = v < 0.0 ? 0x80000000 : 0;
+    f64 a = abs(v);
+    if (a == 0.0) {
+        return 0;
+    }
+    if (math.is_infinite(a)) {
+        return sign | 0x7F800000;
+    }
+    mut i32 e = math.floor(math.log2(a)) as i32;
+    if (math.exp2(e as f64) > a) {
+        e -= 1;
+    }
+    if (math.exp2((e + 1) as f64) <= a) {
+        e += 1;
+    }
+    if (e < -126) {
+        return sign | (a * math.exp2(149.0)) as ui32;  // subnormal
+    }
+    ui32 m = ((a / math.exp2(e as f64) - 1.0) * 8388608.0) as ui32;
+    return sign | (e + 127) as ui32 << 23 | m;
+}
+
+ui32 le32_of3(ui8[] data, usize at) {
+    return data[at] as ui32 | data[at + 1] as ui32 << 8 | data[at + 2] as ui32 << 16;
+}
+
+// The sound of the WAV file `data`.
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data) {
+    if (!is_wav(data)) {
+        return err(audio.AudioError.UnknownFormat);
+    }
+    mut Format? format = none;
+    mut usize at = 12;
+    while (at + 8 <= data.len) {
+        usize size = le32(data, at + 4) as usize;
+        usize body = at + 8;
+        usize room = data.len - body;
+        if (is_tag(data, at, "fmt ")) {
+            if (size > room) {
+                return err(audio.AudioError.Damaged);
+            }
+            format = some(try format_of(data, body, size));
+        } else if (is_tag(data, at, "data")) {
+            Format f = match (format) {
+                some(f) => f,
+                none => {
+                    return err(audio.AudioError.Damaged);  // the format comes first
+                },
+            };
+            usize frames = min(size, room) / f.block as usize;
+            if (!audio.fits(f.rate as i64, f.channels as i64, frames as i64)) {
+                return err(audio.AudioError.TooLarge);
+            }
+            audio.Sound s = audio.create(arena, f.rate as i32, f.channels as i32, frames);
+            usize step = (f.bits / 8) as usize;
+            for (usize i in 0..s.samples.len) {
+                s.samples[i] = sample_at(data, body + i * step, f);
+            }
+            return ok(s);
+        }
+        if (size > room) {
+            return err(audio.AudioError.Damaged);
+        }
+        at = body + size + (size & 1);  // a chunk of an odd size is padded to an even one
+    }
+    return err(audio.AudioError.Damaged);  // no data chunk
+}
+
+// The sound of the WAV file at `path`.
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(audio.AudioError.Unreadable);
+        },
+    };
+    return decode(arena, data);
+}
+
+// ---- Write ----
+
+void put16(ui8[] out, usize at, ui32 v) {
+    out[at] = (v & 0xFF) as ui8;
+    out[at + 1] = (v >> 8 & 0xFF) as ui8;
+}
+
+void put32(ui8[] out, usize at, ui32 v) {
+    put16(out, at, v & 0xFFFF);
+    put16(out, at + 2, v >> 16);
+}
+
+void put_tag(ui8[] out, usize at, str tag) {
+    for (usize i in 0..4) {
+        out[at + i] = tag.bytes[i];
+    }
+}
+
+// `x` (-1 to 1) as an integer of `bits` bits, rounded and cut to its range.
+i32 quantize(f32 x, i32 bits) {
+    f64 scale = (1 << bits - 1) as f64;
+    f64 v = math.round(x as f64 * scale);
+    return max(-scale, min(scale - 1.0, v)) as i32;
+}
+
+// `s` as a WAV file of 16 bits.
+pub ui8[] encode(Arena* arena, audio.Sound s) {
+    return encode_as(arena, s, Pcm16);
+}
+
+pub ui8[] encode_as(Arena* arena, audio.Sound s, Encoding encoding)
+    requires s.samples.len * 8 < 0xFFFFFF00
+{
+    ui32 bytes = match (encoding) {
+        Pcm8 => 1,
+        Pcm16 => 2,
+        Pcm24 => 3,
+        Float32 => 4,
+    };
+    usize size = s.samples.len * bytes as usize;
+    mut ui8[] out = arena.alloc_slice(ui8, 44 + size + (size & 1));
+    ui32 channels = s.channels as ui32;
+    put_tag(out, 0, "RIFF");
+    put32(out, 4, (36 + size + (size & 1)) as ui32);
+    put_tag(out, 8, "WAVE");
+    put_tag(out, 12, "fmt ");
+    put32(out, 16, 16);
+    put16(out, 20, encoding == Float32 ? 3 : 1);
+    put16(out, 22, channels);
+    put32(out, 24, s.rate as ui32);
+    put32(out, 28, s.rate as ui32 * channels * bytes);
+    put16(out, 32, channels * bytes);
+    put16(out, 34, bytes * 8);
+    put_tag(out, 36, "data");
+    put32(out, 40, size as ui32);
+    for (usize i in 0..s.samples.len) {
+        usize at = 44 + i * bytes as usize;
+        f32 x = s.samples[i];
+        match (encoding) {
+            Pcm8 => {
+                out[at] = (quantize(x, 8) + 128) as ui8;
+            },
+            Pcm16 => {
+                put16(out, at, quantize(x, 16) as ui32 & 0xFFFF);
+            },
+            Pcm24 => {
+                ui32 v = quantize(x, 24) as ui32;
+                put16(out, at, v & 0xFFFF);
+                out[at + 2] = (v >> 16 & 0xFF) as ui8;
+            },
+            Float32 => {
+                put32(out, at, bits_of(x));
+            },
+        }
+    }
+    return out;
+}
+
+// Writes `s` as a WAV file of 16 bits at `path`.
+pub void!io.IoError save(Arena* arena, str path, audio.Sound s) uses io {
+    return save_as(arena, path, s, Pcm16);
+}
+
+pub void!io.IoError save_as(Arena* arena, str path, audio.Sound s, Encoding encoding) uses io {
+    ui8[] bytes = encode_as(arena, s, encoding);
+    io.File file = match (io.open(arena, path, io.Mode.Write)) {
+        ok(f) => f,
+        err(e) => {
+            return err(e);
+        },
+    };
+    defer file.close();
+    return file.write(bytes);
+}
