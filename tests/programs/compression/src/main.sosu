@@ -113,6 +113,22 @@ i32 main() uses io {
     read_gzip(&arena, "gzip", bytes_of_hex(&arena, "1f8b0800000000000003cb48cdc9c9070086a6103605000000"));
     read_gzip(&arena, "gzip with a name", bytes_of_hex(&arena, "1f8b08082154e26a00036e616d65642e74787400cb48cdc9c957c8402701e3513d8d17000000"));
     read_gzip(&arena, "two members", bytes_of_hex(&arena, "1f8b08000000000000034b4c4a0600c2412435030000001f8b08000000000000034b494d030061e1c40c03000000"));
+    // 1000 members of 3 bytes each, as a file written by parts (bgzip) holds
+    ui8[] member = gzip.compress(&arena, "abc".bytes);
+    mut ui8[] members = arena.alloc_slice(ui8, member.len * 1000);
+    mut ui8[] expected = arena.alloc_slice(ui8, 3000);
+    for (usize m in 0..1000) {
+        for (usize i in 0..member.len) {
+            members[m * member.len + i] = member[i];
+        }
+        for (usize i in 0..3) {
+            expected[m * 3 + i] = "abc".bytes[i];
+        }
+    }
+    match (gzip.decompress(&arena, members)) {
+        ok(back) => io.print("1000 members: {} bytes, the same: {}", back.len, same(back, expected)),
+        err(e) => io.print("1000 members: {}", deflate.message(e)),
+    }
 
     // damaged
     read_zlib(&arena, "cut", bytes_of_hex(&arena, "789ccb48cdc9"));

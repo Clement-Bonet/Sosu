@@ -40,8 +40,8 @@ Estimated again from the pace above. The versions: `0.2.0` with the packages of 
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
-| 4 | Standard library | Done (§8.0, §8.3, §10.11). Remains: the dialogs and the sound tried by hand (below) | 0 |
-| 5 | Quality | Done (§13.1, §13.2), on Windows. Remains: the first runs in the CI of the fuzzing (`make fuzz`), of `make bench`, and of the commands run without a shell on Linux, macOS, Android and iOS | 0 to 50 k |
+| 4 | Standard library | Done (§8.0, §8.3, §10.11), the dialogs and the sound tried by hand on Windows 11 | 0 |
+| 5 | Quality | Done (§13.1, §13.2): the CI of 0.3.0 passes on Linux (gcc, clang), macOS (with the iOS simulator), Windows and Android, with the fuzzing (`make fuzz`, and `make fuzz-ogg` for stb_vorbis) and `make bench` | 0 |
 | 6 | Tooling | Begun: the reference of `core`, `std` and the packages of `packages/` is generated (`src/docgen`, not yet `sosuc doc` for any package); the rest unchanged | 200 to 350 k |
 | 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
@@ -51,7 +51,7 @@ In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro q
 
 What tokens do not buy, and sets the pace as much:
 
-- The tests by hand: the dialogs and the sound of `platform`, the examples run on an Android phone, iOS on an iPhone (a Mac is needed).
+- The tests by hand: the examples run on an Android phone, iOS on an iPhone (a Mac is needed). The dialogs and the sound are tried on Windows 11, not yet on Linux nor macOS.
 - The accounts and certificates of signed binaries (Apple developer program, a code-signing certificate for Windows), which cost money.
 - The 0.x versions tried by others than their authors, for a few weeks, before 1.0 (§13.1).
 

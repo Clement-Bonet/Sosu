@@ -79,6 +79,7 @@ usize? skip_header(ui8[] data, usize at) {
 pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
     mut checksum.Crc32Table table = checksum.crc32_table();
     mut ui8[] all = arena.alloc_slice(ui8, 0);
+    mut usize len = 0;  // the bytes of `all` filled; it doubles, so that many members stay linear
     mut usize at = 0;
     while (true) {
         usize start = match (skip_header(data, at)) {
@@ -96,22 +97,26 @@ pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
         if (crc != le32(data, end) || (done.bytes.len as ui64 & 0xFFFFFFFF) as ui32 != le32(data, end + 4)) {
             return err(deflate.CompressError.WrongChecksum);
         }
-        if (all.len == 0) {
+        if (len == 0) {
             all = done.bytes;
+            len = all.len;
         } else {
-            mut ui8[] joined = arena.alloc_slice(ui8, all.len + done.bytes.len);
-            for (usize i in 0..all.len) {
-                joined[i] = all[i];
+            if (len + done.bytes.len > all.len) {
+                mut ui8[] grown = arena.alloc_slice(ui8, max(all.len * 2, len + done.bytes.len));
+                for (usize i in 0..len) {
+                    grown[i] = all[i];
+                }
+                all = grown;
             }
             for (usize i in 0..done.bytes.len) {
-                joined[all.len + i] = done.bytes[i];
+                all[len + i] = done.bytes[i];
             }
-            all = joined;
+            len += done.bytes.len;
         }
         at = end + 8;
         if (at >= data.len) {
             break;
         }
     }
-    return ok(all);
+    return ok(all[0..len]);
 }
