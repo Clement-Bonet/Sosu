@@ -1,0 +1,11 @@
+# SQLite (spec §8.2): a driver of `db` on the C sources of SQLite 3.54.1 (its amalgamation,
+# public domain), given with the package: nothing to install. A database is a file.
+[package]
+name = "sqlite"
+version = "0.1.0"
+
+[link]
+c = ["native/sqlite.c"]  # includes native/vendor/sqlite3.c
+
+[dependencies]
+db = { path = "../db" }

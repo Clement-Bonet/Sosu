@@ -58,3 +58,17 @@ under their own licenses.
   length or more than 2^24 comments (CVE-2023-45675 and CVE-2023-45676). The other faults
   reported against 1.22 on hostile files, by the same review of GitHub Security Lab (2023), are
   not fixed: the decoder's memory is bounded, but a hostile file can still crash it.
+
+## SQLite
+
+- Files: `packages/sqlite/native/vendor/sqlite3.c` and `sqlite3.h` (version 3.54.1), compiled
+  into the programs that use the `sqlite` package (through `packages/sqlite/native/sqlite.c`)
+- Source: <https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip> (2 990 966 bytes,
+  SHA3-256 `92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30`, as
+  <https://www.sqlite.org/download.html> gives it); the other files of the archive (`shell.c`,
+  `sqlite3ext.h`) are not kept
+- Written by D. Richard Hipp and the developers of SQLite
+- License: public domain (<https://www.sqlite.org/copyright.html>), with no condition
+- Not changed: its options are set by `native/sqlite.c` before it includes the file
+  (`SQLITE_THREADSAFE=2`, `SQLITE_DQS=0`, `SQLITE_DEFAULT_FOREIGN_KEYS=1`,
+  `SQLITE_OMIT_LOAD_EXTENSION`...)
