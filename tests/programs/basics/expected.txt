@@ -27,3 +27,7 @@ t
 é
 3 letters, 5 bytes
 first even = 2
+4: a digit
+x: not a digit, empty: empty
+names: 3 false true, rows: 4 0
+a pointer is as large as a usize: true

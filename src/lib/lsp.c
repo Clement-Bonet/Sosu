@@ -581,6 +581,7 @@ static void find_expr(Find *f, const Expr *e) {
         }
         break;
     case EXPR_TRY: find_expr(f, e->as.inner); break;
+    case EXPR_TYPE: find_type(f, e->as.type_expr); break;
     case EXPR_ARRAY:
         for (size_t i = 0; i < e->as.array.count; i++) find_expr(f, e->as.array.items[i]);
         find_expr(f, e->as.array.repeat);

@@ -63,6 +63,7 @@ typedef struct {
     char *name;
     bool done;
     MethodInfo *method; /* a method with type parameters of its own (`fn` is its `generic`) */
+    size_t previous;    /* the instance before it of the same function, as its index + 1; 0: none */
 } FnInstance;
 
 typedef struct {
@@ -73,7 +74,9 @@ typedef struct {
     Buf protos; /* function prototypes */
     Buf code;   /* function definitions */
     VEC(TypeEntry) types;
+    PtrMap type_index; /* a type: its entry in `types` */
     VEC(FnInstance) fn_instances;
+    PtrMap last_instance; /* a function or a method: its last instance, as an index + 1 */
     size_t instances_done; /* the instances of generic types generated, in sema->instances */
     CodegenOptions options;
     int lambdas; /* lambdas generated: `L_<n>` */
@@ -175,15 +178,17 @@ static char *generic_method_name(Gen *g, const Expr *e, MethodInfo *method) {
 /* The instance of the generic function `fn` (of `method`, if not NULL) for the arguments
    recorded in the callee `e`, requested once. */
 static char *instance_name(Gen *g, const Expr *e, FnInfo *fn, MethodInfo *method) {
-    for (size_t i = 0; i < g->fn_instances.count; i++) {
-        const FnInstance *inst = &g->fn_instances.items[i];
+    const void *key = method ? (const void *)method : (const void *)fn;
+    size_t *last = ptrmap_get(&g->last_instance, key);
+    for (size_t i = last ? *last : 0; i > 0; i = g->fn_instances.items[i - 1].previous) {
+        const FnInstance *inst = &g->fn_instances.items[i - 1];
         if (inst->fn != fn || inst->method != method) continue;
         bool same = true;
         for (size_t k = 0; k < fn->param_count; k++) same &= inst->args[k] == e->type_values[k];
         for (size_t k = 0; k < fn->effect_param_count; k++) same &= inst->effects[k] == e->effect_values[k];
         if (same) return sosu_strdup(inst->name);
     }
-    FnInstance inst = { fn, NULL, NULL, NULL, false, method };
+    FnInstance inst = { fn, NULL, NULL, NULL, false, method, last ? *last : 0 };
     inst.args = sosu_alloc((fn->param_count + 1) * sizeof *inst.args);
     inst.effects = sosu_alloc((fn->effect_param_count + 1) * sizeof *inst.effects);
     Buf name = {0};
@@ -201,6 +206,7 @@ static char *instance_name(Gen *g, const Expr *e, FnInfo *fn, MethodInfo *method
     }
     inst.name = name.items;
     SOSU_VEC_PUSH(&g->fn_instances, inst);
+    ptrmap_put(&g->last_instance, key, g->fn_instances.count);
     return sosu_strdup(inst.name);
 }
 
@@ -257,10 +263,8 @@ static void mangle(Gen *g, Buf *out, const Type *type) {
 /* ---- Types ---- */
 
 static TypeEntry *find_type(Gen *g, const Type *type) {
-    for (size_t i = 0; i < g->types.count; i++) {
-        if (g->types.items[i].type == type) return &g->types.items[i];
-    }
-    return NULL;
+    size_t *index = ptrmap_get(&g->type_index, type);
+    return index ? &g->types.items[*index] : NULL;
 }
 
 /* The C name of a struct-like type, with its forward typedef (no definition). */
@@ -278,6 +282,7 @@ static const char *struct_name(Gen *g, const Type *type) {
     }
     TypeEntry added = { type, name, false, NULL };
     SOSU_VEC_PUSH(&g->types, added);
+    ptrmap_put(&g->type_index, type, g->types.count - 1);
     if (type->tag == T_FN) {
         Buf params = {0};
         for (size_t i = 0; i < type->as.fn.param_count; i++) {
@@ -313,6 +318,7 @@ static const char *c_type(Gen *g, const Type *type) {
         char *name = sosu_format("%s*", c_type(g, type->as.inner));
         TypeEntry added = { type, name, true, NULL };
         SOSU_VEC_PUSH(&g->types, added);
+        ptrmap_put(&g->type_index, type, g->types.count - 1);
         return name;
     }
     default:
@@ -2675,6 +2681,8 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
         free(g.types.items[i].copier);
     }
     free(g.types.items);
+    ptrmap_free(&g.type_index);
+    ptrmap_free(&g.last_instance);
     for (size_t i = 0; i < g.fn_instances.count; i++) {
         free(g.fn_instances.items[i].args);
         free(g.fn_instances.items[i].effects);

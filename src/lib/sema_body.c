@@ -1171,6 +1171,11 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
         return check_match(b, e, expected, false);
     case EXPR_ARRAY:
         return check_array(b, e, expected);
+    case EXPR_TYPE: {
+        Diagnostic *d = sema_error_expr(b, "E0333", e, "a type is not a value");
+        diag_help(d, "a type is given to a call that takes one, as `arena.alloc_slice(ui8*, n)`");
+        return sema_error_type(b);
+    }
     case EXPR_TRY: {
         Type *type = sema_check_expr(b, e->as.inner, NULL);
         if (sema_is_error(type)) return type;

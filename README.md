@@ -157,7 +157,7 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   parser      syntax analysis (recursive descent)
   ui_parser   the .ui.sosu files (spec §10.2): uses the helpers of parser.c (parser_internal.h)
   path        file path helpers
-  shell       folders (native calls) and the commands run through the system shell (C compiler, git)
+  shell       folders (native calls) and the programs run with their arguments, without a shell (C compiler, git)
   manifest    sosu.toml parser
   git         git dependencies and sosu.lock
   program     loading of packages, dependencies and imported modules
@@ -308,8 +308,8 @@ merged only once it builds and passes the tests everywhere.
   bracket), so one mistake gives one message.
 - The syntax trees live in an arena freed at once; names point into the source text.
 - Only libc is used: the compiler cannot list a folder, so it loads the modules reachable by
-  `import` from the entry file. It calls the C compiler and `git` through the system shell, like a
-  user would.
+  `import` from the entry file. It runs the C compiler and `git` with their arguments
+  (CreateProcess, or fork and execvp), never through a shell.
 
 ## License
 

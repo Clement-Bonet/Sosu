@@ -189,7 +189,8 @@ typedef struct {
     int lib;      /* --lib: 1 a static library, 2 a shared one (spec §9.2); 0 a program */
     const Target *target; /* --target: a phone, or this desktop */
     CodegenOptions checks;
-    char *run_args; /* `sosuc run ... -- args`: given to the program, quoted (spec §8.2, std.os) */
+    char **run_args; /* `sosuc run ... -- args`: given to the program (spec §8.2, std.os) */
+    int run_count;
     bool bench;     /* sosuc test --bench: the benchmarks of `testing.bench` are measured (spec §8.3) */
     bool update;    /* sosuc test --update: the golden files of `testing.fixture` are written again */
 } BuildOptions;
@@ -313,7 +314,7 @@ static char *find_ndk(void) {
     return found;
 }
 
-/* The clang of the NDK for `target`, or NULL after reporting that there is no NDK. */
+/* The clang of the NDK, or NULL after reporting that there is no NDK. */
 static char *android_clang(const Target *target) {
     char *ndk = find_ndk();
     if (!ndk) {
@@ -323,7 +324,7 @@ static char *android_clang(const Target *target) {
     }
 #if defined(_WIN32)
     const char *host = "windows-x86_64";
-    const char *suffix = ".cmd";
+    const char *suffix = ".exe";
 #elif defined(__APPLE__)
     const char *host = "darwin-x86_64";
     const char *suffix = "";
@@ -331,8 +332,8 @@ static char *android_clang(const Target *target) {
     const char *host = "linux-x86_64";
     const char *suffix = "";
 #endif
-    char *clang = sosu_format("%s/toolchains/llvm/prebuilt/%s/bin/%s%d-clang%s", ndk, host, target->triple, ANDROID_API,
-                              suffix);
+    (void)target; /* chosen by --target, as `<triple><api>-clang`, a script, does */
+    char *clang = sosu_format("%s/toolchains/llvm/prebuilt/%s/bin/clang%s", ndk, host, suffix);
     free(ndk);
     if (!shell_file_exists(clang)) {
         fprintf(stderr, "sosuc: `%s` was not found: the NDK seems incomplete\n", clang);
@@ -472,88 +473,95 @@ static void append(char **text, const char *fmt, const char *value) {
     *text = joined;
 }
 
-/* ` "value"`, quoted for the shell of `shell_run`: cmd and the C library of Windows, or sh. */
-static void append_quoted(char **text, const char *value) {
-    size_t length = strlen(value), size = 0;
-    char *quoted = sosu_alloc(2 * length + 4);
-    quoted[size++] = ' ';
-    quoted[size++] = '"';
-    for (size_t i = 0; i < length; i++) {
-#ifdef _WIN32
-        if (value[i] == '"') {
-            for (size_t k = i; k > 0 && value[k - 1] == '\\'; k--) quoted[size++] = '\\'; /* doubled before a quote */
-            quoted[size++] = '\\';
-        }
-#else
-        if (strchr("\"\\$`", value[i])) quoted[size++] = '\\';
-#endif
-        quoted[size++] = value[i];
-    }
-#ifdef _WIN32
-    for (size_t k = length; k > 0 && value[k - 1] == '\\'; k--) quoted[size++] = '\\'; /* before the closing quote */
-#endif
-    quoted[size++] = '"';
-    quoted[size] = '\0';
-    char *joined = sosu_format("%s%s", *text, quoted);
-    free(*text);
-    free(quoted);
-    *text = joined;
-}
-
-/* The arguments that make the C compiler link the libraries. */
-/* The C files of the packages ([link] c), after their folders and defines: ` -I"inc" -DX "a.c"`. */
-static char *source_arguments(const Links *links, bool msvc) {
-    char *args = sosu_strdup("");
+/* The folders of headers and the defines of the packages' C files (spec §9.1). */
+static void add_source_flags(Command *command, const Links *links, bool msvc) {
     for (size_t i = 0; i < links->includes.count; i++) {
         char *native = shell_path(links->includes.items[i]);
-        append(&args, msvc ? " /I\"%s\"" : " -I\"%s\"", native);
+        command_addf(command, msvc ? "/I%s" : "-I%s", native);
         free(native);
     }
-    for (size_t i = 0; i < links->defines.count; i++) append(&args, msvc ? " /D%s" : " -D%s", links->defines.items[i]);
-    for (size_t i = 0; i < links->sources.count; i++) {
-        char *native = shell_path(links->sources.items[i]);
-        append(&args, " \"%s\"", native);
-        free(native);
-    }
-    return args;
+    for (size_t i = 0; i < links->defines.count; i++) command_addf(command, msvc ? "/D%s" : "-D%s", links->defines.items[i]);
 }
 
-/* Their objects in `dir`, for a static library: ` "dir/a.obj"`. */
-static char *source_objects(const Links *links, const char *dir, const char *extension) {
-    char *args = sosu_strdup("");
-    for (size_t i = 0; i < links->sources.count; i++) {
-        const char *path = links->sources.items[i];
-        const char *slash = strrchr(path, '/');
-        const char *back = strrchr(path, '\\');
-        const char *base = back && (!slash || back > slash) ? back + 1 : slash ? slash + 1 : path;
-        const char *dot = strrchr(base, '.');
-        char *object = sosu_format("%s/%.*s%s", dir, (int)(dot ? (size_t)(dot - base) : strlen(base)), base, extension);
-        char *native = shell_path(object);
-        append(&args, " \"%s\"", native);
+/* The C files of the packages, from `from` (all of them: 0) to `to`. */
+static void add_source_files(Command *command, const Links *links, size_t from, size_t to) {
+    for (size_t i = from; i < to; i++) {
+        char *native = shell_path(links->sources.items[i]);
+        command_add(command, native);
         free(native);
+    }
+}
+
+static void add_sources(Command *command, const Links *links, bool msvc) {
+    add_source_flags(command, links, msvc);
+    add_source_files(command, links, 0, links->sources.count);
+}
+
+/* The object of a C file of the packages in `dir`, for a static library: `dir/a.obj`. New string. */
+static char *source_object(const char *path, const char *dir, const char *extension) {
+    const char *slash = strrchr(path, '/');
+    const char *back = strrchr(path, '\\');
+    const char *base = back && (!slash || back > slash) ? back + 1 : slash ? slash + 1 : path;
+    const char *dot = strrchr(base, '.');
+    char *object = sosu_format("%s/%.*s%s", dir, (int)(dot ? (size_t)(dot - base) : strlen(base)), base, extension);
+    char *native = shell_path(object);
+    free(object);
+    return native;
+}
+
+static void add_source_objects(Command *command, const Links *links, const char *dir, const char *extension) {
+    for (size_t i = 0; i < links->sources.count; i++) {
+        char *object = source_object(links->sources.items[i], dir, extension);
+        command_add(command, object);
         free(object);
     }
-    return args;
 }
 
-static char *link_arguments(const Links *links, bool msvc) {
-    char *args = sosu_strdup("");
+/* The libraries of the [link] sections; for MSVC after `/link`, which the options of the linker
+   that follow need too. */
+static void add_link_arguments(Command *command, const Links *links, bool msvc) {
     if (msvc) {
-        if (links->libs.count == 0 && links->paths.count == 0) return args;
-        append(&args, "%s", " /link");
+        command_add(command, "/link");
         for (size_t i = 0; i < links->paths.count; i++) {
             char *native = shell_path(links->paths.items[i]);
-            append(&args, " /LIBPATH:\"%s\"", native);
+            command_addf(command, "/LIBPATH:%s", native);
             free(native);
         }
-        for (size_t i = 0; i < links->libs.count; i++) append(&args, " \"%s.lib\"", links->libs.items[i]);
-        return args;
+        for (size_t i = 0; i < links->libs.count; i++) command_addf(command, "%s.lib", links->libs.items[i]);
+        return;
     }
-    for (size_t i = 0; i < links->paths.count; i++) append(&args, " -L\"%s\"", links->paths.items[i]);
-    for (size_t i = 0; i < links->libs.count; i++) append(&args, " -l%s", links->libs.items[i]);
-    for (size_t i = 0; i < links->frameworks.count; i++) append(&args, " -framework %s", links->frameworks.items[i]);
-    return args;
+    for (size_t i = 0; i < links->paths.count; i++) command_addf(command, "-L%s", links->paths.items[i]);
+    for (size_t i = 0; i < links->libs.count; i++) command_addf(command, "-l%s", links->libs.items[i]);
+    for (size_t i = 0; i < links->frameworks.count; i++) {
+        command_add(command, "-framework");
+        command_add(command, links->frameworks.items[i]);
+    }
 }
+
+static void add_all(Command *command, const char *const *args) {
+    for (const char *const *arg = args; *arg; arg++) command_add(command, *arg);
+}
+
+/* Runs `command` and frees it: true if it succeeded. */
+static bool run(Command *command) {
+    int status = command_run(command);
+    command_free(command);
+    return status == 0;
+}
+
+#ifdef _WIN32
+static void print_file(const char *path, FILE *out);
+
+/* Runs `command` with its output and errors in `log`, shown if it fails (MSVC writes the name of
+   each file it compiles), then frees it. */
+static bool run_logged(Command *command, const char *log) {
+    command->out = command->err = log;
+    bool ok = run(command);
+    if (!ok) print_file(log, stderr);
+    remove(log);
+    return ok;
+}
+#endif
 
 static bool copy_file(const char *from, const char *to) {
     FILE *in = fopen(from, "rb");
@@ -586,59 +594,31 @@ static bool copy_files(const Links *links, const char *build_dir) {
     return true;
 }
 
-#ifdef _WIN32
-/* A .bat script that runs `commands` with MSVC, found like build.bat does when cl.exe is not
-   already on the PATH. */
-static char *msvc_script_for(const char *commands, const char *arch) {
-    return sosu_format(
-        "@echo off\r\n"
-        "%s"
-        "set \"VSWHERE=%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\\vswhere.exe\"\r\n"
-        "if not exist \"%%VSWHERE%%\" goto :no_cl\r\n"
-        "for /f \"usebackq tokens=*\" %%%%i in (`\"%%VSWHERE%%\" -latest -products * -requires "
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set \"VSDIR=%%%%i\"\r\n"
-        "if not defined VSDIR goto :no_cl\r\n"
-        "set \"PATH=%%PATH%%;%%ProgramFiles(x86)%%\\Microsoft Visual Studio\\Installer\"\r\n"
-        "call \"%%VSDIR%%\\VC\\Auxiliary\\Build\\%s\" %s >nul || goto :no_cl\r\n"
-        ":have_cl\r\n"
-        "%s"
-        "exit /b 0\r\n"
-        ":no_cl\r\n"
-        "echo sosuc: no C compiler found: install Visual Studio with the C++ tools%s, or set SOSU_CC 1>&2\r\n"
-        "exit /b 2\r\n",
-        arch ? "" : "where cl >nul 2>nul && goto :have_cl\r\n", arch ? "vcvarsall.bat" : "vcvars64.bat", arch ? arch : "",
-        commands, arch ? " of the architecture of the target (ARM64 or x64)" : "");
-}
-
-static char *msvc_script(const char *commands) { return msvc_script_for(commands, NULL); }
-#endif
-
-/* The C compiler of a desktop target, and the options that choose its target: false, after
-   saying what is missing (spec §11.6). Not used for MSVC, which `compile_c` runs itself. */
-static bool desktop_compiler(const Target *target, char **cc, char **flags) {
+/* The C compiler of a desktop target, and the options that choose its target, added to `command`:
+   false, after saying what is missing (spec §11.6). Not used for MSVC, which `compile_c` runs itself. */
+static bool desktop_compiler(const Target *target, Command *command) {
     const char *given = getenv("SOSU_CC");
     bool has_cc = given && given[0];
-    *flags = sosu_strdup("");
     const char *system = target_system(target);
     const char *arch = target_arch(target);
     const char *host = target_system(&host_target);
     if (target->os == TARGET_HOST || (strcmp(system, host) == 0 && strcmp(arch, target_arch(&host_target)) == 0)) {
-        *cc = sosu_strdup(has_cc ? given : "cc");
+        command_add(command, has_cc ? given : "cc");
         return true;
     }
     if (strcmp(system, host) == 0 && strcmp(system, "macos") == 0) {
-        *cc = sosu_strdup(has_cc ? given : "clang");
-        free(*flags);
-        *flags = sosu_strdup(strcmp(arch, "x64") == 0 ? " -arch x86_64" : strcmp(arch, "arm64") == 0 ? " -arch arm64"
-                                                                        : " -arch arm64 -arch x86_64");
+        command_add(command, has_cc ? given : "clang");
+        const char *x64[] = { "-arch", "x86_64", NULL }, *arm64[] = { "-arch", "arm64", NULL };
+        const char *both[] = { "-arch", "arm64", "-arch", "x86_64", NULL };
+        add_all(command, strcmp(arch, "x64") == 0 ? x64 : strcmp(arch, "arm64") == 0 ? arm64 : both);
         return true;
     }
     if (strcmp(system, host) == 0 && strcmp(system, "linux") == 0) {
-        *cc = sosu_strdup(has_cc ? given : strcmp(arch, "arm64") == 0 ? "aarch64-linux-gnu-gcc" : "x86_64-linux-gnu-gcc");
+        command_add(command, has_cc ? given : strcmp(arch, "arm64") == 0 ? "aarch64-linux-gnu-gcc" : "x86_64-linux-gnu-gcc");
         return true;
     }
     if (strcmp(system, host) == 0 && has_cc) { /* Windows with MinGW */
-        *cc = sosu_strdup(given);
+        command_add(command, given);
         return true;
     }
     const char *sysroot = getenv("SOSU_SYSROOT");
@@ -647,14 +627,23 @@ static bool desktop_compiler(const Target *target, char **cc, char **flags) {
                 "sosuc: building for %s on %s needs clang and the files of %s (its headers and libraries): give their "
                 "folder in SOSU_SYSROOT, and clang in SOSU_CC if it is not `clang` (spec 11.6)\n",
                 target->name, host_system(), system);
-        *cc = NULL;
         return false;
     }
-    *cc = sosu_strdup(has_cc ? given : "clang");
-    free(*flags);
-    *flags = sosu_format(" --target=%s --sysroot=\"%s\" -fuse-ld=lld", target->triple, sysroot);
+    command_add(command, has_cc ? given : "clang");
+    command_addf(command, "--target=%s", target->triple);
+    command_addf(command, "--sysroot=%s", sysroot);
+    command_add(command, "-fuse-ld=lld");
     return true;
 }
+
+#ifdef _WIN32
+/* MSVC for `target`: the tools of its architecture, from this one. */
+static bool use_msvc(const Target *target, const char *work_dir) {
+    bool arm64 = strcmp(target_arch(target), "arm64") == 0;
+    bool other = strcmp(target_arch(target), target_arch(&host_target)) != 0;
+    return shell_use_msvc(!other ? NULL : arm64 ? "x64_arm64" : "arm64_x64", work_dir);
+}
+#endif
 
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
 static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize,
@@ -663,82 +652,68 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
     bool for_windows = strcmp(target_system(target), "windows") == 0;
-    char *command;
+    bool ok;
 #ifdef _WIN32
     if ((!cc || !cc[0]) && for_windows) {
-        /* MSVC, found like build.bat does when cl.exe is not already on the PATH */
-        char *bat = path_join(build_dir, "compile.bat");
+        ok = use_msvc(target, build_dir);
         char *dir = shell_path(build_dir);
+        char *log = path_join(build_dir, "cl.log");
+        Command cl = {0};
+        const char *options[] = { "cl", "/nologo", "/std:c11", "/utf-8", "/W0", "/Zi", optimize ? "/O2" : "/Od", NULL };
+        add_all(&cl, options);
         char *rt = shell_path(runtime);
         char *rt_c = shell_path(runtime_c);
         char *c = shell_path(c_file);
         char *out = shell_path(exe);
-        char *link_args = link_arguments(links, true);
-        if (optimize && links->window) {  /* a program with windows: no console behind them */
-            append(&link_args, "%s", link_args[0] ? " /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
-                                                   : " /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup");
+        command_addf(&cl, "/I%s", rt);
+        command_addf(&cl, "/Fo%s\\", dir);
+        command_addf(&cl, "/Fd%s\\", dir);
+        command_addf(&cl, "/Fe%s", out);
+        add_sources(&cl, links, true);
+        command_add(&cl, c);
+        command_add(&cl, rt_c);
+        if (links->resource) command_add(&cl, links->resource);
+        add_link_arguments(&cl, links, true);
+        if (optimize && links->window) { /* a program with windows: no console behind them */
+            command_add(&cl, "/SUBSYSTEM:WINDOWS");
+            command_add(&cl, "/ENTRY:mainCRTStartup");
         }
-        char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
-        char *sources = source_arguments(links, true);
-        char *commands = sosu_format(
-            "cl /nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\" /Fe\"%s\"%s \"%s\" \"%s\"%s%s "
-            ">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)\r\n",
-            optimize ? "/O2" : "/Od", rt, dir, dir, out, sources, c, rt_c, resource, link_args, dir, dir);
-        free(sources);
-        free(resource);
-        /* another architecture: the tools of MSVC that build for it, from this one */
-        bool arm64 = strcmp(target_arch(target), "arm64") == 0;
-        bool other = strcmp(target_arch(target), target_arch(&host_target)) != 0;
-        char *script = msvc_script_for(commands, !other ? NULL : arm64 ? "x64_arm64" : "arm64_x64");
-        free(commands);
-        bool written = write_file(bat, script);
-        char *native_bat = shell_path(bat);
-        command = written ? sosu_format("\"%s\"", native_bat) : NULL;
-        free(native_bat);
-        free(script);
-        free(bat);
-        free(dir);
-        free(rt);
-        free(rt_c);
-        free(c);
+        if (ok) ok = run_logged(&cl, log);
+        command_free(&cl);
         free(out);
-        free(link_args);
-        if (!command) {
-            fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
-            free(runtime);
-            free(runtime_c);
-            return false;
-        }
+        free(c);
+        free(rt_c);
+        free(rt);
+        free(log);
+        free(dir);
     } else
 #endif
     {
         (void)build_dir;
         (void)cc; /* SOSU_CC: read by desktop_compiler */
-        char *compiler, *flags;
-        if (!desktop_compiler(target, &compiler, &flags)) {
-            free(flags);
-            free(runtime);
-            free(runtime_c);
-            return false;
+        Command command = {0};
+        ok = desktop_compiler(target, &command);
+        const char *options[] = { "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", NULL };
+        add_all(&command, options);
+        command_addf(&command, "-I%s", runtime);
+        command_add(&command, c_file);
+        command_add(&command, runtime_c);
+        add_sources(&command, links, false);
+        if (links->resource) command_add(&command, links->resource);
+        command_add(&command, "-o");
+        command_add(&command, exe);
+        add_link_arguments(&command, links, false);
+        if (optimize && links->window && for_windows) command_add(&command, "-mwindows"); /* MinGW: the same */
+        if (!for_windows) { /* std.thread (spec §5.6), std.math */
+            command_add(&command, "-pthread");
+            command_add(&command, "-lm");
         }
-        char *link_args = link_arguments(links, false);
-        if (optimize && links->window && for_windows) append(&link_args, "%s", " -mwindows");  /* MinGW: the same */
-        if (!for_windows) append(&link_args, "%s", " -pthread -lm"); /* std.thread (spec §5.6), std.math */
-        char *resource = links->resource ? sosu_format(" \"%s\"", links->resource) : sosu_strdup("");
-        char *sources = source_arguments(links, false);
-        command = sosu_format("\"%s\"%s -std=c99 -g %s -w -I\"%s\" \"%s\" \"%s\"%s%s -o \"%s\"%s", compiler, flags,
-                              optimize ? "-O2" : "-O0", runtime, c_file, runtime_c, sources, resource, exe, link_args);
-        free(sources);
-        free(resource);
-        free(link_args);
-        free(flags);
-        free(compiler);
+        if (ok) ok = run(&command);
+        command_free(&command);
     }
-    int status = shell_run(command);
-    free(command);
     free(runtime);
     free(runtime_c);
-    return status == 0;
+    return ok;
 }
 
 /* The system sosuc runs on, as a target name (spec §11.1). */
@@ -810,53 +785,33 @@ typedef struct {
 static bool run_c_compiler(const BindgenOptions *o, const char *dir, const char *c_file, char mode, const char *out,
                            const char *log) {
     const char *cc = getenv("SOSU_CC");
-    char *args = sosu_strdup("");
     bool msvc = false;
 #ifdef _WIN32
     msvc = !cc || !cc[0];
+    if (msvc && !shell_use_msvc(NULL, dir)) return false;
+#else
+    (void)dir;
 #endif
+    Command command = { .out = mode == 'E' && msvc ? out : log, .err = log };
+    if (msvc) {
+        const char *options[] = { "cl", "/nologo", mode == 'E' ? "/E" : "/Zs", "/std:c11", "/utf-8", NULL };
+        add_all(&command, options);
+    } else {
+        const char *options[] = { cc && cc[0] ? cc : "cc", mode == 'E' ? "-E" : "-fsyntax-only", "-std=c11", NULL };
+        add_all(&command, options);
+    }
     for (size_t i = 0; i < o->includes.count; i++) {
         char *native = shell_path(o->includes.items[i]);
-        append(&args, msvc ? " /I\"%s\"" : " -I\"%s\"", native);
+        command_addf(&command, msvc ? "/I%s" : "-I%s", native);
         free(native);
     }
-    for (size_t i = 0; i < o->defines.count; i++) append(&args, msvc ? " /D%s" : " -D%s", o->defines.items[i]);
-    char *c = shell_path(c_file);
-    char *output = out ? shell_path(out) : NULL;
-    char *errors = shell_path(log);
-    int status;
-#ifdef _WIN32
-    if (msvc) {
-        char *commands = mode == 'E' ? sosu_format("cl /nologo /E /std:c11 /utf-8%s \"%s\" >\"%s\" 2>\"%s\" || exit /b 1\r\n",
-                                                   args, c, output, errors)
-                                     : sosu_format("cl /nologo /Zs /std:c11 /utf-8%s \"%s\" >\"%s\" 2>&1 || exit /b 1\r\n",
-                                                   args, c, errors);
-        char *script = msvc_script(commands);
-        char *bat = path_join(dir, mode == 'E' ? "preprocess.bat" : "check.bat");
-        char *native_bat = shell_path(bat);
-        char *command = sosu_format("\"%s\"", native_bat);
-        status = write_file(bat, script) ? shell_run(command) : 2;
-        free(command);
-        free(native_bat);
-        free(bat);
-        free(script);
-        free(commands);
-    } else
-#endif
-    {
-        (void)dir;
-        char *command = mode == 'E' ? sosu_format("\"%s\" -E -std=c11%s \"%s\" -o \"%s\" 2>\"%s\"", cc && cc[0] ? cc : "cc", args,
-                                                  c, output, errors)
-                                    : sosu_format("\"%s\" -fsyntax-only -std=c11%s \"%s\" >\"%s\" 2>&1", cc && cc[0] ? cc : "cc",
-                                                  args, c, errors);
-        status = shell_run(command);
-        free(command);
+    for (size_t i = 0; i < o->defines.count; i++) command_addf(&command, msvc ? "/D%s" : "-D%s", o->defines.items[i]);
+    command_add(&command, c_file);
+    if (mode == 'E' && !msvc) {
+        command_add(&command, "-o");
+        command_add(&command, out);
     }
-    free(args);
-    free(c);
-    free(output);
-    free(errors);
-    return status == 0;
+    return run(&command);
 }
 
 static void print_file(const char *path, FILE *out) {
@@ -1092,118 +1047,140 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
-    char *command = NULL;
+    bool ok;
 #ifdef _WIN32
     if (!cc || !cc[0]) {
-        char *bat = path_join(build_dir, "compile.bat");
+        ok = shell_use_msvc(NULL, build_dir);
         char *dir = shell_path(build_dir);
         char *rt = shell_path(runtime);
         char *rt_c = shell_path(runtime_c);
         char *c = shell_path(c_file);
         char *out = shell_path(files->library);
-        char *flags = sosu_format("/nologo /std:c11 /utf-8 /W0 /Zi %s /I\"%s\" /Fo\"%s\\\\\" /Fd\"%s\\\\\"",
-                                  optimize ? "/O2" : "/Od", rt, dir, dir);
-        char *log = sosu_format(">\"%s\\cl.log\" || (type \"%s\\cl.log\" & exit /b 1)", dir, dir);
-        char *sources = source_arguments(links, true);
-        char *commands;
+        char *log = path_join(build_dir, "cl.log");
+        Command cl = {0};
+        const char *options[] = { "cl", "/nologo", "/std:c11", "/utf-8", "/W0", "/Zi", optimize ? "/O2" : "/Od", NULL };
+        add_all(&cl, options);
+        command_addf(&cl, "/I%s", rt);
+        command_addf(&cl, "/Fo%s\\", dir);
+        command_addf(&cl, "/Fd%s\\", dir);
         if (shared) {
             char *import = shell_path(files->import);
-            char *link_args = link_arguments(links, true);
-            if (!link_args[0]) append(&link_args, "%s", " /link");
-            append(&link_args, " /IMPLIB:\"%s\"", import);
-            commands = sosu_format("cl %s /LD /DSOSU_SHARED /Fe\"%s\"%s \"%s\" \"%s\"%s %s\r\n", flags, out, sources, c,
-                                   rt_c, link_args, log);
+            command_add(&cl, "/LD");
+            command_add(&cl, "/DSOSU_SHARED");
+            command_addf(&cl, "/Fe%s", out);
+            add_sources(&cl, links, true);
+            command_add(&cl, c);
+            command_add(&cl, rt_c);
+            add_link_arguments(&cl, links, true);
+            command_addf(&cl, "/IMPLIB:%s", import);
+            ok = ok && run_logged(&cl, log);
             free(import);
-            free(link_args);
         } else {
+            command_add(&cl, "/c");
+            add_sources(&cl, links, true);
+            command_add(&cl, c);
+            command_add(&cl, rt_c);
+            ok = ok && run_logged(&cl, log);
+            Command library = {0}, runtime_library = {0};
+            command_add(&library, "lib");
+            command_add(&library, "/nologo");
+            command_addf(&library, "/OUT:%s", out);
+            command_addf(&library, "%s\\%s.obj", dir, name);
+            add_source_objects(&library, links, build_dir, ".obj"); /* the C files of the packages, in the library */
+            ok = ok && run_logged(&library, log);
             char *runtime_lib = shell_path(files->runtime);
-            char *objects = source_objects(links, build_dir, ".obj"); /* the C files of the packages, in the library */
-            commands = sosu_format("cl %s /c%s \"%s\" \"%s\" %s\r\n"
-                                   "lib /nologo /OUT:\"%s\" \"%s\\%s.obj\"%s %s\r\n"
-                                   "lib /nologo /OUT:\"%s\" \"%s\\sosu_rt.obj\" %s\r\n",
-                                   flags, sources, c, rt_c, log, out, dir, name, objects, log, runtime_lib, dir, log);
-            free(objects);
+            command_add(&runtime_library, "lib");
+            command_add(&runtime_library, "/nologo");
+            command_addf(&runtime_library, "/OUT:%s", runtime_lib);
+            command_addf(&runtime_library, "%s\\sosu_rt.obj", dir);
+            ok = ok && run_logged(&runtime_library, log);
+            command_free(&library);
+            command_free(&runtime_library);
             free(runtime_lib);
         }
-        free(sources);
-        char *script = msvc_script(commands);
-        if (write_file(bat, script)) {
-            char *native_bat = shell_path(bat);
-            command = sosu_format("\"%s\"", native_bat);
-            free(native_bat);
-        } else {
-            fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
-        }
-        free(script);
-        free(commands);
+        command_free(&cl);
         free(log);
-        free(flags);
         free(out);
         free(c);
         free(rt_c);
         free(rt);
         free(dir);
-        free(bat);
     } else
 #endif
     {
         const char *compiler = cc && cc[0] ? cc : "cc";
-        const char *level = optimize ? "-O2" : "-O0";
+        const char *options[] = { compiler, "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", "-fPIC", NULL };
         if (shared) {
-            char *link_args = link_arguments(links, false);
-#ifndef _WIN32
-            append(&link_args, "%s", " -pthread -lm"); /* std.thread (spec §5.6), std.math */
-#endif
 #ifdef __APPLE__
             const char *kind = "-dynamiclib";
 #else
             const char *kind = "-shared";
 #endif
-            char *sources = source_arguments(links, false);
-            command = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC %s -fvisibility=hidden -DSOSU_SHARED -I\"%s\" \"%s\" \"%s\"%s "
-                                  "-o \"%s\"%s",
-                                  compiler, level, kind, runtime, c_file, runtime_c, sources, files->library, link_args);
-            free(sources);
-            free(link_args);
+            Command command = {0};
+            add_all(&command, options);
+            command_add(&command, kind);
+            command_add(&command, "-fvisibility=hidden");
+            command_add(&command, "-DSOSU_SHARED");
+            command_addf(&command, "-I%s", runtime);
+            command_add(&command, c_file);
+            command_add(&command, runtime_c);
+            add_sources(&command, links, false);
+            command_add(&command, "-o");
+            command_add(&command, files->library);
+            add_link_arguments(&command, links, false);
+#ifndef _WIN32
+            command_add(&command, "-pthread"); /* std.thread (spec §5.6), std.math */
+            command_add(&command, "-lm");
+#endif
+            ok = run(&command);
         } else {
             char *object = sosu_format("%s/%s.o", build_dir, name);
             char *rt_object = sosu_format("%s/sosu_rt.o", build_dir);
+            ok = true;
             /* the C files of the packages: one object each, in the library */
-            Links flags_only = *links;
-            flags_only.sources.count = 0;
-            char *flags = source_arguments(&flags_only, false);
-            char *compile_sources = sosu_strdup("");
-            for (size_t i = 0; i < links->sources.count; i++) {
-                Links one = flags_only;
-                one.sources.items = &links->sources.items[i];
-                one.sources.count = 1;
-                char *source = source_arguments(&one, false);
-                char *output = source_objects(&one, build_dir, ".o");
-                char *step = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC%s -c%s -o%s && ", compiler, level, flags, source + strlen(flags),
-                                         output);
-                append(&compile_sources, "%s", step);
-                free(step);
+            for (size_t i = 0; i < links->sources.count && ok; i++) {
+                Command one = {0};
+                add_all(&one, options);
+                add_source_flags(&one, links, false);
+                command_add(&one, "-c");
+                add_source_files(&one, links, i, i + 1);
+                command_add(&one, "-o");
+                char *output = source_object(links->sources.items[i], build_dir, ".o");
+                command_add(&one, output);
                 free(output);
-                free(source);
+                ok = run(&one);
             }
-            char *objects = source_objects(links, build_dir, ".o");
-            command = sosu_format("%s\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
-                                  "\"%s\" -std=c99 -g %s -w -fPIC -I\"%s\" -c \"%s\" -o \"%s\" && "
-                                  "ar rcs \"%s\" \"%s\"%s && ar rcs \"%s\" \"%s\"",
-                                  compile_sources, compiler, level, runtime, c_file, object, compiler, level, runtime,
-                                  runtime_c, rt_object, files->library, object, objects, files->runtime, rt_object);
-            free(objects);
-            free(compile_sources);
-            free(flags);
+            const char *const files_in[][2] = { { c_file, object }, { runtime_c, rt_object } };
+            for (size_t i = 0; i < 2 && ok; i++) {
+                Command step = {0};
+                add_all(&step, options);
+                command_addf(&step, "-I%s", runtime);
+                command_add(&step, "-c");
+                command_add(&step, files_in[i][0]);
+                command_add(&step, "-o");
+                command_add(&step, files_in[i][1]);
+                ok = run(&step);
+            }
+            Command archive = {0}, runtime_archive = {0};
+            const char *ar[] = { "ar", "rcs", NULL };
+            add_all(&archive, ar);
+            command_add(&archive, files->library);
+            command_add(&archive, object);
+            add_source_objects(&archive, links, build_dir, ".o");
+            ok = ok && run(&archive);
+            add_all(&runtime_archive, ar);
+            command_add(&runtime_archive, files->runtime);
+            command_add(&runtime_archive, rt_object);
+            ok = ok && run(&runtime_archive);
+            command_free(&archive);
+            command_free(&runtime_archive);
             free(object);
             free(rt_object);
         }
     }
-    int status = command ? shell_run(command) : 1;
-    free(command);
     free(runtime);
     free(runtime_c);
-    return status == 0;
+    return ok;
 }
 
 /* The libraries a host must link with a static library: its [link] sections, and outside Windows
@@ -1321,24 +1298,25 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *level = optimize ? "-O2" : "-O0";
-    char *command = NULL;
+    bool ok = false;
     if (target->os == TARGET_ANDROID) {
         char *clang = android_clang(target);
         if (clang) {
             *built = sosu_format("%s/libmain.so", out_dir);
-            char *link_args = link_arguments(links, false);
-            char *sources = source_arguments(links, false);
-            char *inner = sosu_format("\"%s\" -std=c99 -g %s -w -fPIC -shared -fvisibility=hidden -DSOSU_SDL_MAIN -I\"%s\" \"%s\" \"%s\"%s -o \"%s\"%s "
-                                      "-llog",
-                                      clang, level, runtime, c_file, runtime_c, sources, *built, link_args);
-            free(sources);
-#ifdef _WIN32
-            command = sosu_format("\"%s\"", inner); /* cmd keeps the inner quotes when the whole is quoted */
-            free(inner);
-#else
-            command = inner;
-#endif
-            free(link_args);
+            Command command = {0};
+            const char *options[] = { clang, "-std=c99", "-g", level, "-w", "-fPIC", "-shared", "-fvisibility=hidden",
+                                      "-DSOSU_SDL_MAIN", NULL };
+            add_all(&command, options);
+            command_addf(&command, "--target=%s%d", target->triple, ANDROID_API); /* as the scripts of the NDK do */
+            command_addf(&command, "-I%s", runtime);
+            command_add(&command, c_file);
+            command_add(&command, runtime_c);
+            add_sources(&command, links, false);
+            command_add(&command, "-o");
+            command_add(&command, *built);
+            add_link_arguments(&command, links, false);
+            command_add(&command, "-llog");
+            ok = run(&command);
             free(clang);
         }
     } else {
@@ -1346,22 +1324,41 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
         const char *sdk = target->simulator ? "iphonesimulator" : "iphoneos";
         const char *minimum = target->simulator ? "-mios-simulator-version-min=13.0" : "-miphoneos-version-min=13.0";
         *built = sosu_format("%s/libmain.a", out_dir);
-        command = sosu_format("xcrun --sdk %s clang -arch %s %s -std=c99 -g %s -w -DSOSU_SDL_MAIN -I\"%s\" -c \"%s\" -o \"%s/main.o\" && "
-                              "xcrun --sdk %s clang -arch %s %s -std=c99 -g %s -w -I\"%s\" -c \"%s\" -o \"%s/sosu_rt.o\" && "
-                              "rm -f \"%s\" && ar rcs \"%s\" \"%s/main.o\" \"%s/sosu_rt.o\"",
-                              sdk, "arm64", minimum, level, runtime, c_file, out_dir, sdk, "arm64", minimum, level,
-                              runtime, runtime_c, out_dir, *built, *built, out_dir, out_dir);
+        char *main_o = sosu_format("%s/main.o", out_dir);
+        char *rt_o = sosu_format("%s/sosu_rt.o", out_dir);
+        const char *const files[][2] = { { c_file, main_o }, { runtime_c, rt_o } };
+        ok = true;
+        for (size_t i = 0; i < 2 && ok; i++) {
+            Command command = {0};
+            const char *options[] = { "xcrun", "--sdk", sdk, "clang", "-arch", "arm64", minimum, "-std=c99", "-g", level,
+                                      "-w", NULL };
+            add_all(&command, options);
+            if (i == 0) command_add(&command, "-DSOSU_SDL_MAIN");
+            command_addf(&command, "-I%s", runtime);
+            command_add(&command, "-c");
+            command_add(&command, files[i][0]);
+            command_add(&command, "-o");
+            command_add(&command, files[i][1]);
+            ok = run(&command);
+        }
+        if (ok) {
+            remove(*built);
+            Command archive = {0};
+            const char *args[] = { "ar", "rcs", *built, main_o, rt_o, NULL };
+            add_all(&archive, args);
+            ok = run(&archive);
+        }
+        free(main_o);
+        free(rt_o);
 #else
         (void)level;
         (void)links;
         fprintf(stderr, "sosuc: building for iOS needs a Mac with Xcode (spec 11.5)\n");
 #endif
     }
-    int status = command ? shell_run(command) : 1;
-    free(command);
     free(runtime);
     free(runtime_c);
-    return status == 0;
+    return ok;
 }
 
 /* `sosuc build --target android-arm64|android-x64|ios-arm64|ios-sim`: the program, for a phone. */
@@ -1523,22 +1520,18 @@ static bool write_template(const char *templates, const char *project, const cha
 
 /* Copies a file or a folder of the package (an asset) to `to`. */
 static bool copy_asset(const char *from, const char *to) {
+    if (shell_file_exists(from) && !shell_dir_exists(from)) return copy_file(from, to);
     char *native_from = shell_path(from);
     char *native_to = shell_path(to);
-    char *command;
 #ifdef _WIN32
-    command = sosu_format("xcopy /E /I /Y /Q \"%s\" \"%s\" >nul", native_from, native_to);
-    SourceFile probe;
-    if (source_load(&probe, from)) { /* a file: xcopy asks whether the target is a file */
-        source_free(&probe);
-        free(command);
-        command = NULL;
-    }
+    Command command = { .out = SHELL_NOWHERE };
+    const char *args[] = { "xcopy", "/E", "/I", "/Y", "/Q", native_from, native_to, NULL };
 #else
-    command = sosu_format("cp -R \"%s\" \"%s\"", native_from, native_to);
+    Command command = {0};
+    const char *args[] = { "cp", "-R", "--", native_from, native_to, NULL };
 #endif
-    bool ok = command ? shell_run(command) == 0 : copy_file(from, to);
-    free(command);
+    add_all(&command, args);
+    bool ok = run(&command);
     free(native_from);
     free(native_to);
     return ok;
@@ -1696,26 +1689,23 @@ static int command_package_android(const char *dir, const char *argv0, DiagForma
         /* the APK, by Gradle */
         if (built) {
             char *jdk = find_jdk();
-            char *native_project = shell_path(project);
-            char *command;
-#ifdef _WIN32
-            char *native_jdk = jdk ? shell_path(jdk) : NULL;
-            char *java = jdk ? sosu_format("set \"JAVA_HOME=%s\" && ", native_jdk) : sosu_strdup("");
-            command = sosu_format("%s\"%s\\gradlew.bat\" --quiet -p \"%s\" assembleDebug", java, native_project, native_project);
+            /* what gradlew runs, without its script (sh or cmd) */
+            char *java = jdk ? path_join(jdk, "bin/java") : sosu_strdup("java");
+            char *native_java = shell_path(java);
+            if (jdk) shell_set_env("JAVA_HOME", jdk);
+            Command command = { .dir = project };
+            const char *args[] = { native_java, "-Xmx64m", "-Xms64m", "-Dorg.gradle.appname=gradlew", "-classpath",
+                                   "gradle/wrapper/gradle-wrapper.jar", "org.gradle.wrapper.GradleWrapperMain", "--quiet",
+                                   "assembleDebug", NULL };
+            add_all(&command, args);
+            free(native_java);
             free(java);
-            free(native_jdk);
-#else
-            command = jdk ? sosu_format("cd \"%s\" && chmod +x gradlew && JAVA_HOME=\"%s\" ./gradlew --quiet assembleDebug", native_project, jdk)
-                          : sosu_format("cd \"%s\" && chmod +x gradlew && ./gradlew --quiet assembleDebug", native_project);
-#endif
-            if (shell_run(command) == 0) {
+            if (run(&command)) {
                 printf("built %s/app/build/outputs/apk/debug/app-debug.apk\n", project);
                 status = 0;
             } else {
                 fprintf(stderr, "sosuc: Gradle failed on `%s`\n", project);
             }
-            free(command);
-            free(native_project);
             free(jdk);
         }
         for (size_t i = 0; i < fill_count; i++) free(fills[i].value);
@@ -1791,9 +1781,13 @@ static int command_package_ios(const char *dir, const char *argv0, DiagFormat fo
             char *frameworks = path_join(bundle, "Frameworks");
             shell_make_dir(frameworks);
             /* the libraries of [link.ios]: a framework where a path holds one, else a library */
-            char *link_args = sosu_strdup("");
-            for (size_t i = 0; i < links.paths.count; i++) append(&link_args, " -F\"%s\"", links.paths.items[i]);
-            for (size_t i = 0; i < links.paths.count; i++) append(&link_args, " -L\"%s\"", links.paths.items[i]);
+            Command command = {0};
+            const char *options[] = { "xcrun", "--sdk", "iphonesimulator", "clang", "-arch", "arm64",
+                                      "-mios-simulator-version-min=13.0", NULL };
+            add_all(&command, options);
+            command_addf(&command, "-Wl,-force_load,%s", library);
+            for (size_t i = 0; i < links.paths.count; i++) command_addf(&command, "-F%s", links.paths.items[i]);
+            for (size_t i = 0; i < links.paths.count; i++) command_addf(&command, "-L%s", links.paths.items[i]);
             for (size_t i = 0; i < links.libs.count; i++) {
                 const char *lib_name = links.libs.items[i];
                 bool framework = false;
@@ -1802,22 +1796,27 @@ static int command_package_ios(const char *dir, const char *argv0, DiagFormat fo
                     char *probe = sosu_format("%s/Info.plist", candidate);
                     framework = shell_file_exists(probe);
                     if (framework) {
-                        char *copy = sosu_format("cp -R \"%s\" \"%s/\"", candidate, frameworks);
-                        built = built && shell_run(copy) == 0;
-                        free(copy);
+                        Command copy = {0};
+                        const char *args[] = { "cp", "-R", "--", candidate, frameworks, NULL };
+                        add_all(&copy, args);
+                        built = built && run(&copy);
+                        command_free(&copy);
                     }
                     free(probe);
                     free(candidate);
                 }
-                append(&link_args, framework ? " -framework %s" : " -l%s", lib_name);
+                if (framework) command_add(&command, "-framework");
+                command_addf(&command, framework ? "%s" : "-l%s", lib_name);
             }
-            for (size_t i = 0; i < links.frameworks.count; i++) append(&link_args, " -framework %s", links.frameworks.items[i]);
-            char *command = sosu_format("xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=13.0 "
-                                        "-Wl,-force_load,\"%s\"%s -Wl,-rpath,@executable_path/Frameworks -o \"%s/%s\"",
-                                        library, link_args, bundle, root->name);
-            built = built && shell_run(command) == 0;
-            free(command);
-            free(link_args);
+            for (size_t i = 0; i < links.frameworks.count; i++) {
+                command_add(&command, "-framework");
+                command_add(&command, links.frameworks.items[i]);
+            }
+            command_add(&command, "-Wl,-rpath,@executable_path/Frameworks");
+            command_add(&command, "-o");
+            command_addf(&command, "%s/%s", bundle, root->name);
+            built = built && run(&command);
+            command_free(&command);
             free(frameworks);
         }
         if (built) {
@@ -1848,11 +1847,16 @@ static int command_package_ios(const char *dir, const char *argv0, DiagFormat fo
         /* the assets of [app], under the path the program reads (SDL looks in the bundle) */
         built = built && copy_app_assets(root, bundle);
         if (built) {
-            char *sign = sosu_format("codesign --force --sign - --timestamp=none \"%s\" >/dev/null 2>&1 || "
-                                     "codesign --force --sign - \"%s\"",
-                                     bundle, bundle);
-            built = shell_run(sign) == 0;
-            free(sign);
+            Command sign = { .out = SHELL_NOWHERE, .err = SHELL_NOWHERE };
+            const char *args[] = { "codesign", "--force", "--sign", "-", "--timestamp=none", bundle, NULL };
+            add_all(&sign, args);
+            built = run(&sign);
+            if (!built) { /* an older codesign, without --timestamp */
+                Command again = {0};
+                const char *plain[] = { "codesign", "--force", "--sign", "-", bundle, NULL };
+                add_all(&again, plain);
+                built = run(&again);
+            }
         }
         if (built) {
             printf("built %s\n", bundle);
@@ -1923,20 +1927,17 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
             status = 0;
         } else {
             char *native_exe = shell_path(exe);
-#ifdef _WIN32
-            /* cmd takes away the first and the last quote of a line that has more than two */
-            char *command = sosu_format("\"\"%s\"%s\"", native_exe, options->run_args ? options->run_args : "");
-#else
-            char *command = sosu_format("\"%s\"%s", native_exe, options->run_args ? options->run_args : "");
-#endif
+            Command command = {0};
+            command_add(&command, native_exe);
+            for (int i = 0; i < options->run_count; i++) command_add(&command, options->run_args[i]);
             if (mode == MODE_TEST) {
                 /* for the package testing (spec §8.3): its folder, and what to do besides the tests */
                 shell_set_env("SOSU_PACKAGE", root->root);
                 shell_set_env("SOSU_BENCH", options->bench ? "1" : "0");
                 shell_set_env("SOSU_UPDATE", options->update ? "1" : "0");
             }
-            status = shell_run(command);
-            free(command);
+            status = command_run(&command);
+            command_free(&command);
             free(native_exe);
         }
         free_links(&links);
@@ -2030,26 +2031,17 @@ static char *windows_icon(const Package *root, const char *relative_dir) {
     if (ok) {
         char *native_rc = shell_path(rc);
         char *native_res = shell_path(res);
-        char *native_dir = shell_path(build_dir);
+        Command command = { .dir = build_dir, .out = SHELL_NOWHERE };
         if (msvc) {
-            char *commands = sosu_format("cd /d \"%s\" && rc /nologo /fo \"%s\" \"%s\" >nul || exit /b 1\r\n", native_dir,
-                                         native_res, native_rc);
-            char *script = msvc_script(commands);
-            char *bat = path_join(build_dir, "icon.bat");
-            char *native_bat = shell_path(bat);
-            char *command = sosu_format("\"%s\"", native_bat);
-            ok = write_file(bat, script) && shell_run(command) == 0;
-            free(command);
-            free(native_bat);
-            free(bat);
-            free(script);
-            free(commands);
+            const char *args[] = { "rc", "/nologo", "/fo", native_res, native_rc, NULL };
+            add_all(&command, args);
+            ok = shell_use_msvc(NULL, build_dir) && run(&command);
         } else {
-            char *command = sosu_format("cd /d \"%s\" && windres \"%s\" -O coff -o \"%s\"", native_dir, native_rc, native_res);
-            ok = shell_run(command) == 0;
-            free(command);
+            const char *args[] = { "windres", native_rc, "-O", "coff", "-o", native_res, NULL };
+            add_all(&command, args);
+            ok = run(&command);
         }
-        free(native_dir);
+        command_free(&command);
         free(native_res);
         free(native_rc);
     }
@@ -2184,9 +2176,10 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
             built = write_file(plist_file, plist);
 #ifdef __APPLE__
             /* the program finds the libraries of Frameworks */
-            char *rpath = sosu_format("install_name_tool -add_rpath @executable_path/../Frameworks \"%s\" 2>/dev/null; true", exe);
-            shell_run(rpath);
-            free(rpath);
+            Command rpath = { .err = SHELL_NOWHERE }; /* already there: not an error */
+            const char *args[] = { "install_name_tool", "-add_rpath", "@executable_path/../Frameworks", exe, NULL };
+            add_all(&rpath, args);
+            run(&rpath);
 #endif
             free(plist_file);
             free(plist);
@@ -2197,25 +2190,21 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
         if (built) {
             bool zip = windows || macos;
             archive = sosu_format("%s-%s.%s", root->name, target_name, zip ? "zip" : "tar.gz");
-            char *native = shell_path(packages);
+            char *existing = path_join(packages, archive);
+            remove(existing);
+            free(existing);
+            Command command = { .dir = packages };
 #if defined(_WIN32)
-            char *command = sosu_format("cd /d \"%s\" && (del /q \"%s\" 2>nul & tar %s \"%s\" \"%s\")", native, archive,
-                                        zip ? "-a -c -f" : "-czf", archive, folder_name);
+            const char *zip_args[] = { "tar", "-a", "-c", "-f", archive, folder_name, NULL };
 #elif defined(__APPLE__)
-            char *command = zip ? sosu_format("cd \"%s\" && rm -f \"%s\" && ditto -c -k --keepParent \"%s\" \"%s\"", native,
-                                              archive, folder_name, archive)
-                                : sosu_format("cd \"%s\" && rm -f \"%s\" && tar -czf \"%s\" \"%s\"", native, archive, archive,
-                                              folder_name);
+            const char *zip_args[] = { "ditto", "-c", "-k", "--keepParent", folder_name, archive, NULL };
 #else
-            char *command = zip ? sosu_format("cd \"%s\" && rm -f \"%s\" && zip -qr \"%s\" \"%s\"", native, archive, archive,
-                                              folder_name)
-                                : sosu_format("cd \"%s\" && rm -f \"%s\" && tar -czf \"%s\" \"%s\"", native, archive, archive,
-                                              folder_name);
+            const char *zip_args[] = { "zip", "-qr", archive, folder_name, NULL };
 #endif
-            built = shell_run(command) == 0;
+            const char *tar_args[] = { "tar", "-czf", archive, folder_name, NULL };
+            add_all(&command, zip ? zip_args : tar_args);
+            built = run(&command);
             if (!built) fprintf(stderr, "sosuc: cannot make the archive `%s`\n", archive);
-            free(command);
-            free(native);
         }
         if (built) {
             printf("packaged %s/%s\n", packages, folder_name);
@@ -2426,7 +2415,7 @@ int main(int argc, char **argv) {
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
-    BuildOptions options = { false, 0, &host_target, { true, true, true }, NULL, false, false };
+    BuildOptions options = { false, 0, &host_target, { true, true, true }, NULL, 0, false, false };
     int checks = -1;    /* --checks: -1 when not given */
     int contracts = -1; /* --contracts */
     bool is_fmt = strcmp(command, "fmt") == 0;
@@ -2435,8 +2424,8 @@ int main(int argc, char **argv) {
     int path_count = 0;
     for (int i = 2; i < argc; i++) {
         if (strcmp(command, "run") == 0 && strcmp(argv[i], "--") == 0) {
-            options.run_args = sosu_strdup("");
-            for (int j = i + 1; j < argc; j++) append_quoted(&options.run_args, argv[j]);
+            options.run_args = argv + i + 1;
+            options.run_count = argc - i - 1;
             break;
         }
         if (is_fmt && strcmp(argv[i], "--check") == 0) {

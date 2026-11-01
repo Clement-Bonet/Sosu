@@ -226,7 +226,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **Enum values** are written `Shape.Circle(1.0)` or `Shape.Empty`; the name of the enum may be left out when the expected type is known (`Shape s = Circle(1.0);`), as in `match` patterns.
 - **Statements**: an expression statement must be a call or a `match`; `x == 1;` is an error. The value of a call returning `T!E` must be used (with `try`, `match`, or a variable).
 - **Functions** that return a value must end every path with `return`.
-- **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`.
+- **Options and results**: `none`, `ok(x)` and `err(e)` need an expected type (`i32? x = none;`); `some(x)` takes the type of `x`. `try` applies to a `T!E` value, in a function that returns a result with the same error type `E`; for absence, use `match`. A function that returns nothing but can fail returns `void!E`, and ends with `return ok();`; `void!E` is a value as any other (a parameter, a variable, a field, a type argument), matched with `ok => ...` and `err(e) => ...`, while `void` alone stays a return type (E0306).
 - **Conversions with `as`**: between numeric types, `char` and `bool` to integers, `ui8` to `char`, and a class pointer to a parent class or interface pointer. Pointer reinterpretation (`p as ui8*`) and integer / pointer conversions need `unsafe`. `as?` converts a class or interface pointer to a subclass pointer and returns `T*?`.
 - **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`. It ends the line. A float always prints with a dot (`25.0`).
 - **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`. **`<`**, `<=`, `>` and `>=` compare numbers, `char` and `str` (byte by byte, which is the order of the code points in UTF-8).
@@ -478,7 +478,7 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - `alloc` stops the program with a message when memory runs out; `try_alloc` returns `T*?` to handle that case yourself.
 - `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
 - The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
-- `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only. In an `unsafe` block, `alloc`, `try_alloc` and `alloc_slice` accept any type that is not a class: the memory is zeroed, and the program writes a valid value in it before reading it (as `std.vec` does, §5.4).
+- `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only. The type given to `alloc`, `try_alloc`, `alloc_slice`, `new` and `size_of` is any type: a name, or one ending with what no value can before `,` or `)`, as `ui8*`, `i32?`, `str[]` or `void!E` (`arena.alloc_slice(ui8*?, n)`, `size_of(ui8*)`); a type elsewhere among the arguments of a call is not a value (E0333). In an `unsafe` block, `alloc`, `try_alloc` and `alloc_slice` accept any type that is not a class: the memory is zeroed, and the program writes a valid value in it before reading it (as `std.vec` does, §5.4).
 - An `Arena` owns its blocks: it is moved, not copied (below).
 - `defer`: runs a statement when leaving the scope (in reverse order).
 - **Move by default** for types owning a resource; explicit copy with `.copy()`.
@@ -588,7 +588,7 @@ i32 main() uses io {
 
 ### 7.5 Compiler diagnostics
 
-Each error has a stable code, a precise position, an explanation and, when possible, a suggested fix. Two formats: readable text and JSON (`--format=json`).
+Each error has a stable code, a precise position, an explanation and, when possible, a suggested fix. Two formats: readable text and JSON (`--format=json`). The codes are frozen (`docs/errors.md`, §13.2): a code keeps its meaning, and one no longer given is never given again for something else; the wording of the messages may change.
 
 ```
 error[E0312]: non-exhaustive match
@@ -660,7 +660,7 @@ Rule: the **compiler** contains what cannot be written in Sosu, the **library** 
 - `std.thread` and `std.channel`: §5.6.
 - `core.prelude`: `Utf8Error` (§5.3).
 
-Two limits of the language showed while writing these modules, for work 5 (§13.1): `void!E` is a return type only, not the type of a parameter or a variable (E0306), so a result without value is matched where it is made; and a type argument cannot be a pointer (`arena.alloc_slice(ui8*, n)`): an array of C strings is an array of a struct holding one `ui8*`, of the same layout.
+Two limits of the language showed while writing these modules, and were lifted by work 5 (§13.1): `void!E` was a return type only, and the type given to `arena.alloc_slice` could not be a pointer (`arena.alloc_slice(ui8*, n)`), so that an array of C strings was an array of a struct holding one `ui8*`, of the same layout (§6).
 
 ### 8.1 Packages and manifest
 
@@ -697,7 +697,7 @@ shared = { path = "../shared" }
 - In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
 - A Git dependency names a `tag` or a `rev` (a commit, possibly abbreviated); a branch is not accepted, since it moves. The compiler calls the `git` command, which must be installed: the repository is cloned into `build/deps/<name>-<commit>` of the root package, once per commit. A URL without a scheme (`../ui`, `C:/repos/ui`) is a local repository, relative to the package that declares it.
 - `sosu.lock`, next to the `sosu.toml` of the root package, is written by the compiler and kept in version control. One line per Git dependency of the program, transitive ones included: `<name> <url> tag|rev <tag or rev> <commit>`. While a dependency keeps its URL and its `tag` or `rev`, the commit of the lock is used, even if the tag has moved since, and nothing is fetched once the clone exists. Changing the `tag` or `rev` fetches the new version and updates the lock; it is not written when a dependency has an error. The locks of the dependencies themselves are not read.
-- URLs, tags and revs are passed to the shell: they may contain letters, digits and `-._~:/@+=,` only (and `\` in URLs).
+- URLs, tags and revs are given to `git` as arguments, never to a shell: they may contain letters, digits and `-._~:/@+=,` only (and `\` in URLs), and not start with `-`, so that `git` reads none as an option nor as a transport that runs a command (`ext::`).
 - The other values of `sosu.toml` (the paths, libraries, C files, folders and defines of [link], the `path` of a dependency, the files of [app]) are given to the commands of the C compiler and of the tools between quotes: they cannot contain a quote, `` ` ``, `$`, `%` or a control character (E0416), which would end the quotes or be expanded inside them by cmd or sh. So a dependency, even one cloned from the repository of someone else, cannot slip a command of its own into those of the build. The `name` of [app], a text shown, is free.
 - No circular dependencies between packages.
 - `platform`, `render` and `ui` are packages like any other.
@@ -1796,7 +1796,7 @@ sosuc package --target ios-sim examples/window       # build/ios/window.app, for
 
 #### Android
 
-- `sosuc package --target android`: builds `libmain.so` for `arm64-v8a` and `x86_64`, copies `libSDL3.so` next to it, and writes `build/android/`: a Gradle project made from a template (`lib/templates/android`: `settings.gradle`, `app/build.gradle`, `AndroidManifest.xml`, the activity, which is `SDLActivity` and nothing else), then runs `gradlew assembleDebug` if Gradle is found (the wrapper of the template, with the JDK of Android Studio): `build/android/app/build/outputs/apk/debug/app-debug.apk`. `adb install` puts it on a phone or an emulator.
+- `sosuc package --target android`: builds `libmain.so` for `arm64-v8a` and `x86_64`, copies `libSDL3.so` next to it, and writes `build/android/`: a Gradle project made from a template (`lib/templates/android`: `settings.gradle`, `app/build.gradle`, `AndroidManifest.xml`, the activity, which is `SDLActivity` and nothing else), then runs `gradlew assembleDebug` if Gradle is found (the wrapper of the template, `gradle-wrapper.jar` run by `java` without its script, with the JDK of Android Studio): `build/android/app/build/outputs/apk/debug/app-debug.apk`. `adb install` puts it on a phone or an emulator.
 - `sosu.toml` gains an `[app]` section, used by Android and iOS: `id` (`org.sosu.window`), `name` (shown under the icon), `version`, `icon` (a PNG of the package). Without it, the id is `org.sosu.<package>` and the name the name of the package.
 - Minimum: Android 7 (API 24), the oldest that SDL3 and the NDK still support well; the target API is the one of the SDK found.
 - Debug builds are signed with the debug key of the SDK; release builds and the stores (signing, AAB) are for the developer, as §11.2 says.
@@ -1901,10 +1901,9 @@ sosuc build --target linux-arm64 examples/window     # another architecture of a
 - Cross-compilation: the tools of MSVC for ARM64 come from `vcvarsall.bat x64_arm64` (they need the ARM64 component of Visual Studio, and its libraries); `macos-universal` is one `clang -arch arm64 -arch x86_64`, without `lipo`. A program for another desktop is built (`sosuc build`, `sosuc package`), not run; `--lib` stays for this machine.
 - The CI builds `tests/programs/basics` for linux-arm64 (checked with `file`), windows-arm64 (the machine of its PE header) and macos-universal (`lipo -info`), and keeps the archive of `examples/workspace` of each desktop as an artifact of the run.
 
-## 12. Grammar (v0, EBNF)
+## 12. Grammar (EBNF, frozen)
 
-This is the grammar implemented by `sosuc`. `mut` belongs to declarations (variables, fields,
-parameters), not to types.
+This is the grammar implemented by `sosuc`, frozen from version 0.3.0 (§13.2): a text it reads keeps its tree until 2.0, and it changes only by additions, which give a meaning to a text that was an error. `mut` belongs to declarations (variables, fields, parameters), not to types. Where two readings of the same tokens could both apply, the comments say which one wins, as the parser decides it by looking ahead.
 
 A file nests 512 levels at most (E0219): each expression, operand, statement, type, suffix (`.f`, `(...)`, `[i]`, `*`) and term of a chain of operators counts one, so a parenthesis counts two. The passes after the parser walk the tree by recursion; the limit keeps them three times below the stack they need on Windows (1 MB), and the language server alive on any text. After E0219, the rest of the file is not read.
 
@@ -1915,26 +1914,30 @@ path         = IDENT { "." IDENT } ;
 decl         = [ "pub" ] ( struct | class | interface | enum | function | constant | extern ) | export | test ;
 constant     = type IDENT "=" expr ";" ;           (* a constant expression (spec §11.6) *)
 
-struct       = "struct" IDENT "{" { member } "}" ;
-class        = "class" IDENT [ ":" path { "," path } ] "{" { member } "}" ;
+struct       = "struct" IDENT [ type_params ] "{" { member } "}" ;
+class        = "class" IDENT [ type_params ] [ ":" generic { "," generic } ] "{" { member } "}" ;
 member       = [ "pub" ] ( field | [ "virtual" | "override" ] function ) ;  (* virtual / override: classes only *)
 field        = [ "mut" ] type IDENT [ "=" expr ] ";" ;
-interface    = "interface" IDENT "{" { signature } "}" ;
-enum         = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
+interface    = "interface" IDENT [ type_params ] "{" { signature } "}" ;
+enum         = "enum" IDENT [ type_params ] "{" [ variant { "," variant } [ "," ] ] "}" ;
 variant      = IDENT [ "(" [ type IDENT { "," type IDENT } ] ")" ] ;
 extern       = "extern" STRING "{" { signature } "}" ;
 export       = "export" STRING function ;          (* STRING: "C" (spec §9.2) *)
 test         = "test" STRING block ;
 
-function     = [ "unsafe" ] type IDENT "(" [ params ] ")" [ effects ] { contract } block ;
+function     = [ "unsafe" ] type IDENT [ type_params ] "(" [ params ] ")" [ effects ] { contract } block ;
 signature    = [ "unsafe" ] type IDENT "(" [ params ] ")" [ effects ] ";" ;
 params       = param { "," param } ;
 param        = [ "mut" ] type IDENT ;
 effects      = "uses" IDENT { "," IDENT } ;
 contract     = ( "requires" | "ensures" ) expr ;
+type_params  = "<" type_param { "," type_param } ">" ;              (* spec §5.4 *)
+type_param   = IDENT [ ":" path { "+" path } ] | "uses" IDENT ;   (* constraints; an effect parameter *)
+type_args    = "<" type { "," type } ">" ;                         (* `>>` closes two lists *)
+generic      = path [ type_args ] ;
 
 type         = base_type { "*" | "?" | "[" [ INT | path ] "]" | "!" base_type } ;  (* path: an integer constant *)
-base_type    = path | "fn" "(" [ type { "," type } ] ")" "->" type [ effects ] | "(" type ")" ;
+base_type    = generic | "fn" "(" [ type { "," type } ] ")" "->" type [ effects ] | "(" type ")" ;
 
 block        = "{" { stmt } "}" ;
 stmt         = block | var_decl ";" | simple ";" | if | while | for | return
@@ -1954,8 +1957,11 @@ range        = binary [ ( ".." | "..=" ) binary ] ;
 binary       = cast { binary_op cast } ;           (* precedence: §5.1 *)
 cast         = prefix { "as" [ "?" ] type } ;
 prefix       = ( "-" | "!" | "~" | "&" | "*" | "try" ) prefix | postfix ;
-postfix      = primary { call | "[" expr "]" | "." IDENT | struct_lit } ;
-call         = "(" [ expr { "," expr } [ "," ] ] ")" ;
+postfix      = primary { call | "[" expr "]" | "." IDENT | struct_lit | type_args } ;
+             (* type_args: after a path, when `(`, `{`, `.`, `,` or `)` follows the list; else `<` compares *)
+call         = "(" [ arg { "," arg } [ "," ] ] ")" ;
+arg          = type | expr ;   (* a type that ends with `*`, `?` or `[]`, or holds `!`, before `,` or `)`:
+                                  `arena.alloc_slice(ui8*, n)`; any other argument is an expression *)
 struct_lit   = "{" [ IDENT ":" expr { "," IDENT ":" expr } [ "," ] ] "}" ;  (* after a path *)
 primary      = INT | FLOAT | STRING | CHAR | "true" | "false" | "self" | "base"
              | IDENT | "(" expr ")" | match | array | lambda ;
@@ -2013,7 +2019,7 @@ What 1.0 holds, in the proposed order; how long each work may take is estimated 
 | 2 | Concurrency | done (§5.6): threads and channels (§14.1), an arena per thread, the effect `threads` checked; `std.thread`, `std.channel` |
 | 3 | C sources in a package | done (§9.1), in [link] rather than a [build] section, so that a file can belong to one target: `c = ["vendor/sqlite3.c"]` in `sosu.toml`, C files compiled with the program, so that a package gives a C library with it (SQLite, the decoders of §8.2) without asking the user to install it |
 | 4 | Standard library | The modules of `std` of §8.2 marked 1.0: done (§8.0), `std.math`, `std.sort`, `std.text`, the dates of `std.time`, `std.os`, `std.fs`, `std.cli`, `std.log`, `std.json`. The packages of §8.2 marked 1.0 come next (§8.3): `crypto`, `compress`, `math.linear`, `testing`, `image`, `audio`, `db` and `db.sqlite` (the package `sqlite`), `platform.dialogs` (§10.11): done |
-| 5 | Quality | The grammar and the error codes frozen, a compatibility policy, the parser and the semantic analysis fuzzed, the known bugs fixed, the time of `sosuc` on large programs measured. Begun: the depth of the tree bounded (E0219, §12), the values of `sosu.toml` checked before they reach a command (E0416, §8.1), the pointers returned into a function refused (E0371, §7.7) |
+| 5 | Quality | Done: the grammar and the error codes frozen, and a compatibility policy (§12, §13.2, `docs/errors.md`, the codes checked by `make test`); the parser, the semantic analysis, code generation and the formatter fuzzed by libFuzzer in the CI (`tests/fuzz.c`, `make fuzz`, the inputs that crashed replayed by `make test` from `tests/fuzz/`); the time of `sosuc` on programs of 5 000 to 80 000 lines measured in the CI (`tests/bench.c`, `make bench`), which found four lookups that grew with the program (the C types, the instances of generic functions, the structural types, the names of a module): about 285 000 lines a second, linearly; `void!E` a value as any other, and a type such as `ui8*` given to `alloc_slice` and `size_of` (§5.3, §6); `git` and the C compiler run without a shell (§8.1); the depth of the tree bounded (E0219, §12), the values of `sosu.toml` checked before they reach a command (E0416, §8.1), the pointers returned into a function refused (E0371, §7.7) |
 | 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished |
 | 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 |
 | 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) |
@@ -2022,6 +2028,26 @@ What 1.0 holds, in the proposed order; how long each work may take is estimated 
 - Android: the CI builds the APK of `examples/window` (arm64 and x86_64) on each push, but does not run it; running on the emulator or a phone, and touching the screen, is done by hand (§11.5). Supported in 1.0 once the examples of §10 have run on a phone.
 - iOS: supported in 1.0 once it has run on a device (it needs a Mac and an iPhone); until then, a preview, built by the CI for the simulator.
 - After 1.0 (2.x): the native backend (12), `comptime` and regions (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
+
+### 13.2 Compatibility policy
+
+The versions of `sosuc` are `major.minor.patch`, with `core`, `std` and the packages of `packages/` released with it, under the same number.
+
+What is promised: a program that `sosuc` 1.x builds without error is built by every later 1.x, and does the same.
+
+- **The language**: its grammar (§12, frozen from 0.3.0) and the meaning of a valid program. A minor version may add (a syntax, a type, a built-in name), giving a meaning to what was an error; it does not change what a valid program does, nor reject it.
+- **The error codes** (`docs/errors.md`, frozen from 0.3.0): a code keeps its meaning. A new error gets a new code; a code no longer given stays in the list, marked "not given any more", and is never given again for something else (`make test` checks both). The messages, the help and their translations are not promised: a tool reads the code, and the position (`--format=json`, §7.5).
+- **`core`, `std` and the packages of `packages/`**: what is `pub` keeps its name, its signature and its effects. A minor version adds modules, functions, types and methods. A variant added to a public enum, or a field to a public struct, would break a `match` without `_` or a literal of the program (§7.1): it waits for 2.0.
+- **The commands of `sosuc`**, their options, their exit codes (0, 1 for errors in the program, 2 for errors around it, 3 out of memory), the keys of `sosu.toml` and `sosu.lock`, the JSON of `--format=json` (fields may be added) and the header written by `sosuc build --lib` (§9.2).
+
+What is not promised: the C that `sosuc` writes (names, layout of the files), the order and the number of warnings, the time and the memory of the compiler, what a program with undefined behaviour does in `unsafe` or in C, and the packages outside `packages/`.
+
+The exceptions, each named in the notes of the version that makes it:
+
+- **A fault of soundness fixed**: a program that the compiler accepted while the specification refuses it (a pointer that escapes, §7.7; an effect not declared, §7.4) may be refused by a minor version, if the fix cannot come otherwise. The notes give the code of the error and how to change the program.
+- **A security fix** may change a behaviour of `sosuc` or of a library (what `sosu.toml` accepts, E0416; what a decoder accepts from a hostile file).
+
+Removing a feature or changing its meaning waits for 2.0: before, a minor version warns for at least one version, with the new way to write it. Until 1.0, a 0.x minor version may break, and says what in its notes; a patch version (`0.2.x`, `1.0.x`) only fixes.
 
 ## 14. Decisions and open questions
 

@@ -75,7 +75,7 @@ struct Type {
 
 typedef struct {
     Arena arena;
-    struct { Type **items; size_t count; size_t cap; } interned;
+    struct { Type **slots; size_t count; size_t cap; } interned; /* a hash table, by structure */
     struct { Type **items; size_t count; size_t cap; } builtins;
     Type *error;
     Type *void_;

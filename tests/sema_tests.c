@@ -112,6 +112,14 @@ static void test_names(void) {
 static void test_types(void) {
     expect_codes("struct A { void x; }", "E0306");
     expect_codes("void f(void x) { }", "E0306");
+    /* `void!E` is a value as any other (work 5 of spec §13.1) */
+    expect_codes("enum E { Bad }\nvoid!E check(i32 n) { if (n < 0) { return err(Bad); } return ok(); }\n"
+                 "bool passed(void!E r) { return match (r) { ok => true, err(e) => false, }; }\n"
+                 "struct Step { void!E outcome; }\n"
+                 "void f() { void!E r = check(1); mut void!E s = ok(); s = check(-1); bool a = passed(r) && passed(s);\n"
+                 "    Step step = Step{ outcome: err(Bad) }; }",
+                 "");
+    expect_codes("void f(void? x) { }", "E0306");
     expect_codes("struct E { }\ni32!E f() { return 0; }", "E0307");
     expect_codes("i32!str f() { return 0; }", "E0307");
     expect_codes("struct A { i32[0] x; }", "E0308");
@@ -342,6 +350,13 @@ static void test_body_errors(void) {
     expect_codes("void f(ui8[] data) { auto c = \"abc\".to_cstr(data); }", "E0336");
     expect_codes("void f() { auto t = str.from_bytes(\"abc\"); }", "E0331");
     expect_codes("void f(Arena* a) { auto s = a.alloc_slice(ui8); }", "E0336");
+    /* a type that a name alone is not, given to a call (work 5 of spec §13.1) */
+    expect_codes("void f(Arena* a) { unsafe { ui8*[] names = a.alloc_slice(ui8*, 4); } }", "");
+    expect_codes("void f(Arena* a) { ui8*?[] names = a.alloc_slice(ui8*?, 4); i32[][] rows = a.alloc_slice(i32[], 2); }", "");
+    expect_codes("void f() { usize n = size_of(ui8*) + size_of(i32?) + size_of(i32[]); }", "");
+    expect_codes("void f(Arena* a) { ui8*[] names = a.alloc_slice(ui8*, 4); }", "E0354");
+    expect_codes("void f(i32 a, i32 b) { i32 c = g(a * b, a); }\ni32 g(i32 x, i32 y) { return x; }", "");
+    expect_codes("void g(i32 x) { }\nvoid f() { g(i32*); }", "E0333");
     expect_codes("enum Utf8Error { Mine }\nUtf8Error f() { return Mine; }", "");
 
     /* array literals */

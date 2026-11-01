@@ -241,16 +241,19 @@ static void write_text(const char *path, const char *text) {
     fclose(file);
 }
 
+/* git in the test repository, with `args` separated by spaces (none holds one). */
 static bool git(const char *args) {
-    char *command = sosu_format("git -C build/git_test/shapes -c user.name=test -c user.email=test@example.com %s"
-#ifdef _WIN32
-                                " >nul 2>nul",
-#else
-                                " >/dev/null 2>&1",
-#endif
-                                args);
-    int status = shell_run(command);
-    free(command);
+    Command command = { .out = SHELL_NOWHERE, .err = SHELL_NOWHERE };
+    const char *start[] = { "git", "-C", "build/git_test/shapes", "-c", "user.name=test", "-c", "user.email=test@example.com" };
+    for (size_t i = 0; i < sizeof start / sizeof *start; i++) command_add(&command, start[i]);
+    for (const char *at = args; *at;) {
+        size_t length = strcspn(at, " ");
+        command_addf(&command, "%.*s", (int)length, at);
+        at += length;
+        at += strspn(at, " ");
+    }
+    int status = command_run(&command);
+    command_free(&command);
     return status == 0;
 }
 
@@ -364,14 +367,12 @@ static void test_git(void) {
 /* A size whose block would wrap around size_t stops the compiler (exit code 3) before any
    allocation. Checked in a child process, since it exits: this program run with --huge-alloc. */
 static void test_huge_alloc(const char *self) {
-#ifdef _WIN32
-    char *command = sosu_format("%s --huge-alloc 2>nul", self);
-#else
-    char *command = sosu_format("%s --huge-alloc 2>/dev/null", self);
-#endif
-    int status = shell_run(command);
+    Command command = { .err = SHELL_NOWHERE };
+    command_add(&command, self);
+    command_add(&command, "--huge-alloc");
+    int status = command_run(&command);
     CHECK(status == 3, "arena_alloc(SIZE_MAX - 8): exit code %d, expected 3 (out of memory)", status);
-    free(command);
+    command_free(&command);
 }
 
 int main(int argc, char **argv) {
