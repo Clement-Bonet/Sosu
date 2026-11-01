@@ -55,7 +55,7 @@ void types_init(TypeTable *table) {
 }
 
 void types_free(TypeTable *table) {
-    free(table->interned.items);
+    free(table->interned.slots);
     free(table->builtins.items);
     arena_free(&table->arena);
     memset(table, 0, sizeof *table);
@@ -94,17 +94,58 @@ static bool same_structure(const Type *a, const Type *b) {
     }
 }
 
+static uint64_t mix(uint64_t h, uint64_t value) {
+    h ^= value + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h;
+}
+
+/* A hash of what `same_structure` compares. */
+static uint64_t structure_hash(const Type *type) {
+    uint64_t h = mix(0, type->tag);
+    switch (type->tag) {
+    case T_POINTER: case T_OPTION: case T_SLICE: return mix(h, (uintptr_t)type->as.inner);
+    case T_ARRAY: return mix(mix(h, (uintptr_t)type->as.array.element), type->as.array.size);
+    case T_RESULT: return mix(mix(h, (uintptr_t)type->as.result.value), (uintptr_t)type->as.result.error);
+    case T_FN:
+        h = mix(mix(h, (uintptr_t)type->as.fn.ret), type->as.fn.effects);
+        for (size_t i = 0; i < type->as.fn.param_count; i++) h = mix(h, (uintptr_t)type->as.fn.params[i]);
+        return h;
+    default:
+        return h;
+    }
+}
+
+/* The slot of `probe` in the table: the type of the same structure, or an empty slot. */
+static Type **interned_slot(const TypeTable *table, const Type *probe) {
+    size_t mask = table->interned.cap - 1;
+    for (size_t slot = (size_t)structure_hash(probe) & mask;; slot = (slot + 1) & mask) {
+        Type **found = &table->interned.slots[slot];
+        if (!*found || same_structure(*found, probe)) return found;
+    }
+}
+
 /* Returns the interned copy of `probe`. */
 static Type *intern(TypeTable *table, const Type *probe) {
-    for (size_t i = 0; i < table->interned.count; i++) {
-        if (same_structure(table->interned.items[i], probe)) return table->interned.items[i];
+    if (2 * (table->interned.count + 1) > table->interned.cap) { /* half full at most */
+        Type **old = table->interned.slots;
+        size_t old_cap = table->interned.cap;
+        table->interned.cap = old_cap ? 2 * old_cap : 256;
+        table->interned.slots = sosu_alloc(table->interned.cap * sizeof *old);
+        memset(table->interned.slots, 0, table->interned.cap * sizeof *old);
+        for (size_t i = 0; i < old_cap; i++) {
+            if (old[i]) *interned_slot(table, old[i]) = old[i];
+        }
+        free(old);
     }
+    Type **slot = interned_slot(table, probe);
+    if (*slot) return *slot;
     Type *type = arena_copy(&table->arena, probe, sizeof *probe);
     if (probe->tag == T_FN) {
         type->as.fn.params = arena_copy(&table->arena, probe->as.fn.params,
                                         probe->as.fn.param_count * sizeof *probe->as.fn.params);
     }
-    SOSU_VEC_PUSH(&table->interned, type);
+    *slot = type;
+    table->interned.count++;
     return type;
 }
 

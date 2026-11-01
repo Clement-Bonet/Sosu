@@ -24,8 +24,12 @@ good place to start.
 4. If you changed `lib/core`, `lib/std` or a package of the reference (`DOC_PACKAGES` in the
    `Makefile`, and `platform.dialogs`), run `make doc` and commit `docs/REFERENCE.md` (the CI
    checks that it is up to date).
-5. Open the pull request. The CI builds and tests it on Linux (gcc, clang), Windows (MSVC), macOS
-   and Android; it is merged once everything passes.
+5. A new error gets a new code in `docs/errors.md`; a code no longer given stays there, marked
+   "not given any more" (spec §13.2). A change of the grammar updates §12 of the spec.
+6. Open the pull request. The CI builds and tests it on Linux (gcc, clang), Windows (MSVC), macOS
+   and Android, fuzzes the compiler for three minutes (`make fuzz`, with clang) and measures its
+   time on large programs (`make bench`); it is merged once everything passes. An input that the
+   fuzzer made crash is kept as an artifact of the job: once fixed, it goes to `tests/fuzz/`.
 
 ## AI-assisted contributions
 

@@ -504,6 +504,7 @@ Type *sema_named_instance(Body *b, const Expr *named, Type *type, Type *expected
 /* A type given as an argument: `arena.alloc(Point)`, `arena.new(shapes.Circle, ...)`.
    NULL if the expression is not a type name. */
 Type *sema_type_argument(Body *b, Expr *arg) {
+    if (arg->kind == EXPR_TYPE) return sema_resolve_type(b->s, b->unit, arg->as.type_expr, POSITION_VALUE);
     Name names[2];
     size_t count = 0;
     const Expr *e = arg;

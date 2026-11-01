@@ -891,6 +891,20 @@ static Expr *parse_primary(Parser *p) {
     return close_expr(p, expr);
 }
 
+/* A type as the argument of a call, which ends with what no expression can before `,` or `)`:
+   `T*`, `T?`, `T[]` or `T!E`. A name, `pkg.T` or `Vec<i32>` stays an expression (spec §5.4). */
+static bool at_type_argument(const Parser *p) {
+    size_t after = skip_type(p, p->pos);
+    if (after == 0 || (token_at(p, after)->kind != TOK_COMMA && token_at(p, after)->kind != TOK_RPAREN)) return false;
+    TokenKind last = token_at(p, after - 1)->kind;
+    if (last == TOK_STAR || last == TOK_QUESTION) return true;
+    if (last == TOK_RBRACKET && token_at(p, after - 2)->kind == TOK_LBRACKET) return true;
+    for (size_t i = p->pos; i < after; i++) {
+        if (token_at(p, i)->kind == TOK_BANG) return true;
+    }
+    return false;
+}
+
 static Expr *parse_call(Parser *p, Expr *callee) {
     Expr *expr = new_expr(p, EXPR_CALL, callee->offset);
     expr->as.call.callee = callee;
@@ -899,7 +913,14 @@ static Expr *parse_call(Parser *p, Expr *callee) {
     p->no_struct_literal = false;
     VEC(Expr *) args = {0};
     while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
-        Expr *arg = parse_expr(p);
+        Expr *arg;
+        if (at_type_argument(p)) {
+            arg = new_expr(p, EXPR_TYPE, cur(p)->offset);
+            arg->as.type_expr = parse_type(p, false);
+            arg = close_expr(p, arg);
+        } else {
+            arg = parse_expr(p);
+        }
         SOSU_VEC_PUSH(&args, arg);
         if (!parser_accept(p, TOK_COMMA)) break;
     }

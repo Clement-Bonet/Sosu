@@ -39,6 +39,12 @@ jobs:
           sudo ldconfig
       - name: Build and test
         run: make test
+      # The time of sosuc on programs of 5 000 to 80 000 lines, in the summary of the job
+      # (work 5 of spec 13.1); it fails if the time grows much faster than the program.
+      - name: The time of sosuc on large programs
+        if: matrix.cc == 'gcc'
+        timeout-minutes: 5
+        run: make bench
       - name: docs/REFERENCE.md is up to date
         if: matrix.cc == 'gcc'
         run: |
@@ -172,3 +178,26 @@ jobs:
           export JAVA_HOME="${JAVA_HOME_21_X64:-$JAVA_HOME}"
           ./build/sosuc package --target android examples/window
           test -f examples/window/build/android/project/app/build/outputs/apk/debug/app-debug.apk
+
+  # The parser, the semantic analysis and code generation fuzzed (work 5 of spec 13.1): three
+  # minutes of libFuzzer with the sanitizers of addresses and undefined behaviour, from the inputs
+  # found by the runs before (a cache). An input that crashes is kept as an artifact: once fixed,
+  # it goes to tests/fuzz/, which `make test` replays.
+  fuzz:
+    name: Fuzzing (libFuzzer)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v4
+        with:
+          path: build/fuzz_corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz
+        timeout-minutes: 10
+        run: make fuzz FUZZ_TIME=180
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: build/fuzz_crashes

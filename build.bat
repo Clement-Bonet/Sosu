@@ -33,6 +33,7 @@ cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\json_tests.exe src\
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\lsp_tests.exe src\lib\*.c tests\lsp_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\i18n_tests.exe src\lib\*.c tests\i18n_tests.c || exit /b 1
 cl %CFLAGS% /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\program_tests.exe tests\program_tests.c || exit /b 1
+cl %CFLAGS% /DSOSU_FUZZ_MAIN /Fobuild\obj\tests\ /Fdbuild\obj\tests\ /Febuild\fuzz_replay.exe src\lib\*.c tests\fuzz.c || exit /b 1
 
 if /i not "%1"=="test" exit /b 0
 
@@ -45,6 +46,7 @@ build\json_tests.exe || exit /b 1
 build\lsp_tests.exe || exit /b 1
 build\i18n_tests.exe || exit /b 1
 build\program_tests.exe build\sosuc.exe || exit /b 1
+for %%f in (tests\fuzz\*) do build\fuzz_replay.exe "%%f" >nul || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 build\sosuc.exe check packages\platform || exit /b 1
 build\sosuc.exe test packages\platform || exit /b 1

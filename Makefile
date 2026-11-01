@@ -5,7 +5,7 @@ CPPFLAGS += -Isrc/lib
 
 LIB_SRC := $(wildcard src/lib/*.c)
 LIB_HDR := $(wildcard src/lib/*.h src/lib/*.inc)
-TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/fmt_tests build/json_tests build/lsp_tests build/i18n_tests build/program_tests
+TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/fmt_tests build/json_tests build/lsp_tests build/i18n_tests build/program_tests build/fuzz_replay
 
 all: build/sosuc $(TESTS)
 
@@ -28,6 +28,7 @@ test: all
 	./build/lsp_tests
 	./build/i18n_tests
 	./build/program_tests ./build/sosuc
+	./build/fuzz_replay tests/fuzz/* > /dev/null
 	./build/sosuc check tests/packages/app
 	./build/sosuc check packages/platform
 	./build/sosuc test packages/platform
@@ -49,6 +50,41 @@ test: all
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	@echo "samples: ok"
+	@# the error codes are frozen (spec 13.2): each one given is in docs/errors.md, and one no longer
+	@# given stays there, marked as such, so that it is never given again for something else
+	@grep -ohE '"E[0-9]{4}"' src/lib/*.c src/sosuc/main.c | tr -d '"' | sort -u > build/codes.txt
+	@for c in $$(cat build/codes.txt); do grep -q "^| $$c |" docs/errors.md || { echo "FAIL $$c is not in docs/errors.md"; exit 1; }; done
+	@for c in $$(grep -oE '^\| E[0-9]{4}' docs/errors.md | tr -d '| '); do grep -qx "$$c" build/codes.txt || \
+		grep "^| $$c |" docs/errors.md | grep -q "not given any more" || \
+		{ echo "FAIL $$c is in docs/errors.md but not given, nor marked as not given any more"; exit 1; }; done
+	@echo "error codes: ok"
+
+# The time of sosuc on large programs (tests/bench.c), optimized: fails if it grows faster than
+# the program. `build/bench <modules> <blocks>` measures one size.
+bench: build/bench
+	./build/bench
+
+build/bench: $(LIB_SRC) $(LIB_HDR) tests/bench.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -O2 -o $@ $(LIB_SRC) tests/bench.c
+
+# The fuzzing of the parser, the semantic analysis and code generation (tests/fuzz.c), by
+# libFuzzer, with clang: FUZZ_TIME seconds, the inputs found kept in build/fuzz_corpus, a crash
+# written to build/fuzz_crashes/. build/fuzz_replay runs files once each, without libFuzzer.
+FUZZ_CC ?= clang
+FUZZ_TIME ?= 60
+FUZZ_SEEDS := tests/samples tests/fuzz lib/core/src lib/std/src
+
+fuzz: build/fuzz
+	mkdir -p build/fuzz_corpus build/fuzz_crashes
+	./build/fuzz -max_total_time=$(FUZZ_TIME) -max_len=8192 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-dict=tests/fuzz.dict -print_final_stats=1 -artifact_prefix=build/fuzz_crashes/ build/fuzz_corpus $(FUZZ_SEEDS)
+
+build/fuzz: $(LIB_SRC) $(LIB_HDR) tests/fuzz.c | build
+	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+		-o $@ $(LIB_SRC) tests/fuzz.c
+
+build/fuzz_replay: $(LIB_SRC) $(LIB_HDR) tests/fuzz.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DSOSU_FUZZ_MAIN -o $@ $(LIB_SRC) tests/fuzz.c
 
 # The compiler in a web page, with Emscripten: playground/ and the module it loads, the library
 # embedded at /lib. The compiler recurses on the syntax trees: the default stack (64 KB) is too

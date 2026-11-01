@@ -79,6 +79,7 @@ typedef enum {
     EXPR_TRY,
     EXPR_ARRAY, /* [1, 2, 3] or [0; 64] */
     EXPR_LAMBDA, /* (i32 a) => a + 1, (a) => { ... } */
+    EXPR_TYPE,   /* a type given to a call, which a name alone cannot be: `arena.alloc_slice(ui8*, n)` */
 } ExprKind;
 
 typedef struct {
@@ -151,6 +152,7 @@ struct Expr {
         bool bool_value;
         Name name;
         Expr *inner; /* TRY */
+        TypeExpr *type_expr; /* TYPE */
         struct { TokenKind op; Expr *operand; } unary;
         struct { TokenKind op; Expr *left; Expr *right; } binary;
         struct { Expr *value; TypeExpr *type; } cast;

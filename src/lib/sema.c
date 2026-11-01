@@ -51,11 +51,38 @@ static void *arena_vec(Sema *s, void *items, size_t count, size_t size) {
 
 static Scope *scope_of(Sema *s, const Unit *unit) { return &s->scopes[unit->index]; }
 
-static Symbol *scope_find(Scope *scope, Name name) {
-    for (size_t i = 0; i < scope->count; i++) {
-        if (name_eq(scope->items[i].name, name)) return &scope->items[i];
+static size_t name_hash(Name name) {
+    size_t h = 2166136261u; /* FNV-1a */
+    for (size_t i = 0; i < name.length; i++) h = (h ^ (unsigned char)name.text[i]) * 16777619u;
+    return h;
+}
+
+/* The slot of `name` in the hash table of `scope`: its symbol, or an empty slot. */
+static size_t *scope_slot(const Scope *scope, Name name) {
+    size_t mask = scope->slot_cap - 1;
+    for (size_t slot = name_hash(name) & mask;; slot = (slot + 1) & mask) {
+        size_t *found = &scope->slots[slot];
+        if (!*found || name_eq(scope->items[*found - 1].name, name)) return found;
     }
-    return NULL;
+}
+
+static Symbol *scope_find(Scope *scope, Name name) {
+    if (!scope->slot_cap) return NULL;
+    size_t index = *scope_slot(scope, name);
+    return index ? &scope->items[index - 1] : NULL;
+}
+
+static void scope_add(Scope *scope, Symbol symbol) {
+    SOSU_VEC_PUSH(scope, symbol);
+    if (2 * scope->count > scope->slot_cap) { /* half full at most */
+        free(scope->slots);
+        scope->slot_cap = scope->slot_cap ? 2 * scope->slot_cap : 64;
+        scope->slots = sosu_alloc(scope->slot_cap * sizeof *scope->slots);
+        memset(scope->slots, 0, scope->slot_cap * sizeof *scope->slots);
+        for (size_t i = 0; i < scope->count; i++) *scope_slot(scope, scope->items[i].name) = i + 1;
+    } else {
+        *scope_slot(scope, symbol.name) = scope->count;
+    }
 }
 
 static const char *decl_keyword(const Decl *decl) {
@@ -129,7 +156,7 @@ static void declare(Sema *s, Unit *unit, Symbol symbol) {
     }
     Symbol *existing = scope_find(scope, name);
     if (!existing) {
-        SOSU_VEC_PUSH(scope, symbol);
+        scope_add(scope, symbol);
         return;
     }
     Diagnostic *d;
@@ -380,9 +407,9 @@ static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition 
         return type_array(&s->types, element, te->as.array.size);
     }
     case TYPE_RESULT: {
-        /* `void!E` is the return type of a function that returns nothing but can fail. */
-        Type *value = resolve_type(s, unit, te->as.result.value,
-                                   position == POSITION_RETURN ? POSITION_RETURN : POSITION_VALUE);
+        /* `void!E`: what a function that returns nothing but can fail returns, a value as any
+           other (a parameter, a variable, a field, a type argument) */
+        Type *value = resolve_type(s, unit, te->as.result.value, POSITION_RETURN);
         Type *error = resolve_type(s, unit, te->as.result.error, POSITION_VALUE);
         if (error->tag != T_ENUM && error->tag != T_ERROR) {
             const TypeExpr *ete = te->as.result.error;
@@ -1747,7 +1774,10 @@ Type *sema_resolve_named(Sema *s, Unit *unit, Path path, size_t offset, size_t l
 
 void sema_free(Sema *s) {
     if (s->program) {
-        for (size_t i = 0; i < s->program->units.count; i++) free(s->scopes[i].items);
+        for (size_t i = 0; i < s->program->units.count; i++) {
+            free(s->scopes[i].items);
+            free(s->scopes[i].slots);
+        }
     }
     free(s->scopes);
     free(s->type_infos.items);
