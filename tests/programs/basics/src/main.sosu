@@ -101,6 +101,31 @@ void show(i32!ParseError r) uses io {
     }
 }
 
+// `void!E` is a value as any other: a parameter, a variable, a field
+void!ParseError check_digit(str s) {
+    i32 n = try digit(s);
+    return ok();
+}
+
+struct Checked {
+    str text;
+    void!ParseError outcome;
+}
+
+str verdict(void!ParseError r) {
+    return match (r) {
+        ok => "a digit",
+        err(e) => e == Empty ? "empty" : "not a digit",
+    };
+}
+
+bool present(ui8*? p) {
+    return match (p) {
+        some(c) => true,
+        none => false,
+    };
+}
+
 // `while (true)` with `break`: the function still needs its own `return`.
 i32 first_even() {
     mut i32 n = 1;
@@ -168,5 +193,21 @@ i32 main() uses io {
     }
     io.print("{} letters, {} bytes", letters, "été".len);
     io.print("first even = {}", first_even());
+
+    mut void!ParseError last = check_digit("4");
+    io.print("4: {}", verdict(last));
+    last = check_digit("x");
+    Checked checked = Checked{ text: "", outcome: check_digit("") };
+    io.print("x: {}, empty: {}", verdict(last), verdict(checked.outcome));
+
+    // a type that a name alone is not, given to `alloc_slice` and `size_of`
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    mut ui8*?[] names = arena.alloc_slice(ui8*?, 3);
+    names[1] = some("abc".to_cstr(&arena));
+    mut i32[][] rows = arena.alloc_slice(i32[], 2);
+    rows[0] = arena.alloc_slice(i32, 4);
+    io.print("names: {} {} {}, rows: {} {}", names.len, present(names[0]), present(names[1]), rows[0].len, rows[1].len);
+    io.print("a pointer is as large as a usize: {}", size_of(ui8*) == size_of(usize));
     return 0;
 }

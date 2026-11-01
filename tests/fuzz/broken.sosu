@@ -1,0 +1,9 @@
+// A seed of the fuzzing (tests/fuzz.c): what is cut in the middle, or not closed.
+import std.io;
+struct A { i32 x
+class B : A, { virtual void f( }
+enum C { D(i32, E(, }
+i32 g<T: Ordered, uses>(T a) uses io, { return a < a > a >> 1; }
+void h() { auto x = [1, 2; 3]; match (x) { some( => , _ }; "abc
+'
+/* not closed

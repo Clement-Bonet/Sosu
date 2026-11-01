@@ -381,6 +381,9 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         fmt_operand(f, operand, precedence(operand) < P_PREFIX || is_cast(operand) || operand->kind == EXPR_UNARY);
         break;
     }
+    case EXPR_TYPE:
+        fmt_type(f, e->as.type_expr);
+        break;
     case EXPR_TRY:
         put(f, "try ");
         fmt_operand(f, e->as.inner, precedence(e->as.inner) < P_PREFIX || is_cast(e->as.inner));

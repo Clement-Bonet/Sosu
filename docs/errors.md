@@ -1,7 +1,10 @@
 # Error codes
 
-Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` semantic analysis,
-`E04xx` packages and imports.
+Codes are frozen from version 0.3.0 (spec §7.5, §13.2): a code keeps its meaning, a new error gets
+a new code, and a code no longer given stays here, marked "not given any more", so that it is never
+given for something else. `make test` checks that each code given is here. The messages may be
+worded differently from one version to the next: a tool reads the code. Ranges: `E01xx` lexer,
+`E02xx` parser, `E03xx` semantic analysis, `E04xx` packages and imports, `E05xx` code generation.
 
 ## Lexer
 
@@ -57,7 +60,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0303 | unknown type or module | `Pont p;` (did you mean `Point`?), `io.Socket s;`, `u8 b;` (now `ui8`) |
 | E0304 | not a type | a function or a module used as a type |
 | E0305 | private to its module | `shapes.Secret` without `pub struct Secret` |
-| E0306 | `void` can only be a return type | `void x;`, `void f(void x)` |
+| E0306 | `void` can only be a return type | `void x;`, `void f(void x)`, `void? x` (`void!E` is a value: a parameter, a variable, a field) |
 | E0307 | the error type of `T!E` must be an enum | `i32!str` |
 | E0308 | an array has at least one element, of a constant size | `i32[0]`, `ui8[NAME]` where `NAME` is not an integer constant (spec §11.6) |
 | E0309 | a type contains itself by value | `struct A { A a; }` |
@@ -76,7 +79,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 | E0330 | unknown name | `cuont` (did you mean `count`?) |
 | E0331 | type mismatch | `i32 b = a;` with `a: i64`, `f32 x = 3;` |
 | E0332 | number literal out of range | `ui8 x = 256;` |
-| E0333 | not a value | a type, a module or a method used as a value |
+| E0333 | not a value | a type, a module or a method used as a value, `f(i32*)` when `f` takes no type |
 | E0334 | invalid operands | `i32 + i64`, `true + 1`, indexing or slicing a `str`, `-x` on a `ui32` or a `uf32` |
 | E0335 | cannot assign | a variable or a field that is not `mut`, `&a` or `a[0..2]` of an array that is not `mut`, `v[0..2] = w` |
 | E0336 | wrong number of arguments or variant fields | `g(1, 2)` for `g(i32 a)`, `(x, y) => x` given to a `fn(i32) -> i32` |
@@ -116,7 +119,7 @@ Codes are stable (spec §7.5). Ranges: `E01xx` lexer, `E02xx` parser, `E03xx` se
 
 | Code | Message | Example |
 |---|---|---|
-| E0501 | (no longer used: classes and interfaces are generated since arenas exist) | |
+| E0501 | classes and interfaces are not generated yet | not given any more: they are generated since arenas exist |
 | E0502 | no valid `main` | `sosuc run` on a library, or `i32 main(i32 x)` |
 
 ## Packages and imports

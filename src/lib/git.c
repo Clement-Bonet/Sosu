@@ -107,7 +107,9 @@ void lock_free(LockFile *lock) {
 
 /* ---- Fetching ---- */
 
-/* Characters that mean nothing to `cmd` or `sh` inside double quotes. */
+/* The characters of a URL or a ref: given to git as arguments, never to a shell, they are still
+   kept to these, so that neither is read by git as an option nor as a transport that runs a
+   command (`ext::`, which needs a space). */
 static bool is_safe(const char *text, const char *extra) {
     if (!text[0] || text[0] == '-') return false;
     for (const char *c = text; *c; c++) {
@@ -140,13 +142,14 @@ static char *first_line(const char *path) {
     return sosu_strdup(line);
 }
 
-/* Runs a git command whose output goes to `log`; on failure, sets *error from it. */
-static bool run_git(const char *command, const char *log, const char *what, char **error) {
-    char *native_log = shell_path(log);
-    char *full = sosu_format("git %s > \"%s\" 2>&1", command, native_log);
-    int status = shell_run(full);
-    free(full);
-    free(native_log);
+/* Runs git with `args` (ended by NULL), its output and errors going to `log`; on failure, sets
+   *error from it. */
+static bool run_git(const char *const *args, const char *log, const char *what, char **error) {
+    Command git = { .out = log, .err = log };
+    command_add(&git, "git");
+    for (const char *const *arg = args; *arg; arg++) command_add(&git, *arg);
+    int status = command_run(&git);
+    command_free(&git);
     if (status == 0) return true;
     char *message = first_line(log);
     *error = message[0] ? sosu_format("%s: %s", what, message)
@@ -205,9 +208,9 @@ char *git_fetch(const char *deps_dir, const char *name, const char *url, const c
 
     char *target = commit ? sosu_strdup(commit) : strcmp(kind, "tag") == 0 ? sosu_format("refs/tags/%s", ref)
                                                                          : sosu_strdup(ref);
-    char *clone = sosu_format("clone --quiet --no-checkout \"%s\" \"%s\"", url, work);
-    char *checkout = sosu_format("-C \"%s\" -c advice.detachedHead=false checkout --quiet \"%s\"", work, target);
-    char *rev_parse = sosu_format("-C \"%s\" rev-parse HEAD", work);
+    const char *clone[] = { "clone", "--quiet", "--no-checkout", "--", url, work, NULL };
+    const char *checkout[] = { "-C", work, "-c", "advice.detachedHead=false", "checkout", "--quiet", target, NULL };
+    const char *rev_parse[] = { "-C", work, "rev-parse", "HEAD", NULL };
     char *what_clone = sosu_format("cannot clone `%s`", url);
     char *what_checkout = sosu_format("cannot check out %s `%s`", commit ? "the commit" : kind, commit ? commit : ref);
     char *dir = NULL;
@@ -235,9 +238,6 @@ char *git_fetch(const char *deps_dir, const char *name, const char *url, const c
     if (!dir) shell_remove_dir(work);
     remove(log);
     free(target);
-    free(clone);
-    free(checkout);
-    free(rev_parse);
     free(what_clone);
     free(what_checkout);
     free(work);

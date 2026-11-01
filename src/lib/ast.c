@@ -258,6 +258,11 @@ static void print_expr(Printer *pr, const Expr *expr, int indent) {
         }
         fputc(')', out);
         break;
+    case EXPR_TYPE:
+        fputs("(type ", out);
+        print_type(pr, expr->as.type_expr);
+        fputc(')', out);
+        break;
     case EXPR_TRY:
         fputs("(try ", out);
         print_expr(pr, expr->as.inner, indent);

@@ -117,6 +117,8 @@ typedef struct {
     Symbol *items;
     size_t count;
     size_t cap;
+    size_t *slots; /* a hash table of the names: index + 1 in `items`, 0 for an empty slot */
+    size_t slot_cap;
 } Scope;
 
 typedef struct {

@@ -1,0 +1,27 @@
+// A seed of the fuzzing (tests/fuzz.c): types given to calls, and `void!E` as a value.
+enum E { Bad }
+
+void!E check(i32 n) {
+    if (n < 0) {
+        return err(Bad);
+    }
+    return ok();
+}
+
+struct Step {
+    void!E outcome;
+}
+
+i32 main() {
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    ui8*?[] names = arena.alloc_slice(ui8*?, 3);
+    i32[][] rows = arena.alloc_slice(i32[], 2);
+    usize n = size_of(ui8*) + size_of(i32?) + size_of(void!E);
+    void!E r = check(1);
+    Step s = Step{ outcome: r };
+    return match (s.outcome) {
+        ok => 0,
+        err(e) => 1,
+    };
+}
