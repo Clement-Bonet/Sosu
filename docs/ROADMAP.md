@@ -35,14 +35,14 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 
 ## What remains (November 1, 2026)
 
-Estimated again from the pace above. The planned versions: `0.2.0` when work 5 is done (it changes the language: the two limits below), `0.3.0` with the packages of work 4; `0.1.x` for fixes in between.
+Estimated again from the pace above. The versions: `0.2.0` with the packages of work 4, which was done first (`render.image` moved to the package `image`); `0.3.0` when work 5 is done (it changes the language: the two limits below); `0.2.x` for fixes in between.
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
 | 4 | Standard library | Done (§8.0, §8.3, §10.11). Remains: the dialogs and the sound tried by hand (below) | 0 |
 | 5 | Quality | Begun (E0219, E0416, E0371, the review fixes above); the fuzzing of the parser and of the semantic analysis, in the CI; the time of `sosuc` on large programs, measured in the CI; the two limits found while writing `std` (`void!E` as the type of a parameter or a variable, a pointer as a type argument); `git` and the C compiler run without the shell; the grammar and the error codes frozen, a compatibility policy | 200 to 350 k |
-| 6 | Tooling | Begun: the reference of `core` and `std` is generated (`src/docgen`, not yet `sosuc doc` for any package); the rest unchanged | 200 to 350 k |
-| 7 | Documentation | Done: the reference of `std` (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
+| 6 | Tooling | Begun: the reference of `core`, `std` and the packages of `packages/` is generated (`src/docgen`, not yet `sosuc doc` for any package); the rest unchanged | 200 to 350 k |
+| 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
 

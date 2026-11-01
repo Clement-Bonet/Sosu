@@ -64,9 +64,12 @@ build/playground/sosuc.js: $(LIB_SRC) $(LIB_HDR) src/playground/playground.c pla
 	$(EMCC) $(CPPFLAGS) -std=c99 -Wall -O2 $(PLAYGROUND_FLAGS) --embed-file lib@/lib -o $@ $(LIB_SRC) src/playground/playground.c
 	cp playground/index.html playground/playground.js build/playground/
 
-# The reference of the public API of `core` and `std`, from the comments of lib/ (src/docgen).
-# Committed; the CI checks that it is up to date.
-DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu))
+# The reference of the public API of `core`, `std` and the packages of spec §8.3, from their
+# comments (src/docgen); the lib.sosu of a package only imports its modules. Committed; the CI
+# checks that it is up to date.
+DOC_PACKAGES := audio compress crypto db image math sqlite testing
+DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu) packages/platform/src/dialogs.sosu \
+	$(filter-out %/lib.sosu,$(foreach p,$(DOC_PACKAGES),$(wildcard packages/$(p)/src/*.sosu))))
 
 doc: build/docgen
 	./build/docgen docs/REFERENCE.md $(DOC_SOURCES)

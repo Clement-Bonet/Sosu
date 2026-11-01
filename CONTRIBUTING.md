@@ -21,7 +21,8 @@ good place to start.
 2. Build and test (see [Building](README.md#building)): `build.bat test` on Windows, `make test`
    elsewhere.
 3. Format the `.sosu` files you changed: `sosuc fmt <folder>`.
-4. If you changed `lib/core` or `lib/std`, run `make doc` and commit `docs/REFERENCE.md` (the CI
+4. If you changed `lib/core`, `lib/std` or a package of the reference (`DOC_PACKAGES` in the
+   `Makefile`, and `platform.dialogs`), run `make doc` and commit `docs/REFERENCE.md` (the CI
    checks that it is up to date).
 5. Open the pull request. The CI builds and tests it on Linux (gcc, clang), Windows (MSVC), macOS
    and Android; it is merged once everything passes.

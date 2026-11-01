@@ -459,15 +459,19 @@ void right_column(canvas.Canvas* cv, Fonts* f) {
     put(cv, f.body, 14.5, 1113.0, 750.0, "Generics:", pale);
     put(cv, f.mono, 10.5, 1113.0 + f.body.measure("Generics:", 14.5) + 6.0, 750.0, "Vec<T>, HashMap<K, V>", pale);
     bullet(cv, f, 1094.0, 772.0, "Lambdas", 14.5);
-    // 5. Operators
+    // 5. Library: std, and the packages of 1.0 (spec §8.3)
     badge_icon(cv, 3, 1306.0, 650.0, 40.0, white);
-    put_bold(cv, f.bold, f.faux_bold, 20.0, 1356.0, 676.0, "5. Operators", white);
-    str[5] kinds = ["Arithmetic", "Comparison", "Logical", "Bitwise", "Assignment"];
-    str[5] signs = ["+ - * / %", "== != < <= > >=", "&& || !", "& | ^ ~ << >>", "= += -= *= /= %="];
+    put_bold(cv, f.bold, f.faux_bold, 20.0, 1356.0, 676.0, "5. Library", white);
+    str[5] domains = ["std", "Images", "Sound", "Data", "Crypto"];
+    str[5] contents = ["files, JSON, time, CLI", "PNG, JPEG, resize", "WAV, Ogg, mixer", "SQLite, zlib, gzip", "SHA-256, HMAC, base64"];
+    mut f32 column = 0.0;
+    for (str d in domains) {
+        column = max(column, f.body.measure(d, 12.5));
+    }
     for (usize k in 0..5) {
         cv.fill_circle(1318.0, 702.0 + k as f32 * 22.0, 2.2, pale);
-        put(cv, f.body, 12.5, 1328.0, 706.0 + k as f32 * 22.0, kinds[k], pale);
-        put(cv, f.mono, 11.0, 1424.0, 706.0 + k as f32 * 22.0, signs[k], pale);
+        put(cv, f.body, 12.5, 1328.0, 706.0 + k as f32 * 22.0, domains[k], pale);
+        put(cv, f.body, 12.5, 1328.0 + column + 12.0, 706.0 + k as f32 * 22.0, contents[k], pale);
     }
     // the motto and the platforms
     canvas.Color line = rgba(200, 215, 255, 110);
