@@ -3,10 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-Diagnostic *diag_verror(DiagList *list, const char *code, const SourceFile *file,
-                        size_t offset, size_t length, const char *fmt, va_list args) {
+static Diagnostic *report(DiagList *list, Severity severity, const char *code, const SourceFile *file,
+                          size_t offset, size_t length, const char *fmt, va_list args) {
     Diagnostic diag = {0};
-    diag.severity = SEVERITY_ERROR;
+    diag.severity = severity;
     diag.code = code;
     diag.file = file;
     diag.offset = offset;
@@ -14,8 +14,18 @@ Diagnostic *diag_verror(DiagList *list, const char *code, const SourceFile *file
     diag.message = sosu_vformat(fmt, args);
 
     SOSU_VEC_PUSH(list, diag);
-    list->error_count++;
+    if (severity == SEVERITY_ERROR) list->error_count++;
     return &list->items[list->count - 1];
+}
+
+Diagnostic *diag_verror(DiagList *list, const char *code, const SourceFile *file,
+                        size_t offset, size_t length, const char *fmt, va_list args) {
+    return report(list, SEVERITY_ERROR, code, file, offset, length, fmt, args);
+}
+
+Diagnostic *diag_vwarning(DiagList *list, const char *code, const SourceFile *file,
+                          size_t offset, size_t length, const char *fmt, va_list args) {
+    return report(list, SEVERITY_WARNING, code, file, offset, length, fmt, args);
 }
 
 Diagnostic *diag_error(DiagList *list, const char *code, const SourceFile *file,

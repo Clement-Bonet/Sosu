@@ -643,6 +643,14 @@ pub struct Ui {
     mut canvas.Rect layer = nowhere();
     mut f32 drop_scroll = 0.0;  // how far the open list of a dropdown is scrolled (spec §10.10)
     mut bool drop_reveal = false;  // the keyboard moved its highlight: it comes into view
+    // On a touch screen, the open list is a dialog (spec §10.9): its top at the last frame, the
+    // window dimmed under it (nothing there sees the mouse), and a finger on it, where it is,
+    // and whether it moved (it scrolls the list instead of choosing).
+    mut f32 drop_top = 0.0;
+    mut bool dimmed = false;
+    mut bool drop_held = false;
+    mut f32 drop_grab_y = 0.0;
+    mut bool drop_dragged = false;
     // An item dragged in a list that can be reordered (spec §10.10): the list, the item, where the press
     // was, and whether it moved enough to be a drag.
     mut ui64 drag_list = 0;
@@ -687,6 +695,9 @@ pub struct Ui {
     // so with `CustomTitleBar`), else a `title_bar` is a tool bar; whether it is maximized.
     pub mut bool custom_title_bar = false;
     pub mut bool maximized = false;
+    // A finger touched the screen (`touch`, or the program on `platform.app.Touch` when it keeps the
+    // mouse events the system makes of fingers): the open list of a dropdown is then a dialog.
+    pub mut bool touch_screen = false;
 
     // The font of the widgets; without one, the built-in 8 by 8 font. Text is 9 pixels per
     // em for each step of scale: 18 for labels, 27 for titles.
@@ -783,6 +794,7 @@ pub struct Ui {
     pub void touch(i64 id, f32 x, f32 y, Finger phase) {
         match (phase) {
             Down => {
+                touch_screen = true;
                 if (finger < 0) {
                     finger = id;
                     finger_x = x;
@@ -938,7 +950,7 @@ pub struct Ui {
 
     // Whether (x, y) is on the layer above: the list of a dropdown or a menu, open.
     bool on_layer(f32 x, f32 y) {
-        if (contains(layer, x, y)) {
+        if (dimmed || contains(layer, x, y)) {
             return true;
         }
         for (usize i in 0..popup_count) {
@@ -2152,6 +2164,10 @@ pub struct Frame {
     mut str[64] options = [""; 64];
     mut usize option_count = 0;
     mut i32 option_chosen = -1;
+    // The same for the open dropdown, which another one described after it must not replace.
+    mut str[64] layer_options = [""; 64];
+    mut usize layer_count = 0;
+    mut i32 layer_chosen = -1;
     mut bool dropdown_pressed = false;  // a press went to a dropdown or to one of its options
     // The menus being described, one per level (`menu_level` of them), and those open, drawn by
     // `finish()`; a press that went to a menu, a right press that opened a context menu.
@@ -3682,7 +3698,22 @@ pub struct Frame {
             ui.open = ui.open == id ? 0 : id;
             ui.highlight = -1;
             ui.drop_scroll = 0.0;
+            ui.drop_held = false;
             dropdown_pressed = true;
+        }
+        if (ui.open == id && ui.touch_screen) {  // a finger on the dialog: it chooses, or drags it
+            if (ui.pressed && contains(ui.layer, ui.mouse_x, ui.mouse_y)) {
+                ui.drop_held = true;
+                ui.drop_dragged = false;
+                ui.drop_grab_y = ui.mouse_y;
+                dropdown_pressed = true;
+            }
+            f32 moved = ui.mouse_y - ui.drop_grab_y;
+            if (ui.drop_held && (ui.drop_dragged || abs_f32(moved) > 8.0 * ui.scale)) {
+                ui.drop_dragged = true;
+                ui.drop_scroll -= moved;
+                ui.drop_grab_y = ui.mouse_y;
+            }
         }
         option_index = 0;
         option_current = -1;
@@ -3714,7 +3745,11 @@ pub struct Frame {
         dropdown_hint = placeholder;
         option_count = 0;
         option_chosen = -1;
-        if (ui.open == id) {
+        if (ui.open == id && ui.touch_screen) {  // in the middle of the window, as placed at the last frame
+            layer_owner = id;
+            f32 w = max(min(surface.width as f32 - 48.0 * ui.scale, max(r.w, 280.0 * ui.scale)), r.w);
+            layer = canvas.Rect{ x: max((surface.width as f32 - w) / 2.0, 0.0), y: ui.drop_top, w: w, h: 0.0 };
+        } else if (ui.open == id) {
             layer_owner = id;
             layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
         } else if (ui.open == 0) {
@@ -3727,6 +3762,11 @@ pub struct Frame {
         i32 cy = (r.y + height / 2.0) as i32;
         surface.line(cx - 5, cy - 2, cx, cy + 3, drop_look.color);
         surface.line(cx, cy + 3, cx + 5, cy - 2, drop_look.color);
+    }
+
+    // The height of an option in the open list of a dropdown: 48 pixels for a finger, as on Android.
+    f32 option_height() {
+        return ui.touch_screen ? 48.0 * ui.scale : height;
     }
 
     // An option of the dropdown being described, drawn in its box when `chosen`; returns
@@ -3762,10 +3802,15 @@ pub struct Frame {
         if (layer_owner != dropdown_id) {
             return false;
         }
-        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h - ui.drop_scroll, w: layer.w, h: height };
-        layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: layer.h + height };
-        if (ui.open == dropdown_id && ui.pressed && contains(r, ui.mouse_x, ui.mouse_y) && contains(ui.layer, ui.mouse_x, ui.mouse_y)) {
+        f32 row = option_height();
+        canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + layer.h - ui.drop_scroll, w: layer.w, h: row };
+        layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: layer.h + row };
+        bool hit = contains(r, ui.mouse_x, ui.mouse_y) && contains(ui.layer, ui.mouse_x, ui.mouse_y);
+        // with a finger, an option is chosen when it leaves it without having dragged the list
+        bool chose = ui.touch_screen ? ui.released && ui.drop_held && !ui.drop_dragged : ui.pressed;
+        if (ui.open == dropdown_id && chose && hit) {
             ui.open = 0;
+            ui.drop_held = false;
             dropdown_pressed = true;
             ui.focus = dropdown_id;  // the dropdown keeps the keyboard
             focus_taken = true;
@@ -3808,16 +3853,30 @@ pub struct Frame {
                 }
             }
             if (ui.open == dropdown_id) {  // the list: no lower than the window, and scrolled
+                layer_options = options;
+                layer_count = option_count;
+                layer_chosen = option_chosen;
+                f32 row = option_height();
                 f32 full = layer.h;
-                f32 room = max(surface.height as f32 - layer.y - 8.0, height * 3.0);
-                layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: min(full, room) };
+                if (ui.touch_screen) {  // a dialog: in the middle of the safe area, with a margin
+                    f32 tall = surface.height as f32 - ui.safe_top - ui.safe_bottom;
+                    f32 h = min(full, max(tall - 96.0 * ui.scale, row * 3.0));
+                    ui.drop_top = ui.safe_top + max((tall - h) / 2.0, 0.0);
+                    layer = canvas.Rect{ x: layer.x, y: ui.drop_top, w: layer.w, h: h };
+                } else {
+                    f32 room = max(surface.height as f32 - layer.y - 8.0, height * 3.0);
+                    layer = canvas.Rect{ x: layer.x, y: layer.y, w: layer.w, h: min(full, room) };
+                }
+                if (ui.released) {
+                    ui.drop_held = false;
+                }
                 if (contains(ui.layer, ui.mouse_x, ui.mouse_y) && ui.wheel != 0.0) {
-                    ui.drop_scroll -= ui.wheel * height * 3.0;
+                    ui.drop_scroll -= ui.wheel * row * 3.0;
                     ui.wheel = 0.0;
                 }
                 if (ui.drop_reveal) {  // the option of the keyboard, in view
-                    f32 lit = ui.highlight as f32 * height;
-                    ui.drop_scroll = max(min(ui.drop_scroll, lit), lit + height - layer.h);
+                    f32 lit = ui.highlight as f32 * row;
+                    ui.drop_scroll = max(min(ui.drop_scroll, lit), lit + row - layer.h);
                     ui.drop_reveal = false;
                 }
                 ui.drop_scroll = max(min(ui.drop_scroll, full - layer.h), 0.0);
@@ -4244,25 +4303,40 @@ pub struct Frame {
     // The open list of a dropdown, over everything else.
     void draw_layer() {
         Look m = look(Menu, 0);
+        f32 row = option_height();
+        if (ui.touch_screen) {  // a dialog: the window dimmed under it
+            surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: surface.width as f32, h: surface.height as f32 }, canvas.Color{ r: 0, g: 0, b: 0, a: 128 });
+        }
         surface.fill_rounded(layer, m.radius, face(false, false));
         surface.push_clip(layer);
-        for (usize i in 0..option_count) {
-            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * height - ui.drop_scroll, w: layer.w, h: height };
+        for (usize i in 0..layer_count) {
+            canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * row - ui.drop_scroll, w: layer.w, h: row };
             if (r.y + r.h < layer.y || r.y > layer.y + layer.h) {
                 continue;
             }
-            if (i as i32 == option_chosen) {
+            if (i as i32 == layer_chosen) {
                 surface.fill(r, m.selection);
             }
-            if (i as i32 == ui.highlight) {  // with the keyboard
+            if (i as i32 == ui.highlight && !ui.touch_screen) {  // with the keyboard
                 surface.stroke(r, m.accent, 2.0);
             } else if (contains(r, ui.mouse_x, ui.mouse_y)) {
                 surface.fill(r, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
             }
-            write_px(r.x + 8.0, r.y, height, options[i], m.color, m.font_size);
+            if (ui.touch_screen) {  // a radio button, filled for the option chosen
+                f32 s = ui.scale;
+                canvas.Rect ring = canvas.Rect{ x: r.x + 16.0 * s, y: r.y + (row - 20.0 * s) / 2.0, w: 20.0 * s, h: 20.0 * s };
+                bool on = i as i32 == layer_chosen;
+                surface.stroke_rounded(ring, 10.0 * s, on ? m.accent : m.color, 2.0 * s);
+                if (on) {
+                    surface.fill_rounded(canvas.Rect{ x: ring.x + 5.0 * s, y: ring.y + 5.0 * s, w: 10.0 * s, h: 10.0 * s }, 5.0 * s, m.accent);
+                }
+                write_px(r.x + 52.0 * s, r.y, row, layer_options[i], m.color, m.font_size);
+            } else {
+                write_px(r.x + 8.0, r.y, row, layer_options[i], m.color, m.font_size);
+            }
         }
         surface.pop_clip();
-        f32 full = option_count as f32 * height;
+        f32 full = layer_count as f32 * row;
         if (full > layer.h) {  // a bar: where the list is
             f32 thumb = max(layer.h * layer.h / full, 16.0);
             f32 y = layer.y + (layer.h - thumb) * ui.drop_scroll / (full - layer.h);
@@ -4285,8 +4359,10 @@ pub struct Frame {
                 draw_layer();
             }
             ui.layer = layer;
+            ui.dimmed = ui.touch_screen && ui.open != cal_owner;
         } else {
             ui.layer = nowhere();
+            ui.dimmed = false;
         }
         finish_menus();
         draw_tooltip();  // above everything
@@ -5318,8 +5394,9 @@ pub struct Frame {
     // A widget `w` by `h` placed in its cell, as its alignment says; it measures its column and
     // its row for the next frame.
     canvas.Rect place_in_grid(usize g, f32 w, f32 h) {
-        if (!grids[g].has_cell) {
-            cell(-1, -1, 1, 1, Start);
+        if (!grids[g].has_cell) {  // the next free cell, with the alignment of `align`
+            cell(-1, -1, 1, 1, next_align);
+            next_align = Start;
         }
         GridBuild* b = &grids[g];
         b.has_cell = false;
@@ -6880,6 +6957,67 @@ test "a dropdown opens above the rest, chooses and closes" {
     assert(ui.open == 0 && choice == 0);
 }
 
+// Two dropdowns, the first on "Release" and the second on "Profile"; returns the frame, finished.
+Frame two_dropdowns_frame(Ui* ui, canvas.Canvas* surface) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    for (i32 d in 0..2) {
+        f.push_id(d as ui64);
+        f.dropdown(160.0);
+        for (i32 i in 0..3) {
+            f.option(i == 0 ? "Debug" : i == 1 ? "Release" : "Profile", i == d + 1);
+        }
+        f.end_dropdown();
+        f.pop_id();
+    }
+    f.finish();
+    return f;
+}
+
+test "the open list shows its own dropdown's choice, not the one of a dropdown described after it" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    two_dropdowns_frame(&ui, &surface);
+    click_at(&ui, 20.0, 10.0);  // the first one
+    Frame f = two_dropdowns_frame(&ui, &surface);
+    assert(ui.open != 0 && f.layer_count == 3 && f.layer_chosen == 1);
+}
+
+test "on a touch screen, the list of a dropdown is a dialog: a tap chooses, a drag does not" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut Ui ui = Ui{ };
+    ui.touch_screen = true;
+    mut i32 choice = 1;
+    dropdown_frame(&ui, &surface, &choice);
+    click_at(&ui, 20.0, 10.0);  // the box opens it, in the middle: 3 options of 48, 280 wide
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open != 0 && ui.layer.x == 60.0 && ui.layer.y == 78.0 && ui.layer.w == 280.0 && ui.layer.h == 144.0);
+
+    click_at(&ui, 100.0, 100.0);  // a tap on the first option
+    dropdown_frame(&ui, &surface, &choice);
+    assert(choice == 0 && ui.open == 0);
+
+    click_at(&ui, 20.0, 10.0);  // a tap beside the dialog closes it; the button under does not get it
+    dropdown_frame(&ui, &surface, &choice);
+    click_at(&ui, 20.0, 50.0);
+    assert(!dropdown_frame(&ui, &surface, &choice));
+    assert(ui.open == 0 && choice == 0);
+
+    click_at(&ui, 20.0, 10.0);  // a finger that drags the list leaves it open, nothing chosen
+    dropdown_frame(&ui, &surface, &choice);
+    ui.mouse_move(100.0, 180.0);
+    ui.mouse_button(true);
+    dropdown_frame(&ui, &surface, &choice);
+    ui.mouse_move(100.0, 140.0);
+    dropdown_frame(&ui, &surface, &choice);
+    ui.mouse_button(false);
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open != 0 && choice == 0);
+}
+
 test "an image is placed as a widget, centered in a row" {
     mut Arena arena = Arena.new(256 * KB);
     defer arena.free();
@@ -7503,6 +7641,7 @@ canvas.Rect[6] grid_frame(Ui* ui, canvas.Canvas* surface) {
     f.cell(0, 2, 1, 1, Stretch);
     f.label("wide");
     r[2] = f.last;
+    f.align(Stretch);  // `align:` without a cell: the next free one, stretched
     f.label("next");  // (1, 0)
     r[3] = f.last;
     f.cell(-1, -1, 3, 1, End);  // (1, 1), over the 2 columns left
@@ -7528,7 +7667,7 @@ test "a grid: pixels, Auto and Fill columns, the next free cell, spans and align
     assert(r[1].x == 110.0 && r[1].y == 0.0);
     f32 third = 110.0 + ok_w + 10.0;
     assert(r[2].x == third && r[2].w == 400.0 - third);  // Fill, and Stretch
-    assert(r[3].x == 0.0 && r[3].y == 42.0);  // the row below, a line high
+    assert(r[3].x == 0.0 && r[3].y == 42.0 && r[3].w == 100.0);  // the row below, a line high, stretched
     assert(r[4].x + r[4].w == 400.0 && r[4].y == 42.0);  // End of the 2 columns
     assert(r[5].x == 0.0 && r[5].y == 82.0);  // under its 2 rows (74), then the gap of the frame
 }

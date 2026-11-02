@@ -32,6 +32,9 @@ Diagnostic *diag_error(DiagList *list, const char *code, const SourceFile *file,
                        size_t offset, size_t length, const char *fmt, ...);
 Diagnostic *diag_verror(DiagList *list, const char *code, const SourceFile *file,
                         size_t offset, size_t length, const char *fmt, va_list args);
+/* Reports a warning: it does not stop the build (error_count is unchanged). */
+Diagnostic *diag_vwarning(DiagList *list, const char *code, const SourceFile *file,
+                          size_t offset, size_t length, const char *fmt, va_list args);
 /* Adds a suggested fix; does nothing when `diag` is NULL (silenced error). */
 void diag_help(Diagnostic *diag, const char *fmt, ...);
 

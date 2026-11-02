@@ -20,6 +20,14 @@ typedef struct {
     int loop_depth;      /* loops around its declaration */
     bool closure;        /* holds a lambda of this function that captures variables (spec §5.5) */
     bool points_inside;  /* was given a pointer or a view into this function (spec §7.7, E0371) */
+    /* The regions, stage 1 (spec §6.1, E0372): the local arenas it was given memory of (their
+       declaration offsets; more than four are not followed), and whether one of them was freed. */
+    size_t origins[4];
+    int origin_count;
+    bool dangling;
+    Name freed_arena;    /* the arena freed, and where */
+    size_t freed_offset;
+    bool free_deferred;  /* an `Arena` whose `free()` is in a `defer`: runs at the end of its block */
 } Local;
 
 /* A lambda being checked (spec §5.5): its own locals start at `base`; those below it, and
@@ -104,6 +112,8 @@ void sema_consume(Body *b, Expr *e);
 void sema_declare_local(Body *b, Name name, Type *type, bool is_mut);
 Diagnostic *sema_error_at(Body *b, const char *code, size_t offset, size_t length, const char *fmt, ...);
 Diagnostic *sema_error_expr(Body *b, const char *code, const Expr *e, const char *fmt, ...);
+Diagnostic *sema_warning_expr(Body *b, const char *code, const Expr *e, const char *fmt, ...);
+void sema_arena_freed(Body *b, Expr *object, size_t offset);
 Type *sema_error_type(Body *b);
 FieldInfo *sema_find_field(TypeInfo *info, Name name);
 Local *sema_find_local(Body *b, Name name);

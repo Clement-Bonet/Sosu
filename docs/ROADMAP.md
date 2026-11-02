@@ -51,7 +51,7 @@ In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro q
 
 What tokens do not buy, and sets the pace as much:
 
-- The tests by hand: the examples run on an Android phone, iOS on an iPhone (a Mac is needed). The dialogs and the sound are tried on Windows 11, not yet on Linux nor macOS.
+- The tests by hand: Beatbox runs on an Android phone (built with `--release`: the sound, the dialog of its lists, landscape); iOS on an iPhone remains (a Mac is needed). The dialogs and the sound are tried on Windows 11, not yet on Linux nor macOS.
 - The accounts and certificates of signed binaries (Apple developer program, a code-signing certificate for Windows), which cost money.
 - The 0.x versions tried by others than their authors, for a few weeks, before 1.0 (§13.1).
 

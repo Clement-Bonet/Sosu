@@ -15,7 +15,13 @@ From this folder, with `sosuc` built at the root of the repository and SDL3 inst
 ../../build/sosuc run .                        # the machine
 ../../build/sosuc run . -- --snapshot out.png  # draws the window into a PNG, no screen or sound card
 ../../build/sosuc test .                       # the tests
+../../build/sosuc package --release --target android .  # build/android/project/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+On a phone, the window stays landscape (`landscape: true` in `app.Config`), fills the width of the screen (the steps
+share it) and its height (the scale of `ui` is made smaller until the window fits), and the list of an instrument
+opens as a dialog. A window made lower on the desktop shrinks the same way. Build it with `--release` for a phone: in debug, a frame takes about
+100 ms there, and the sound has to be mixed further in advance.
 
 Click a step to toggle it, its speaker button to mute a track. The list of a track changes its instrument. Click the note of
 a track to select it, then a key of the piano (C2 to C4) to change its note; the note is played at once.

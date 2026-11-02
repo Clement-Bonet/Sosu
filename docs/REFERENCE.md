@@ -1850,7 +1850,7 @@ pub Device[] recording_devices(Arena* arena) uses io
 
 ### struct `Output`
 
-How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner).
+How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner). When the device runs dry between two calls of `update()` close together (a program slower than that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
 
 ```sosu
 pub struct Output
@@ -1862,6 +1862,14 @@ pub struct Output
 - `pub i32 channels = 2`
 - `pub i32 ahead_ms = 60`
 
+### `MOST_AHEAD_MS`
+
+How far in advance a player that runs dry goes at most.
+
+```sosu
+pub i32 MOST_AHEAD_MS = 250
+```
+
 ### class `Player`
 
 A device that plays the sounds of its mixer, `sounds`.
@@ -1872,6 +1880,8 @@ pub class Player
 
 - `pub mixer.Mixer* sounds`  
   what it plays
+- `pub i32 ahead_ms()`  
+  What it keeps mixed in advance now, in milliseconds: the delay before a sound is heard.
 - `pub void update() uses io`  
   Mixes what the device needs next; to call often.
 - `pub void pause() uses io`  

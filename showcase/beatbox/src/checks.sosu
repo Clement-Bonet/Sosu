@@ -203,3 +203,21 @@ test "the loop has the length of sixteen steps and stays within range" {
         },
     }
 }
+
+test "a player that runs dry keeps more in advance, which sets the playhead back" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    match (device.open_player(&arena, device.Output{ rate: sounds.RATE })) {
+        some(player) => {
+            player.update();
+            assert(player.ahead_ms() == 60);
+            sdl.delay(300);  // a frame of 300 ms: the device has played everything
+            player.update();
+            assert(player.ahead_ms() == 120);
+            player.close();
+        },
+        none => {
+            assert(false);
+        },
+    }
+}
