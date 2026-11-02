@@ -137,7 +137,11 @@ void sema_declare_local(Body *b, Name name, Type *type, bool is_mut) {
                                  NAME_ARGS(name));
         diag_help(d, "the first declaration is on line %zu: choose another name", sema_line_of(b->unit, existing->name.offset));
     }
-    Local local = { name, type, is_mut, false, 0, b->loop_depth, false, false };
+    Local local = {0};
+    local.name = name;
+    local.type = type;
+    local.is_mut = is_mut;
+    local.loop_depth = b->loop_depth;
     SOSU_VEC_PUSH(&b->locals, local);
 }
 
@@ -1746,8 +1750,10 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
     init_body(&b, s, unit, self_info, fn->name, typed ? type->as.fn.ret : s->types.error, typed ? type->as.fn.effects : 0);
     b.in_init = self_info && sema_name_is(fn->name, "init");
     for (size_t i = 0; i < fn->param_count; i++) {
-        Local param = { fn->params[i].name, typed ? type->as.fn.params[i] : s->types.error, fn->params[i].is_mut,
-                        false, 0, 0, false, false };
+        Local param = {0};
+        param.name = fn->params[i].name;
+        param.type = typed ? type->as.fn.params[i] : s->types.error;
+        param.is_mut = fn->params[i].is_mut;
         SOSU_VEC_PUSH(&b.locals, param); /* duplicates were reported with the declarations (E0319) */
     }
     for (size_t i = 0; i < fn->contract_count; i++) {
