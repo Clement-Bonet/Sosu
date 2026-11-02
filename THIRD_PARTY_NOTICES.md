@@ -67,9 +67,12 @@ under their own licenses.
 - Written by Sean Barrett (2007) and its contributors, named in the file
 - License: public domain (the Unlicense), or the MIT license (Copyright (c) 2017 Sean Barrett),
   at your option; both are at the end of the file
-- Not changed. `ogg.c` bounds its memory and compiles it without the comment header
-  (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read; the CI fuzzes it (`make fuzz-ogg`). A
-  fault found later in it is fixed by taking the new commit of that branch (`SECURITY.md`).
+- Changed by Sosu: one line, marked `// Sosu:`. `get_window` compares a length with half of the
+  block sizes instead of shifting it, which was undefined for the negative length of a hostile file
+  (found by `make fuzz-ogg`; the window was not found either way). `ogg.c` bounds its memory and
+  compiles it without the comment header (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read;
+  the CI fuzzes it. A fault found later in it is fixed by taking the new commit of that branch, or
+  here when that branch has none (`SECURITY.md`).
 
 ## SQLite
 

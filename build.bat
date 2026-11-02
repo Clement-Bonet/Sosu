@@ -64,7 +64,10 @@ build\sosuc.exe check examples\containers || exit /b 1
 build\sosuc.exe check packages\audio || exit /b 1
 build\sosuc.exe check examples\sound || exit /b 1
 build\sosuc.exe check examples\dialogs || exit /b 1
+rem its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)
+set "SDL_AUDIO_DRIVER=dummy"
 build\sosuc.exe test showcase\beatbox || exit /b 1
+set "SDL_AUDIO_DRIVER="
 build\sosuc.exe test showcase\disktiles || exit /b 1
 build\sosuc.exe test showcase\pixelforge || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
