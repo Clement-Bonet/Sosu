@@ -6,12 +6,22 @@ under their own licenses.
 
 ## Noto Sans
 
-- Files: `packages/render/fonts/NotoSans-Regular.ttf`
+- Files: `packages/render/fonts/NotoSans-Regular.ttf`, and the same file in `assets/` of each
+  application of `showcase/` (with its `OFL.txt`)
 - Source: <https://github.com/notofonts/notofonts.github.io> (unhinted TrueType)
 - Copyright 2022 The Noto Project Authors (<https://github.com/notofonts/latin-greek-cyrillic>)
 - License: SIL Open Font License, Version 1.1, in `packages/render/fonts/OFL.txt`. The font may
   be used, embedded and redistributed with programs; it may not be sold by itself, and a modified
   version must not use the name "Noto".
+
+## Font Awesome Free
+
+- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox
+- Source: <https://fontawesome.com> (Font Awesome Free, desktop font files)
+- Copyright (c) 2024 Fonticons, Inc., with the Reserved Font Name "Font Awesome"
+- License: SIL Open Font License, Version 1.1, for the font files, in
+  `showcase/beatbox/assets/FA-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
+  the code under MIT; neither is given here)
 
 ## Montserrat
 

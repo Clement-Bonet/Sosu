@@ -1,0 +1,1738 @@
+// pixelforge.editor: what the window shows and what its tools do: the sheet, the tool and the
+// color chosen, the zoom and the place of the picture in the window, the mouse and the files.
+import std.io;
+import std.text;
+import std.vec;
+import image.image;
+import image.png;
+import pixelforge.project;
+import pixelforge.sheet;
+
+// The room kept by the title bar (above), the tools (left), the panel (right), the status bar and
+// the strip of frames (below the picture).
+pub f32 TOP = 40.0;
+pub f32 BOTTOM = 26.0;
+pub f32 LEFT = 84.0;
+pub f32 RIGHT = 232.0;
+pub f32 STRIP = 132.0;
+
+pub i32 MAX_FRAMES = 64;
+// A sprite sheet bigger than this (in pixels) is refused.
+i64 MAX_SHEET = 64000000;
+
+pub i32 PEN = 0;
+pub i32 ERASER = 1;
+pub i32 FILL = 2;
+pub i32 LINE = 3;
+pub i32 RECT = 4;
+pub i32 BOX = 5;
+pub i32 PICK = 6;
+pub i32 SELECT = 7;
+pub i32 TOOLS = 8;
+
+pub str tool_name(i32 tool) {
+    str[8] names = ["Pen", "Eraser", "Fill", "Line", "Rect", "Box", "Pick", "Select"];
+    return names[tool as usize];
+}
+
+// `x` kept between 0 and 1.
+pub f32 unit_range(f32 x) {
+    return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
+}
+
+ui32 byte_of(f32 x) {
+    i32 n = (unit_range(x) * 255.0 + 0.5) as i32;
+    return n as ui32;
+}
+
+// An opaque color from hue (0 to 360), saturation and brightness (0 to 1).
+pub ui32 hsv_rgb(f32 h, f32 s, f32 v) {
+    f32 hh = h < 0.0 || h >= 360.0 ? 0.0 : h;
+    f32 sector = hh / 60.0;
+    i32 i = sector as i32;
+    f32 f = sector - i as f32;
+    f32 p = v * (1.0 - s);
+    f32 q = v * (1.0 - s * f);
+    f32 t = v * (1.0 - s * (1.0 - f));
+    mut f32 r = v;
+    mut f32 g = t;
+    mut f32 b = p;
+    if (i == 1) {
+        r = q;
+        g = v;
+    } else if (i == 2) {
+        r = p;
+        g = v;
+        b = t;
+    } else if (i == 3) {
+        r = p;
+        g = q;
+        b = v;
+    } else if (i == 4) {
+        r = t;
+        g = p;
+        b = v;
+    } else if (i == 5) {
+        g = p;
+        b = q;
+    }
+    return 0xFF000000 | (byte_of(r) << 16) | (byte_of(g) << 8) | byte_of(b);
+}
+
+i32 top_channel(ui32 c) {
+    i32 r = ((c >> 16) & 0xFF) as i32;
+    i32 g = ((c >> 8) & 0xFF) as i32;
+    i32 b = (c & 0xFF) as i32;
+    i32 m = r > g ? r : g;
+    return m > b ? m : b;
+}
+
+i32 low_channel(ui32 c) {
+    i32 r = ((c >> 16) & 0xFF) as i32;
+    i32 g = ((c >> 8) & 0xFF) as i32;
+    i32 b = (c & 0xFF) as i32;
+    i32 m = r < g ? r : g;
+    return m < b ? m : b;
+}
+
+// The brightness (0 to 1) of a color.
+pub f32 rgb_value(ui32 c) {
+    return top_channel(c) as f32 / 255.0;
+}
+
+// One of cyan, magenta, yellow (0 to 2) or black (3) of an RGB color, from 0 to 1.
+pub f32 cmyk_part(ui32 c, i32 part) {
+    f32 r = ((c >> 16) & 0xFF) as f32 / 255.0;
+    f32 g = ((c >> 8) & 0xFF) as f32 / 255.0;
+    f32 b = (c & 0xFF) as f32 / 255.0;
+    mut f32 m = r > g ? r : g;
+    m = m > b ? m : b;
+    if (part == 3) {
+        return 1.0 - m;
+    }
+    if (m <= 0.0) {
+        return 0.0;
+    }
+    f32 ch = part == 0 ? r : part == 1 ? g : b;
+    return (m - ch) / m;
+}
+
+pub ui32 cmyk_rgb(f32 c, f32 m, f32 y, f32 k) {
+    ui32 r = byte_of((1.0 - c) * (1.0 - k));
+    ui32 g = byte_of((1.0 - m) * (1.0 - k));
+    ui32 b = byte_of((1.0 - y) * (1.0 - k));
+    return (r << 16) | (g << 8) | b;
+}
+
+// The saturation (0 to 1) of a color.
+pub f32 rgb_sat(ui32 c) {
+    i32 top = top_channel(c);
+    if (top == 0) {
+        return 0.0;
+    }
+    return (top - low_channel(c)) as f32 / top as f32;
+}
+
+// The hue (0 to 360) of a color; 0 for a gray.
+pub f32 rgb_hue(ui32 c) {
+    f32 r = ((c >> 16) & 0xFF) as f32;
+    f32 g = ((c >> 8) & 0xFF) as f32;
+    f32 b = (c & 0xFF) as f32;
+    i32 top = top_channel(c);
+    f32 d = (top - low_channel(c)) as f32;
+    if (d == 0.0) {
+        return 0.0;
+    }
+    mut f32 h = 0.0;
+    if (top as f32 == r) {
+        h = 60.0 * ((g - b) / d);
+    } else if (top as f32 == g) {
+        h = 60.0 * ((b - r) / d + 2.0);
+    } else {
+        h = 60.0 * ((r - g) / d + 4.0);
+    }
+    return h < 0.0 ? h + 360.0 : h;
+}
+
+// The 32 colors of the palette (those of PICO-8).
+pub ui32 palette(i32 i) {
+    ui32[32] colors = [
+        0xFF000000, 0xFF1D2B53, 0xFF7E2553, 0xFF008751, 0xFFAB5236, 0xFF5F574F, 0xFFC2C3C7, 0xFFFFF1E8,
+        0xFFFF004D, 0xFFFFA300, 0xFFFFEC27, 0xFF00E436, 0xFF29ADFF, 0xFF83769C, 0xFFFF77A8, 0xFFFFCCAA,
+        0xFF291814, 0xFF111D35, 0xFF422136, 0xFF125359, 0xFF742F29, 0xFF49333B, 0xFFA28879, 0xFFF3EF7D,
+        0xFFBE1250, 0xFFFF6C24, 0xFFA8E72E, 0xFF00B543, 0xFF065AB5, 0xFF754665, 0xFFFF6E59, 0xFFFF9D81
+    ];
+    return colors[i as usize];
+}
+
+pub class Editor {
+    Arena* arena;
+    mut Arena sheet_arena;
+    pub mut sheet.Sheet* art;  // the picture being drawn: the one of the current frame
+    pub mut vec.Vec<sheet.Frame>* frames;
+    pub mut i32 current;
+    pub mut bool playing;
+    pub mut i32 columns;  // of the sprite sheet
+    pub mut i32 gap;  // between the frames of the sprite sheet
+    pub mut bool want_sheet;
+    pub mut bool want_frames;
+    pub mut bool want_import;
+    pub mut bool want_png;
+    mut ui64 next_frame;
+    pub mut i32 tool;
+    pub mut ui32 color;
+    pub mut bool picking;  // the color picker is open
+    pub mut f32 hue;  // 0 to 360
+    pub mut f32 sat;  // 0 to 1
+    pub mut f32 val;  // 0 to 1
+    pub mut i32 alpha;  // 0 to 255
+    pub mut f32 sat_l;  // the saturation of HSL, 0 to 1
+    pub mut f32 light;  // the lightness of HSL, 0 to 1
+    pub mut ui32 original;  // the color when the picker opened
+    mut bool fading;  // the opacity is being set: 0 is allowed
+    pub mut bool typing;  // a hex code is being typed in the picker
+    pub mut i64 typed;
+    pub mut i32 typed_count;
+    pub mut i32 model;  // the numbers of the picker: 0 RGB, 1 CMYK, 2 HSL
+    pub mut i32 field;  // the number being typed (a row), or -1
+    pub mut i32 ftyped;
+    pub mut i32 fcount;
+    pub mut i32 brush;
+    pub mut i32 zoom;
+    pub mut f32 pan_x;  // where the corner of the picture is, in the window
+    pub mut f32 pan_y;
+    pub mut bool grid;
+    pub mut f32 mouse_x;
+    pub mut f32 mouse_y;
+    pub mut i32 hover_x;  // the pixel under the mouse (it can be out of the picture)
+    pub mut i32 hover_y;
+    pub mut bool want_open;
+    pub mut bool want_save;
+    pub mut str message;
+    pub mut ui64 message_until;
+    pub mut ui64 now;
+    mut bool painting;
+    mut bool panning;
+    mut i32 start_x;
+    mut i32 start_y;
+    mut i32 last_x;
+    mut i32 last_y;
+    mut i32 view_w;
+    mut i32 view_h;
+    mut bool need_fit;
+    mut i64 clock;  // the number of the last action, to order them across the frames
+    pub mut bool asking;  // the dialog of a new picture is open
+    pub mut bool linked;  // the width and the height of the new picture follow each other
+    pub mut i64 new_w;
+    pub mut i64 new_h;
+    pub mut bool onion;  // the frames before and after are shown, faint, under the picture
+    mut Arena ghost_arena;
+    pub mut image.Image ghost_before;
+    pub mut image.Image ghost_after;
+    pub mut bool has_before;
+    pub mut bool has_after;
+    mut sheet.Sheet* shown_before;  // the picture the ghosts were made from
+    mut sheet.Sheet* shown_after;
+    mut i64 shown_before_version;
+    mut i64 shown_after_version;
+    pub mut bool has_sel;  // a rectangle of the picture is selected
+    pub mut i32 sel_x;
+    pub mut i32 sel_y;
+    pub mut i32 sel_w;
+    pub mut i32 sel_h;
+    mut bool selecting;  // the rectangle is being dragged
+    mut bool moving;  // the content of the rectangle is being dragged
+    mut bool floating;  // pasted, and not yet put down: the action is still open
+    mut bool lift_clear;  // moving makes a hole where the content was (not for a paste)
+    mut i32 lift_x;
+    mut i32 lift_y;
+    mut i32 grab_x;
+    mut i32 grab_y;
+    mut Arena lift_arena;
+    mut ui32[] lifted;
+    mut i32 lifted_w;
+    mut i32 lifted_h;
+    mut Arena clip_arena;
+    mut ui32[] clip;  // what Copy took
+    pub mut i32 clip_w;
+    pub mut i32 clip_h;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        sheet_arena = Arena.new(1 * MB);
+        art = sheet.new_sheet(&sheet_arena, 32, 32);
+        frames = vec.new<sheet.Frame>(&sheet_arena);
+        frames.push(sheet.Frame{ art: art, delay: 100, drawn: -1 });
+        current = 0;
+        playing = false;
+        columns = 4;
+        gap = 0;
+        want_sheet = false;
+        want_frames = false;
+        want_import = false;
+        want_png = false;
+        next_frame = 0;
+        tool = PEN;
+        color = palette(8);
+        picking = false;
+        hue = 0.0;
+        sat = 1.0;
+        val = 1.0;
+        alpha = 255;
+        sat_l = 1.0;
+        light = 0.5;
+        original = 0;
+        fading = false;
+        typing = false;
+        typed = 0;
+        typed_count = 0;
+        model = 0;
+        field = -1;
+        ftyped = 0;
+        fcount = 0;
+        brush = 1;
+        zoom = 8;
+        pan_x = LEFT;
+        pan_y = TOP;
+        grid = true;
+        mouse_x = 0.0;
+        mouse_y = 0.0;
+        hover_x = -1;
+        hover_y = -1;
+        want_open = false;
+        want_save = false;
+        message = "";
+        message_until = 0;
+        now = 0;
+        painting = false;
+        panning = false;
+        start_x = 0;
+        start_y = 0;
+        last_x = 0;
+        last_y = 0;
+        view_w = 800;
+        view_h = 600;
+        need_fit = true;
+        clock = 0;
+        asking = false;
+        linked = true;
+        new_w = 32;
+        new_h = 32;
+        onion = false;
+        ghost_arena = Arena.new(64 * KB);
+        ghost_before = image.create(&ghost_arena, 1, 1);
+        ghost_after = image.create(&ghost_arena, 1, 1);
+        has_before = false;
+        has_after = false;
+        shown_before = art;
+        shown_after = art;
+        shown_before_version = -1;
+        shown_after_version = -1;
+        has_sel = false;
+        sel_x = 0;
+        sel_y = 0;
+        sel_w = 0;
+        sel_h = 0;
+        selecting = false;
+        moving = false;
+        floating = false;
+        lift_clear = false;
+        lift_x = 0;
+        lift_y = 0;
+        grab_x = 0;
+        grab_y = 0;
+        lift_arena = Arena.new(64 * KB);
+        lifted = lift_arena.alloc_slice(ui32, 1);
+        lifted_w = 0;
+        lifted_h = 0;
+        clip_arena = Arena.new(64 * KB);
+        clip = clip_arena.alloc_slice(ui32, 1);
+        clip_w = 0;
+        clip_h = 0;
+    }
+
+    pub void say(str text) {
+        message = text;
+        message_until = now + 3000;
+    }
+
+    // A new empty picture of `side` by `side` pixels.
+    pub void new_doc(i32 side) {
+        new_picture(side as i64, side as i64);
+    }
+
+    // A new empty picture of `width` by `height` pixels (1 to 1024 each).
+    pub void new_picture(i64 width, i64 height) {
+        i32 w = clamp(width as i32, 1, sheet.MAX_SIDE);
+        i32 h = clamp(height as i32, 1, sheet.MAX_SIDE);
+        asking = false;
+        fresh(w, h);
+        say("New picture");
+    }
+
+    // The dialog of a new picture: it opens with the size of the current one.
+    pub void ask_new() {
+        settle();
+        new_w = art.width as i64;
+        new_h = art.height as i64;
+        linked = new_w == new_h;
+        asking = true;
+    }
+
+    pub void create_new() {
+        new_picture(new_w, new_h);
+    }
+
+    pub void cancel_new() {
+        asking = false;
+    }
+
+    // Linked, the two sizes follow each other (a square picture); otherwise they are independent.
+    pub void width_changed() {
+        if (linked) {
+            new_h = new_w;
+        }
+    }
+
+    pub void height_changed() {
+        if (linked) {
+            new_w = new_h;
+        }
+    }
+
+    pub void link_changed() {
+        if (linked) {
+            new_h = new_w;
+        }
+    }
+
+    pub void preset_w(i64 side) {
+        new_w = side;
+        width_changed();
+    }
+
+    pub void preset_h(i64 side) {
+        new_h = side;
+        height_changed();
+    }
+
+    void fresh(i32 width, i32 height) {
+        sheet_arena.free();
+        sheet_arena = Arena.new(1 * MB);
+        art = sheet.new_sheet(&sheet_arena, width, height);
+        frames = vec.new<sheet.Frame>(&sheet_arena);
+        frames.push(sheet.Frame{ art: art, delay: 100, drawn: -1 });
+        current = 0;
+        playing = false;
+        reset_tools();
+        panning = false;
+        need_fit = true;
+    }
+
+    // Nothing is being drawn, dragged or selected.
+    void reset_tools() {
+        painting = false;
+        selecting = false;
+        moving = false;
+        floating = false;
+        has_sel = false;
+        shown_before_version = -1;
+        shown_after_version = -1;
+    }
+
+    // The zoom and the place that show the whole picture in the middle of the window.
+    pub void fit() {
+        i32 across = (view_w - 40) / art.width;
+        i32 down = (view_h - 40) / art.height;
+        mut i32 z = across < down ? across : down;
+        if (z < 1) {
+            z = 1;
+        }
+        if (z > 64) {
+            z = 64;
+        }
+        zoom = z;
+        pan_x = LEFT + (view_w as f32 - (art.width * z) as f32) / 2.0;
+        pan_y = TOP + (view_h as f32 - (art.height * z) as f32) / 2.0;
+    }
+
+    // Called at each frame.
+    pub void update(i32 w, i32 h, ui64 now) {
+        self.now = now;
+        view_w = w - LEFT as i32 - RIGHT as i32;
+        view_h = h - TOP as i32 - BOTTOM as i32 - STRIP as i32;
+        if (need_fit) {
+            fit();
+            need_fit = false;
+        }
+        if (playing && now >= next_frame) {
+            select_frame((current + 1) % frames.len() as i32);
+            next_frame = now + frames.at(current as usize).delay as ui64;
+        }
+        for (usize k in 0..frames.len()) {
+            sheet.Frame* f = frames.at(k);
+            if (f.art.version != f.drawn) {
+                f.art.flatten();
+                f.drawn = f.art.version;
+            }
+        }
+        refresh_ghosts();
+    }
+
+    // The ghosts of the onion skin: the frame before, in red, and the frame after, in blue.
+    void refresh_ghosts() {
+        bool show = onion && !playing;
+        has_before = show && current > 0;
+        has_after = show && current + 1 < frame_count();
+        if (!show) {
+            return;
+        }
+        if (ghost_before.width != art.width || ghost_before.height != art.height) {
+            ghost_arena.free();
+            ghost_arena = Arena.new(64 * KB);
+            ghost_before = image.create(&ghost_arena, art.width, art.height);
+            ghost_after = image.create(&ghost_arena, art.width, art.height);
+            shown_before_version = -1;
+            shown_after_version = -1;
+        }
+        if (has_before) {
+            sheet.Sheet* s = frames.at((current - 1) as usize).art;
+            if (s != shown_before || s.version != shown_before_version) {
+                paint_ghost(ghost_before, s, 0xFFFF3030);
+                shown_before = s;
+                shown_before_version = s.version;
+            }
+        }
+        if (has_after) {
+            sheet.Sheet* s = frames.at((current + 1) as usize).art;
+            if (s != shown_after || s.version != shown_after_version) {
+                paint_ghost(ghost_after, s, 0xFF3070FF);
+                shown_after = s;
+                shown_after_version = s.version;
+            }
+        }
+    }
+
+    void paint_ghost(image.Image into, sheet.Sheet* from, ui32 tint) {
+        from.flatten();
+        for (usize i in 0..into.pixels.len) {
+            into.pixels[i] = sheet.ghost(from.flat.pixels[i], tint);
+        }
+    }
+
+    pub void toggle_onion() {
+        onion = !onion;
+        shown_before_version = -1;
+        shown_after_version = -1;
+    }
+
+    pub bool in_view(f32 x, f32 y) {
+        return x >= LEFT && x < LEFT + view_w as f32 && y >= TOP && y < TOP + view_h as f32;
+    }
+
+    // The pixel of the picture under a place of the window.
+    i32 cell(f32 at, f32 origin) {
+        return (((at - origin) / zoom as f32 + 4096.0) as i32) - 4096;
+    }
+
+    pub void move_to(f32 x, f32 y) {
+        if (panning) {
+            pan_x += x - mouse_x;
+            pan_y += y - mouse_y;
+        }
+        mouse_x = x;
+        mouse_y = y;
+        hover_x = cell(x, pan_x);
+        hover_y = cell(y, pan_y);
+        if (painting) {
+            if (tool == PEN || tool == ERASER) {
+                art.line(last_x, last_y, hover_x, hover_y, brush, ink());
+                last_x = hover_x;
+                last_y = hover_y;
+            } else {
+                art.revert_stroke();
+                shape(hover_x, hover_y);
+            }
+        } else if (selecting) {
+            set_selection(start_x, start_y, hover_x, hover_y);
+        } else if (moving) {
+            carry(hover_x - grab_x, hover_y - grab_y);
+        }
+    }
+
+    ui32 ink() {
+        return tool == ERASER ? 0 : color;
+    }
+
+    void shape(i32 x, i32 y) {
+        if (tool == LINE) {
+            art.line(start_x, start_y, x, y, brush, color);
+        } else if (tool == RECT) {
+            art.box(start_x, start_y, x, y, brush, color, false);
+        } else if (tool == BOX) {
+            art.box(start_x, start_y, x, y, brush, color, true);
+        }
+    }
+
+    // The left button goes down: the tool starts.
+    pub void press(f32 x, f32 y) {
+        if (!in_view(x, y)) {
+            return;
+        }
+        move_to(x, y);
+        playing = false;
+        i32 px = hover_x;
+        i32 py = hover_y;
+        if (tool == PICK) {
+            pick(px, py);
+            return;
+        }
+        if (tool == SELECT) {
+            press_select(px, py);
+            return;
+        }
+        settle();
+        begin_action();
+        last_x = px;
+        last_y = py;
+        start_x = px;
+        start_y = py;
+        if (tool == PEN || tool == ERASER) {
+            art.stamp(px, py, brush, ink());
+            painting = true;
+        } else if (tool == FILL) {
+            art.flood(px, py, color);
+            art.end();
+        } else {
+            shape(px, py);
+            painting = true;
+        }
+    }
+
+    pub void release() {
+        if (painting) {
+            painting = false;
+            art.end();
+        }
+        if (selecting) {
+            selecting = false;
+            if (sel_w == 1 && sel_h == 1) {
+                has_sel = false;
+            }
+        }
+        if (moving) {
+            moving = false;
+            if (!floating) {
+                art.end();
+            }
+        }
+        panning = false;
+    }
+
+    // Starts an action in the current picture. The undo of all the frames follows the order of
+    // the actions, so what was undone in the other frames cannot be redone any more.
+    void begin_action() {
+        clock += 1;
+        for (usize k in 0..frames.len()) {
+            if (k as i32 != current) {
+                frames.at(k).art.drop_redo();
+            }
+        }
+        art.begin_seq(clock);
+    }
+
+    // What is in progress is over: a pasted picture is put down, a stroke ends.
+    pub void settle() {
+        if (floating) {
+            floating = false;
+            moving = false;
+        }
+        art.end();
+        painting = false;
+        selecting = false;
+        moving = false;
+    }
+
+    pub void set_tool(i32 t) {
+        settle();
+        tool = t;
+    }
+
+    bool in_selection(i32 x, i32 y) {
+        return has_sel && x >= sel_x && y >= sel_y && x < sel_x + sel_w && y < sel_y + sel_h;
+    }
+
+    // The selection between two corners, kept inside the picture.
+    pub void set_selection(i32 x0, i32 y0, i32 x1, i32 y1) {
+        i32 left = clamp(x0 < x1 ? x0 : x1, 0, art.width - 1);
+        i32 right = clamp(x0 < x1 ? x1 : x0, 0, art.width - 1);
+        i32 top = clamp(y0 < y1 ? y0 : y1, 0, art.height - 1);
+        i32 bottom = clamp(y0 < y1 ? y1 : y0, 0, art.height - 1);
+        sel_x = left;
+        sel_y = top;
+        sel_w = right - left + 1;
+        sel_h = bottom - top + 1;
+        has_sel = true;
+    }
+
+    i32 clamp(i32 v, i32 low, i32 high) {
+        return v < low ? low : v > high ? high : v;
+    }
+
+    void press_select(i32 px, i32 py) {
+        if (in_selection(px, py)) {
+            if (!floating) {
+                begin_action();
+                lift_arena.free();
+                lift_arena = Arena.new(64 * KB);
+                lifted = lift_arena.alloc_slice(ui32, (sel_w * sel_h) as usize);
+                for (i32 j in 0..sel_h) {
+                    for (i32 i in 0..sel_w) {
+                        lifted[(j * sel_w + i) as usize] = art.get(sel_x + i, sel_y + j);
+                    }
+                }
+                lifted_w = sel_w;
+                lifted_h = sel_h;
+                lift_clear = true;
+                lift_x = sel_x;
+                lift_y = sel_y;
+            }
+            grab_x = px - sel_x;
+            grab_y = py - sel_y;
+            moving = true;
+        } else {
+            settle();
+            selecting = true;
+            start_x = px;
+            start_y = py;
+            set_selection(px, py, px, py);
+        }
+    }
+
+    // The lifted pixels are put at (x, y), and the place they came from is emptied.
+    void carry(i32 x, i32 y) {
+        art.revert_stroke();
+        if (lift_clear && x == lift_x && y == lift_y) {
+            sel_x = x;
+            sel_y = y;
+            return;
+        }
+        if (lift_clear) {
+            for (i32 j in 0..lifted_h) {
+                for (i32 i in 0..lifted_w) {
+                    art.put(lift_x + i, lift_y + j, 0);
+                }
+            }
+        }
+        lay(lifted, lifted_w, lifted_h, x, y);
+        sel_x = x;
+        sel_y = y;
+    }
+
+    // Draws `pixels` over the active layer, at (x, y). What is transparent changes nothing.
+    void lay(ui32[] pixels, i32 w, i32 h, i32 x, i32 y) {
+        for (i32 j in 0..h) {
+            for (i32 i in 0..w) {
+                ui32 c = pixels[(j * w + i) as usize];
+                if ((c >> 24) != 0) {
+                    art.put(x + i, y + j, sheet.blend(c, art.get(x + i, y + j)));
+                }
+            }
+        }
+    }
+
+    pub void select_all() {
+        settle();
+        tool = SELECT;
+        set_selection(0, 0, art.width - 1, art.height - 1);
+    }
+
+    pub void deselect() {
+        settle();
+        has_sel = false;
+    }
+
+    // Takes the selection of the active layer.
+    pub void copy_selection() {
+        settle();
+        if (!has_sel) {
+            say("Nothing is selected");
+            return;
+        }
+        clip_arena.free();
+        clip_arena = Arena.new(64 * KB);
+        clip = clip_arena.alloc_slice(ui32, (sel_w * sel_h) as usize);
+        for (i32 j in 0..sel_h) {
+            for (i32 i in 0..sel_w) {
+                clip[(j * sel_w + i) as usize] = art.get(sel_x + i, sel_y + j);
+            }
+        }
+        clip_w = sel_w;
+        clip_h = sel_h;
+        say("Copied");
+    }
+
+    pub void cut_selection() {
+        if (!has_sel) {
+            say("Nothing is selected");
+            return;
+        }
+        copy_selection();
+        clear_selection();
+        say("Cut");
+    }
+
+    // Empties the selection in the active layer.
+    pub void clear_selection() {
+        settle();
+        if (!has_sel) {
+            return;
+        }
+        begin_action();
+        for (i32 j in 0..sel_h) {
+            for (i32 i in 0..sel_w) {
+                art.put(sel_x + i, sel_y + j, 0);
+            }
+        }
+        art.end();
+    }
+
+    // Puts what was copied in the active layer, at the top left of what is seen of the picture:
+    // it is selected and can be dragged until something else is done.
+    pub void paste() {
+        settle();
+        if (clip_w == 0) {
+            say("Nothing to paste");
+            return;
+        }
+        tool = SELECT;
+        i32 x = clamp(cell(LEFT, pan_x), 0, art.width - 1);
+        i32 y = clamp(cell(TOP, pan_y), 0, art.height - 1);
+        begin_action();
+        lay(clip, clip_w, clip_h, x, y);
+        lifted = clip;
+        lifted_w = clip_w;
+        lifted_h = clip_h;
+        lift_clear = false;
+        lift_x = x;
+        lift_y = y;
+        floating = true;
+        has_sel = true;
+        sel_x = x;
+        sel_y = y;
+        sel_w = clip_w;
+        sel_h = clip_h;
+    }
+
+    // The right or the middle button: the picture follows the mouse.
+    pub void grab(f32 x, f32 y) {
+        if (in_view(x, y)) {
+            panning = true;
+            mouse_x = x;
+            mouse_y = y;
+        }
+    }
+
+    void pick(i32 x, i32 y) {
+        ui32 seen = art.seen(x, y);
+        if ((seen >> 24) != 0) {
+            color = seen;
+        }
+    }
+
+    // The wheel: zoom, around the mouse.
+    pub void wheel(f32 steps) {
+        if (!in_view(mouse_x, mouse_y) || steps == 0.0) {
+            return;
+        }
+        f32 px = (mouse_x - pan_x) / zoom as f32;
+        f32 py = (mouse_y - pan_y) / zoom as f32;
+        i32 jump = zoom / 4 < 1 ? 1 : zoom / 4;
+        mut i32 z = zoom + (steps > 0.0 ? jump : -jump);
+        if (z < 1) {
+            z = 1;
+        }
+        if (z > 64) {
+            z = 64;
+        }
+        zoom = z;
+        pan_x = mouse_x - px * z as f32;
+        pan_y = mouse_y - py * z as f32;
+    }
+
+    pub void toggle_grid() {
+        grid = !grid;
+    }
+
+    pub i32 frame_count() {
+        return frames.len() as i32;
+    }
+
+    // Goes to a frame: the tools draw in it from now on.
+    pub void select_frame(i32 i) {
+        if (i < 0 || i >= frame_count() || i == current) {
+            return;
+        }
+        settle();
+        current = i;
+        art = frames.at(i as usize).art;
+    }
+
+    // `art` becomes a new frame, just after the current one.
+    void insert_frame(sheet.Sheet* s, i32 delay) {
+        settle();
+        frames.insert((current + 1) as usize, sheet.Frame{ art: s, delay: delay, drawn: -1 });
+        current += 1;
+        art = s;
+    }
+
+    pub void add_frame() {
+        if (frame_count() >= MAX_FRAMES) {
+            say("Too many frames");
+            return;
+        }
+        insert_frame(sheet.new_sheet(&sheet_arena, art.width, art.height), frames.at(current as usize).delay);
+    }
+
+    pub void copy_frame() {
+        if (frame_count() >= MAX_FRAMES) {
+            say("Too many frames");
+            return;
+        }
+        insert_frame(sheet.duplicate(&sheet_arena, art), frames.at(current as usize).delay);
+    }
+
+    pub void delete_frame() {
+        if (frame_count() <= 1) {
+            say("The last frame stays");
+            return;
+        }
+        settle();
+        frames.remove(current as usize);
+        if (current >= frame_count()) {
+            current = frame_count() - 1;
+        }
+        art = frames.at(current as usize).art;
+        if (frame_count() < 2) {
+            playing = false;
+        }
+    }
+
+    // `dir` +1 moves the current frame later, -1 earlier.
+    pub void move_frame(i32 dir) {
+        i32 to = current + dir;
+        if (to < 0 || to >= frame_count()) {
+            return;
+        }
+        settle();
+        sheet.Frame moved = frames.remove(current as usize);
+        frames.insert(to as usize, moved);
+        current = to;
+    }
+
+    pub void toggle_play() {
+        if (frame_count() < 2) {
+            say("Add a frame first");
+            return;
+        }
+        settle();
+        playing = !playing;
+        next_frame = now + frames.at(current as usize).delay as ui64;
+    }
+
+    // Changes the time the current frame stays, in milliseconds (20 to 2000).
+    pub void nudge_delay(i32 by) {
+        sheet.Frame* f = frames.at(current as usize);
+        mut i32 d = f.delay + by;
+        if (d < 20) {
+            d = 20;
+        }
+        if (d > 2000) {
+            d = 2000;
+        }
+        f.delay = d;
+    }
+
+    pub void more_columns(i32 by) {
+        mut i32 c = columns + by;
+        if (c < 1) {
+            c = 1;
+        }
+        if (c > MAX_FRAMES) {
+            c = MAX_FRAMES;
+        }
+        columns = c;
+    }
+
+    pub void more_gap(i32 by) {
+        mut i32 g = gap + by;
+        if (g < 0) {
+            g = 0;
+        }
+        if (g > 32) {
+            g = 32;
+        }
+        gap = g;
+    }
+
+    // The columns of the sprite sheet: no more than there are frames.
+    pub i32 sheet_columns() {
+        return columns < frame_count() ? columns : frame_count();
+    }
+
+    pub i32 sheet_width() {
+        i32 cols = sheet_columns();
+        return cols * art.width + (cols - 1) * gap;
+    }
+
+    pub i32 sheet_height() {
+        i32 rows = (frame_count() + sheet_columns() - 1) / sheet_columns();
+        return rows * art.height + (rows - 1) * gap;
+    }
+
+    // The frames, flattened, side by side in a grid (the picture of the sprite sheet).
+    pub image.Image build_sheet(Arena* out) {
+        i32 w = art.width;
+        i32 h = art.height;
+        i32 cols = sheet_columns();
+        mut image.Image img = image.create(out, sheet_width(), sheet_height());
+        for (i32 k in 0..frame_count()) {
+            sheet.Sheet* s = frames.at(k as usize).art;
+            s.flatten();
+            i32 ox = (k % cols) * (w + gap);
+            i32 oy = (k / cols) * (h + gap);
+            for (i32 y in 0..h) {
+                for (i32 x in 0..w) {
+                    img.pixels[((oy + y) * img.width + ox + x) as usize] = s.flat.pixels[(y * w + x) as usize];
+                }
+            }
+        }
+        return img;
+    }
+
+    // The sprite sheet described for a game: where each frame is, and for how long.
+    pub str sheet_json(Arena* out, str image_name) {
+        text.TextBuilder* b = text.builder(out);
+        i32 w = art.width;
+        i32 h = art.height;
+        i32 cols = sheet_columns();
+        b.push("{\n  \"image\": \"");
+        b.push(image_name);
+        b.push("\",\n  \"width\": ");
+        b.push_i64(sheet_width() as i64);
+        b.push(",\n  \"height\": ");
+        b.push_i64(sheet_height() as i64);
+        b.push(",\n  \"frame_width\": ");
+        b.push_i64(w as i64);
+        b.push(",\n  \"frame_height\": ");
+        b.push_i64(h as i64);
+        b.push(",\n  \"columns\": ");
+        b.push_i64(cols as i64);
+        b.push(",\n  \"gap\": ");
+        b.push_i64(gap as i64);
+        b.push(",\n  \"frames\": [\n");
+        for (i32 k in 0..frame_count()) {
+            b.push("    { \"index\": ");
+            b.push_i64(k as i64);
+            b.push(", \"x\": ");
+            b.push_i64(((k % cols) * (w + gap)) as i64);
+            b.push(", \"y\": ");
+            b.push_i64(((k / cols) * (h + gap)) as i64);
+            b.push(", \"w\": ");
+            b.push_i64(w as i64);
+            b.push(", \"h\": ");
+            b.push_i64(h as i64);
+            b.push(", \"duration\": ");
+            b.push_i64(frames.at(k as usize).delay as i64);
+            b.push(k + 1 < frame_count() ? " },\n" : " }\n");
+        }
+        b.push("  ]\n}\n");
+        return b.text();
+    }
+
+    pub void ask_sheet() {
+        want_sheet = true;
+    }
+
+    pub void ask_frames() {
+        want_frames = true;
+    }
+
+    pub void ask_import() {
+        want_import = true;
+    }
+
+    pub void ask_png() {
+        want_png = true;
+    }
+
+    // Opens a project (.pforge) or a PNG, by the end of its name.
+    pub void open_file(str path) uses io {
+        mut Arena scratch = Arena.new(64 * KB);
+        defer scratch.free();
+        if (text.ends_with(text.to_lower(&scratch, path), ".pforge")) {
+            open_project(path);
+        } else {
+            open_png(path);
+        }
+    }
+
+    // Writes the frames, their layers and the settings in a project file.
+    pub void save_project(str path) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        text.TextBuilder* b = text.builder(&scratch);
+        b.push(path);
+        if (!text.ends_with(text.to_lower(&scratch, path), ".pforge")) {
+            b.push(".pforge");
+        }
+        settle();
+        ui8[] bytes = project.encode(&scratch, frames, columns, gap, current);
+        match (io.open(&scratch, b.text(), io.Mode.Write)) {
+            ok(file) => {
+                defer file.close();
+                match (file.write(bytes)) {
+                    ok() => {
+                        say("Project saved");
+                    },
+                    err(e) => {
+                        say("The project cannot be written");
+                    },
+                }
+            },
+            err(e) => {
+                say("The project cannot be written");
+            },
+        }
+    }
+
+    pub void open_project(str path) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        match (io.read_bytes(&scratch, path)) {
+            ok(bytes) => {
+                // a first reading in a spare arena: the picture in the window stays if the file is bad
+                mut Arena probe = Arena.new(1 * MB);
+                defer probe.free();
+                match (project.decode(&probe, bytes)) {
+                    some(checked) => { },
+                    none => {
+                        say("This is not a Pixel Forge project");
+                        return;
+                    },
+                }
+                sheet_arena.free();
+                sheet_arena = Arena.new(1 * MB);
+                match (project.decode(&sheet_arena, bytes)) {
+                    some(loaded) => {
+                        frames = loaded.frames;
+                        columns = loaded.columns;
+                        gap = loaded.gap;
+                        current = loaded.current;
+                        art = frames.at(current as usize).art;
+                        playing = false;
+                        reset_tools();
+                        panning = false;
+                        need_fit = true;
+                        say("Project opened");
+                    },
+                    none => {
+                        fresh(32, 32);
+                    },
+                }
+            },
+            err(e) => {
+                say("This file cannot be read");
+            },
+        }
+    }
+
+    // The path without its ".png".
+    str stem(Arena* out, str path) {
+        if (text.ends_with(text.to_lower(out, path), ".png")) {
+            return text.slice(path, 0, path.len - 4);
+        }
+        return path;
+    }
+
+    // The name of the file, without the folders.
+    str file_name(str path) {
+        mut usize start = 0;
+        match (text.find_last(path, "/")) {
+            some(i) => {
+                start = i + 1;
+            },
+            none => { },
+        }
+        match (text.find_last(path, "\\")) {
+            some(i) => {
+                if (i + 1 > start) {
+                    start = i + 1;
+                }
+            },
+            none => { },
+        }
+        return text.slice(path, start, path.len);
+    }
+
+    str with_ext(Arena* out, str stem, str ext) {
+        text.TextBuilder* b = text.builder(out);
+        b.push(stem);
+        b.push(ext);
+        return b.text();
+    }
+
+    // Writes the sprite sheet in `<name>.png` and its description in `<name>.json`.
+    pub void export_sheet(str path) uses io {
+        if ((sheet_width() as i64) * (sheet_height() as i64) > MAX_SHEET) {
+            say("The sprite sheet is too large");
+            return;
+        }
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        str root = stem(&scratch, path);
+        str picture = with_ext(&scratch, root, ".png");
+        image.Image img = build_sheet(&scratch);
+        match (png.save(&scratch, picture, img)) {
+            ok() => { },
+            err(e) => {
+                say("The sprite sheet cannot be written");
+                return;
+            },
+        }
+        match (io.write_file(&scratch, with_ext(&scratch, root, ".json"), sheet_json(&scratch, with_ext(&scratch, file_name(root), ".png")))) {
+            ok() => {
+                say("Sprite sheet saved (png and json)");
+            },
+            err(e) => {
+                say("The description cannot be written");
+            },
+        }
+    }
+
+    // Writes each frame in its own file: `<name>_001.png`, `<name>_002.png`...
+    pub void export_frames(str path) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        str root = stem(&scratch, path);
+        for (i32 k in 0..frame_count()) {
+            sheet.Sheet* s = frames.at(k as usize).art;
+            s.flatten();
+            text.TextBuilder* b = text.builder(&scratch);
+            b.push(root);
+            b.push("_");
+            if (k + 1 < 100) {
+                b.push("0");
+            }
+            if (k + 1 < 10) {
+                b.push("0");
+            }
+            b.push_i64((k + 1) as i64);
+            b.push(".png");
+            match (png.save(&scratch, b.text(), s.flat)) {
+                ok() => { },
+                err(e) => {
+                    say("A frame cannot be written");
+                    return;
+                },
+            }
+        }
+        say("Frames saved");
+    }
+
+    // Cuts a PNG in frames of the size of the current picture (and the same gap): they replace the
+    // animation.
+    pub void import_sheet(str path) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        match (png.load(&scratch, path)) {
+            ok(img) => {
+                i32 w = art.width;
+                i32 h = art.height;
+                i32 across = (img.width + gap) / (w + gap);
+                i32 down = (img.height + gap) / (h + gap);
+                if (across < 1 || down < 1) {
+                    say("This picture is smaller than a frame");
+                    return;
+                }
+                mut i32 count = across * down;
+                if (count > MAX_FRAMES) {
+                    count = MAX_FRAMES;
+                }
+                fresh(w, h);
+                for (i32 k in 0..count) {
+                    if (k > 0) {
+                        frames.push(sheet.Frame{ art: sheet.new_sheet(&sheet_arena, w, h), delay: 100, drawn: -1 });
+                    }
+                    frames.at(k as usize).art.load_cell(img, (k % across) * (w + gap), (k / across) * (h + gap));
+                }
+                art = frames.at(0).art;
+                columns = across < MAX_FRAMES ? across : MAX_FRAMES;
+                say(count == across * down ? "Sprite sheet cut in frames" : "Only the first 64 frames are kept");
+            },
+            err(e) => {
+                say("This picture cannot be read");
+            },
+        }
+    }
+
+    pub void undo() {
+        settle();
+        mut i32 best = -1;
+        mut i64 best_seq = -1;
+        for (usize k in 0..frames.len()) {
+            i64 q = frames.at(k).art.last_seq();
+            if (q > best_seq) {
+                best_seq = q;
+                best = k as i32;
+            }
+        }
+        if (best >= 0) {
+            select_frame(best);
+            art.undo();
+        }
+    }
+
+    pub void redo() {
+        settle();
+        mut i32 best = -1;
+        mut i64 best_seq = -1;
+        for (usize k in 0..frames.len()) {
+            i64 q = frames.at(k).art.next_seq();
+            if (q >= 0 && (best < 0 || q < best_seq)) {
+                best_seq = q;
+                best = k as i32;
+            }
+        }
+        if (best >= 0) {
+            select_frame(best);
+            art.redo();
+        }
+    }
+
+    pub void ask_open() {
+        want_open = true;
+    }
+
+    pub void ask_save() {
+        want_save = true;
+    }
+
+    pub void set_brush(i32 size) {
+        brush = size;
+    }
+
+    // The color picker: a wheel of hue with a triangle of saturation and brightness, the same
+    // color as hue / saturation / lightness (HSL) and opacity, and a hex code. The color of the
+    // editor follows at once; Cancel brings back the one it had when the picker opened.
+    pub void open_picker() {
+        settle();
+        typing = false;
+        field = -1;
+        original = color;
+        sync_picker();
+        picking = true;
+    }
+
+    pub void close_picker() {
+        commit_hex();
+        picking = false;
+    }
+
+    pub void cancel_picker() {
+        color = original;
+        typing = false;
+        field = -1;
+        picking = false;
+    }
+
+    // The hue, saturation, brightness and opacity of `color` (a gray keeps the hue it had).
+    void sync_picker() {
+        val = rgb_value(color);
+        sat = rgb_sat(color);
+        if (sat > 0.0 && val > 0.0) {
+            hue = rgb_hue(color);
+        }
+        alpha = (color >> 24) as i32;
+        hsv_to_hsl();
+    }
+
+    // HSL is kept apart, so that going to white or black and back does not forget the saturation.
+    void hsv_to_hsl() {
+        light = val * (1.0 - sat / 2.0);
+        f32 room = light < 1.0 - light ? light : 1.0 - light;
+        sat_l = room <= 0.0 ? 0.0 : (val - light) / room;
+    }
+
+    void hsl_to_hsv() {
+        f32 room = light < 1.0 - light ? light : 1.0 - light;
+        val = light + sat_l * room;
+        sat = val <= 0.0 ? 0.0 : 2.0 * (1.0 - light / val);
+    }
+
+    void apply_picker() {
+        if (alpha == 0 && !fading) {
+            alpha = 255;
+        }
+        color = ((alpha as ui32) << 24) | (hsv_rgb(hue, sat, val) & 0xFFFFFF);
+    }
+
+    // `fx` and `fy` from 0 to 1, from the top left of the square of saturation and brightness.
+    pub void pick_square(f32 fx, f32 fy) {
+        commit_hex();
+        sat = unit_range(fx);
+        val = 1.0 - unit_range(fy);
+        hsv_to_hsl();
+        apply_picker();
+    }
+
+    pub void pick_hue(f32 degrees) {
+        commit_hex();
+        mut f32 h = degrees;
+        if (h < 0.0) {
+            h += 360.0;
+        }
+        if (h >= 360.0) {
+            h -= 360.0;
+        }
+        hue = h < 0.0 ? 0.0 : h > 359.99 ? 359.99 : h;
+        apply_picker();
+    }
+
+    // `f` from 0 to 1.
+    pub void pick_sat_l(f32 f) {
+        commit_hex();
+        sat_l = unit_range(f);
+        hsl_to_hsv();
+        apply_picker();
+    }
+
+    pub void pick_light(f32 f) {
+        commit_hex();
+        light = unit_range(f);
+        hsl_to_hsv();
+        apply_picker();
+    }
+
+    // `f` from 0 (transparent) to 1 (opaque).
+    pub void pick_alpha(f32 f) {
+        commit_hex();
+        alpha = (unit_range(f) * 255.0 + 0.5) as i32;
+        fading = true;
+        apply_picker();
+        fading = false;
+    }
+
+    // One step up or down on a row: hue (0, 1 degree), saturation (1), lightness (2), opacity (3).
+    pub void nudge(i32 row, i32 dir) {
+        if (row == 0) {
+            pick_hue(hue + dir as f32);
+        } else if (row == 1) {
+            pick_sat_l(sat_l + dir as f32 / 100.0);
+        } else if (row == 2) {
+            pick_light(light + dir as f32 / 100.0);
+        } else {
+            pick_alpha((alpha + dir) as f32 / 255.0);
+        }
+    }
+
+    // The numbers of the picker: model 0 is R G B, 1 is C M Y K, 2 is H S L; the last row is always
+    // the opacity (0 to 255 for RGB, a percentage otherwise).
+    pub i32 field_rows() {
+        return model == 1 ? 5 : 4;
+    }
+
+    pub i32 field_max(i32 k) {
+        if (k == field_rows() - 1) {
+            return model == 0 ? 255 : 100;
+        }
+        if (model == 0) {
+            return 255;
+        }
+        return model == 2 && k == 0 ? 360 : 100;
+    }
+
+    pub i32 field_value(i32 k) {
+        ui32 s = hsv_rgb(hue, sat, val) & 0xFFFFFF;
+        if (k == field_rows() - 1) {
+            return model == 0 ? alpha : (alpha * 100 + 127) / 255;
+        }
+        if (model == 0) {
+            if (k == 0) {
+                return ((s >> 16) & 0xFF) as i32;
+            }
+            return k == 1 ? ((s >> 8) & 0xFF) as i32 : (s & 0xFF) as i32;
+        }
+        if (model == 1) {
+            return (cmyk_part(s, k) * 100.0 + 0.5) as i32;
+        }
+        if (k == 0) {
+            return (hue + 0.5) as i32;
+        }
+        return ((k == 1 ? sat_l : light) * 100.0 + 0.5) as i32;
+    }
+
+    pub void set_field(i32 k, i32 v) {
+        i32 top = field_max(k);
+        i32 n = v < 0 ? 0 : v > top ? top : v;
+        if (k == field_rows() - 1) {
+            pick_alpha(n as f32 / top as f32);
+            return;
+        }
+        if (model == 2) {
+            if (k == 0) {
+                pick_hue(n as f32);
+            } else if (k == 1) {
+                pick_sat_l(n as f32 / 100.0);
+            } else {
+                pick_light(n as f32 / 100.0);
+            }
+            return;
+        }
+        ui32 s = hsv_rgb(hue, sat, val) & 0xFFFFFF;
+        mut ui32 packed = s;
+        if (model == 0) {
+            ui32 u = n as ui32;
+            if (k == 0) {
+                packed = (u << 16) | (s & 0x00FFFF);
+            } else if (k == 1) {
+                packed = (u << 8) | (s & 0xFF00FF);
+            } else {
+                packed = u | (s & 0xFFFF00);
+            }
+        } else {
+            f32 f = n as f32 / 100.0;
+            packed = cmyk_rgb(k == 0 ? f : cmyk_part(s, 0), k == 1 ? f : cmyk_part(s, 1), k == 2 ? f : cmyk_part(s, 2), k == 3 ? f : cmyk_part(s, 3));
+        }
+        if (alpha == 0) {
+            alpha = 255;
+        }
+        color = ((alpha as ui32) << 24) | packed;
+        sync_picker();
+    }
+
+    pub void set_model(i32 m) {
+        commit_hex();
+        model = m;
+    }
+
+    pub void start_field(i32 k) {
+        commit_hex();
+        field = k;
+        ftyped = 0;
+        fcount = 0;
+    }
+
+    // The number being typed is applied (nothing happens if no digit was typed).
+    pub void commit_field() {
+        i32 k = field;
+        i32 v = ftyped;
+        bool any = fcount > 0;
+        field = -1;
+        if (k >= 0 && any) {
+            set_field(k, v);
+        }
+    }
+
+    pub void start_hex() {
+        commit_field();
+        typing = true;
+        typed = 0;
+        typed_count = 0;
+    }
+
+    pub void type_hex(i32 digit) {
+        if (!typing) {
+            start_hex();
+        }
+        if (typed_count < 6) {
+            typed = typed * 16 + digit as i64;
+            typed_count += 1;
+        }
+        if (typed_count == 6) {
+            commit_hex();
+        }
+    }
+
+    pub void erase_hex() {
+        if (typing && typed_count > 0) {
+            typed = typed / 16;
+            typed_count -= 1;
+        }
+    }
+
+    // Six digits typed: that is the color (opaque if it was transparent).
+    pub void commit_hex() {
+        commit_field();
+        if (typing && typed_count == 6) {
+            if (alpha == 0) {
+                alpha = 255;
+            }
+            color = ((alpha as ui32) << 24) | (typed as ui32);
+            sync_picker();
+        }
+        typing = false;
+    }
+
+    // The keys while the picker is open: hex digits, Backspace, Enter and Escape.
+    pub void picker_key(ui32 code) {
+        if (field >= 0) {
+            if (code >= 48 && code <= 57 && fcount < 3) {
+                ftyped = ftyped * 10 + (code - 48) as i32;
+                fcount += 1;
+            } else if (code == 8 && fcount > 0) {
+                ftyped = ftyped / 10;
+                fcount -= 1;
+            } else if (code == 9) {
+                i32 next = (field + 1) % field_rows();
+                start_field(next);
+            } else if (code == 13) {
+                commit_field();
+            } else if (code == 27) {
+                field = -1;
+            }
+            return;
+        }
+        if (code == 9) {
+            start_field(0);
+        } else if (code >= 48 && code <= 57) {
+            type_hex((code - 48) as i32);
+        } else if (code >= 97 && code <= 102) {
+            type_hex((code - 87) as i32);
+        } else if (code == 8) {
+            erase_hex();
+        } else if (code == 13) {
+            close_picker();
+        } else if (code == 27) {
+            if (typing) {
+                typing = false;
+            } else {
+                cancel_picker();
+            }
+        }
+    }
+
+    // The keys: tools (b e f l r x i m), grid (g), onion skin (o), brush (1 to 4), zoom (+ -), undo
+    // and redo, open and save, the selection (Ctrl+A, C, X, V, Delete, Escape). True if the key
+    // meant something.
+    pub bool key(ui32 code, bool ctrl, bool shift) uses io {
+        if (ctrl) {
+            if (code == 122) {  // z
+                if (shift) {
+                    redo();
+                } else {
+                    undo();
+                }
+            } else if (code == 121) {  // y
+                redo();
+            } else if (code == 115) {  // s
+                ask_save();
+            } else if (code == 111) {  // o
+                ask_open();
+            } else if (code == 110) {  // n
+                ask_new();
+            } else if (code == 99) {  // c
+                copy_selection();
+            } else if (code == 120) {  // x
+                cut_selection();
+            } else if (code == 118) {  // v
+                paste();
+            } else if (code == 97) {  // a
+                select_all();
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (code == 98) {
+            set_tool(PEN);
+        } else if (code == 101) {
+            set_tool(ERASER);
+        } else if (code == 102) {
+            set_tool(FILL);
+        } else if (code == 108) {
+            set_tool(LINE);
+        } else if (code == 114) {
+            set_tool(RECT);
+        } else if (code == 120) {
+            set_tool(BOX);
+        } else if (code == 105) {
+            set_tool(PICK);
+        } else if (code == 109) {
+            set_tool(SELECT);
+        } else if (code == 111) {
+            toggle_onion();
+        } else if (code == 127 || code == 8) {
+            clear_selection();
+        } else if (code == 27) {
+            deselect();
+        } else if (code == 13) {
+            settle();
+        } else if (code == 103) {
+            grid = !grid;
+        } else if (code == 44) {
+            select_frame(current - 1);
+        } else if (code == 46) {
+            select_frame(current + 1);
+        } else if (code == 32) {
+            toggle_play();
+        } else if (code >= 49 && code <= 52) {
+            brush = (code - 48) as i32;
+        } else if (code == 61 || code == 43) {
+            mouse_x = LEFT + view_w as f32 / 2.0;
+            mouse_y = TOP + view_h as f32 / 2.0;
+            wheel(1.0);
+        } else if (code == 45) {
+            mouse_x = LEFT + view_w as f32 / 2.0;
+            mouse_y = TOP + view_h as f32 / 2.0;
+            wheel(-1.0);
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    // Opens a PNG: it becomes a picture of one layer.
+    pub void open_png(str path) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        match (png.load(&scratch, path)) {
+            ok(img) => {
+                if (img.width > sheet.MAX_SIDE || img.height > sheet.MAX_SIDE) {
+                    say("This picture is too large");
+                    return;
+                }
+                fresh(img.width, img.height);
+                art.load(img);
+                say("Opened");
+            },
+            err(e) => {
+                say("This picture cannot be read");
+            },
+        }
+    }
+
+    // Writes the visible layers, flattened, in a PNG.
+    pub void save_png(str path) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        text.TextBuilder* b = text.builder(&scratch);
+        b.push(path);
+        if (!text.ends_with(text.to_lower(&scratch, path), ".png")) {
+            b.push(".png");
+        }
+        art.flatten();
+        match (png.save(&scratch, b.text(), art.flat)) {
+            ok() => {
+                say("Saved");
+            },
+            err(e) => {
+                say("The picture cannot be written");
+            },
+        }
+    }
+}
+
+pub Editor* new_editor(Arena* arena) {
+    return arena.new(Editor, arena);
+}

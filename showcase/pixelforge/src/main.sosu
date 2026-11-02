@@ -1,0 +1,1097 @@
+// Pixel Forge: a pixel art editor. Tools on the left, the picture in the middle, the colors and the
+// layers on the right. See README.md for the keys.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run .` from this folder.
+// `--snapshot out.png` writes the window, with a small picture, in a picture.
+import std.io;
+import std.os;
+import std.text;
+import std.math;
+import platform.app;
+import platform.dialogs;
+import render.canvas;
+import render.truetype;
+import image.png;
+import image.image;
+import ui.widgets;
+import pixelforge.checks;
+import pixelforge.editor;
+import pixelforge.screen;
+import pixelforge.sheet;
+
+ui32 OPEN_TAG = 1;
+ui32 SAVE_TAG = 2;
+ui32 SHEET_TAG = 3;
+ui32 FRAMES_TAG = 4;
+ui32 IMPORT_TAG = 5;
+ui32 PNG_TAG = 6;
+
+// The strip of frames, below the picture.
+f32 THUMB = 60.0;
+f32 THUMB_STEP = 66.0;
+f32 PREVIEW = 72.0;
+
+// The panel on the right, from the title bar down.
+f32 PALETTE_Y = 74.0;
+f32 SWATCH = 26.0;
+f32 LAYERS_Y = 196.0;
+f32 LAYER_BUTTONS_Y = 218.0;
+f32 LAYER_LIST_Y = 254.0;
+f32 LAYER_ROW = 30.0;
+f32 TOOL_H = 34.0;
+f32 TOOL_STEP = 40.0;
+
+// The color picker, a box in the middle of the window: a wheel with a triangle inside.
+f32 PICK_W = 360.0;
+f32 PICK_H = 604.0;
+f32 WHEEL = 300.0;
+f32 RING_OUT = 150.0;
+f32 RING_IN = 122.0;
+f32 TRI_R = 116.0;
+f32 ROW_X = 112.0;
+f32 ROW_W = 232.0;
+
+canvas.Color rgb(ui32 c) {
+    return canvas.Color{ r: ((c >> 16) & 0xFF) as ui8, g: ((c >> 8) & 0xFF) as ui8, b: (c & 0xFF) as ui8, a: (c >> 24) as ui8 };
+}
+
+canvas.Color shade(i32 r, i32 g, i32 b) {
+    return canvas.Color{ r: r as ui8, g: g as ui8, b: b as ui8 };
+}
+
+canvas.Color ink() {
+    return shade(238, 240, 248);
+}
+
+bool inside(f32 x, f32 y, f32 rx, f32 ry, f32 rw, f32 rh) {
+    return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    editor.Editor* state;
+    mut truetype.Font*? face;
+    mut f32 win_w;
+    mut f32 win_h;
+    mut i32 slider;  // the part of the color picker being dragged (1 ring, 2 triangle, 4 to 7 a row), or -1
+    mut image.Image ring;  // the ring of hues, drawn once
+    mut bool ring_done;
+    mut image.Image tri;  // the triangle for the hue `tri_hue`
+    mut f32 tri_hue;
+
+    void init(editor.Editor* state, Arena* arena) {
+        ui = widgets.Ui{ };
+        self.state = state;
+        ring = image.create(arena, 300, 300);
+        tri = image.create(arena, 300, 300);
+        ring_done = false;
+        face = none;
+        win_w = 1180.0;
+        win_h = 780.0;
+        slider = -1;
+        tri_hue = -1.0;
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Key(code, down, mods) => {
+                if (state.picking) {
+                    if (down) {
+                        state.picker_key(code);
+                    }
+                } else if (!down || state.asking) {
+                    ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+                } else if (!state.key(code, mods.ctrl || mods.command, mods.shift)) {
+                    ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+                if (slider >= 0) {
+                    picker_drag(x, y);
+                }
+                state.move_to(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                state.move_to(x, y);
+                match (button) {
+                    Left => {
+                        if (state.picking) {
+                            picker_click(x, y);
+                            return true;
+                        }
+                        ui.mouse_button(true);
+                        if (y >= editor.TOP && y < win_h - editor.BOTTOM && !state.asking) {
+                            if (x < editor.LEFT || x >= win_w - editor.RIGHT) {
+                                panel_click(x, y);
+                            } else if (y >= strip_top()) {
+                                strip_click(x, y);
+                            } else {
+                                state.press(x, y);
+                            }
+                        }
+                    },
+                    _ => {
+                        if (!state.picking) {
+                            state.grab(x, y);
+                        }
+                    },
+                }
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+                slider = -1;
+                state.release();
+            },
+            Wheel(x, y) => {
+                if (!state.asking && !state.picking) {
+                    state.wheel(y);
+                }
+            },
+            FileDropped(path, x, y) => {
+                state.open_file(path);
+            },
+            Dialog(answer) => {
+                match (answer) {
+                    Chosen(tag, paths, filter) => {
+                        if (paths.len > 0) {
+                            if (tag == OPEN_TAG) {
+                                state.open_file(paths[0]);
+                            } else if (tag == SAVE_TAG) {
+                                state.save_project(paths[0]);
+                            } else if (tag == PNG_TAG) {
+                                state.save_png(paths[0]);
+                            } else if (tag == SHEET_TAG) {
+                                state.export_sheet(paths[0]);
+                            } else if (tag == FRAMES_TAG) {
+                                state.export_frames(paths[0]);
+                            } else if (tag == IMPORT_TAG) {
+                                state.import_sheet(paths[0]);
+                            }
+                        }
+                    },
+                    _ => { },
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        ui.clock(app.now_ms());
+        win_w = surface.width as f32;
+        win_h = surface.height as f32;
+        state.update(surface.width, surface.height, app.now_ms());
+        paint(surface);
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        if (state.want_open) {
+            state.want_open = false;
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.open_file(OPEN_TAG, filters(&scratch, 2), "");
+        }
+        if (state.want_save) {
+            state.want_save = false;
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.save_file(SAVE_TAG, filters(&scratch, 1), "");
+        }
+        if (state.want_png) {
+            state.want_png = false;
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.save_file(PNG_TAG, filters(&scratch, 0), "");
+        }
+        if (state.want_sheet) {
+            state.want_sheet = false;
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.save_file(SHEET_TAG, filters(&scratch, 0), "");
+        }
+        if (state.want_frames) {
+            state.want_frames = false;
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.save_file(FRAMES_TAG, filters(&scratch, 0), "");
+        }
+        if (state.want_import) {
+            state.want_import = false;
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.open_file(IMPORT_TAG, filters(&scratch, 0), "");
+        }
+    }
+
+    f32 strip_top() {
+        return win_h - editor.BOTTOM - editor.STRIP;
+    }
+
+    // How many thumbnails fit in the strip.
+    i32 strip_capacity() {
+        return ((win_w - editor.LEFT - editor.RIGHT - 8.0 - PREVIEW - 20.0) / THUMB_STEP) as i32;
+    }
+
+    // The first frame shown: the current one is always among them.
+    i32 strip_first() {
+        i32 first = state.current - strip_capacity() + 1;
+        return first < 0 ? 0 : first;
+    }
+
+    f32 row_a_x(i32 k) {
+        return editor.LEFT + 8.0 + k as f32 * 60.0;
+    }
+
+    f32 row_b_x(i32 k) {
+        mut f32 x = editor.LEFT + 8.0;
+        for (i32 i in 0..k) {
+            x += i < 3 ? 100.0 : 64.0;
+        }
+        return x;
+    }
+
+    f32 row_b_w(i32 k) {
+        return k < 3 ? 96.0 : 60.0;
+    }
+
+    str play_label() {
+        return state.playing ? "Stop" : "Play";
+    }
+
+    // A click on the strip: a thumbnail, or a button of the two rows.
+    void strip_click(f32 x, f32 y) {
+        f32 top = strip_top();
+        i32 first = strip_first();
+        for (i32 j in 0..strip_capacity()) {
+            if (first + j < state.frame_count() && inside(x, y, editor.LEFT + 8.0 + j as f32 * THUMB_STEP, top + 8.0, THUMB, THUMB)) {
+                state.select_frame(first + j);
+            }
+        }
+        for (i32 k in 0..8) {
+            if (inside(x, y, row_a_x(k), top + 76.0, 56.0, 24.0)) {
+                if (k == 0) {
+                    state.add_frame();
+                } else if (k == 1) {
+                    state.copy_frame();
+                } else if (k == 2) {
+                    state.delete_frame();
+                } else if (k == 3) {
+                    state.move_frame(-1);
+                } else if (k == 4) {
+                    state.move_frame(1);
+                } else if (k == 5) {
+                    state.toggle_play();
+                } else if (k == 6) {
+                    state.nudge_delay(10);
+                } else {
+                    state.nudge_delay(-10);
+                }
+            }
+        }
+        for (i32 k in 0..7) {
+            if (inside(x, y, row_b_x(k), top + 104.0, row_b_w(k), 24.0)) {
+                if (k == 0) {
+                    state.ask_sheet();
+                } else if (k == 1) {
+                    state.ask_frames();
+                } else if (k == 2) {
+                    state.ask_import();
+                } else if (k == 3) {
+                    state.more_columns(-1);
+                } else if (k == 4) {
+                    state.more_columns(1);
+                } else if (k == 5) {
+                    state.more_gap(-1);
+                } else {
+                    state.more_gap(1);
+                }
+            }
+        }
+    }
+
+    dialogs.Filter[] filters(Arena* arena, i32 kind) {
+        mut dialogs.Filter[] list = arena.alloc_slice(dialogs.Filter, kind == 2 ? 2 : 1);
+        if (kind == 0) {
+            list[0] = dialogs.Filter{ name: "PNG pictures", extensions: text.split(arena, "png", ",") };
+        } else {
+            list[0] = dialogs.Filter{ name: "Pixel Forge projects", extensions: text.split(arena, "pforge", ",") };
+            if (kind == 2) {
+                list[1] = dialogs.Filter{ name: "PNG pictures", extensions: text.split(arena, "png", ",") };
+            }
+        }
+        return list;
+    }
+
+    // A click on the tools or on the panel.
+    void panel_click(f32 x, f32 y) {
+        state.settle();
+        if (x < editor.LEFT) {
+            for (i32 i in 0..editor.TOOLS) {
+                if (inside(x, y, 8.0, editor.TOP + 12.0 + i as f32 * TOOL_STEP, 68.0, TOOL_H)) {
+                    state.set_tool(i);
+                }
+            }
+            for (i32 b in 0..4) {
+                if (inside(x, y, 8.0 + (b % 2) as f32 * 36.0, editor.TOP + 358.0 + (b / 2) as f32 * 34.0, 32.0, 30.0)) {
+                    state.set_brush(b + 1);
+                }
+            }
+            for (i32 k in 0..4) {
+                if (inside(x, y, 8.0, editor.TOP + 456.0 + k as f32 * 32.0, 68.0, 28.0)) {
+                    if (k == 0) {
+                        state.copy_selection();
+                    } else if (k == 1) {
+                        state.cut_selection();
+                    } else if (k == 2) {
+                        state.paste();
+                    } else {
+                        state.clear_selection();
+                    }
+                }
+            }
+            return;
+        }
+        f32 x0 = win_w - editor.RIGHT + 12.0;
+        for (i32 i in 0..32) {
+            f32 cx = x0 + (i % 8) as f32 * SWATCH;
+            f32 cy = editor.TOP + PALETTE_Y + (i / 8) as f32 * SWATCH;
+            if (inside(x, y, cx, cy, 24.0, 24.0)) {
+                state.color = editor.palette(i);
+            }
+        }
+        if (inside(x, y, x0, editor.TOP + 12.0, 48.0, 48.0)) {
+            state.open_picker();
+        }
+        if (inside(x, y, x0 + 160.0, editor.TOP + 12.0, 48.0, 48.0)) {
+            state.color = 0;
+        }
+        for (i32 k in 0..4) {
+            if (inside(x, y, x0 + k as f32 * 52.0, editor.TOP + LAYER_BUTTONS_Y, 48.0, 24.0)) {
+                if (k == 0) {
+                    state.art.add_layer();
+                } else if (k == 1) {
+                    state.art.remove_layer();
+                } else if (k == 2) {
+                    state.art.move_layer(1);
+                } else {
+                    state.art.move_layer(-1);
+                }
+            }
+        }
+        i32 count = state.art.layers.len() as i32;
+        for (i32 i in 0..count) {
+            f32 row = editor.TOP + LAYER_LIST_Y + (count - 1 - i) as f32 * LAYER_ROW;
+            if (inside(x, y, x0, row, 208.0, LAYER_ROW - 2.0)) {
+                if (x < x0 + 26.0) {
+                    state.art.toggle_layer(i);
+                } else {
+                    state.art.select_layer(i);
+                }
+            }
+        }
+    }
+
+    // A click in the color picker: the ring (hue), the triangle, an arrow or a bar of a row, the
+    // hex code, OK or Cancel.
+    void picker_click(f32 x, f32 y) {
+        f32 px = (win_w - PICK_W) / 2.0;
+        f32 py = (win_h - PICK_H) / 2.0;
+        f32 d = wheel_distance(x, y);
+        state.commit_field();
+        if (d <= RING_OUT && d >= RING_IN - 4.0) {
+            slider = 1;
+        } else if (d < RING_IN - 4.0) {
+            slider = 2;
+        } else if (inside(x, y, px + 16.0, py + 526.0, ROW_X + ROW_W - 16.0, 24.0)) {
+            if (x >= px + ROW_X) {
+                state.start_hex();
+            }
+        } else if (inside(x, y, px + PICK_W - 184.0, py + PICK_H - 46.0, 80.0, 30.0)) {
+            state.close_picker();
+        } else if (inside(x, y, px + PICK_W - 96.0, py + PICK_H - 46.0, 80.0, 30.0)) {
+            state.cancel_picker();
+        }
+        for (i32 k in 0..state.field_rows()) {
+            f32 ry = py + 390.0 + k as f32 * 26.0;
+            if (inside(x, y, px + ROW_X, ry, ROW_W, 22.0)) {
+                if (x >= px + ROW_X + ROW_W - 52.0) {
+                    state.start_field(k);
+                } else if (x >= px + ROW_X + 20.0) {
+                    slider = 4 + k;
+                }
+            }
+        }
+        for (i32 i in 0..3) {
+            if (inside(x, y, px + ROW_X + i as f32 * 78.0, py + 362.0, 76.0, 22.0)) {
+                state.set_model(i);
+            }
+        }
+        if (slider >= 0) {
+            picker_drag(x, y);
+        }
+    }
+
+    f32 wheel_distance(f32 x, f32 y) {
+        f32 dx = x - (win_w / 2.0);
+        f32 dy = y - ((win_h - PICK_H) / 2.0 + 44.0 + WHEEL / 2.0);
+        return math.sqrt((dx * dx + dy * dy) as f64) as f32;
+    }
+
+    void picker_drag(f32 x, f32 y) {
+        f32 px = (win_w - PICK_W) / 2.0;
+        f32 py = (win_h - PICK_H) / 2.0;
+        f32 dx = x - (win_w / 2.0);
+        f32 dy = y - (py + 44.0 + WHEEL / 2.0);
+        if (slider == 1) {
+            state.pick_hue((math.atan2(dy as f64, dx as f64) * 180.0 / math.PI) as f32);
+        } else if (slider == 2) {
+            // the point of the triangle nearest to the mouse: weights below 0 are cut off
+            mut f32 wc = weight(0, dx, dy, state.hue);
+            mut f32 ww = weight(1, dx, dy, state.hue);
+            mut f32 wb = weight(2, dx, dy, state.hue);
+            wc = wc < 0.0 ? 0.0 : wc;
+            ww = ww < 0.0 ? 0.0 : ww;
+            wb = wb < 0.0 ? 0.0 : wb;
+            f32 total = wc + ww + wb;
+            if (total > 0.0) {
+                f32 v = (wc + ww) / total;
+                state.pick_square(v > 0.0 ? wc / total / v : 0.0, 1.0 - v);
+            }
+        } else if (slider >= 4) {
+            f32 f = (x - (px + ROW_X + 20.0)) / (ROW_W - 76.0);
+            f32 c = f < 0.0 ? 0.0 : f > 1.0 ? 1.0 : f;
+            i32 k = slider - 4;
+            state.set_field(k, (c * state.field_max(k) as f32 + 0.5) as i32);
+        }
+    }
+
+    // A weight of the triangle at (dx, dy) from the center of the wheel, for hue `h`: the color
+    // corner (0), white (1) or black (2). The three add up to 1; inside the triangle they are all
+    // between 0 and 1.
+    f32 weight(i32 which, f32 dx, f32 dy, f32 h) {
+        f64 t = h as f64 * math.PI / 180.0;
+        f64 r = TRI_R as f64;
+        f64 ax = r * math.cos(t);
+        f64 ay = r * math.sin(t);
+        f64 bx = r * math.cos(t + 2.0 * math.TAU / 3.0);
+        f64 by = r * math.sin(t + 2.0 * math.TAU / 3.0);
+        f64 kx = r * math.cos(t + math.TAU / 3.0);
+        f64 ky = r * math.sin(t + math.TAU / 3.0);
+        f64 den = (by - ky) * (ax - kx) + (kx - bx) * (ay - ky);
+        f64 wa = ((by - ky) * (dx as f64 - kx) + (kx - bx) * (dy as f64 - ky)) / den;
+        f64 wh = ((ky - ay) * (dx as f64 - kx) + (ax - kx) * (dy as f64 - ky)) / den;
+        if (which == 0) {
+            return wa as f32;
+        }
+        if (which == 1) {
+            return wh as f32;
+        }
+        return (1.0 - wa - wh) as f32;
+    }
+
+    // The two images of the wheel: the ring of hues (once) and the triangle (for each hue).
+    void draw_wheel_images() {
+        if (!ring_done) {
+            ring_done = true;
+            for (i32 j in 0..300) {
+                for (i32 i in 0..300) {
+                    f32 dx = i as f32 + 0.5 - 150.0;
+                    f32 dy = j as f32 + 0.5 - 150.0;
+                    f32 d = math.sqrt((dx * dx + dy * dy) as f64) as f32;
+                    f32 edge = editor.unit_range(RING_OUT - d + 0.5) * editor.unit_range(d - RING_IN + 0.5);
+                    mut ui32 c = 0;
+                    if (edge > 0.0) {
+                        mut f32 h = (math.atan2(dy as f64, dx as f64) * 180.0 / math.PI) as f32;
+                        h = h < 0.0 ? h + 360.0 : h;
+                        c = (((edge * 255.0 + 0.5) as i32) as ui32) << 24 | (editor.hsv_rgb(h, 1.0, 1.0) & 0xFFFFFF);
+                    }
+                    ring.pixels[(j * 300 + i) as usize] = c;
+                }
+            }
+        }
+        if (tri_hue != state.hue) {
+            tri_hue = state.hue;
+            for (i32 j in 0..300) {
+                for (i32 i in 0..300) {
+                    f32 dx = i as f32 + 0.5 - 150.0;
+                    f32 dy = j as f32 + 0.5 - 150.0;
+                    mut ui32 c = 0;
+                    if (dx * dx + dy * dy <= (TRI_R + 2.0) * (TRI_R + 2.0)) {
+                        f32 wc = weight(0, dx, dy, state.hue);
+                        f32 ww = weight(1, dx, dy, state.hue);
+                        f32 wb = 1.0 - wc - ww;
+                        mut f32 least = wc < ww ? wc : ww;
+                        least = least < wb ? least : wb;
+                        // 1.5 * TRI_R is the height of the triangle: that is a distance in pixels
+                        f32 edge = editor.unit_range(least * 1.5 * TRI_R + 0.5);
+                        if (edge > 0.0) {
+                            f32 a = wc < 0.0 ? 0.0 : wc;
+                            f32 b = ww < 0.0 ? 0.0 : ww;
+                            f32 v = a + b;
+                            c = (((edge * 255.0 + 0.5) as i32) as ui32) << 24 | (editor.hsv_rgb(state.hue, v > 0.0 ? a / v : 0.0, v > 1.0 ? 1.0 : v) & 0xFFFFFF);
+                        }
+                    }
+                    tri.pixels[(j * 300 + i) as usize] = c;
+                }
+            }
+        }
+    }
+
+    // The whole window.
+    void paint(canvas.Canvas* surface) {
+        surface.clear(shade(24, 26, 36));
+        draw_view(surface);
+        draw_tools(surface);
+        draw_panel(surface);
+        draw_strip(surface);
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.PixelForge(&f, state);
+        f.finish();
+        draw_status(surface);
+        if (state.picking) {
+            draw_picker(surface);
+        }
+    }
+
+    // Small checkerboard squares of 8 pixels (the size must be a multiple of 8).
+    void checker_box(canvas.Canvas* surface, f32 x, f32 y, f32 w, f32 h) {
+        for (i32 j in 0..(h / 8.0) as i32) {
+            for (i32 i in 0..(w / 8.0) as i32) {
+                canvas.Color c = (i + j) % 2 == 0 ? shade(96, 98, 110) : shade(66, 68, 82);
+                surface.fill(canvas.Rect{ x: x + i as f32 * 8.0, y: y + j as f32 * 8.0, w: 8.0, h: 8.0 }, c);
+            }
+        }
+    }
+
+    // The color picker, over the window.
+    void draw_picker(canvas.Canvas* surface) {
+        f32 px = (win_w - PICK_W) / 2.0;
+        f32 py = (win_h - PICK_H) / 2.0;
+        surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: win_w, h: win_h }, canvas.Color{ r: 0, g: 0, b: 0, a: 140 });
+        canvas.Rect box = canvas.Rect{ x: px, y: py, w: PICK_W, h: PICK_H };
+        surface.fill_rounded(box, 6.0, shade(36, 38, 54));
+        surface.stroke(box, shade(90, 96, 124), 1.0);
+        say(surface, px + 16.0, py + 12.0, 16.0, "Color", ink());
+        ui32 shown = state.color;
+        ui32 solid = editor.hsv_rgb(state.hue, state.sat, state.val);
+        draw_wheel_images();
+        f32 wx = px + (PICK_W - WHEEL) / 2.0;
+        f32 wy = py + 44.0;
+        surface.draw_image(ring, canvas.Rect{ x: wx, y: wy, w: WHEEL, h: WHEEL });
+        surface.draw_image(tri, canvas.Rect{ x: wx, y: wy, w: WHEEL, h: WHEEL });
+        f32 mid = wx + WHEEL / 2.0;
+        f32 center = wy + WHEEL / 2.0;
+        // the marker of the hue, on the ring
+        f64 t = state.hue as f64 * math.PI / 180.0;
+        f32 hx = mid + ((RING_IN + RING_OUT) / 2.0) * math.cos(t) as f32;
+        f32 hy = center + ((RING_IN + RING_OUT) / 2.0) * math.sin(t) as f32;
+        surface.stroke(canvas.Rect{ x: hx - 5.0, y: hy - 5.0, w: 10.0, h: 10.0 }, shade(0, 0, 0), 3.0);
+        surface.stroke(canvas.Rect{ x: hx - 5.0, y: hy - 5.0, w: 10.0, h: 10.0 }, shade(255, 255, 255), 1.0);
+        // the marker of the color, in the triangle: color corner, white and black corners mixed
+        f32 wc = state.sat * state.val;
+        f32 ww = state.val - wc;
+        f32 wb = 1.0 - state.val;
+        f32 tx = mid + TRI_R * (wc * math.cos(t) as f32 + ww * math.cos(t + 2.0 * math.TAU / 3.0) as f32 + wb * math.cos(t + math.TAU / 3.0) as f32);
+        f32 ty = center + TRI_R * (wc * math.sin(t) as f32 + ww * math.sin(t + 2.0 * math.TAU / 3.0) as f32 + wb * math.sin(t + math.TAU / 3.0) as f32);
+        surface.stroke(canvas.Rect{ x: tx - 5.0, y: ty - 5.0, w: 10.0, h: 10.0 }, shade(0, 0, 0), 3.0);
+        surface.stroke(canvas.Rect{ x: tx - 5.0, y: ty - 5.0, w: 10.0, h: 10.0 }, shade(255, 255, 255), 1.0);
+        // the color now (above) and the one when the picker opened (below)
+        checker_box(surface, px + 16.0, py + 362.0, 80.0, 80.0);
+        surface.fill(canvas.Rect{ x: px + 16.0, y: py + 362.0, w: 80.0, h: 40.0 }, rgb(shown));
+        surface.fill(canvas.Rect{ x: px + 16.0, y: py + 402.0, w: 80.0, h: 40.0 }, rgb(state.original));
+        surface.stroke(canvas.Rect{ x: px + 16.0, y: py + 362.0, w: 80.0, h: 80.0 }, shade(110, 116, 140), 1.0);
+        say(surface, px + 16.0, py + 446.0, 11.0, "new / old", shade(130, 136, 160));
+        // the model of the numbers, then its rows: the last one is the opacity
+        str[3] models = ["RGB", "CMYK", "HSL"];
+        mut Arena frame = Arena.new(1 * KB);
+        defer frame.free();
+        for (i32 i in 0..3) {
+            button(surface, px + ROW_X + i as f32 * 78.0, py + 362.0, 76.0, 22.0, models[i as usize], state.model == i);
+        }
+        i32 rows = state.field_rows();
+        for (i32 k in 0..rows) {
+            f32 ry = py + 390.0 + k as f32 * 26.0;
+            f32 rx = px + ROW_X;
+            mut str label = "A";
+            if (k < rows - 1) {
+                str[4] letters = state.model == 0 ? ["R", "G", "B", ""] : state.model == 1 ? ["C", "M", "Y", "K"] : ["H", "S", "L", ""];
+                label = letters[k as usize];
+            }
+            i32 top = state.field_max(k);
+            f32 amount = state.field_value(k) as f32 / top as f32;
+            surface.fill_rounded(canvas.Rect{ x: rx, y: ry, w: ROW_W, h: 22.0 }, 3.0, shade(24, 26, 36));
+            say(surface, rx + 5.0, ry + 3.0, 12.0, label, shade(160, 166, 190));
+            surface.fill(canvas.Rect{ x: rx + 20.0, y: ry + 10.0, w: ROW_W - 76.0, h: 2.0 }, shade(60, 64, 86));
+            surface.fill(canvas.Rect{ x: rx + 20.0, y: ry + 10.0, w: (ROW_W - 76.0) * amount, h: 2.0 }, shade(110, 140, 220));
+            f32 knob = rx + 20.0 + (ROW_W - 76.0) * amount;
+            surface.fill_rounded(canvas.Rect{ x: knob - 3.0, y: ry + 4.0, w: 6.0, h: 14.0 }, 2.0, shade(200, 206, 230));
+            canvas.Rect cell = canvas.Rect{ x: rx + ROW_W - 52.0, y: ry, w: 52.0, h: 22.0 };
+            surface.fill_rounded(cell, 3.0, shade(16, 18, 26));
+            surface.stroke(cell, state.field == k ? shade(120, 160, 255) : shade(70, 76, 100), 1.0);
+            text.TextBuilder* n = text.builder(&frame);
+            if (state.field == k) {
+                if (state.fcount > 0) {
+                    n.push_i64(state.ftyped as i64);
+                }
+                n.push("|");
+            } else {
+                n.push_i64(state.field_value(k) as i64);
+                if (state.model != 0 && (k == rows - 1 || state.model == 1)) {
+                    n.push("%");
+                } else if (state.model == 2) {
+                    n.push(k == 0 ? "°" : "%");
+                }
+            }
+            say(surface, rx + ROW_W - 46.0, ry + 3.0, 12.0, n.text(), ink());
+        }
+        // the hex code
+        canvas.Rect field = canvas.Rect{ x: px + ROW_X, y: py + 526.0, w: 120.0, h: 24.0 };
+        surface.fill_rounded(field, 3.0, shade(24, 26, 36));
+        surface.stroke(field, state.typing ? shade(120, 160, 255) : shade(90, 96, 124), 1.0);
+        text.TextBuilder* b = text.builder(&frame);
+        if (state.typing) {
+            b.push("#");
+            for (i32 i in 0..6) {
+                if (i < state.typed_count) {
+                    ui32 d = ((state.typed >> ((state.typed_count - 1 - i) * 4) as i64) & 0xF) as ui32;
+                    b.push_char(text.char_of(d < 10 ? 48 + d : 55 + d));
+                } else {
+                    b.push(i == state.typed_count ? "|" : "_");
+                }
+            }
+            say(surface, px + ROW_X + 8.0, py + 529.0, 14.0, b.text(), ink());
+        } else {
+            say(surface, px + ROW_X + 8.0, py + 529.0, 14.0, hex(&frame, solid), ink());
+        }
+        say(surface, px + 16.0, py + 530.0, 12.0, "Hex", shade(160, 166, 190));
+        button(surface, px + PICK_W - 184.0, py + PICK_H - 46.0, 80.0, 30.0, "      OK", false);
+        button(surface, px + PICK_W - 96.0, py + PICK_H - 46.0, 80.0, 30.0, "  Cancel", false);
+        say(surface, px + 16.0, py + PICK_H - 38.0, 11.0, "Enter: OK   Esc: Cancel", shade(130, 136, 160));
+    }
+
+    void say(canvas.Canvas* surface, f32 x, f32 y, f32 size, str text, canvas.Color color) {
+        match (face) {
+            some(font) => {
+                surface.text_with(font, size, x, y, text, color);
+            },
+            none => {
+                surface.text(x, y, text, color, 1);
+            },
+        }
+    }
+
+    // A button of the tools or of the panel.
+    void button(canvas.Canvas* surface, f32 x, f32 y, f32 w, f32 h, str label, bool on) {
+        canvas.Rect r = canvas.Rect{ x: x, y: y, w: w, h: h };
+        surface.fill_rounded(r, 4.0, on ? shade(64, 96, 176) : shade(44, 48, 66));
+        surface.push_clip(r);
+        say(surface, x + 8.0, y + (h - 16.0) / 2.0, 13.0, label, ink());
+        surface.pop_clip();
+    }
+
+    void draw_tools(canvas.Canvas* surface) {
+        surface.fill(canvas.Rect{ x: 0.0, y: editor.TOP, w: editor.LEFT, h: surface.height as f32 - editor.TOP - editor.BOTTOM }, shade(30, 32, 44));
+        for (i32 i in 0..editor.TOOLS) {
+            button(surface, 8.0, editor.TOP + 12.0 + i as f32 * TOOL_STEP, 68.0, TOOL_H, editor.tool_name(i), state.tool == i);
+        }
+        say(surface, 10.0, editor.TOP + 336.0, 12.0, "Brush", shade(160, 166, 190));
+        for (i32 b in 0..4) {
+            button(surface, 8.0 + (b % 2) as f32 * 36.0, editor.TOP + 358.0 + (b / 2) as f32 * 34.0, 32.0, 30.0, size_label(b), state.brush == b + 1);
+        }
+        say(surface, 10.0, editor.TOP + 436.0, 12.0, "Selection", shade(160, 166, 190));
+        for (i32 k in 0..4) {
+            button(surface, 8.0, editor.TOP + 456.0 + k as f32 * 32.0, 68.0, 28.0, selection_label(k), false);
+        }
+    }
+
+    str selection_label(i32 k) {
+        str[4] names = ["Copy", "Cut", "Paste", "Clear"];
+        return names[k as usize];
+    }
+
+    // The picture, with its checkerboard, grid and the pixel under the mouse.
+    void draw_view(canvas.Canvas* surface) {
+        f32 vw = surface.width as f32 - editor.LEFT - editor.RIGHT;
+        f32 vh = surface.height as f32 - editor.TOP - editor.BOTTOM - editor.STRIP;
+        canvas.Rect view = canvas.Rect{ x: editor.LEFT, y: editor.TOP, w: vw, h: vh };
+        surface.fill(view, shade(38, 40, 52));
+        surface.push_clip(view);
+        f32 z = state.zoom as f32;
+        f32 px = state.pan_x;
+        f32 py = state.pan_y;
+        f32 pw = state.art.width as f32 * z;
+        f32 ph = state.art.height as f32 * z;
+        draw_checker(surface, view, px, py, pw, ph);
+        if (state.has_before) {
+            surface.draw_image(state.ghost_before, canvas.Rect{ x: px, y: py, w: pw, h: ph });
+        }
+        if (state.has_after) {
+            surface.draw_image(state.ghost_after, canvas.Rect{ x: px, y: py, w: pw, h: ph });
+        }
+        surface.draw_image(state.art.flat, canvas.Rect{ x: px, y: py, w: pw, h: ph });
+        if (state.grid && state.zoom >= 6) {
+            canvas.Color line = canvas.Color{ r: 255, g: 255, b: 255, a: 36 };
+            for (i32 i in 0..state.art.width + 1) {
+                surface.fill(canvas.Rect{ x: px + i as f32 * z, y: py, w: 1.0, h: ph }, line);
+            }
+            for (i32 i in 0..state.art.height + 1) {
+                surface.fill(canvas.Rect{ x: px, y: py + i as f32 * z, w: pw, h: 1.0 }, line);
+            }
+        }
+        surface.stroke(canvas.Rect{ x: px - 1.0, y: py - 1.0, w: pw + 2.0, h: ph + 2.0 }, shade(110, 116, 140), 1.0);
+        if (state.has_sel && state.tool == editor.SELECT) {
+            f32 sx = px + state.sel_x as f32 * z;
+            f32 sy = py + state.sel_y as f32 * z;
+            f32 sw = state.sel_w as f32 * z;
+            f32 sh = state.sel_h as f32 * z;
+            surface.stroke(canvas.Rect{ x: sx - 1.0, y: sy - 1.0, w: sw + 2.0, h: sh + 2.0 }, shade(0, 0, 0), 1.0);
+            surface.stroke(canvas.Rect{ x: sx, y: sy, w: sw, h: sh }, shade(255, 255, 255), 1.0);
+        }
+        if (state.in_view(state.mouse_x, state.mouse_y)) {
+            i32 size = state.tool == editor.PEN || state.tool == editor.ERASER ? state.brush : 1;
+            f32 first = ((size - 1) / 2) as f32;
+            surface.stroke(canvas.Rect{ x: px + (state.hover_x as f32 - first) * z, y: py + (state.hover_y as f32 - first) * z, w: size as f32 * z, h: size as f32 * z }, shade(255, 255, 255), 1.0);
+        }
+        surface.pop_clip();
+    }
+
+    void draw_checker(canvas.Canvas* surface, canvas.Rect view, f32 px, f32 py, f32 pw, f32 ph) {
+        mut i32 first_x = ((view.x - px) / 8.0) as i32;
+        mut i32 first_y = ((view.y - py) / 8.0) as i32;
+        if (first_x < 0 || view.x < px) {
+            first_x = 0;
+        }
+        if (first_y < 0 || view.y < py) {
+            first_y = 0;
+        }
+        i32 across = ((pw + 7.0) / 8.0) as i32;
+        i32 down = ((ph + 7.0) / 8.0) as i32;
+        i32 last_x = (((view.x + view.w - px) / 8.0) as i32) + 1;
+        i32 last_y = (((view.y + view.h - py) / 8.0) as i32) + 1;
+        i32 stop_x = last_x < across ? last_x : across;
+        i32 stop_y = last_y < down ? last_y : down;
+        for (i32 cy in first_y..stop_y) {
+            for (i32 cx in first_x..stop_x) {
+                f32 w = pw - cx as f32 * 8.0;
+                f32 h = ph - cy as f32 * 8.0;
+                surface.fill(canvas.Rect{ x: px + cx as f32 * 8.0, y: py + cy as f32 * 8.0, w: w < 8.0 ? w : 8.0, h: h < 8.0 ? h : 8.0 }, (cx + cy) % 2 == 0 ? shade(96, 98, 110) : shade(74, 76, 90));
+            }
+        }
+    }
+
+    // The frames, their buttons, and a preview of the animation.
+    void draw_strip(canvas.Canvas* surface) {
+        f32 top = strip_top();
+        f32 width = surface.width as f32 - editor.LEFT - editor.RIGHT;
+        surface.fill(canvas.Rect{ x: editor.LEFT, y: top, w: width, h: editor.STRIP }, shade(30, 32, 44));
+        i32 first = strip_first();
+        mut Arena labels = Arena.new(16 * KB);
+        defer labels.free();
+        for (i32 j in 0..strip_capacity()) {
+            i32 k = first + j;
+            if (k < state.frame_count()) {
+                f32 x = editor.LEFT + 8.0 + j as f32 * THUMB_STEP;
+                draw_thumb(surface, state.frames.at(k as usize).art, x, top + 8.0, THUMB);
+                surface.fill(canvas.Rect{ x: x, y: top + 8.0 + THUMB - 14.0, w: 22.0, h: 14.0 }, shade(18, 19, 28));
+                text.TextBuilder* number = text.builder(&labels);
+                number.push_i64((k + 1) as i64);
+                say(surface, x + 3.0, top + 8.0 + THUMB - 16.0, 13.0, number.text(), ink());
+                surface.stroke(canvas.Rect{ x: x - 1.0, y: top + 7.0, w: THUMB + 2.0, h: THUMB + 2.0 }, k == state.current ? shade(255, 255, 255) : shade(80, 86, 110), k == state.current ? 2.0 : 1.0);
+            }
+        }
+        f32 px = editor.LEFT + width - PREVIEW - 10.0;
+        draw_thumb(surface, state.art, px, top + 8.0, PREVIEW);
+        surface.stroke(canvas.Rect{ x: px - 1.0, y: top + 7.0, w: PREVIEW + 2.0, h: PREVIEW + 2.0 }, shade(80, 86, 110), 1.0);
+        str[8] a = ["Add", "Copy", "Del", "<", ">", play_label(), "Slow", "Fast"];
+        for (i32 k in 0..8) {
+            button(surface, row_a_x(k), top + 76.0, 56.0, 24.0, a[k as usize], k == 5 && state.playing);
+        }
+        mut Arena frame = Arena.new(1 * KB);
+        defer frame.free();
+        text.TextBuilder* b = text.builder(&frame);
+        b.push_i64(state.frames.at(state.current as usize).delay as i64);
+        b.push(" ms");
+        say(surface, row_a_x(8) + 4.0, top + 80.0, 13.0, b.text(), ink());
+        str[7] s = ["Save sheet", "Save frames", "Import sheet", "Cols -", "Cols +", "Gap -", "Gap +"];
+        for (i32 k in 0..7) {
+            button(surface, row_b_x(k), top + 104.0, row_b_w(k), 24.0, s[k as usize], false);
+        }
+        text.TextBuilder* c = text.builder(&frame);
+        c.push_i64(state.sheet_columns() as i64);
+        c.push(" columns, gap ");
+        c.push_i64(state.gap as i64);
+        say(surface, row_b_x(7) + 4.0, top + 108.0, 13.0, c.text(), shade(160, 166, 190));
+    }
+
+    // A frame in a square of `box` pixels, on a checkerboard, as large as it can be there.
+    void draw_thumb(canvas.Canvas* surface, sheet.Sheet* art, f32 x, f32 y, f32 box) {
+        f32 across = box / art.width as f32;
+        f32 down = box / art.height as f32;
+        f32 scale = across < down ? across : down;
+        f32 w = art.width as f32 * scale;
+        f32 h = art.height as f32 * scale;
+        f32 left = x + (box - w) / 2.0;
+        f32 up = y + (box - h) / 2.0;
+        surface.fill(canvas.Rect{ x: x, y: y, w: box, h: box }, shade(24, 26, 36));
+        draw_checker(surface, canvas.Rect{ x: left, y: up, w: w, h: h }, left, up, w, h);
+        surface.draw_image(art.flat, canvas.Rect{ x: left, y: up, w: w, h: h });
+    }
+
+    // The color, the palette, the sliders and the layers.
+    void draw_panel(canvas.Canvas* surface) {
+        f32 left = surface.width as f32 - editor.RIGHT;
+        surface.fill(canvas.Rect{ x: left, y: editor.TOP, w: editor.RIGHT, h: surface.height as f32 - editor.TOP - editor.BOTTOM }, shade(30, 32, 44));
+        f32 x0 = left + 12.0;
+        surface.fill(canvas.Rect{ x: x0, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, shade(96, 98, 110));
+        surface.fill(canvas.Rect{ x: x0 + 24.0, y: editor.TOP + 12.0, w: 24.0, h: 24.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: x0, y: editor.TOP + 36.0, w: 24.0, h: 24.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: x0, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, rgb(state.color));
+        surface.stroke(canvas.Rect{ x: x0, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, shade(110, 116, 140), 1.0);
+        mut Arena frame = Arena.new(1 * KB);
+        defer frame.free();
+        say(surface, x0 + 56.0, editor.TOP + 22.0, 14.0, (state.color >> 24) == 0 ? "Transparent" : hex(&frame, state.color), ink());
+        say(surface, x0 + 56.0, editor.TOP + 42.0, 11.0, "click to edit", shade(130, 136, 160));
+        // the transparent color: a checkerboard
+        f32 tx = x0 + 160.0;
+        surface.fill(canvas.Rect{ x: tx, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, shade(96, 98, 110));
+        surface.fill(canvas.Rect{ x: tx + 12.0, y: editor.TOP + 12.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx + 36.0, y: editor.TOP + 12.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx, y: editor.TOP + 24.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx + 24.0, y: editor.TOP + 24.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx + 12.0, y: editor.TOP + 36.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx + 36.0, y: editor.TOP + 36.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx, y: editor.TOP + 48.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.fill(canvas.Rect{ x: tx + 24.0, y: editor.TOP + 48.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
+        surface.stroke(canvas.Rect{ x: tx, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, (state.color >> 24) == 0 ? shade(255, 255, 255) : shade(110, 116, 140), (state.color >> 24) == 0 ? 2.0 : 1.0);
+        for (i32 i in 0..32) {
+            f32 cx = x0 + (i % 8) as f32 * SWATCH;
+            f32 cy = editor.TOP + PALETTE_Y + (i / 8) as f32 * SWATCH;
+            surface.fill(canvas.Rect{ x: cx, y: cy, w: 24.0, h: 24.0 }, rgb(editor.palette(i)));
+            if (editor.palette(i) == state.color) {
+                surface.stroke(canvas.Rect{ x: cx - 1.0, y: cy - 1.0, w: 26.0, h: 26.0 }, shade(255, 255, 255), 2.0);
+            }
+        }
+        say(surface, x0, editor.TOP + LAYERS_Y, 12.0, "Layers", shade(160, 166, 190));
+        str[4] actions = ["Add", "Del", "Up", "Down"];
+        for (i32 k in 0..4) {
+            button(surface, x0 + k as f32 * 52.0, editor.TOP + LAYER_BUTTONS_Y, 48.0, 24.0, actions[k as usize], false);
+        }
+        i32 count = state.art.layers.len() as i32;
+        for (i32 i in 0..count) {
+            sheet.Layer* l = state.art.layers.at(i as usize);
+            f32 row = editor.TOP + LAYER_LIST_Y + (count - 1 - i) as f32 * LAYER_ROW;
+            canvas.Rect r = canvas.Rect{ x: x0, y: row, w: 208.0, h: LAYER_ROW - 2.0 };
+            surface.fill_rounded(r, 4.0, i == state.art.active ? shade(64, 96, 176) : shade(44, 48, 66));
+            surface.fill_rounded(canvas.Rect{ x: x0 + 6.0, y: row + (LAYER_ROW - 2.0) / 2.0 - 6.0, w: 12.0, h: 12.0 }, 2.0, l.visible ? ink() : shade(70, 74, 96));
+            draw_layer_thumb(surface, l, state.art.width, state.art.height, x0 + 26.0, row + 2.0, LAYER_ROW - 6.0, l.visible);
+            surface.push_clip(r);
+            say(surface, x0 + 30.0 + LAYER_ROW, row + (LAYER_ROW - 2.0) / 2.0 - 8.0, 13.0, l.name, ink());
+            surface.pop_clip();
+        }
+    }
+
+    // One layer alone, in a square of `box` pixels, on a checkerboard; faint when the layer is hidden.
+    void draw_layer_thumb(canvas.Canvas* surface, sheet.Layer* l, i32 width, i32 height, f32 x, f32 y, f32 box, bool visible) {
+        f32 across = box / width as f32;
+        f32 down = box / height as f32;
+        f32 scale = across < down ? across : down;
+        f32 w = width as f32 * scale;
+        f32 h = height as f32 * scale;
+        f32 left = x + (box - w) / 2.0;
+        f32 up = y + (box - h) / 2.0;
+        surface.fill(canvas.Rect{ x: x, y: y, w: box, h: box }, shade(24, 26, 36));
+        draw_checker(surface, canvas.Rect{ x: left, y: up, w: w, h: h }, left, up, w, h);
+        surface.draw_image(image.Image{ width: width, height: height, pixels: l.pixels }, canvas.Rect{ x: left, y: up, w: w, h: h });
+        if (!visible) {
+            surface.fill(canvas.Rect{ x: x, y: y, w: box, h: box }, rgb(0xC01E2030));
+        }
+    }
+
+    void draw_status(canvas.Canvas* surface) {
+        f32 top = surface.height as f32 - editor.BOTTOM;
+        surface.fill(canvas.Rect{ x: 0.0, y: top, w: surface.width as f32, h: editor.BOTTOM }, shade(18, 19, 28));
+        mut Arena frame = Arena.new(2 * KB);
+        defer frame.free();
+        text.TextBuilder* b = text.builder(&frame);
+        if (state.now < state.message_until) {
+            b.push(state.message);
+        } else {
+            b.push(editor.tool_name(state.tool));
+            b.push("    ");
+            if (state.hover_x >= 0 && state.hover_y >= 0 && state.hover_x < state.art.width && state.hover_y < state.art.height) {
+                b.push_i64(state.hover_x as i64);
+                b.push(", ");
+                b.push_i64(state.hover_y as i64);
+            } else {
+                b.push("-");
+            }
+            b.push("    ");
+            b.push_i64(state.art.width as i64);
+            b.push(" x ");
+            b.push_i64(state.art.height as i64);
+            b.push("    zoom ");
+            b.push_i64(state.zoom as i64);
+            b.push("x");
+            b.push("    frame ");
+            b.push_i64((state.current + 1) as i64);
+            b.push("/");
+            b.push_i64(state.frame_count() as i64);
+            if (state.has_sel) {
+                b.push("    selection ");
+                b.push_i64(state.sel_w as i64);
+                b.push("x");
+                b.push_i64(state.sel_h as i64);
+            }
+        }
+        say(surface, 10.0, top + 5.0, 13.0, b.text(), ink());
+    }
+}
+
+str size_label(i32 b) {
+    str[4] labels = ["1", "2", "3", "4"];
+    return labels[b as usize];
+}
+
+// A color as #RRGGBB.
+str hex(Arena* arena, ui32 c) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("#");
+    for (i32 i in 0..6) {
+        ui32 d = (c >> ((5 - i) * 4) as ui32) & 0xF;
+        b.push_char(text.char_of(d < 10 ? 48 + d : 55 + d));
+    }
+    return b.text();
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* m = editor.new_editor(&arena);
+    App* handler = arena.new(App, m, &arena);
+    match (app.read_asset(&arena, "assets/NotoSans-Regular.ttf")) {
+        some(bytes) => {
+            match (truetype.parse(&arena, bytes)) {
+                ok(font) => {
+                    handler.ui.font = some(font);
+                    handler.face = some(font);
+                },
+                err(e) => {
+                    io.print("Noto Sans is not readable: the built-in font is used");
+                },
+            }
+        },
+        none => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    str[] args = os.args(&arena);
+    if (args.len >= 2 && args[0] == "--snapshot") {
+        return snapshot(&arena, handler, m, args[1], args.len >= 3 && args[2] == "--dialog", args.len >= 3 && args[2] == "--picker");
+    }
+    if (args.len >= 1) {
+        m.open_file(args[0]);
+    }
+    widgets.Window window = screen.PixelForgeConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler*);
+}
+
+// A small picture, drawn with the tools, for the snapshot.
+void demo(editor.Editor* m) {
+    m.new_doc(32);
+    m.art.begin();
+    m.art.box(0, 0, 31, 20, 1, 0xFF29ADFF, true);
+    m.art.box(0, 21, 31, 31, 1, 0xFF00B543, true);
+    m.art.end();
+    m.art.add_layer();
+    m.art.begin();
+    m.art.box(13, 17, 18, 26, 1, 0xFFFFF1E8, true);
+    for (i32 y in 8..18) {
+        i32 half = y < 11 ? 5 + (y - 8) * 2 : 11;
+        m.art.line(16 - half, y, 16 + half, y, 1, 0xFFFF004D);
+    }
+    m.art.box(10, 11, 22, 17, 1, 0xFFFF004D, true);
+    m.art.stamp(12, 13, 2, 0xFFFFF1E8);
+    m.art.stamp(19, 12, 3, 0xFFFFF1E8);
+    m.art.stamp(16, 9, 2, 0xFFFFF1E8);
+    m.art.line(14, 22, 14, 25, 1, 0xFF000000);
+    m.art.end();
+    m.art.stamp(4, 4, 3, 0xFFFFEC27);
+    for (i32 k in 0..3) {
+        m.copy_frame();
+        m.art.stamp(4 + 5 * k, 4 - k, 3, 0);
+        m.art.stamp(9 + 5 * k, 3 - (k > 1 ? 1 : 0), 3, 0xFFFFEC27);
+    }
+    for (i32 k in 0..4) {
+        m.select_frame(k);
+        m.art.toggle_layer(0);
+    }
+    m.select_frame(1);
+    m.tool = editor.SELECT;
+    m.set_selection(10, 8, 22, 17);
+    m.color = 0xFFFF004D;
+    m.toggle_onion();
+}
+
+// The window in a picture: no mouse.
+i32 snapshot(Arena* arena, App* handler, editor.Editor* m, str file, bool dialog, bool picker) uses io {
+    mut canvas.Canvas surface = canvas.create(arena, 1180, 780);
+    handler.ui.custom_title_bar = true;
+    handler.win_w = 1180.0;
+    handler.win_h = 780.0;
+    demo(m);
+    if (dialog) {
+        m.ask_new();
+    }
+    if (picker) {
+        m.color = 0xC0E8742A;
+        m.open_picker();
+    }
+    m.update(1180, 780, 0);
+    handler.ui.clock(0);
+    handler.paint(&surface);
+    if (dialog) {
+        handler.ui.clock(50);
+        handler.paint(&surface);
+    }
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            io.print("written to {}", file);
+            return 0;
+        },
+        err(e) => {
+            io.print("cannot write {}", file);
+            return 1;
+        },
+    }
+}

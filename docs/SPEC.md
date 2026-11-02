@@ -504,7 +504,7 @@ Status: proposed, not implemented; to be decided before any code. What it closes
 | the function | `&x` of a local or a parameter, a view of a local array (E0371 today) |
 | the arena `a` | `a.alloc`, `a.new`, `a.alloc_slice`, `a.try_alloc`, and what is reached through such a pointer, for a local `Arena a` or a parameter `Arena* a` |
 | the caller | a parameter, and what is reached through it: memory that outlives the call |
-| static | string literals, constants, globals |
+| static | string literals and constants (Sosu has no global variables) |
 | unchecked | what C or an `unsafe` block gives |
 
 A variable takes the origins of every value it is given (as E0371 now does, without following the order of the branches); a value of several origins is checked against each.

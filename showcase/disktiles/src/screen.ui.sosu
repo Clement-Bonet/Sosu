@@ -1,0 +1,17 @@
+// disktiles.screen: the title bar, with the buttons; the tiles and the status bar are drawn by
+// `main`, since they are not widgets.
+import disktiles.model;
+
+window DiskTiles(model.Model* m) {
+    title: "DiskTiles"
+    width: 1100
+    height: 720
+
+    TitleBar(height: 40) {
+        Text("DiskTiles")
+        Button("Open folder", on_click: m.choose)
+        Button("Up", on_click: m.up)
+        Button("Rescan", on_click: m.rescan)
+        Text(m.info)
+    }
+}

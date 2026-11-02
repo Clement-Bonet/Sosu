@@ -3595,7 +3595,7 @@ pub usize? ask(Question q) uses io
 
 ## sqlite.sqlite
 
-SQLite databases through `db.Connection` (spec §8.2), on SQLite 3.54.1, a C file of the package (native/sqlite.c, spec §9.1). A database is a file, created when it is not there; ":memory:" is one that lives as long as its connection. Foreign keys are checked (SQLite's default leaves them off), a text between double quotes is a name, never a text, and a lock held by another connection is waited for up to 5 seconds before `Busy`. A text column that is not UTF-8 is read as bytes.      db.Connection* c = try sqlite.open(&arena, "app.db");     defer c.close();
+SQLite databases through `db.Connection` (spec §8.2), on SQLite 3.54.1, a C file of the package (native/sqlite.c, spec §9.1). A database is a file, created when it is not there; ":memory:" is one that lives as long as its connection. Foreign keys are checked (SQLite's default leaves them off), a text between double quotes is a name, never a text, and a lock held by another connection is waited for up to 5 seconds before `Busy`. A text column that is not UTF-8 is read as bytes. A connection is used by the thread that opened it: threads of Sosu cannot share it (`Send`, spec §5.6), and a C program calling a library of Sosu must not either (SQLite is built without the locks of each connection); `db.pool` opens one per thread.      db.Connection* c = try sqlite.open(&arena, "app.db");     defer c.close();
 
 ### `open`
 

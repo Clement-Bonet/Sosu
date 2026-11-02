@@ -1,0 +1,208 @@
+// disktiles.layout: the tiles of a folder, as a squarified treemap (Bruls, Huizing, van Wijk):
+// each folder is cut into rectangles whose areas follow the sizes, as square as can be, and the
+// rectangle of a folder holds those of its entries.
+import std.fs;
+import std.sort;
+import std.text;
+import std.vec;
+import disktiles.scan;
+
+pub struct Tile {
+    pub i32 node;
+    pub f32 x;
+    pub f32 y;
+    pub f32 w;
+    pub f32 h;
+    pub i32 depth;  // 0 for the folder shown
+    pub mut bool leaf;  // a file, or a folder with no room for its entries
+    pub i32 kind;  // see `category`
+}
+
+struct Entry {
+    i64 size;
+    i32 node;
+}
+
+// Rectangles smaller than this (in pixels) are not worth a tile, nor their entries.
+f32 SMALLEST_AREA = 9.0;
+f32 SMALLEST_SIDE = 3.0;
+// What a folder keeps around its entries, and above them for its name.
+f32 FRAME = 2.0;
+pub f32 HEADER = 14.0;
+
+pub class Layout {
+    pub vec.Vec<Tile>* tiles;
+    mut scan.Tree* tree;
+    mut Arena* scratch;
+
+    void init(Arena* arena) {
+        tiles = vec.new<Tile>(arena);
+        tree = scan.scan(arena, "");  // replaced by `build`
+        scratch = arena;
+    }
+
+    // The tiles of the node `root` in a rectangle; the first is the node itself.
+    pub void build(scan.Tree* tree, i32 root, f32 x, f32 y, f32 w, f32 h) {
+        self.tree = tree;
+        tiles.clear();
+        mut Arena work = Arena.new(64 * KB);
+        defer work.free();
+        scratch = &work;
+        place(root, x, y, w, h, 0);
+    }
+
+    void place(i32 index, f32 x, f32 y, f32 w, f32 h, i32 depth) {
+        scan.Node* n = tree.nodes.at(index as usize);
+        usize slot = tiles.len();
+        tiles.push(Tile{ node: index, x: x, y: y, w: w, h: h, depth: depth, leaf: true, kind: n.dir ? 0 : category(scratch, n.name) });
+        if (!n.dir || n.count == 0 || n.size == 0) {
+            return;
+        }
+        f32 top = h >= 40.0 && w >= 60.0 ? HEADER : FRAME;
+        f32 ix = x + FRAME;
+        f32 iy = y + top;
+        f32 iw = w - 2.0 * FRAME;
+        f32 ih = h - top - FRAME;
+        if (iw < SMALLEST_SIDE || ih < SMALLEST_SIDE) {
+            return;
+        }
+        // the entries that have a size, the largest first
+        mut usize count = 0;
+        for (i32 i in n.first..n.first + n.count) {
+            if (tree.nodes.at(i as usize).size > 0) {
+                count += 1;
+            }
+        }
+        mut Entry[] entries = scratch.alloc_slice(Entry, 0);
+        unsafe {
+            entries = scratch.alloc_slice(Entry, count);  // each written before it is read
+        }
+        mut usize k = 0;
+        for (i32 i in n.first..n.first + n.count) {
+            i64 size = tree.nodes.at(i as usize).size;
+            if (size > 0) {
+                entries[k] = Entry{ size: size, node: i };
+                k += 1;
+            }
+        }
+        sort.sort_by(entries, (Entry a, Entry b) => a.size > b.size);
+        tiles.at(slot).leaf = false;
+        squarify(entries, n.size, ix, iy, iw, ih, depth + 1);
+    }
+
+    void squarify(Entry[] items, i64 total, f32 x0, f32 y0, f32 w0, f32 h0, i32 depth) {
+        f32 scale = w0 * h0 / total as f32;  // pixels of area for one byte
+        mut f32 x = x0;
+        mut f32 y = y0;
+        mut f32 w = w0;
+        mut f32 h = h0;
+        mut usize i = 0;
+        while (i < items.len) {
+            f32 first = items[i].size as f32 * scale;
+            if (first < SMALLEST_AREA || w < 1.0 || h < 1.0) {
+                break;  // the rest is smaller still
+            }
+            f32 side = min(w, h);
+            mut usize j = i;
+            mut f32 sum = 0.0;
+            mut f32 worst = 1000000000000.0;
+            while (j < items.len) {
+                f32 a = items[j].size as f32 * scale;
+                if (a <= 0.0) {
+                    break;
+                }
+                f32 next = sum + a;
+                f32 ratio = max(side * side * first / (next * next), next * next / (side * side * a));
+                if (j > i && ratio > worst) {
+                    break;
+                }
+                sum = next;
+                worst = ratio;
+                j += 1;
+            }
+            if (w >= h) {  // a column on the left, as wide as its area asks
+                f32 cw = sum / h;
+                mut f32 cy = y;
+                for (usize k in i..j) {
+                    f32 ch = items[k].size as f32 * scale / cw;
+                    place(items[k].node, x, cy, cw, ch, depth);
+                    cy += ch;
+                }
+                x += cw;
+                w -= cw;
+            } else {  // a row on the top
+                f32 rh = sum / w;
+                mut f32 cx = x;
+                for (usize k in i..j) {
+                    f32 cw = items[k].size as f32 * scale / rh;
+                    place(items[k].node, cx, y, cw, rh, depth);
+                    cx += cw;
+                }
+                y += rh;
+                h -= rh;
+            }
+            i = j;
+        }
+    }
+
+    // The deepest tile at a point, or -1.
+    pub i64 tile_at(f32 px, f32 py) {
+        mut usize i = tiles.len();
+        while (i > 0) {
+            i -= 1;
+            Tile* t = tiles.at(i);
+            if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) {
+                return i as i64;
+            }
+        }
+        return -1;
+    }
+}
+
+pub Layout* new_layout(Arena* arena) {
+    return arena.new(Layout, arena);
+}
+
+// The sort of a file by its extension: 0 other, 1 picture, 2 video, 3 sound, 4 archive,
+// 5 document, 6 code, 7 program.
+pub i32 category(Arena* arena, str name) {
+    match (fs.extension(name)) {
+        some(written) => {
+            str e = text.to_lower(arena, written);
+            if (is_one_of(arena, e, "png jpg jpeg gif bmp webp tif tiff svg ico heic psd raw")) {
+                return 1;
+            }
+            if (is_one_of(arena, e, "mp4 mkv avi mov wmv webm flv m4v mpg mpeg")) {
+                return 2;
+            }
+            if (is_one_of(arena, e, "mp3 wav flac ogg m4a aac wma opus mid")) {
+                return 3;
+            }
+            if (is_one_of(arena, e, "zip 7z rar tar gz bz2 xz zst iso cab msi vhd vhdx")) {
+                return 4;
+            }
+            if (is_one_of(arena, e, "pdf doc docx xls xlsx ppt pptx txt md rtf odt csv json xml html")) {
+                return 5;
+            }
+            if (is_one_of(arena, e, "c h cpp hpp cs java js ts py rs go sosu toml yml yaml css sh bat ps1 lua")) {
+                return 6;
+            }
+            if (is_one_of(arena, e, "exe dll sys so dylib bin obj lib o a pdb jar class")) {
+                return 7;
+            }
+            return 0;
+        },
+        none => {
+            return 0;
+        },
+    }
+}
+
+bool is_one_of(Arena* arena, str e, str list) {
+    for (str w in text.words(arena, list)) {
+        if (w == e) {
+            return true;
+        }
+    }
+    return false;
+}
