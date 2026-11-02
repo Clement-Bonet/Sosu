@@ -10,8 +10,8 @@ import audio.device;
 import beatbox.machine;
 import beatbox.sounds;
 
-// The time between a frame mixed and the sound that comes out: the playhead is set back by it.
-i64 LATENCY_MS = 70;
+// The time the device takes beyond what the player keeps in advance: the playhead is set back by both.
+i64 LATENCY_MS = 10;
 
 // A tempo that stays unchanged this long is applied, so that dragging the slider does not restart
 // the loop at every frame.
@@ -155,7 +155,7 @@ pub class Engine {
     // The step that is heard now.
     i32 position(ui64 now) {
         i64 length_ms = cycle.frames() as i64 * 1000 / sounds.RATE as i64;
-        i64 since = now as i64 - started_ms as i64 - LATENCY_MS;
+        i64 since = now as i64 - started_ms as i64 - player.ahead_ms() as i64 - LATENCY_MS;
         i64 within = (since % length_ms + length_ms) % length_ms;
         return (within * 16 / length_ms) as i32;
     }

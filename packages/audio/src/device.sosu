@@ -122,6 +122,8 @@ void close_stream(Opened o) uses io {
 
 // How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps
 // `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner).
+// When the device runs dry between two calls of `update()` close together (a program slower than
+// that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
 pub struct Output {
     pub ui32 device = 0xFFFFFFFF;  // DEFAULT_PLAYBACK
     pub i32 rate = 48000;
@@ -132,20 +134,36 @@ pub struct Output {
 // The frames mixed at a time: about 10 ms, the steps of the changes of volume.
 usize BLOCK = 512;
 
+// How far in advance a player that runs dry goes at most.
+pub i32 MOST_AHEAD_MS = 250;
+
 // A device that plays the sounds of its mixer, `sounds`.
 pub class Player {
     pub mixer.Mixer* sounds;  // what it plays
     Opened opened;
     f32[] buffer;
-    i32 ahead;  // bytes kept queued
+    mut i32 ahead;  // bytes kept queued
+    i32 most;  // the most `ahead` grows to
+    i32 per_ms;  // bytes a millisecond, times 1000
+    mut bool fed;  // something was queued
+    mut ui64 last_ms;  // the time of the last `update()`
     mut bool closed;
 
     void init(Arena* arena, Opened opened, Output output) {
         sounds = mixer.create(arena, output.rate, output.channels);
         self.opened = opened;
         buffer = arena.alloc_slice(f32, BLOCK * output.channels as usize);
-        ahead = (output.rate as i64 * output.ahead_ms as i64 / 1000) as i32 * output.channels * 4;
+        per_ms = output.rate * output.channels * 4;
+        ahead = (per_ms as i64 * output.ahead_ms as i64 / 1000) as i32;
+        most = max(ahead, (per_ms as i64 * MOST_AHEAD_MS as i64 / 1000) as i32);
+        fed = false;
+        last_ms = 0;
         closed = false;
+    }
+
+    // What it keeps mixed in advance now, in milliseconds: the delay before a sound is heard.
+    pub i32 ahead_ms() {
+        return (ahead as i64 * 1000 / per_ms as i64) as i32;
     }
 
     // Mixes what the device needs next; to call often.
@@ -155,6 +173,13 @@ pub class Player {
         }
         unsafe {
             mut i32 queued = sdl_c.SDL_GetAudioStreamQueued(opened.stream);
+            ui64 now = sdl_c.SDL_GetTicks();
+            // dry since a call not long ago (not a pause of the program): more in advance
+            if (fed && queued == 0 && now - last_ms < 1000 && ahead < most) {
+                ahead = min(ahead * 2, most);
+            }
+            last_ms = now;
+            fed = true;
             while (queued >= 0 && queued < ahead) {
                 sounds.mix(buffer);
                 i32 bytes = (buffer.len * 4) as i32;

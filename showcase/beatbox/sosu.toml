@@ -4,6 +4,12 @@
 name = "beatbox"
 version = "0.1.0"
 
+# On a phone, the fonts are read from the application (`app.read_asset`), under the same path.
+[app]
+id = "org.sosu.beatbox"
+name = "Beatbox"
+assets = ["assets"]
+
 [dependencies]
 audio = { path = "../../packages/audio" }
 platform = { path = "../../packages/platform" }

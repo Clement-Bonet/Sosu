@@ -114,6 +114,7 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0369 | invalid lambda | `auto g = (x) => x;` (the type of `x` is unknown), `n = x` in a lambda that captured `n`, a captured `Arena` (spec §5.5) |
 | E0370 | a lambda that captures variables leaves its function | `return (i32 x) => x + k;`, `S{ h: (x) => x + k }`, `g = (x) => x + k;`, a C function that takes a function used as a value (spec §5.5) |
 | E0371 | a returned pointer or view would point into the function | `return &x;` on a local or a parameter, `return &p.v;` on a local struct, `return a[0..2];` on a local array, also in `some(...)`, a literal or `?:`, or a variable that was given one (`p = &x; return p;`, `h.p = &x; return h;`) (spec §7.7); a pointer stored in memory that lasts longer is not followed |
+| E0372 | memory of a local arena used after its `free()` (a warning for now, spec §6.1) | `N* p = a.alloc(N); a.free(); return p.v;`, also through a variable or a struct that was given it, a free in a branch, or `defer a.free();` in an inner block whose pointer is kept outside |
 
 ## Code generation
 

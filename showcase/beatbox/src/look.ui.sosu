@@ -22,7 +22,7 @@ theme Night {
     }
 }
 
-// The steps: all of them 38 pixels wide, whatever they hold, by the grid they are in.
+// The steps: all of them as wide, whatever they hold, sharing the width of the window by their grid.
 style Off {
     background: #313244
     padding: 14

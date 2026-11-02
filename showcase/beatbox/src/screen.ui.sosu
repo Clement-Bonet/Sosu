@@ -4,7 +4,7 @@ import beatbox.look;
 import beatbox.machine;
 
 component Pad(machine.Machine* m, usize t, usize i) {
-    Button(" ", on_click: m.toggle(t, i), style: m.step == i as i32 ? (m.hit(t, i) ? look.OnPlay : look.OffPlay) : (m.hit(t, i) ? look.On : (i % 4 == 0 ? look.OffBeat : look.Off)))
+    Button(" ", on_click: m.toggle(t, i), align: Stretch, style: m.step == i as i32 ? (m.hit(t, i) ? look.OnPlay : look.OffPlay) : (m.hit(t, i) ? look.On : (i % 4 == 0 ? look.OffBeat : look.Off)))
 }
 
 // A key of the piano; 0 is C2. The one of the selected track's note is lit.
@@ -37,7 +37,7 @@ component Track(machine.Machine* m, usize t) {
     Grid(columns: [90], gap: 2) {
         Button(machine.note_name(m.note[t]), on_click: m.select(t), style: m.selected == t ? look.Chosen : look.Name)
     }
-    Grid(columns: [38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38], gap: 4) {
+    Grid(columns: [Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill, Fill], gap: 4) {
         for (usize i in 0..16) {
             Pad(m, t, i)
         }
@@ -68,7 +68,8 @@ window Beatbox(machine.Machine* m) {
             Text("Swing")
             Slider(bind: m.swing, min: 0, max: 50, step: 1, width: 120)
         }
-        Grid(columns: [Auto, Auto, Auto, Auto, Auto], gap: 8) {
+        // the steps take the width left
+        Grid(columns: [Auto, Auto, Fill, Auto, Auto], gap: 8) {
             for (usize t in 0..m.tracks) {
                 Track(m, t)
             }

@@ -13,7 +13,10 @@ typedef enum {
 
 Diagnostic *sema_verror(Sema *s, const Unit *unit, const char *code, size_t offset, size_t length,
                         const char *fmt, va_list args);
+Diagnostic *sema_vwarning(Sema *s, const Unit *unit, const char *code, size_t offset, size_t length,
+                          const char *fmt, va_list args);
 bool sema_name_eq(Name a, Name b);
+bool sema_is_send(const Type *type); /* holds no pointer, view, text, function or arena (spec §5.6) */
 size_t sema_edit_distance(Name a, Name b);
 size_t sema_line_of(const Unit *unit, size_t offset);
 

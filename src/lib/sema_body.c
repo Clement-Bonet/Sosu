@@ -31,6 +31,14 @@ Diagnostic *sema_error_expr(Body *b, const char *code, const Expr *e, const char
     return d;
 }
 
+Diagnostic *sema_warning_expr(Body *b, const char *code, const Expr *e, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    Diagnostic *d = sema_vwarning(b->s, b->unit, code, e->offset, e->length, fmt, args);
+    va_end(args);
+    return d;
+}
+
 bool sema_name_is(Name name, const char *text) {
     size_t length = strlen(text);
     return name.length == length && memcmp(name.text, text, length) == 0;
@@ -129,7 +137,11 @@ void sema_declare_local(Body *b, Name name, Type *type, bool is_mut) {
                                  NAME_ARGS(name));
         diag_help(d, "the first declaration is on line %zu: choose another name", sema_line_of(b->unit, existing->name.offset));
     }
-    Local local = { name, type, is_mut, false, 0, b->loop_depth, false, false };
+    Local local = {0};
+    local.name = name;
+    local.type = type;
+    local.is_mut = is_mut;
+    local.loop_depth = b->loop_depth;
     SOSU_VEC_PUSH(&b->locals, local);
 }
 
@@ -223,6 +235,96 @@ static void check_dangling(Body *b, const Expr *e) {
                                view ? "a view of a local array" : "the address of a local variable");
     diag_help(d, view ? "return the array itself, or a view of memory from an arena (`arena.alloc_slice`)"
                       : "return the value itself, or a pointer to memory from an arena (`arena.alloc`)");
+}
+
+/* ---- Regions, stage 1 (spec §6.1): a pointer into a local arena, used after its `free()` ---- */
+
+/* The local `Arena` that `object` names, if any: `a` in `a.free()`, not a pointer to an arena. */
+static Local *local_arena(Body *b, const Expr *object) {
+    if (object->kind != EXPR_NAME || object->resolution != RESOLVED_LOCAL || !object->type ||
+        object->type->tag != T_ARENA) {
+        return NULL;
+    }
+    return sema_find_local(b, object->as.name);
+}
+
+static void add_origin(Local *to, size_t arena) {
+    for (int i = 0; i < to->origin_count; i++) {
+        if (to->origins[i] == arena) return;
+    }
+    if (to->origin_count < 4) to->origins[to->origin_count++] = arena;
+}
+
+/* Gives `to` the local arenas whose memory `e` may hold: `a.alloc(...)` and the other
+   allocations of `a`, what is reached through it (`p.next`, `v[i]`, `*p`), a variable that was
+   given some, also inside `some`, `ok`, `err`, a literal or `?:`. A value of a type without
+   pointers holds none; neither does what a function returns (stage 4). */
+static void add_origins(Body *b, Local *to, const Expr *e) {
+    if (!e->type || sema_is_send(e->type)) return;
+    switch (e->kind) {
+    case EXPR_NAME: {
+        const Local *local = e->resolution == RESOLVED_LOCAL ? sema_find_local(b, e->as.name) : NULL;
+        for (int i = 0; local && local != to && i < local->origin_count; i++) add_origin(to, local->origins[i]);
+        return;
+    }
+    case EXPR_FIELD: add_origins(b, to, e->as.field.object); return;
+    case EXPR_INDEX: add_origins(b, to, e->as.index.object); return;
+    case EXPR_UNARY: add_origins(b, to, e->as.unary.operand); return;
+    case EXPR_TRY: add_origins(b, to, e->as.inner); return;
+    case EXPR_CALL: {
+        const Expr *callee = e->as.call.callee;
+        if (callee->kind == EXPR_FIELD && callee->resolution == RESOLVED_BUILTIN && callee->target &&
+            strncmp((const char *)callee->target, "arena.", 6) == 0) {
+            const Local *arena = local_arena(b, callee->as.field.object);
+            if (arena) add_origin(to, arena->name.offset);
+            return;
+        }
+        if (callee->kind != EXPR_NAME || sema_find_local(b, callee->as.name)) return;
+        if (!sema_name_is(callee->as.name, "some") && !sema_name_is(callee->as.name, "ok") && !sema_name_is(callee->as.name, "err")) {
+            return;
+        }
+        for (size_t i = 0; i < e->as.call.arg_count; i++) add_origins(b, to, e->as.call.args[i]);
+        return;
+    }
+    case EXPR_STRUCT_LIT:
+        for (size_t i = 0; i < e->as.struct_lit.field_count; i++) add_origins(b, to, e->as.struct_lit.fields[i].value);
+        return;
+    case EXPR_ARRAY:
+        for (size_t i = 0; !e->as.array.repeat && i < e->as.array.count; i++) add_origins(b, to, e->as.array.items[i]);
+        if (e->as.array.repeat) add_origins(b, to, e->as.array.repeat);
+        return;
+    case EXPR_TERNARY:
+        add_origins(b, to, e->as.ternary.then_expr);
+        add_origins(b, to, e->as.ternary.else_expr);
+        return;
+    default:
+        return;
+    }
+}
+
+/* The memory of `arena` is gone: the variables below `end` that hold some can no longer be used. */
+static void free_origin(Body *b, const Local *arena, size_t end, size_t offset) {
+    for (size_t i = 0; i < end; i++) {
+        Local *local = &b->locals.items[i];
+        for (int j = 0; j < local->origin_count; j++) {
+            if (local->origins[j] != arena->name.offset) continue;
+            local->dangling = true;
+            local->freed_arena = arena->name;
+            local->freed_offset = offset;
+        }
+    }
+}
+
+/* `object.free()`, at `offset`: in a `defer`, it runs when the block of the arena ends. A free in
+   a lambda is not followed, since the lambda may never be called. */
+void sema_arena_freed(Body *b, Expr *object, size_t offset) {
+    Local *arena = local_arena(b, object);
+    if (!arena || b->lambda) return;
+    if (b->defer_depth > 0) {
+        arena->free_deferred = true;
+        return;
+    }
+    free_origin(b, arena, b->locals.count, offset);
 }
 
 /* True if `local` is a copy held by the innermost lambda being checked. */
@@ -456,6 +558,13 @@ static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
             Diagnostic *d = sema_error_expr(b, "E0356", e, "`%.*s` was moved", NAME_ARGS(ref.local->name));
             diag_help(d, "it moved on line %zu: a value that owns a resource (an `Arena`...) has one owner at a "
                          "time; pass a pointer to lend it instead", sema_line_of(b->unit, ref.local->moved_offset));
+        }
+        if (ref.local->dangling && !b->assigning && b->unsafe_depth == 0) {
+            Diagnostic *d = sema_warning_expr(b, "E0372", e, "`%.*s` holds memory of the arena `%.*s`, freed on line %zu",
+                                              NAME_ARGS(ref.local->name), NAME_ARGS(ref.local->freed_arena),
+                                              sema_line_of(b->unit, ref.local->freed_offset));
+            diag_help(d, "use it before the `free()`, or free the arena later; this warning becomes an error "
+                         "in a later version (spec §6.1)");
         }
         return ref.local->type;
     case REF_FIELD: return ref.field->type;
@@ -1314,11 +1423,12 @@ static void check_assign(Body *b, Stmt *stmt) {
                                    : "stored there");
         if (target->kind == EXPR_NAME && target->resolution == RESOLVED_LOCAL) {
             Local *local = sema_find_local(b, target->as.name);
-            if (local) local->moved = false;
+            if (local) local->moved = local->dangling = false;
         }
         /* `p = &x;` or `h.p = &x;`: never cleared, since the order of the branches is not followed */
         Local *holder = storage_local(b, target);
         if (holder && dangling_part(b, value)) holder->points_inside = true;
+        if (holder) add_origins(b, holder, value);
         return;
     }
     if (op == TOK_SHL_EQ || op == TOK_SHR_EQ) {
@@ -1411,6 +1521,9 @@ bool sema_always_returns(const Stmt *stmt) {
 void sema_check_block(Body *b, Stmt *block) {
     size_t mark = b->locals.count;
     for (size_t i = 0; i < block->as.block.count; i++) check_stmt(b, block->as.block.items[i]);
+    for (size_t i = mark; i < b->locals.count; i++) { /* the `defer`s run: `defer a.free();` */
+        if (b->locals.items[i].free_deferred) free_origin(b, &b->locals.items[i], mark, block->offset + block->length - 1);
+    }
     b->locals.count = mark;
 }
 
@@ -1433,6 +1546,7 @@ static void check_var(Body *b, Stmt *stmt) {
     if (!sema_name_is(stmt->as.var.name, "_")) {
         b->locals.items[b->locals.count - 1].closure = closure;
         b->locals.items[b->locals.count - 1].points_inside = points_inside;
+        add_origins(b, &b->locals.items[b->locals.count - 1], init);
     }
 }
 
@@ -1636,8 +1750,10 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
     init_body(&b, s, unit, self_info, fn->name, typed ? type->as.fn.ret : s->types.error, typed ? type->as.fn.effects : 0);
     b.in_init = self_info && sema_name_is(fn->name, "init");
     for (size_t i = 0; i < fn->param_count; i++) {
-        Local param = { fn->params[i].name, typed ? type->as.fn.params[i] : s->types.error, fn->params[i].is_mut,
-                        false, 0, 0, false, false };
+        Local param = {0};
+        param.name = fn->params[i].name;
+        param.type = typed ? type->as.fn.params[i] : s->types.error;
+        param.is_mut = fn->params[i].is_mut;
         SOSU_VEC_PUSH(&b.locals, param); /* duplicates were reported with the declarations (E0319) */
     }
     for (size_t i = 0; i < fn->contract_count; i++) {
