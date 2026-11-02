@@ -179,6 +179,8 @@ packages/     platform (window and events, on SDL3), render (pixels, shapes, tex
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
               trees, inputs), poster (the poster of the project, drawn with `render` into a PNG)
+showcase/     whole applications: beatbox (a drum machine), disktiles (the sizes of a disk as tiles),
+              pixelforge (a pixel art editor)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification, error codes, library reference, roadmap
@@ -245,6 +247,14 @@ The examples:
   own becomes a tool bar;
 - `examples/themes`: themes and styles of a `.ui.sosu` file, following the system;
 - `examples/containers`: a grid, groups, a tree of folders, and every input widget.
+
+Whole applications, each with its README, a screenshot and its tests (`sosuc test`), run from their
+folder (`../../build/sosuc run .`):
+
+- `showcase/beatbox`: a drum machine, its 16 instruments synthesized in code, on a 16-step grid;
+- `showcase/disktiles`: the sizes of the files and folders of a disk as tiles (a treemap), read
+  while the window stays alive;
+- `showcase/pixelforge`: a pixel art editor, with layers, frames, onion skin and sprite sheets.
 
 On Windows:
 

@@ -46,10 +46,15 @@ deflate.Inflated!deflate.CompressError checked(ui8[] data, deflate.Inflated done
 
 // The bytes held by the zlib container `data`, in `arena`.
 pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
+    return decompress_limit(arena, data, deflate.MAX_SIZE as usize);
+}
+
+// As `decompress`, with at most `limit` bytes (`TooLarge` beyond).
+pub ui8[]!deflate.CompressError decompress_limit(Arena* arena, ui8[] data, usize limit) {
     if (!header(data)) {
         return err(deflate.CompressError.Damaged);
     }
-    deflate.Inflated done = try deflate.inflate_stream(arena, data[2..data.len]);
+    deflate.Inflated done = try deflate.inflate_stream_limit(arena, data[2..data.len], limit);
     deflate.Inflated good = try checked(data, done);
     return ok(good.bytes);
 }

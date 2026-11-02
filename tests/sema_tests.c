@@ -565,6 +565,19 @@ static void test_dangling(void) {
     expect_codes("struct H { i32* p; }\nH f() { mut i32 x = 1; return H{ p: &x }; }", "E0371");
     expect_codes("i32* f(bool c, i32* q) { mut i32 x = 1; return c ? q : &x; }", "E0371");
     expect_codes("fn() -> i32* f() { return () => { mut i32 y = 2; return &y; }; }", "E0371");
+    /* kept in a variable first */
+    expect_codes("i32* f() { mut i32 x = 1; i32* p = &x; return p; }", "E0371");
+    expect_codes("i32[] f() { mut i32[3] a = [1, 2, 3]; i32[] v = a[0..2]; return v; }", "E0371");
+    expect_codes("i32* f() { mut i32 x = 1; i32* p = &x; i32* q = p; return q; }", "E0371");
+    expect_codes("i32* f(i32* r) { mut i32 x = 1; mut i32* p = r; p = &x; return p; }", "E0371");
+    expect_codes("i32* f(bool c, i32* r) { mut i32 x = 1; mut i32* p = r; if (c) { p = &x; } return p; }", "E0371");
+    expect_codes("i32*? f() { mut i32 x = 1; i32* p = &x; return some(p); }", "E0371");
+    expect_codes("struct H { mut i32* p; }\nH f(i32* r) { mut i32 x = 1; mut H h = H{ p: r }; h.p = &x; return h; }",
+                 "E0371");
+    /* the variable is read, not returned; or holds memory that outlives the function */
+    expect_codes("i32 f() { mut i32[3] a = [1, 2, 3]; i32[] v = a[0..2]; return v[1]; }", "");
+    expect_codes("i32 f() { mut i32 x = 1; i32* p = &x; return *p; }", "");
+    expect_codes("i32* f(Arena* a, i32* r) { mut i32 x = 1; i32* p = &x; i32* q = r; return q; }", "");
     /* memory that outlives the function */
     expect_codes("struct P { mut i32 v; }\ni32* f(P* p) { return &p.v; }", "");
     expect_codes("i32[] f(i32[] s) { return s[0..1]; }", "");

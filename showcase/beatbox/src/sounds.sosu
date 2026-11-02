@@ -1,0 +1,184 @@
+// The drum kit, synthesized: no sample files. Every sound is mono, at RATE, and ends in silence,
+// so that it can be mixed whole.
+import std.math;
+import std.random;
+import audio.audio;
+
+pub i32 RATE = 48000;
+
+// A silent sound of `seconds`.
+audio.Sound blank(Arena* arena, f64 seconds) {
+    return audio.create(arena, RATE, 1, math.round(seconds * RATE as f64) as usize);
+}
+
+// The end of the sound falls to silence over 10 ms, so that it never stops with a click; a sound
+// louder than 0.95 is lowered to it.
+void taper(audio.Sound s) {
+    usize n = s.samples.len;
+    usize ramp = min(480, n);
+    for (usize i in 0..ramp) {
+        s.samples[n - 1 - i] *= i as f32 / ramp as f32;
+    }
+    f64 top = s.peak() as f64;
+    if (top > 0.95) {
+        f32 scale = (0.95 / top) as f32;
+        for (usize i in 0..n) {
+            s.samples[i] *= scale;
+        }
+    }
+}
+
+// A sine that falls from `high` to `low` Hz, under an envelope that decays at `decay` per second.
+audio.Sound sweep(Arena* arena, f64 seconds, f64 low, f64 high, f64 speed, f64 decay, f64 click) {
+    audio.Sound s = blank(arena, seconds);
+    mut f64 phase = 0.0;
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        phase += math.TAU * (low + (high - low) * math.exp(-t * speed)) / RATE as f64;
+        s.samples[i] = ((math.sin(phase) * math.exp(-t * decay) + click * math.exp(-t * 400.0)) * 0.9) as f32;
+    }
+    taper(s);
+    return s;
+}
+
+pub audio.Sound kick(Arena* arena) {
+    return sweep(arena, 0.5, 46.0, 190.0, 30.0, 7.0, 0.4);
+}
+
+pub audio.Sound tom(Arena* arena) {
+    return sweep(arena, 0.5, 95.0, 170.0, 14.0, 6.0, 0.1);
+}
+
+// A noise whose low part is taken away (each sample minus the one before): a hiss.
+audio.Sound hiss(Arena* arena, f64 seconds, f64 decay, f64 level, ui64 seed) {
+    audio.Sound s = blank(arena, seconds);
+    mut random.Rng rng = random.seeded(seed);
+    mut f64 before = 0.0;
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        f64 noise = rng.unit() * 2.0 - 1.0;
+        s.samples[i] = ((noise - before) * 0.5 * level * math.exp(-t * decay)) as f32;
+        before = noise;
+    }
+    taper(s);
+    return s;
+}
+
+pub audio.Sound hat(Arena* arena) {
+    return hiss(arena, 0.12, 60.0, 0.8, 11);
+}
+
+pub audio.Sound open_hat(Arena* arena) {
+    return hiss(arena, 0.5, 8.0, 0.6, 12);
+}
+
+// A noise with a tone under it, which both fall quickly.
+pub audio.Sound snare(Arena* arena) {
+    audio.Sound s = hiss(arena, 0.3, 16.0, 0.9, 13);
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        f64 body = math.sin(math.TAU * 185.0 * t) * math.exp(-t * 22.0) * 0.55;
+        s.samples[i] += body as f32;
+    }
+    taper(s);
+    return s;
+}
+
+// Three short bursts of noise one after the other, then a longer one: hands clapping.
+pub audio.Sound clap(Arena* arena) {
+    audio.Sound s = hiss(arena, 0.3, 14.0, 0.5, 14);
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        f64 bursts = math.exp(-math.fmod(t, 0.011) * 300.0);
+        f64 gate = t < 0.033 ? bursts : 0.35;
+        s.samples[i] *= (gate * 1.6) as f32;
+    }
+    taper(s);
+    return s;
+}
+
+f64 square(f64 phase) {
+    return math.sin(phase) >= 0.0 ? 1.0 : -1.0;
+}
+
+// A short, dry click: a high sine that falls at once.
+pub audio.Sound rim(Arena* arena) {
+    return sweep(arena, 0.09, 1700.0, 2100.0, 12.0, 55.0, 0.5);
+}
+
+// Two square waves a fifth apart, which ring and fall.
+pub audio.Sound cowbell(Arena* arena) {
+    audio.Sound s = blank(arena, 0.45);
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        f64 both = square(math.TAU * 540.0 * t) + square(math.TAU * 810.0 * t);
+        s.samples[i] = (both * 0.3 * (0.35 * math.exp(-t * 40.0) + 0.65 * math.exp(-t * 9.0))) as f32;
+    }
+    taper(s);
+    return s;
+}
+
+pub audio.Sound conga(Arena* arena) {
+    return sweep(arena, 0.35, 190.0, 290.0, 35.0, 10.0, 0.2);
+}
+
+// A long, bright noise.
+pub audio.Sound crash(Arena* arena) {
+    return hiss(arena, 1.4, 3.2, 0.7, 15);
+}
+
+// A noise that swells a little before it falls.
+pub audio.Sound shaker(Arena* arena) {
+    audio.Sound s = hiss(arena, 0.14, 28.0, 0.9, 16);
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        s.samples[i] *= min(1.0, t * 180.0) as f32;
+    }
+    taper(s);
+    return s;
+}
+
+// A tone of `freq` Hz that falls at `decay` per second. `shape`: 0 a deep sine, 1 a square, 2 a
+// saw, 3 a bell (a sine and two partials that are not whole multiples).
+audio.Sound tone(Arena* arena, f64 seconds, f64 freq, f64 decay, i32 shape) {
+    audio.Sound s = blank(arena, seconds);
+    for (usize i in 0..s.samples.len) {
+        f64 t = i as f64 / RATE as f64;
+        f64 phase = math.TAU * freq * t;
+        mut f64 v = 0.0;
+        if (shape == 0) {
+            v = math.tanh((math.sin(phase) + 0.4 * math.sin(2.0 * phase)) * 1.6);
+        } else if (shape == 1) {
+            v = square(phase) * 0.45;
+        } else if (shape == 2) {
+            v = (math.fmod(phase, math.TAU) / math.PI - 1.0) * 0.5;
+        } else {
+            v = math.sin(phase) * math.exp(-t * 3.0) + 0.4 * math.sin(2.76 * phase) * math.exp(-t * 7.0) + 0.2 * math.sin(5.4 * phase) * math.exp(-t * 11.0);
+        }
+        f64 attack = min(1.0, t * 400.0);
+        s.samples[i] = (v * attack * math.exp(-t * decay) * 0.8) as f32;
+    }
+    taper(s);
+    return s;
+}
+
+pub audio.Sound bass(Arena* arena) {
+    return tone(arena, 0.45, 130.81, 5.0, 0);
+}
+
+pub audio.Sound pluck(Arena* arena) {
+    return tone(arena, 0.35, 130.81, 9.0, 1);
+}
+
+pub audio.Sound lead(Arena* arena) {
+    return tone(arena, 0.5, 130.81, 4.0, 2);
+}
+
+pub audio.Sound bell(Arena* arena) {
+    return tone(arena, 1.2, 130.81, 1.5, 3);
+}
+
+// A laser: a sine that falls from high to low.
+pub audio.Sound zap(Arena* arena) {
+    return sweep(arena, 0.3, 160.0, 3200.0, 14.0, 9.0, 0.0);
+}

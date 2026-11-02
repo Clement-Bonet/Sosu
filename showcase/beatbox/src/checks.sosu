@@ -1,0 +1,205 @@
+import std.math;
+import audio.device;
+import audio.audio;
+import platform.sdl;
+import testing.check;
+import beatbox.engine;
+import beatbox.machine;
+import beatbox.sounds;
+
+f64 peak(audio.Sound s) {
+    mut f64 top = 0.0;
+    for (usize i in 0..s.samples.len) {
+        top = max(top, abs(s.samples[i] as f64));
+    }
+    return top;
+}
+
+test "a step toggles on and off" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    machine.Machine* m = arena.new(machine.Machine, 1);
+    m.clear();
+    assert(!m.hit(2, 5));
+    m.toggle(2, 5);
+    assert(m.hit(2, 5));
+    m.toggle(2, 5);
+    assert(!m.hit(2, 5));
+}
+
+test "the presets differ and clear empties the pattern" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    machine.Machine* m = arena.new(machine.Machine, 1);
+    m.load(0);
+    ui64 rock = m.signature();
+    m.load(1);
+    assert(m.signature() != rock);
+    m.clear();
+    for (usize t in 0..m.tracks) {
+        for (usize i in 0..16) {
+            assert(!m.hit(t, i));
+        }
+    }
+}
+
+test "the signature follows every edit" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    machine.Machine* m = arena.new(machine.Machine, 1);
+    m.load(0);
+    ui64 before = m.signature();
+    m.mute(1);
+    assert(m.signature() != before);
+    m.mute(1);
+    assert(m.signature() == before);
+    m.swing = 20;
+    assert(m.signature() != before);
+    m.swing = 0;
+    m.pick_key(15);
+    assert(m.signature() != before);
+    m.pick_key(12);
+    m.inst[2] = machine.Instrument.Zap;
+    assert(m.signature() != before);
+}
+
+test "tracks are added up to the limit and removed down to one" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    machine.Machine* m = arena.new(machine.Machine, 1);
+    for (i32 k in 0..20) {
+        m.add_track();
+    }
+    assert(m.tracks == machine.MAX_TRACKS);
+    assert(machine.index(m.inst[7]) == 6);  // the first instrument that the seven others do not play
+    for (usize i in 0..16) {
+        assert(!m.hit(7, i));
+    }
+    for (i32 k in 0..20) {
+        m.remove_track(0);
+    }
+    assert(m.tracks == 1);
+
+    m.load(0);
+    m.select(6);
+    m.inst[3] = machine.Instrument.Zap;
+    m.remove_track(3);
+    assert(m.tracks == 6 && m.selected == 5);
+    assert(machine.index(m.inst[3]) == machine.index(machine.instrument(4)));
+    assert(m.hit(0, 0) && m.hit(5, 0));  // the bass moved up with its steps
+}
+
+test "instruments are found in the list and notes stay within range" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    machine.Machine* m = arena.new(machine.Machine, 1);
+    for (usize i in 0..machine.INSTRUMENTS) {
+        assert(machine.index(machine.instrument(i)) == i);
+    }
+    m.pick_key(15);
+    assert(m.note[0] == 3);
+    assert(m.preview);
+    m.pick_key(-40);
+    assert(m.note[0] == machine.LOWEST);
+    m.pick_key(90);
+    assert(m.note[0] == machine.HIGHEST);
+    m.select(2);
+    assert(m.selected == 2);
+    m.pick_key(12);
+    assert(m.note[2] == 0 && m.note[0] == machine.HIGHEST);
+    assert(machine.white_key(0) == 0 && machine.white_key(2) == 4 && machine.white_key(14) == 24);
+    assert(check.same_text(machine.note_name(0), "C3"));
+    assert(check.same_text(machine.note_name(machine.HIGHEST), "C4"));
+}
+
+test "every instrument sounds, and none clips" {
+    mut Arena arena = Arena.new(64 * MB);
+    defer arena.free();
+    match (device.open_player(&arena, device.Output{ rate: sounds.RATE })) {
+        some(player) => {
+            engine.Engine* sound = arena.new(engine.Engine, &arena, player);
+            for (usize i in 0..machine.INSTRUMENTS) {
+                f64 p = peak(sound.kit[i]);
+                assert(p > 0.1);
+                assert(p <= 1.0);
+            }
+            sound.close();
+        },
+        none => {
+            assert(false);
+        },
+    }
+}
+
+test "a higher note shortens the sound and stays within range" {
+    mut Arena arena = Arena.new(64 * MB);
+    defer arena.free();
+    match (device.open_player(&arena, device.Output{ rate: sounds.RATE })) {
+        some(player) => {
+            machine.Machine* m = arena.new(machine.Machine, 1);
+            m.clear();
+            m.toggle(0, 0);
+            m.inst[0] = machine.Instrument.Bell;
+            m.tracks = 1;
+            engine.Engine* sound = arena.new(engine.Engine, &arena, player);
+            m.note[0] = 0;
+            sound.mix_pattern(m);
+            f64 low = peak(sound.cycle);
+            m.note[0] = 12;
+            sound.mix_pattern(m);
+            f64 high = peak(sound.cycle);
+            assert(low > 0.05 && low <= 1.0);
+            assert(high > 0.05 && high <= 1.0);
+            sound.close();
+        },
+        none => {
+            assert(false);
+        },
+    }
+}
+
+test "the tempo can change while playing" {
+    mut Arena arena = Arena.new(64 * MB);
+    defer arena.free();
+    match (device.open_player(&arena, device.Output{ rate: sounds.RATE })) {
+        some(player) => {
+            machine.Machine* m = arena.new(machine.Machine, 1);
+            m.load(3);
+            m.playing = true;
+            engine.Engine* sound = arena.new(engine.Engine, &arena, player);
+            for (i64 bpm in 40..221) {
+                m.bpm = bpm;
+                for (i32 frame in 0..10) {
+                    sound.update(m);
+                    sdl.delay(16);
+                }
+                assert(m.step >= 0 && m.step < 16);
+            }
+            sound.close();
+        },
+        none => {
+            assert(false);
+        },
+    }
+}
+
+test "the loop has the length of sixteen steps and stays within range" {
+    mut Arena arena = Arena.new(64 * MB);
+    defer arena.free();
+    match (device.open_player(&arena, device.Output{ rate: sounds.RATE })) {
+        some(player) => {
+            machine.Machine* m = arena.new(machine.Machine, 1);
+            m.load(3);
+            m.bpm = 120;
+            engine.Engine* sound = arena.new(engine.Engine, &arena, player);
+            sound.mix_pattern(m);
+            assert(sound.cycle.frames() == 16 * (sounds.RATE as usize * 60 / (120 * 4)));
+            assert(peak(sound.cycle) > 0.1);
+            assert(peak(sound.cycle) <= 1.0);
+            sound.close();
+        },
+        none => {
+            assert(false);
+        },
+    }
+}

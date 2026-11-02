@@ -1,0 +1,166 @@
+// The sound of the drum machine. The whole pattern is mixed into one buffer, one loop of 16
+// steps, which the mixer plays again and again: the steps then fall on the very frame they
+// should, whatever the speed of the window. An edit mixes the pattern again into the same
+// buffer, while it plays, so the loop never restarts; only a new tempo restarts it.
+import std.math;
+import platform.sdl;
+import audio.audio;
+import audio.mixer;
+import audio.device;
+import beatbox.machine;
+import beatbox.sounds;
+
+// The time between a frame mixed and the sound that comes out: the playhead is set back by it.
+i64 LATENCY_MS = 70;
+
+// A tempo that stays unchanged this long is applied, so that dragging the slider does not restart
+// the loop at every frame.
+i64 SETTLE_MS = 120;
+
+// The place of each instrument in the stereo field, from -1 (left) to 1 (right).
+f64 pan_of(usize instrument) {
+    f64[16] pans = [0.0, -0.15, 0.25, 0.35, -0.35, -0.5, 0.2, -0.3, 0.4, 0.45, -0.4, 0.0, -0.2, 0.3, 0.15, -0.25];
+    return pans[instrument];
+}
+
+// The frames of a step at `bpm`: sixteenth notes.
+usize step_frames(i64 bpm)
+    requires bpm > 0
+{
+    return (sounds.RATE as i64 * 60 / (bpm * 4)) as usize;
+}
+
+pub class Engine {
+    device.Player* player;
+    pub audio.Sound[16] kit;
+    audio.Sound room;  // room for the slowest loop, mixed in place
+    pub mut audio.Sound cycle;  // the part of `room` that plays
+    mut ui32 voice;
+    mut bool sounding;
+    mut i64 cycle_bpm;
+    mut ui64 cycle_signature;
+    mut ui64 started_ms;
+    mut i64 seen_bpm;
+    mut ui64 seen_ms;
+
+    void init(Arena* arena, device.Player* player) {
+        self.player = player;
+        kit = [sounds.kick(arena), sounds.snare(arena), sounds.clap(arena), sounds.hat(arena), sounds.open_hat(arena), sounds.tom(arena), sounds.rim(arena), sounds.cowbell(arena), sounds.conga(arena), sounds.crash(arena), sounds.shaker(arena), sounds.bass(arena), sounds.pluck(arena), sounds.lead(arena), sounds.bell(arena), sounds.zap(arena)];
+        room = audio.create(arena, sounds.RATE, 2, 16 * step_frames(machine.MIN_BPM));
+        cycle = audio.part(room, 0, 0);
+        voice = 0;
+        sounding = false;
+        cycle_bpm = 0;
+        cycle_signature = 0;
+        started_ms = 0;
+        seen_bpm = 0;
+        seen_ms = 0;
+    }
+
+    // Mixes the pattern into the first frames of `room`, as many as the loop at `bpm`.
+    pub void mix_pattern(machine.Machine* m) {
+        usize unit = step_frames(m.bpm);
+        usize n = 16 * unit;
+        for (usize i in 0..n * 2) {
+            room.samples[i] = 0.0;
+        }
+        for (usize t in 0..m.tracks) {
+            if (m.muted[t]) {
+                continue;
+            }
+            f64 gain = m.level[t] as f64 / 100.0 * 0.6;
+            f64 angle = (pan_of(machine.index(m.inst[t])) + 1.0) * math.PI / 4.0;
+            f32 left = (gain * math.cos(angle)) as f32;
+            f32 right = (gain * math.sin(angle)) as f32;
+            audio.Sound drum = kit[machine.index(m.inst[t])];
+            f64 ratio = math.exp(m.note[t] as f64 * 0.05776226504666211);  // 2 to the power of note / 12
+            usize frames = (drum.frames() as f64 / ratio) as usize;
+            for (usize at in 0..16) {
+                if (!m.hit(t, at)) {
+                    continue;
+                }
+                usize late = at % 2 == 1 ? unit * m.swing as usize / 100 : 0;
+                usize start = at * unit + late;
+                for (usize k in 0..frames) {
+                    f64 pos = k as f64 * ratio;  // the sound read faster or slower, for a higher or lower note
+                    usize from = pos as usize;
+                    usize next = min(from + 1, drum.frames() - 1);
+                    f32 part = (pos - from as f64) as f32;
+                    f32 v = drum.samples[from] * (1.0 - part) + drum.samples[next] * part;
+                    usize place = ((start + k) % n) * 2;  // the end of a sound goes round the loop
+                    room.samples[place] += v * left;
+                    room.samples[place + 1] += v * right;
+                }
+            }
+        }
+        for (usize i in 0..n * 2) {
+            room.samples[i] = math.tanh(room.samples[i] as f64) as f32;
+        }
+        cycle = audio.part(room, 0, n);
+    }
+
+    void start(machine.Machine* m) uses io {
+        mix_pattern(m);
+        voice = player.sounds.play_with(cycle, mixer.Play{ looping: true });
+        sounding = true;
+        cycle_bpm = m.bpm;
+        cycle_signature = m.signature();
+        started_ms = sdl.ticks();
+    }
+
+    void stop() {
+        player.sounds.stop(voice);
+        sounding = false;
+    }
+
+    // Plays the selected track once, as it sounds in the loop, when the machine asks for it.
+    void play_preview(machine.Machine* m) uses io {
+        usize t = m.selected;
+        f64 gain = m.level[t] as f64 / 100.0 * 0.6;
+        f64 ratio = math.exp(m.note[t] as f64 * 0.05776226504666211);
+        player.sounds.play_with(kit[machine.index(m.inst[t])], mixer.Play{ volume: gain as f32, pan: pan_of(machine.index(m.inst[t])) as f32, speed: ratio as f32 });
+    }
+
+    // Keeps the device fed and the sound in line with the machine; to call at every frame.
+    pub void update(machine.Machine* m) uses io {
+        player.update();
+        if (m.preview) {
+            m.preview = false;
+            play_preview(m);
+        }
+        if (m.playing && !sounding) {
+            start(m);
+        } else if (!m.playing && sounding) {
+            stop();
+        }
+        if (sounding) {
+            ui64 now = sdl.ticks();
+            if (m.bpm != seen_bpm) {
+                seen_bpm = m.bpm;
+                seen_ms = now;
+            }
+            if (m.bpm != cycle_bpm && now - seen_ms >= SETTLE_MS as ui64) {
+                stop();
+                start(m);
+            } else if (m.signature() != cycle_signature && m.bpm == cycle_bpm) {
+                mix_pattern(m);
+                cycle_signature = m.signature();
+            }
+            m.step = position(now);
+        } else {
+            m.step = -1;
+        }
+    }
+
+    // The step that is heard now.
+    i32 position(ui64 now) {
+        i64 length_ms = cycle.frames() as i64 * 1000 / sounds.RATE as i64;
+        i64 since = now as i64 - started_ms as i64 - LATENCY_MS;
+        i64 within = (since % length_ms + length_ms) % length_ms;
+        return (within * 16 / length_ms) as i32;
+    }
+
+    pub void close() uses io {
+        player.close();
+    }
+}

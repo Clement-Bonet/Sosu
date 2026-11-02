@@ -1,0 +1,116 @@
+// The window of Beatbox (spec §10.2, §10.5): the transport and the tracks in its title bar, the
+// tempo, the grid of the steps, and the presets. Its state is machine.sosu; the playhead is `m.step`.
+import beatbox.look;
+import beatbox.machine;
+
+component Pad(machine.Machine* m, usize t, usize i) {
+    Button(" ", on_click: m.toggle(t, i), style: m.step == i as i32 ? (m.hit(t, i) ? look.OnPlay : look.OffPlay) : (m.hit(t, i) ? look.On : (i % 4 == 0 ? look.OffBeat : look.Off)))
+}
+
+// A key of the piano; 0 is C2. The one of the selected track's note is lit.
+component Key(machine.Machine* m, i32 key, bool black) {
+    Button(" ", on_click: m.pick_key(key), style: m.note[m.selected] + 12 == key as i64 ? (black ? look.BlackOn : look.WhiteOn) : (black ? look.Black : look.White))
+}
+
+// A track: its mute and instrument, its note, its steps and its level.
+component Track(machine.Machine* m, usize t) {
+    Row(gap: 4) {
+        Dropdown(bind: m.inst[t], width: 120) {
+            Option("Kick", value: Kick)
+            Option("Snare", value: Snare)
+            Option("Clap", value: Clap)
+            Option("Hat", value: Hat)
+            Option("Open hat", value: OpenHat)
+            Option("Tom", value: Tom)
+            Option("Rim", value: Rim)
+            Option("Cowbell", value: Cowbell)
+            Option("Conga", value: Conga)
+            Option("Crash", value: Crash)
+            Option("Shaker", value: Shaker)
+            Option("Bass", value: Bass)
+            Option("Pluck", value: Pluck)
+            Option("Lead", value: Lead)
+            Option("Bell", value: Bell)
+            Option("Zap", value: Zap)
+        }
+    }
+    Grid(columns: [90], gap: 2) {
+        Button(machine.note_name(m.note[t]), on_click: m.select(t), style: m.selected == t ? look.Chosen : look.Name)
+    }
+    Grid(columns: [38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38], gap: 4) {
+        for (usize i in 0..16) {
+            Pad(m, t, i)
+        }
+    }
+    Row(gap: 4) {
+        Button(m.muted[t] ? machine.ICON_MUTE : machine.ICON_SOUND, on_click: m.mute(t), style: m.muted[t] ? look.Silent : look.Name)
+        Slider(bind: m.level[t], min: 0, max: 100, step: 1, width: 100)
+    }
+    Button(machine.ICON_TRASH, on_click: m.remove_track(t), enabled: m.tracks > 1, style: look.Bin)
+}
+
+window Beatbox(machine.Machine* m) {
+    title: "Beatbox"
+    width: 1190
+    height: 700
+
+    TitleBar(height: 46, gap: 10, padding: 6) {
+        Text("Beatbox")
+        Button(m.playing ? machine.ICON_PAUSE : machine.ICON_PLAY, on_click: m.toggle_play, style: m.playing ? look.Halt : look.Go)
+        Button(machine.ICON_PLUS, on_click: m.add_track, enabled: m.tracks < machine.MAX_TRACKS)
+        Text("Track")
+    }
+    Column(gap: 16, padding: 20) {
+        Row(gap: 16) {
+            Text("Tempo")
+            Slider(bind: m.bpm, min: 40, max: 220, step: 1, width: 200)
+            Text(m.tempo_text.text())
+            Text("Swing")
+            Slider(bind: m.swing, min: 0, max: 50, step: 1, width: 120)
+        }
+        Grid(columns: [Auto, Auto, Auto, Auto, Auto], gap: 8) {
+            for (usize t in 0..m.tracks) {
+                Track(m, t)
+            }
+        }
+        Text("Piano: click a track's note, then a key", style: look.Muted)
+        Column(gap: 0) {
+            Row(gap: 0) {
+                Space(25)
+                Key(m, 1, true)
+                Space(15)
+                Key(m, 3, true)
+                Space(50)
+                Key(m, 6, true)
+                Space(15)
+                Key(m, 8, true)
+                Space(15)
+                Key(m, 10, true)
+                Space(50)
+                Key(m, 13, true)
+                Space(15)
+                Key(m, 15, true)
+                Space(50)
+                Key(m, 18, true)
+                Space(15)
+                Key(m, 20, true)
+                Space(15)
+                Key(m, 22, true)
+            }
+            Row(gap: 2) {
+                for (i32 w in 0..15) {
+                    Key(m, machine.white_key(w), false)
+                }
+            }
+        }
+        Row(gap: 8) {
+            Button("Rock", on_click: m.load(0))
+            Button("House", on_click: m.load(1))
+            Button("Hip hop", on_click: m.load(2))
+            Button("Break", on_click: m.load(3))
+            Button("Random", on_click: m.shuffle)
+            Button("Clear", on_click: m.clear)
+        }
+        Text("Space: play and pause    Click a step to change it    The speaker mutes a track    The list changes its instrument    A note and a piano key change its note", style: look.Muted)
+    }
+}

@@ -1,0 +1,556 @@
+import testing.check;
+import std.text;
+import image.image;
+import pixelforge.editor;
+import pixelforge.project;
+import pixelforge.sheet;
+
+test "a project keeps frames, layers, times and settings" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.art.put(1, 2, 0xFF112233);
+    e.art.add_layer();
+    e.art.put(3, 3, 0x80FF0000);
+    e.art.toggle_layer(0);
+    e.copy_frame();
+    e.nudge_delay(50);
+    e.more_columns(-2);
+    e.more_gap(3);
+    ui8[] bytes = project.encode(&arena, e.frames, e.columns, e.gap, e.current);
+    match (project.decode(&arena, bytes)) {
+        some(p) => {
+            assert(p.width == 8 && p.height == 8);
+            assert(p.frames.len() == 2);
+            assert(p.current == 1);
+            assert(p.columns == 2 && p.gap == 3);
+            assert(p.frames.at(1).delay == 150);
+            sheet.Sheet* s = p.frames.at(0).art;
+            assert(s.layers.len() == 2);
+            assert(s.active == 1);
+            assert(!s.layers.at(0).visible);
+            assert(s.layers.at(0).pixels[2 * 8 + 1] == 0xFF112233);
+            assert(s.layers.at(1).pixels[3 * 8 + 3] == 0x80FF0000);
+            assert(s.layers.at(1).name == "Layer 2");
+        },
+        none => {
+            assert(false);
+        },
+    }
+}
+
+bool refused(Arena* arena, ui8[] bytes) {
+    return match (project.decode(arena, bytes)) {
+        some(p) => false,
+        none => true,
+    };
+}
+
+test "a damaged project is refused" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    ui8[] bytes = project.encode(&arena, e.frames, e.columns, e.gap, e.current);
+    assert(!refused(&arena, bytes));
+    assert(refused(&arena, bytes[0..bytes.len - 5]));
+    assert(refused(&arena, bytes[0..10]));
+    mut ui8[] other = arena.alloc_slice(ui8, 40);
+    assert(refused(&arena, other));
+}
+
+test "frames are added, copied, moved and deleted" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.art.put(1, 1, 0xFFFF0000);
+    e.copy_frame();
+    assert(e.frame_count() == 2);
+    assert(e.current == 1);
+    assert(e.art.get(1, 1) == 0xFFFF0000);
+    e.art.put(1, 1, 0xFF00FF00);
+    e.select_frame(0);
+    assert(e.art.get(1, 1) == 0xFFFF0000);
+    e.add_frame();
+    assert(e.frame_count() == 3);
+    assert(e.current == 1);
+    assert(e.art.get(1, 1) == 0);
+    e.move_frame(1);
+    assert(e.current == 2);
+    assert(e.frames.at(1).art.get(1, 1) == 0xFF00FF00);
+    e.delete_frame();
+    assert(e.frame_count() == 2);
+    assert(e.current == 1);
+    e.delete_frame();
+    e.delete_frame();
+    assert(e.frame_count() == 1);
+    e.nudge_delay(-500);
+    assert(e.frames.at(0).delay == 20);
+}
+
+test "the sprite sheet puts the frames in a grid with a gap" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(4);
+    e.more_columns(-3);
+    e.more_columns(1);
+    e.more_gap(1);
+    e.art.put(0, 0, 0xFF000001);
+    e.copy_frame();
+    e.art.put(0, 0, 0xFF000002);
+    e.copy_frame();
+    e.art.put(0, 0, 0xFF000003);
+    assert(e.sheet_columns() == 2);
+    assert(e.sheet_width() == 9);
+    assert(e.sheet_height() == 9);
+    image.Image img = e.build_sheet(&arena);
+    assert(img.width == 9);
+    assert(img.pixels[0] == 0xFF000001);
+    assert(img.pixels[5] == 0xFF000002);
+    assert(img.pixels[5 * 9] == 0xFF000003);
+    assert(img.pixels[4] == 0);
+    str json = e.sheet_json(&arena, "walk.png");
+    assert(text.contains(json, "\"image\": \"walk.png\""));
+    assert(text.contains(json, "{ \"index\": 1, \"x\": 5, \"y\": 0, \"w\": 4, \"h\": 4, \"duration\": 100 }"));
+    assert(text.contains(json, "{ \"index\": 2, \"x\": 0, \"y\": 5"));
+}
+
+test "a frame is cut from a picture" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(4);
+    e.art.put(0, 0, 0xFF000009);
+    e.copy_frame();
+    e.art.put(0, 0, 0xFF00000A);
+    image.Image img = e.build_sheet(&arena);
+    sheet.Sheet* s = sheet.new_sheet(&arena, 4, 4);
+    s.load_cell(img, 4, 0);
+    assert(s.get(0, 0) == 0xFF00000A);
+    s.load_cell(img, 100, 100);
+    assert(s.get(0, 0) == 0);
+}
+
+test "a pixel is drawn, undone and done again" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    sheet.Sheet* s = sheet.new_sheet(&arena, 8, 8);
+    s.begin();
+    s.put(2, 3, 0xFFFF0000);
+    s.put(3, 3, 0xFFFF0000);
+    s.end();
+    assert(s.get(2, 3) == 0xFFFF0000);
+    s.undo();
+    assert(s.get(2, 3) == 0);
+    assert(s.get(3, 3) == 0);
+    assert(s.can_redo());
+    s.redo();
+    assert(s.get(3, 3) == 0xFFFF0000);
+    assert(!s.can_redo());
+}
+
+test "a new stroke forgets what was undone" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    sheet.Sheet* s = sheet.new_sheet(&arena, 8, 8);
+    s.begin();
+    s.put(0, 0, 0xFF00FF00);
+    s.end();
+    s.undo();
+    s.begin();
+    s.put(1, 1, 0xFF0000FF);
+    s.end();
+    assert(!s.can_redo());
+    s.undo();
+    assert(s.get(1, 1) == 0);
+    assert(s.get(0, 0) == 0);
+}
+
+test "a line joins its ends, a box fills its corners" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    sheet.Sheet* s = sheet.new_sheet(&arena, 16, 16);
+    s.line(1, 1, 10, 4, 1, 0xFFFFFFFF);
+    assert(s.get(1, 1) == 0xFFFFFFFF);
+    assert(s.get(10, 4) == 0xFFFFFFFF);
+    s.box(12, 12, 14, 14, 1, 0xFF112233, true);
+    assert(s.get(12, 12) == 0xFF112233);
+    assert(s.get(14, 14) == 0xFF112233);
+    assert(s.get(13, 13) == 0xFF112233);
+    assert(s.get(15, 15) == 0);
+}
+
+test "the preview of a shape can be taken back" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    sheet.Sheet* s = sheet.new_sheet(&arena, 16, 16);
+    s.begin();
+    s.line(0, 0, 8, 8, 1, 0xFFFFFFFF);
+    s.revert_stroke();
+    assert(s.get(4, 4) == 0);
+    s.line(0, 0, 8, 0, 1, 0xFFFFFFFF);
+    s.end();
+    assert(s.get(8, 0) == 0xFFFFFFFF);
+    assert(s.get(4, 4) == 0);
+}
+
+test "a fill stops at the walls" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    sheet.Sheet* s = sheet.new_sheet(&arena, 8, 8);
+    for (i32 y in 0..8) {
+        s.put(4, y, 0xFF000000);
+    }
+    s.begin();
+    s.flood(0, 0, 0xFFFF0000);
+    s.end();
+    assert(s.get(3, 7) == 0xFFFF0000);
+    assert(s.get(5, 0) == 0);
+    s.undo();
+    assert(s.get(3, 7) == 0);
+}
+
+test "layers are flattened from the bottom, and can be hidden" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    sheet.Sheet* s = sheet.new_sheet(&arena, 4, 4);
+    s.put(1, 1, 0xFF0000FF);
+    s.add_layer();
+    s.put(1, 1, 0xFFFF0000);
+    s.put(2, 2, 0x80FFFFFF);
+    s.flatten();
+    assert(s.seen(1, 1) == 0xFFFF0000);
+    s.toggle_layer(1);
+    s.flatten();
+    assert(s.seen(1, 1) == 0xFF0000FF);
+    assert(s.seen(2, 2) == 0);
+    s.toggle_layer(1);
+    s.remove_layer();
+    assert(s.layers.len() == 1);
+    s.flatten();
+    assert(s.seen(1, 1) == 0xFF0000FF);
+}
+
+test "a half transparent pixel mixes with what is below" {
+    ui32 mixed = sheet.blend(0x80FF0000, 0xFF0000FF);
+    assert((mixed >> 24) == 255);
+    assert(((mixed >> 16) & 0xFF) > 100);
+    assert((mixed & 0xFF) > 100);
+}
+
+// The window place at the middle of a pixel, with the picture at the origin and a zoom of 8.
+f32 wx(i32 p) {
+    return editor.LEFT + (p * 8 + 4) as f32;
+}
+
+f32 wy(i32 p) {
+    return editor.TOP + (p * 8 + 4) as f32;
+}
+
+void stroke_at(editor.Editor* e, i32 x, i32 y) {
+    e.press(wx(x), wy(y));
+    e.release();
+}
+
+test "a selection is copied and pasted, and pasting can be undone" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.zoom = 8;
+    e.pan_x = editor.LEFT;
+    e.pan_y = editor.TOP;
+    e.art.put(1, 1, 0xFFFF0000);
+    e.art.put(2, 1, 0xFF0000FF);
+    e.set_selection(2, 1, 1, 1);
+    assert(e.sel_w == 2 && e.sel_h == 1);
+    e.copy_selection();
+    assert(e.clip_w == 2 && e.clip_h == 1);
+    e.paste();
+    assert(e.art.get(0, 0) == 0xFFFF0000);
+    assert(e.art.get(1, 0) == 0xFF0000FF);
+    assert(e.has_sel && e.sel_x == 0 && e.sel_y == 0);
+    e.undo();
+    assert(e.art.get(0, 0) == 0);
+    assert(e.art.get(1, 0) == 0);
+    assert(e.art.get(1, 1) == 0xFFFF0000);
+    e.redo();
+    assert(e.art.get(0, 0) == 0xFFFF0000);
+}
+
+test "a pasted picture is dragged before it is put down" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.zoom = 8;
+    e.pan_x = editor.LEFT;
+    e.pan_y = editor.TOP;
+    e.art.put(5, 5, 0xFF00FF00);
+    e.set_selection(5, 5, 5, 5);
+    e.copy_selection();
+    e.paste();
+    e.press(wx(0), wy(0));
+    e.move_to(wx(3), wy(2));
+    e.release();
+    assert(e.art.get(0, 0) == 0);
+    assert(e.art.get(3, 2) == 0xFF00FF00);
+    assert(e.art.get(5, 5) == 0xFF00FF00);
+    stroke_at(e, 7, 7);
+    e.undo();
+    e.undo();
+    assert(e.art.get(3, 2) == 0);
+    assert(e.art.get(5, 5) == 0xFF00FF00);
+}
+
+test "the content of a selection is moved, leaving a hole, in one action" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.zoom = 8;
+    e.pan_x = editor.LEFT;
+    e.pan_y = editor.TOP;
+    e.art.put(1, 1, 0xFFFF0000);
+    e.art.put(2, 1, 0xFF0000FF);
+    e.tool = editor.SELECT;
+    e.press(wx(1), wy(1));
+    e.move_to(wx(2), wy(1));
+    e.release();
+    assert(e.has_sel && e.sel_w == 2 && e.sel_h == 1);
+    e.press(wx(1), wy(1));
+    e.move_to(wx(4), wy(3));
+    e.move_to(wx(5), wy(4));
+    e.release();
+    assert(e.art.get(1, 1) == 0);
+    assert(e.art.get(2, 1) == 0);
+    assert(e.art.get(5, 4) == 0xFFFF0000);
+    assert(e.art.get(6, 4) == 0xFF0000FF);
+    e.undo();
+    assert(e.art.get(1, 1) == 0xFFFF0000);
+    assert(e.art.get(2, 1) == 0xFF0000FF);
+    assert(e.art.get(5, 4) == 0);
+}
+
+test "cut and clear empty the selection, undo brings it back" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.art.put(3, 3, 0xFFFFFFFF);
+    e.set_selection(2, 2, 4, 4);
+    e.cut_selection();
+    assert(e.art.get(3, 3) == 0);
+    assert(e.clip_w == 3);
+    e.undo();
+    assert(e.art.get(3, 3) == 0xFFFFFFFF);
+    e.clear_selection();
+    assert(e.art.get(3, 3) == 0);
+    e.select_all();
+    assert(e.sel_w == 8 && e.sel_h == 8);
+    e.deselect();
+    assert(!e.has_sel);
+}
+
+test "undo and redo go from one frame to another, in the order of the actions" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(8);
+    e.zoom = 8;
+    e.pan_x = editor.LEFT;
+    e.pan_y = editor.TOP;
+    stroke_at(e, 1, 1);
+    e.add_frame();
+    stroke_at(e, 2, 2);
+    e.select_frame(0);
+    assert(e.art.get(1, 1) != 0);
+    e.undo();
+    assert(e.current == 1);
+    assert(e.art.get(2, 2) == 0);
+    e.undo();
+    assert(e.current == 0);
+    assert(e.art.get(1, 1) == 0);
+    e.redo();
+    assert(e.current == 0 && e.art.get(1, 1) != 0);
+    e.redo();
+    assert(e.current == 1 && e.art.get(2, 2) != 0);
+    e.undo();
+    e.select_frame(0);
+    stroke_at(e, 4, 4);
+    e.redo();
+    assert(e.frames.at(1).art.get(2, 2) == 0);
+}
+
+test "a picture can have any size from 1 to 1024, and a project keeps it" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_picture(48, 24);
+    assert(e.art.width == 48 && e.art.height == 24);
+    e.add_frame();
+    assert(e.sheet_width() == 96 && e.sheet_height() == 24);
+    ui8[] bytes = project.encode(&arena, e.frames, e.columns, e.gap, e.current);
+    match (project.decode(&arena, bytes)) {
+        some(p) => {
+            assert(p.width == 48 && p.height == 24);
+        },
+        none => {
+            assert(false);
+        },
+    }
+    e.new_picture(0, 5);
+    assert(e.art.width == 1 && e.art.height == 5);
+    e.ask_new();
+    assert(e.asking && e.new_w == 1 && e.new_h == 5);
+    assert(!e.linked);
+    e.preset_w(64);
+    assert(e.new_w == 64 && e.new_h == 5);
+    e.linked = true;
+    e.preset_h(16);
+    assert(e.new_w == 16 && e.new_h == 16);
+    e.new_w = 40;
+    e.width_changed();
+    assert(e.new_h == 40);
+    e.linked = false;
+    e.new_h = 8;
+    e.height_changed();
+    assert(e.new_w == 40);
+    e.create_new();
+    assert(!e.asking && e.art.width == 40 && e.art.height == 8);
+}
+
+test "the color picker: hue, saturation, brightness, opacity and a hex code" {
+    assert(editor.hsv_rgb(0.0, 1.0, 1.0) == 0xFFFF0000);
+    assert(editor.hsv_rgb(120.0, 1.0, 1.0) == 0xFF00FF00);
+    assert(editor.hsv_rgb(240.0, 1.0, 1.0) == 0xFF0000FF);
+    assert(editor.hsv_rgb(60.0, 0.0, 1.0) == 0xFFFFFFFF);
+    assert(editor.hsv_rgb(300.0, 1.0, 0.0) == 0xFF000000);
+    ui32[4] samples = [0xFFFF004D, 0xFF29ADFF, 0xFF7E2553, 0xFFFFF1E8];
+    for (i32 i in 0..4) {
+        ui32 c = samples[i as usize];
+        assert(editor.hsv_rgb(editor.rgb_hue(c), editor.rgb_sat(c), editor.rgb_value(c)) == c);
+    }
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.color = 0xFF00FF00;
+    e.open_picker();
+    assert(e.picking && e.hue == 120.0 && e.sat == 1.0 && e.val == 1.0 && e.alpha == 255);
+    e.pick_square(0.0, 0.0);
+    assert(e.color == 0xFFFFFFFF);
+    e.pick_alpha(0.0);
+    assert(e.color == 0x00FFFFFF);
+    e.pick_hue(0.0);
+    assert(e.alpha == 255 && e.color == 0xFFFFFFFF);
+    e.pick_square(1.0, 0.0);
+    assert(e.color == 0xFFFF0000);
+    e.pick_light(0.25);
+    assert(e.color == 0xFF800000);
+    e.pick_light(1.0);
+    assert(e.color == 0xFFFFFFFF);
+    e.pick_light(0.5);
+    assert(e.color == 0xFFFF0000);
+    e.pick_sat_l(0.0);
+    assert(e.color == 0xFF808080);
+    e.pick_sat_l(1.0);
+    e.pick_hue(240.0);
+    assert(e.color == 0xFF0000FF);
+    e.nudge(3, -255);
+    assert(e.alpha == 0 && e.color == 0x000000FF);
+    e.pick_square(1.0, 0.0);
+    assert(e.alpha == 255 && e.color == 0xFF0000FF);
+    e.pick_square(1.0, 0.0);
+    e.pick_hue(0.0);
+    e.cancel_picker();
+    assert(!e.picking && e.color == 0xFF00FF00);
+    e.open_picker();
+    e.pick_square(1.0, 0.0);
+    e.pick_hue(0.0);
+    e.picker_key(102);
+    e.picker_key(49);
+    assert(e.typing && e.typed_count == 2 && e.color == 0xFFFF0000);
+    e.picker_key(8);
+    e.picker_key(48);
+    e.picker_key(48);
+    e.picker_key(48);
+    e.picker_key(48);
+    e.picker_key(50);
+    assert(!e.typing && e.color == 0xFFF00002);
+    e.picker_key(27);
+    assert(!e.picking);
+}
+
+test "the numbers of the picker: RGB, CMYK and HSL, with the opacity" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* e = editor.new_editor(&arena);
+    e.color = 0xFFFF0000;
+    e.open_picker();
+    assert(e.field_rows() == 4 && e.field_value(0) == 255 && e.field_value(1) == 0 && e.field_value(3) == 255);
+    e.set_field(1, 128);
+    assert(e.color == 0xFFFF8000);
+    e.start_field(2);
+    e.picker_key(50);
+    e.picker_key(53);
+    e.picker_key(53);
+    assert(e.field == 2 && e.color == 0xFFFF8000);
+    e.picker_key(9);
+    assert(e.color == 0xFFFF80FF && e.field == 3);
+    e.picker_key(49);
+    e.picker_key(48);
+    e.picker_key(48);
+    e.picker_key(13);
+    assert(e.field == -1 && e.picking && e.color == 0x64FF80FF);
+    e.set_model(1);
+    assert(e.field_rows() == 5 && e.field_value(3) == 0 && e.field_value(1) == 50 && e.field_value(4) == 39);
+    e.set_field(3, 100);
+    assert((e.color & 0xFFFFFF) == 0x000000 && e.alpha == 100);
+    e.set_field(4, 100);
+    e.set_field(3, 0);
+    e.set_field(0, 100);
+    assert(e.color == 0xFF00FFFF);
+    e.set_model(2);
+    e.set_field(0, 120);
+    e.set_field(1, 100);
+    e.set_field(2, 50);
+    assert(e.color == 0xFF00FF00);
+    assert(e.field_value(0) == 120 && e.field_value(1) == 100 && e.field_value(2) == 50);
+    e.set_field(3, 50);
+    assert(e.alpha == 128);
+    e.cancel_picker();
+    assert(e.color == 0xFFFF0000);
+}
+
+test "the onion skin shows the frames around, tinted and faint" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    assert(sheet.ghost(0, 0xFFFF0000) == 0);
+    ui32 g = sheet.ghost(0xFFFFFFFF, 0xFFFF0000);
+    assert((g >> 24) > 0 && (g >> 24) < 255);
+    assert(((g >> 16) & 0xFF) > ((g >> 8) & 0xFF));
+    editor.Editor* e = editor.new_editor(&arena);
+    e.new_doc(4);
+    e.art.put(1, 1, 0xFF00FF00);
+    e.add_frame();
+    e.add_frame();
+    e.select_frame(1);
+    e.update(1180, 780, 0);
+    assert(!e.has_before && !e.has_after);
+    e.toggle_onion();
+    e.update(1180, 780, 0);
+    assert(e.has_before && e.has_after);
+    assert((e.ghost_before.pixels[5] >> 24) > 0);
+    assert(e.ghost_after.pixels[5] == 0);
+    e.select_frame(0);
+    e.art.put(2, 1, 0xFF00FF00);
+    e.select_frame(1);
+    e.update(1180, 780, 0);
+    assert((e.ghost_before.pixels[6] >> 24) > 0);
+    e.select_frame(0);
+    e.update(1180, 780, 0);
+    assert(!e.has_before && e.has_after);
+}
+

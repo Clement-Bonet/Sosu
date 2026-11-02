@@ -1,5 +1,7 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L /* clock_gettime, nanosleep */
+#define _DEFAULT_SOURCE         /* MAP_ANONYMOUS (glibc) */
+#define _DARWIN_C_SOURCE        /* MAP_ANON (macOS, iOS) */
 #endif
 
 #include "sosu_rt.h"
@@ -19,6 +21,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -286,6 +289,60 @@ struct sosu_arena_state {
     size_t block_size;
 };
 
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#if defined(SOSU_DEBUG) && !defined(__EMSCRIPTEN__) && (defined(_WIN32) || defined(MAP_ANONYMOUS))
+/* In debug (every build but --release), each block has pages of its own, and `free()` makes them
+   unreadable instead of giving them back: a pointer kept past the `free()` of its arena stops the
+   program where it is used, by an access violation (spec §7.7). The last blocks a thread freed
+   stay so; older ones go back to the system, so that a program freeing arenas each frame keeps
+   running. Zeroed, as calloc gives them. */
+#define SOSU_QUARANTINE 1024
+static SOSU_THREAD struct {
+    void *memory;
+    size_t size;
+} quarantine[SOSU_QUARANTINE];
+static SOSU_THREAD size_t quarantine_next;
+
+static void *block_alloc(size_t size) {
+#ifdef _WIN32
+    return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void *memory = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return memory == MAP_FAILED ? NULL : memory;
+#endif
+}
+
+static void block_release(void *memory, size_t size) {
+#ifdef _WIN32
+    VirtualFree(memory, size, MEM_DECOMMIT); /* the addresses stay reserved, without memory behind */
+#else
+    /* new pages without access over the old ones: their memory goes back to the system */
+    mmap(memory, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+#endif
+    size_t i = quarantine_next++ % SOSU_QUARANTINE;
+    if (quarantine[i].memory) {
+#ifdef _WIN32
+        VirtualFree(quarantine[i].memory, 0, MEM_RELEASE);
+#else
+        munmap(quarantine[i].memory, quarantine[i].size);
+#endif
+    }
+    quarantine[i].memory = memory;
+    quarantine[i].size = size;
+}
+#else
+static void *block_alloc(size_t size) {
+    return calloc(1, size);
+}
+
+static void block_release(void *memory, size_t size) {
+    (void)size;
+    free(memory);
+}
+#endif
+
 sosu_arena sosu_arena_new(uint64_t block_size, const char *loc) {
     sosu_arena arena;
     arena.state = malloc(sizeof *arena.state);
@@ -307,7 +364,7 @@ void *sosu_arena_try_alloc(sosu_arena *arena, size_t size) {
         if (cap > SIZE_MAX - sizeof(sosu_block)) return NULL;
         /* zeroed once, by the system: memory is handed out only once (a block is never reused), and
            large blocks often come as pages already zero, untouched until they are written */
-        sosu_block *block = calloc(1, sizeof(sosu_block) + cap);
+        sosu_block *block = block_alloc(sizeof(sosu_block) + cap);
         if (!block) return NULL;
         block->next = state->head;
         block->used = 0;
@@ -340,7 +397,7 @@ void sosu_arena_free(sosu_arena *arena) {
     sosu_block *block = state->head;
     while (block) {
         sosu_block *next = block->next;
-        free(block);
+        block_release(block, sizeof(sosu_block) + block->cap);
         block = next;
     }
     free(state);

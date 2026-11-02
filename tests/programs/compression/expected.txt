@@ -11,6 +11,11 @@ gzip: "hello"
 gzip with a name: "hello hello hello hello"
 two members: "abcdef"
 1000 members: 3000 bytes, the same: true
+1 MB of zeros (1033 bytes) within 1000: deflate false, zlib too large for the room given
+1 MB of zeros (1033 bytes) within 1048575: deflate false, zlib too large for the room given
+1 MB of zeros (1033 bytes) within 1048576: deflate true, zlib ok
+1000 members within 2999: too large for the room given
+1000 members within 3000: ok
 cut: damaged data
 wrong Adler-32: wrong checksum
 not zlib: damaged data

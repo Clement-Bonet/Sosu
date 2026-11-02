@@ -1,0 +1,13 @@
+# Beatbox: a drum machine, written in Sosu. Its sounds are synthesized (no sample files), the
+# interface is described in src/screen.ui.sosu, and the packages are those of this repository.
+[package]
+name = "beatbox"
+version = "0.1.0"
+
+[dependencies]
+audio = { path = "../../packages/audio" }
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+image = { path = "../../packages/image" }
+ui = { path = "../../packages/ui" }
+testing = { path = "../../packages/testing" }

@@ -130,6 +130,28 @@ i32 main() uses io {
         err(e) => io.print("1000 members: {}", deflate.message(e)),
     }
 
+    // a limit on what is inflated: 1 MB of zeros in about 1 KB, and the members of gzip together
+    ui8[] zeros = deflate.deflate(&arena, arena.alloc_slice(ui8, 1048576));
+    ui8[] zeros_z = zlib.compress(&arena, arena.alloc_slice(ui8, 1048576));
+    for (i32 limit in [1000, 1048575, 1048576]) {
+        bool d = match (deflate.inflate_limit(&arena, zeros, limit as usize)) {
+            ok(back) => back.len == 1048576,
+            err(e) => false,
+        };
+        str z = match (zlib.decompress_limit(&arena, zeros_z, limit as usize)) {
+            ok(back) => "ok",
+            err(e) => deflate.message(e),
+        };
+        io.print("1 MB of zeros ({} bytes) within {}: deflate {}, zlib {}", zeros.len, limit, d, z);
+    }
+    for (i32 limit in [2999, 3000]) {
+        str g = match (gzip.decompress_limit(&arena, members, limit as usize)) {
+            ok(back) => "ok",
+            err(e) => deflate.message(e),
+        };
+        io.print("1000 members within {}: {}", limit, g);
+    }
+
     // damaged
     read_zlib(&arena, "cut", bytes_of_hex(&arena, "789ccb48cdc9"));
     read_zlib(&arena, "wrong Adler-32", bytes_of_hex(&arena, "789ccb48cdc9c90700062c0216"));

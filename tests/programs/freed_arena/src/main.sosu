@@ -1,0 +1,13 @@
+// A pointer kept past the `free()` of its arena (spec §7.7): in debug, reading through it stops
+// the program, since the pages of a freed arena are made unreadable (lib/runtime/sosu_rt.c).
+import std.io;
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4096);
+    i32* p = arena.alloc(i32);
+    *p = 7;
+    io.print("before: {}", *p);
+    arena.free();
+    io.print("after: {}", *p);
+    return 0;
+}

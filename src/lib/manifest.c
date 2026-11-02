@@ -122,9 +122,9 @@ static char *parse_string(Toml *t) {
         SOSU_VEC_PUSH(&text, c);
     }
     SOSU_VEC_PUSH(&text, '\0');
-    /* The values reach the commands of the C compiler and of the tools, between quotes: what
-       would end the quotes or be expanded inside them (by cmd or sh) is refused, so that a
-       dependency cannot run a command while it is built. */
+    /* The values reach the commands of the C compiler and of the tools as arguments of their own,
+       never through a shell (shell.c). What a shell would read (quotes, `$`, `%`, a backquote)
+       is still refused: a second wall, should a value ever reach one. */
     for (size_t i = 0; !t->free_text && text.items[i]; i++) {
         unsigned char b = (unsigned char)text.items[i];
         if (b < 32 || b == 127 || strchr("\"`$%", b)) {
