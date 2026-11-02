@@ -231,7 +231,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 - **`io.print`** is built into the compiler: `io.print("x = {}, y = {}", x, y)` checks at compile time that the format is a string literal with one `{}` per value, and that each value is a number, a `bool`, a `char` or a `str`. It ends the line. A float always prints with a dot (`25.0`).
 - **`%`** works on integers only. **`==`** compares numbers, `bool`, `char`, `str` (by content), pointers, and enums without data; enums with data are compared with `match`. **`<`**, `<=`, `>` and `>=` compare numbers, `char` and `str` (byte by byte, which is the order of the code points in UTF-8).
 - **Conversions at run time**: between integers, `as` keeps the low bits (modulo 2^n, `300 as ui8` is an error only for a literal); from a float to an integer, a value out of range stops the program.
-- **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only.
+- **Run-time errors** (overflow, division by zero, index out of bounds, failed `assert` or contract) print the position and stop the program with the exit code 101; in `sosuc test`, they fail the current test only. A stack overflow (a recursion too deep, a local array too large) stops the program too, with the code 101 and the message `sosu: stack overflow`, in debug and in release, in the thread that started the program and in those of `std.thread` (a thread started by C code keeps the crash of the system). An optimized `--release` build may turn a recursion without end into a loop that never ends.
 
 ### 5.4 Generics (step 10)
 
@@ -476,7 +476,7 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 ```
 
 - `alloc` stops the program with a message when memory runs out; `try_alloc` returns `T*?` to handle that case yourself.
-- `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program.
+- `Arena` is a built-in type, with `KB`, `MB` and `GB` (`usize`) for sizes. `Arena.new(size)` gives the size of its blocks (a bigger allocation gets its own block). Its methods: `alloc(T)` and `try_alloc(T)` give zeroed memory, so `T` cannot contain a pointer (never null) nor be a class; `new(T, args)` creates a class, or a struct, and calls its `init` with `args` (without `init`, it takes no argument and the type must be valid when zeroed); `free()` releases every block, and using the arena afterwards stops the program; a second `free()` does nothing, so that a `defer arena.free();` may follow a `free()` made earlier, in a branch.
 - The type given to `alloc`, `try_alloc` and `new` is written `Type` or `module.Type`.
 - `alloc_slice(T, count)` gives a zeroed `T[]` of `count` elements (same rule on `T` as `alloc`), for sizes known at run time only. The type given to `alloc`, `try_alloc`, `alloc_slice`, `new` and `size_of` is any type: a name, or one ending with what no value can before `,` or `)`, as `ui8*`, `i32?`, `str[]` or `void!E` (`arena.alloc_slice(ui8*?, n)`, `size_of(ui8*)`); a type elsewhere among the arguments of a call is not a value (E0333). In an `unsafe` block, `alloc`, `try_alloc` and `alloc_slice` accept any type that is not a class: the memory is zeroed, and the program writes a valid value in it before reading it (as `std.vec` does, §5.4).
 - An `Arena` owns its blocks: it is moved, not copied (below).
@@ -629,7 +629,7 @@ i32 main() uses io {
 
 ### 7.5 Compiler diagnostics
 
-Each error has a stable code, a precise position, an explanation and, when possible, a suggested fix. Two formats: readable text and JSON (`--format=json`). The codes are frozen (`docs/errors.md`, §13.2): a code keeps its meaning, and one no longer given is never given again for something else; the wording of the messages may change.
+Each error has a stable code, a precise position, an explanation and, when possible, a suggested fix. Two formats: readable text and JSON (`--format=json`). A file shows its first 100 diagnostics; the next ones are counted in the number of errors, and the text says how many were not shown. The codes are frozen (`docs/errors.md`, §13.2): a code keeps its meaning, and one no longer given is never given again for something else; the wording of the messages may change.
 
 ```
 error[E0312]: non-exhaustive match

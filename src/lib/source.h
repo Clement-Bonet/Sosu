@@ -23,7 +23,9 @@ bool source_load(SourceFile *file, const char *path);
 void source_from_string(SourceFile *file, const char *path, const char *text);
 void source_free(SourceFile *file);
 
-/* 1-based line and column of a byte offset; columns count code points. */
+/* 1-based line of a byte offset: a binary search, whatever the length of the line. */
+size_t source_line_of(const SourceFile *file, size_t offset);
+/* 1-based line and column of a byte offset; columns count code points, from the start of the line. */
 void source_position(const SourceFile *file, size_t offset, size_t *line, size_t *column);
 /* Text of a 1-based line, without its line terminator. */
 const char *source_line(const SourceFile *file, size_t line, size_t *length);

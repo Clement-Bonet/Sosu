@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -146,13 +147,18 @@ typedef struct {
 #endif
 } sosu_thread;
 
+static void watch_stack(void);
+static void unwatch_stack(void);
+
 #ifdef _WIN32
 static DWORD WINAPI thread_main(LPVOID argument) {
 #else
 static void *thread_main(void *argument) {
 #endif
     sosu_thread *thread = argument;
+    watch_stack();
     thread->entry(thread->data);
+    unwatch_stack();
     free(staging);
     staging = NULL;
     staging_size = 0;
@@ -356,7 +362,7 @@ static void watch_faults(void) {
     struct sigaction action;
     memset(&action, 0, sizeof action);
     action.sa_sigaction = freed_fault;
-    action.sa_flags = SA_SIGINFO;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK; /* a stack overflow still reaches the handler of the stack */
     sigemptyset(&action.sa_mask);
     sigaction(SIGSEGV, &action, &previous_segv);
     sigaction(SIGBUS, &action, &previous_bus); /* macOS gives this one for unreadable pages */
@@ -599,12 +605,115 @@ void sosu_os_take(uint8_t *out) {
     scratch_length = 0;
 }
 
+/* ---- Stack overflow ---- */
+
+/* A recursion too deep, or a local array too large, stops the program with a message and the
+   code of the other errors (101), in debug and in release, instead of a crash without a word
+   (review R3): on the thread that started the program, and on those of std.thread. Any other
+   fault goes to the handler there was before. */
+static const char stack_message[] =
+    "sosu: stack overflow: a recursion too deep, or a local array too large (spec 7.7)\n";
+
+#if defined(_WIN32)
+static LONG CALLBACK stack_fault(EXCEPTION_POINTERS *info) {
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    fflush(stdout); /* on the stack kept by SetThreadStackGuarantee */
+    fputs(stack_message, stderr);
+    fflush(stderr);
+    ExitProcess(101);
+}
+
+/* For the thread that calls it. */
+static void watch_stack(void) {
+    static volatile LONG watching;
+    ULONG kept = 64 * 1024; /* left to the handler when the stack is full */
+    SetThreadStackGuarantee(&kept);
+    if (InterlockedExchange(&watching, 1) == 0) AddVectoredExceptionHandler(1, stack_fault);
+}
+
+static void unwatch_stack(void) {}
+#elif !defined(__EMSCRIPTEN__)
+#define STACK_SPARE (64 * 1024)
+static SOSU_THREAD uintptr_t stack_top;  /* near the start of the stack of the thread; 0 if not watched */
+static SOSU_THREAD uintptr_t stack_span; /* how far below it a fault is taken for an overflow */
+static SOSU_THREAD void *stack_spare;    /* where the handler runs, since the stack is full */
+static struct sigaction stack_previous_segv, stack_previous_bus;
+
+static void stack_fault(int sig, siginfo_t *info, void *context) {
+    (void)context;
+    uintptr_t at = (uintptr_t)info->si_addr;
+    if (stack_top && at < stack_top + STACK_SPARE && stack_top - at < stack_span) {
+        fflush(stdout); /* not safe in a handler in general, but the program stops here anyway */
+        ssize_t written = write(2, stack_message, sizeof stack_message - 1);
+        (void)written;
+        _exit(101);
+    }
+    /* not ours: the handler before takes it, when the instruction faults again */
+    sigaction(sig, sig == SIGSEGV ? &stack_previous_segv : &stack_previous_bus, NULL);
+}
+
+/* For the thread that calls it: its own spare stack. The handler is installed by the first call,
+   in `main`, before any other thread. */
+static void watch_stack(void) {
+    static int watching;
+    char here;
+    uintptr_t top = (uintptr_t)&here;
+    struct rlimit limit;
+    size_t size = 8u << 20;
+    if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY &&
+        limit.rlim_cur < (rlim_t)(top / 2)) {
+        size = (size_t)limit.rlim_cur;
+    }
+    stack_spare = malloc(STACK_SPARE);
+    if (!stack_spare) return;
+    stack_t spare;
+    memset(&spare, 0, sizeof spare);
+    spare.ss_sp = stack_spare;
+    spare.ss_size = STACK_SPARE;
+    if (sigaltstack(&spare, NULL) != 0) {
+        free(stack_spare);
+        stack_spare = NULL;
+        return;
+    }
+    /* the stack, and below it as far as a large local array reaches (the addresses given by mmap
+       start lower) */
+    stack_span = top > ((size_t)1 << 30) && size < top - ((size_t)1 << 30) ? size + ((size_t)1 << 30) : top;
+    stack_top = top;
+    if (watching) return;
+    watching = 1;
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = stack_fault;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, &stack_previous_segv);
+    sigaction(SIGBUS, &action, &stack_previous_bus); /* macOS may give this one */
+}
+
+/* At the end of a thread of std.thread: its spare stack goes back. */
+static void unwatch_stack(void) {
+    if (!stack_spare) return;
+    stack_top = 0;
+    stack_t off;
+    memset(&off, 0, sizeof off);
+    off.ss_flags = SS_DISABLE;
+    sigaltstack(&off, NULL);
+    free(stack_spare);
+    stack_spare = NULL;
+}
+#else
+static void watch_stack(void) {}
+static void unwatch_stack(void) {}
+#endif
+
 static int sosu_argc;
 static char **sosu_argv;
 
+/* Called first by `main` (and the `main` of the tests). */
 void sosu_set_args(int argc, char **argv) {
     sosu_argc = argc;
     sosu_argv = argv;
+    watch_stack();
 }
 
 #ifdef _WIN32

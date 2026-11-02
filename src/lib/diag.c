@@ -5,6 +5,15 @@
 
 static Diagnostic *report(DiagList *list, Severity severity, const char *code, const SourceFile *file,
                           size_t offset, size_t length, const char *fmt, va_list args) {
+    if (severity == SEVERITY_ERROR) list->error_count++;
+    size_t in_file = 0;
+    for (size_t i = 0; i < list->count && in_file < DIAG_MAX_PER_FILE; i++) {
+        if (list->items[i].file == file) in_file++;
+    }
+    if (in_file >= DIAG_MAX_PER_FILE) {
+        list->dropped++;
+        return NULL;
+    }
     Diagnostic diag = {0};
     diag.severity = severity;
     diag.code = code;
@@ -14,7 +23,6 @@ static Diagnostic *report(DiagList *list, Severity severity, const char *code, c
     diag.message = sosu_vformat(fmt, args);
 
     SOSU_VEC_PUSH(list, diag);
-    if (severity == SEVERITY_ERROR) list->error_count++;
     return &list->items[list->count - 1];
 }
 
@@ -100,6 +108,10 @@ void diag_print_text(const DiagList *list, FILE *out) {
     for (size_t i = 0; i < list->count; i++) {
         print_text(&list->items[i], out);
         fputc('\n', out);
+    }
+    if (list->dropped) {
+        fprintf(out, "note: %zu more diagnostic%s not shown (at most %d per file)\n\n", list->dropped,
+                list->dropped == 1 ? "" : "s", DIAG_MAX_PER_FILE);
     }
 }
 
