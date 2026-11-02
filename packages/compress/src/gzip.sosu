@@ -77,6 +77,11 @@ usize? skip_header(ui8[] data, usize at) {
 
 // The bytes held by the gzip file `data`, in `arena`.
 pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
+    return decompress_limit(arena, data, deflate.MAX_SIZE as usize);
+}
+
+// As `decompress`, with at most `limit` bytes for all the members (`TooLarge` beyond).
+pub ui8[]!deflate.CompressError decompress_limit(Arena* arena, ui8[] data, usize limit) {
     mut checksum.Crc32Table table = checksum.crc32_table();
     mut ui8[] all = arena.alloc_slice(ui8, 0);
     mut usize len = 0;  // the bytes of `all` filled; it doubles, so that many members stay linear
@@ -88,7 +93,7 @@ pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
                 return err(deflate.CompressError.Damaged);
             },
         };
-        deflate.Inflated done = try deflate.inflate_stream(arena, data[start..data.len]);
+        deflate.Inflated done = try deflate.inflate_stream_limit(arena, data[start..data.len], limit - len);
         usize end = start + done.read;
         if (end + 8 > data.len) {
             return err(deflate.CompressError.Damaged);
@@ -102,7 +107,7 @@ pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data) {
             len = all.len;
         } else {
             if (len + done.bytes.len > all.len) {
-                mut ui8[] grown = arena.alloc_slice(ui8, max(all.len * 2, len + done.bytes.len));
+                mut ui8[] grown = arena.alloc_slice(ui8, min(max(all.len * 2, len + done.bytes.len), limit));
                 for (usize i in 0..len) {
                     grown[i] = all[i];
                 }
