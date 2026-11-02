@@ -404,7 +404,7 @@ static Type *call_generic(Body *b, Expr *e, FnInfo *fn, Name name, Type *expecte
         check_args_loosely(b, e);
         return sema_error_type(b);
     }
-    bool *checked = calloc(count + 1, sizeof *checked);
+    bool *checked = sosu_calloc(count + 1, sizeof *checked);
     for (int pass = 0; pass < 2; pass++) {
         for (size_t i = 0; i < count; i++) {
             if (checked[i]) continue;

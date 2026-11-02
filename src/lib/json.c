@@ -47,7 +47,7 @@ static int hex_digit(char c) {
 static long read_hex4(Reader *r) {
     if (r->length - r->pos < 4) return -1;
     long value = 0;
-    for (int i = 0; i < 4; i++) {
+    for (size_t i = 0; i < 4; i++) {
         int d = hex_digit(r->text[r->pos + i]);
         if (d < 0) return -1;
         value = value * 16 + d;

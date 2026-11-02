@@ -1,0 +1,23 @@
+// A recursion without end in a thread of std.thread (review R3): the program stops with a message
+// and the code 101, as in the thread that started it (lib/runtime/sosu_rt.c).
+import std.io;
+import std.thread;
+
+i32 down(i32 n) {
+    if (n < 0) {
+        return 0;
+    }
+    return down(n + 1) + 1;
+}
+
+i32 work(Arena* own, i32 start) {
+    return down(start);
+}
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(4096);
+    defer arena.free();
+    auto t = thread.spawn(&arena, work, 0);
+    io.print("joined: {}", t.join());
+    return 0;
+}

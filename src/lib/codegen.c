@@ -267,6 +267,16 @@ static TypeEntry *find_type(Gen *g, const Type *type) {
     return index ? &g->types.items[*index] : NULL;
 }
 
+/* The entry of a type that c_type already named: there is always one. */
+static TypeEntry *named_type(Gen *g, const Type *type) {
+    TypeEntry *entry = find_type(g, type);
+    if (!entry) {
+        fputs("sosuc: internal error: a type without its C name\n", stderr);
+        abort();
+    }
+    return entry;
+}
+
 /* The C name of a struct-like type, with its forward typedef (no definition). */
 static const char *struct_name(Gen *g, const Type *type) {
     TypeEntry *entry = find_type(g, type);
@@ -291,11 +301,11 @@ static const char *struct_name(Gen *g, const Type *type) {
         buf_printf(&g->fwd, "typedef %s (*%s)(%s);\n", c_type(g, type->as.fn.ret), name,
                    params.items ? params.items : "void");
         free(params.items);
-        find_type(g, type)->defined = true;
+        named_type(g, type)->defined = true;
     } else {
         buf_printf(&g->fwd, "typedef struct %s %s;\n", name, name);
     }
-    return find_type(g, type)->name;
+    return named_type(g, type)->name;
 }
 
 static void define_type(Gen *g, const Type *type);
@@ -420,7 +430,7 @@ static void define_type(Gen *g, const Type *type) {
         return;
     }
     const char *name = c_type(g, type);
-    TypeEntry *entry = find_type(g, type);
+    TypeEntry *entry = named_type(g, type);
     if (entry->defined) return;
     entry->defined = true;
 
@@ -523,7 +533,7 @@ static void copy_part(Gen *g, Buf *out, const char *indent, const Type *type, co
 /* The C function that copies a value of `type` (not `Arena`), generated on first use. */
 static const char *copy_function(Gen *g, const Type *type) {
     const char *ctype = value_type(g, type);
-    if (find_type(g, type)->copier) return find_type(g, type)->copier;
+    if (named_type(g, type)->copier) return named_type(g, type)->copier;
     Buf body = {0};
     switch (type->tag) {
     case T_STRUCT: {
@@ -581,7 +591,7 @@ static const char *copy_function(Gen *g, const Type *type) {
     buf_printf(&g->code, "static %s %s(const %s *v, const char *loc) {\n    %s r = *v;\n%s    return r;\n}\n\n", ctype, name,
                ctype, ctype, body.items ? body.items : "");
     free(body.items);
-    find_type(g, type)->copier = name;
+    named_type(g, type)->copier = name;
     return name;
 }
 
@@ -599,9 +609,7 @@ static void emit(Fn *f, const char *fmt, ...) {
 }
 
 static void emit_line(Fn *f, size_t offset) {
-    size_t line, column;
-    source_position(&f->unit->file, offset, &line, &column);
-    buf_printf(f->out, "#line %zu \"", line);
+    buf_printf(f->out, "#line %zu \"", source_line_of(&f->unit->file, offset));
     for (const char *c = f->unit->file.path; *c; c++) {
         if (*c == '\\' || *c == '"') buf_puts(f->out, "\\");
         buf_add(f->out, c, 1);
@@ -2649,7 +2657,7 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
                 count++;
             }
         }
-        buf_printf(&main_code, "int main(void) {\n    int failed = 0;\n%s    return sosu_test_summary(%d, failed);\n}\n",
+        buf_printf(&main_code, "int main(void) {\n    sosu_set_args(0, NULL);\n    int failed = 0;\n%s    return sosu_test_summary(%d, failed);\n}\n",
                    runs.items ? runs.items : "", count);
         free(runs.items);
     }

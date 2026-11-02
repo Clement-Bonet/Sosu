@@ -506,6 +506,12 @@ static CType *strip(CType *t) {
     return t;
 }
 
+/* True if `t`, through its typedefs, is a type of `kind`. */
+static bool strips_to(CType *t, CKind kind) {
+    CType *s = strip(t);
+    return s && s->kind == kind;
+}
+
 static const Tok *cur(P *p) { return &p->toks.items[p->pos]; }
 static const Tok *at(P *p, size_t k) {
     size_t i = p->pos + k;
@@ -916,6 +922,7 @@ static bool eval_unary(P *p, Value *v) {
         Value inner;
         if (!eval_unary(p, &inner)) return false;
         CType *s = strip(type);
+        if (!s) return false;
         if (s->kind == CK_ENUM) {
             *v = convert_int(&inner, 32, false);
             return true;
@@ -1610,7 +1617,7 @@ static void parse_declaration(P *p) {
         skip_ignored(p);
         if (name && !p->failed) {
             if (is_typedef) add_typedef(p, name, type);
-            else if (strip(type) && strip(type)->kind == CK_FUNC) add_function(p, name, type, is_static);
+            else if (strips_to(type, CK_FUNC)) add_function(p, name, type, is_static);
         }
         if (is(p, "=")) { /* a variable with a value */
             skip_declaration(p);
@@ -1795,7 +1802,7 @@ static char *sosu_type(P *p, CType *t, int position, TypeNote *note) {
         CType *inner = strip(s->inner);
         if (inner && inner->kind == CK_FUNC) return sosu_type(p, s->inner, 0, note); /* a function pointer */
         if (inner && inner->kind == CK_RECORD && !inner->record->own) return sosu_strdup("ui8*"); /* FILE*... */
-        if (inner && inner->kind == CK_POINTER && strip(inner->inner) && strip(inner->inner)->kind == CK_FUNC) {
+        if (inner && inner->kind == CK_POINTER && strips_to(inner->inner, CK_FUNC)) {
             return sosu_strdup("ui8*"); /* a pointer to a function pointer */
         }
         if (inner && (inner->kind == CK_UNKNOWN || inner->kind == CK_FUNC)) return sosu_strdup("ui8*");

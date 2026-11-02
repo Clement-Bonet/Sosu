@@ -79,9 +79,7 @@ static size_t line_start(const Fmt *f, size_t offset) {
 }
 
 static size_t line_number(const Fmt *f, size_t offset) {
-    size_t line, column;
-    source_position(f->file, offset, &line, &column);
-    return line;
+    return source_line_of(f->file, offset);
 }
 
 /* True if the line before the one of `offset` is empty in the source. */
@@ -948,20 +946,17 @@ static char *format_ui(const SourceFile *file, DiagList *diags) {
     size_t last_line = 0;
     size_t i = 0;
     while (i < count) {
-        size_t line, column;
-        source_position(file, pieces[i].offset, &line, &column);
+        size_t line = source_line_of(file, pieces[i].offset);
         if (last_line > 0 && line > last_line + 1) put_n(&out, "\n", 1);  /* one blank line at most */
         size_t end = i;  /* the pieces of this line */
         for (;;) {
             if (end >= count) break;
-            size_t piece_line, piece_column;
-            source_position(file, pieces[end].offset, &piece_line, &piece_column);
-            if (piece_line != line) break;
+            if (source_line_of(file, pieces[end].offset) != line) break;
             end++;
         }
-        int closing = 0;  /* the brackets that close at the start of the line are outdented */
+        size_t closing = 0;  /* the brackets that close at the start of the line are outdented */
         while (i + closing < end && ui_closes(pieces[i + closing].kind)) closing++;
-        int indent = depth - closing > 0 ? depth - closing : 0;
+        int indent = depth > (int)closing ? depth - (int)closing : 0;
         for (int k = 0; k < indent; k++) put_n(&out, "    ", 4);
         for (size_t k = i; k < end; k++) {
             if (k > i) {

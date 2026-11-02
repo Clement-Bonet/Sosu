@@ -39,6 +39,14 @@ jobs:
           sudo ldconfig
       - name: Build and test
         run: make test
+      # Stricter warnings (review R6), with gcc: -Wnull-dereference needs -O2, which sees through
+      # the calls. They are not in CFLAGS, since clang words its own -Wconversion differently.
+      - name: Stricter warnings
+        if: matrix.cc == 'gcc'
+        run: |
+          for f in src/lib/*.c src/sosuc/main.c; do
+            gcc -std=c99 -O2 -Isrc/lib -Wall -Wextra -pedantic -Wshadow -Wconversion -Wnull-dereference -Werror -c "$f" -o /dev/null
+          done
       # The time of sosuc on programs of 5 000 to 80 000 lines, in the summary of the job
       # (work 5 of spec 13.1); it fails if the time grows much faster than the program.
       - name: The time of sosuc on large programs
