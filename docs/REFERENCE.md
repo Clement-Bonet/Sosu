@@ -2184,8 +2184,16 @@ The deflate stream (RFC 1951), without container. `inflate` reads every stream (
 pub enum CompressError {
     Damaged,  // not a valid stream, or one that was cut
     WrongChecksum,  // the stream was read, but its checksum is not that of what it holds
-    TooLarge,  // more bytes than the room given (`inflate_into`)
+    TooLarge,  // more bytes than the room given (`inflate_into`), or than the limit (`MAX_SIZE`)
 }
+```
+
+### `MAX_SIZE`
+
+The most bytes `inflate`, `zlib.decompress` and `gzip.decompress` give (1 GB), so that a small hostile stream cannot ask for more (deflate gives up to 1 032 bytes a byte); the `_limit` functions take another.
+
+```sosu
+pub i64 MAX_SIZE = 1073741824
 ```
 
 ### `message`
@@ -2215,6 +2223,14 @@ Inflates the stream at the start of `data`, in `arena`; what follows it is left.
 pub Inflated!CompressError inflate_stream(Arena* arena, ui8[] data)
 ```
 
+### `inflate_stream_limit`
+
+As `inflate_stream`, with at most `limit` bytes (`TooLarge` beyond).
+
+```sosu
+pub Inflated!CompressError inflate_stream_limit(Arena* arena, ui8[] data, usize limit)
+```
+
 ### `inflate_stream_into`
 
 Inflates the stream at the start of `data` into `out`, which does not grow (`TooLarge`).
@@ -2229,6 +2245,14 @@ The bytes of the deflate stream `data`, in `arena`.
 
 ```sosu
 pub ui8[]!CompressError inflate(Arena* arena, ui8[] data)
+```
+
+### `inflate_limit`
+
+As `inflate`, with at most `limit` bytes (`TooLarge` beyond).
+
+```sosu
+pub ui8[]!CompressError inflate_limit(Arena* arena, ui8[] data, usize limit)
 ```
 
 ### `inflate_into`
@@ -2283,6 +2307,14 @@ The bytes held by the gzip file `data`, in `arena`.
 pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data)
 ```
 
+### `decompress_limit`
+
+As `decompress`, with at most `limit` bytes for all the members (`TooLarge` beyond).
+
+```sosu
+pub ui8[]!deflate.CompressError decompress_limit(Arena* arena, ui8[] data, usize limit)
+```
+
 ## compress.zlib
 
 The zlib container (RFC 1950): two bytes of header, a deflate stream, and the Adler-32 of what it holds, checked when read. PNG images hold their pixels so.
@@ -2309,6 +2341,14 @@ The bytes held by the zlib container `data`, in `arena`.
 
 ```sosu
 pub ui8[]!deflate.CompressError decompress(Arena* arena, ui8[] data)
+```
+
+### `decompress_limit`
+
+As `decompress`, with at most `limit` bytes (`TooLarge` beyond).
+
+```sosu
+pub ui8[]!deflate.CompressError decompress_limit(Arena* arena, ui8[] data, usize limit)
 ```
 
 ### `decompress_into`
