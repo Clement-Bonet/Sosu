@@ -16,6 +16,8 @@ pub struct Config {
     pub TitleBar*? title_bar = none;
     // The icon of the window, for the system: its task bar, Alt+Tab, its title bar.
     pub image.Image? icon = none;
+    // On a phone or a tablet, the window stays landscape, whichever way the device is turned.
+    pub bool landscape = false;
 }
 
 // A title bar drawn by the program: the system asks it, point by point, between two frames,
@@ -403,6 +405,9 @@ pub i32 run(Config config, Handler* handler) uses io {
     }
     defer sdl.quit();
 
+    if (config.landscape) {
+        sdl.landscape_only(&arena);
+    }
     sdl_c.SDL_Window* window = match (sdl.create_window(&arena, config.title, config.width, config.height, !wants_bar)) {
         some(created) => created,
         none => {
@@ -431,7 +436,13 @@ pub i32 run(Config config, Handler* handler) uses io {
         },
         none => { },
     }
-    sdl.start_text_input(window);
+    mut bool on_screen = false;
+    unsafe {
+        on_screen = sdl_c.SDL_HasScreenKeyboardSupport();
+    }
+    if (!on_screen) {  // a phone: its keyboard would cover the window; `show_keyboard` shows it
+        sdl.start_text_input(window);
+    }
     sdl_c.SDL_Renderer* renderer = match (sdl.create_renderer(window)) {
         some(created) => created,
         none => {

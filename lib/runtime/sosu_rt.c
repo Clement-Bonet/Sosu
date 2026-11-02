@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -305,7 +306,65 @@ static SOSU_THREAD struct {
 } quarantine[SOSU_QUARANTINE];
 static SOSU_THREAD size_t quarantine_next;
 
+/* Such a fault on a block of the quarantine says why it stops the program, with the code of the
+   other errors (101); any other fault goes to the handler there was before. */
+static const char freed_message[] = "sosu: a pointer into an arena was used after the free() of the arena (spec 7.7)\n";
+
+static bool in_quarantine(uintptr_t at) {
+    for (size_t i = 0; i < SOSU_QUARANTINE; i++) {
+        uintptr_t from = (uintptr_t)quarantine[i].memory;
+        if (from && at >= from && at - from < quarantine[i].size) return true;
+    }
+    return false;
+}
+
+#ifdef _WIN32
+static LONG CALLBACK freed_fault(EXCEPTION_POINTERS *info) {
+    EXCEPTION_RECORD *r = info->ExceptionRecord;
+    if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2 ||
+        !in_quarantine((uintptr_t)r->ExceptionInformation[1]))
+        return EXCEPTION_CONTINUE_SEARCH;
+    fflush(stdout);
+    fputs(freed_message, stderr);
+    fflush(stderr);
+    ExitProcess(101);
+}
+
+static void watch_faults(void) {
+    static volatile LONG watching;
+    if (InterlockedExchange(&watching, 1) == 0) AddVectoredExceptionHandler(1, freed_fault);
+}
+#else
+static struct sigaction previous_segv, previous_bus;
+
+static void freed_fault(int sig, siginfo_t *info, void *context) {
+    (void)context;
+    if (in_quarantine((uintptr_t)info->si_addr)) {
+        fflush(stdout); /* not safe in a handler in general, but the program stops here anyway */
+        ssize_t written = write(2, freed_message, sizeof freed_message - 1);
+        (void)written;
+        _exit(101);
+    }
+    /* not ours: the handler before takes it, when the instruction faults again */
+    sigaction(sig, sig == SIGSEGV ? &previous_segv : &previous_bus, NULL);
+}
+
+static void watch_faults(void) {
+    static volatile int watching;
+    if (watching) return;
+    watching = 1;
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = freed_fault;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, &previous_segv);
+    sigaction(SIGBUS, &action, &previous_bus); /* macOS gives this one for unreadable pages */
+}
+#endif
+
 static void *block_alloc(size_t size) {
+    watch_faults();
 #ifdef _WIN32
     return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else

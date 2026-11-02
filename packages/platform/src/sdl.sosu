@@ -413,6 +413,15 @@ pub void quit() uses io {
 
 // A resizable window, or none if SDL cannot create it. Without `decorated`, the system draws
 // no title bar and no border: the program draws its own.
+// Keeps the windows created after it landscape on a phone or a tablet (SDL_HINT_ORIENTATIONS).
+pub void landscape_only(Arena* arena) uses io {
+    ui8* name = sdl_c.SDL_HINT_ORIENTATIONS.to_cstr(arena);
+    ui8* value = "LandscapeLeft LandscapeRight".to_cstr(arena);
+    unsafe {
+        sdl_c.SDL_SetHint(name, value);
+    }
+}
+
 pub sdl_c.SDL_Window*? create_window(Arena* arena, str title, i32 width, i32 height, bool decorated) uses io {
     CString* text = arena.alloc(CString);
     usize length = min(title.len, 255);

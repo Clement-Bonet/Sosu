@@ -20,13 +20,23 @@ import beatbox.screen;
 import beatbox.sounds;
 import beatbox.checks;  // the tests of checks.sosu, which `sosuc test` finds from here
 
+// The height of the window at scale 1, from its title bar to the line of help, with 7 tracks;
+// each other track adds a row.
+f32 TALL = 620.0;
+f32 ROW = 40.0;
+
 class App : app.Handler, app.TitleBar {
     mut widgets.Ui ui;
     machine.Machine* m;
     engine.Engine*? sound;
+    // The scale of the display, and the height the safe area takes from the window (a phone).
+    mut f32 display_scale;
+    mut f32 bars;
 
     void init(machine.Machine* m, engine.Engine*? sound) {
         ui = widgets.Ui{ };
+        display_scale = 1.0;
+        bars = 0.0;
         self.m = m;
         self.sound = sound;
     }
@@ -67,12 +77,20 @@ class App : app.Handler, app.TitleBar {
                 ui.mouse_move(x, y);
                 ui.mouse_button(false);
             },
+            // a finger: the system also gives it as the mouse, which `ui` follows; the lists become dialogs
+            Touch(finger, x, y, phase) => {
+                ui.touch_screen = true;
+            },
+            SafeAreaChanged(left, top, right, bottom) => {  // a phone: below its status bar and notch
+                ui.safe_area(left, top, right, bottom);
+                bars = top + bottom;
+            },
             Wheel(x, y) => {
                 ui.scroll_wheel(y);
                 ui.scroll_wheel_x(x);
             },
             ScaleChanged(scale) => {
-                ui.scale = scale;
+                display_scale = scale;
             },
             _ => { },
         }
@@ -112,6 +130,9 @@ class App : app.Handler, app.TitleBar {
         m.tempo_text.set(text.format_i64(&scratch, m.bpm));
         m.tempo_text.append(" BPM");
         ui.theme = some(look.Night());
+        // the whole window in the height of the screen: smaller on a phone, whose screen is low
+        f32 tall = TALL + (m.tracks as f32 - 7.0) * ROW;
+        ui.scale = min(display_scale, (surface.height as f32 - bars) / tall);
         mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
         screen.Beatbox(&f, m);
         f.finish();
@@ -200,7 +221,7 @@ i32 main() uses io {
     load_font(&arena, handler);
     widgets.Window window = screen.BeatboxConfig();
     app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
-    i32 code = app.run(app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar }, handler as app.Handler*);
+    i32 code = app.run(app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar, landscape: true }, handler as app.Handler*);
     sound.close();
     return code;
 }

@@ -561,6 +561,7 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
         callee->target = "arena.free";
         if (count) sema_error_expr(b, "E0336", callee, "`free` takes no argument");
         check_args_loosely(b, e);
+        if (callee->kind == EXPR_FIELD) sema_arena_freed(b, callee->as.field.object, e->offset);
         return sema_void_type(b);
     }
     bool is_alloc = sema_name_is(name, "alloc");

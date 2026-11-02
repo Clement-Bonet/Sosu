@@ -883,6 +883,8 @@ static bool is_send(const Type *type) {
     }
 }
 
+bool sema_is_send(const Type *type) { return is_send(type); }
+
 static uint32_t own_constraints(const Type *type);
 
 static uint32_t constraints_of(const Type *type) {
@@ -1756,6 +1758,12 @@ Diagnostic *sema_verror(Sema *s, const Unit *unit, const char *code, size_t offs
                         const char *fmt, va_list args) {
     if (s->quiet) return NULL;
     return diag_verror(&s->program->diags, code, &unit->file, offset, length, fmt, args);
+}
+
+Diagnostic *sema_vwarning(Sema *s, const Unit *unit, const char *code, size_t offset, size_t length,
+                          const char *fmt, va_list args) {
+    if (s->quiet) return NULL;
+    return diag_vwarning(&s->program->diags, code, &unit->file, offset, length, fmt, args);
 }
 
 bool sema_name_eq(Name a, Name b) { return name_eq(a, b); }

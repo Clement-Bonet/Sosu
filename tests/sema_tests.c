@@ -587,6 +587,38 @@ static void test_dangling(void) {
     expect_codes("struct P { mut i32 v; i32* at() { return &v; } }", "");
 }
 
+/* Spec §6.1, stage 1: memory of a local arena used after its `free()` (E0372, a warning for now). */
+static void test_freed_arena(void) {
+    const char *head = "struct N { i32 v; }\nstruct H { N* n; }\n";
+    char text[512];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "mut Arena a = Arena.new(64); N* p = a.alloc(N); a.free(); return p.v;", "E0372" },
+        { "mut Arena a = Arena.new(64); N* p = a.alloc(N); N* q = p; a.free(); return q.v;", "E0372" },
+        { "mut Arena a = Arena.new(64); N[] s = a.alloc_slice(N, 2); a.free(); return s[0].v;", "E0372" },
+        { "mut Arena a = Arena.new(64); H h = H{ n: a.alloc(N) }; a.free(); return h.n.v;", "E0372" },
+        { "mut Arena a = Arena.new(64); N*? o = a.try_alloc(N); a.free(); N*? r = o; return 0;", "E0372" },
+        { "mut Arena a = Arena.new(64); N* p = a.alloc(N); if (c) { a.free(); } return p.v;", "E0372" },
+        /* a `defer` frees the arena when its block ends */
+        { "mut Arena o = Arena.new(64); mut N* p = o.alloc(N);\n"
+          "{ mut Arena a = Arena.new(64); defer a.free(); p = a.alloc(N); }\nreturn p.v;", "E0372" },
+        /* used before the free, given other memory, read in a value, or freed later */
+        { "mut Arena a = Arena.new(64); N* p = a.alloc(N); i32 v = p.v; a.free(); return v;", "" },
+        { "mut Arena a = Arena.new(64); mut Arena o = Arena.new(64); mut N* p = a.alloc(N); a.free(); "
+          "p = o.alloc(N); return p.v;", "" },
+        { "mut Arena a = Arena.new(64); defer a.free(); N* p = a.alloc(N); return p.v;", "" },
+        { "mut Arena a = Arena.new(64); mut Arena o = Arena.new(64); N* p = o.alloc(N); a.free(); return p.v;", "" },
+        /* `unsafe` turns the rule off */
+        { "mut Arena a = Arena.new(64); N* p = a.alloc(N); a.free(); unsafe { return p.v; }", "" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%si32 f(bool c) {\n%s\n}\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
+    expect_help("i32 f() { mut Arena a = Arena.new(64); i32* p = a.alloc(i32); a.free(); return *p; }", "E0372",
+                "use it before the `free()`, or free the arena later; this warning becomes an error in a later "
+                "version (spec §6.1)");
+}
+
 static void test_lambdas(void) {
     const char *twice = "i32 twice(fn(i32) -> i32 f, i32 x) { return f(f(x)); }\n";
     char text[1024];
@@ -641,6 +673,7 @@ int main(void) {
     test_generics();
     test_lambdas();
     test_dangling();
+    test_freed_arena();
     test_constants();
     test_packages();
     return test_summary("sema tests");
