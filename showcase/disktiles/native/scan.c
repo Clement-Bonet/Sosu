@@ -1,6 +1,9 @@
 // What DiskTiles asks of the system and `std.fs` does not say: the size of an entry without
 // following its link. A link (symbolic link, junction) is reported as `other` and never entered,
 // so that a link to a parent folder cannot make the scan loop, and a size is not counted twice.
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L /* lstat: -std=c99 hides it (glibc) */
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
