@@ -1058,7 +1058,7 @@ static Type *check_struct_literal(Body *b, Expr *e, Type *expected) {
         return sema_error_type(b);
     }
     TypeInfo *info = type->as.info;
-    bool *given = calloc(info->field_count + 1, sizeof *given);
+    bool *given = sosu_calloc(info->field_count + 1, sizeof *given);
     for (size_t i = 0; i < count; i++) {
         Name name = inits[i].name;
         size_t index = info->field_count;
@@ -1123,7 +1123,7 @@ static Type *check_match(Body *b, Expr *e, Type *expected, bool statement) {
         sema_release_names(&n);
     }
     size_t case_count = info ? info->variant_count : cases.count;
-    bool *covered = calloc(case_count + 1, sizeof *covered);
+    bool *covered = sosu_calloc(case_count + 1, sizeof *covered);
     bool wildcard = false;
     bool known = info || cases.count > 0;
     Type *result = statement ? sema_void_type(b) : expected;

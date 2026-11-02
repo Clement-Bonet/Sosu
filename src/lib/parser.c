@@ -114,10 +114,7 @@ static bool is_assign_op(TokenKind kind) {
 }
 
 static bool on_later_line(const Parser *p, const Token *before, const Token *after) {
-    size_t line_before, line_after, column;
-    source_position(p->file, before->offset, &line_before, &column);
-    source_position(p->file, after->offset, &line_after, &column);
-    return line_after > line_before;
+    return source_line_of(p->file, after->offset) > source_line_of(p->file, before->offset);
 }
 
 /* Reports "expected <what>, found <current token>". `after_expression` is set where an

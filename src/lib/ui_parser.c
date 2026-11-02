@@ -1536,9 +1536,7 @@ static void ui_parse_item(Parser *p, StmtVec *out) {
 }
 
 static size_t line_of(const Parser *p, size_t offset) {
-    size_t line, column;
-    source_position(p->file, offset, &line, &column);
-    return line;
+    return source_line_of(p->file, offset);
 }
 
 /* After an error in an item: skip to the next line, where the next item starts. */

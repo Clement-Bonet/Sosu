@@ -153,6 +153,23 @@ static void test_freed_arena(const char *sosuc) {
     free(said);
 }
 
+/* A recursion without end stops the program with a message, and the code 101 (review R3), in the
+   thread that started it and in one of std.thread. */
+static void test_stack_overflow(const char *sosuc) {
+    static const char *const programs[] = { "stack_overflow", "thread_overflow" };
+    for (size_t i = 0; i < sizeof programs / sizeof programs[0]; i++) {
+        const char *name = programs[i];
+        char command[1024];
+        snprintf(command, sizeof command, "%s run tests/programs/%s > build/%s.out 2> build/%s.err", sosuc, name, name, name);
+        CHECK(run(command) == 101, "run %s: the overflow does not stop with the code 101", name);
+        char path[256];
+        snprintf(path, sizeof path, "build/%s.err", name);
+        char *said = read_text(path);
+        CHECK(said && strstr(said, "sosu: stack overflow"), "run %s: the stop does not say why (see %s)", name, path);
+        free(said);
+    }
+}
+
 static void test_bindgen(const char *sosuc) {
     char command[1024];
     snprintf(command, sizeof command,
@@ -261,6 +278,7 @@ int main(int argc, char **argv) {
     test_library(argv[1]);
     test_bindgen(argv[1]);
     test_freed_arena(argv[1]);
+    test_stack_overflow(argv[1]);
     test_package(argv[1]);
     test_android(argv[1]);
 

@@ -1,0 +1,15 @@
+// A recursion without end (review R3): the program stops with a message and the code 101, instead
+// of a crash without a word (lib/runtime/sosu_rt.c).
+import std.io;
+
+i32 down(i32 n) {
+    if (n < 0) {
+        return 0;
+    }
+    return down(n + 1) + 1;
+}
+
+i32 main() uses io {
+    io.print("before");
+    return down(0);
+}

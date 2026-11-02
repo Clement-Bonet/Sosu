@@ -15,6 +15,12 @@ void *sosu_alloc(size_t size) {
     return ptr;
 }
 
+void *sosu_calloc(size_t count, size_t size) {
+    void *ptr = calloc(count ? count : 1, size ? size : 1);
+    if (!ptr) sosu_out_of_memory();
+    return ptr;
+}
+
 void *sosu_realloc(void *ptr, size_t size) {
     void *result = realloc(ptr, size ? size : 1);
     if (!result) sosu_out_of_memory();

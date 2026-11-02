@@ -176,9 +176,7 @@ static bool is_text_node(const SourceFile *file, const Token *token) {
 }
 
 static size_t line_at(const SourceFile *file, size_t offset) {
-    size_t line, column;
-    source_position(file, offset, &line, &column);
-    return line;
+    return source_line_of(file, offset);
 }
 
 /* The arguments of a node of a .ui.sosu file, from its `(` at `open`: its first value if it is a
@@ -222,7 +220,7 @@ static void add_call(I18nTemplate *t, const SourceFile *file, const Token *token
                      const char *path) {
     bool in = is_ident(file, &tokens[at], "tr_in") || is_ident(file, &tokens[at], "tr_plural_in");
     bool plural = is_ident(file, &tokens[at], "tr_plural") || is_ident(file, &tokens[at], "tr_plural_in");
-    size_t needed = 1 + (in ? 1 : 0) + (plural ? 1 : 0); /* literal texts in a row */
+    size_t needed = 1 + (size_t)in + (size_t)plural; /* literal texts in a row */
     const Token *strings[3];
     size_t i = at + 2;
     for (size_t k = 0; k < needed; k++) {

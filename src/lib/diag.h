@@ -20,14 +20,20 @@ typedef struct {
     size_t length;
 } Diagnostic;
 
+/* A file keeps its first diagnostics only: past them, an error is counted but not kept, so that a
+   file with an error every few characters costs no more than one with a few (review R2). */
+#define DIAG_MAX_PER_FILE 100
+
 typedef struct {
     Diagnostic *items;
     size_t count;
     size_t cap;
-    size_t error_count;
+    size_t error_count; /* also the errors not kept */
+    size_t dropped;     /* diagnostics not kept, past DIAG_MAX_PER_FILE in their file */
 } DiagList;
 
-/* Reports an error. The returned pointer stays valid until the next report. */
+/* Reports an error. The returned pointer stays valid until the next report; it is NULL when the
+   file already has DIAG_MAX_PER_FILE diagnostics. */
 Diagnostic *diag_error(DiagList *list, const char *code, const SourceFile *file,
                        size_t offset, size_t length, const char *fmt, ...);
 Diagnostic *diag_verror(DiagList *list, const char *code, const SourceFile *file,

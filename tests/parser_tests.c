@@ -953,7 +953,26 @@ static void test_ui_themes(void) {
     expect_ui_error("window W() {\n    Text(\"a\", style: c ? [A, B] : A)\n}\n", "E0215", 2, 26);
 }
 
+/* Review R2: an error every two characters, on one line. A file keeps its first diagnostics only,
+   and the others are counted, so that such a file is parsed and reported in linear time. */
+static void test_many_errors(void) {
+    size_t length = 20000;
+    char *text = malloc(length + 1);
+    if (!text) return;
+    memset(text, '-', length);
+    text[length] = '\0';
+    Parsed parsed;
+    parse_text(&parsed, text, false);
+    CHECK(parsed.diags.count == DIAG_MAX_PER_FILE, "%zu diagnostics kept, expected %d", parsed.diags.count,
+          DIAG_MAX_PER_FILE);
+    CHECK(parsed.diags.error_count > DIAG_MAX_PER_FILE && parsed.diags.dropped == parsed.diags.error_count - parsed.diags.count,
+          "%zu errors, %zu dropped", parsed.diags.error_count, parsed.diags.dropped);
+    parsed_free(&parsed);
+    free(text);
+}
+
 int main(void) {
+    test_many_errors();
     test_ui_files();
     test_ui_themes();
     test_ui_grids();

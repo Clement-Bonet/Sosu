@@ -8,7 +8,8 @@ good place to start.
 
 - English for code, comments, compiler messages and documentation.
 - The compiler is C99 with libc only: no other dependency. It must build without warnings with
-  MSVC (`/W4 /WX`), gcc and clang (`-Wall -Wextra -pedantic -Werror`).
+  MSVC (`/W4 /WX`), gcc and clang (`-Wall -Wextra -pedantic -Werror`). The CI also builds it with
+  gcc and `-O2 -Wshadow -Wconversion -Wnull-dereference`, also without warnings.
 - The language is described by [docs/SPEC.md](docs/SPEC.md): a change of the language changes the
   spec in the same pull request.
 - A new diagnostic gets a stable code, listed in [docs/errors.md](docs/errors.md) with an example,

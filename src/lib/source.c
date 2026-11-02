@@ -85,7 +85,7 @@ void source_free(SourceFile *file) {
     memset(file, 0, sizeof *file);
 }
 
-void source_position(const SourceFile *file, size_t offset, size_t *line, size_t *column) {
+size_t source_line_of(const SourceFile *file, size_t offset) {
     size_t lo = 0;
     size_t hi = file->line_count;
     while (hi - lo > 1) {
@@ -93,6 +93,11 @@ void source_position(const SourceFile *file, size_t offset, size_t *line, size_t
         if (file->line_starts[mid] <= offset) lo = mid;
         else hi = mid;
     }
+    return lo + 1;
+}
+
+void source_position(const SourceFile *file, size_t offset, size_t *line, size_t *column) {
+    size_t lo = source_line_of(file, offset) - 1;
     size_t start = file->line_starts[lo];
     if (lo == 0 && has_bom(file) && offset >= 3) start = 3;
 

@@ -36,9 +36,7 @@ static bool name_eq(Name a, Name b) {
 }
 
 static size_t line_of(const Unit *unit, size_t offset) {
-    size_t line, column;
-    source_position(&unit->file, offset, &line, &column);
-    return line;
+    return source_line_of(&unit->file, offset);
 }
 
 static void *arena_vec(Sema *s, void *items, size_t count, size_t size) {
