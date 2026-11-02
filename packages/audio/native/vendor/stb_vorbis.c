@@ -3126,9 +3126,9 @@ void inverse_mdct_naive(float *buffer, int n)
 
 static float *get_window(vorb *f, int len)
 {
-   len <<= 1;
-   if (len == f->blocksize_0) return f->window[0];
-   if (len == f->blocksize_1) return f->window[1];
+   // Sosu: compared with half of the block sizes (powers of 2), not shifted: `len` may be negative
+   if (len == f->blocksize_0 / 2) return f->window[0];
+   if (len == f->blocksize_1 / 2) return f->window[1];
    return NULL;
 }
 

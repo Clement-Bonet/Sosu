@@ -1,0 +1,298 @@
+// The state of the drum machine: up to 8 tracks of 16 steps, a tempo, a swing, and for each track an
+// instrument, a note, a level and a mute. There is no sound here: engine.sosu plays it, and
+// screen.ui.sosu shows and edits it.
+import std.random;
+import std.text;
+import ui.widgets;
+
+pub i64 MIN_BPM = 40;
+pub i64 MAX_BPM = 220;
+pub usize MAX_TRACKS = 8;
+
+// Icons of Font Awesome (assets/fa-solid-900.ttf), written as escapes since the font is the fallback.
+pub str ICON_PLAY = "\u{f144}";
+pub str ICON_PAUSE = "\u{f28b}";
+pub str ICON_PLUS = "\u{f067}";
+pub str ICON_TRASH = "\u{f2ed}";
+pub str ICON_SOUND = "\u{f028}";
+pub str ICON_MUTE = "\u{f6a9}\u{200a}";
+pub usize INSTRUMENTS = 16;
+pub i64 LOWEST = -12;  // the notes, in semitones from the one the instrument was made at
+pub i64 HIGHEST = 12;
+
+// What a track plays; the list of the dropdown of a track, in this order.
+pub enum Instrument {
+    Kick,
+    Snare,
+    Clap,
+    Hat,
+    OpenHat,
+    Tom,
+    Rim,
+    Cowbell,
+    Conga,
+    Crash,
+    Shaker,
+    Bass,
+    Pluck,
+    Lead,
+    Bell,
+    Zap,
+}
+
+pub Instrument[16] instruments() {
+    return [Kick, Snare, Clap, Hat, OpenHat, Tom, Rim, Cowbell, Conga, Crash, Shaker, Bass, Pluck, Lead, Bell, Zap];
+}
+
+// The place of an instrument in the list.
+pub usize index(Instrument instrument) {
+    Instrument[16] all = instruments();
+    for (usize i in 0..16) {
+        if (all[i] == instrument) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+pub Instrument instrument(usize at) {
+    return instruments()[at];
+}
+
+pub str instrument_name(usize instrument) {
+    str[16] names = ["Kick", "Snare", "Clap", "Hat", "Open hat", "Tom", "Rim", "Cowbell", "Conga", "Crash", "Shaker", "Bass", "Pluck", "Lead", "Bell", "Zap"];
+    return names[instrument];
+}
+
+// The name of a note: 0 is the C of the instrument (C3, 131 Hz for the tuned ones), 12 the C above.
+pub str note_name(i64 note)
+    requires note >= -12 && note <= 12
+{
+    str[25] names = ["C2", "C#2", "D2", "D#2", "E2", "F2", "F#2", "G2", "G#2", "A2", "A#2", "B2", "C3", "C#3", "D3", "D#3", "E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3", "C4"];
+    return names[(note + 12) as usize];
+}
+
+// The label of a key of the piano: the C's are named.
+pub str key_label(i32 key) {
+    if (key == 0) {
+        return "C2";
+    }
+    if (key == 12) {
+        return "C3";
+    }
+    if (key == 24) {
+        return "C4";
+    }
+    return " ";
+}
+
+// The key of the piano (0 is C2) of the white key `at`, from the left.
+pub i32 white_key(i32 at) {
+    i32[7] steps = [0, 2, 4, 5, 7, 9, 11];
+    return at / 7 * 12 + steps[(at % 7) as usize];
+}
+
+// The steps of every track of a preset, one text of 16 characters per track: `x` is a hit.
+// The tracks are the kick, snare, clap, hat, open hat, tom and a bass.
+str[7] preset_rows(i32 which) {
+    if (which == 0) {  // rock
+        return ["x.......x.x.....", "....x.......x...", "................", "x.x.x.x.x.x.x.x.", "...............x", "..............x.", "x.......x.x....."];
+    }
+    if (which == 1) {  // house
+        return ["x...x...x...x...", "................", "....x.......x...", "x.xxx.xxx.xxx.xx", "..x...x...x...x.", "................", ".x..x..x.x..x..x"];
+    }
+    if (which == 2) {  // hip hop
+        return ["x..x..x...x..x..", "....x.......x..x", "................", "x.x.x.x.x.x.x.xx", "..............x.", ".........x......", "x..x......x..x.."];
+    }
+    return ["x.....x...x.....", "....x..x.x..x...", "................", "xxxxxxxxxxxxxxxx", "......x.........", "..............xx", "x.....x.x......."];  // break
+}
+
+// How likely a step is to be played at random, by instrument.
+f64 chance(usize instrument, usize at) {
+    if (instrument == 0) {
+        return at % 4 == 0 ? 0.9 : 0.15;
+    }
+    if (instrument == 1) {
+        return at % 8 == 4 ? 0.9 : 0.1;
+    }
+    if (instrument == 2) {
+        return at % 8 == 4 ? 0.3 : 0.0;
+    }
+    if (instrument == 3) {
+        return 0.6;
+    }
+    if (instrument == 4) {
+        return at % 4 == 2 ? 0.4 : 0.0;
+    }
+    if (instrument == 10) {
+        return 0.35;
+    }
+    if (instrument == 11) {
+        return at % 4 == 0 ? 0.6 : 0.2;
+    }
+    return 0.12;
+}
+
+pub class Machine {
+    pub mut bool playing;
+    pub mut i64 bpm;
+    pub mut i64 swing;  // 0 to 50: the odd steps are late by that percent of a step
+    pub mut usize tracks;  // how many of the 8 are there
+    pub mut usize selected;  // the track whose note the piano sets
+    pub mut bool preview;  // asks the engine to play the selected track once, as it is
+    pub mut Instrument[8] inst;  // the instrument of each track
+    pub mut i64[8] note;  // from -12 to 12 semitones
+    pub mut i64[8] level;  // 0 to 100
+    pub mut bool[8] muted;
+    pub mut bool[128] on;  // 16 steps per track
+    pub mut i32 step;  // the step being played, -1 when stopped
+    pub mut widgets.TextBuffer tempo_text;
+    mut random.Rng rng;
+
+    void init(ui64 seed) {
+        playing = false;
+        swing = 0;
+        step = -1;
+        tempo_text = widgets.TextBuffer{ };
+        rng = random.seeded(seed);
+        inst = [Kick; 8];
+        note = [0; 8];
+        level = [80; 8];
+        muted = [false; 8];
+        on = [false; 128];
+        tracks = 0;
+        selected = 0;
+        preview = false;
+        bpm = 100;
+        load(0);
+    }
+
+    pub bool hit(usize track, usize at) {
+        return on[track * 16 + at];
+    }
+
+    pub void toggle(usize track, usize at) {
+        on[track * 16 + at] = !on[track * 16 + at];
+    }
+
+    pub void mute(usize track) {
+        muted[track] = !muted[track];
+    }
+
+    pub void toggle_play() {
+        playing = !playing;
+    }
+
+    pub void clear() {
+        on = [false; 128];
+    }
+
+    // The note of the selected track, from a key of the piano (0 is C2, 24 is C4), heard at once.
+    pub void pick_key(i32 key) {
+        note[selected] = min(HIGHEST, max(LOWEST, key as i64 - 12));
+        preview = true;
+    }
+
+    pub void select(usize track) {
+        selected = track;
+        preview = true;
+    }
+
+    // A silent track at the end, with the first instrument that no track plays yet.
+    pub void add_track() {
+        if (tracks >= MAX_TRACKS) {
+            return;
+        }
+        mut usize pick = 0;
+        for (usize i in 0..INSTRUMENTS) {
+            mut bool used = false;
+            for (usize t in 0..tracks) {
+                if (index(inst[t]) == i) {
+                    used = true;
+                }
+            }
+            if (!used) {
+                pick = i;
+                break;
+            }
+        }
+        inst[tracks] = instrument(pick);
+        note[tracks] = 0;
+        level[tracks] = 80;
+        muted[tracks] = false;
+        for (usize i in 0..16) {
+            on[tracks * 16 + i] = false;
+        }
+        tracks += 1;
+    }
+
+    // A track removed: the ones below it move up. The last track is kept.
+    pub void remove_track(usize track) {
+        if (tracks <= 1 || track >= tracks) {
+            return;
+        }
+        for (usize t in track..tracks - 1) {
+            inst[t] = inst[t + 1];
+            note[t] = note[t + 1];
+            level[t] = level[t + 1];
+            muted[t] = muted[t + 1];
+            for (usize i in 0..16) {
+                on[t * 16 + i] = on[(t + 1) * 16 + i];
+            }
+        }
+        tracks -= 1;
+        if (selected > track) {
+            selected -= 1;
+        }
+        selected = min(selected, tracks - 1);
+    }
+
+    // The steps of a preset (0 rock, 1 house, 2 hip hop, 3 break) with its tempo; the kit is the
+    // standard one again, with a bass.
+    pub void load(i32 which) {
+        str[7] rows = preset_rows(which);
+        usize[7] kit = [0, 1, 2, 3, 4, 5, 11];
+        i64[7] levels = [90, 80, 70, 55, 55, 75, 80];
+        i64[4] basses = [-7, -4, -9, -12];
+        tracks = 7;
+        for (usize t in 0..7) {
+            inst[t] = instrument(kit[t]);
+            note[t] = t == 6 ? basses[which as usize] : 0;
+            level[t] = levels[t];
+            muted[t] = false;
+            for (usize i in 0..16) {
+                on[t * 16 + i] = text.slice(rows[t], i, i + 1) == "x";
+            }
+        }
+        i64[4] tempos = [100, 124, 88, 140];
+        bpm = tempos[which as usize];
+    }
+
+    // A pattern at random, in the way of each instrument: the kick on the beat, the snare on the
+    // backbeat, the rest by chance.
+    pub void shuffle() {
+        for (usize t in 0..tracks) {
+            for (usize i in 0..16) {
+                on[t * 16 + i] = rng.unit() < chance(index(inst[t]), i);
+            }
+        }
+    }
+
+    // A number that changes with everything that changes the sound (not the playhead).
+    pub ui64 signature() {
+        mut ui64 h = 1469598103934665603;
+        h = wrapping_add(wrapping_mul(h, 1099511628211), wrapping_add(bpm as ui64, 1000));
+        h = wrapping_add(wrapping_mul(h, 1099511628211), swing as ui64);
+        h = wrapping_add(wrapping_mul(h, 1099511628211), tracks as ui64);
+        for (usize t in 0..tracks) {
+            h = wrapping_add(wrapping_mul(h, 1099511628211), level[t] as ui64);
+            h = wrapping_add(wrapping_mul(h, 1099511628211), muted[t] ? 1 : 0);
+            h = wrapping_add(wrapping_mul(h, 1099511628211), index(inst[t]) as ui64);
+            h = wrapping_add(wrapping_mul(h, 1099511628211), (note[t] + 100) as ui64);
+            for (usize i in 0..16) {
+                h = wrapping_add(wrapping_mul(h, 1099511628211), on[t * 16 + i] ? 1 : 0);
+            }
+        }
+        return h;
+    }
+}

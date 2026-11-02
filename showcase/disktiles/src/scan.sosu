@@ -1,0 +1,151 @@
+// disktiles.scan: the tree of a folder, read a little at each frame so that the window stays alive.
+// Every entry is a `Node` in one list; the children of a folder are next to each other.
+import std.fs;
+import std.vec;
+
+extern "C" {
+    i32 dt_entry(ui8* path, i64* size, i32* kind) uses io;
+    i32 dt_reveal(ui8* path) uses io;
+}
+
+// Shows an entry in the file manager, the folder that holds it open and the entry selected.
+pub bool reveal(Arena* arena, str path) uses io {
+    mut i32 error = 1;
+    unsafe {
+        error = dt_reveal(path.to_cstr(arena));
+    }
+    return error == 0;
+}
+
+pub struct Node {
+    pub str name;  // the whole path for the root
+    pub i32 parent;  // -1 for the root
+    pub mut i64 size;  // for a folder, what its entries hold so far
+    pub mut i32 first;  // the first child
+    pub mut i32 count;  // the number of children
+    pub bool dir;
+    pub mut bool read;  // a folder whose entries are listed
+}
+
+pub class Tree {
+    pub vec.Vec<Node>* nodes;
+    vec.Vec<i32>* pending;  // the folders to read, the last one first
+    Arena* arena;
+    pub mut i64 files;
+    pub mut i64 folders;
+    pub mut i64 unreadable;  // folders and files the system did not let us see
+    pub mut i64 skipped;  // the links, devices...
+    pub mut bool done;
+
+    void init(Arena* arena, str root) {
+        self.arena = arena;
+        nodes = vec.new<Node>(arena);
+        pending = vec.new<i32>(arena);
+        files = 0;
+        folders = 1;
+        unreadable = 0;
+        skipped = 0;
+        done = false;
+        nodes.push(Node{ name: root, parent: -1, size: 0, first: 0, count: 0, dir: true, read: false });
+        pending.push(0);
+    }
+
+    // The path of the node `index`.
+    pub str path_of(Arena* scratch, i32 index) {
+        Node* n = nodes.at(index as usize);
+        if (n.parent < 0) {
+            return n.name;
+        }
+        return fs.join(scratch, path_of(scratch, n.parent), n.name);
+    }
+
+    // Reads folders until about `budget` entries have been seen; true while there is more.
+    pub bool step(i32 budget) uses io {
+        mut i32 spent = 0;
+        while (spent < budget) {
+            match (pending.pop()) {
+                some(folder) => {
+                    spent += read_folder(folder) + 1;
+                },
+                none => {
+                    done = true;
+                    return false;
+                },
+            }
+        }
+        return true;
+    }
+
+    // Reads everything: for the tests and the snapshots.
+    pub void finish() uses io {
+        while (step(100000)) { }
+    }
+
+    // Lists the folder `index`, and adds its entries; the number of entries seen.
+    i32 read_folder(i32 index) uses io {
+        mut Arena scratch = Arena.new(8 * KB);
+        defer scratch.free();
+        str path = path_of(&scratch, index);
+        match (fs.list(arena, path)) {
+            ok(names) => {
+                i32 first = nodes.len() as i32;
+                mut i32 added = 0;
+                for (str name in names) {
+                    mut Arena one = Arena.new(1 * KB);
+                    str full = fs.join(&one, path, name);
+                    mut i64 size = 0;
+                    mut i32 kind = 0;
+                    mut i32 error = 0;
+                    unsafe {
+                        error = dt_entry(full.to_cstr(&one), &size, &kind);
+                    }
+                    one.free();
+                    if (error != 0) {
+                        unreadable += 1;
+                    } else if (kind == 2) {
+                        skipped += 1;
+                    } else {
+                        i32 child = nodes.len() as i32;
+                        nodes.push(Node{ name: name, parent: index, size: size, first: 0, count: 0, dir: kind == 1, read: false });
+                        added += 1;
+                        if (kind == 1) {
+                            folders += 1;
+                            pending.push(child);
+                        } else {
+                            files += 1;
+                            grow(index, size);
+                        }
+                    }
+                }
+                Node* me = nodes.at(index as usize);
+                me.first = first;
+                me.count = added;
+                me.read = true;
+                return added;
+            },
+            err(e) => {
+                unreadable += 1;
+                nodes.at(index as usize).read = true;
+                return 0;
+            },
+        }
+    }
+
+    // The folders from `index` up to the root hold `size` bytes more.
+    void grow(i32 index, i64 size) {
+        mut i32 at = index;
+        while (at >= 0) {
+            Node* n = nodes.at(at as usize);
+            n.size += size;
+            at = n.parent;
+        }
+    }
+
+    pub i64 total() {
+        return nodes.at(0).size;
+    }
+}
+
+pub Tree* scan(Arena* arena, str root) {
+    return arena.new(Tree, arena, root);
+}

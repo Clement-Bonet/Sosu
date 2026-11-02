@@ -46,6 +46,10 @@ test: all
 	./build/sosuc check packages/audio
 	./build/sosuc check examples/sound
 	./build/sosuc check examples/dialogs
+	@# its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)
+	SDL_AUDIO_DRIVER=dummy ./build/sosuc test showcase/beatbox
+	./build/sosuc test showcase/disktiles
+	./build/sosuc test showcase/pixelforge
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done

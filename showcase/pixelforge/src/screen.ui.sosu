@@ -1,0 +1,46 @@
+// pixelforge.screen: the title bar, with the buttons of the file, the history and the picture; the
+// tools, the picture and the panel are drawn by `main`, since they are not widgets.
+import pixelforge.editor;
+
+window PixelForge(editor.Editor* e) {
+    title: "Pixel Forge"
+    width: 1180
+    height: 780
+
+    TitleBar(height: 40, gap: 8, padding: 4) {
+        Text("Pixel Forge")
+        Button("Open", on_click: e.ask_open)
+        Button("Save", on_click: e.ask_save)
+        Button("PNG", on_click: e.ask_png)
+        Button("New...", on_click: e.ask_new)
+        Button("Undo", on_click: e.undo)
+        Button("Redo", on_click: e.redo)
+        Button(e.grid ? "Grid on" : "Grid off", on_click: e.toggle_grid)
+        Button(e.onion ? "Onion on" : "Onion off", on_click: e.toggle_onion)
+    }
+    Dialog("New picture", open: e.asking, width: 560) {
+        Grid(columns: [Auto, Auto, Fill], gap: 12) {
+            Text("Width")
+            NumberField(bind: e.new_w, min: 1, max: 1024, width: 120, on_change: e.width_changed, tooltip: "In pixels, 1 to 1024")
+            Row(gap: 8) {
+                Button("16", on_click: e.preset_w(16))
+                Button("32", on_click: e.preset_w(32))
+                Button("64", on_click: e.preset_w(64))
+                Button("128", on_click: e.preset_w(128))
+            }
+            Text("Height")
+            NumberField(bind: e.new_h, min: 1, max: 1024, width: 120, on_change: e.height_changed, tooltip: "In pixels, 1 to 1024")
+            Row(gap: 8) {
+                Button("16", on_click: e.preset_h(16))
+                Button("32", on_click: e.preset_h(32))
+                Button("64", on_click: e.preset_h(64))
+                Button("128", on_click: e.preset_h(128))
+            }
+        }
+        Checkbox("Link width and height (square)", bind: e.linked, on_change: e.link_changed)
+        Row(gap: 8) {
+            Button("&Create", on_click: e.create_new)
+            Button("&Cancel", on_click: e.cancel_new)
+        }
+    }
+}

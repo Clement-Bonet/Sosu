@@ -1,0 +1,180 @@
+// pixelforge.project: the file of a project (.pforge): the frames with their layers, the times, and
+// the settings of the sprite sheet. Little-endian numbers; each layer is a PNG.
+//   "PFORGE1\n", width, height, columns, gap, current, frames
+//   per frame: delay, active layer, layers
+//   per layer: visible, length of the name, the name, length of the PNG, the PNG
+import std.text;
+import std.vec;
+import image.image;
+import image.png;
+import pixelforge.sheet;
+
+str MAGIC = "PFORGE1\n";
+usize MAX_NAME = 256;
+
+pub struct Project {
+    pub i32 width;
+    pub i32 height;
+    pub i32 columns;
+    pub i32 gap;
+    pub i32 current;
+    pub vec.Vec<sheet.Frame>* frames;
+}
+
+void put_u32(vec.Vec<ui8>* out, ui32 v) {
+    out.push((v & 0xFF) as ui8);
+    out.push(((v >> 8) & 0xFF) as ui8);
+    out.push(((v >> 16) & 0xFF) as ui8);
+    out.push(((v >> 24) & 0xFF) as ui8);
+}
+
+void put_bytes(vec.Vec<ui8>* out, ui8[] bytes) {
+    for (usize i in 0..bytes.len) {
+        out.push(bytes[i]);
+    }
+}
+
+// The bytes of a project.
+pub ui8[] encode(Arena* arena, vec.Vec<sheet.Frame>* frames, i32 columns, i32 gap, i32 current) {
+    vec.Vec<ui8>* out = vec.new<ui8>(arena);
+    for (usize i in 0..MAGIC.len) {
+        out.push(MAGIC.bytes[i]);
+    }
+    sheet.Sheet* first = frames.at(0).art;
+    put_u32(out, first.width as ui32);
+    put_u32(out, first.height as ui32);
+    put_u32(out, columns as ui32);
+    put_u32(out, gap as ui32);
+    put_u32(out, current as ui32);
+    put_u32(out, frames.len() as ui32);
+    for (usize k in 0..frames.len()) {
+        sheet.Frame* f = frames.at(k);
+        put_u32(out, f.delay as ui32);
+        put_u32(out, f.art.active as ui32);
+        put_u32(out, f.art.layers.len() as ui32);
+        for (usize j in 0..f.art.layers.len()) {
+            sheet.Layer* l = f.art.layers.at(j);
+            put_u32(out, l.visible ? 1 : 0);
+            put_u32(out, l.name.len as ui32);
+            for (usize n in 0..l.name.len) {
+                out.push(l.name.bytes[n]);
+            }
+            ui8[] picture = png.encode(arena, image.Image{ width: first.width, height: first.height, pixels: l.pixels });
+            put_u32(out, picture.len as ui32);
+            put_bytes(out, picture);
+        }
+    }
+    return out.items();
+}
+
+class Reader {
+    ui8[] data;
+    mut usize at;
+    pub mut bool bad;
+
+    void init(ui8[] data) {
+        self.data = data;
+        at = 0;
+        bad = false;
+    }
+
+    pub ui32 u32() {
+        if (bad || at + 4 > data.len) {
+            bad = true;
+            return 0;
+        }
+        ui32 v = (data[at] as ui32) | ((data[at + 1] as ui32) << 8) | ((data[at + 2] as ui32) << 16) | ((data[at + 3] as ui32) << 24);
+        at += 4;
+        return v;
+    }
+
+    // A number that must be between `low` and `high`.
+    pub i32 limited(i32 low, i32 high) {
+        ui32 v = u32();
+        if (v > 1000000 || (v as i32) < low || (v as i32) > high) {
+            bad = true;
+            return low;
+        }
+        return v as i32;
+    }
+
+    pub ui8[] take(usize count) {
+        if (bad || count > data.len - at) {
+            bad = true;
+            return data[0..0];
+        }
+        ui8[] part = data[at..at + count];
+        at += count;
+        return part;
+    }
+}
+
+// What the bytes hold, copied in `arena`; none if they are not a project (or are damaged).
+pub Project? decode(Arena* arena, ui8[] data) {
+    if (data.len < MAGIC.len) {
+        return none;
+    }
+    for (usize i in 0..MAGIC.len) {
+        if (data[i] != MAGIC.bytes[i]) {
+            return none;
+        }
+    }
+    mut Arena scratch = Arena.new(1 * MB);
+    defer scratch.free();
+    Reader* r = scratch.new(Reader, data[MAGIC.len..data.len]);
+    i32 width = r.limited(1, sheet.MAX_SIDE);
+    i32 height = r.limited(1, sheet.MAX_SIDE);
+    i32 columns = r.limited(1, 64);
+    i32 gap = r.limited(0, 32);
+    i32 current = r.limited(0, 63);
+    i32 count = r.limited(1, 64);
+    if (r.bad || current >= count) {
+        return none;
+    }
+    vec.Vec<sheet.Frame>* frames = vec.new<sheet.Frame>(arena);
+    for (i32 k in 0..count) {
+        i32 delay = r.limited(20, 2000);
+        i32 active = r.limited(0, sheet.MAX_LAYERS - 1);
+        i32 layers = r.limited(1, sheet.MAX_LAYERS);
+        if (r.bad || active >= layers) {
+            return none;
+        }
+        sheet.Sheet* s = sheet.new_sheet(arena, width, height);
+        s.layers.clear();
+        for (i32 j in 0..layers) {
+            ui32 visible = r.u32();
+            usize name_len = r.limited(0, 256) as usize;
+            ui8[] name_bytes = r.take(name_len);
+            usize picture_len = r.limited(1, 1000000000) as usize;
+            ui8[] picture = r.take(picture_len);
+            if (r.bad) {
+                return none;
+            }
+            mut ui8[] kept = arena.alloc_slice(ui8, name_len);
+            for (usize n in 0..name_len) {
+                kept[n] = name_bytes[n];
+            }
+            str name = match (str.from_bytes(kept)) {
+                ok(text) => text,
+                err(e) => "Layer",
+            };
+            image.Image img = match (png.decode(&scratch, picture)) {
+                ok(decoded) => decoded,
+                err(e) => {
+                    return none;
+                },
+            };
+            if (img.width != width || img.height != height) {
+                return none;
+            }
+            mut ui32[] pixels = arena.alloc_slice(ui32, (width * height) as usize);
+            for (usize i in 0..pixels.len) {
+                pixels[i] = img.pixels[i];
+            }
+            s.layers.push(sheet.Layer{ name: name, pixels: pixels, visible: visible != 0 });
+        }
+        s.active = active;
+        frames.push(sheet.Frame{ art: s, delay: delay, drawn: -1 });
+    }
+    return some(Project{ width: width, height: height, columns: columns, gap: gap, current: current, frames: frames });
+}

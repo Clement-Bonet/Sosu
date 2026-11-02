@@ -661,6 +661,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         Command cl = {0};
         const char *options[] = { "cl", "/nologo", "/std:c11", "/utf-8", "/W0", "/Zi", optimize ? "/O2" : "/Od", NULL };
         add_all(&cl, options);
+        if (!optimize) command_add(&cl, "-DSOSU_DEBUG"); /* freed arenas made unreadable (sosu_rt.c) */
         char *rt = shell_path(runtime);
         char *rt_c = shell_path(runtime_c);
         char *c = shell_path(c_file);
@@ -695,6 +696,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         ok = desktop_compiler(target, &command);
         const char *options[] = { "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", NULL };
         add_all(&command, options);
+        if (!optimize) command_add(&command, "-DSOSU_DEBUG");
         command_addf(&command, "-I%s", runtime);
         command_add(&command, c_file);
         command_add(&command, runtime_c);
@@ -1060,6 +1062,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
         Command cl = {0};
         const char *options[] = { "cl", "/nologo", "/std:c11", "/utf-8", "/W0", "/Zi", optimize ? "/O2" : "/Od", NULL };
         add_all(&cl, options);
+        if (!optimize) command_add(&cl, "-DSOSU_DEBUG"); /* freed arenas made unreadable (sosu_rt.c) */
         command_addf(&cl, "/I%s", rt);
         command_addf(&cl, "/Fo%s\\", dir);
         command_addf(&cl, "/Fd%s\\", dir);
@@ -1118,6 +1121,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
 #endif
             Command command = {0};
             add_all(&command, options);
+            if (!optimize) command_add(&command, "-DSOSU_DEBUG");
             command_add(&command, kind);
             command_add(&command, "-fvisibility=hidden");
             command_add(&command, "-DSOSU_SHARED");
@@ -1154,6 +1158,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
             for (size_t i = 0; i < 2 && ok; i++) {
                 Command step = {0};
                 add_all(&step, options);
+                if (!optimize) command_add(&step, "-DSOSU_DEBUG");
                 command_addf(&step, "-I%s", runtime);
                 command_add(&step, "-c");
                 command_add(&step, files_in[i][0]);
@@ -1307,6 +1312,7 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
             const char *options[] = { clang, "-std=c99", "-g", level, "-w", "-fPIC", "-shared", "-fvisibility=hidden",
                                       "-DSOSU_SDL_MAIN", NULL };
             add_all(&command, options);
+            if (!optimize) command_add(&command, "-DSOSU_DEBUG");
             command_addf(&command, "--target=%s%d", target->triple, ANDROID_API); /* as the scripts of the NDK do */
             command_addf(&command, "-I%s", runtime);
             command_add(&command, c_file);
@@ -1333,6 +1339,7 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
             const char *options[] = { "xcrun", "--sdk", sdk, "clang", "-arch", "arm64", minimum, "-std=c99", "-g", level,
                                       "-w", NULL };
             add_all(&command, options);
+            if (!optimize) command_add(&command, "-DSOSU_DEBUG");
             if (i == 0) command_add(&command, "-DSOSU_SDL_MAIN");
             command_addf(&command, "-I%s", runtime);
             command_add(&command, "-c");

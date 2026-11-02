@@ -1,0 +1,295 @@
+// disktiles.model: what the window shows and what its buttons do: the folder scanned, the folder
+// shown (the view), the tiles, and the text of the title bar and of the status bar.
+import std.fs;
+import std.text;
+import disktiles.layout;
+import disktiles.scan;
+
+// Space kept by the title bar (above) and the status bar (below) around the tiles.
+pub f32 TOP = 40.0;
+pub f32 BOTTOM = 26.0;
+pub f32 MENU_W = 200.0;
+pub f32 ITEM_H = 28.0;
+pub f32 MENU_H = 56.0;
+
+pub class Model {
+    Arena* arena;
+    mut Arena scan_arena;
+    pub mut scan.Tree* tree;
+    pub mut bool has_tree;
+    pub mut i32 view;  // the folder the tiles show
+    pub mut bool scanning;
+    pub layout.Layout* map;
+    pub mut i64 hover;  // the tile under the mouse, or -1
+    pub mut f32 mouse_x;
+    pub mut f32 mouse_y;
+    pub mut bool want_choose;
+    pub mut bool want_rescan;
+    pub mut bool want_reveal;
+    pub mut bool menu;  // the context menu is open
+    pub mut f32 menu_x;
+    pub mut f32 menu_y;
+    pub mut i32 menu_node;  // the entry the menu is about
+    pub mut str info;  // for the title bar
+    mut str notice;  // shown in the status bar for a while, e.g. when the scan ends
+    mut ui64 notice_until;
+    mut ui64 now;
+    mut ui64 started;
+    mut str root;
+    mut bool dirty;
+    mut ui64 laid_at;
+    mut i32 laid_w;
+    mut i32 laid_h;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        scan_arena = Arena.new(64 * KB);
+        tree = scan.scan(&scan_arena, "");
+        has_tree = false;
+        view = 0;
+        scanning = false;
+        map = layout.new_layout(arena);
+        hover = -1;
+        mouse_x = 0.0;
+        mouse_y = 0.0;
+        want_choose = false;
+        want_rescan = false;
+        want_reveal = false;
+        menu = false;
+        menu_x = 0.0;
+        menu_y = 0.0;
+        menu_node = 0;
+        notice = "";
+        notice_until = 0;
+        now = 0;
+        started = 0;
+        info = "Open a folder, or drop one on the window";
+        root = "";
+        dirty = false;
+        laid_at = 0;
+        laid_w = 0;
+        laid_h = 0;
+    }
+
+    // The buttons only ask: `main` does it between two frames.
+    pub void choose() {
+        want_choose = true;
+    }
+
+    pub void rescan() {
+        want_rescan = true;
+    }
+
+    // The folder above the one shown.
+    pub void up() {
+        if (!has_tree) {
+            return;
+        }
+        i32 parent = tree.nodes.at(view as usize).parent;
+        if (parent >= 0) {
+            view = parent;
+            dirty = true;
+        }
+    }
+
+    // Starts reading `path`, in place of what was read.
+    pub void open(str path) uses io {
+        scan_arena.free();
+        scan_arena = Arena.new(1 * MB);
+        root = text.repeat(&scan_arena, path, 1);
+        tree = scan.scan(&scan_arena, root);
+        has_tree = true;
+        scanning = true;
+        started = 0;
+        notice_until = 0;
+        menu = false;
+        view = 0;
+        hover = -1;
+        dirty = true;
+    }
+
+    pub void again() uses io {
+        if (has_tree) {
+            open(root);
+        }
+    }
+
+    // The mouse went to a place.
+    pub void move_to(f32 x, f32 y) {
+        mouse_x = x;
+        mouse_y = y;
+        hover = map.tile_at(x, y);
+    }
+
+    // A click: go into the folder that holds the tile, one level at a time.
+    pub void click() {
+        if (!has_tree || hover < 0) {
+            return;
+        }
+        mut i32 at = map.tiles.at(hover as usize).node;
+        while (at != view && tree.nodes.at(at as usize).parent != view) {
+            i32 parent = tree.nodes.at(at as usize).parent;
+            if (parent < 0) {
+                return;
+            }
+            at = parent;
+        }
+        if (at != view && tree.nodes.at(at as usize).dir && tree.nodes.at(at as usize).count > 0) {
+            view = at;
+            dirty = true;
+        }
+    }
+
+    // The context menu: its size, and what is under the mouse (-1 for nothing).
+    pub void open_menu(f32 x, f32 y) {
+        if (!has_tree || hover < 0) {
+            menu = false;
+            return;
+        }
+        menu_node = map.tiles.at(hover as usize).node;
+        menu_x = x;
+        menu_y = y;
+        if (laid_w > 0 && x > laid_w as f32 - MENU_W) {
+            menu_x = laid_w as f32 - MENU_W;
+        }
+        if (laid_h > 0 && y > laid_h as f32 - MENU_H) {
+            menu_y = laid_h as f32 - MENU_H;
+        }
+        menu = true;
+    }
+
+    pub i32 menu_item_at(f32 x, f32 y) {
+        if (!menu || x < menu_x || x >= menu_x + MENU_W || y < menu_y || y >= menu_y + MENU_H) {
+            return -1;
+        }
+        return ((y - menu_y) / ITEM_H) as i32;
+    }
+
+    // A click while the menu is open: runs the item under the mouse, and closes the menu.
+    pub void menu_click(f32 x, f32 y) {
+        i32 item = menu_item_at(x, y);
+        menu = false;
+        if (item == 0) {
+            want_reveal = true;
+        } else if (item == 1) {
+            up();
+        }
+    }
+
+    // Shows the entry of the menu in the file manager.
+    pub void reveal(Arena* frame) uses io {
+        want_reveal = false;
+        if (!has_tree) {
+            return;
+        }
+        if (!scan.reveal(frame, tree.path_of(frame, menu_node))) {
+            notice = "The file manager could not be opened";
+            notice_until = now + 5000;
+        }
+    }
+
+    // Reads a little more, and lays the tiles out again when they changed.
+    pub void update(Arena* frame, i32 budget, ui64 now, i32 w, i32 h) uses io {
+        if (!has_tree) {
+            return;
+        }
+        self.now = now;
+        if (started == 0) {
+            started = now + 1;
+        }
+        if (scanning && !tree.step(budget)) {
+            scanning = false;
+            dirty = true;
+            text.TextBuilder* b = text.builder(&scan_arena);
+            b.push("Scan finished: ");
+            b.push_i64(tree.files);
+            b.push(" files, ");
+            b.push(size_text(&scan_arena, tree.total()));
+            b.push(" in ");
+            b.push_f64((now + 1 - started) as f64 / 1000.0, 1);
+            b.push(" s");
+            notice = b.text();
+            notice_until = now + 8000;
+        }
+        if (w != laid_w || h != laid_h) {
+            dirty = true;
+        }
+        if (dirty || scanning && now - laid_at >= 300) {
+            map.build(tree, view, 0.0, TOP, w as f32, h as f32 - TOP - BOTTOM);
+            laid_at = now;
+            laid_w = w;
+            laid_h = h;
+            dirty = false;
+            hover = map.tile_at(mouse_x, mouse_y);
+        }
+        info = summary(frame);
+    }
+
+    str summary(Arena* frame) {
+        text.TextBuilder* b = text.builder(frame);
+        b.push(scanning ? "Reading: " : "");
+        b.push_i64(tree.files);
+        b.push(" files, ");
+        b.push(size_text(frame, tree.total()));
+        if (tree.unreadable > 0) {
+            b.push(", ");
+            b.push_i64(tree.unreadable);
+            b.push(" not readable");
+        }
+        return b.text();
+    }
+
+    // The status bar: the tile under the mouse, or the folder shown.
+    pub str status(Arena* frame) {
+        if (!has_tree) {
+            return "";
+        }
+        if (now < notice_until) {
+            return notice;
+        }
+        mut i32 node = view;
+        if (hover >= 0) {
+            node = map.tiles.at(hover as usize).node;
+        }
+        scan.Node* n = tree.nodes.at(node as usize);
+        i64 whole = tree.nodes.at(view as usize).size;
+        text.TextBuilder* b = text.builder(frame);
+        b.push(tree.path_of(frame, node));
+        b.push("    ");
+        b.push(size_text(frame, n.size));
+        if (whole > 0) {
+            b.push("    ");
+            b.push_f64(n.size as f64 * 100.0 / whole as f64, 1);
+            b.push("%");
+        }
+        if (n.dir) {
+            b.push("    ");
+            b.push_i64(n.count as i64);
+            b.push(" entries");
+        }
+        return b.text();
+    }
+}
+
+pub Model* new_model(Arena* arena) {
+    return arena.new(Model, arena);
+}
+
+// A size as people read it: 1.5 MB.
+pub str size_text(Arena* arena, i64 bytes) {
+    text.TextBuilder* b = text.builder(arena);
+    mut f64 value = bytes as f64;
+    mut usize unit = 0;
+    while (value >= 1024.0 && unit < 4) {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if (unit == 0) {
+        b.push_i64(bytes);
+        b.push(" B");
+    } else {
+        b.push_f64(value, 1);
+        b.push(unit == 1 ? " KB" : unit == 2 ? " MB" : unit == 3 ? " GB" : " TB");
+    }
+    return b.text();
+}

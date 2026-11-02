@@ -1,0 +1,136 @@
+// The look of Beatbox (spec §10.7): a dark theme, and the styles of the steps, which say at a
+// glance what a step is: off, on, a beat (every fourth), and the one the playhead is on.
+
+theme Night {
+    accent: #FAB387
+    surface: #313244
+    color: #CDD6F4
+    field: #181825
+
+    Window { background: #1E1E2E }
+    Title { color: accent }
+    Button {
+        background: surface
+        radius: 6
+        padding: 10
+        hover { background: #45475A }
+        pressed { background: field }
+        disabled { color: #6C7086, background: field }
+    }
+    Slider {
+        accent: #FAB387
+    }
+}
+
+// The steps: all of them 38 pixels wide, whatever they hold, by the grid they are in.
+style Off {
+    background: #313244
+    padding: 14
+    radius: 4
+    hover { background: #45475A }
+}
+
+style OffBeat {
+    background: #3F4157
+    padding: 14
+    radius: 4
+    hover { background: #52556E }
+}
+
+style On {
+    background: #FAB387
+    color: #FAB387
+    padding: 14
+    radius: 4
+    hover { background: #FCC7A5, color: #FCC7A5 }
+}
+
+style OffPlay {
+    background: #6C7086
+    color: #6C7086
+    padding: 14
+    radius: 4
+}
+
+style OnPlay {
+    background: #F9E2AF
+    color: #F9E2AF
+    padding: 14
+    radius: 4
+}
+
+// The name of a track, and the same when the track is muted.
+style Name {
+    background: #45475A
+    padding: 10
+}
+
+style Silent {
+    background: #181825
+    color: #6C7086
+    padding: 10
+}
+
+style Go {
+    background: #A6E3A1
+    color: #1E1E2E
+    hover { background: #BDEBB9 }
+}
+
+style Halt {
+    background: #F38BA8
+    color: #1E1E2E
+    hover { background: #F5A5BB }
+}
+
+// The trash button of a track.
+style Bin {
+    background: #45475A
+    color: #F38BA8
+    padding: 10
+    hover { background: #F38BA8, color: #1E1E2E }
+}
+
+style Muted {
+    color: #7F849C
+    font_size: 15
+}
+
+// The note of a track, and the same when the piano is playing that track.
+style Chosen {
+    background: #FAB387
+    color: #1E1E2E
+    padding: 10
+    hover { background: #FCC7A5 }
+}
+
+// The keys of the piano: white and black, and the one that is the note of the track.
+style White {
+    background: #CDD6F4
+    color: #CDD6F4
+    padding: 14
+    radius: 3
+    hover { background: #E6ECFF, color: #E6ECFF }
+}
+
+style WhiteOn {
+    background: #FAB387
+    color: #FAB387
+    padding: 14
+    radius: 3
+}
+
+style Black {
+    background: #11111B
+    color: #11111B
+    padding: 8
+    radius: 3
+    hover { background: #45475A, color: #45475A }
+}
+
+style BlackOn {
+    background: #E8803F
+    color: #E8803F
+    padding: 8
+    radius: 3
+}

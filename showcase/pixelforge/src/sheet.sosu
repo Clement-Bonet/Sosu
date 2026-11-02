@@ -1,0 +1,460 @@
+// pixelforge.sheet: the picture being drawn: its layers, the drawing of pixels, lines, boxes and
+// fills, and the undo history. A pixel is 0xAARRGGBB, not premultiplied (as `image.Image`).
+import std.text;
+import std.vec;
+import image.image;
+
+pub i32 MAX_SIDE = 1024;
+pub i32 MAX_LAYERS = 8;
+// When the history holds more changes than this, it is forgotten (it is kept in an arena).
+i64 MAX_CHANGES = 4000000;
+
+pub struct Layer {
+    pub mut str name;
+    pub mut ui32[] pixels;
+    pub mut bool visible;
+}
+
+struct Change {
+    i32 layer;
+    i32 at;
+    ui32 before;
+    ui32 after;
+}
+
+struct Mark {
+    usize end;
+    i64 seq;  // the order of the action among all the frames (see `begin_seq`)
+}
+
+struct Cell {
+    i32 at;
+}
+
+i32 iabs(i32 v) {
+    return v < 0 ? -v : v;
+}
+
+// `over` drawn on `below`, both not premultiplied.
+pub ui32 blend(ui32 over, ui32 below) {
+    ui32 sa = over >> 24;
+    ui32 da = below >> 24;
+    if (sa == 0) {
+        return below;
+    }
+    if (sa == 255 || da == 0) {
+        return over;
+    }
+    ui32 weight = da * (255 - sa) / 255;
+    ui32 oa = sa + weight;
+    ui32 r = (((over >> 16) & 0xFF) * sa + ((below >> 16) & 0xFF) * weight) / oa;
+    ui32 g = (((over >> 8) & 0xFF) * sa + ((below >> 8) & 0xFF) * weight) / oa;
+    ui32 b = ((over & 0xFF) * sa + (below & 0xFF) * weight) / oa;
+    return (oa << 24) | (r << 16) | (g << 8) | b;
+}
+
+// A pixel as the onion skin shows it: tinted and faint (`tint` is 0xAARRGGBB, its alpha is not used).
+pub ui32 ghost(ui32 c, ui32 tint) {
+    ui32 a = c >> 24;
+    if (a == 0) {
+        return 0;
+    }
+    ui32 r = (((c >> 16) & 0xFF) + ((tint >> 16) & 0xFF) * 2) / 3;
+    ui32 g = (((c >> 8) & 0xFF) + ((tint >> 8) & 0xFF) * 2) / 3;
+    ui32 b = ((c & 0xFF) + (tint & 0xFF) * 2) / 3;
+    return ((a * 120 / 255) << 24) | (r << 16) | (g << 8) | b;
+}
+
+pub class Sheet {
+    Arena* arena;
+    pub i32 width;
+    pub i32 height;
+    pub vec.Vec<Layer>* layers;
+    pub mut i32 active;
+    pub mut i64 version;  // changes at each edit: what is drawn from the sheet is made again
+    pub mut image.Image flat;  // the visible layers, flattened by `flatten`
+    vec.Vec<Change>* changes;
+    vec.Vec<Mark>* ends;  // where each action ends in `changes`
+    mut usize done;  // the actions applied: the ones after are what `redo` does again
+    mut usize stroke;  // where the action in progress starts in `changes`
+    mut bool drawing;
+    mut i64 seq_now;  // the order given to the action in progress
+    mut i32 made;  // layers created, for their names
+
+    void init(Arena* arena, i32 width, i32 height) {
+        self.arena = arena;
+        self.width = width;
+        self.height = height;
+        layers = vec.new<Layer>(arena);
+        active = 0;
+        version = 1;
+        flat = image.create(arena, width, height);
+        changes = vec.new<Change>(arena);
+        ends = vec.new<Mark>(arena);
+        done = 0;
+        stroke = 0;
+        drawing = false;
+        seq_now = 0;
+        made = 0;
+        layers.push(blank());
+    }
+
+    Layer blank() {
+        made += 1;
+        text.TextBuilder* b = text.builder(arena);
+        b.push("Layer ");
+        b.push_i64(made as i64);
+        return Layer{ name: b.text(), pixels: arena.alloc_slice(ui32, (width * height) as usize), visible: true };
+    }
+
+    // The history only knows pixels: a change of layers forgets it.
+    void forget() {
+        changes.clear();
+        ends.clear();
+        done = 0;
+        stroke = 0;
+        drawing = false;
+        version += 1;
+    }
+
+    pub void add_layer() {
+        if (layers.len() as i32 >= MAX_LAYERS) {
+            return;
+        }
+        layers.insert((active + 1) as usize, blank());
+        active += 1;
+        forget();
+    }
+
+    pub void remove_layer() {
+        if (layers.len() <= 1) {
+            return;
+        }
+        layers.remove(active as usize);
+        if (active >= layers.len() as i32) {
+            active = layers.len() as i32 - 1;
+        }
+        forget();
+    }
+
+    // `dir` +1 raises the active layer, -1 lowers it.
+    pub void move_layer(i32 dir) {
+        i32 to = active + dir;
+        if (to < 0 || to >= layers.len() as i32) {
+            return;
+        }
+        Layer moved = layers.remove(active as usize);
+        layers.insert(to as usize, moved);
+        active = to;
+        forget();
+    }
+
+    pub void select_layer(i32 i) {
+        if (i >= 0 && i < layers.len() as i32) {
+            active = i;
+        }
+    }
+
+    pub void toggle_layer(i32 i) {
+        if (i >= 0 && i < layers.len() as i32) {
+            Layer* l = layers.at(i as usize);
+            l.visible = !l.visible;
+            version += 1;
+        }
+    }
+
+    // The pixel of the active layer.
+    pub ui32 get(i32 x, i32 y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return 0;
+        }
+        Layer* l = layers.at(active as usize);
+        return l.pixels[(y * width + x) as usize];
+    }
+
+    // The pixel of what is seen (call `flatten` first).
+    pub ui32 seen(i32 x, i32 y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return 0;
+        }
+        return flat.pixels[(y * width + x) as usize];
+    }
+
+    pub void put(i32 x, i32 y, ui32 color) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        Layer* l = layers.at(active as usize);
+        usize i = (y * width + x) as usize;
+        ui32 old = l.pixels[i];
+        if (old == color) {
+            return;
+        }
+        if (drawing) {
+            changes.push(Change{ layer: active, at: i as i32, before: old, after: color });
+        }
+        l.pixels[i] = color;
+        version += 1;
+    }
+
+    // Sets the pixels of the first layer without recording them (a picture that was opened).
+    pub void load(image.Image img) {
+        Layer* l = layers.at(0);
+        for (usize i in 0..l.pixels.len) {
+            l.pixels[i] = i < img.pixels.len ? img.pixels[i] : 0;
+        }
+        forget();
+    }
+
+    // Sets the pixels of the first layer from the part of `img` that starts at (ox, oy): a frame
+    // cut from a sprite sheet. What is out of `img` is transparent.
+    pub void load_cell(image.Image img, i32 ox, i32 oy) {
+        Layer* l = layers.at(0);
+        for (i32 y in 0..height) {
+            for (i32 x in 0..width) {
+                i32 sx = ox + x;
+                i32 sy = oy + y;
+                l.pixels[(y * width + x) as usize] = sx < img.width && sy < img.height ? img.pixels[(sy * img.width + sx) as usize] : 0;
+            }
+        }
+        forget();
+    }
+
+    // The actions: `begin`, some drawing, `end`. A stroke in progress can be taken back with
+    // `revert_stroke` (the preview of a line or a box).
+    pub void begin() {
+        begin_seq(0);
+    }
+
+    // As `begin`, with the place of the action in the history of all the frames: the editor gives
+    // a higher number each time, so that undo and redo can go from one frame to another.
+    pub void begin_seq(i64 seq) {
+        if (drawing) {
+            end();
+        }
+        drop_redo();
+        seq_now = seq;
+        stroke = changes.len();
+        drawing = true;
+    }
+
+    // Forgets the actions that were undone.
+    pub void drop_redo() {
+        if (drawing || done >= ends.len()) {
+            return;
+        }
+        usize keep = done == 0 ? 0 : ends.at(done - 1).end;
+        while (ends.len() > done) {
+            ends.pop();
+        }
+        while (changes.len() > keep) {
+            changes.pop();
+        }
+    }
+
+    // The order of the last action done (-1 if there is none), and of the next one `redo` does.
+    pub i64 last_seq() {
+        return done == 0 ? -1 : ends.at(done - 1).seq;
+    }
+
+    pub i64 next_seq() {
+        return done < ends.len() ? ends.at(done).seq : -1;
+    }
+
+    pub void end() {
+        if (!drawing) {
+            return;
+        }
+        drawing = false;
+        if (changes.len() > stroke) {
+            ends.push(Mark{ end: changes.len(), seq: seq_now });
+            done = ends.len();
+            if (changes.len() as i64 > MAX_CHANGES) {
+                forget();
+            }
+        }
+    }
+
+    pub void revert_stroke() {
+        while (changes.len() > stroke) {
+            Change* c = changes.at(changes.len() - 1);
+            layers.at(c.layer as usize).pixels[c.at as usize] = c.before;
+            changes.pop();
+        }
+        version += 1;
+    }
+
+    pub bool can_undo() {
+        return done > 0 || drawing && changes.len() > stroke;
+    }
+
+    pub bool can_redo() {
+        return done < ends.len();
+    }
+
+    pub void undo() {
+        end();
+        if (done == 0) {
+            return;
+        }
+        done -= 1;
+        usize start = done == 0 ? 0 : ends.at(done - 1).end;
+        mut usize i = ends.at(done).end;
+        while (i > start) {
+            i -= 1;
+            Change* c = changes.at(i);
+            layers.at(c.layer as usize).pixels[c.at as usize] = c.before;
+        }
+        version += 1;
+    }
+
+    pub void redo() {
+        end();
+        if (done >= ends.len()) {
+            return;
+        }
+        usize start = done == 0 ? 0 : ends.at(done - 1).end;
+        usize stop = ends.at(done).end;
+        for (usize i in start..stop) {
+            Change* c = changes.at(i);
+            layers.at(c.layer as usize).pixels[c.at as usize] = c.after;
+        }
+        done += 1;
+        version += 1;
+    }
+
+    // A square of `size` pixels around (x, y).
+    pub void stamp(i32 x, i32 y, i32 size, ui32 color) {
+        i32 first = (size - 1) / 2;
+        for (i32 dy in 0..size) {
+            for (i32 dx in 0..size) {
+                put(x - first + dx, y - first + dy, color);
+            }
+        }
+    }
+
+    pub void line(i32 x0, i32 y0, i32 x1, i32 y1, i32 size, ui32 color) {
+        mut i32 x = x0;
+        mut i32 y = y0;
+        i32 dx = iabs(x1 - x0);
+        i32 dy = -iabs(y1 - y0);
+        i32 sx = x0 < x1 ? 1 : -1;
+        i32 sy = y0 < y1 ? 1 : -1;
+        mut i32 err = dx + dy;
+        while (true) {
+            stamp(x, y, size, color);
+            if (x == x1 && y == y1) {
+                return;
+            }
+            i32 e2 = 2 * err;
+            if (e2 >= dy) {
+                err += dy;
+                x += sx;
+            }
+            if (e2 <= dx) {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    pub void box(i32 x0, i32 y0, i32 x1, i32 y1, i32 size, ui32 color, bool filled) {
+        i32 left = x0 < x1 ? x0 : x1;
+        i32 right = x0 < x1 ? x1 : x0;
+        i32 top = y0 < y1 ? y0 : y1;
+        i32 bottom = y0 < y1 ? y1 : y0;
+        if (filled) {
+            for (i32 y in top..bottom + 1) {
+                for (i32 x in left..right + 1) {
+                    put(x, y, color);
+                }
+            }
+            return;
+        }
+        line(left, top, right, top, size, color);
+        line(left, bottom, right, bottom, size, color);
+        line(left, top, left, bottom, size, color);
+        line(right, top, right, bottom, size, color);
+    }
+
+    // Fills the pixels of the same color as (x, y), that touch it.
+    pub void flood(i32 x, i32 y, ui32 color) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        ui32 target = get(x, y);
+        if (target == color) {
+            return;
+        }
+        mut Arena scratch = Arena.new(64 * KB);
+        defer scratch.free();
+        vec.Vec<Cell>* stack = vec.new<Cell>(&scratch);
+        stack.push(Cell{ at: y * width + x });
+        while (stack.len() > 0) {
+            i32 p = stack.at(stack.len() - 1).at;
+            stack.pop();
+            i32 px = p % width;
+            i32 py = p / width;
+            if (get(px, py) != target) {
+                continue;
+            }
+            put(px, py, color);
+            if (px > 0) {
+                stack.push(Cell{ at: p - 1 });
+            }
+            if (px + 1 < width) {
+                stack.push(Cell{ at: p + 1 });
+            }
+            if (py > 0) {
+                stack.push(Cell{ at: p - width });
+            }
+            if (py + 1 < height) {
+                stack.push(Cell{ at: p + width });
+            }
+        }
+    }
+
+    // The visible layers, one over the other, in `flat`.
+    pub void flatten() {
+        usize count = (width * height) as usize;
+        for (usize i in 0..count) {
+            mut ui32 pixel = 0;
+            for (usize k in 0..layers.len()) {
+                Layer* l = layers.at(k);
+                if (l.visible) {
+                    pixel = blend(l.pixels[i], pixel);
+                }
+            }
+            flat.pixels[i] = pixel;
+        }
+    }
+}
+
+pub Sheet* new_sheet(Arena* arena, i32 width, i32 height)
+    requires width >= 1 && height >= 1 && width <= MAX_SIDE && height <= MAX_SIDE
+{
+    return arena.new(Sheet, arena, width, height);
+}
+
+// A picture of the animation: its drawing and how long it stays, in milliseconds.
+pub struct Frame {
+    pub mut Sheet* art;
+    pub mut i32 delay;
+    pub mut i64 drawn;  // the `version` of `art` that `flat` shows
+}
+
+// A copy of `src` with its layers, and an empty history.
+pub Sheet* duplicate(Arena* arena, Sheet* src) {
+    Sheet* s = new_sheet(arena, src.width, src.height);
+    s.layers.clear();
+    for (usize k in 0..src.layers.len()) {
+        Layer* from = src.layers.at(k);
+        mut ui32[] pixels = arena.alloc_slice(ui32, from.pixels.len);
+        for (usize i in 0..pixels.len) {
+            pixels[i] = from.pixels[i];
+        }
+        s.layers.push(Layer{ name: from.name, pixels: pixels, visible: from.visible });
+    }
+    s.active = src.active;
+    return s;
+}

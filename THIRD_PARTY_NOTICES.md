@@ -6,12 +6,22 @@ under their own licenses.
 
 ## Noto Sans
 
-- Files: `packages/render/fonts/NotoSans-Regular.ttf`
+- Files: `packages/render/fonts/NotoSans-Regular.ttf`, and the same file in `assets/` of each
+  application of `showcase/` (with its `OFL.txt`)
 - Source: <https://github.com/notofonts/notofonts.github.io> (unhinted TrueType)
 - Copyright 2022 The Noto Project Authors (<https://github.com/notofonts/latin-greek-cyrillic>)
 - License: SIL Open Font License, Version 1.1, in `packages/render/fonts/OFL.txt`. The font may
   be used, embedded and redistributed with programs; it may not be sold by itself, and a modified
   version must not use the name "Noto".
+
+## Font Awesome Free
+
+- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox
+- Source: <https://fontawesome.com> (Font Awesome Free, desktop font files)
+- Copyright (c) 2024 Fonticons, Inc., with the Reserved Font Name "Font Awesome"
+- License: SIL Open Font License, Version 1.1, for the font files, in
+  `showcase/beatbox/assets/FA-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
+  the code under MIT; neither is given here)
 
 ## Montserrat
 
@@ -57,9 +67,12 @@ under their own licenses.
 - Written by Sean Barrett (2007) and its contributors, named in the file
 - License: public domain (the Unlicense), or the MIT license (Copyright (c) 2017 Sean Barrett),
   at your option; both are at the end of the file
-- Not changed. `ogg.c` bounds its memory and compiles it without the comment header
-  (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read; the CI fuzzes it (`make fuzz-ogg`). A
-  fault found later in it is fixed by taking the new commit of that branch (`SECURITY.md`).
+- Changed by Sosu: one line, marked `// Sosu:`. `get_window` compares a length with half of the
+  block sizes instead of shifting it, which was undefined for the negative length of a hostile file
+  (found by `make fuzz-ogg`; the window was not found either way). `ogg.c` bounds its memory and
+  compiles it without the comment header (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read;
+  the CI fuzzes it. A fault found later in it is fixed by taking the new commit of that branch, or
+  here when that branch has none (`SECURITY.md`).
 
 ## SQLite
 

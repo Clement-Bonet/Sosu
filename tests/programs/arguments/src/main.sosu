@@ -1,0 +1,13 @@
+// The arguments given by `sosuc run -- ...`, each between brackets: they reach the program as
+// they were given, through the command line of Windows (quoted by src/lib/shell.c) or execvp.
+import std.io;
+import std.os;
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4096);
+    defer arena.free();
+    for (str a in os.args(&arena)) {
+        io.print("[{}]", a);
+    }
+    return 0;
+}

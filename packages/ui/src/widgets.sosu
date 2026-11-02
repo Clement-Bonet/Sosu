@@ -3681,6 +3681,7 @@ pub struct Frame {
         if (ui.pressed && over(r)) {
             ui.open = ui.open == id ? 0 : id;
             ui.highlight = -1;
+            ui.drop_scroll = 0.0;
             dropdown_pressed = true;
         }
         option_index = 0;
@@ -3716,8 +3717,8 @@ pub struct Frame {
         if (ui.open == id) {
             layer_owner = id;
             layer = canvas.Rect{ x: r.x, y: r.y + r.h, w: r.w, h: 0.0 };
-        } else {
-            ui.drop_scroll = 0.0;
+        } else if (ui.open == 0) {
+            ui.drop_scroll = 0.0;  // the scroll belongs to the open list: another dropdown must not reset it
         }
         ui32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0) | (ui.open == id ? state_open() : 0);
         drop_look = look(Dropdown, states);

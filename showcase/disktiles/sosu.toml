@@ -1,0 +1,14 @@
+# DiskTiles: the size of the files and folders of a disk, as tiles (a treemap), on every system.
+[package]
+name = "disktiles"
+version = "0.1.0"
+
+[link]
+c = ["native/scan.c"]
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }
+image = { path = "../../packages/image" }
+testing = { path = "../../packages/testing" }

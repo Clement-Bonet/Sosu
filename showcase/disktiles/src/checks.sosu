@@ -1,0 +1,102 @@
+import std.fs;
+import std.io;
+import testing.check;
+import disktiles.layout;
+import disktiles.model;
+import disktiles.scan;
+
+// A small tree: sizes 10 and 20 in `a`, 30 in `a/b`, 40 at the root.
+void make_tree(Arena* arena, str root) uses io {
+    try_or_stop(fs.create_dirs(arena, fs.join(arena, root, "a/b")));
+    try_or_stop(io.write_file(arena, fs.join(arena, root, "a/ten.txt"), "0123456789"));
+    try_or_stop(io.write_file(arena, fs.join(arena, root, "a/twenty.bin"), "01234567890123456789"));
+    try_or_stop(io.write_file(arena, fs.join(arena, root, "a/b/thirty.png"), "012345678901234567890123456789"));
+    try_or_stop(io.write_file(arena, fs.join(arena, root, "forty.mp4"), "0123456789012345678901234567890123456789"));
+}
+
+void try_or_stop(void!io.IoError result) {
+    match (result) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+}
+
+test "the scan adds up the sizes" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str root = "build/checks-tree";
+    make_tree(&arena, root);
+    scan.Tree* tree = scan.scan(&arena, root);
+    tree.finish();
+    assert(tree.done);
+    assert(tree.total() == 100);
+    assert(tree.files == 4);
+    assert(tree.folders == 3);
+    assert(tree.unreadable == 0);
+}
+
+test "a folder is read in steps" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str root = "build/checks-tree";
+    make_tree(&arena, root);
+    scan.Tree* tree = scan.scan(&arena, root);
+    mut i32 steps = 0;
+    while (tree.step(1)) {
+        steps += 1;
+    }
+    assert(steps >= 2);
+    assert(tree.total() == 100);
+}
+
+test "the tiles follow the sizes and stay in their rectangle" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str root = "build/checks-tree";
+    make_tree(&arena, root);
+    scan.Tree* tree = scan.scan(&arena, root);
+    tree.finish();
+    layout.Layout* map = layout.new_layout(&arena);
+    map.build(tree, 0, 0.0, 0.0, 400.0, 300.0);
+    assert(map.tiles.len() >= 5);
+    mut f32 leaves = 0.0;
+    for (layout.Tile t in map.tiles.items()) {
+        assert(t.x >= 0.0 && t.y >= 0.0);
+        assert(t.x + t.w <= 400.01 && t.y + t.h <= 300.01);
+        if (t.leaf) {
+            leaves += t.w * t.h;
+        }
+    }
+    // the files fill what the frames of the folders leave
+    assert(leaves > 0.8 * 400.0 * 300.0 * 0.9);
+    // no two leaves overlap
+    for (usize i in 0..map.tiles.len()) {
+        layout.Tile* a = map.tiles.at(i);
+        for (usize j in i + 1..map.tiles.len()) {
+            layout.Tile* b = map.tiles.at(j);
+            if (a.leaf && b.leaf) {
+                bool apart = a.x + a.w <= b.x + 0.01 || b.x + b.w <= a.x + 0.01 || a.y + a.h <= b.y + 0.01 || b.y + b.h <= a.y + 0.01;
+                assert(apart);
+            }
+        }
+    }
+}
+
+test "the sorts of files" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    assert(layout.category(&arena, "photo.PNG") == 1);
+    assert(layout.category(&arena, "movie.mkv") == 2);
+    assert(layout.category(&arena, "main.sosu") == 6);
+    assert(layout.category(&arena, "README") == 0);
+}
+
+test "sizes read by people" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    assert(model.size_text(&arena, 512) == "512 B");
+    assert(model.size_text(&arena, 1536) == "1.5 KB");
+    assert(model.size_text(&arena, 3 * 1024 * 1024 * 1024) == "3.0 GB");
+}

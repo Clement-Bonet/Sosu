@@ -1,0 +1,351 @@
+// DiskTiles: the size of the files and folders of a folder or a disk, as tiles. Open a folder
+// with the button, or drop one on the window, or give it on the command line; click a tile to go
+// into its folder, Up, Backspace or the right button to come back.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run .` from this folder.
+// `--snapshot out.png [folder]` writes the window in a picture, without opening it.
+import std.fs;
+import std.io;
+import std.os;
+import std.text;
+import platform.app;
+import platform.dialogs;
+import render.canvas;
+import render.truetype;
+import image.png;
+import ui.widgets;
+import disktiles.checks;
+import disktiles.layout;
+import disktiles.model;
+import disktiles.scan;
+import disktiles.screen;
+
+ui32 FOLDER_TAG = 1;
+
+canvas.Color background() {
+    return canvas.Color{ r: 24, g: 26, b: 36 };
+}
+canvas.Color ink() {
+    return canvas.Color{ r: 238, g: 240, b: 248 };
+}
+
+// The color of the files of each sort (see `layout.category`), and its name.
+canvas.Color color_of(i32 kind) {
+    if (kind == 1) {
+        return canvas.Color{ r: 64, g: 160, b: 96 };
+    }
+    if (kind == 2) {
+        return canvas.Color{ r: 196, g: 78, b: 82 };
+    }
+    if (kind == 3) {
+        return canvas.Color{ r: 148, g: 98, b: 200 };
+    }
+    if (kind == 4) {
+        return canvas.Color{ r: 208, g: 140, b: 52 };
+    }
+    if (kind == 5) {
+        return canvas.Color{ r: 68, g: 128, b: 208 };
+    }
+    if (kind == 6) {
+        return canvas.Color{ r: 48, g: 168, b: 168 };
+    }
+    if (kind == 7) {
+        return canvas.Color{ r: 176, g: 160, b: 60 };
+    }
+    return canvas.Color{ r: 116, g: 122, b: 140 };
+}
+
+str name_of(i32 kind) {
+    str[8] names = ["Other", "Pictures", "Videos", "Sounds", "Archives", "Documents", "Code", "Programs"];
+    return names[kind as usize];
+}
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    model.Model* state;
+    mut truetype.Font*? face;
+
+    void init(model.Model* state) {
+        ui = widgets.Ui{ };
+        self.state = state;
+        face = none;
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Key(code, down, mods) => {
+                if (down && code == 27) {  // Escape
+                    state.menu = false;
+                } else if (down && code == 8) {  // Backspace
+                    state.up();
+                } else {
+                    ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+                state.move_to(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                state.move_to(x, y);
+                match (button) {
+                    Right => {
+                        if (y >= model.TOP) {
+                            state.open_menu(x, y);
+                        }
+                    },
+                    Left => {
+                        if (state.menu) {
+                            state.menu_click(x, y);
+                        } else {
+                            ui.mouse_button(true);
+                            if (y >= model.TOP) {
+                                state.click();
+                            }
+                        }
+                    },
+                    _ => { },
+                }
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            FileDropped(path, x, y) => {
+                mut Arena scratch = Arena.new(1 * KB);
+                defer scratch.free();
+                if (fs.is_dir(&scratch, path)) {
+                    state.open(path);
+                } else {
+                    match (fs.parent(path)) {
+                        some(folder) => {
+                            state.open(folder);
+                        },
+                        none => { },
+                    }
+                }
+            },
+            Dialog(answer) => {
+                match (answer) {
+                    Chosen(tag, paths, filter) => {
+                        if (tag == FOLDER_TAG && paths.len > 0) {
+                            state.open(paths[0]);
+                        }
+                    },
+                    _ => { },
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        ui.clock(app.now_ms());
+        mut Arena frame = Arena.new(8 * KB);
+        defer frame.free();
+        state.update(&frame, 1500, app.now_ms(), surface.width, surface.height);
+        paint(surface, &frame);
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        if (state.want_choose) {
+            state.want_choose = false;
+            dialogs.choose_folder(FOLDER_TAG, "");
+        }
+        if (state.want_reveal) {
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            state.reveal(&scratch);
+        }
+        if (state.want_rescan) {
+            state.want_rescan = false;
+            state.again();
+        }
+    }
+
+    // The whole window.
+    void paint(canvas.Canvas* surface, Arena* frame) {
+        surface.clear(background());
+        if (state.has_tree) {
+            draw_tiles(surface, frame);
+        } else {
+            say(surface, 24.0, model.TOP + 24.0, 16.0, state.info, ink());
+        }
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.DiskTiles(&f, state);
+        f.finish();
+        draw_status(surface, frame);
+        draw_menu(surface);
+    }
+
+    void draw_menu(canvas.Canvas* surface) {
+        if (!state.menu) {
+            return;
+        }
+        f32 x = state.menu_x;
+        f32 y = state.menu_y;
+        surface.fill(canvas.Rect{ x: x - 1.0, y: y - 1.0, w: model.MENU_W + 2.0, h: model.MENU_H + 2.0 }, canvas.Color{ r: 90, g: 96, b: 120 });
+        surface.fill(canvas.Rect{ x: x, y: y, w: model.MENU_W, h: model.MENU_H }, canvas.Color{ r: 34, g: 37, b: 52 });
+        i32 over = state.menu_item_at(state.mouse_x, state.mouse_y);
+        str[2] labels = ["Show in file manager", "Go up"];
+        for (i32 i in 0..2) {
+            f32 top = y + i as f32 * model.ITEM_H;
+            if (i == over) {
+                surface.fill(canvas.Rect{ x: x, y: top, w: model.MENU_W, h: model.ITEM_H }, canvas.Color{ r: 64, g: 90, b: 160 });
+            }
+            say(surface, x + 12.0, top + 6.0, 14.0, labels[i as usize], ink());
+        }
+    }
+
+    void say(canvas.Canvas* surface, f32 x, f32 y, f32 size, str text, canvas.Color color) {
+        match (face) {
+            some(font) => {
+                surface.text_with(font, size, x, y, text, color);
+            },
+            none => {
+                surface.text(x, y, text, color, 1);
+            },
+        }
+    }
+
+    f32 width_of(str text, f32 size) {
+        return match (face) {
+            some(font) => font.measure(text, size),
+            none => canvas.text_size(text, 1).w,
+        };
+    }
+
+    void draw_tiles(canvas.Canvas* surface, Arena* frame) {
+        for (layout.Tile t in state.map.tiles.items()) {
+            scan.Node* n = state.tree.nodes.at(t.node as usize);
+            canvas.Rect whole = canvas.Rect{ x: t.x, y: t.y, w: t.w, h: t.h };
+            if (!t.leaf) {
+                i32 shade = 36 + (t.depth % 6) * 7;
+                surface.fill(whole, canvas.Color{ r: shade as ui8, g: (shade + 4) as ui8, b: (shade + 14) as ui8 });
+                if (t.h >= 40.0 && t.w >= 60.0) {
+                    surface.push_clip(whole);
+                    say(surface, t.x + 4.0, t.y + 1.0, 11.0, n.name, ink());
+                    surface.pop_clip();
+                }
+                continue;
+            }
+            canvas.Color color = n.dir ? canvas.Color{ r: 70, g: 80, b: 112 } : color_of(t.kind);
+            canvas.Rect inner = canvas.Rect{ x: t.x + 0.5, y: t.y + 0.5, w: t.w - 1.0, h: t.h - 1.0 };
+            surface.fill(inner, color);
+            surface.fill(canvas.Rect{ x: inner.x, y: inner.y, w: inner.w, h: 1.0 }, canvas.Color{ r: 255, g: 255, b: 255, a: 40 });
+            if (t.w >= 64.0 && t.h >= 16.0) {
+                surface.push_clip(inner);
+                say(surface, t.x + 4.0, t.y + 2.0, 11.0, n.name, ink());
+                if (t.h >= 32.0) {
+                    say(surface, t.x + 4.0, t.y + 15.0, 10.0, model.size_text(frame, n.size), canvas.Color{ r: 238, g: 240, b: 248, a: 170 });
+                }
+                surface.pop_clip();
+            }
+        }
+        if (state.hover >= 0 && state.hover < state.map.tiles.len() as i64) {
+            layout.Tile* t = state.map.tiles.at(state.hover as usize);
+            surface.stroke(canvas.Rect{ x: t.x, y: t.y, w: t.w, h: t.h }, canvas.Color{ r: 255, g: 255, b: 255 }, 2.0);
+        }
+    }
+
+    void draw_status(canvas.Canvas* surface, Arena* frame) {
+        f32 top = surface.height as f32 - model.BOTTOM;
+        surface.fill(canvas.Rect{ x: 0.0, y: top, w: surface.width as f32, h: model.BOTTOM }, canvas.Color{ r: 18, g: 19, b: 28 });
+        say(surface, 10.0, top + 5.0, 13.0, state.status(frame), ink());
+        // the legend, from the right
+        mut f32 right = surface.width as f32 - 10.0;
+        for (i32 i in 0..8) {
+            i32 kind = 7 - i;
+            str label = name_of(kind);
+            f32 w = width_of(label, 12.0);
+            right -= w;
+            say(surface, right, top + 6.0, 12.0, label, ink());
+            right -= 14.0;
+            surface.fill(canvas.Rect{ x: right, y: top + 8.0, w: 10.0, h: 10.0 }, color_of(kind));
+            right -= 12.0;
+        }
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    model.Model* m = model.new_model(&arena);
+    App* handler = arena.new(App, m);
+    match (app.read_asset(&arena, "assets/NotoSans-Regular.ttf")) {
+        some(bytes) => {
+            match (truetype.parse(&arena, bytes)) {
+                ok(font) => {
+                    handler.ui.font = some(font);
+                    handler.face = some(font);
+                },
+                err(e) => {
+                    io.print("Noto Sans is not readable: the built-in font is used");
+                },
+            }
+        },
+        none => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    str[] args = os.args(&arena);
+    if (args.len >= 2 && args[0] == "--snapshot") {
+        return snapshot(&arena, handler, m, args[1], args.len >= 3 ? args[2] : ".");
+    }
+    if (args.len >= 1) {
+        m.open(args[0]);
+    }
+    widgets.Window window = screen.DiskTilesConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler*);
+}
+
+// The window in a picture: the folder read at once, no mouse.
+i32 snapshot(Arena* arena, App* handler, model.Model* m, str file, str folder) uses io {
+    mut canvas.Canvas surface = canvas.create(arena, 1100, 720);
+    handler.ui.custom_title_bar = true;
+    m.open(folder);
+    m.tree.finish();
+    m.scanning = true;  // `update` sees that it ends
+    m.update(arena, 1, 0, surface.width, surface.height);
+    handler.ui.clock(0);
+    handler.paint(&surface, arena);
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            io.print("written to {}", file);
+            return 0;
+        },
+        err(e) => {
+            io.print("cannot write {}", file);
+            return 1;
+        },
+    }
+}

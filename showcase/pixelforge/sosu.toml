@@ -1,0 +1,11 @@
+# Pixel Forge: a pixel art editor, written in Sosu.
+[package]
+name = "pixelforge"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }
+image = { path = "../../packages/image" }
+testing = { path = "../../packages/testing" }
