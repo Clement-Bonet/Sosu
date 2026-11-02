@@ -129,34 +129,44 @@ void sema_declare_local(Body *b, Name name, Type *type, bool is_mut) {
                                  NAME_ARGS(name));
         diag_help(d, "the first declaration is on line %zu: choose another name", sema_line_of(b->unit, existing->name.offset));
     }
-    Local local = { name, type, is_mut, false, 0, b->loop_depth, false };
+    Local local = { name, type, is_mut, false, 0, b->loop_depth, false, false };
     SOSU_VEC_PUSH(&b->locals, local);
 }
 
-/* True if the place `e` is in a variable or a parameter of the function: the variable itself,
-   or a field or an element of it, reached without going through a pointer or a view. */
-static bool in_local_storage(Body *b, const Expr *e) {
+/* The variable or parameter of the function that holds the place `e`: the variable itself, or a
+   field or an element of it, reached without going through a pointer or a view; else NULL. */
+static Local *storage_local(Body *b, const Expr *e) {
     switch (e->kind) {
     case EXPR_NAME:
-        return sema_find_local(b, e->as.name) != NULL;
+        return sema_find_local(b, e->as.name);
     case EXPR_FIELD: {
         const Type *object = e->as.field.object->type;
-        return object && object->tag != T_POINTER && in_local_storage(b, e->as.field.object);
+        return object && object->tag != T_POINTER ? storage_local(b, e->as.field.object) : NULL;
     }
     case EXPR_INDEX: {
         const Type *object = e->as.index.object->type;
-        return object && object->tag == T_ARRAY && in_local_storage(b, e->as.index.object);
+        return object && object->tag == T_ARRAY ? storage_local(b, e->as.index.object) : NULL;
     }
     default:
-        return false;
+        return NULL;
     }
 }
 
+static bool in_local_storage(Body *b, const Expr *e) {
+    return storage_local(b, e) != NULL;
+}
+
 /* The first part of `e` that would leave a pointer into the function once it returns: `&x`,
-   `&x.f`, `&a[i]`, `a[i..j]` of a local array, also inside `some`, `ok`, `err`, a literal or
-   `?:`. Pointers kept in variables first are not followed: the regions after 1.0 will. */
+   `&x.f`, `&a[i]`, `a[i..j]` of a local array, or a variable that was given one (even later
+   given another value: the check does not follow the order of the code), also inside `some`,
+   `ok`, `err`, a literal or `?:`. A pointer stored in memory that lasts longer is not followed:
+   the regions after 1.0 will. */
 static const Expr *dangling_part(Body *b, const Expr *e) {
     switch (e->kind) {
+    case EXPR_NAME: {
+        const Local *local = sema_find_local(b, e->as.name);
+        return local && local->points_inside ? e : NULL;
+    }
     case EXPR_UNARY:
         return e->as.unary.op == TOK_AMP && in_local_storage(b, e->as.unary.operand) ? e : NULL;
     case EXPR_INDEX: {
@@ -201,6 +211,13 @@ static const Expr *dangling_part(Body *b, const Expr *e) {
 static void check_dangling(Body *b, const Expr *e) {
     const Expr *part = dangling_part(b, e);
     if (!part) return;
+    if (part->kind == EXPR_NAME) {
+        Diagnostic *d = sema_error_expr(b, "E0371", part, "`%.*s` returned would point into this function, which ends",
+                                        NAME_ARGS(part->as.name));
+        diag_help(d, "it was given the address of a local variable or a view of a local array: return the value "
+                     "itself, or memory from an arena (`arena.alloc`, `arena.alloc_slice`)");
+        return;
+    }
     bool view = part->kind == EXPR_INDEX;
     Diagnostic *d = sema_error_expr(b, "E0371", part, "%s returned would point into this function, which ends",
                                view ? "a view of a local array" : "the address of a local variable");
@@ -1299,6 +1316,9 @@ static void check_assign(Body *b, Stmt *stmt) {
             Local *local = sema_find_local(b, target->as.name);
             if (local) local->moved = false;
         }
+        /* `p = &x;` or `h.p = &x;`: never cleared, since the order of the branches is not followed */
+        Local *holder = storage_local(b, target);
+        if (holder && dangling_part(b, value)) holder->points_inside = true;
         return;
     }
     if (op == TOK_SHL_EQ || op == TOK_SHR_EQ) {
@@ -1408,8 +1428,12 @@ static void check_var(Body *b, Stmt *stmt) {
     }
     sema_consume(b, init);
     bool closure = type->tag == T_FN && sema_is_closure(b, init);
+    bool points_inside = dangling_part(b, init) != NULL;
     sema_declare_local(b, stmt->as.var.name, type, stmt->as.var.is_mut);
-    if (closure && !sema_name_is(stmt->as.var.name, "_")) b->locals.items[b->locals.count - 1].closure = true;
+    if (!sema_name_is(stmt->as.var.name, "_")) {
+        b->locals.items[b->locals.count - 1].closure = closure;
+        b->locals.items[b->locals.count - 1].points_inside = points_inside;
+    }
 }
 
 void sema_check_expr_stmt(Body *b, Expr *e) {

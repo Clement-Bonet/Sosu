@@ -403,7 +403,7 @@ i32 main() uses io {
 A lambda that captures variables, a closure, lives as long as the function that creates it runs: what it captured is kept in the variables of that function. So a closure is called, given to a variable at its declaration (`auto f = ...`), and passed as an argument; it is not returned, nor stored in a field, an array, an option, a result or an enum, nor given to a C function, nor assigned with `=` (E0370). These cover `map`, `filter`, `sort_by` and the interface in immediate mode (§10.4), which call the function while they run. A lambda without captures, and a named function, go everywhere.
 
 - The compiler reports the closures it sees (E0370). A function received as a parameter may be one: where it would leave its function, it is checked when the program runs, which stops with the code 101 if it captured variables.
-- A closure kept beyond its function (a callback stored by the interface) needs another rule, regions or an arena that holds what it captured: after 1.0 (§13).
+- A closure kept beyond its function (a callback stored by the interface) needs another rule, regions or an arena that holds what it captured: after 1.0 (§13), proposed in §6.1 (rule 5).
 
 #### What it becomes
 
@@ -491,7 +491,48 @@ Point* p = arena.alloc(Point);      // lives until arena.free()
 - Plain `struct`s (without a resource) are copied by value.
 - No hidden allocation: no global allocator; every function that allocates explicitly receives an `Arena*`.
 - No borrow checker in v0: safety relies on arenas and `defer`.
-- Research track (v1): a simple region rule checked by the compiler, without lifetime parameters. A pointer coming from an arena can neither be stored in a structure that outlives the arena, nor be returned beyond its scope.
+- Research track (v1): a simple region rule checked by the compiler, without lifetime parameters. A pointer coming from an arena can neither be stored in a structure that outlives the arena, nor be returned beyond its scope: the proposal of §6.1.
+
+### 6.1 Regions (proposal, after 1.0)
+
+Status: proposed, not implemented; to be decided before any code. What it closes: the dangling pointers of §7.7 that the compiler does not catch yet (a pointer into an arena after its `free()`, a pointer into a function stored in memory that lasts longer), and the closures kept beyond their function (§5.5). The rule is checked in each function, by the compiler alone: no lifetime written in the types, no change to what a pointer is in C (§9), nothing at run time.
+
+**Origins.** The compiler gives each pointer and each view an origin, which is never written:
+
+| Origin | Where the value comes from |
+|---|---|
+| the function | `&x` of a local or a parameter, a view of a local array (E0371 today) |
+| the arena `a` | `a.alloc`, `a.new`, `a.alloc_slice`, `a.try_alloc`, and what is reached through such a pointer, for a local `Arena a` or a parameter `Arena* a` |
+| the caller | a parameter, and what is reached through it: memory that outlives the call |
+| static | string literals, constants, globals |
+| unchecked | what C or an `unsafe` block gives |
+
+A variable takes the origins of every value it is given (as E0371 now does, without following the order of the branches); a value of several origins is checked against each.
+
+**The rules.**
+
+1. *Free.* After `a.free()`, or the `defer` that runs it, a variable of origin the arena `a` cannot be used (a new code). The check follows the order of the source, as moves do (§6): a free in a branch makes the variable unusable after the `if`.
+2. *Return.* A returned value may have the origins the caller, static, unchecked, or an arena received as a parameter (`Arena*`). Not the function (E0371), nor a local arena, unless that arena is returned with it, in the same struct (an object that owns its arena, §9.2).
+3. *Store.* A pointer may be written into memory that lasts no longer than what it points to: into a local; into memory of the same arena; into memory of the caller when its origin is the caller or an `Arena*` parameter. A pointer of origin the function, or of a local arena, is never stored into memory of the caller or of another arena.
+4. *Calls.* A function may store any pointer argument into the memory of any other one, so that it needs no annotation. A call is therefore refused when it gives a pointer of a shorter origin (the function, a local arena) together with memory that outlives it (the caller, another arena), unless the parameter says that it is only read during the call, by a word to decide (below).
+5. *Closures.* A closure has the origin the function. `a.closure(f)` would copy what it captured into the arena `a`, and give a closure of origin the arena `a`: it can then be stored as rule 3 says, which is what a callback kept by the interface needs (§5.5, E0370).
+6. *Escape.* `unsafe` turns the rules off, as it does for the other checks of §7.7.
+
+**In stages**, each measured on `lib/` and `packages/` before the next (the number of errors in code that is correct tells what the rule costs):
+
+1. The free rule, on local arenas: the most frequent case, and the simplest (the tracking of moves already exists).
+2. The origins, and the return rule extended to local arenas.
+3. The store rule.
+4. The call rule, and its word for a parameter only read.
+5. The closures in an arena.
+
+**Open questions** (proposed answers in parentheses):
+
+- The word for a parameter that is only read during the call (rule 4): `in`, as in `void draw(in Canvas* c)`, or the inverse, a word for those that may be stored? (proposed: the inverse, `keeps`, since most parameters are only read; a function that stores a pointer argument says so, `void push(keeps T* item)`, and the others need nothing)
+- Two arenas received as parameters: may a pointer of one be stored into the other? (proposed: no, without a word saying that they live as long; the error says to use one arena)
+- Containers (`std.vec`, `std.map`) store their elements in their own arena: an element pointing into another arena breaks rule 3. (proposed: allowed when the element comes from the same arena as the container, which is the use in `lib/` and `packages/`; to be measured at stage 3)
+- A pointer read from a field of the caller's memory has the origin the caller: rule 3 then allows storing it back anywhere in the caller's memory, although the two places may belong to different arenas of the caller. (proposed: accepted, the price of having no lifetimes; the debug check of §7.7 stays for what slips through)
+- How the rules come in: a new error code for each (§13.2). Refusing a pointer that really dangles is a fault of soundness fixed, which a minor version may do (§13.2); refusing correct code that a rule cannot prove is not. (proposed: each rule first warns during one minor version, with the code it will have; it becomes an error in that minor version when the measure of its stage finds no correct code refused in `lib/` and `packages/`, else in the next major version)
 
 ## 7. Reliability and readability
 
@@ -615,7 +656,7 @@ error[E0312]: non-exhaustive match
 ### 7.7 `unsafe` and debug checks
 
 - `unsafe { ... }` is the only place where pointer arithmetic, raw pointer conversions (`p as T*`) or unwrapped calls to C are allowed. A function marked `unsafe` can only be called from an `unsafe` block.
-- Outside `unsafe`, a `T*` is never null, and a view stays within its bounds. A pointer or a view can still be left dangling in three cases, which the compiler does not catch yet: a pointer into an arena after its `free()` (using the arena itself afterwards stops the program, §6, but its pointers are not checked); a pointer to a local variable, and a view of a local array, that outlive their function. The compiler refuses those that are returned as they are made (E0371: `return &x;`, `return &p.v;`, `return a[0..2];`, also in `some(...)`, a literal or `?:`), not those kept in a variable first, nor those stored in memory that lasts longer. Reading through them is undefined behavior, as in C. The rule of regions (§6, after 1.0) is meant to close these cases; until then, an arena freed by a `defer` of the scope that uses it, and pointers to locals kept within their function, avoid them.
+- Outside `unsafe`, a `T*` is never null, and a view stays within its bounds. A pointer or a view can still be left dangling in three cases, which the compiler does not catch yet: a pointer into an arena after its `free()` (using the arena itself afterwards stops the program, §6; in debug, reading or writing through such a pointer stops it too, by an access violation, since the pages of a freed arena are made unreadable instead of given back, for the last 1 024 blocks freed by each thread; in release, nothing checks it); a pointer to a local variable, and a view of a local array, that outlive their function. The compiler refuses those that are returned (E0371: `return &x;`, `return &p.v;`, `return a[0..2];`, also in `some(...)`, a literal or `?:`), also through a variable that was given one (`i32* p = &x; return p;`, `h.p = &x; return h;`): such a variable stays refused even if it is given another value afterwards, since the order of the code is not followed (use another variable). It does not refuse those stored in memory that lasts longer (a field reached through a pointer, an arena). Reading through them is undefined behavior, as in C. The rule of regions (§6.1, proposed for after 1.0) is meant to close these cases; until then, an arena freed by a `defer` of the scope that uses it, and pointers to locals kept within their function, avoid them.
 - In debug, everything is checked: array and slice bounds, variables initialized before being read, integer overflows, unsigned floats never negative, contracts.
 - In release, bounds stay checked by default (`--checks=off` disables them); contracts, overflows and unsigned floats are not.
 - Options of `sosuc build`, `run` and `test`: `--release` (optimized C, modulo arithmetic, no contracts), `--checks=on|off` (indexes), `--contracts=check|off` (`requires` / `ensures`). Division by zero always stops the program, as do `assert` failures.

@@ -139,6 +139,15 @@ static const char *after_lines(const char *text, int lines) {
 /* `sosuc bindgen` (spec §11.6): the module of tests/programs/bindgen, written again from its header
    and checked against it by the C compiler, is the one committed (but its first lines, which name
    the system and the command); `long` is warned about. */
+/* A pointer read after the `free()` of its arena stops a debug build (spec §7.7): an access
+   violation, whose code depends on the system; what was printed before is lost with it. */
+static void test_freed_arena(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command, "%s run tests/programs/freed_arena > build/freed_arena.out 2> build/freed_arena.err",
+             sosuc);
+    CHECK(run(command) != 0, "run freed_arena: the pointer into a freed arena was read without stopping");
+}
+
 static void test_bindgen(const char *sosuc) {
     char command[1024];
     snprintf(command, sizeof command,
@@ -246,6 +255,7 @@ int main(int argc, char **argv) {
 
     test_library(argv[1]);
     test_bindgen(argv[1]);
+    test_freed_arena(argv[1]);
     test_package(argv[1]);
     test_android(argv[1]);
 

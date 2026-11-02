@@ -19,6 +19,7 @@ typedef struct {
     size_t moved_offset; /* where */
     int loop_depth;      /* loops around its declaration */
     bool closure;        /* holds a lambda of this function that captures variables (spec §5.5) */
+    bool points_inside;  /* was given a pointer or a view into this function (spec §7.7, E0371) */
 } Local;
 
 /* A lambda being checked (spec §5.5): its own locals start at `base`; those below it, and

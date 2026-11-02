@@ -113,7 +113,7 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0368 | a constant of a type other than a number, `bool`, `char` or `str` | `i32[2] PAIR = [1, 2];` (spec §11.6) |
 | E0369 | invalid lambda | `auto g = (x) => x;` (the type of `x` is unknown), `n = x` in a lambda that captured `n`, a captured `Arena` (spec §5.5) |
 | E0370 | a lambda that captures variables leaves its function | `return (i32 x) => x + k;`, `S{ h: (x) => x + k }`, `g = (x) => x + k;`, a C function that takes a function used as a value (spec §5.5) |
-| E0371 | a returned pointer or view would point into the function | `return &x;` on a local or a parameter, `return &p.v;` on a local struct, `return a[0..2];` on a local array, also in `some(...)`, a literal or `?:` (spec §7.7); a pointer first kept in a variable is not followed |
+| E0371 | a returned pointer or view would point into the function | `return &x;` on a local or a parameter, `return &p.v;` on a local struct, `return a[0..2];` on a local array, also in `some(...)`, a literal or `?:`, or a variable that was given one (`p = &x; return p;`, `h.p = &x; return h;`) (spec §7.7); a pointer stored in memory that lasts longer is not followed |
 
 ## Code generation
 
