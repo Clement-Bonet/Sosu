@@ -18,6 +18,9 @@ typedef struct {
 
 static const Case cases[] = {
     { "run", "basics", "expected.txt", 0, NULL },
+    /* read the same by sh and by cmd (an even number of quotes, so that cmd sees the `>` after
+       them), then quoted again by sosuc for the program */
+    { "run", "arguments", "expected.txt", 0, "\"a b\" \"c d\\\\\" \"x\\\"y\\\"z\" \"\" plain" },
     { "run", "overflow", "expected.txt", 101, NULL },
     { "run", "classes", "expected.txt", 0, NULL },
     { "run", "linking", "expected.txt", 0, NULL },
