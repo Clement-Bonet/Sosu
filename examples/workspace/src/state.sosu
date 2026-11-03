@@ -122,7 +122,7 @@ pub class Workspace {
     // The files chosen together in the tab Selection, by Ctrl and Shift (spec §10.10).
     pub mut widgets.Selection picked;
 
-    void init(image.Image icon) {
+    void init(keeps image.Image icon) {
         self.icon = icon;
         files = [File{ }; 16];
         picked = widgets.selection();

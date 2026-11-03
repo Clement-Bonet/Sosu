@@ -16,7 +16,7 @@ class App : app.Handler {
     state.Demo* s;
     mut bool keyboard;  // a text widget has the keyboard
 
-    void init(state.Demo* s) {
+    void init(keeps state.Demo* s) {
         ui = widgets.Ui{ };
         self.s = s;
         keyboard = false;

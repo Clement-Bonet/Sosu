@@ -37,7 +37,7 @@ pub class Tree {
     pub mut i64 skipped;  // the links, devices...
     pub mut bool done;
 
-    void init(Arena* arena, str root) {
+    void init(Arena* arena, keeps str root) {
         self.arena = arena;
         nodes = vec.new<Node>(arena);
         pending = vec.new<i32>(arena);
@@ -146,6 +146,6 @@ pub class Tree {
     }
 }
 
-pub Tree* scan(Arena* arena, str root) {
+pub Tree* scan(Arena* arena, keeps str root) {
     return arena.new(Tree, arena, root);
 }

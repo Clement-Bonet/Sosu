@@ -257,6 +257,10 @@ static void test_declarations(void) {
                   "(test \"works\"\n"
                   "  (block\n"
                   "    (call assert true)))\n");
+    /* `keeps` (spec §6.1, rule 4): a word before the type of a parameter only */
+    expect_module("void push(keeps T* item, mut keeps str s, keeps k, keeps* p, keeps a, i32 keeps) { }\n",
+                  "(fn void push ((keeps T* item) (mut keeps str s) (keeps k) (keeps* p) (keeps a) (i32 keeps))\n"
+                  "  (block))\n");
 }
 
 static void test_errors(void) {

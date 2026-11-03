@@ -1305,6 +1305,19 @@ static Stmt *parse_statement(Parser *p) {
 
 /* ---- Declarations ---- */
 
+/* `keeps` before the type of a parameter (spec §6.1, rule 4): a word only there, so that a type or a
+   name `keeps` stays valid. It is the type when a name, `,` or `)` follows it, or what continues a type. */
+static bool at_keeps(const Parser *p) {
+    if (!token_is(p, cur(p), "keeps")) return false;
+    TokenKind next = kind_at(p, 1);
+    if (next == TOK_COMMA || next == TOK_RPAREN || next == TOK_STAR || next == TOK_QUESTION || next == TOK_LBRACKET ||
+        next == TOK_DOT || next == TOK_LT || next == TOK_BANG) {
+        return false;
+    }
+    TokenKind after = kind_at(p, 2);
+    return !(next == TOK_IDENT && (after == TOK_COMMA || after == TOK_RPAREN));
+}
+
 void parse_params(Parser *p, Param **out, size_t *count, bool allow_mut) {
     expect(p, TOK_LPAREN);
     VEC(Param) params = {0};
@@ -1316,6 +1329,10 @@ void parse_params(Parser *p, Param **out, size_t *count, bool allow_mut) {
                 error_at(p, "E0212", mut->offset, mut->length, "`mut` is not allowed here");
             }
             param.is_mut = mut->kind == TOK_KW_MUT;
+            if (at_keeps(p)) {
+                advance(p);
+                param.is_keeps = true;
+            }
             param.type = parse_type(p, false);
             expect_name(p, &param.name, "a parameter name");
             SOSU_VEC_PUSH(&params, param);

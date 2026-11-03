@@ -1,0 +1,49 @@
+// Closures kept in an arena (spec §6.1, rule 5): `arena.closure` copies what a lambda captures into
+// the arena, so that it outlives the function that made it, in a field of a class.
+import std.io;
+
+class Button {
+    fn() -> i32 on_click;
+
+    void init(keeps fn() -> i32 handler) {
+        on_click = handler;
+    }
+
+    i32 click() {
+        return on_click();
+    }
+}
+
+class Counter {
+    mut i32 total;
+    mut fn(i32) -> void add;
+
+    void init() {
+        total = 0;
+    }
+}
+
+Button* make(Arena* arena, i32 start) {
+    i32 k = start * 2;
+    return arena.new(Button, arena.closure(() => k + 1));
+}
+
+void wire(Arena* arena, keeps Counter* c, i32 step) {
+    c.add = arena.closure((i32 n) => {
+        c.total += n * step;
+    });
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Button* b = make(&arena, 20);
+    Button* other = make(&arena, 5);
+    io.print("clicked: {} {}", b.click(), other.click());
+    Counter* c = arena.new(Counter);
+    wire(&arena, c, 3);
+    c.add(1);
+    c.add(2);
+    io.print("total: {}", c.total);
+    return 0;
+}

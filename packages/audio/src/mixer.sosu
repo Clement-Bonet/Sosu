@@ -66,11 +66,11 @@ pub class Mixer {
     }
 
     // Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
-    pub ui32 play(audio.Sound sound) {
+    pub ui32 play(keeps audio.Sound sound) {
         return play_with(sound, Play{ });
     }
 
-    pub ui32 play_with(audio.Sound sound, Play how)
+    pub ui32 play_with(keeps audio.Sound sound, Play how)
         requires how.speed > 0.0
     {
         ui32 id = next_id;

@@ -493,8 +493,8 @@ static void define_type(Gen *g, const Type *type) {
         buf_printf(&g->fwd, "typedef struct %s__vt %s__vt;\n", name, name);
         buf_printf(&g->defs, "struct %s__vt {\n%s};\n\n", name, table.items);
         free(table.items);
-        for (size_t i = 0; i < info->field_count; i++) {
-            buf_printf(&body, "    %s f_%.*s;\n", field_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
+        for (size_t i = 0; i < info->field_count; i++) { /* a field of function type is a pair: an object is not given to C */
+            buf_printf(&body, "    %s f_%.*s;\n", value_type(g, info->fields[i].type), NAME_ARGS(info->fields[i].name));
         }
         break;
     }
@@ -756,10 +756,14 @@ static char *from_pointer(char *value) {
 }
 
 /* A field of function type: `x.f`, or `f` in a method. */
-static bool is_fn_field(const Expr *e) {
+/* A field of function type of a struct: a C function pointer (those of a class are pairs). */
+static bool is_fn_field(const Fn *f, const Expr *e) {
     if (!e->type || e->type->tag != T_FN) return false;
-    return (e->kind == EXPR_FIELD && e->resolution == RESOLVED_NONE) ||
-           (e->kind == EXPR_NAME && e->resolution == RESOLVED_SELF_FIELD);
+    if (e->kind == EXPR_NAME && e->resolution == RESOLVED_SELF_FIELD) return f->self_info->type->tag != T_CLASS;
+    if (e->kind != EXPR_FIELD || e->resolution != RESOLVED_NONE) return false;
+    const Type *object = e->as.field.object->type;
+    if (object && object->tag == T_POINTER) object = object->as.inner;
+    return !object || object->tag != T_CLASS;
 }
 
 /* ---- Literals ---- */
@@ -900,7 +904,7 @@ static char *gen_name(Fn *f, Expr *e) {
         char *path = f->self_info->type->tag == T_CLASS ? field_path(f->self_info, e->as.name) : sosu_strdup("");
         char *result = sosu_format("v_self->%sf_%.*s", path, NAME_ARGS(e->as.name));
         free(path);
-        return e->type->tag == T_FN && !f->raw_field ? from_pointer(result) : result;
+        return e->type->tag == T_FN && !f->raw_field && f->self_info->type->tag != T_CLASS ? from_pointer(result) : result;
     }
     case RESOLVED_FN: return from_pointer(fn_name_of(f->g, e));
     case RESOLVED_VARIANT: return gen_variant(f, e, e->target, e->target_index, NULL);
@@ -1258,7 +1262,7 @@ static char *gen_field(Fn *f, Expr *e) {
         char *path = base->tag == T_CLASS ? field_path(base->as.info, name) : sosu_strdup("");
         result = sosu_format("%s%s%sf_%.*s", value, access, path, NAME_ARGS(name));
         free(path);
-        if (e->type->tag == T_FN && !f->raw_field) result = from_pointer(result);
+        if (e->type->tag == T_FN && !f->raw_field && base->tag != T_CLASS) result = from_pointer(result);
     }
     free(value);
     return result;
@@ -1456,6 +1460,8 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
 }
 
 /* Arena.new(size), arena.alloc(T), arena.try_alloc(T), arena.new(T, ...), arena.free() */
+static char *gen_lambda_in(Fn *f, Expr *e, const char *arena);
+
 static char *gen_arena_call(Fn *f, Expr *e, const char *name) {
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
@@ -1469,6 +1475,12 @@ static char *gen_arena_call(Fn *f, Expr *e, const char *name) {
         return result;
     }
     char *arena = address_of(f, e->as.call.callee->as.field.object);
+    if (strcmp(name, "arena.closure") == 0) {
+        result = gen_lambda_in(f, args[0], arena);
+        free(arena);
+        free(where);
+        return result;
+    }
     if (strcmp(name, "arena.free") == 0) {
         emit(f, "sosu_arena_free(%s);", arena);
         free(arena);
@@ -1620,7 +1632,9 @@ static void finish_function(Gen *g, Fn *f, Buf *code, size_t body_start);
 /* A lambda (spec §5.5): a C function of its own. When it captures variables, they are copied
    into a struct declared at the start of the enclosing function, whose address the value
    holds; the function starts by copying them back into variables of the same names. */
-static char *gen_lambda(Fn *f, Expr *e) {
+/* A lambda; with `arena` (a C pointer to it), what it captures is copied into that arena
+   (`arena.closure`, spec §6.1, rule 5) instead of the variables of the function. */
+static char *gen_lambda_in(Fn *f, Expr *e, const char *arena) {
     Gen *g = f->g;
     int id = ++g->lambdas;
     const Type *type = e->type;
@@ -1692,14 +1706,28 @@ static char *gen_lambda(Fn *f, Expr *e) {
     free(header);
 
     if (!captures) return sosu_format("sosu_fn_of((sosu_code)L_%d)", id);
-    buf_printf(&f->locals, "    struct L_%d_env e_%d;\n", id, id);
+    char *kept;
+    if (arena) {
+        char *where = loc(f, e->offset);
+        kept = new_temp(f);
+        emit(f, "struct L_%d_env *%s = (struct L_%d_env *)sosu_arena_alloc(%s, sizeof(struct L_%d_env), %s);", id, kept, id,
+             arena, id, where);
+        free(where);
+    } else {
+        buf_printf(&f->locals, "    struct L_%d_env e_%d;\n", id, id);
+        kept = sosu_format("(&e_%d)", id);
+    }
     for (size_t i = 0; i < captures; i++) {
         const Capture *c = &e->as.lambda.captures[i];
-        if (c->is_self) emit(f, "e_%d.v_self = v_self;", id);
-        else emit(f, "e_%d.v_%.*s = v_%.*s;", id, NAME_ARGS(c->name), NAME_ARGS(c->name));
+        if (c->is_self) emit(f, "%s->v_self = v_self;", kept);
+        else emit(f, "%s->v_%.*s = v_%.*s;", kept, NAME_ARGS(c->name), NAME_ARGS(c->name));
     }
-    return sosu_format("((sosu_fn){ (sosu_code)L_%d, &e_%d })", id, id);
+    char *result = sosu_format("((sosu_fn){ (sosu_code)L_%d, %s, %s })", id, kept, arena ? "true" : "false");
+    free(kept);
+    return result;
 }
+
+static char *gen_lambda(Fn *f, Expr *e) { return gen_lambda_in(f, e, NULL); }
 
 static char *gen_call(Fn *f, Expr *e) {
     Expr *callee = e->as.call.callee;
@@ -1986,7 +2014,7 @@ static void gen_assign(Fn *f, const Stmt *stmt) {
     Expr *target = stmt->as.assign.target;
     Expr *value_expr = stmt->as.assign.value;
     TokenKind op = stmt->as.assign.op;
-    bool field = is_fn_field(target); /* a C function pointer */
+    bool field = is_fn_field(f, target); /* a C function pointer */
     f->raw_field = field;
     char *place = gen_expr(f, target);
     f->raw_field = false;

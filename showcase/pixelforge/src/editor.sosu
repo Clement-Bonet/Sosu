@@ -351,7 +351,7 @@ pub class Editor {
         clip_h = 0;
     }
 
-    pub void say(str text) {
+    pub void say(keeps str text) {
         message = text;
         message_until = now + 3000;
     }
@@ -879,7 +879,7 @@ pub class Editor {
     }
 
     // `art` becomes a new frame, just after the current one.
-    void insert_frame(sheet.Sheet* s, i32 delay) {
+    void insert_frame(keeps sheet.Sheet* s, i32 delay) {
         settle();
         frames.insert((current + 1) as usize, sheet.Frame{ art: s, delay: delay, drawn: -1 });
         current += 1;

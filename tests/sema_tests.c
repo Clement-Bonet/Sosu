@@ -235,7 +235,7 @@ static void test_valid_bodies(void) {
                  "}\n"
                  "class Button : Widget {\n"
                  "    str label;\n"
-                 "    void init(str label) { base.init(0.0); self.label = label; }\n"
+                 "    void init(keeps str label) { base.init(0.0); self.label = label; }\n"
                  "    override void on_click() uses io { base.on_click(); }\n"
                  "}\n"
                  "void use(Button* b) uses io {\n"
@@ -587,7 +587,7 @@ static void test_dangling(void) {
     expect_codes("struct P { mut i32 v; i32* at() { return &v; } }", "");
 }
 
-/* Spec §6.1, stage 1: memory of a local arena used after its `free()` (E0372, a warning for now). */
+/* Spec §6.1, stage 1: memory of a local arena used after its `free()` (E0372). */
 static void test_freed_arena(void) {
     const char *head = "struct N { i32 v; }\nstruct H { N* n; }\n";
     char text[512];
@@ -615,8 +615,123 @@ static void test_freed_arena(void) {
         expect_codes(text, cases[i].codes);
     }
     expect_help("i32 f() { mut Arena a = Arena.new(64); i32* p = a.alloc(i32); a.free(); return *p; }", "E0372",
-                "use it before the `free()`, or free the arena later; this warning becomes an error in a later "
-                "version (spec §6.1)");
+                "use it before the `free()`, or free the arena later (spec §6.1)");
+}
+
+/* Spec §6.1, stage 2: a returned value holds no memory of a local arena (E0373),
+   unless the arena is returned with it. */
+static void test_returned_arena(void) {
+    const char *head = "struct N { i32 v; }\nstruct H { N* n; }\nstruct Doc { Arena arena; N* root; }\n";
+    char text[512];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "N* f() { mut Arena a = Arena.new(64); N* p = a.alloc(N); return p; }", "E0373" },
+        { "N* f() { mut Arena a = Arena.new(64); return a.alloc(N); }", "E0373" },
+        { "H f() { mut Arena a = Arena.new(64); return H{ n: a.alloc(N) }; }", "E0373" },
+        { "N*? f() { mut Arena a = Arena.new(64); N* p = a.alloc(N); return some(p); }", "E0373" },
+        { "N[] f() { mut Arena a = Arena.new(64); N[] s = a.alloc_slice(N, 4); return s; }", "E0373" },
+        { "N* f(bool c, N* q) { mut Arena a = Arena.new(64); return c ? q : a.alloc(N); }", "E0373" },
+        { "N* f(Arena a) { N* p = a.alloc(N); return p; }", "E0373" },
+        /* the arena is returned with it, or the memory outlives the function */
+        { "Doc f() { mut Arena a = Arena.new(64); N* r = a.alloc(N); return Doc{ arena: a, root: r }; }", "" },
+        { "Doc f() { mut Arena a = Arena.new(64); N* r = a.alloc(N); Doc d = Doc{ arena: a, root: r }; return d; }", "" },
+        { "N* f(Arena* a) { N* p = a.alloc(N); return p; }", "" },
+        { "class C { Arena arena; void init(Arena a) { arena = a; } }\n"
+          "C* f() { mut Arena a = Arena.new(64); return a.new(C, a); }", "" },
+        { "N* f(N* q) { mut Arena a = Arena.new(64); N* p = a.alloc(N); return q; }", "" },
+        { "i32 f() { mut Arena a = Arena.new(64); N* p = a.alloc(N); return p.v; }", "" },
+        /* `unsafe` turns the rule off */
+        { "N* f() { mut Arena a = Arena.new(64); N* p = a.alloc(N); unsafe { return p; } }", "" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%s%s\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
+    expect_help("i32* f() { mut Arena a = Arena.new(64); return a.alloc(i32); }", "E0373",
+                "allocate it in an arena received as a parameter (`Arena*`), or return the arena with it, in the same "
+                "struct (spec §6.1)");
+}
+
+/* Spec §6.1, stage 3: a pointer is stored only where it lasts no longer than what it points to
+   (E0374). */
+static void test_stored_pointer(void) {
+    const char *head = "struct N { i32 v; }\nstruct H { mut N*? n; }\nstruct Doc { mut Arena arena; mut N*? root; }\n";
+    char text[512];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "void f(H* h) { mut Arena a = Arena.new(64); h.n = some(a.alloc(N)); }", "E0374" },
+        { "void f(H* h) { mut N x = N{ v: 1 }; h.n = some(&x); }", "E0374" },
+        { "void f() { mut Arena a = Arena.new(64); mut Arena c = Arena.new(64); H* h = c.alloc(H); h.n = some(a.alloc(N)); }", "E0374" },
+        { "void f(Arena* a, Arena* c) { H* h = c.alloc(H); h.n = some(a.alloc(N)); }", "E0374" },
+        { "void f(H* h) { mut Arena a = Arena.new(64); N* p = a.alloc(N); H* g = h; g.n = some(p); }", "E0374" },
+        { "void f(N*?[] slots) { mut Arena a = Arena.new(64); slots[0] = some(a.alloc(N)); }", "E0374" },
+        { "struct S { mut N*? n; void set() { mut Arena a = Arena.new(64); n = some(a.alloc(N)); } }", "E0374" },
+        { "void f(Arena* a) { H* h = a.alloc(H); h.n = some(a.alloc(N)); }", "" },
+        { "void f(H* h, Arena* a) { h.n = some(a.alloc(N)); }", "" },
+        { "void f(H* h, keeps N* q) { h.n = some(q); }", "" },
+        { "void f(N* q) { mut Arena a = Arena.new(64); H* h = a.alloc(H); h.n = some(q); }", "" },
+        { "void f() { mut Arena a = Arena.new(64); H* h = a.alloc(H); h.n = some(a.alloc(N)); }", "" },
+        { "void f() { mut Arena a = Arena.new(64); mut H h = H{ n: none }; h.n = some(a.alloc(N)); }", "" },
+        { "void f(Doc* d) { mut Arena a = Arena.new(64); N* r = a.alloc(N); d.arena = a; d.root = some(r); }", "" },
+        { "void f(H* h) { mut Arena a = Arena.new(64); unsafe { h.n = some(a.alloc(N)); } }", "" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%s%s\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
+}
+
+/* Spec §6.1, stage 4: a `keeps` parameter may be stored, so it is given no memory that ends sooner
+   (E0375); a parameter stored is marked `keeps` (E0376). */
+static void test_keeps(void) {
+    const char *head = "struct N { i32 v; }\nstruct H { mut N*? n; }\nvoid put(H* h, keeps N* p) { h.n = some(p); }\nN* make(Arena* a) { return a.alloc(N); }\n";
+    char text[640];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "void f(H* h, N* q) { h.n = some(q); }", "E0376" },
+        { "void f(H* h, N* q) { put(h, q); }", "E0376" },
+        { "struct B { mut N*? n; void set(N* p) { n = some(p); } }", "E0376" },
+        { "void f(H* h) { mut Arena a = Arena.new(64); put(h, a.alloc(N)); }", "E0375" },
+        { "void f(H* h) { mut N x = N{ v: 1 }; put(h, &x); }", "E0375" },
+        { "void f(Arena* b) { mut Arena a = Arena.new(64); H* h = b.alloc(H); put(h, a.alloc(N)); }", "E0375" },
+        { "struct B { mut N*? n; void set(keeps N* p) { n = some(p); } }\nvoid f(B* b) { mut Arena a = Arena.new(64); b.set(a.alloc(N)); }", "E0375" },
+        { "class C { N* n; void init(keeps N* p) { n = p; } }\nC* f(Arena* a) { mut Arena t = Arena.new(64); return a.new(C, t.alloc(N)); }", "E0375" },
+        { "void f(H* h, keeps N* q) { put(h, q); }", "" },
+        { "void f(Arena* a) { H* h = a.alloc(H); put(h, a.alloc(N)); }", "" },
+        { "void f() { mut Arena a = Arena.new(64); H* h = a.alloc(H); put(h, a.alloc(N)); }", "" },
+        { "void f(H* h, H* g) { h.n = g.n; }", "" },
+        { "void f(N* q) { mut Arena a = Arena.new(64); H* h = a.alloc(H); h.n = some(q); }", "" },
+        { "void f() { mut Arena a = Arena.new(64); mut N x = N{ v: 1 }; H* h = a.alloc(H); put(h, &x); }", "" },
+        { "void f(H* h) { mut Arena a = Arena.new(64); unsafe { put(h, a.alloc(N)); } }", "" },
+        { "i32 f() { mut Arena a = Arena.new(64); N* p = make(&a); a.free(); return p.v; }", "E0372" },
+        { "N* f() { mut Arena a = Arena.new(64); return make(&a); }", "E0373" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%s%s\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
+}
+
+/* Spec §6.1, stage 5: `arena.closure(lambda)` keeps what a lambda captures in an arena, which then
+   follows the rules of the regions; a closure of the function does not leave it (E0370). */
+static void test_closures_in_arena(void) {
+    const char *head = "struct N { i32 v; }\n";
+    char text[640];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "void f(Arena* a) { auto g = a.closure(5); }", "E0377" },
+        { "void f(Arena* a) { mut i32 x = 1; i32* p = &x; auto g = a.closure(() => *p); }", "E0374" },
+        { "void f(Arena* a) { mut Arena t = Arena.new(64); N* p = t.alloc(N); auto g = a.closure(() => p.v); }", "E0374" },
+        { "void f(Arena* a, N* p) { auto g = a.closure(() => p.v); }", "E0376" },
+        { "fn() -> i32 f() { mut Arena a = Arena.new(64); i32 k = 1; return a.closure(() => k); }", "E0373" },
+        { "i32 f() { mut Arena a = Arena.new(64); i32 k = 1; auto g = a.closure(() => k); a.free(); return g(); }", "E0372" },
+        { "fn() -> i32 f(Arena* a, i32 k) { return a.closure(() => k + 1); }", "" },
+        { "fn() -> i32 f(Arena* a) { N* p = a.alloc(N); return a.closure(() => p.v); }", "" },
+        { "fn() -> i32 f(Arena* a, keeps N* p) { return a.closure(() => p.v); }", "" },
+        { "fn(i32) -> i32 f(Arena* a, i32 k) { return a.closure((x) => x + k); }", "" },
+        { "class B { fn() -> i32 h; void init(keeps fn() -> i32 g) { h = g; } }\nB* f(Arena* a, i32 k) { return a.new(B, a.closure(() => k)); }", "" },
+        { "fn() -> i32 f(i32 k) { return () => k; }", "E0370" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%s%s\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
 }
 
 static void test_lambdas(void) {
@@ -674,6 +789,10 @@ int main(void) {
     test_lambdas();
     test_dangling();
     test_freed_arena();
+    test_returned_arena();
+    test_stored_pointer();
+    test_keeps();
+    test_closures_in_arena();
     test_constants();
     test_packages();
     return test_summary("sema tests");

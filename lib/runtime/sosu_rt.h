@@ -114,26 +114,31 @@ void sosu_assert_char(const char *loc, const char *message, uint32_t left, uint3
 void sosu_assert_str(const char *loc, const char *message, sosu_str left, sosu_str right);
 
 /* Values of function type (spec §5.5): the code, and the variables a lambda captured (NULL
-   for a function, or a lambda that captures nothing, whose code is then a plain C function).
-   A field and a C function hold the code alone, a C function pointer. */
+   for a function, or a lambda that captures nothing, whose code is then a plain C function);
+   `kept` when they were copied into an arena by `arena.closure` (spec §6.1, rule 5). A field of
+   a struct and a C function hold the code alone, a C function pointer. */
 typedef void (*sosu_code)(void);
 typedef struct {
     sosu_code code;
     void *env;
+    bool kept;
 } sosu_fn;
 
 static inline sosu_fn sosu_fn_of(sosu_code code) {
-    sosu_fn f = { code, NULL };
+    sosu_fn f = { code, NULL, false };
     return f;
 }
 
-/* A value that leaves its function (returned, stored...) must not have captured variables. */
+/* A value that leaves its function (returned, stored...) must not have captured variables in
+   the variables of that function. */
 static inline sosu_fn sosu_fn_check(sosu_fn f, const char *loc) {
-    if (f.env) sosu_fail(loc, "a lambda that captures variables cannot leave the function that creates it");
+    if (f.env && !f.kept) sosu_fail(loc, "a lambda that captures variables cannot leave the function that creates it");
     return f;
 }
 
+/* The code alone, for a field of a struct or a C function: nothing captured. */
 static inline sosu_code sosu_fn_code(sosu_fn f, const char *loc) {
+    if (f.env && f.kept) sosu_fail(loc, "a closure in an arena cannot become a C function pointer: keep it in a field of a class");
     return sosu_fn_check(f, loc).code;
 }
 

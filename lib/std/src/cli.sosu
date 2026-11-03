@@ -49,7 +49,7 @@ pub class Command {
     mut str rest_name;  // "" without `rest`
     mut str rest_help;
 
-    void init(Arena* arena, str name, str about) {
+    void init(Arena* arena, keeps str name, keeps str about) {
         self.arena = arena;
         self.name = name;
         self.about = about;
@@ -60,31 +60,31 @@ pub class Command {
     }
 
     // An option without value, false unless given: `--name` or `-s`.
-    pub void flag(str name, char short, str help) {
+    pub void flag(keeps str name, char short, keeps str help) {
         options.push(Spec{ name: name, short: some(short), value_name: "", help: help, default_value: "" });
     }
 
     // The same, without a short name.
-    pub void long_flag(str name, str help) {
+    pub void long_flag(keeps str name, keeps str help) {
         options.push(Spec{ name: name, short: none, value_name: "", help: help, default_value: "" });
     }
 
     // An option with a value, `default_value` unless given; the help shows it as `value_name`.
-    pub void option(str name, char short, str value_name, str help, str default_value) {
+    pub void option(keeps str name, char short, keeps str value_name, keeps str help, keeps str default_value) {
         options.push(Spec{ name: name, short: some(short), value_name: value_name, help: help, default_value: default_value });
     }
 
-    pub void long_option(str name, str value_name, str help, str default_value) {
+    pub void long_option(keeps str name, keeps str value_name, keeps str help, keeps str default_value) {
         options.push(Spec{ name: name, short: none, value_name: value_name, help: help, default_value: default_value });
     }
 
     // An argument that must be given, after those declared before it.
-    pub void argument(str name, str help) {
+    pub void argument(keeps str name, keeps str help) {
         arguments.push(Spec{ name: name, short: none, value_name: "", help: help, default_value: "" });
     }
 
     // The arguments after the declared ones, as many as given (none too).
-    pub void rest(str name, str help) {
+    pub void rest(keeps str name, keeps str help) {
         rest_name = name;
         rest_help = help;
     }
@@ -407,7 +407,7 @@ pub class Matches {
 }
 
 // A command named `name` (as the help shows it), doing what `about` says.
-pub Command* command(Arena* arena, str name, str about) {
+pub Command* command(Arena* arena, keeps str name, keeps str about) {
     return arena.new(Command, arena, name, about);
 }
 

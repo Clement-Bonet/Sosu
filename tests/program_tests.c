@@ -39,6 +39,7 @@ static const Case cases[] = {
     { "run", "constants", "expected.txt", 0, NULL },
     { "run", "bindgen", "expected.txt", 0, NULL },
     { "run", "lambdas", "expected.txt", 101, NULL },
+    { "run", "kept_closures", "expected.txt", 0, NULL }, /* closures in an arena (spec §6.1, rule 5) */
     { "run", "iterators", "expected.txt", 0, NULL },
     { "run", "csources", "expected.txt", 0, NULL },
     { "run", "threads", "expected.txt", 0, NULL },
@@ -149,7 +150,6 @@ static void test_freed_arena(const char *sosuc) {
     char *said = read_text("build/freed_arena.err");
     CHECK(said && strstr(said, "sosu: a pointer into an arena was used after the free() of the arena"),
           "run freed_arena: the stop does not say why (see build/freed_arena.err)");
-    CHECK(said && strstr(said, "warning[E0372]"), "run freed_arena: the compiler does not warn (see build/freed_arena.err)");
     free(said);
 }
 

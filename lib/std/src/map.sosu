@@ -50,7 +50,7 @@ pub class HashMap<K: Hash, V> {
     }
 
     // Gives `key` the value `value`, in place of the one it had.
-    pub void put(K key, V value) {
+    pub void put(keeps K key, keeps V value) {
         if ((count + 1) * 4 > used.len * 3) {
             grow();
         }
