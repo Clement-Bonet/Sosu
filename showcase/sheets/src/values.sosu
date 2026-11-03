@@ -51,7 +51,7 @@ pub struct Ref {
 }
 
 pub bool is_letter(ui8 b) {
-    return (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+    return b >= 65 && b <= 90 || b >= 97 && b <= 122;
 }
 
 pub bool is_digit(ui8 b) {

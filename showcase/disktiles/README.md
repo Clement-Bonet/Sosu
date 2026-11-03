@@ -1,6 +1,6 @@
 # DiskTiles
 
-The size of the files and folders of a folder or a disk, as tiles (a treemap, as WindirStat does), written in [Sosu](https://github.com/Clement-Bonet/Sosu). Windows, Linux and macOS.
+The size of the files and folders of a folder or a disk, as tiles (a treemap, as WinDirStat does), written in [Sosu](https://github.com/Clement-Bonet/Sosu). Windows, Linux and macOS.
 
 ![DiskTiles](screenshot.png)
 

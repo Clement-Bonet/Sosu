@@ -1,68 +1,70 @@
 # Sosu Sheets
 
-Un tableur façon Excel écrit en Sosu : une feuille de 100 colonnes × 2000 lignes, un moteur de formules (~120 fonctions), des formats, des couleurs, l'annulation illimitée (100 niveaux), des fichiers `.sheet`, `.ods` et `.csv`.
+A spreadsheet written in [Sosu](https://github.com/Clement-Bonet/Sosu): a sheet of 100 columns by 2,000 rows, a formula engine (about 120 functions), formats, colours, 100 levels of undo, and `.sheet`, `.ods` and `.csv` files.
 
-![capture](screenshot.png)
+![Sosu Sheets](screenshot.png)
 
-## Lancer
+## Build
+
+From this folder, with `sosuc` built at the root of the repository:
 
 ```
-Sosu\packages\platform\fetch-sdl3.ps1      (une seule fois)
-sosuc run Sheets
-sosuc test Sheets                          (18 tests : moteur, éditeur, fichiers, ZIP/XML, OpenDocument)
-sosuc build Sheets  puis copier assets\ dans build\assets
-build\sheets.exe --snapshot sortie.png     (image de la fenêtre avec une feuille de démonstration)
+..\..\packages\platform\fetch-sdl3.ps1   # once, on Windows
+..\..\build\sosuc.exe test .             # 18 tests: engine, editor, files, ZIP/XML, OpenDocument
+..\..\build\sosuc.exe run .
 ```
 
-## Saisie
+To run `build\sheets.exe` directly, after `sosuc build .`, copy `assets\` to `build\assets`. `build\sheets.exe --snapshot out.png` writes the window, with a demonstration sheet, in a picture.
 
-- Taper dans une cellule remplace son contenu ; **F2** ou double-clic modifie ; **Entrée** valide et descend (Maj : monte), **Tab** valide et va à droite, **Échap** annule.
-- Une formule commence par `=`. Pendant la saisie d'une formule, un clic sur une cellule insère sa référence (`A1`, `$A$1`, `A1:B5`).
-- Une apostrophe force le texte (`'007`). Les nombres, pourcentages (`12%`), dates `aaaa-mm-jj`, `TRUE`/`FALSE` sont reconnus.
-- Erreurs : `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!`, `#N/A`, `#NUM!`, `#CIRC!` (référence circulaire).
+## Typing
 
-## Raccourcis
+- Typing in a cell replaces its content; **F2** or a double click edits it; **Enter** confirms and goes down (Shift: up), **Tab** confirms and goes right, **Escape** cancels.
+- A formula starts with `=`. While typing one, a click on a cell inserts its reference (`A1`, `$A$1`, `A1:B5`).
+- An apostrophe forces text (`'007`). Numbers, percentages (`12%`), dates `yyyy-mm-dd`, `TRUE` and `FALSE` are recognized.
+- Errors: `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!`, `#N/A`, `#NUM!`, `#CIRC!` (circular reference).
 
-| Touche | Action |
+## Shortcuts
+
+| Key | Action |
 |---|---|
-| Flèches, Maj+flèches | déplacer, étendre la sélection |
-| Ctrl+flèches | aller au bord du bloc de données |
-| Début, Ctrl+Début, Ctrl+Fin, PgPréc/PgSuiv | navigation |
-| Ctrl+A | tout sélectionner |
-| Ctrl+C / X / V | copier, couper, coller (via le presse-papiers système, collage depuis Excel possible) ; les références relatives sont décalées |
-| Ctrl+D / Ctrl+R | recopier vers le bas / la droite |
-| Ctrl+Z / Ctrl+Y | annuler / rétablir |
-| Ctrl+B / I / U | gras, italique, souligné |
-| Ctrl+G | aller à une cellule (ou clic sur la boîte de nom) |
-| Ctrl+F, F3 | rechercher, suivant |
-| Ctrl+N / O / S | nouveau, ouvrir, enregistrer |
-| Suppr | effacer le contenu |
+| Arrows, Shift+arrows | move, extend the selection |
+| Ctrl+arrows | go to the edge of the block of data |
+| Home, Ctrl+Home, Ctrl+End, PgUp/PgDn | navigation |
+| Ctrl+A | select all |
+| Ctrl+C / X / V | copy, cut, paste (through the system clipboard, pasting from Excel works); relative references are shifted |
+| Ctrl+D / Ctrl+R | fill down / right |
+| Ctrl+Z / Ctrl+Y | undo / redo |
+| Ctrl+B / I / U | bold, italic, underline |
+| Ctrl+G | go to a cell (or a click on the name box) |
+| Ctrl+F, F3 | find, find next |
+| Ctrl+N / O / S | new, open, save |
+| Delete | clear the content |
 
-La souris : clic et glisser pour sélectionner, clic sur un en-tête de colonne ou de ligne pour la sélectionner, glisser le bord d'un en-tête pour redimensionner une colonne, molette pour défiler (horizontalement avec le défilement latéral).
+With the mouse: click and drag to select, click a column or row header to select it, drag the edge of a header to resize a column, the wheel to scroll (horizontally with sideways scrolling).
 
-## Barre d'outils
+## Toolbar
 
-Gras / italique / souligné, alignement (gauche, centre, droite), formats (Général, Nombre, %, Monnaie €, Scientifique, Date, Texte), décimales ± , couleur du texte et du fond (chaque clic passe à la couleur suivante), tri A→Z / Z→A (par la colonne active, sur la sélection ou sur toute la zone utilisée), insertion/suppression de lignes et de colonnes (les références des formules sont réécrites), recherche. La barre d'état affiche Nombre, Somme, Moyenne, Min et Max de la sélection.
+Bold, italic, underline, alignment (left, centre, right), formats (General, Number, %, Currency €, Scientific, Date, Text), decimals + and -, text and fill colour (each click goes to the next colour), sort A to Z and Z to A (by the active column, on the selection or on the whole used area), insert and delete rows and columns (the references of formulas are rewritten), find. The status bar shows the Count, Sum, Average, Min and Max of the selection.
 
-## Fonctions
+## Functions
 
-- **Mathématiques** : SUM, PRODUCT, ABS, ROUND, ROUNDUP, ROUNDDOWN, INT, MOD, POWER, SQRT, EXP, LN, LOG, LOG10, SIGN, CEILING, FLOOR, TRUNC, PI, RAND, RANDBETWEEN, SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, DEGREES, RADIANS, FACT, GCD, LCM, QUOTIENT, SUMPRODUCT, SUMSQ…
-- **Statistiques** : AVERAGE, MEDIAN, MODE, MIN, MAX, COUNT, COUNTA, COUNTBLANK, LARGE, SMALL, RANK, STDEV, VAR…
-- **Conditionnelles** : IF, IFERROR, IFNA, AND, OR, NOT, XOR, SUMIF, SUMIFS, COUNTIF, COUNTIFS, AVERAGEIF…
-- **Texte** : LEN, LEFT, RIGHT, MID, UPPER, LOWER, PROPER, TRIM, CONCAT, CONCATENATE, TEXTJOIN, FIND, SEARCH, SUBSTITUTE, REPLACE, REPT, TEXT, VALUE, EXACT, CHAR, CODE…
-- **Recherche** : VLOOKUP, HLOOKUP, INDEX, MATCH, CHOOSE, ROW, COLUMN, ROWS, COLUMNS…
-- **Dates** : TODAY, NOW, DATE, YEAR, MONTH, DAY, WEEKDAY, DAYS…
-- Opérateurs : `+ - * / ^ & = <> < <= > >=`, `%` postfixe, plages `A1:B5`, références absolues `$A$1`.
+- **Math**: SUM, PRODUCT, ABS, ROUND, ROUNDUP, ROUNDDOWN, INT, MOD, POWER, SQRT, EXP, LN, LOG, LOG10, SIGN, CEILING, FLOOR, TRUNC, PI, RAND, RANDBETWEEN, SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, DEGREES, RADIANS, FACT, GCD, LCM, QUOTIENT, SUMPRODUCT, SUMSQ...
+- **Statistics**: AVERAGE, MEDIAN, MODE, MIN, MAX, COUNT, COUNTA, COUNTBLANK, LARGE, SMALL, RANK, STDEV, VAR...
+- **Conditions**: IF, IFERROR, IFNA, AND, OR, NOT, XOR, SUMIF, SUMIFS, COUNTIF, COUNTIFS, AVERAGEIF...
+- **Text**: LEN, LEFT, RIGHT, MID, UPPER, LOWER, PROPER, TRIM, CONCAT, CONCATENATE, TEXTJOIN, FIND, SEARCH, SUBSTITUTE, REPLACE, REPT, TEXT, VALUE, EXACT, CHAR, CODE...
+- **Lookup**: VLOOKUP, HLOOKUP, INDEX, MATCH, CHOOSE, ROW, COLUMN, ROWS, COLUMNS...
+- **Dates**: TODAY, NOW, DATE, YEAR, MONTH, DAY, WEEKDAY, DAYS...
+- Operators: `+ - * / ^ & = <> < <= > >=`, postfix `%`, ranges `A1:B5`, absolute references `$A$1`.
 
-## Fichiers
+## Files
 
-- `.sheet` : format texte natif (contenus, formats, couleurs, largeurs de colonnes).
-- `.ods` (OpenDocument) : lecture et écriture, une feuille. Conservés : valeurs, formules (`of:=SUM([.A1:.B2])`), gras/italique/souligné, alignement, formats, couleurs, largeurs. Perdus : autres feuilles, graphiques, mise en forme conditionnelle. Le conteneur ZIP (`zip.sosu`), l'analyseur XML (`xml.sosu`) et la conversion (`ods.sosu`) sont dans `src`.
-- `build\sheets.exe --convert entrée sortie` convertit un fichier (`.csv`/`.sheet`/`.ods` vers `.sheet` ou `.ods`).
-- `.csv` : import (séparateur `,` ou `;`, guillemets) et export. Un fichier déposé sur la fenêtre est ouvert.
+- `.sheet`: the native text format (contents, formats, colours, column widths).
+- `.ods` (OpenDocument): read and written, one sheet. Kept: values, formulas (`of:=SUM([.A1:.B2])`), bold, italic, underline, alignment, formats, colours, widths. Lost: other sheets, charts, conditional formatting. The ZIP container (`zip.sosu`), the XML parser (`xml.sosu`) and the conversion (`ods.sosu`) are in `src`.
+- `build\sheets.exe --convert input output` converts a file (`.csv`, `.sheet` or `.ods` to `.sheet` or `.ods`).
+- `.csv`: import (separator `,` or `;`, quotes) and export. A file dropped on the window is opened.
 
-## Limites
+## Limits
 
-Une seule feuille, pas de graphiques, pas de formules matricielles, pas de mise en forme conditionnelle. Le recalcul est complet à chaque modification.
+One sheet only, no charts, no array formulas, no conditional formatting. Everything is calculated again at each change.
 
-L'interface a été vérifiée par captures (`--snapshot`) et par les tests, pas dans une fenêtre interactive.
+The interface was checked with pictures (`--snapshot`) and by the tests, not in an interactive window.

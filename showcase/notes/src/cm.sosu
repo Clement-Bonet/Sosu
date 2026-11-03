@@ -166,7 +166,7 @@ pub bool is_ws(i32 c) {
 }
 
 pub bool is_punct_ascii(i32 c) {
-    return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
+    return c >= 33 && c <= 47 || c >= 58 && c <= 64 || c >= 91 && c <= 96 || c >= 123 && c <= 126;
 }
 
 pub bool is_digit(i32 c) {
@@ -174,7 +174,7 @@ pub bool is_digit(i32 c) {
 }
 
 pub bool is_alpha(i32 c) {
-    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+    return c >= 65 && c <= 90 || c >= 97 && c <= 122;
 }
 
 pub bool is_alnum(i32 c) {
@@ -215,12 +215,12 @@ pub Ent char_at(str s, usize i) {
         return Ent{ len: 1, code: c };
     }
     if (c >= 0xF0) {
-        return Ent{ len: 4, code: ((c & 7) << 18) | ((ch(s, i + 1) & 63) << 12) | ((ch(s, i + 2) & 63) << 6) | (ch(s, i + 3) & 63) };
+        return Ent{ len: 4, code: (c & 7) << 18 | (ch(s, i + 1) & 63) << 12 | (ch(s, i + 2) & 63) << 6 | ch(s, i + 3) & 63 };
     }
     if (c >= 0xE0) {
-        return Ent{ len: 3, code: ((c & 15) << 12) | ((ch(s, i + 1) & 63) << 6) | (ch(s, i + 2) & 63) };
+        return Ent{ len: 3, code: (c & 15) << 12 | (ch(s, i + 1) & 63) << 6 | ch(s, i + 2) & 63 };
     }
-    return Ent{ len: 2, code: ((c & 31) << 6) | (ch(s, i + 1) & 63) };
+    return Ent{ len: 2, code: (c & 31) << 6 | ch(s, i + 1) & 63 };
 }
 
 // The code point that ends just before `i`, or -1 at the start.
@@ -229,7 +229,7 @@ pub i32 char_before(str s, usize i) {
         return -1;
     }
     mut usize j = i - 1;
-    while (j > 0 && (s.bytes[j] & 0xC0) == 0x80) {
+    while (j > 0 && s.bytes[j] & 0xC0 == 0x80) {
         j -= 1;
     }
     return char_at(s, j).code;
@@ -237,7 +237,7 @@ pub i32 char_before(str s, usize i) {
 
 // A white space of Unicode (the flanking rules of emphasis look at it).
 pub bool is_uni_space(i32 c) {
-    return c < 0 || is_ws(c) || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x202F || c == 0x205F || c == 0x3000;
+    return c < 0 || is_ws(c) || c == 0xA0 || c == 0x1680 || c >= 0x2000 && c <= 0x200A || c == 0x202F || c == 0x205F || c == 0x3000;
 }
 
 // A punctuation or a symbol of Unicode.
@@ -245,7 +245,7 @@ pub bool is_uni_punct(i32 c) {
     if (c < 0x80) {
         return is_punct_ascii(c);
     }
-    return (c >= 0xA1 && c <= 0xA9) || c == 0xAB || c == 0xAC || (c >= 0xAE && c <= 0xB1) || c == 0xB4 || (c >= 0xB6 && c <= 0xB8) || c == 0xBB || c == 0xBF || c == 0xD7 || c == 0xF7 || (c >= 0x2010 && c <= 0x2027) || (c >= 0x2030 && c <= 0x205E) || (c >= 0x20A0 && c <= 0x20CF) || (c >= 0x2190 && c <= 0x23FF) || (c >= 0x2500 && c <= 0x27FF) || (c >= 0x3001 && c <= 0x3003) || (c >= 0x3008 && c <= 0x3020) || (c >= 0xFF01 && c <= 0xFF0F);
+    return c >= 0xA1 && c <= 0xA9 || c == 0xAB || c == 0xAC || c >= 0xAE && c <= 0xB1 || c == 0xB4 || c >= 0xB6 && c <= 0xB8 || c == 0xBB || c == 0xBF || c == 0xD7 || c == 0xF7 || c >= 0x2010 && c <= 0x2027 || c >= 0x2030 && c <= 0x205E || c >= 0x20A0 && c <= 0x20CF || c >= 0x2190 && c <= 0x23FF || c >= 0x2500 && c <= 0x27FF || c >= 0x3001 && c <= 0x3003 || c >= 0x3008 && c <= 0x3020 || c >= 0xFF01 && c <= 0xFF0F;
 }
 
 // ---- entities and escapes ----
@@ -302,7 +302,7 @@ pub Ent entity_at(str s, usize pos) {
         if (n == 0 || n > (hex ? 6 : 7) || ch(s, i) != 59) {
             return Ent{ };
         }
-        if (v == 0 || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) {
+        if (v == 0 || v > 0x10FFFF || v >= 0xD800 && v <= 0xDFFF) {
             v = 0xFFFD;
         }
         return Ent{ len: i + 1 - pos, code: v };
@@ -439,7 +439,7 @@ pub Scan scan_dest(Arena* arena, str s, usize pos) {
             i += 1;
         }
     }
-    if ((i == pos && ch(s, i) != 41) || parens != 0) {
+    if (i == pos && ch(s, i) != 41 || parens != 0) {
         return Scan{ };
     }
     return Scan{ end: i, text: unescape(arena, text.slice(s, pos, i)), ok: true };

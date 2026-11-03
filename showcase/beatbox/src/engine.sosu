@@ -87,7 +87,7 @@ pub class Engine {
                     usize next = min(from + 1, drum.frames() - 1);
                     f32 part = (pos - from as f64) as f32;
                     f32 v = drum.samples[from] * (1.0 - part) + drum.samples[next] * part;
-                    usize place = ((start + k) % n) * 2;  // the end of a sound goes round the loop
+                    usize place = (start + k) % n * 2;  // the end of a sound goes round the loop
                     room.samples[place] += v * left;
                     room.samples[place + 1] += v * right;
                 }

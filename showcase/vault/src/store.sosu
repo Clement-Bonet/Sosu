@@ -8,7 +8,7 @@ import vault.entry;
 import vault.rand;
 import vault.seal;
 
-pub i32 ROUNDS = 30000;
+pub i32 ROUNDS = 600000;
 
 pub enum Opened {
     Yes,

@@ -23,9 +23,9 @@ pub struct Project {
 
 void put_u32(vec.Vec<ui8>* out, ui32 v) {
     out.push((v & 0xFF) as ui8);
-    out.push(((v >> 8) & 0xFF) as ui8);
-    out.push(((v >> 16) & 0xFF) as ui8);
-    out.push(((v >> 24) & 0xFF) as ui8);
+    out.push((v >> 8 & 0xFF) as ui8);
+    out.push((v >> 16 & 0xFF) as ui8);
+    out.push((v >> 24 & 0xFF) as ui8);
 }
 
 void put_bytes(vec.Vec<ui8>* out, ui8[] bytes) {
@@ -83,7 +83,7 @@ class Reader {
             bad = true;
             return 0;
         }
-        ui32 v = (data[at] as ui32) | ((data[at + 1] as ui32) << 8) | ((data[at + 2] as ui32) << 16) | ((data[at + 3] as ui32) << 24);
+        ui32 v = data[at] as ui32 | data[at + 1] as ui32 << 8 | data[at + 2] as ui32 << 16 | data[at + 3] as ui32 << 24;
         at += 4;
         return v;
     }
@@ -91,7 +91,7 @@ class Reader {
     // A number that must be between `low` and `high`.
     pub i32 limited(i32 low, i32 high) {
         ui32 v = u32();
-        if (v > 1000000 || (v as i32) < low || (v as i32) > high) {
+        if (v > 1000000 || v as i32 < low || v as i32 > high) {
             bad = true;
             return low;
         }

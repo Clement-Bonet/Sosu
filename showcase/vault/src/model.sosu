@@ -235,10 +235,10 @@ pub class Model {
             }
         }
         for (usize i in 1..view.len()) {  // insertion sort
-            i32 held = (*view.at(i));
+            i32 held = *view.at(i);
             mut usize j = i;
-            while (j > 0 && before(entries.at(held as usize).title.text(), entries.at((*view.at(j - 1)) as usize).title.text())) {
-                view.set(j, (*view.at(j - 1)));
+            while (j > 0 && before(entries.at(held as usize).title.text(), entries.at(*view.at(j - 1) as usize).title.text())) {
+                view.set(j, *view.at(j - 1));
                 j -= 1;
             }
             view.set(j, held);
@@ -247,7 +247,7 @@ pub class Model {
         chosen = -1;
         if (editing && at >= 0) {
             for (usize r in 0..view.len()) {
-                if ((*view.at(r)) == at) {
+                if (*view.at(r) == at) {
                     chosen = r as i32;
                 }
             }
@@ -281,8 +281,8 @@ pub class Model {
         if (chosen != shown) {
             shown = chosen;
             if (chosen >= 0 && chosen < view.len() as i32) {
-                at = (*view.at(chosen as usize));
-                edit = (*entries.at(at as usize));
+                at = *view.at(chosen as usize);
+                edit = *entries.at(at as usize);
                 editing = true;
                 reveal = false;
                 say("");
@@ -321,11 +321,11 @@ pub class Model {
     }
 
     pub str title_at(i32 row) {
-        return entries.at((*view.at(row as usize)) as usize).title.text();
+        return entries.at(*view.at(row as usize) as usize).title.text();
     }
 
     pub str user_at(i32 row) {
-        return entries.at((*view.at(row as usize)) as usize).user.text();
+        return entries.at(*view.at(row as usize) as usize).user.text();
     }
 
     pub str dots() {

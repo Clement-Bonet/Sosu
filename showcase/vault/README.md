@@ -12,7 +12,7 @@ A password manager written in [Sosu](https://github.com/Clement-Bonet/Sosu), wit
 
 ## How it is sealed
 
-The stdlib has no cipher, so `src/chacha.sosu` is ChaCha20 (RFC 8439) written in Sosu, and `src/seal.sosu` adds HMAC-SHA256 (encrypt, then MAC). `src/kdf.sosu` is PBKDF2-HMAC-SHA256 (30 000 rounds, stored in the file, so it can be raised).
+The stdlib has no cipher, so `src/chacha.sosu` is ChaCha20 (RFC 8439) written in Sosu, and `src/seal.sosu` adds HMAC-SHA256 (encrypt, then MAC). `src/kdf.sosu` is PBKDF2-HMAC-SHA256 (600,000 rounds, stored in the file: a vault keeps the number it was created with).
 
 - The master password and a random salt give 64 bytes: a key to encrypt and a key to authenticate.
 - Each account is one row of `entries`: a random 12-byte nonce, the encrypted account, and a 32-byte tag. A row that is changed in the file does not open.
@@ -23,13 +23,15 @@ The stdlib has no cipher, so `src/chacha.sosu` is ChaCha20 (RFC 8439) written in
 
 ## Build
 
+From this folder, with `sosuc` built at the root of the repository:
+
 ```
-..\Sosu\packages\platform\fetch-sdl3.ps1   # once, on Windows
-..\Sosu\build\sosuc.exe test .
-..\Sosu\build\sosuc.exe run .              # or: vault.exe my.db
+..\..\packages\platform\fetch-sdl3.ps1   # once, on Windows
+..\..\build\sosuc.exe test .
+..\..\build\sosuc.exe run --release .    # or: vault.exe my.db
 ```
 
-`vault.db` in the current folder is the default file; it is created with the first master password. `--snapshot out.png` writes the window in a picture, with demo accounts in a vault in memory. The font (`assets/`, Noto Sans, OFL) is read from `assets/` or next to the program.
+Use `--release`: the 600,000 rounds take about a second there, and about 16 seconds in debug, while the window waits. `vault.db` in the current folder is the default file; it is created with the first master password. `--snapshot out.png` writes the window in a picture, with demo accounts in a vault in memory. The font (`assets/`, Noto Sans, OFL) is read from `assets/` or next to the program.
 
 ## Files
 

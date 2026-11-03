@@ -353,7 +353,7 @@ pub class Inl {
                 target = text.slice(inner, 0, i);
                 alias = text.trim(text.slice(inner, i + 1, inner.len));
             },
-            none => {},
+            none => { },
         }
         mut str name = target;
         mut str heading = "";
@@ -362,7 +362,7 @@ pub class Inl {
                 name = text.slice(target, 0, i);
                 heading = text.trim(text.slice(target, i + 1, target.len));
             },
-            none => {},
+            none => { },
         }
         mut cm.Kind kind = Wiki;
         if (embed) {
@@ -524,7 +524,7 @@ pub class Inl {
 
     i32 slot(i32 cc, i32 orig, bool can_open) {
         i32 k = cc == 95 ? 0 : cc == 42 ? 1 : cc == 126 ? 2 : 3;
-        return k * 6 + (orig % 3) * 2 + (can_open ? 1 : 0);
+        return k * 6 + orig % 3 * 2 + (can_open ? 1 : 0);
     }
 
     void process_emphasis(i32 bottom) {
@@ -566,7 +566,7 @@ pub class Inl {
                 continue;
             }
             Delim op = *ds.at(opener as usize);
-            i32 take = plain ? ((c.num >= 2 && op.num >= 2) ? 2 : 1) : c.num;
+            i32 take = plain ? c.num >= 2 && op.num >= 2 ? 2 : 1 : c.num;
             i32 o_node = op.node;
             i32 c_node = c.node;
             ds.at(opener as usize).num = op.num - take;
@@ -846,7 +846,7 @@ void read_callout(Arena* arena, vec.Vec<cm.Node>* nodes, i32 par) {
         some(n) => {
             e = n;
         },
-        none => {},
+        none => { },
     }
     nodes.at(q as usize).info = kind;
     nodes.at(q as usize).title = text.trim(text.slice(lit, j, e));

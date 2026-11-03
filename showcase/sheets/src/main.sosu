@@ -47,7 +47,7 @@ f32 NAME_W = 92.0;
 i32 TOOLS = 24;
 
 canvas.Color rgb(ui32 c) {
-    return canvas.Color{ r: ((c >> 16) & 0xFF) as ui8, g: ((c >> 8) & 0xFF) as ui8, b: (c & 0xFF) as ui8, a: (c >> 24) as ui8 };
+    return canvas.Color{ r: (c >> 16 & 0xFF) as ui8, g: (c >> 8 & 0xFF) as ui8, b: (c & 0xFF) as ui8, a: (c >> 24) as ui8 };
 }
 
 canvas.Color shade(i32 r, i32 g, i32 b) {
@@ -692,14 +692,14 @@ class App : app.Handler, app.TitleBar {
     }
 
     dialogs.Filter[] filters(Arena* arena, i32 kind) {
-        mut dialogs.Filter[] list = arena.alloc_slice(dialogs.Filter,         kind == 0 ? 3 : (kind == 1 ? 2 : 1));
+        mut dialogs.Filter[] list = arena.alloc_slice(dialogs.Filter, kind == 0 ? 3 : kind == 1 ? 2 : 1);
         if (kind == 0) {
             list[0] = dialogs.Filter{ name: "Sheets", extensions: text.split(arena, "sheet", ",") };
-                    list[1] = dialogs.Filter{ name: "OpenDocument", extensions: text.split(arena, "ods", ",") };
-                    list[2] = dialogs.Filter{ name: "CSV files", extensions: text.split(arena, "csv", ",") };
-                } else if (kind == 1) {
-                    list[0] = dialogs.Filter{ name: "Sheets", extensions: text.split(arena, "sheet", ",") };
-                    list[1] = dialogs.Filter{ name: "OpenDocument", extensions: text.split(arena, "ods", ",") };
+            list[1] = dialogs.Filter{ name: "OpenDocument", extensions: text.split(arena, "ods", ",") };
+            list[2] = dialogs.Filter{ name: "CSV files", extensions: text.split(arena, "csv", ",") };
+        } else if (kind == 1) {
+            list[0] = dialogs.Filter{ name: "Sheets", extensions: text.split(arena, "sheet", ",") };
+            list[1] = dialogs.Filter{ name: "OpenDocument", extensions: text.split(arena, "ods", ",") };
         } else {
             list[0] = dialogs.Filter{ name: "CSV files", extensions: text.split(arena, "csv", ",") };
         }
@@ -709,8 +709,8 @@ class App : app.Handler, app.TitleBar {
     // ----- text
 
     truetype.Font*? font_for(i32 flags) {
-        bool b = (flags & calc.FLAG_BOLD) != 0;
-        bool i = (flags & calc.FLAG_ITALIC) != 0;
+        bool b = flags & calc.FLAG_BOLD != 0;
+        bool i = flags & calc.FLAG_ITALIC != 0;
         mut truetype.Font*? want = face;
         if (b && i) {
             want = bold_italic;
@@ -765,7 +765,7 @@ class App : app.Handler, app.TitleBar {
             f32 x = tool_x(id);
             f32 w = tool_w(id);
             canvas.Rect box = canvas.Rect{ x: x, y: TOOL_Y + 3.0, w: w, h: TOOL_H - 6.0 };
-            bool on = (id == 0 && (s.flags & calc.FLAG_BOLD) != 0) || (id == 1 && (s.flags & calc.FLAG_ITALIC) != 0) || (id == 2 && (s.flags & calc.FLAG_UNDERLINE) != 0) || (id >= 3 && id <= 5 && s.align == id - 2) || (id >= 6 && id <= 12 && s.fmt == id - 6);
+            bool on = id == 0 && s.flags & calc.FLAG_BOLD != 0 || id == 1 && s.flags & calc.FLAG_ITALIC != 0 || id == 2 && s.flags & calc.FLAG_UNDERLINE != 0 || id >= 3 && id <= 5 && s.align == id - 2 || id >= 6 && id <= 12 && s.fmt == id - 6;
             bool hot = inside(mx, my, x, TOOL_Y + 3.0, w, TOOL_H - 6.0);
             if (on) {
                 surface.fill_rounded(box, 4.0, shade(198, 216, 246));
@@ -817,7 +817,7 @@ class App : app.Handler, app.TitleBar {
         surface.stroke(box, state.editing ? shade(40, 110, 220) : shade(190, 196, 210), 1.0);
         surface.push_clip(box);
         say(surface, 0, fx, FORMULA_Y + 7.0, content, shade(20, 22, 30));
-        if (state.editing && (now / 500) % 2 == 0) {
+        if (state.editing && now / 500 % 2 == 0) {
             f32 cx = fx + wide(0, text.slice(content, 0, state.caret));
             surface.fill(canvas.Rect{ x: cx, y: FORMULA_Y + 6.0, w: 1.0, h: 16.0 }, shade(20, 22, 30));
         }
@@ -904,7 +904,7 @@ class App : app.Handler, app.TitleBar {
         canvas.Color color = cell.fg != 0 ? rgb(cell.fg) : v.kind == values.ERROR ? shade(192, 0, 0) : shade(20, 22, 30);
         surface.push_clip(canvas.Rect{ x: x, y: y, w: room - 1.0, h: ROW - 1.0 });
         say(surface, cell.flags, tx, y + 3.0, shown, color);
-        if ((cell.flags & calc.FLAG_UNDERLINE) != 0) {
+        if (cell.flags & calc.FLAG_UNDERLINE != 0) {
             surface.fill(canvas.Rect{ x: tx, y: y + ROW - 5.0, w: tw, h: 1.0 }, color);
         }
         surface.pop_clip();
@@ -924,7 +924,7 @@ class App : app.Handler, app.TitleBar {
         surface.fill(box, shade(255, 255, 255));
         surface.stroke(box, shade(40, 110, 220), 2.0);
         say(surface, 0, x + 4.0, y + 3.0, typed, shade(20, 22, 30));
-        if ((now / 500) % 2 == 0) {
+        if (now / 500 % 2 == 0) {
             f32 cx = x + 4.0 + wide(0, text.slice(typed, 0, state.caret));
             surface.fill(canvas.Rect{ x: cx, y: y + 3.0, w: 1.0, h: 16.0 }, shade(20, 22, 30));
         }

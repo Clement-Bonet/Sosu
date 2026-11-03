@@ -46,13 +46,13 @@ i32 html_kind(str s, bool in_paragraph) {
     }
     usize e1 = cm.name_end(s, 1);
     str name1 = text.slice(s, 1, e1);
-    if ((cm.in_names("|script|pre|style|textarea|", name1)) && (is_end(s, e1) || cm.ch(s, e1) == 62)) {
+    if (cm.in_names("|script|pre|style|textarea|", name1) && (is_end(s, e1) || cm.ch(s, e1) == 62)) {
         return 1;
     }
     usize from = c == 47 ? 2 : 1;
     usize e = cm.name_end(s, from);
     if (e > from && cm.in_names(BLOCK_NAMES, text.slice(s, from, e))) {
-        if (is_end(s, e) || cm.ch(s, e) == 62 || (cm.ch(s, e) == 47 && cm.ch(s, e + 1) == 62)) {
+        if (is_end(s, e) || cm.ch(s, e) == 62 || cm.ch(s, e) == 47 && cm.ch(s, e + 1) == 62) {
             return 6;
         }
     }
@@ -392,7 +392,7 @@ pub class Parser {
                     some(n) => {
                         nl = n;
                     },
-                    none => {},
+                    none => { },
                 }
                 at(id).info = cm.unescape(arena, text.trim(text.slice(content, 0, nl)));
                 at(id).lit = nl + 1 <= content.len ? text.slice(content, nl + 1, content.len) : "";
@@ -550,7 +550,7 @@ pub class Parser {
         advance_next_nonspace();
         advance_offset(n as i32, false);
         mut usize skip = 0;
-        while (cm.is_space_tab(cm.ch(line, (offset as usize) + skip))) {
+        while (cm.is_space_tab(cm.ch(line, offset as usize + skip))) {
             skip += 1;
         }
         advance_offset(skip as i32, true);
@@ -675,7 +675,7 @@ pub class Parser {
             some(n) => {
                 start = n + 1;
             },
-            none => {},
+            none => { },
         }
         str head = text.slice(body, start, body.len);
         vec.Vec<str>* hc = vec.new<str>(arena);
@@ -761,7 +761,7 @@ pub class Parser {
         advance_next_nonspace();
         advance_offset(i as i32 + 2, false);
         mut usize skip = 0;
-        while (cm.is_space_tab(cm.ch(line, (offset as usize) + skip))) {
+        while (cm.is_space_tab(cm.ch(line, offset as usize + skip))) {
             skip += 1;
         }
         advance_offset(skip as i32, true);
@@ -919,7 +919,7 @@ pub class Parser {
         all_closed = container == oldtip;
         last_matched = container;
         cm.Kind ck = kind_of(container);
-        mut bool matched_leaf = ck != Paragraph && (is_leaf_text(ck));
+        mut bool matched_leaf = ck != Paragraph && is_leaf_text(ck);
         while (!matched_leaf) {
             find_next_nonspace();
             i32 r = try_starts(container);
@@ -941,7 +941,7 @@ pub class Parser {
                 at(at(container).last).blank_end = true;
             }
             cm.Kind t = kind_of(container);
-            bool last_blank = blank && !(t == BlockQuote || (t == CodeBlock && at(container).fenced) || (t == Item && at(container).first < 0 && at(container).line == line_no));
+            bool last_blank = blank && !(t == BlockQuote || t == CodeBlock && at(container).fenced || t == Item && at(container).first < 0 && at(container).line == line_no);
             mut i32 c = container;
             while (c >= 0) {
                 at(c).blank_end = last_blank;
@@ -956,7 +956,7 @@ pub class Parser {
                 if (t == HtmlBlock) {
                     i32 hk = at(container).html_type;
                     str r = rest();
-                    if ((hk == 1 && closes_1(r)) || (hk == 2 && text.contains(r, "-->")) || (hk == 3 && text.contains(r, "?>")) || (hk == 4 && text.contains(r, ">")) || (hk == 5 && text.contains(r, "]]>"))) {
+                    if (hk == 1 && closes_1(r) || hk == 2 && text.contains(r, "-->") || hk == 3 && text.contains(r, "?>") || hk == 4 && text.contains(r, ">") || hk == 5 && text.contains(r, "]]>")) {
                         finalize(container);
                     }
                 }

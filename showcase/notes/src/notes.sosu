@@ -130,7 +130,7 @@ pub class Notes {
     ui64 hash_of(str text) {
         mut ui64 h = 14695981039346656037 as ui64;
         for (ui8 b in text.bytes) {
-            h = wrapping_mul(h ^ (b as ui64), 1099511628211 as ui64);
+            h = wrapping_mul(h ^ b as ui64, 1099511628211 as ui64);
         }
         return h;
     }
@@ -224,10 +224,10 @@ pub class Notes {
             }
         }
         for (usize i in 1..view.len()) {  // insertion sort, the list is nearly in order
-            i32 held = (*view.at(i));
+            i32 held = *view.at(i);
             mut usize j = i;
-            while (j > 0 && md.before(entry_path(held), entry_path((*view.at(j - 1))))) {
-                view.set(j, (*view.at(j - 1)));
+            while (j > 0 && md.before(entry_path(held), entry_path(*view.at(j - 1)))) {
+                view.set(j, *view.at(j - 1));
                 j -= 1;
             }
             view.set(j, held);
@@ -240,7 +240,7 @@ pub class Notes {
         chosen = -1;
         if (open) {
             for (usize r in 0..view.len()) {
-                i32 idx = (*view.at(r));
+                i32 idx = *view.at(r);
                 if (!entries.at(idx as usize).folder && md.same(entry_path(idx), current.text())) {
                     chosen = r as i32;
                 }
@@ -258,7 +258,7 @@ pub class Notes {
                 break;
             }
             str path = entry_path(i as i32);
-            if (entries.at(i).folder || !md.has(path, query) || (open && md.same(path, current.text()))) {
+            if (entries.at(i).folder || !md.has(path, query) || open && md.same(path, current.text())) {
                 continue;
             }
             sugg.insert(sugg.text().len, path);
@@ -273,13 +273,13 @@ pub class Notes {
 
     // What the tree shows of a row: the name; the depth, the groups and their folds are asked apart.
     pub str name_at(i32 row) {
-        label.set(md.base_of(entry_path((*view.at(row as usize)))));
+        label.set(md.base_of(entry_path(*view.at(row as usize))));
         return label.text();
     }
 
     pub i32 depth_at(i32 row) {
         mut i32 n = 0;
-        for (ui8 b in entry_path((*view.at(row as usize))).bytes) {
+        for (ui8 b in entry_path(*view.at(row as usize)).bytes) {
             if (b == 47) {
                 n += 1;
             }
@@ -288,7 +288,7 @@ pub class Notes {
     }
 
     pub bool is_branch(i32 row) {
-        return entries.at((*view.at(row as usize)) as usize).folder;
+        return entries.at(*view.at(row as usize) as usize).folder;
     }
 
     bool is_shut(str path) {
@@ -317,12 +317,12 @@ pub class Notes {
     }
 
     pub bool is_open_row(i32 row) {
-        return is_branch(row) && (search.text().len > 0 || !is_shut(entry_path((*view.at(row as usize)))));
+        return is_branch(row) && (search.text().len > 0 || !is_shut(entry_path(*view.at(row as usize))));
     }
 
     // A click on the triangle of a group.
     pub void toggle(i32 row) uses io {
-        str path = entry_path((*view.at(row as usize)));
+        str path = entry_path(*view.at(row as usize));
         if (is_shut(path)) {
             mut widgets.LongText rest = widgets.long_text();
             defer rest.free();
@@ -526,7 +526,7 @@ pub class Notes {
         if (chosen != shown) {
             shown = chosen;
             if (chosen >= 0 && chosen < view.len() as i32) {
-                i32 idx = (*view.at(chosen as usize));
+                i32 idx = *view.at(chosen as usize);
                 mut widgets.TextBuffer pick = widgets.TextBuffer{ };
                 pick.set(entry_path(idx));
                 if (entries.at(idx as usize).folder) {
@@ -773,7 +773,7 @@ pub class Notes {
                 scan();
                 rebuild();
                 for (usize r in 0..view.len()) {
-                    i32 idx = (*view.at(r));
+                    i32 idx = *view.at(r);
                     if (entries.at(idx as usize).folder && entry_path(idx) == pick.text()) {
                         chosen = r as i32;
                         shown = chosen;
@@ -861,7 +861,7 @@ pub class Notes {
         if (chosen < 0 || chosen >= view.len() as i32) {
             return;
         }
-        i32 idx = (*view.at(chosen as usize));
+        i32 idx = *view.at(chosen as usize);
         ren_from.set(entry_path(idx));
         ren_name.set(entry_path(idx));
         ren_group = entries.at(idx as usize).folder;
@@ -902,7 +902,7 @@ pub class Notes {
     }
 
     void rename_group(str from, str to) uses io {
-        if (!valid_path(to) || md.same(to, from) || (text.starts_with(to, from) && to.bytes[from.len] == 47)) {
+        if (!valid_path(to) || md.same(to, from) || text.starts_with(to, from) && to.bytes[from.len] == 47) {
             say("This name cannot be used.");
             return;
         }
@@ -1062,7 +1062,7 @@ pub class Notes {
         if (font_at >= 0) {
             return font_at_path(font_at);
         }
-        return font_at == -2 ? "@serif" : (font_at == -3 ? "@mono" : "");
+        return font_at == -2 ? "@serif" : font_at == -3 ? "@mono" : "";
     }
 
     void select_font(i32 at) {
@@ -1070,7 +1070,7 @@ pub class Notes {
         font_dirty = true;
         font_label.set("");
         if (at < 0) {
-            font_label.append(at == -2 ? "Noto Serif" : (at == -3 ? "JetBrains Mono" : "Noto Sans"));
+            font_label.append(at == -2 ? "Noto Serif" : at == -3 ? "JetBrains Mono" : "Noto Sans");
         } else {
             str name = md.base_of(font_at_path(at));
             font_label.append(text.slice(name, 0, name.len - 4));

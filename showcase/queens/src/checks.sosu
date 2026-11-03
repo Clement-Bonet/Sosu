@@ -12,7 +12,7 @@ bool valid_solution(board.Game* g) {
     for (i32 y in 0..g.n) {
         i32 c = g.answer[y as usize];
         i32 r = g.region_of(c, y);
-        if ((cols & (1 << c)) != 0 || (regions & (1 << r)) != 0) {
+        if (cols & 1 << c != 0 || regions & 1 << r != 0) {
             return false;
         }
         cols |= 1 << c;
