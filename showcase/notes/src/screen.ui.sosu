@@ -1,0 +1,46 @@
+// notes.screen: the title bar, the list of notes and the editor. The preview and the backlinks
+// are drawn by main.sosu, at the right of the editor.
+import notes.notes;
+
+window Notes(notes.Notes* m) uses io {
+    title: "Notes"
+    width: 1200
+    height: 720
+    icon: "assets/icon.png"
+
+    TitleBar(height: 40) {
+        Text("Notes")
+        Button("New", on_click: m.new_note)
+        Button("New group", on_click: m.new_folder)
+        Button(m.preview ? "Hide preview" : "Preview", on_click: m.toggle_preview)
+        Button("Delete", on_click: m.remove_note, enabled: m.open)
+        Button("Reindex", on_click: m.reindex)
+        Button("Folder", on_click: m.ask_folder)
+        Button("<", on_click: m.font_prev)
+        Text(m.font_label.text())
+        Button(">", on_click: m.font_next)
+    }
+    Row(gap: 12, padding: 12) {
+        Column(gap: 8) {
+            TextField(bind: m.search, width: 220, placeholder: "Search")
+            if (m.renaming) {
+                TextField(bind: m.ren_name, width: 220, on_enter: m.commit_rename, focus: true)
+            }
+            Tree(count: m.rows(), item: i, depth: m.depth_at(i), branch: m.is_branch(i), open: m.is_open_row(i), on_toggle: m.toggle(i), selected: m.chosen, width: 220, height: Fill) {
+                Text(m.name_at(i))
+            }
+            ContextMenu {
+                MenuItem("Rename", on_click: m.begin_rename, shortcut: "F2", enabled: m.chosen >= 0)
+            }
+        }
+        Column(gap: 8) {
+            Space(26)
+            if (m.open) {
+                TextField(bind: m.title, width: m.edit_w, on_enter: m.rename)
+                TextArea(bind: m.doc, rows: m.edit_rows, width: m.edit_w, wrap: true, tabs: true, placeholder: "Write in Markdown")
+            } else {
+                Text("Choose a note, or press New.")
+            }
+        }
+    }
+}

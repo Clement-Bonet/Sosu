@@ -1,0 +1,1079 @@
+// sheets.ods: the sheet as an OpenDocument spreadsheet (.ods), written and read. What the sheet knows
+// is kept: values, formulas, number formats, bold, italic, underline, alignment, colors, column widths.
+import sheets.calc;
+import sheets.values;
+import sheets.xml;
+import sheets.zip;
+import std.map;
+import std.sort;
+import std.text;
+import std.vec;
+
+pub str MIME = "application/vnd.oasis.opendocument.spreadsheet";
+i32 DEFAULT_WIDTH = 88;
+
+// ----- formulas
+
+bool is_word(ui8 b) {
+    return values.is_letter(b) || values.is_digit(b) || b == 36 || b == 95 || b == 46;
+}
+
+// The end of the text between quotes that starts at `i` (a doubled quote stays inside).
+usize string_end(str s, usize i) {
+    mut usize j = i + 1;
+    while (j < s.len) {
+        if (s.bytes[j] == 34) {
+            if (j + 1 < s.len && s.bytes[j + 1] == 34) {
+                j += 2;
+                continue;
+            }
+            return j + 1;
+        }
+        j += 1;
+    }
+    return s.len;
+}
+
+usize word_end(str s, usize i) {
+    mut usize j = i;
+    while (j < s.len && is_word(s.bytes[j])) {
+        j += 1;
+    }
+    return j;
+}
+
+// A formula of the sheet (=SUM(A1:B2, 3)) as OpenDocument writes it (of:=SUM([.A1:.B2];3)).
+pub str to_odf(Arena* arena, str raw) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("of:=");
+    mut usize i = 1;
+    while (i < raw.len) {
+        ui8 c = raw.bytes[i];
+        if (c == 34) {
+            usize end = string_end(raw, i);
+            b.push(text.slice(raw, i, end));
+            i = end;
+        } else if (c == 44) {
+            b.push(";");
+            i += 1;
+        } else if (is_word(c)) {
+            usize j = word_end(raw, i);
+            str w = text.slice(raw, i, j);
+            bool call = j < raw.len && raw.bytes[j] == 40;
+            if (values.parse_ref(w).ok && !call) {
+                mut usize stop = j;
+                mut str second = "";
+                if (j + 1 < raw.len && raw.bytes[j] == 58) {
+                    usize m = word_end(raw, j + 1);
+                    str w2 = text.slice(raw, j + 1, m);
+                    if (values.parse_ref(w2).ok) {
+                        second = w2;
+                        stop = m;
+                    }
+                }
+                b.push("[.");
+                b.push(w);
+                if (second.len > 0) {
+                    b.push(":.");
+                    b.push(second);
+                }
+                b.push("]");
+                i = stop;
+            } else {
+                b.push(w);
+                i = j;
+            }
+        } else {
+            usize e = calc.char_end(raw, i);
+            b.push(text.slice(raw, i, e));
+            i = e;
+        }
+    }
+    return b.text();
+}
+
+// What follows the last dot of `part` (the sheet name before it is dropped).
+str drop_sheet(str part) {
+    return match (text.find_last(part, ".")) {
+        some(p) => text.slice(part, p + 1, part.len),
+        none => part,
+    };
+}
+
+// A formula as OpenDocument writes it (of:=SUM([.A1:.B2];3)) as the sheet reads it (=SUM(A1:B2,3)).
+pub str from_odf(Arena* arena, str f) {
+    mut usize i = 0;
+    usize eq = xml_index(f, "=");
+    if (eq < f.len && eq <= 8) {
+        i = eq + 1;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    b.push("=");
+    while (i < f.len) {
+        ui8 c = f.bytes[i];
+        if (c == 34) {
+            usize end = string_end(f, i);
+            b.push(text.slice(f, i, end));
+            i = end;
+        } else if (c == 59) {
+            b.push(",");
+            i += 1;
+        } else if (c == 91) {
+            usize close = xml_index(f, "]");
+            str inner = text.slice(f, i + 1, close);
+            str[] parts = text.split(arena, inner, ":");
+            for (usize k in 0..parts.len) {
+                if (k > 0) {
+                    b.push(":");
+                }
+                b.push(drop_sheet(parts[k]));
+            }
+            i = close >= f.len ? f.len : close + 1;
+        } else {
+            usize e = calc.char_end(f, i);
+            b.push(text.slice(f, i, e));
+            i = e;
+        }
+    }
+    return b.text();
+}
+
+usize xml_index(str s, str needle) {
+    return match (text.find(s, needle)) {
+        some(p) => p,
+        none => s.len,
+    };
+}
+
+// ----- writing
+
+struct Key {
+    i32 flags;
+    i32 align;
+    i32 fmt;
+    i32 dec;
+    ui32 fg;
+    ui32 bg;
+}
+
+bool same_key(Key a, Key b) {
+    return a.flags == b.flags && a.align == b.align && a.fmt == b.fmt && a.dec == b.dec && a.fg == b.fg && a.bg == b.bg;
+}
+
+bool plain_key(Key k) {
+    return k.flags == 0 && k.align == 0 && k.fmt == 0 && k.dec < 0 && k.fg == 0 && k.bg == 0;
+}
+
+bool needs_data(Key k) {
+    return k.fmt != 0 || k.dec >= 0;
+}
+
+// The place of `k` in `keys`, added when it is new; 0 is the style of a cell with nothing set.
+i32 style_of(vec.Vec<Key>* keys, Key k) {
+    if (plain_key(k)) {
+        return 0;
+    }
+    Key[] list = keys.items();
+    for (usize i in 0..list.len) {
+        if (same_key(list[i], k)) {
+            return (i + 1) as i32;
+        }
+    }
+    keys.push(k);
+    return keys.len() as i32;
+}
+
+str namespaces() {
+    return "xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:fo=\"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0\" xmlns:number=\"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0\" xmlns:meta=\"urn:oasis:names:tc:opendocument:xmlns:meta:1.0\" xmlns:calcext=\"urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0\"";
+}
+
+void push_attr(text.TextBuilder* b, str name, str value) {
+    b.push(" ");
+    b.push(name);
+    b.push("=\"");
+    xml.push_escaped(b, value);
+    b.push("\"");
+}
+
+void push_number_attr(text.TextBuilder* b, str name, i64 value) {
+    b.push(" ");
+    b.push(name);
+    b.push("=\"");
+    b.push_i64(value);
+    b.push("\"");
+}
+
+void push_color(text.TextBuilder* b, ui32 argb) {
+    str digits = "0123456789abcdef";
+    b.push("#");
+    for (i32 k in 0..6) {
+        ui32 d = (argb >> ((5 - k) * 4) as ui32) & 15;
+        b.push(text.slice(digits, d as usize, d as usize + 1));
+    }
+}
+
+void push_places(text.TextBuilder* b, i32 dec, i32 fallback) {
+    b.push("<number:number");
+    push_number_attr(b, "number:decimal-places", (dec < 0 ? fallback : dec) as i64);
+    push_number_attr(b, "number:min-integer-digits", 1);
+}
+
+void push_data_style(text.TextBuilder* b, i32 n, Key k) {
+    if (!needs_data(k)) {
+        return;
+    }
+    mut str tag = "number:number-style";
+    if (k.fmt == 2) {
+        tag = "number:percentage-style";
+    } else if (k.fmt == 3) {
+        tag = "number:currency-style";
+    } else if (k.fmt == 5) {
+        tag = "number:date-style";
+    } else if (k.fmt == 6) {
+        tag = "number:text-style";
+    }
+    b.push("<");
+    b.push(tag);
+    b.push(" style:name=\"N");
+    b.push_i64(n as i64);
+    b.push("\">");
+    if (k.fmt == 6) {
+        b.push("<number:text-content/>");
+    } else if (k.fmt == 5) {
+        b.push("<number:year number:style=\"long\"/><number:text>-</number:text><number:month number:style=\"long\"/><number:text>-</number:text><number:day number:style=\"long\"/>");
+    } else if (k.fmt == 4) {
+        b.push("<number:scientific-number");
+        push_number_attr(b, "number:decimal-places", (k.dec < 0 ? 2 : k.dec) as i64);
+        b.push(" number:min-integer-digits=\"1\" number:min-exponent-digits=\"2\"/>");
+    } else if (k.fmt == 3) {
+        b.push("<number:currency-symbol>€</number:currency-symbol>");
+        push_places(b, k.dec, 2);
+        b.push(" number:grouping=\"true\"/>");
+    } else if (k.fmt == 2) {
+        push_places(b, k.dec, 0);
+        b.push("/><number:text>%</number:text>");
+    } else if (k.fmt == 1) {
+        push_places(b, k.dec, 2);
+        b.push(" number:grouping=\"true\"/>");
+    } else {
+        push_places(b, k.dec, 0);
+        b.push("/>");
+    }
+    b.push("</");
+    b.push(tag);
+    b.push(">");
+}
+
+void push_cell_style(text.TextBuilder* b, i32 n, Key k) {
+    b.push("<style:style style:name=\"ce");
+    b.push_i64(n as i64);
+    b.push("\" style:family=\"table-cell\" style:parent-style-name=\"Default\"");
+    if (needs_data(k)) {
+        b.push(" style:data-style-name=\"N");
+        b.push_i64(n as i64);
+        b.push("\"");
+    }
+    b.push(">");
+    if (k.bg != 0) {
+        b.push("<style:table-cell-properties fo:background-color=\"");
+        push_color(b, k.bg);
+        b.push("\"/>");
+    }
+    if (k.align > 0) {
+        b.push("<style:paragraph-properties fo:text-align=\"");
+        b.push(k.align == 1 ? "start" : k.align == 2 ? "center" : "end");
+        b.push("\"/>");
+    }
+    if (k.flags != 0 || k.fg != 0) {
+        b.push("<style:text-properties");
+        if (k.flags & calc.FLAG_BOLD != 0) {
+            b.push(" fo:font-weight=\"bold\"");
+        }
+        if (k.flags & calc.FLAG_ITALIC != 0) {
+            b.push(" fo:font-style=\"italic\"");
+        }
+        if (k.flags & calc.FLAG_UNDERLINE != 0) {
+            b.push(" style:text-underline-style=\"solid\" style:text-underline-width=\"auto\" style:text-underline-color=\"font-color\"");
+        }
+        if (k.fg != 0) {
+            b.push(" fo:color=\"");
+            push_color(b, k.fg);
+            b.push("\"");
+        }
+        b.push("/>");
+    }
+    b.push("</style:style>");
+}
+
+void flush_text(text.TextBuilder* b, str s, usize from, usize to) {
+    xml.push_escaped(b, text.slice(s, from, to));
+}
+
+// A text as the paragraphs of a cell: lines, tabs and runs of spaces have their own elements.
+void push_paragraphs(text.TextBuilder* b, str s) {
+    b.push("<text:p>");
+    mut usize run = 0;
+    mut usize i = 0;
+    while (i < s.len) {
+        ui8 c = s.bytes[i];
+        if (c == 10) {
+            flush_text(b, s, run, i);
+            b.push("</text:p><text:p>");
+            i += 1;
+            run = i;
+        } else if (c == 13) {
+            flush_text(b, s, run, i);
+            i += 1;
+            run = i;
+        } else if (c == 9) {
+            flush_text(b, s, run, i);
+            b.push("<text:tab/>");
+            i += 1;
+            run = i;
+        } else if (c == 32) {
+            mut usize j = i;
+            while (j < s.len && s.bytes[j] == 32) {
+                j += 1;
+            }
+            bool at_start = i == 0 || s.bytes[i - 1] == 10;
+            bool at_end = j == s.len || s.bytes[j] == 10 || s.bytes[j] == 13;
+            if (at_start || at_end || j - i > 1) {
+                flush_text(b, s, run, i);
+                mut usize spaces = j - i;
+                if (!at_start && !at_end) {
+                    b.push(" ");
+                    spaces -= 1;
+                }
+                b.push("<text:s");
+                push_number_attr(b, "text:c", spaces as i64);
+                b.push("/>");
+                run = j;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    flush_text(b, s, run, s.len);
+    b.push("</text:p>");
+}
+
+void push_cell(Arena* arena, text.TextBuilder* b, calc.Cell* c, i32 style) {
+    b.push("<table:table-cell");
+    if (style > 0) {
+        b.push(" table:style-name=\"ce");
+        b.push_i64(style as i64);
+        b.push("\"");
+    }
+    if (c.raw.len == 0) {
+        b.push("/>");
+        return;
+    }
+    bool formula = c.raw.len > 1 && c.raw.bytes[0] == 61 && c.fmt != 6;
+    if (formula) {
+        push_attr(b, "table:formula", to_odf(arena, c.raw));
+    }
+    values.Value v = c.val;
+    str shown = values.display(arena, v, c.fmt, c.dec);
+    if (v.kind == values.NUMBER) {
+        if (c.fmt == 5) {
+            b.push(" office:value-type=\"date\"");
+            push_attr(b, "office:date-value", values.date_text(arena, v.num));
+        } else {
+            b.push(c.fmt == 2 ? " office:value-type=\"percentage\"" : c.fmt == 3 ? " office:value-type=\"currency\"" : " office:value-type=\"float\"");
+            b.push(" office:value=\"");
+            b.push_f64_shortest(v.num);
+            b.push("\"");
+            if (c.fmt == 3) {
+                b.push(" office:currency=\"EUR\"");
+            }
+        }
+        b.push(">");
+        push_paragraphs(b, shown);
+    } else if (v.kind == values.BOOL) {
+        b.push(" office:value-type=\"boolean\"");
+        push_attr(b, "office:boolean-value", v.num != 0.0 ? "true" : "false");
+        b.push(">");
+        push_paragraphs(b, shown);
+    } else if (v.kind == values.TEXT || v.kind == values.ERROR) {
+        b.push(" office:value-type=\"string\"");
+        if (formula) {
+            push_attr(b, "office:string-value", v.kind == values.ERROR ? "" : v.text);
+        }
+        if (v.kind == values.ERROR) {
+            b.push(" calcext:value-type=\"error\"");
+        }
+        b.push(">");
+        push_paragraphs(b, shown);
+    } else {
+        b.push(">");
+    }
+    b.push("</table:table-cell>");
+}
+
+void push_empty_cells(text.TextBuilder* b, i64 count) {
+    b.push("<table:table-cell");
+    if (count > 1) {
+        push_number_attr(b, "table:number-columns-repeated", count);
+    }
+    b.push("/>");
+}
+
+str px_cm(Arena* arena, i32 px) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(text.format_f64(arena, px as f64 * 2.54 / 96.0, 4));
+    b.push("cm");
+    return b.text();
+}
+
+// The sheet as an .ods file.
+pub ui8[] encode(Arena* arena, calc.Book* book) {
+    book.recalc();
+    i64[] cells = book.cells.keys(arena);
+    sort_keys(cells);
+    vec.Vec<Key>* styles = vec.new<Key>(arena);
+    vec.Vec<i64>* used = vec.new<i64>(arena);
+    vec.Vec<i32>* used_style = vec.new<i32>(arena);
+    mut i32 last_col = -1;
+    mut i32 last_row = -1;
+    for (usize i in 0..cells.len) {
+        calc.Cell*? have = book.cells.get(cells[i]);
+        match (have) {
+            some(c) => {
+                i32 s = style_of(styles, Key{ flags: c.flags, align: c.align, fmt: c.fmt, dec: c.dec, fg: c.fg, bg: c.bg });
+                if (c.raw.len > 0 || s > 0) {
+                    used.push(cells[i]);
+                    used_style.push(s);
+                    i32 col = (cells[i] % 256) as i32;
+                    i32 row = (cells[i] / 256) as i32;
+                    last_col = col > last_col ? col : last_col;
+                    last_row = row > last_row ? row : last_row;
+                }
+            },
+            none => { },
+        }
+    }
+    mut i32 columns = last_col + 1;
+    for (i32 c in 0..values.COLS) {
+        if (book.width_of(c) != DEFAULT_WIDTH && c + 1 > columns) {
+            columns = c + 1;
+        }
+    }
+    if (columns < 1) {
+        columns = 1;
+    }
+
+    text.TextBuilder* b = text.builder(arena);
+    b.push("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<office:document-content ");
+    b.push(namespaces());
+    b.push(" office:version=\"1.3\"><office:automatic-styles>");
+    map.HashMap<i32, bool>* widths = map.new<i32, bool>(arena);
+    for (i32 c in 0..columns) {
+        i32 w = book.width_of(c);
+        if (!widths.has(w)) {
+            widths.put(w, true);
+            b.push("<style:style style:name=\"co");
+            b.push_i64(w as i64);
+            b.push("\" style:family=\"table-column\"><style:table-column-properties style:column-width=\"");
+            b.push(px_cm(arena, w));
+            b.push("\"/></style:style>");
+        }
+    }
+    Key[] list = styles.items();
+    for (usize i in 0..list.len) {
+        push_data_style(b, (i + 1) as i32, list[i]);
+        push_cell_style(b, (i + 1) as i32, list[i]);
+    }
+    b.push("<style:style style:name=\"ta1\" style:family=\"table\"><style:table-properties table:display=\"true\"/></style:style>");
+    b.push("</office:automatic-styles><office:body><office:spreadsheet><table:table table:name=\"Sheet1\" table:style-name=\"ta1\">");
+    mut i32 c0 = 0;
+    while (c0 < columns) {
+        i32 w = book.width_of(c0);
+        mut i32 c1 = c0;
+        while (c1 + 1 < columns && book.width_of(c1 + 1) == w) {
+            c1 += 1;
+        }
+        b.push("<table:table-column table:style-name=\"co");
+        b.push_i64(w as i64);
+        b.push("\"");
+        if (c1 > c0) {
+            push_number_attr(b, "table:number-columns-repeated", (c1 - c0 + 1) as i64);
+        }
+        b.push("/>");
+        c0 = c1 + 1;
+    }
+    mut usize k = 0;
+    mut i32 row = 0;
+    i32 rows = last_row < 0 ? 1 : last_row + 1;
+    while (row < rows) {
+        i32 next_row = k < used.len() ? (used.items()[k] / 256) as i32 : rows;
+        if (next_row > row) {
+            b.push("<table:table-row");
+            if (next_row - row > 1) {
+                push_number_attr(b, "table:number-rows-repeated", (next_row - row) as i64);
+            }
+            b.push(">");
+            push_empty_cells(b, columns as i64);
+            b.push("</table:table-row>");
+            row = next_row;
+            continue;
+        }
+        b.push("<table:table-row>");
+        mut i32 col = 0;
+        while (k < used.len() && (used.items()[k] / 256) as i32 == row) {
+            i32 at = (used.items()[k] % 256) as i32;
+            if (at > col) {
+                push_empty_cells(b, (at - col) as i64);
+            }
+            calc.Cell*? have = book.cells.get(used.items()[k]);
+            match (have) {
+                some(c) => {
+                    push_cell(arena, b, c, used_style.items()[k]);
+                },
+                none => { },
+            }
+            col = at + 1;
+            k += 1;
+        }
+        b.push("</table:table-row>");
+        row += 1;
+    }
+    b.push("</table:table></office:spreadsheet></office:body></office:document-content>");
+
+    vec.Vec<zip.Entry>* files = vec.new<zip.Entry>(arena);
+    files.push(zip.Entry{ name: "mimetype", data: MIME.bytes, pack: false });
+    files.push(zip.Entry{ name: "META-INF/manifest.xml", data: manifest().bytes, pack: true });
+    files.push(zip.Entry{ name: "meta.xml", data: meta().bytes, pack: true });
+    files.push(zip.Entry{ name: "styles.xml", data: styles_file().bytes, pack: true });
+    files.push(zip.Entry{ name: "content.xml", data: b.text().bytes, pack: true });
+    return zip.write(arena, files.items());
+}
+
+str manifest() {
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.3\"><manifest:file-entry manifest:full-path=\"/\" manifest:version=\"1.3\" manifest:media-type=\"application/vnd.oasis.opendocument.spreadsheet\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/><manifest:file-entry manifest:full-path=\"styles.xml\" manifest:media-type=\"text/xml\"/><manifest:file-entry manifest:full-path=\"meta.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>";
+}
+
+str meta() {
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<office:document-meta xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:meta=\"urn:oasis:names:tc:opendocument:xmlns:meta:1.0\" office:version=\"1.3\"><office:meta><meta:generator>Sosu Sheets</meta:generator></office:meta></office:document-meta>";
+}
+
+str styles_file() {
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<office:document-styles xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" xmlns:fo=\"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0\" office:version=\"1.3\"><office:styles><style:style style:name=\"Default\" style:family=\"table-cell\"/></office:styles></office:document-styles>";
+}
+
+void sort_keys(i64[] keys) {
+    sort.sort(keys);
+}
+
+// ----- reading
+
+// What a style says; -1 for a number and "" for a text that it does not say.
+struct Look {
+    mut i32 bold;
+    mut i32 italic;
+    mut i32 underline;
+    mut i32 align;
+    mut i64 fg;
+    mut i64 bg;
+    str parent;
+    mut str data;
+}
+
+struct Fmt {
+    i32 fmt;
+    i32 dec;
+}
+
+// A cell that was read: where it goes and what it holds.
+struct Item {
+    i32 col;
+    mut str raw;
+    i32 flags;
+    i32 align;
+    mut i32 fmt;
+    i32 dec;
+    ui32 fg;
+    ui32 bg;
+    mut bool keep;
+}
+
+// #rrggbb as an opaque color; 0 for transparent; -1 when it is not a color.
+i64 parse_color(str s) {
+    if (s == "transparent") {
+        return 0;
+    }
+    if (s.len != 7 || s.bytes[0] != 35) {
+        return -1;
+    }
+    mut i64 x = 0;
+    for (usize k in 1..7) {
+        ui8 d = s.bytes[k];
+        if (d >= 48 && d <= 57) {
+            x = x * 16 + (d - 48) as i64;
+        } else if (d >= 97 && d <= 102) {
+            x = x * 16 + (d - 87) as i64;
+        } else if (d >= 65 && d <= 70) {
+            x = x * 16 + (d - 55) as i64;
+        } else {
+            return -1;
+        }
+    }
+    return 0xFF000000 + x;
+}
+
+// A length (2.3cm, 12mm, 0.9in, 40pt, 90px) in pixels; -1 when it is not one.
+i32 parse_px(str s) {
+    mut usize k = 0;
+    while (k < s.len && (values.is_digit(s.bytes[k]) || s.bytes[k] == 46 || s.bytes[k] == 45)) {
+        k += 1;
+    }
+    f64 x = match (text.parse_f64(text.slice(s, 0, k))) {
+        ok(v) => v,
+        err(e) => -1.0,
+    };
+    if (x < 0.0) {
+        return -1;
+    }
+    str unit = text.slice(s, k, s.len);
+    mut f64 scale = 1.0;
+    if (unit == "cm") {
+        scale = 96.0 / 2.54;
+    } else if (unit == "mm") {
+        scale = 96.0 / 25.4;
+    } else if (unit == "in") {
+        scale = 96.0;
+    } else if (unit == "pt") {
+        scale = 96.0 / 72.0;
+    } else if (unit == "pc") {
+        scale = 16.0;
+    } else if (unit != "px" && unit.len > 0) {
+        return -1;
+    }
+    return (x * scale + 0.5) as i32;
+}
+
+// How many times an element is repeated.
+i64 repeat_of(xml.Node* n, str key) {
+    i64 r = calc.int_of(n.attr(key));
+    if (r < 1) {
+        return 1;
+    }
+    return r > 2000000 ? 2000000 : r;
+}
+
+// The seconds of a duration such as PT13H45M30S.
+f64 duration_seconds(str s) {
+    mut f64 total = 0.0;
+    mut usize start = 0;
+    mut bool in_time = false;
+    for (usize i in 0..s.len) {
+        ui8 c = s.bytes[i];
+        if (c == 84) {
+            in_time = true;
+            start = i + 1;
+        } else if (c == 68 || c == 72 || (c == 77 && in_time) || c == 83) {
+            f64 x = match (text.parse_f64(text.slice(s, start, i))) {
+                ok(v) => v,
+                err(e) => 0.0,
+            };
+            total += x * (c == 68 ? 86400.0 : c == 72 ? 3600.0 : c == 77 ? 60.0 : 1.0);
+            start = i + 1;
+        } else if (c == 80) {
+            start = i + 1;
+        }
+    }
+    return total;
+}
+
+// The text of a cell: its paragraphs, one per line.
+void inline_text(text.TextBuilder* b, xml.Node* n) {
+    xml.Node*[] kids = n.kids.items();
+    for (usize i in 0..kids.len) {
+        xml.Node* k = kids[i];
+        if (k.name.len == 0) {
+            b.push(k.value);
+        } else if (k.name == "text:s") {
+            i64 count = repeat_count(k, "text:c");
+            for (i64 m in 0..count) {
+                b.push(" ");
+            }
+        } else if (k.name == "text:tab") {
+            b.push("\t");
+        } else if (k.name == "text:line-break") {
+            b.push("\n");
+        } else {
+            inline_text(b, k);
+        }
+    }
+}
+
+i64 repeat_count(xml.Node* n, str key) {
+    i64 r = calc.int_of(n.attr(key));
+    if (r < 1) {
+        return 1;
+    }
+    return r > 10000 ? 10000 : r;
+}
+
+str cell_text(Arena* arena, xml.Node* cell) {
+    text.TextBuilder* b = text.builder(arena);
+    mut bool first = true;
+    xml.Node*[] kids = cell.kids.items();
+    for (usize i in 0..kids.len) {
+        if (kids[i].name == "text:p" || kids[i].name == "text:h") {
+            if (!first) {
+                b.push("\n");
+            }
+            first = false;
+            inline_text(b, kids[i]);
+        }
+    }
+    return b.text();
+}
+
+class Reader {
+    Arena* arena;
+    calc.Book* book;
+    map.HashMap<str, Look>* looks;
+    map.HashMap<str, Fmt>* fmts;
+    map.HashMap<str, i32>* widths;
+    vec.Vec<str>* col_style;
+    vec.Vec<Item>* row_items;
+    mut i64 col;
+    mut i64 row;
+
+    void init(Arena* arena, keeps calc.Book* book) {
+        self.arena = arena;
+        self.book = book;
+        self.looks = map.new<str, Look>(arena);
+        self.fmts = map.new<str, Fmt>(arena);
+        self.widths = map.new<str, i32>(arena);
+        self.col_style = vec.new<str>(arena);
+        for (i32 c in 0..values.COLS) {
+            self.col_style.push("");
+        }
+        self.row_items = vec.new<Item>(arena);
+        self.col = 0;
+        self.row = 0;
+    }
+
+    void add_styles(xml.Node* box) {
+        xml.Node*[] list = box.kids.items();
+        for (usize i in 0..list.len) {
+            xml.Node* n = list[i];
+            if (n.name == "style:style") {
+                self.add_style(n);
+            } else if (text.starts_with(n.name, "number:")) {
+                self.add_data_style(n);
+            }
+        }
+    }
+
+    void add_style(xml.Node* n) {
+        str name = n.attr("style:name");
+        if (name.len == 0) {
+            return;
+        }
+        mut Look look = Look{ bold: -1, italic: -1, underline: -1, align: -1, fg: -1, bg: -1, parent: n.attr("style:parent-style-name"), data: n.attr("style:data-style-name") };
+        xml.Node*[] kids = n.kids.items();
+        for (usize i in 0..kids.len) {
+            xml.Node* k = kids[i];
+            if (k.name == "style:text-properties") {
+                str w = k.attr("fo:font-weight");
+                if (w.len > 0) {
+                    look.bold = w == "bold" || calc.int_of(w) >= 600 ? 1 : 0;
+                }
+                str s = k.attr("fo:font-style");
+                if (s.len > 0) {
+                    look.italic = s == "italic" || s == "oblique" ? 1 : 0;
+                }
+                str u = k.attr("style:text-underline-style");
+                if (u.len > 0) {
+                    look.underline = u != "none" ? 1 : 0;
+                }
+                if (k.has("fo:color")) {
+                    look.fg = parse_color(k.attr("fo:color"));
+                }
+            } else if (k.name == "style:paragraph-properties") {
+                str a = k.attr("fo:text-align");
+                if (a == "start" || a == "left" || a == "justify") {
+                    look.align = 1;
+                } else if (a == "center") {
+                    look.align = 2;
+                } else if (a == "end" || a == "right") {
+                    look.align = 3;
+                }
+            } else if (k.name == "style:table-cell-properties") {
+                if (k.has("fo:background-color")) {
+                    look.bg = parse_color(k.attr("fo:background-color"));
+                }
+            } else if (k.name == "style:table-column-properties") {
+                i32 px = parse_px(k.attr("style:column-width"));
+                if (px > 0) {
+                    self.widths.put(name, px);
+                }
+            }
+        }
+        self.looks.put(name, look);
+    }
+
+    void add_data_style(xml.Node* n) {
+        str name = n.attr("style:name");
+        if (name.len == 0) {
+            return;
+        }
+        mut i32 fmt = -1;
+        if (n.name == "number:number-style" || n.name == "number:time-style") {
+            fmt = 0;
+        } else if (n.name == "number:percentage-style") {
+            fmt = 2;
+        } else if (n.name == "number:currency-style") {
+            fmt = 3;
+        } else if (n.name == "number:date-style") {
+            fmt = 5;
+        } else if (n.name == "number:text-style") {
+            fmt = 6;
+        }
+        if (fmt < 0) {
+            return;
+        }
+        mut i32 dec = -1;
+        xml.Node*[] kids = n.kids.items();
+        for (usize i in 0..kids.len) {
+            xml.Node* k = kids[i];
+            if (k.name == "number:number" || k.name == "number:scientific-number") {
+                if (k.has("number:decimal-places")) {
+                    dec = calc.int_of(k.attr("number:decimal-places")) as i32;
+                }
+                if (k.name == "number:scientific-number") {
+                    fmt = 4;
+                } else if (fmt == 0 && k.attr("number:grouping") == "true") {
+                    fmt = 1;
+                }
+            }
+        }
+        self.fmts.put(name, Fmt{ fmt: fmt, dec: dec });
+    }
+
+    // The style `name` with what its parents say under it.
+    Look resolve(str name, i32 depth) {
+        mut Look r = Look{ bold: -1, italic: -1, underline: -1, align: -1, fg: -1, bg: -1, parent: "", data: "" };
+        if (name.len == 0 || depth > 8) {
+            return r;
+        }
+        Look? own = self.looks.get(name);
+        match (own) {
+            some(l) => {
+                if (l.parent.len > 0) {
+                    r = self.resolve(l.parent, depth + 1);
+                }
+                r.bold = l.bold >= 0 ? l.bold : r.bold;
+                r.italic = l.italic >= 0 ? l.italic : r.italic;
+                r.underline = l.underline >= 0 ? l.underline : r.underline;
+                r.align = l.align >= 0 ? l.align : r.align;
+                r.fg = l.fg >= 0 ? l.fg : r.fg;
+                r.bg = l.bg >= 0 ? l.bg : r.bg;
+                r.data = l.data.len > 0 ? l.data : r.data;
+            },
+            none => { },
+        }
+        return r;
+    }
+
+    void walk(xml.Node* t) {
+        xml.Node*[] kids = t.kids.items();
+        for (usize i in 0..kids.len) {
+            xml.Node* k = kids[i];
+            if (k.name == "table:table-column") {
+                self.add_columns(k);
+            } else if (k.name == "table:table-row") {
+                self.add_row(k);
+            } else if (k.name == "table:table-header-columns" || k.name == "table:table-columns" || k.name == "table:table-column-group" || k.name == "table:table-header-rows" || k.name == "table:table-rows" || k.name == "table:table-row-group") {
+                self.walk(k);
+            }
+        }
+    }
+
+    void add_columns(xml.Node* n) {
+        i64 rep = repeat_of(n, "table:number-columns-repeated");
+        i32 px = match (self.widths.get(n.attr("table:style-name"))) {
+            some(w) => w,
+            none => -1,
+        };
+        str dflt = n.attr("table:default-cell-style-name");
+        mut i64 k = 0;
+        while (k < rep && self.col + k < values.COLS as i64) {
+            i32 c = (self.col + k) as i32;
+            if (px > 0) {
+                self.book.set_width(c, px < 20 ? 20 : px > 600 ? 600 : px);
+            }
+            self.col_style.set(c as usize, dflt);
+            k += 1;
+        }
+        self.col += rep;
+    }
+
+    Item read_cell(xml.Node* n, i32 col) {
+        mut str style = n.attr("table:style-name");
+        if (style.len == 0) {
+            style = self.col_style.items()[col as usize];
+        }
+        Look look = self.resolve(style, 0);
+        Fmt f = match (self.fmts.get(look.data)) {
+            some(x) => x,
+            none => Fmt{ fmt: 0, dec: -1 },
+        };
+        mut Item it = Item{
+            col: col,
+            raw: "",
+            flags: (look.bold == 1 ? calc.FLAG_BOLD : 0) | (look.italic == 1 ? calc.FLAG_ITALIC : 0) | (look.underline == 1 ? calc.FLAG_UNDERLINE : 0),
+            align: look.align > 0 ? look.align : 0,
+            fmt: f.fmt,
+            dec: f.dec,
+            fg: look.fg > 0 ? look.fg as ui32 : 0,
+            bg: look.bg > 0 ? look.bg as ui32 : 0,
+            keep: false,
+        };
+        str kind = n.attr("office:value-type");
+        str formula = n.attr("table:formula");
+        if (kind == "percentage" && it.fmt == 0) {
+            it.fmt = 2;
+        } else if (kind == "currency" && it.fmt == 0) {
+            it.fmt = 3;
+        } else if (kind == "date" && it.fmt == 0) {
+            it.fmt = 5;
+        }
+        mut str raw = "";
+        if (kind == "float" || kind == "percentage" || kind == "currency") {
+            str v = n.attr("office:value");
+            raw = match (text.parse_f64(v)) {
+                ok(x) => v,
+                err(e) => "",
+            };
+        } else if (kind == "date") {
+            str d = n.attr("office:date-value");
+            if (d.len == 10) {
+                raw = d;
+            } else if (d.len > 10 && d.bytes[10] == 84) {
+                i64 y = calc.int_of(text.slice(d, 0, 4));
+                i64 m = calc.int_of(text.slice(d, 5, 7));
+                i64 day = calc.int_of(text.slice(d, 8, 10));
+                f64 secs = duration_seconds(text.slice(d, 10, d.len));
+                if (y > 0 && m >= 1 && m <= 12 && day >= 1 && day <= 31) {
+                    raw = text.format_f64_shortest(self.arena, values.serial_of(y, m, day) + secs / 86400.0);
+                }
+            }
+        } else if (kind == "time") {
+            raw = text.format_f64_shortest(self.arena, duration_seconds(n.attr("office:time-value")) / 86400.0);
+        } else if (kind == "boolean") {
+            raw = n.attr("office:boolean-value") == "true" ? "TRUE" : "FALSE";
+        } else if (kind == "string") {
+            str s = n.has("office:string-value") ? n.attr("office:string-value") : cell_text(self.arena, n);
+            raw = s;
+            if (it.fmt != 6 && s.len > 0 && (s.bytes[0] == 39 || s.bytes[0] == 61 || calc.literal(self.arena, s, 0).kind != values.TEXT)) {
+                text.TextBuilder* q = text.builder(self.arena);
+                q.push("'");
+                q.push(s);
+                raw = q.text();
+            }
+        }
+        if (formula.len > 0) {
+            str f2 = from_odf(self.arena, formula);
+            if (f2.len > 1) {
+                raw = f2;
+            }
+        }
+        it.raw = raw;
+        it.keep = raw.len > 0 || it.flags != 0 || it.align != 0 || it.fmt != 0 || it.dec >= 0 || it.fg != 0 || it.bg != 0;
+        return it;
+    }
+
+    void add_row(xml.Node* n) {
+        i64 rep = repeat_of(n, "table:number-rows-repeated");
+        if (self.row >= values.ROWS as i64) {
+            return;
+        }
+        self.row_items.clear();
+        mut i64 col = 0;
+        xml.Node*[] kids = n.kids.items();
+        for (usize i in 0..kids.len) {
+            xml.Node* c = kids[i];
+            bool covered = c.name == "table:covered-table-cell";
+            if (c.name != "table:table-cell" && !covered) {
+                continue;
+            }
+            if (col >= values.COLS as i64) {
+                break;
+            }
+            i64 times = repeat_of(c, "table:number-columns-repeated");
+            if (!covered) {
+                mut i64 k = 0;
+                while (k < times && col + k < values.COLS as i64) {
+                    Item it = self.read_cell(c, (col + k) as i32);
+                    if (it.keep) {
+                        self.row_items.push(it);
+                    }
+                    k += 1;
+                }
+            }
+            col += times;
+        }
+        Item[] items = self.row_items.items();
+        if (items.len > 0) {
+            mut i64 r = 0;
+            while (r < rep && self.row + r < values.ROWS as i64) {
+                for (usize i in 0..items.len) {
+                    Item it = items[i];
+                    calc.Cell* cell = self.book.make(self.arena, it.col, (self.row + r) as i32);
+                    cell.raw = self.book.keep(it.raw);
+                    cell.flags = it.flags;
+                    cell.align = it.align;
+                    cell.fmt = it.fmt;
+                    cell.dec = it.dec;
+                    cell.fg = it.fg;
+                    cell.bg = it.bg;
+                }
+                r += 1;
+            }
+        }
+        self.row += rep;
+    }
+}
+
+// Reads the .ods file `bytes` into `book`, an empty book. False when it is not an OpenDocument spreadsheet.
+pub bool decode(Arena* arena, keeps calc.Book* book, ui8[] bytes) {
+    vec.Vec<zip.Entry>* files = vec.new<zip.Entry>(arena);
+    if (!zip.read(arena, bytes, files)) {
+        return false;
+    }
+    zip.Entry[] list = files.items();
+    i64 at = zip.find(list, "content.xml");
+    if (at < 0) {
+        return false;
+    }
+    str content = match (str.from_bytes(list[at as usize].data)) {
+        ok(s) => s,
+        err(e) => "",
+    };
+    xml.Node* top = xml.first(arena, xml.parse(arena, content), "office:document-content");
+    xml.Node* table = xml.first(arena, xml.first(arena, xml.first(arena, top, "office:body"), "office:spreadsheet"), "table:table");
+    if (table.name.len == 0) {
+        return false;
+    }
+    Reader* reader = arena.new(Reader, arena, book);
+    i64 sat = zip.find(list, "styles.xml");
+    if (sat >= 0) {
+        str sheet = match (str.from_bytes(list[sat as usize].data)) {
+            ok(s) => s,
+            err(e) => "",
+        };
+        xml.Node* base_doc = xml.first(arena, xml.parse(arena, sheet), "office:document-styles");
+        reader.add_styles(xml.first(arena, base_doc, "office:styles"));
+        reader.add_styles(xml.first(arena, base_doc, "office:automatic-styles"));
+    }
+    reader.add_styles(xml.first(arena, top, "office:styles"));
+    reader.add_styles(xml.first(arena, top, "office:automatic-styles"));
+    reader.walk(table);
+    book.recalc();
+    return true;
+}

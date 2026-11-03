@@ -459,7 +459,7 @@ pub Catalog*!I18nError load(Arena* arena, str path) uses io {
 }
 
 // Reads the catalog of the text of a catalog file.
-pub Catalog*!I18nError parse(Arena* arena, keeps str file) {
+pub Catalog*!I18nError parse(Arena* arena, str file) {
     // At most one entry per `msgid` line.
     mut usize capacity = 0;
     mut usize at = 0;
@@ -575,7 +575,7 @@ void add_piece(Reading* r, usize start, usize stop) {
 }
 
 // Ends the entry being read: kept unless it is fuzzy or the header (whose plural rule is read).
-usize flush(Arena* arena, keeps str file, Reading* r, Entry[] entries, usize count, PluralForms* plurals) {
+usize flush(Arena* arena, str file, Reading* r, Entry[] entries, usize count, PluralForms* plurals) {
     if (!r.id.present) {
         *r = Reading{ };
         return count;
@@ -650,7 +650,7 @@ usize language_length(str tag) {
 
 // ---- Tests ----
 
-Catalog* parsed(Arena* arena, keeps str text) {
+Catalog* parsed(Arena* arena, str text) {
     return match (parse(arena, text)) {
         ok(c) => c,
         err(e) => arena.new(Catalog, arena.alloc_slice(Entry, 0), arena.alloc_slice(ui32, 0), "", 2),

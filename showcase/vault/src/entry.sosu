@@ -1,0 +1,102 @@
+// vault.entry: one account of the vault, and how it is written as bytes before it is sealed:
+// a version byte, six texts (title, user, address, password, two-factor secret, notes) each with
+// its length on two bytes, then the date of the last change on eight bytes.
+import ui.widgets;
+
+pub struct Entry {
+    pub mut i64 id = 0;  // the row of the database, 0 while it is not saved
+    pub mut widgets.TextBuffer title = widgets.TextBuffer{ };
+    pub mut widgets.TextBuffer user = widgets.TextBuffer{ };
+    pub mut widgets.TextBuffer url = widgets.TextBuffer{ };
+    pub mut widgets.TextBuffer password = widgets.TextBuffer{ };
+    pub mut widgets.TextBuffer totp = widgets.TextBuffer{ };
+    pub mut widgets.TextBuffer notes = widgets.TextBuffer{ };
+    pub mut i64 updated = 0;  // unix seconds
+}
+
+usize put(ui8[] out, usize at, str text) {
+    out[at] = (text.len & 0xFF) as ui8;
+    out[at + 1] = (text.len >> 8) as ui8;
+    for (usize i in 0..text.len) {
+        out[at + 2 + i] = text.bytes[i];
+    }
+    return at + 2 + text.len;
+}
+
+// Where the text starting at `at` ends, written into `into`; 0 if the bytes are cut short or not text.
+usize take(ui8[] data, usize at, widgets.TextBuffer* into) {
+    if (at + 2 > data.len) {
+        return 0;
+    }
+    usize size = data[at] as usize | data[at + 1] as usize << 8;
+    if (at + 2 + size > data.len) {
+        return 0;
+    }
+    match (str.from_bytes(data[at + 2..at + 2 + size])) {
+        ok(text) => {
+            into.set(text);
+        },
+        err(e) => {
+            return 0;
+        },
+    }
+    return at + 2 + size;
+}
+
+// The bytes of `e`, in `arena`.
+pub ui8[] encode(Arena* arena, Entry* e) {
+    usize size = 1 + 6 * 2 + e.title.text().len + e.user.text().len + e.url.text().len + e.password.text().len + e.totp.text().len + e.notes.text().len + 8;
+    mut ui8[] out = arena.alloc_slice(ui8, size);
+    out[0] = 1;
+    mut usize at = 1;
+    at = put(out, at, e.title.text());
+    at = put(out, at, e.user.text());
+    at = put(out, at, e.url.text());
+    at = put(out, at, e.password.text());
+    at = put(out, at, e.totp.text());
+    at = put(out, at, e.notes.text());
+    mut ui64 stamp = e.updated as ui64;
+    for (usize i in 0..8) {
+        out[at + i] = (stamp & 0xFF) as ui8;
+        stamp = stamp >> 8;
+    }
+    return out;
+}
+
+// Reads `data` into `e`: false if it is not what `encode` writes.
+pub bool decode(ui8[] data, Entry* e) {
+    if (data.len < 1 + 12 + 8 || data[0] != 1) {
+        return false;
+    }
+    mut usize at = 1;
+    at = take(data, at, &e.title);
+    if (at == 0) {
+        return false;
+    }
+    at = take(data, at, &e.user);
+    if (at == 0) {
+        return false;
+    }
+    at = take(data, at, &e.url);
+    if (at == 0) {
+        return false;
+    }
+    at = take(data, at, &e.password);
+    if (at == 0) {
+        return false;
+    }
+    at = take(data, at, &e.totp);
+    if (at == 0) {
+        return false;
+    }
+    at = take(data, at, &e.notes);
+    if (at == 0 || at + 8 > data.len) {
+        return false;
+    }
+    mut ui64 stamp = 0;
+    for (usize i in 0..8) {
+        stamp = stamp << 8 | data[at + 7 - i] as ui64;
+    }
+    e.updated = stamp as i64;
+    return true;
+}

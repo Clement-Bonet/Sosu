@@ -208,6 +208,14 @@ pub void set_clipboard_text(Arena* arena, str text) uses io {
     }
 }
 
+// Opens `url` in the program of the system for it (the browser).
+pub void open_url(Arena* arena, str url) uses io {
+    ui8* c_url = url.to_cstr(arena);
+    unsafe {
+        sdl_c.SDL_OpenURL(c_url);
+    }
+}
+
 pub Keyboard* as_keyboard(Event* event) {
     unsafe {
         return event as Keyboard*;

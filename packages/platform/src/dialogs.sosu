@@ -8,7 +8,7 @@ import platform.sdl;
 import platform.sdl_c;
 
 // A filter of the file dialogs: a name for the user, and the extensions it keeps ("png", "jpg";
-// "*.png" and ".png" are read as "png"); no extension, or "*", keeps every file.
+// "*.png" and ".png" are read as "png"); no extension, or "*", every file.
 pub struct Filter {
     pub str name;
     pub str[] extensions;

@@ -3483,7 +3483,7 @@ The dialogs of the system (spec §10.11), on SDL3. A file dialog does not wait: 
 
 ### struct `Filter`
 
-A filter of the file dialogs: a name for the user, and the extensions it keeps ("png", "jpg"; "*.png" and ".png" are read as "png"); no extension, or "*", keeps every file.
+A filter of the file dialogs: a name for the user, and the extensions it keeps ("png", "jpg"; "*.png" and ".png" are read as "png"); no extension, or "*", every file.
 
 ```sosu
 pub struct Filter

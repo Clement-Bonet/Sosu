@@ -1,0 +1,60 @@
+// vault.kdf: PBKDF2 with HMAC-SHA256 (RFC 8018): a password and a salt become keys, slowly, so that
+// trying many passwords costs a lot. The two halves of the HMAC key are hashed once, then copied.
+import crypto.sha256;
+
+// HMAC-SHA256 of `message`, from the states after the inner and the outer key blocks.
+ui8[32] mac(sha256.Sha256 inner_start, sha256.Sha256 outer_start, ui8[] message) {
+    mut sha256.Sha256 inner = inner_start;
+    inner.update(message);
+    mut ui8[32] inside = inner.finish();
+    mut sha256.Sha256 outer = outer_start;
+    outer.update(inside[0..32]);
+    return outer.finish();
+}
+
+// Fills `out` with the bytes derived from `password` and `salt` (60 bytes at most) in `rounds` rounds.
+pub void pbkdf2(ui8[] password, ui8[] salt, i32 rounds, ui8[] out)
+    requires salt.len <= 60 && rounds >= 1
+{
+    mut ui8[64] inner_key = [0x36; 64];
+    mut ui8[64] outer_key = [0x5c; 64];
+    mut ui8[32] hashed = [0; 32];
+    mut ui8[] key = password;
+    if (password.len > 64) {
+        hashed = sha256.sum(password);
+        key = hashed[0..32];
+    }
+    for (usize i in 0..key.len) {
+        inner_key[i] = inner_key[i] ^ key[i];
+        outer_key[i] = outer_key[i] ^ key[i];
+    }
+    mut sha256.Sha256 inner = sha256.start();
+    inner.update(inner_key[0..64]);
+    mut sha256.Sha256 outer = sha256.start();
+    outer.update(outer_key[0..64]);
+
+    mut usize written = 0;
+    mut ui32 block = 1;
+    while (written < out.len) {
+        mut ui8[64] first = [0; 64];
+        for (usize i in 0..salt.len) {
+            first[i] = salt[i];
+        }
+        first[salt.len + 3] = block as ui8;
+        mut ui8[32] u = mac(inner, outer, first[0..salt.len + 4]);
+        mut ui8[32] total = u;
+        for (i32 r in 1..rounds) {
+            u = mac(inner, outer, u[0..32]);
+            for (usize k in 0..32) {
+                total[k] = total[k] ^ u[k];
+            }
+        }
+        for (usize k in 0..32) {
+            if (written < out.len) {
+                out[written] = total[k];
+                written += 1;
+            }
+        }
+        block += 1;
+    }
+}

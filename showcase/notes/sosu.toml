@@ -1,0 +1,15 @@
+# Notes: a folder of Markdown notes, written in Sosu. The model is src/notes.sosu.
+[package]
+name = "notes"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }
+image = { path = "../../packages/image" }
+testing = { path = "../../packages/testing" }
+
+[app]
+assets = ["assets/NotoSans-Regular.ttf", "assets/NotoSans-Bold.ttf", "assets/NotoSans-Italic.ttf", "assets/NotoSans-BoldItalic.ttf", "assets/NotoSerif-Regular.ttf", "assets/NotoSerif-Bold.ttf", "assets/NotoSerif-Italic.ttf", "assets/NotoSerif-BoldItalic.ttf", "assets/JetBrainsMono-Regular.ttf", "assets/JetBrainsMono-Bold.ttf", "assets/JetBrainsMono-Italic.ttf", "assets/JetBrainsMono-BoldItalic.ttf", "assets/icon.png"]
+icon = "assets/icon.png"

@@ -700,6 +700,11 @@ static void test_keeps(void) {
         { "void f(N* q) { mut Arena a = Arena.new(64); H* h = a.alloc(H); h.n = some(q); }", "" },
         { "void f() { mut Arena a = Arena.new(64); mut N x = N{ v: 1 }; H* h = a.alloc(H); put(h, &x); }", "" },
         { "void f(H* h) { mut Arena a = Arena.new(64); unsafe { put(h, a.alloc(N)); } }", "" },
+        { "N* copy(Arena* a, N* p) { N* c = a.alloc(N); return c; }\nvoid f(H* h, Arena* a) { mut Arena t = Arena.new(64); N* tmp = t.alloc(N); h.n = some(copy(a, tmp)); }", "" },
+        { "N* pass(Arena* a, N* p) { return p; }\nvoid f(H* h, Arena* a) { mut Arena t = Arena.new(64); N* tmp = t.alloc(N); h.n = some(pass(a, tmp)); }", "E0374" },
+        { "N*? first(H* g) { return g.n; }\nvoid f(H* h, Arena* a) { mut Arena t = Arena.new(64); H* g = t.alloc(H); h.n = first(g); }", "E0374" },
+        { "struct B { mut Arena store; N* keep(N* p) { N* c = store.alloc(N); return c; } }\nvoid f(H* h, B* b) { mut Arena t = Arena.new(64); h.n = some(b.keep(t.alloc(N))); }", "" },
+        { "N* later(Arena* a, N* p) { return early(a, p); }\nN* early(Arena* a, N* p) { return p; }\nvoid f(H* h, Arena* a) { mut Arena t = Arena.new(64); h.n = some(later(a, t.alloc(N))); }", "E0374" },
         { "i32 f() { mut Arena a = Arena.new(64); N* p = make(&a); a.free(); return p.v; }", "E0372" },
         { "N* f() { mut Arena a = Arena.new(64); return make(&a); }", "E0373" },
     };

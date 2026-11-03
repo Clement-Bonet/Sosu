@@ -1,0 +1,82 @@
+// vault.screen: the title bar, the list of accounts and the form of the one chosen. The unlock
+// screen is drawn by `main`, since the master password is typed in a field of dots.
+import vault.model;
+
+window Vault(model.Model* m) uses io {
+    title: "Vault"
+    width: 1000
+    height: 680
+
+    TitleBar(height: 40) {
+        Text("Vault")
+        Button("New", on_click: m.new_entry, enabled: !m.locked)
+        Button("Lock", on_click: m.lock, enabled: !m.locked)
+    }
+    if (!m.locked) {
+        Row(gap: 16, padding: 16) {
+            Column(gap: 8) {
+                TextField(bind: m.search, width: 280, placeholder: "Search")
+                List(width: 280, height: Fill, selected: m.chosen) {
+                    for (i32 i in 0..m.rows()) {
+                        Text(m.title_at(i))
+                    }
+                }
+            }
+            Column(gap: 10) {
+                if (m.editing) {
+                    Form(m)
+                } else {
+                    Text("Choose an account, or press New.")
+                }
+            }
+        }
+    }
+}
+
+component Form(model.Model* m) uses io {
+    Grid(columns: [90, Fill], gap: 12) {
+        Text("Title")
+        TextField(bind: m.edit.title, width: Fill)
+        Text("User")
+        Row(gap: 8) {
+            TextField(bind: m.edit.user, width: 300)
+            Button("Copy", on_click: m.copy_user)
+        }
+        Text("Address")
+        TextField(bind: m.edit.url, width: Fill)
+        Text("Password")
+        Row(gap: 8) {
+            if (m.reveal) {
+                TextField(bind: m.edit.password, width: 300)
+            } else {
+                Text(m.dots())
+            }
+            Button(m.reveal ? "Hide" : "Show", on_click: m.toggle_reveal)
+            Button("Copy", on_click: m.copy_password)
+        }
+        Text("Strength")
+        Text(m.strength_text())
+        Text("Generator")
+        Row(gap: 12) {
+            Slider(bind: m.length, min: 8, max: 48, step: 1, width: 100)
+            Text(m.length_label.text())
+            Checkbox("A-Z", bind: m.rules.upper)
+            Checkbox("0-9", bind: m.rules.digits)
+            Checkbox("#$%", bind: m.rules.symbols)
+            Button("Generate", on_click: m.generate)
+        }
+        Text("Two-factor")
+        Row(gap: 8) {
+            TextField(bind: m.edit.totp, width: 300, placeholder: "Base32 secret")
+            Text(m.code.text())
+            Button("Copy", on_click: m.copy_code, enabled: m.code.count() > 0)
+        }
+        Text("Notes")
+        TextField(bind: m.edit.notes, width: Fill)
+        Row(gap: 8, col: 1) {
+            Button("Save", on_click: m.save)
+            Button("Delete", on_click: m.remove_entry)
+            Text(m.message.text())
+        }
+    }
+}

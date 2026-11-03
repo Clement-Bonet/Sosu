@@ -1,0 +1,198 @@
+// sheets.zip: ZIP archives, written and read (an OpenDocument file is one). The compression is
+// compress.deflate; the files are kept in memory.
+import compress.checksum;
+import compress.deflate;
+import std.vec;
+
+// A file of an archive.
+pub struct Entry {
+    pub str name;
+    pub ui8[] data;
+    pub bool pack;  // when writing: deflate it (the "mimetype" file must stay stored)
+}
+
+// The biggest file this reader inflates: a damaged or hostile archive cannot ask for more.
+pub usize MAX_FILE = 256 * 1024 * 1024;
+
+void put16(vec.Vec<ui8>* out, usize x) {
+    out.push((x & 0xFF) as ui8);
+    out.push((x >> 8 & 0xFF) as ui8);
+}
+
+void put32(vec.Vec<ui8>* out, usize x) {
+    put16(out, x & 0xFFFF);
+    put16(out, x >> 16 & 0xFFFF);
+}
+
+void put_name(vec.Vec<ui8>* out, str s) {
+    for (ui8 b in s.bytes) {
+        out.push(b);
+    }
+}
+
+// The archive holding `entries`, in order.
+pub ui8[] write(Arena* arena, Entry[] entries) {
+    vec.Vec<ui8>* out = vec.new<ui8>(arena);
+    vec.Vec<usize>* crcs = vec.new<usize>(arena);
+    vec.Vec<usize>* sizes = vec.new<usize>(arena);
+    vec.Vec<usize>* methods = vec.new<usize>(arena);
+    vec.Vec<usize>* offsets = vec.new<usize>(arena);
+    mut checksum.Crc32Table table = checksum.crc32_table();
+    for (usize i in 0..entries.len) {
+        Entry e = entries[i];
+        mut ui8[] body = e.data;
+        mut usize method = 0;
+        if (e.pack) {
+            ui8[] packed = deflate.deflate(arena, e.data);
+            if (packed.len < e.data.len) {
+                body = packed;
+                method = 8;
+            }
+        }
+        usize crc = checksum.crc32_from(&table, 0, e.data) as usize;
+        crcs.push(crc);
+        sizes.push(body.len);
+        methods.push(method);
+        offsets.push(out.len());
+        put32(out, 0x04034B50);
+        put16(out, 20);
+        put16(out, 0);
+        put16(out, method);
+        put16(out, 0);  // time
+        put16(out, 33);  // date: 1980-01-01
+        put32(out, crc);
+        put32(out, body.len);
+        put32(out, e.data.len);
+        put16(out, e.name.len);
+        put16(out, 0);
+        put_name(out, e.name);
+        for (ui8 b in body) {
+            out.push(b);
+        }
+    }
+    usize directory = out.len();
+    for (usize i in 0..entries.len) {
+        Entry e = entries[i];
+        put32(out, 0x02014B50);
+        put16(out, 20);
+        put16(out, 20);
+        put16(out, 0);
+        put16(out, methods.items()[i]);
+        put16(out, 0);
+        put16(out, 33);
+        put32(out, crcs.items()[i]);
+        put32(out, sizes.items()[i]);
+        put32(out, e.data.len);
+        put16(out, e.name.len);
+        put16(out, 0);  // extra
+        put16(out, 0);  // comment
+        put16(out, 0);  // disk
+        put16(out, 0);  // internal attributes
+        put32(out, 0);  // external attributes
+        put32(out, offsets.items()[i]);
+        put_name(out, e.name);
+    }
+    usize size = out.len() - directory;
+    put32(out, 0x06054B50);
+    put16(out, 0);
+    put16(out, 0);
+    put16(out, entries.len);
+    put16(out, entries.len);
+    put32(out, size);
+    put32(out, directory);
+    put16(out, 0);
+    return out.items();
+}
+
+usize get16(ui8[] data, usize at) {
+    return data[at] as usize | data[at + 1] as usize << 8;
+}
+
+usize get32(ui8[] data, usize at) {
+    return get16(data, at) | get16(data, at + 2) << 16;
+}
+
+// Reads the files of the archive `data` into `into`. False when it is not an archive, or damaged.
+pub bool read(Arena* arena, ui8[] data, vec.Vec<Entry>* into) {
+    if (data.len < 22) {
+        return false;
+    }
+    usize floor = data.len > 22 + 65535 ? data.len - 22 - 65535 : 0;
+    mut usize at = data.len - 22;
+    mut bool found = false;
+    while (true) {
+        if (get32(data, at) == 0x06054B50) {
+            found = true;
+            break;
+        }
+        if (at == floor) {
+            break;
+        }
+        at -= 1;
+    }
+    if (!found) {
+        return false;
+    }
+    usize count = get16(data, at + 10);
+    mut usize p = get32(data, at + 16);
+    for (usize k in 0..count) {
+        if (p + 46 > data.len || get32(data, p) != 0x02014B50) {
+            return false;
+        }
+        usize method = get16(data, p + 10);
+        usize packed = get32(data, p + 20);
+        usize size = get32(data, p + 24);
+        usize name_len = get16(data, p + 28);
+        usize extra_len = get16(data, p + 30);
+        usize comment_len = get16(data, p + 32);
+        usize local = get32(data, p + 42);
+        if (p + 46 + name_len > data.len || size > MAX_FILE) {
+            return false;
+        }
+        str name = match (str.from_bytes(data[p + 46..p + 46 + name_len])) {
+            ok(s) => s,
+            err(e) => "",
+        };
+        p = p + 46 + name_len + extra_len + comment_len;
+        if (local + 30 > data.len || get32(data, local) != 0x04034B50) {
+            return false;
+        }
+        usize start = local + 30 + get16(data, local + 26) + get16(data, local + 28);
+        if (start > data.len || packed > data.len - start) {
+            return false;
+        }
+        ui8[] body = data[start..start + packed];
+        if (method == 0) {
+            if (packed != size) {
+                return false;
+            }
+            into.push(Entry{ name: name, data: body, pack: false });
+        } else if (method == 8) {
+            ui8[] whole = arena.alloc_slice(ui8, size);
+            match (deflate.inflate_into(body, whole)) {
+                ok(n) => {
+                    if (n != size) {
+                        return false;
+                    }
+                },
+                err(e) => {
+                    return false;
+                },
+            }
+            into.push(Entry{ name: name, data: whole, pack: false });
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The place of the file `name` in `list`, or -1.
+pub i64 find(Entry[] list, str name) {
+    for (usize i in 0..list.len) {
+        if (list[i].name == name) {
+            return i as i64;
+        }
+    }
+    return -1;
+}
