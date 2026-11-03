@@ -1792,6 +1792,8 @@ void sema_free(Sema *s) {
     free(s->fns.items);
     free(s->consts.items);
     free(s->method_params.items);
+    ptrmap_free(&s->summary_index);
+    free(s->summaries.items);
     types_free(&s->types);
     arena_free(&s->arena);
     memset(s, 0, sizeof *s);

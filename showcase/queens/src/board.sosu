@@ -1,0 +1,310 @@
+// queens.board: the rules of the game, with no window. A square board of n by n squares is cut in n
+// coloured regions; the player puts n queens so that each row, each column and each region has
+// exactly one, and no two queens touch, even by a corner. A puzzle has one solution only: the
+// generator checks it by counting the solutions.
+pub i32 MAX = 10;
+pub i32 MIN = 5;
+
+pub i32 EMPTY = 0;
+pub i32 CROSS = 1;  // "no queen here", a note of the player
+pub i32 QUEEN = 2;
+
+pub class Game {
+    pub mut i32 n;
+    pub mut i32[100] region;  // the region of each square, row by row
+    pub mut i32[10] answer;  // the column of the queen of each row, in the solution
+    pub mut ui8[100] marks;  // EMPTY, CROSS or QUEEN
+    mut ui64 state;
+    mut i32[10] work;
+    mut i32 found;
+    mut i32 cap;
+    pub mut i32 tries;
+
+    void init(i32 size, ui64 seed) {
+        n = size;
+        region = [0; 100];
+        answer = [0; 10];
+        marks = [0; 100];
+        work = [0; 10];
+        found = 0;
+        cap = 2;
+        tries = 0;
+        state = 0;
+        restart(size, seed);
+    }
+
+    i32 below(i32 bound) {
+        state = wrapping_add(wrapping_mul(state, 6364136223846793005 as ui64), 1442695040888963407 as ui64);
+        return ((state >> 33) % bound as ui64) as i32;
+    }
+
+    // A new puzzle of `size` by `size` squares, from `seed`.
+    pub void restart(i32 size, ui64 seed) {
+        n = size < MIN ? MIN : (size > MAX ? MAX : size);
+        state = wrapping_add(wrapping_mul(seed, 2862933555777941757 as ui64), 3037000493 as ui64);
+        tries = 0;
+        while (true) {
+            tries += 1;
+            place_queens();
+            grow_regions();
+            if (refine() || tries >= 2000) {
+                break;
+            }
+        }
+        clear();
+    }
+
+    // How many placements the regions allow, up to `limit`.
+    i32 count(i32 limit) {
+        cap = limit;
+        found = 0;
+        solve(0, 0, 0, -9);
+        return found;
+    }
+
+    pub i32 solutions() {
+        return count(2);
+    }
+
+    // Moves squares from a region to the next one as long as that does not give more solutions,
+    // until the puzzle has one only. False if it is not found in a while.
+    bool refine() {
+        mut i32 now = count(500);
+        for (i32 step in 0..4000) {
+            if (now == 1) {
+                return true;
+            }
+            i32 at = below(n * n);
+            i32 x = at % n;
+            i32 y = at / n;
+            if (answer[y as usize] == x) {
+                continue;
+            }
+            i32 dir = below(4);
+            i32 nx = x + (dir == 0 ? 1 : (dir == 1 ? -1 : 0));
+            i32 ny = y + (dir == 2 ? 1 : (dir == 3 ? -1 : 0));
+            if (nx < 0 || ny < 0 || nx >= n || ny >= n) {
+                continue;
+            }
+            i32 from = region[at as usize];
+            i32 to = region[(ny * n + nx) as usize];
+            if (from == to) {
+                continue;
+            }
+            region[at as usize] = to;
+            if (connected(from)) {
+                i32 after = count(500);
+                if (after <= now) {
+                    now = after;
+                    continue;
+                }
+            }
+            region[at as usize] = from;
+        }
+        return now == 1;
+    }
+
+    // Is the region in one piece, from the square of its queen?
+    bool connected(i32 r) {
+        mut i32[100] seen = [0; 100];
+        mut i32[100] stack = [0; 100];
+        mut i32 total = 0;
+        for (i32 i in 0..n * n) {
+            if (region[i as usize] == r) {
+                total += 1;
+            }
+        }
+        mut i32 top = 1;
+        stack[0] = r * n + answer[r as usize];
+        seen[stack[0] as usize] = 1;
+        mut i32 reached = 0;
+        while (top > 0) {
+            top -= 1;
+            i32 at = stack[top as usize];
+            reached += 1;
+            i32 x = at % n;
+            i32 y = at / n;
+            for (i32 dir in 0..4) {
+                i32 nx = x + (dir == 0 ? 1 : (dir == 1 ? -1 : 0));
+                i32 ny = y + (dir == 2 ? 1 : (dir == 3 ? -1 : 0));
+                if (nx < 0 || ny < 0 || nx >= n || ny >= n) {
+                    continue;
+                }
+                i32 next = ny * n + nx;
+                if (region[next as usize] == r && seen[next as usize] == 0) {
+                    seen[next as usize] = 1;
+                    stack[top as usize] = next;
+                    top += 1;
+                }
+            }
+        }
+        return reached == total;
+    }
+
+    pub void clear() {
+        marks = [0; 100];
+    }
+
+    // A random placement of the queens: one by row and column, none touching.
+    void place_queens() {
+        while (!put(0, 0, -9)) {
+        }
+    }
+
+    bool put(i32 row, i32 used, i32 prev) {
+        if (row == n) {
+            return true;
+        }
+        i32 start = below(n);
+        for (i32 k in 0..n) {
+            i32 c = (start + k) % n;
+            if ((used & (1 << c)) != 0 || (c - prev <= 1 && prev - c <= 1)) {
+                continue;
+            }
+            answer[row as usize] = c;
+            if (put(row + 1, used | (1 << c), c)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Each queen is the seed of a region, which grows by a random square next to it.
+    void grow_regions() {
+        region = [-1; 100];
+        for (i32 r in 0..n) {
+            region[(r * n + answer[r as usize]) as usize] = r;
+        }
+        mut i32 left = n * n - n;
+        mut i32 guard = 0;
+        while (left > 0 && guard < 100000) {
+            guard += 1;
+            i32 at = below(n * n);
+            if (region[at as usize] < 0) {
+                continue;
+            }
+            i32 x = at % n;
+            i32 y = at / n;
+            i32 dir = below(4);
+            i32 nx = x + (dir == 0 ? 1 : (dir == 1 ? -1 : 0));
+            i32 ny = y + (dir == 2 ? 1 : (dir == 3 ? -1 : 0));
+            if (nx < 0 || ny < 0 || nx >= n || ny >= n) {
+                continue;
+            }
+            if (region[(ny * n + nx) as usize] < 0) {
+                region[(ny * n + nx) as usize] = region[at as usize];
+                left -= 1;
+            }
+        }
+        for (i32 i in 0..n * n) {
+            if (region[i as usize] < 0) {
+                region[i as usize] = 0;
+            }
+        }
+    }
+
+    // Counts the placements of the regions, up to two, row by row. `answer` is left alone while
+    // generating: the generator knows its own placement is one of them.
+    void solve(i32 row, i32 cols, i32 regions, i32 prev) {
+        if (found >= cap) {
+            return;
+        }
+        if (row == n) {
+            found += 1;
+            return;
+        }
+        for (i32 c in 0..n) {
+            if ((cols & (1 << c)) != 0 || (c - prev <= 1 && prev - c <= 1)) {
+                continue;
+            }
+            i32 g = region[(row * n + c) as usize];
+            if ((regions & (1 << g)) != 0) {
+                continue;
+            }
+            solve(row + 1, cols | (1 << c), regions | (1 << g), c);
+        }
+    }
+
+    pub i32 at(i32 x, i32 y) {
+        return marks[(y * n + x) as usize] as i32;
+    }
+
+    pub i32 region_of(i32 x, i32 y) {
+        return region[(y * n + x) as usize];
+    }
+
+    // Does the solution have its queen on this square?
+    pub bool is_solution(i32 x, i32 y) {
+        return answer[y as usize] == x;
+    }
+
+    // Click on a square: empty, then a cross, then a queen, then empty again.
+    pub void cycle(i32 x, i32 y) {
+        i32 i = y * n + x;
+        marks[i as usize] = ((marks[i as usize] as i32 + 1) % 3) as ui8;
+    }
+
+    pub void set(i32 x, i32 y, i32 what) {
+        marks[(y * n + x) as usize] = what as ui8;
+    }
+
+    // The solution, as queens: the crosses are gone.
+    pub void show_solution() {
+        marks = [0; 100];
+        for (i32 y in 0..n) {
+            marks[(y * n + answer[y as usize]) as usize] = QUEEN as ui8;
+        }
+    }
+
+    pub i32 queens() {
+        mut i32 count = 0;
+        for (i32 i in 0..n * n) {
+            if (marks[i as usize] == QUEEN as ui8) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    // Is the queen at (x, y) in the way of another: same row, column or region, or next to it?
+    pub bool conflict(i32 x, i32 y) {
+        if (at(x, y) != QUEEN) {
+            return false;
+        }
+        for (i32 j in 0..n) {
+            for (i32 i in 0..n) {
+                if ((i == x && j == y) || at(i, j) != QUEEN) {
+                    continue;
+                }
+                mut i32 dx = i - x;
+                mut i32 dy = j - y;
+                if (dx < 0) {
+                    dx = -dx;
+                }
+                if (dy < 0) {
+                    dy = -dy;
+                }
+                if (i == x || j == y || region_of(i, j) == region_of(x, y) || (dx <= 1 && dy <= 1)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    pub bool has_conflict() {
+        for (i32 y in 0..n) {
+            for (i32 x in 0..n) {
+                if (conflict(x, y)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // n queens that do not bother each other: with one solution only, it is that one.
+    pub bool won() {
+        return queens() == n && !has_conflict();
+    }
+}

@@ -550,6 +550,10 @@ ui32 key_page_down() {
     return 0x4000004E;
 }
 
+ui32 key_select() {
+    return 0x7FFF0001;
+}
+
 ui32 key_f10() {
     return 0x40000043;
 }
@@ -574,6 +578,7 @@ struct WidgetState {
     mut bool seen = false;  // used during this frame: entries not used are freed at its end
     mut f32 scroll_x = 0.0;  // how far its content is scrolled
     mut f32 scroll_y = 0.0;
+    mut usize seen_cursor = 0;  // where the cursor of a text area was when it was last brought into view
     mut f32 content_w = 0.0;  // the size of its content at the last frame
     mut f32 content_h = 0.0;
     mut i32 items = 0;  // a list: how many items
@@ -869,6 +874,25 @@ pub struct Ui {
     // to `platform.app.set_text_input_area`.
     pub canvas.Rect caret_area() {
         return caret;
+    }
+
+    // The cursor and the other end of the selection (byte offsets) of the text field that has the
+    // keyboard, as of the last frame.
+    pub usize cursor_at() {
+        return cursor;
+    }
+
+    pub usize anchor_at() {
+        return anchor;
+    }
+
+    // Selects the bytes `from` to `to` of the text field that has the keyboard (the cursor at `to`),
+    // at its next frame, in order with the text typed and the keys sent before and after.
+    pub void select_later(usize from, usize to) {
+        if (edit_count < 64) {
+            edits[edit_count] = Edit{ key: key_select(), from: from, to: to };
+            edit_count += 1;
+        }
     }
 
     // Whether a text widget has the keyboard: the keyboard of the system is shown then, on a touch
@@ -2592,6 +2616,9 @@ pub struct Frame {
             usize end = max(ui.anchor, ui.cursor);
             if (e.key == 0) {
                 type_into(text, ui.typed.slice(e.from, e.to), format);
+            } else if (e.key == key_select()) {  // `Ui.select_later`
+                ui.anchor = min(e.from, text.len());
+                ui.cursor = min(e.to, text.len());
             } else if (e.ctrl && e.key == 97) {  // Ctrl+A: all
                 ui.anchor = 0;
                 ui.cursor = text.len();
@@ -3416,8 +3443,11 @@ pub struct Frame {
             Spot at = spot_of(t, layout, ui.cursor);
             f32 top = at.line as f32 * line_h;
             WidgetState* s = &ui.states[slot];
-            s.scroll_y = min(s.scroll_y, top);
-            s.scroll_y = max(s.scroll_y, top + line_h - inner.h);
+            if (s.seen_cursor != ui.cursor) {  // only when it moved: the wheel may scroll it away
+                s.seen_cursor = ui.cursor;
+                s.scroll_y = min(s.scroll_y, top);
+                s.scroll_y = max(s.scroll_y, top + line_h - inner.h);
+            }
         }
         WidgetState kept = ui.states[slot];
         surface.push_clip(canvas.Rect{ x: inner.x - 2.0, y: r.y + 2.0, w: inner.w + 4.0, h: r.h - 4.0 });
@@ -8352,7 +8382,7 @@ test "a long list: 100 000 items, only those in view described" {
 
 // A table of 50 files, 3 columns (Name: Fill, Size: 100 aligned at the end, Kind: Auto), for the
 // test below; `cells` gets the rectangles of the cells of its first row. Returns its activation.
-bool table_frame(Ui* ui, canvas.Canvas* surface, keeps i32* row, keeps Sort* sort, canvas.Rect[3]* cells) {
+bool table_frame(Ui* ui, canvas.Canvas* surface, i32* row, Sort* sort, canvas.Rect[3]* cells) {
     mut Frame f = begin(ui, surface, 0.0, 0.0);
     f.table(50, 400.0, 200.0, some(row), some(sort));
     f.table_column("Name", Fill(1.0), true, Start);

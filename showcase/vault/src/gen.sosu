@@ -1,0 +1,101 @@
+// vault.gen: passwords drawn at random (vault.rand), and an estimate of how hard a password is to guess.
+import std.math;
+import vault.rand;
+
+str LOWER = "abcdefghijkmnpqrstuvwxyz";  // without l and o, easy to mistake for 1 and 0
+str UPPER = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+str DIGITS = "23456789";
+str SYMBOLS = "!@#$%&*-_+=?";
+
+pub struct Rules {
+    pub mut i32 length = 20;
+    pub mut bool upper = true;
+    pub mut bool digits = true;
+    pub mut bool symbols = true;
+}
+
+// A password following `rules`, in `arena`: letters always, and at least one character of each class asked for.
+pub str generate(Arena* arena, Rules* rules) uses io {
+    usize size = min(max(rules.length, 8), 64) as usize;
+    str[4] sets = [LOWER, UPPER, DIGITS, SYMBOLS];
+    bool[4] on = [true, rules.upper, rules.digits, rules.symbols];
+    mut ui8[] pool = arena.alloc_slice(ui8, 80);
+    mut usize pooled = 0;
+    for (usize k in 0..4) {
+        if (on[k]) {
+            for (ui8 b in sets[k].bytes) {
+                pool[pooled] = b;
+                pooled += 1;
+            }
+        }
+    }
+    mut ui8[] out = arena.alloc_slice(ui8, size);
+    for (usize i in 0..size) {
+        out[i] = pool[rand.below(pooled)];
+    }
+    // one character of each class, at places drawn without repeating
+    mut bool[64] taken = [false; 64];
+    for (usize k in 0..4) {
+        if (on[k]) {
+            mut usize at = rand.below(size);
+            while (taken[at]) {
+                at = (at + 1) % size;
+            }
+            taken[at] = true;
+            out[at] = sets[k].bytes[rand.below(sets[k].len)];
+        }
+    }
+    return match (str.from_bytes(out)) {
+        ok(text) => text,
+        err(e) => "",
+    };
+}
+
+// The bits of entropy of a password drawn at random from the classes of characters it uses.
+pub f64 bits(str password) {
+    mut bool lower = false;
+    mut bool upper = false;
+    mut bool digit = false;
+    mut bool other = false;
+    for (ui8 b in password.bytes) {
+        if (b >= 97 && b <= 122) {
+            lower = true;
+        } else if (b >= 65 && b <= 90) {
+            upper = true;
+        } else if (b >= 48 && b <= 57) {
+            digit = true;
+        } else {
+            other = true;
+        }
+    }
+    mut f64 pool = 0.0;
+    if (lower) {
+        pool += 26.0;
+    }
+    if (upper) {
+        pool += 26.0;
+    }
+    if (digit) {
+        pool += 10.0;
+    }
+    if (other) {
+        pool += 33.0;
+    }
+    if (pool == 0.0) {
+        return 0.0;
+    }
+    return password.len as f64 * math.log2(pool);
+}
+
+pub str verdict(f64 bits) {
+    if (bits < 40.0) {
+        return "Weak";
+    }
+    if (bits < 60.0) {
+        return "Fair";
+    }
+    if (bits < 80.0) {
+        return "Good";
+    }
+    return "Strong";
+}

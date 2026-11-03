@@ -121,6 +121,15 @@ typedef struct {
     size_t slot_cap;
 } Scope;
 
+/* What a function returns of its parameters (spec §6.1, stage 4): the origins of what a call to it
+   gives are those of these arguments only. Bit i stands for the parameter i (64 at most). */
+typedef struct {
+    uint64_t values;  /* the value of the parameter (for an `Arena*`: memory allocated in it) */
+    uint64_t through; /* what is reached through it */
+    bool receiver;    /* memory of `self` */
+    bool complete;    /* its body was checked to its end: otherwise a call takes every argument */
+} ReturnSummary;
+
 typedef struct {
     Program *program;
     TypeTable types;
@@ -135,6 +144,11 @@ typedef struct {
     struct { FnInfo **items; size_t count; size_t cap; } method_params;
     const TypeEnv *env; /* NULL outside generic declarations */
     bool quiet;         /* resolving the members of an instance: its errors were reported for the generic */
+    /* the summaries of the functions and methods, by declaration, made by a first pass over their
+       bodies (`summarizing`) before the one that reports */
+    PtrMap summary_index;
+    struct { ReturnSummary *items; size_t count; size_t cap; } summaries;
+    bool summarizing;
 } Sema;
 
 /* Checks a loaded program; errors go to program->diags. Returns true if there were none. */

@@ -262,6 +262,10 @@ static Local *param_arena(Body *b, const Expr *object) {
    through a parameter). Never the offset of a declaration. A parameter is an origin of its own:
    the value the caller gave, which only a `keeps` parameter may store (rule 4). */
 #define ORIGIN_CALLER SIZE_MAX
+/* What is reached through the parameter `i` (< 64): the caller's, but it says which argument. */
+#define ORIGIN_VIA(i) (SIZE_MAX - 1 - (size_t)(i))
+
+static bool is_via(size_t origin) { return origin != ORIGIN_CALLER && origin >= SIZE_MAX - 64; }
 
 typedef enum {
     ORIGIN_OTHER,
@@ -278,7 +282,7 @@ static bool is_arena_pointer(const Type *type) {
 /* What `origin` is; `*local` is its variable (the arena, or the parameter), when it is still declared. */
 static OriginKind origin_kind(Body *b, size_t origin, const Local **local) {
     *local = NULL;
-    if (origin == ORIGIN_CALLER) return ORIGIN_IS_CALLER;
+    if (origin == ORIGIN_CALLER || is_via(origin)) return ORIGIN_IS_CALLER;
     for (size_t i = 0; i < b->locals.count; i++) {
         if (b->locals.items[i].name.offset == origin) *local = &b->locals.items[i];
     }
@@ -344,6 +348,29 @@ static void add_owned(Body *b, Local *to, const Expr *e) {
    pointers holds none; neither does what a function returns (stage 4). */
 static void add_origins(Body *b, Local *to, const Expr *e);
 
+/* The summary of `decl`, made (empty, not complete) when `create`; NULL if there is none. */
+static ReturnSummary *summary_of(Sema *s, const FnDecl *decl, bool create) {
+    size_t *index = ptrmap_get(&s->summary_index, decl);
+    if (index) return &s->summaries.items[*index];
+    if (!create) return NULL;
+    ReturnSummary empty = { 0, 0, false, false };
+    SOSU_VEC_PUSH(&s->summaries, empty);
+    ptrmap_put(&s->summary_index, decl, s->summaries.count - 1);
+    return &s->summaries.items[s->summaries.count - 1];
+}
+
+/* The declaration called by `e` when its body is Sosu: a function (not C) or a method. */
+static const FnDecl *called_decl(const Expr *e) {
+    const Expr *callee = e->as.call.callee;
+    if (!callee->target) return NULL;
+    switch (callee->resolution) {
+    case RESOLVED_FN: return ((const FnInfo *)callee->target)->is_extern ? NULL : ((const FnInfo *)callee->target)->decl;
+    case RESOLVED_METHOD:
+    case RESOLVED_SELF_METHOD: return ((const MethodInfo *)callee->target)->decl;
+    default: return NULL;
+    }
+}
+
 /* Gives `to` the origins of what is reached through the pointer or view `e`: those of `e`, a
    parameter becoming the caller (what is read in the memory of the caller is the caller's). */
 static void add_through(Body *b, Local *to, const Expr *e) {
@@ -351,7 +378,12 @@ static void add_through(Body *b, Local *to, const Expr *e) {
     add_origins(b, &held, e);
     for (int i = 0; i < held.origin_count; i++) {
         const Local *local;
-        add_origin(to, origin_kind(b, held.origins[i], &local) == ORIGIN_PARAM_VALUE ? ORIGIN_CALLER : held.origins[i]);
+        if (origin_kind(b, held.origins[i], &local) != ORIGIN_PARAM_VALUE) {
+            add_origin(to, held.origins[i]);
+            continue;
+        }
+        size_t index = (size_t)(local - b->locals.items); /* the parameters come first */
+        add_origin(to, index < 64 ? ORIGIN_VIA(index) : ORIGIN_CALLER);
     }
 }
 
@@ -396,22 +428,35 @@ static void add_origins(Body *b, Local *to, const Expr *e) {
         const Expr *callee = e->as.call.callee;
         if (callee->kind == EXPR_FIELD && callee->resolution == RESOLVED_BUILTIN && callee->target &&
             strncmp((const char *)callee->target, "arena.", 6) == 0) {
-            const Local *arena = local_arena(b, callee->as.field.object);
-            if (!arena) arena = param_arena(b, callee->as.field.object);
+            const Expr *object = callee->as.field.object;
+            const Local *arena = local_arena(b, object);
+            if (!arena) arena = param_arena(b, object);
             if (arena) add_origin(to, arena->name.offset);
+            else add_origins(b, to, object); /* an `Arena*` given another way: where it points */
             return;
         }
         if (callee->resolution == RESOLVED_FN && callee->target && ((const FnInfo *)callee->target)->is_extern) return;
-        /* what a function returns may come from any of its arguments (stage 4), the receiver of
-           a method included; `some`, `ok` and `err` hold theirs */
-        if (callee->resolution == RESOLVED_METHOD && callee->kind == EXPR_FIELD) {
-            const Expr *object = callee->as.field.object;
-            if (object->type && object->type->tag == T_POINTER) add_through(b, to, object);
-            else add_origins(b, to, object);
-        } else if (callee->resolution == RESOLVED_SELF_METHOD) {
-            add_origin(to, ORIGIN_CALLER);
+        /* what a function returns comes from the arguments its summary names; without one (a
+           value of function type, a body not checked yet), from any of them, the receiver of a
+           method included; `some`, `ok` and `err` hold theirs */
+        const FnDecl *decl = called_decl(e);
+        const ReturnSummary *summary = decl ? summary_of(b->s, decl, false) : NULL;
+        bool complete = summary && summary->complete;
+        if (!complete || summary->receiver) {
+            if (callee->resolution == RESOLVED_METHOD && callee->kind == EXPR_FIELD) {
+                const Expr *object = callee->as.field.object;
+                if (object->type && object->type->tag == T_POINTER) add_through(b, to, object);
+                else add_origins(b, to, object);
+            } else if (callee->resolution == RESOLVED_SELF_METHOD) {
+                add_origin(to, ORIGIN_CALLER);
+            }
         }
-        for (size_t i = 0; i < e->as.call.arg_count; i++) add_origins(b, to, e->as.call.args[i]);
+        for (size_t i = 0; i < e->as.call.arg_count; i++) {
+            const Expr *arg = e->as.call.args[i];
+            uint64_t bit = i < 64 ? (uint64_t)1 << i : 0;
+            if (!complete || (summary->values & bit)) add_origins(b, to, arg);
+            if (complete && (summary->through & bit)) add_through(b, to, arg);
+        }
         return;
     }
     case EXPR_STRUCT_LIT:
@@ -439,6 +484,33 @@ static void free_origin(Body *b, const Local *arena, size_t end, size_t offset) 
             local->dangling = true;
             local->freed_arena = arena->name;
             local->freed_offset = offset;
+        }
+    }
+}
+
+/* In the pass that makes the summaries: what `value`, returned, holds of the parameters. More
+   origins than a variable keeps make it take everything. */
+static void record_return(Body *b, const Expr *value) {
+    if (!b->s->summarizing || !b->fn_decl || b->lambda) return;
+    ReturnSummary *summary = summary_of(b->s, b->fn_decl, true);
+    Local held = {0};
+    add_origins(b, &held, value);
+    if (held.origin_count >= 8) {
+        summary->values = summary->through = ~(uint64_t)0;
+        summary->receiver = true;
+        return;
+    }
+    for (int i = 0; i < held.origin_count; i++) {
+        size_t origin = held.origins[i];
+        if (origin == ORIGIN_CALLER) {
+            summary->receiver = true;
+        } else if (is_via(origin)) {
+            summary->through |= (uint64_t)1 << (SIZE_MAX - 1 - origin);
+        } else {
+            const Local *local;
+            OriginKind kind = origin_kind(b, origin, &local);
+            size_t index = local ? (size_t)(local - b->locals.items) : 64;
+            if ((kind == ORIGIN_PARAM_VALUE || kind == ORIGIN_PARAM_ARENA) && index < 64) summary->values |= (uint64_t)1 << index;
         }
     }
 }
@@ -584,6 +656,18 @@ static const FnDecl *called(const Expr *e, const Expr **receiver, bool *self_rec
     }
 }
 
+/* True if a pointer can be stored into what a value of `type` reaches: not a `str`, nor a view or a
+   pointer of values without pointers (`ui8[]`, `i32*`). */
+static bool may_receive_pointer(const Type *type) {
+    switch (type->tag) {
+    case T_STR: return false;
+    case T_POINTER:
+    case T_SLICE: return !sema_is_send(type->as.inner);
+    case T_OPTION: return may_receive_pointer(type->as.inner);
+    default: return !sema_is_send(type);
+    }
+}
+
 /* Gives `to` the memory that the callee may store into: the receiver (an arena for `a.new`). */
 static void add_receiver(Body *b, Local *to, const Expr *receiver, bool self_receiver) {
     if (self_receiver) add_origin(to, ORIGIN_CALLER);
@@ -616,7 +700,8 @@ void sema_check_call_keeps(Body *b, const Expr *e) {
         Local others = {0}; /* the memory it may be stored into */
         add_receiver(b, &others, receiver, self_receiver);
         for (size_t j = first; j < e->as.call.arg_count; j++) {
-            if (j != first + i) add_origins(b, &others, e->as.call.args[j]);
+            const Expr *other = e->as.call.args[j];
+            if (j != first + i && other->type && may_receive_pointer(other->type)) add_origins(b, &others, other);
         }
         for (int k = 0; k < others.origin_count; k++) {
             const Local *into;
@@ -2049,6 +2134,7 @@ static void check_return(Body *b, Stmt *stmt) {
         sema_check_escape(b, value, "returned");
         check_dangling(b, value);
         check_returned_arena(b, value);
+        record_return(b, value);
     } else if (b->ret->tag != T_VOID && !sema_is_error(b->ret)) {
         TypeNames n = {0};
         Diagnostic *d = sema_error_at(b, "E0346", stmt->offset, stmt->length, "`%.*s` must return a `%s`",
@@ -2139,6 +2225,8 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
     bool typed = type->tag == T_FN;
     init_body(&b, s, unit, self_info, fn->name, typed ? type->as.fn.ret : s->types.error, typed ? type->as.fn.effects : 0);
     b.in_init = self_info && sema_name_is(fn->name, "init");
+    b.fn_decl = fn;
+    if (s->summarizing) summary_of(s, fn, true);
     for (size_t i = 0; i < fn->param_count; i++) {
         Local param = {0};
         param.name = fn->params[i].name;
@@ -2160,6 +2248,7 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
                                  "`%.*s` does not return a value on every path", NAME_ARGS(fn->name));
         diag_help(d, "end each path with `return ...;`");
     }
+    if (s->summarizing) summary_of(s, fn, true)->complete = true;
     free(b.locals.items);
 }
 
@@ -2251,6 +2340,31 @@ void sema_check_bodies(Sema *s) {
         if (c->type->tag != T_ERROR) check_constant_expr(&b, c->decl->as.const_.value);
         free(b.locals.items);
     }
+    /* first, silently, what each function returns of its parameters (stage 4 of the regions) */
+    bool quiet = s->quiet;
+    s->quiet = true;
+    s->summarizing = true;
+    for (size_t i = 0; i < s->fns.count; i++) {
+        FnInfo *fn = s->fns.items[i];
+        s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;
+        if (!fn->is_extern) check_function(s, fn->unit, fn->decl, NULL, fn->type);
+        s->env = NULL;
+    }
+    for (size_t i = 0; i < s->type_infos.count; i++) {
+        TypeInfo *info = s->type_infos.items[i];
+        s->env = info->param_count ? sema_info_env(s, info, info->params) : NULL;
+        const TypeEnv *env = s->env;
+        for (size_t j = 0; j < info->method_count; j++) {
+            FnInfo *generic = info->methods[j].generic;
+            if (generic) s->env = sema_method_env(s, env, generic, generic->params, NULL);
+            check_function(s, info->unit, info->methods[j].decl, info, info->methods[j].type);
+            s->env = env;
+        }
+        s->env = NULL;
+    }
+    s->summarizing = false;
+    s->quiet = quiet;
+
     for (size_t i = 0; i < s->fns.count; i++) {
         FnInfo *fn = s->fns.items[i];
         s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;

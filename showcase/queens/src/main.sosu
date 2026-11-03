@@ -1,0 +1,417 @@
+// Queens: put one queen in each row, each column and each coloured region, with no two queens
+// touching. A click puts a cross (a note: no queen here), a second click a queen, a third one
+// clears the square; a right click puts or removes a cross. N starts again, C clears the board,
+// S shows the solution, Escape quits.
+// On Windows: run Sosu/packages/platform/fetch-sdl3.ps1 once, then `sosuc run Queens`.
+// `--snapshot out.png` writes a game in progress in a picture, without opening a window.
+import std.io;
+import std.os;
+import std.text;
+import std.time;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import image.png;
+import queens.board;
+import queens.checks;
+
+f32 BOARD_X = 40.0;
+f32 BOARD_Y = 184.0;
+f32 BOARD = 560.0;
+
+// Font Awesome Free (solid): the codepoints of the icons.
+ui32 ICON_CROWN = 0xF521;
+ui32 ICON_CROSS = 0xF00D;
+ui32 ICON_CLOCK = 0xF017;
+ui32 ICON_NEW = 0xF021;
+ui32 ICON_CLEAR = 0xF12D;
+ui32 ICON_SOLUTION = 0xF0EB;
+ui32 ICON_TROPHY = 0xF091;
+
+canvas.Color pastel(i32 region) {
+    i32[30] pal = [
+        255, 179, 143,
+        255, 224, 130,
+        170, 214, 255,
+        186, 230, 150,
+        215, 180, 240,
+        150, 225, 215,
+        255, 170, 200,
+        205, 205, 205,
+        240, 200, 150,
+        200, 220, 130,
+    ];
+    i32 k = (region % 10) * 3;
+    return canvas.Color{ r: pal[k as usize] as ui8, g: pal[(k + 1) as usize] as ui8, b: pal[(k + 2) as usize] as ui8 };
+}
+
+canvas.Rect size_button(i32 i) {
+    return canvas.Rect{ x: 112.0 + i as f32 * 54.0, y: 84.0, w: 46.0, h: 38.0 };
+}
+
+canvas.Rect action_button(i32 i) {
+    return canvas.Rect{ x: 40.0 + i as f32 * 190.0, y: 130.0, w: 180.0, h: 38.0 };
+}
+
+bool inside(canvas.Rect r, f32 x, f32 y) {
+    return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+}
+
+class App : app.Handler {
+    board.Game* game;
+    mut truetype.Font*? face;
+    mut truetype.Font*? bold;
+    mut truetype.Font*? icons;
+    mut i32 size;
+    mut i64 seed;
+    mut bool running;  // the stopwatch is going
+    mut bool finished;  // won, or the solution was shown
+    mut bool solved;  // won by the player
+    mut i64 started_at;
+    mut i64 frozen;  // the time shown when the stopwatch is not going
+
+    void init(keeps board.Game* game, i32 size, i64 seed) {
+        self.game = game;
+        face = none;
+        bold = none;
+        icons = none;
+        self.size = size;
+        self.seed = seed;
+        running = false;
+        finished = false;
+        solved = false;
+        started_at = 0;
+        frozen = 0;
+    }
+
+    i64 elapsed(i64 now) {
+        return running ? now - started_at : frozen;
+    }
+
+    void stop(i64 now) {
+        if (running) {
+            frozen = now - started_at;
+            running = false;
+        }
+    }
+
+    void new_game() uses io {
+        seed += 1;
+        game.restart(size, seed as ui64);
+        running = false;
+        finished = false;
+        solved = false;
+        frozen = 0;
+    }
+
+    // Any move of the player starts the stopwatch.
+    void touched(i64 now) {
+        if (!running && !finished) {
+            running = true;
+            started_at = now - frozen;
+        }
+    }
+
+    void check_win(i64 now) {
+        if (game.won()) {
+            stop(now);
+            finished = true;
+            solved = true;
+        }
+    }
+
+    override bool on_event(app.Event e) uses io {
+        i64 now = app.now_ms() as i64;
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Key(code, down, mods) => {
+                if (!down) {
+                    return true;
+                }
+                if (code == 27) {
+                    return false;
+                }
+                if (code == 110) {  // n
+                    new_game();
+                } else if (code == 99) {  // c
+                    game.clear();
+                } else if (code == 115) {  // s
+                    show_solution(now);
+                }
+            },
+            Click(x, y, button) => {
+                click(x, y, button == app.Button.Right, now);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    void show_solution(i64 now) {
+        game.show_solution();
+        stop(now);
+        finished = true;
+        solved = false;
+    }
+
+    void click(f32 x, f32 y, bool right, i64 now) uses io {
+        for (i32 i in 0..board.MAX - board.MIN + 1) {
+            if (inside(size_button(i), x, y)) {
+                size = board.MIN + i;
+                new_game();
+                return;
+            }
+        }
+        if (inside(action_button(0), x, y)) {
+            new_game();
+        } else if (inside(action_button(1), x, y)) {
+            game.clear();
+            if (finished) {
+                finished = false;
+                solved = false;
+            }
+        } else if (inside(action_button(2), x, y)) {
+            show_solution(now);
+        } else if (!finished && inside(canvas.Rect{ x: BOARD_X, y: BOARD_Y, w: BOARD, h: BOARD }, x, y)) {
+            f32 cell = BOARD / game.n as f32;
+            i32 cx = ((x - BOARD_X) / cell) as i32;
+            i32 cy = ((y - BOARD_Y) / cell) as i32;
+            if (right) {
+                game.set(cx, cy, game.at(cx, cy) == board.CROSS ? board.EMPTY : board.CROSS);
+            } else {
+                game.cycle(cx, cy);
+            }
+            touched(now);
+            check_win(now);
+        }
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        paint(surface, app.now_ms() as i64);
+    }
+
+    void say(canvas.Canvas* surface, truetype.Font*? font, f32 size, f32 x, f32 y, str words, canvas.Color color) {
+        match (font) {
+            some(f) => {
+                surface.text_with(f, size, x, y, words, color);
+            },
+            none => {
+                surface.text(x, y, words, color, 1);
+            },
+        }
+    }
+
+    f32 width_of(truetype.Font*? font, f32 size, str words) {
+        match (font) {
+            some(f) => {
+                return f.measure(words, size);
+            },
+            none => {
+                return words.len as f32 * 8.0;
+            },
+        }
+    }
+
+    str glyph(Arena* scratch, ui32 code) {
+        text.TextBuilder* b = text.builder(scratch);
+        b.push_char(text.char_of(code));
+        return b.text();
+    }
+
+    // An icon centred on (cx, cy).
+    void icon(canvas.Canvas* surface, Arena* scratch, ui32 code, f32 cx, f32 cy, f32 size, canvas.Color color) {
+        str g = glyph(scratch, code);
+        f32 w = width_of(icons, size, g);
+        say(surface, icons, size, cx - w / 2.0, cy - size * 0.62, g, color);
+    }
+
+    void button(canvas.Canvas* surface, Arena* scratch, canvas.Rect r, ui32 code, str label, bool active) {
+        canvas.Color back = active ? canvas.Color{ r: 52, g: 58, b: 84 } : canvas.Color{ r: 255, g: 255, b: 255 };
+        canvas.Color ink = active ? canvas.Color{ r: 255, g: 255, b: 255 } : canvas.Color{ r: 52, g: 58, b: 84 };
+        surface.fill_rounded(r, 8.0, back);
+        surface.stroke_rounded(r, 8.0, canvas.Color{ r: 200, g: 204, b: 216 }, 1.0);
+        if (code == 0) {
+            f32 w = width_of(bold, 17.0, label);
+            say(surface, bold, 17.0, r.x + (r.w - w) / 2.0, r.y + 9.0, label, ink);
+            return;
+        }
+        f32 w = width_of(bold, 16.0, label);
+        f32 start = r.x + (r.w - w - 28.0) / 2.0;
+        icon(surface, scratch, code, start + 9.0, r.y + r.h / 2.0, 16.0, ink);
+        say(surface, bold, 16.0, start + 28.0, r.y + 9.0, label, ink);
+    }
+
+    str clock_text(Arena* scratch, i64 ms) {
+        i64 total = ms / 1000;
+        text.TextBuilder* b = text.builder(scratch);
+        i64 minutes = total / 60;
+        if (minutes < 10) {
+            b.push("0");
+        }
+        b.push_i64(minutes);
+        b.push(":");
+        if (total % 60 < 10) {
+            b.push("0");
+        }
+        b.push_i64(total % 60);
+        return b.text();
+    }
+
+    void wall(canvas.Canvas* surface, f32 x, f32 y, f32 w, f32 h) {
+        surface.fill(canvas.Rect{ x: x, y: y, w: w, h: h }, canvas.Color{ r: 30, g: 34, b: 52 });
+    }
+
+    void paint(canvas.Canvas* surface, i64 now) {
+        mut Arena scratch = Arena.new(8 * KB);
+        defer scratch.free();
+        surface.clear(canvas.Color{ r: 244, g: 245, b: 250 });
+        canvas.Color ink = canvas.Color{ r: 30, g: 34, b: 52 };
+        canvas.Color grey = canvas.Color{ r: 120, g: 126, b: 150 };
+        say(surface, bold, 34.0, 40.0, 16.0, "Queens", ink);
+        str clock = clock_text(&scratch, elapsed(now));
+        f32 cw = width_of(bold, 28.0, clock);
+        say(surface, bold, 28.0, 600.0 - cw, 22.0, clock, ink);
+        icon(surface, &scratch, ICON_CLOCK, 600.0 - cw - 22.0, 40.0, 20.0, grey);
+
+        say(surface, face, 16.0, 40.0, 94.0, "Size", grey);
+        for (i32 i in 0..board.MAX - board.MIN + 1) {
+            text.TextBuilder* b = text.builder(&scratch);
+            b.push_i64((board.MIN + i) as i64);
+            button(surface, &scratch, size_button(i), 0, b.text(), board.MIN + i == game.n);
+        }
+        button(surface, &scratch, action_button(0), ICON_NEW, "New game", false);
+        button(surface, &scratch, action_button(1), ICON_CLEAR, "Clear", false);
+        button(surface, &scratch, action_button(2), ICON_SOLUTION, "Solution", false);
+
+        paint_board(surface, &scratch);
+
+        f32 sy = BOARD_Y + BOARD + 14.0;
+        if (solved) {
+            icon(surface, &scratch, ICON_TROPHY, 52.0, sy + 12.0, 20.0, canvas.Color{ r: 214, g: 160, b: 20 });
+            say(surface, bold, 18.0, 74.0, sy + 2.0, "Solved!", ink);
+            say(surface, face, 16.0, 160.0, sy + 3.0, clock, grey);
+        } else if (finished) {
+            icon(surface, &scratch, ICON_SOLUTION, 52.0, sy + 12.0, 18.0, grey);
+            say(surface, face, 16.0, 74.0, sy + 3.0, "The solution", grey);
+        } else {
+            icon(surface, &scratch, ICON_CROWN, 52.0, sy + 12.0, 18.0, grey);
+            text.TextBuilder* b = text.builder(&scratch);
+            b.push_i64(game.queens() as i64);
+            b.push(" / ");
+            b.push_i64(game.n as i64);
+            say(surface, bold, 16.0, 74.0, sy + 3.0, b.text(), ink);
+            say(surface, face, 14.0, 150.0, sy + 5.0, "A click: cross, queen, empty. Right click: cross.", grey);
+        }
+    }
+
+    void paint_board(canvas.Canvas* surface, Arena* scratch) {
+        i32 n = game.n;
+        f32 cell = BOARD / n as f32;
+        for (i32 y in 0..n) {
+            for (i32 x in 0..n) {
+                f32 px = BOARD_X + x as f32 * cell;
+                f32 py = BOARD_Y + y as f32 * cell;
+                surface.fill(canvas.Rect{ x: px, y: py, w: cell, h: cell }, pastel(game.region_of(x, y)));
+                if (game.conflict(x, y)) {
+                    surface.fill(canvas.Rect{ x: px, y: py, w: cell, h: cell }, canvas.Color{ r: 220, g: 40, b: 40, a: 110 });
+                }
+            }
+        }
+        for (i32 y in 0..n) {
+            for (i32 x in 0..n) {
+                f32 px = BOARD_X + x as f32 * cell;
+                f32 py = BOARD_Y + y as f32 * cell;
+                i32 r = game.region_of(x, y);
+                bool right = x == n - 1 || game.region_of(x + 1, y) != r;
+                bool down = y == n - 1 || game.region_of(x, y + 1) != r;
+                bool left = x == 0 || game.region_of(x - 1, y) != r;
+                bool up = y == 0 || game.region_of(x, y - 1) != r;
+                if (right) {
+                    wall(surface, px + cell - 2.0, py - 1.0, 4.0, cell + 2.0);
+                } else {
+                    wall(surface, px + cell - 0.5, py, 1.0, cell);
+                }
+                if (down) {
+                    wall(surface, px - 1.0, py + cell - 2.0, cell + 2.0, 4.0);
+                } else {
+                    wall(surface, px, py + cell - 0.5, cell, 1.0);
+                }
+                if (left && x == 0) {
+                    wall(surface, px - 2.0, py - 1.0, 4.0, cell + 2.0);
+                }
+                if (up && y == 0) {
+                    wall(surface, px - 1.0, py - 2.0, cell + 2.0, 4.0);
+                }
+                i32 what = game.at(x, y);
+                if (what == board.QUEEN) {
+                    canvas.Color c = game.conflict(x, y) ? canvas.Color{ r: 170, g: 20, b: 20 } : canvas.Color{ r: 30, g: 34, b: 52 };
+                    icon(surface, scratch, ICON_CROWN, px + cell / 2.0, py + cell / 2.0, cell * 0.5, c);
+                } else if (what == board.CROSS) {
+                    icon(surface, scratch, ICON_CROSS, px + cell / 2.0, py + cell / 2.0, cell * 0.3, canvas.Color{ r: 30, g: 34, b: 52, a: 150 });
+                }
+            }
+        }
+    }
+}
+
+truetype.Font*? load(Arena* arena, str path) uses io {
+    match (app.read_asset(arena, path)) {
+        some(bytes) => {
+            match (truetype.parse(arena, bytes)) {
+                ok(font) => {
+                    return some(font);
+                },
+                err(e) => {
+                    io.print("{} is not readable: the built-in font is used", path);
+                },
+            }
+        },
+        none => {
+            io.print("{} not found: the built-in font is used", path);
+        },
+    }
+    return none;
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    i64 seed = time.unix_seconds();
+    board.Game* game = arena.new(board.Game, 8, seed as ui64);
+    App* handler = arena.new(App, game, 8, seed);
+    handler.face = load(&arena, "assets/NotoSans-Regular.ttf");
+    handler.bold = load(&arena, "assets/NotoSans-Bold.ttf");
+    handler.icons = load(&arena, "assets/fa-solid-900.ttf");
+    str[] args = os.args(&arena);
+    if (args.len >= 2 && args[0] == "--snapshot") {
+        return snapshot(&arena, handler, game, args[1]);
+    }
+    return app.run(app.Config{ title: "Queens", width: 640, height: 800 }, handler as app.Handler*);
+}
+
+// A game in progress in a picture: a few queens, crosses and one conflict.
+i32 snapshot(Arena* arena, App* handler, board.Game* game, str file) uses io {
+    game.restart(8, 42);
+    for (i32 y in 0..4) {
+        game.set(game.answer[y as usize], y, board.QUEEN);
+    }
+    game.set((game.answer[4] + 3) % 8, 4, board.QUEEN);
+    game.set(game.answer[5], 6, board.CROSS);
+    game.set(game.answer[7], 1, board.CROSS);
+    game.set(0, 7, board.CROSS);
+    handler.frozen = 83000;
+    mut canvas.Canvas surface = canvas.create(arena, 640, 800);
+    handler.paint(&surface, 0);
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            io.print("written to {}", file);
+            return 0;
+        },
+        err(e) => {
+            io.print("cannot write {}", file);
+            return 1;
+        },
+    }
+}

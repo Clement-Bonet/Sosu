@@ -62,6 +62,7 @@ typedef struct {
     bool assigning;      /* the target of `=`: a moved variable may receive a new value */
     VEC(Local) locals;
     LambdaScope *lambda; /* the innermost lambda being checked, or NULL */
+    const FnDecl *fn_decl; /* the function or method whose body this is, or NULL */
 } Body;
 
 /* Type names for one message; freed by release_names. */

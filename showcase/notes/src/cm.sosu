@@ -1,0 +1,763 @@
+// notes.cm: what the Markdown parser shares: the tree of nodes (kept in a list, linked by indexes),
+// the scanners of links, and the characters.
+import std.text;
+import std.vec;
+
+pub enum Kind {
+    Document,
+    BlockQuote,
+    List,
+    Item,
+    Footnote,  // the definition of a footnote: `[^id]: text`
+    Paragraph,
+    Heading,
+    CodeBlock,
+    HtmlBlock,
+    ThematicBreak,
+    Table,
+    Row,
+    Cell,
+    Frontmatter,
+    Text,
+    SoftBreak,
+    HardBreak,
+    Code,
+    Emph,
+    Strong,
+    Strike,
+    Highlight,
+    Link,
+    Image,
+    HtmlInline,
+    Wiki,  // [[note]], with `dest` the note and `info` the heading
+    Embed,  // ![[note]]
+    Tag,  // #tag
+    Math,  // $x$
+    Comment,  // %%text%%
+    FootRef,  // [^id]
+}
+
+pub struct Node {
+    pub mut Kind kind = Paragraph;
+    pub mut i32 parent = -1;
+    pub mut i32 first = -1;
+    pub mut i32 last = -1;
+    pub mut i32 next = -1;
+    pub mut i32 prev = -1;
+    pub mut bool open = true;
+    pub mut bool blank_end = false;  // the last line of the block was blank
+    pub mut bool checked_end = false;
+    pub mut i32 line = 0;
+    pub mut str lit = "";  // the text of a leaf, or what an inline node says
+    pub mut i32 level = 0;  // heading level, start of an ordered list, alignment of a cell
+    pub mut bool ordered = false;
+    pub mut bool tight = true;
+    pub mut i32 marker = 0;  // the bullet, or the `.` or `)` of an ordered list
+    pub mut i32 pad = 0;
+    pub mut i32 marker_off = 0;
+    pub mut str info = "";
+    pub mut str dest = "";
+    pub mut str title = "";
+    pub mut i32 fence_char = 0;
+    pub mut i32 fence_len = 0;
+    pub mut i32 fence_off = 0;
+    pub mut i32 html_type = 0;
+    pub mut i32 task = 0;  // 0 no box, 1 empty box, 2 checked box
+    pub mut bool fenced = false;
+    pub mut bool head = false;  // a row of the head of a table
+}
+
+pub struct Ref {
+    pub str label = "";
+    pub str dest = "";
+    pub str title = "";
+}
+
+pub struct Scan {
+    pub usize end = 0;
+    pub str text = "";
+    pub bool ok = false;
+}
+
+pub struct Ent {
+    pub usize len = 0;
+    pub i32 code = 0;
+}
+
+pub i32 make(vec.Vec<Node>* nodes, Kind kind) {
+    nodes.push(Node{ kind: kind });
+    return (nodes.len() - 1) as i32;
+}
+
+pub void unlink(vec.Vec<Node>* nodes, i32 id) {
+    Node n = *nodes.at(id as usize);
+    if (n.prev >= 0) {
+        nodes.at(n.prev as usize).next = n.next;
+    } else if (n.parent >= 0) {
+        nodes.at(n.parent as usize).first = n.next;
+    }
+    if (n.next >= 0) {
+        nodes.at(n.next as usize).prev = n.prev;
+    } else if (n.parent >= 0) {
+        nodes.at(n.parent as usize).last = n.prev;
+    }
+    Node* m = nodes.at(id as usize);
+    m.parent = -1;
+    m.prev = -1;
+    m.next = -1;
+}
+
+pub void append(vec.Vec<Node>* nodes, i32 parent, i32 child) {
+    unlink(nodes, child);
+    Node* p = nodes.at(parent as usize);
+    i32 last = p.last;
+    p.last = child;
+    if (last >= 0) {
+        nodes.at(last as usize).next = child;
+    } else {
+        nodes.at(parent as usize).first = child;
+    }
+    Node* c = nodes.at(child as usize);
+    c.parent = parent;
+    c.prev = last;
+}
+
+pub void insert_after(vec.Vec<Node>* nodes, i32 at, i32 child) {
+    unlink(nodes, child);
+    Node a = *nodes.at(at as usize);
+    nodes.at(child as usize).parent = a.parent;
+    nodes.at(child as usize).prev = at;
+    nodes.at(child as usize).next = a.next;
+    nodes.at(at as usize).next = child;
+    if (a.next >= 0) {
+        nodes.at(a.next as usize).prev = child;
+    } else if (a.parent >= 0) {
+        nodes.at(a.parent as usize).last = child;
+    }
+}
+
+pub void insert_before(vec.Vec<Node>* nodes, i32 at, i32 child) {
+    unlink(nodes, child);
+    Node a = *nodes.at(at as usize);
+    nodes.at(child as usize).parent = a.parent;
+    nodes.at(child as usize).next = at;
+    nodes.at(child as usize).prev = a.prev;
+    nodes.at(at as usize).prev = child;
+    if (a.prev >= 0) {
+        nodes.at(a.prev as usize).next = child;
+    } else if (a.parent >= 0) {
+        nodes.at(a.parent as usize).first = child;
+    }
+}
+
+// ---- characters ----
+
+// The byte at `i`, or -1 after the end.
+pub i32 ch(str s, usize i) {
+    return i < s.len ? s.bytes[i] as i32 : -1;
+}
+
+pub bool is_space_tab(i32 c) {
+    return c == 32 || c == 9;
+}
+
+pub bool is_ws(i32 c) {
+    return c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11;
+}
+
+pub bool is_punct_ascii(i32 c) {
+    return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
+}
+
+pub bool is_digit(i32 c) {
+    return c >= 48 && c <= 57;
+}
+
+pub bool is_alpha(i32 c) {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+pub bool is_alnum(i32 c) {
+    return is_digit(c) || is_alpha(c);
+}
+
+pub i32 hexval(i32 c) {
+    if (c >= 48 && c <= 57) {
+        return c - 48;
+    }
+    if (c >= 97 && c <= 102) {
+        return c - 87;
+    }
+    if (c >= 65 && c <= 70) {
+        return c - 55;
+    }
+    return -1;
+}
+
+pub i32 lower(i32 c) {
+    return c >= 65 && c <= 90 ? c + 32 : c;
+}
+
+// Is the text empty, or only white space?
+pub bool is_blank(str s) {
+    for (usize i in 0..s.len) {
+        if (!is_ws(s.bytes[i] as i32)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The code point that begins at `i`, with its length in bytes.
+pub Ent char_at(str s, usize i) {
+    i32 c = ch(s, i);
+    if (c < 0x80) {
+        return Ent{ len: 1, code: c };
+    }
+    if (c >= 0xF0) {
+        return Ent{ len: 4, code: ((c & 7) << 18) | ((ch(s, i + 1) & 63) << 12) | ((ch(s, i + 2) & 63) << 6) | (ch(s, i + 3) & 63) };
+    }
+    if (c >= 0xE0) {
+        return Ent{ len: 3, code: ((c & 15) << 12) | ((ch(s, i + 1) & 63) << 6) | (ch(s, i + 2) & 63) };
+    }
+    return Ent{ len: 2, code: ((c & 31) << 6) | (ch(s, i + 1) & 63) };
+}
+
+// The code point that ends just before `i`, or -1 at the start.
+pub i32 char_before(str s, usize i) {
+    if (i == 0) {
+        return -1;
+    }
+    mut usize j = i - 1;
+    while (j > 0 && (s.bytes[j] & 0xC0) == 0x80) {
+        j -= 1;
+    }
+    return char_at(s, j).code;
+}
+
+// A white space of Unicode (the flanking rules of emphasis look at it).
+pub bool is_uni_space(i32 c) {
+    return c < 0 || is_ws(c) || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+// A punctuation or a symbol of Unicode.
+pub bool is_uni_punct(i32 c) {
+    if (c < 0x80) {
+        return is_punct_ascii(c);
+    }
+    return (c >= 0xA1 && c <= 0xA9) || c == 0xAB || c == 0xAC || (c >= 0xAE && c <= 0xB1) || c == 0xB4 || (c >= 0xB6 && c <= 0xB8) || c == 0xBB || c == 0xBF || c == 0xD7 || c == 0xF7 || (c >= 0x2010 && c <= 0x2027) || (c >= 0x2030 && c <= 0x205E) || (c >= 0x20A0 && c <= 0x20CF) || (c >= 0x2190 && c <= 0x23FF) || (c >= 0x2500 && c <= 0x27FF) || (c >= 0x3001 && c <= 0x3003) || (c >= 0x3008 && c <= 0x3020) || (c >= 0xFF01 && c <= 0xFF0F);
+}
+
+// ---- entities and escapes ----
+
+pub str ENTITIES = "|quot:34|amp:38|apos:39|lt:60|gt:62|nbsp:160|iexcl:161|cent:162|pound:163|curren:164|yen:165|brvbar:166|sect:167|uml:168|copy:169|ordf:170|laquo:171|not:172|shy:173|reg:174|macr:175|deg:176|plusmn:177|sup2:178|sup3:179|acute:180|micro:181|para:182|middot:183|cedil:184|sup1:185|ordm:186|raquo:187|frac14:188|frac12:189|frac34:190|iquest:191|Auml:196|AElig:198|Ccedil:199|Eacute:201|Ntilde:209|Ouml:214|times:215|Uuml:220|szlig:223|agrave:224|aacute:225|auml:228|aelig:230|ccedil:231|egrave:232|eacute:233|ntilde:241|ouml:246|divide:247|uuml:252|Dcaron:270|alpha:945|beta:946|gamma:947|delta:948|lambda:955|mu:956|pi:960|sigma:963|omega:969|Omega:937|ndash:8211|mdash:8212|lsquo:8216|rsquo:8217|ldquo:8220|rdquo:8221|dagger:8224|bull:8226|hellip:8230|euro:8364|trade:8482|HilbertSpace:8459|DifferentialD:8518|larr:8592|rarr:8594|harr:8596|infin:8734|ClockwiseContourIntegral:8754|ne:8800|le:8804|ge:8805|check:10003|hearts:9829|";
+
+i32 named(str name) {
+    mut usize p = 1;
+    while (p < ENTITIES.len) {
+        mut usize q = p;
+        while (ch(ENTITIES, q) != 58) {
+            q += 1;
+        }
+        mut bool same = q - p == name.len;
+        if (same) {
+            for (usize k in 0..name.len) {
+                if (ENTITIES.bytes[p + k] != name.bytes[k]) {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        mut usize e = q + 1;
+        mut i32 v = 0;
+        while (ch(ENTITIES, e) != 124) {
+            v = v * 10 + (ENTITIES.bytes[e] as i32 - 48);
+            e += 1;
+        }
+        if (same) {
+            return v;
+        }
+        p = e + 1;
+    }
+    return 0;
+}
+
+// The entity that begins at `s[pos]` (an `&`): its length and its character; a length of 0 if there is none.
+pub Ent entity_at(str s, usize pos) {
+    mut usize i = pos + 1;
+    if (ch(s, i) == 35) {
+        i += 1;
+        mut bool hex = false;
+        if (ch(s, i) == 120 || ch(s, i) == 88) {
+            hex = true;
+            i += 1;
+        }
+        usize from = i;
+        mut i32 v = 0;
+        while (i < s.len && (hex ? hexval(ch(s, i)) >= 0 : is_digit(ch(s, i))) && i - from < 8) {
+            v = v * (hex ? 16 : 10) + hexval(ch(s, i));
+            i += 1;
+        }
+        usize n = i - from;
+        if (n == 0 || n > (hex ? 6 : 7) || ch(s, i) != 59) {
+            return Ent{ };
+        }
+        if (v == 0 || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) {
+            v = 0xFFFD;
+        }
+        return Ent{ len: i + 1 - pos, code: v };
+    }
+    usize from = i;
+    while (is_alnum(ch(s, i))) {
+        i += 1;
+    }
+    if (i == from || ch(s, i) != 59) {
+        return Ent{ };
+    }
+    i32 v = named(text.slice(s, from, i));
+    if (v == 0) {
+        return Ent{ };
+    }
+    return Ent{ len: i + 1 - pos, code: v };
+}
+
+pub void put_code(text.TextBuilder* b, i32 code) {
+    b.push_char(text.char_of(code as ui32));
+}
+
+// The text with its backslash escapes and its entities resolved.
+pub str unescape(Arena* arena, str s) {
+    mut bool plain = true;
+    for (usize i in 0..s.len) {
+        if (s.bytes[i] == 92 || s.bytes[i] == 38) {
+            plain = false;
+            break;
+        }
+    }
+    if (plain) {
+        return s;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    mut usize run = 0;
+    mut usize i = 0;
+    while (i < s.len) {
+        i32 c = ch(s, i);
+        if (c == 92 && is_punct_ascii(ch(s, i + 1))) {
+            b.push(text.slice(s, run, i));
+            run = i + 1;
+            i += 2;
+        } else if (c == 38) {
+            Ent e = entity_at(s, i);
+            if (e.len > 0) {
+                b.push(text.slice(s, run, i));
+                put_code(b, e.code);
+                i += e.len;
+                run = i;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    b.push(text.slice(s, run, s.len));
+    return b.text();
+}
+
+pub str cat(Arena* arena, str a, str b) {
+    if (a.len == 0) {
+        return b;
+    }
+    text.TextBuilder* t = text.builder(arena);
+    t.push(a);
+    t.push(b);
+    return t.text();
+}
+
+// ---- links ----
+
+// The `[label]` at `s[pos]`: the place after its `]`, or 0.
+pub usize scan_label(str s, usize pos) {
+    if (ch(s, pos) != 91) {
+        return 0;
+    }
+    mut usize i = pos + 1;
+    while (i < s.len) {
+        i32 c = ch(s, i);
+        if (c == 92 && i + 1 < s.len) {
+            i += 2;
+        } else if (c == 91) {
+            return 0;
+        } else if (c == 93) {
+            if (i - pos - 1 > 999) {
+                return 0;
+            }
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    return 0;
+}
+
+// The destination of a link, which begins at `s[pos]`.
+pub Scan scan_dest(Arena* arena, str s, usize pos) {
+    if (ch(s, pos) == 60) {
+        mut usize i = pos + 1;
+        while (i < s.len) {
+            i32 c = ch(s, i);
+            if (c == 92 && is_punct_ascii(ch(s, i + 1))) {
+                i += 2;
+            } else if (c == 10 || c == 60) {
+                return Scan{ };
+            } else if (c == 62) {
+                return Scan{ end: i + 1, text: unescape(arena, text.slice(s, pos + 1, i)), ok: true };
+            } else {
+                i += 1;
+            }
+        }
+        return Scan{ };
+    }
+    mut i32 parens = 0;
+    mut usize i = pos;
+    while (i < s.len) {
+        i32 c = ch(s, i);
+        if (c == 92 && is_punct_ascii(ch(s, i + 1))) {
+            i += 2;
+        } else if (c == 40) {
+            parens += 1;
+            i += 1;
+        } else if (c == 41) {
+            if (parens < 1) {
+                break;
+            }
+            parens -= 1;
+            i += 1;
+        } else if (c <= 32) {
+            break;
+        } else {
+            i += 1;
+        }
+    }
+    if ((i == pos && ch(s, i) != 41) || parens != 0) {
+        return Scan{ };
+    }
+    return Scan{ end: i, text: unescape(arena, text.slice(s, pos, i)), ok: true };
+}
+
+// The title of a link, in quotes or in parentheses.
+pub Scan scan_title(Arena* arena, str s, usize pos) {
+    i32 open = ch(s, pos);
+    i32 close = open == 34 ? 34 : open == 39 ? 39 : open == 40 ? 41 : 0;
+    if (close == 0) {
+        return Scan{ };
+    }
+    mut usize i = pos + 1;
+    while (i < s.len) {
+        i32 c = ch(s, i);
+        if (c == 92 && i + 1 < s.len) {
+            i += 2;
+        } else if (c == close) {
+            return Scan{ end: i + 1, text: unescape(arena, text.slice(s, pos + 1, i)), ok: true };
+        } else if (close == 41 && c == 40) {
+            return Scan{ };
+        } else {
+            i += 1;
+        }
+    }
+    return Scan{ };
+}
+
+// Spaces, at most one line break, and spaces.
+pub usize skip_spnl(str s, usize pos) {
+    mut usize i = pos;
+    while (is_space_tab(ch(s, i))) {
+        i += 1;
+    }
+    if (ch(s, i) == 10) {
+        i += 1;
+        while (is_space_tab(ch(s, i))) {
+            i += 1;
+        }
+    }
+    return i;
+}
+
+// A label as the references compare it: the case and the white space do not count.
+pub str norm_label(Arena* arena, str s) {
+    str low = text.replace(arena, text.replace(arena, text.to_lower(arena, s), "ß", "ss"), "ẞ", "ss");
+    text.TextBuilder* b = text.builder(arena);
+    mut bool gap = false;
+    mut bool any = false;
+    mut usize run = 0;
+    mut usize i = 0;
+    while (i < low.len) {
+        if (is_ws(low.bytes[i] as i32)) {
+            if (!gap) {
+                if (any) {
+                    b.push(text.slice(low, run, i));
+                }
+                gap = true;
+            }
+        } else if (gap) {
+            if (any) {
+                b.push(" ");
+            }
+            gap = false;
+            run = i;
+            any = true;
+        } else if (!any) {
+            any = true;
+            run = i;
+        }
+        i += 1;
+    }
+    if (any && !gap) {
+        b.push(text.slice(low, run, low.len));
+    }
+    return b.text();
+}
+
+pub i32 find_ref(vec.Vec<Ref>* refs, str label) {
+    for (usize i in 0..refs.len()) {
+        if (refs.at(i).label == label) {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+// A definition `[label]: /url "title"` at the start of `s`: how many bytes it takes, or 0. It is
+// kept in `refs` when no definition has that label.
+pub usize parse_ref(Arena* arena, vec.Vec<Ref>* refs, str s) {
+    usize end_label = scan_label(s, 0);
+    if (end_label == 0) {
+        return 0;
+    }
+    str label = text.slice(s, 1, end_label - 1);
+    if (ch(s, end_label) != 58) {
+        return 0;
+    }
+    mut usize pos = skip_spnl(s, end_label + 1);
+    Scan d = scan_dest(arena, s, pos);
+    if (!d.ok) {
+        return 0;
+    }
+    pos = d.end;
+    usize before = pos;
+    pos = skip_spnl(s, pos);
+    mut Scan t = Scan{ };
+    if (pos != before) {
+        t = scan_title(arena, s, pos);
+        if (t.ok) {
+            pos = t.end;
+        } else {
+            pos = before;
+        }
+    }
+    mut usize q = pos;
+    while (ch(s, q) == 32) {
+        q += 1;
+    }
+    mut bool at_end = ch(s, q) == 10 || q >= s.len;
+    if (!at_end) {
+        if (!t.ok) {
+            return 0;
+        }
+        t = Scan{ };
+        pos = before;
+        q = pos;
+        while (ch(s, q) == 32) {
+            q += 1;
+        }
+        at_end = ch(s, q) == 10 || q >= s.len;
+        if (!at_end) {
+            return 0;
+        }
+    }
+    str norm = norm_label(arena, label);
+    if (norm.len == 0) {
+        return 0;
+    }
+    if (find_ref(refs, norm) < 0) {
+        refs.push(Ref{ label: norm, dest: d.text, title: t.text });
+    }
+    mut usize e = q;
+    if (ch(s, e) == 10) {
+        e += 1;
+    }
+    return e;
+}
+
+// ---- HTML ----
+
+// The end of the name of a tag (letters, digits and `-`) that begins at `from`.
+pub usize name_end(str s, usize from) {
+    mut usize i = from;
+    if (!is_alpha(ch(s, i))) {
+        return from;
+    }
+    while (is_alnum(ch(s, i)) || ch(s, i) == 45) {
+        i += 1;
+    }
+    return i;
+}
+
+// Is the text at `pos` the `prefix`, whatever the case?
+pub bool has_prefix_ci(str s, usize pos, str prefix) {
+    if (pos + prefix.len > s.len) {
+        return false;
+    }
+    for (usize k in 0..prefix.len) {
+        if (lower(s.bytes[pos + k] as i32) != lower(prefix.bytes[k] as i32)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Is `name` one of the names of `list`, which looks like `|a|b|`?
+pub bool in_names(str list, str name) {
+    mut usize p = 1;
+    while (p < list.len) {
+        mut usize q = p;
+        while (ch(list, q) != 124) {
+            q += 1;
+        }
+        if (q - p == name.len && has_prefix_ci(name, 0, text.slice(list, p, q))) {
+            return true;
+        }
+        p = q + 1;
+    }
+    return false;
+}
+
+usize skip_ws(str s, usize pos) {
+    mut usize i = pos;
+    while (is_ws(ch(s, i))) {
+        i += 1;
+    }
+    return i;
+}
+
+// An open tag `<a href="x">` or a closing tag `</a>` at `pos`: where it ends, or 0.
+pub usize scan_tag(str s, usize pos) {
+    if (ch(s, pos) != 60) {
+        return 0;
+    }
+    mut usize i = pos + 1;
+    if (ch(s, i) == 47) {
+        usize e = name_end(s, i + 1);
+        if (e == i + 1) {
+            return 0;
+        }
+        i = skip_ws(s, e);
+        return ch(s, i) == 62 ? i + 1 : 0;
+    }
+    usize e = name_end(s, i);
+    if (e == i) {
+        return 0;
+    }
+    i = e;
+    while (true) {
+        usize j = skip_ws(s, i);
+        i32 c = ch(s, j);
+        if (j > i && (is_alpha(c) || c == 95 || c == 58)) {
+            mut usize k = j + 1;
+            while (is_alnum(ch(s, k)) || ch(s, k) == 95 || ch(s, k) == 46 || ch(s, k) == 58 || ch(s, k) == 45) {
+                k += 1;
+            }
+            usize m = skip_ws(s, k);
+            if (ch(s, m) == 61) {
+                mut usize v = skip_ws(s, m + 1);
+                i32 q = ch(s, v);
+                if (q == 34 || q == 39) {
+                    mut usize w = v + 1;
+                    while (w < s.len && ch(s, w) != q) {
+                        w += 1;
+                    }
+                    if (w >= s.len) {
+                        return 0;
+                    }
+                    i = w + 1;
+                } else {
+                    usize from = v;
+                    while (v < s.len && !is_ws(ch(s, v)) && ch(s, v) != 34 && ch(s, v) != 39 && ch(s, v) != 61 && ch(s, v) != 60 && ch(s, v) != 62 && ch(s, v) != 96) {
+                        v += 1;
+                    }
+                    if (v == from) {
+                        return 0;
+                    }
+                    i = v;
+                }
+            } else {
+                i = k;
+            }
+        } else {
+            i = j;
+            if (ch(s, i) == 47) {
+                i += 1;
+            }
+            return ch(s, i) == 62 ? i + 1 : 0;
+        }
+    }
+    return 0;
+}
+
+// Any piece of HTML at `pos`: a tag, a comment, an instruction, a declaration, a CDATA section.
+pub usize scan_html(str s, usize pos) {
+    if (ch(s, pos) != 60) {
+        return 0;
+    }
+    i32 c = ch(s, pos + 1);
+    if (c == 33) {
+        if (ch(s, pos + 2) == 45 && ch(s, pos + 3) == 45) {
+            if (ch(s, pos + 4) == 62) {
+                return pos + 5;
+            }
+            if (ch(s, pos + 4) == 45 && ch(s, pos + 5) == 62) {
+                return pos + 6;
+            }
+            match (text.find_from(s, "-->", pos + 4)) {
+                some(e) => {
+                    return e + 3;
+                },
+                none => {
+                    return 0;
+                },
+            }
+        }
+        if (text.starts_with(text.slice(s, pos, s.len), "<![CDATA[")) {
+            match (text.find_from(s, "]]>", pos + 9)) {
+                some(e) => {
+                    return e + 3;
+                },
+                none => {
+                    return 0;
+                },
+            }
+        }
+        if (is_alpha(ch(s, pos + 2))) {
+            match (text.find_from(s, ">", pos + 2)) {
+                some(e) => {
+                    return e + 1;
+                },
+                none => {
+                    return 0;
+                },
+            }
+        }
+        return 0;
+    }
+    if (c == 63) {
+        match (text.find_from(s, "?>", pos + 2)) {
+            some(e) => {
+                return e + 2;
+            },
+            none => {
+                return 0;
+            },
+        }
+    }
+    return scan_tag(s, pos);
+}

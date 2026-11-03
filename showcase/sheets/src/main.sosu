@@ -1,0 +1,1178 @@
+// Sosu Sheets: a spreadsheet. A toolbar, the formula bar, the grid and a status bar; the title bar
+// holds the buttons of the file and of the history. See README.md for the keys and the functions.
+// On Windows: run Sosu/packages/platform/fetch-sdl3.ps1 once, then `sosuc run Sheets`.
+// `--snapshot out.png` writes the window, with a small sheet, in a picture (`--edit` adds a formula being typed).
+import std.io;
+import std.os;
+import std.text;
+import std.time;
+import platform.app;
+import platform.dialogs;
+import render.canvas;
+import render.truetype;
+import image.png;
+import ui.widgets;
+import sheets.values;
+import sheets.calc;
+import sheets.checks;
+import sheets.editor;
+import sheets.screen;
+
+ui32 OPEN_TAG = 1;
+ui32 SAVE_TAG = 2;
+ui32 CSV_TAG = 3;
+
+ui32 K_RIGHT = 0x4000004F;
+ui32 K_LEFT = 0x40000050;
+ui32 K_DOWN = 0x40000051;
+ui32 K_UP = 0x40000052;
+ui32 K_F2 = 0x4000003B;
+ui32 K_F3 = 0x4000003C;
+ui32 K_HOME = 0x4000004A;
+ui32 K_END = 0x4000004D;
+ui32 K_PAGEUP = 0x4000004B;
+ui32 K_PAGEDOWN = 0x4000004E;
+
+f32 TOOL_Y = 40.0;
+f32 TOOL_H = 32.0;
+f32 FORMULA_Y = 72.0;
+f32 FORMULA_H = 28.0;
+f32 HEAD_Y = 100.0;
+f32 HEAD_H = 22.0;
+f32 GRID_Y = 122.0;
+f32 ROWHEAD_W = 48.0;
+f32 STATUS_H = 24.0;
+f32 ROW = 22.0;
+f32 NAME_W = 92.0;
+i32 TOOLS = 24;
+
+canvas.Color rgb(ui32 c) {
+    return canvas.Color{ r: ((c >> 16) & 0xFF) as ui8, g: ((c >> 8) & 0xFF) as ui8, b: (c & 0xFF) as ui8, a: (c >> 24) as ui8 };
+}
+
+canvas.Color shade(i32 r, i32 g, i32 b) {
+    return canvas.Color{ r: r as ui8, g: g as ui8, b: b as ui8 };
+}
+
+bool inside(f32 x, f32 y, f32 rx, f32 ry, f32 rw, f32 rh) {
+    return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+ui32 text_color(i32 i) {
+    if (i == 1) {
+        return 0xFFC00000;
+    } else if (i == 2) {
+        return 0xFFE36C09;
+    } else if (i == 3) {
+        return 0xFF2E7D32;
+    } else if (i == 4) {
+        return 0xFF1F4E9E;
+    } else if (i == 5) {
+        return 0xFF7030A0;
+    } else if (i == 6) {
+        return 0xFF595959;
+    }
+    return 0;
+}
+
+ui32 fill_color(i32 i) {
+    if (i == 1) {
+        return 0xFFFFF2CC;
+    } else if (i == 2) {
+        return 0xFFC6E0B4;
+    } else if (i == 3) {
+        return 0xFFBDD7EE;
+    } else if (i == 4) {
+        return 0xFFF8CBAD;
+    } else if (i == 5) {
+        return 0xFFE2CFEA;
+    } else if (i == 6) {
+        return 0xFFD9D9D9;
+    }
+    return 0;
+}
+
+str tool_label(i32 id) {
+    if (id == 0) {
+        return "B";
+    } else if (id == 1) {
+        return "I";
+    } else if (id == 2) {
+        return "U";
+    } else if (id == 3) {
+        return "Left";
+    } else if (id == 4) {
+        return "Mid";
+    } else if (id == 5) {
+        return "Right";
+    } else if (id == 6) {
+        return "Gen";
+    } else if (id == 7) {
+        return "1,0";
+    } else if (id == 8) {
+        return "%";
+    } else if (id == 9) {
+        return "EUR";
+    } else if (id == 10) {
+        return "Sci";
+    } else if (id == 11) {
+        return "Date";
+    } else if (id == 12) {
+        return "Abc";
+    } else if (id == 13) {
+        return ".0+";
+    } else if (id == 14) {
+        return ".0-";
+    } else if (id == 15) {
+        return "Text";
+    } else if (id == 16) {
+        return "Fill";
+    } else if (id == 17) {
+        return "A-Z";
+    } else if (id == 18) {
+        return "Z-A";
+    } else if (id == 19) {
+        return "+Row";
+    } else if (id == 20) {
+        return "-Row";
+    } else if (id == 21) {
+        return "+Col";
+    } else if (id == 22) {
+        return "-Col";
+    }
+    return "Find";
+}
+
+f32 tool_w(i32 id) {
+    if (id <= 2) {
+        return 28.0;
+    } else if (id == 5 || id == 11 || id == 12 || id == 15 || id == 16 || id >= 19 && id <= 22) {
+        return 46.0;
+    }
+    return 42.0;
+}
+
+// A little more room before the groups of buttons.
+f32 tool_gap(i32 id) {
+    if (id == 3 || id == 6 || id == 13 || id == 15 || id == 17 || id == 19 || id == 23) {
+        return 12.0;
+    }
+    return 2.0;
+}
+
+f32 tool_x(i32 id) {
+    mut f32 x = 8.0;
+    for (i32 i in 0..id) {
+        x += tool_w(i) + tool_gap(i + 1);
+    }
+    return x;
+}
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    editor.Editor* state;
+    mut truetype.Font*? face;
+    mut truetype.Font*? bold;
+    mut truetype.Font*? italic;
+    mut truetype.Font*? bold_italic;
+    mut f32 win_w;
+    mut f32 win_h;
+    mut f32 mx;
+    mut f32 my;
+    mut i32 drag;  // 1 cells, 2 a column width, 3 columns, 4 rows
+    mut i32 drag_col;
+    mut f32 drag_x;
+    mut bool shift;
+    mut bool follow;
+    mut ui64 last_click;
+    mut i32 last_c;
+    mut i32 last_r;
+    mut i32 fg_i;
+    mut i32 bg_i;
+    mut i32 seen_seq;
+    mut ui64 seen_at;
+    mut ui64 now;
+    mut i64 base_unix;  // the date when the program started, for TODAY and NOW
+    mut ui64 base_ms;
+
+    void init(keeps editor.Editor* state) {
+        ui = widgets.Ui{ };
+        self.state = state;
+        face = none;
+        bold = none;
+        italic = none;
+        bold_italic = none;
+        win_w = 1280.0;
+        win_h = 800.0;
+        mx = 0.0;
+        my = 0.0;
+        drag = 0;
+        drag_col = 0;
+        drag_x = 0.0;
+        shift = false;
+        follow = false;
+        last_click = 0;
+        last_c = -1;
+        last_r = -1;
+        fg_i = 0;
+        bg_i = 0;
+        seen_seq = 0;
+        seen_at = 0;
+        now = 0;
+        base_unix = 1788000000;
+        base_ms = 0;
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    // ----- the geometry of the grid
+
+    f32 view_w() {
+        return win_w - ROWHEAD_W;
+    }
+
+    f32 view_h() {
+        return win_h - GRID_Y - STATUS_H;
+    }
+
+    i32 col_at(f32 x) {
+        mut f32 edge = ROWHEAD_W;
+        mut i32 c = state.left_col;
+        while (c < values.COLS - 1 && edge + state.book.width_of(c) as f32 <= x) {
+            edge += state.book.width_of(c) as f32;
+            c += 1;
+        }
+        return c;
+    }
+
+    i32 row_at(f32 y) {
+        i32 r = state.top_row + ((y - GRID_Y) / ROW) as i32;
+        return r < 0 ? 0 : r >= values.ROWS ? values.ROWS - 1 : r;
+    }
+
+    f32 col_x(i32 col) {
+        return ROWHEAD_W + state.span(state.left_col, col) as f32;
+    }
+
+    // ----- events
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Key(code, down, mods) => {
+                shift = mods.shift;
+                if (down) {
+                    key(code, mods.ctrl || mods.command, mods.shift);
+                }
+            },
+            TextInput(typed) => {
+                if (typed.len > 0 && typed.bytes[0] >= 32) {
+                    if (!state.editing) {
+                        state.start_edit(true);
+                    }
+                    state.insert_text(typed);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+                mx = x;
+                my = y;
+                moved(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                mx = x;
+                my = y;
+                match (button) {
+                    Left => {
+                        ui.mouse_button(true);
+                        press(x, y);
+                    },
+                    _ => { },
+                }
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+                drag = 0;
+            },
+            Wheel(x, y) => {
+                if (y > 0.0) {
+                    state.top_row = state.top_row < 3 ? 0 : state.top_row - 3;
+                } else if (y < 0.0) {
+                    state.top_row = state.top_row + 3 >= values.ROWS ? values.ROWS - 1 : state.top_row + 3;
+                }
+                if (x > 0.0 && state.left_col > 0) {
+                    state.left_col -= 1;
+                } else if (x < 0.0 && state.left_col < values.COLS - 1) {
+                    state.left_col += 1;
+                }
+            },
+            FileDropped(path, x, y) => {
+                state.open_document(path);
+            },
+            Dialog(answer) => {
+                match (answer) {
+                    Chosen(tag, paths, filter) => {
+                        if (paths.len > 0) {
+                            if (tag == OPEN_TAG) {
+                                state.open_document(paths[0]);
+                            } else if (tag == SAVE_TAG) {
+                                mut Arena pick = Arena.new(4 * KB);
+                                defer pick.free();
+                                if (filter == 1) {
+                                    state.save_document(editor.with_extension(&pick, paths[0], ".ods"));
+                                } else {
+                                    state.save_document(paths[0]);
+                                }
+                            } else if (tag == CSV_TAG) {
+                                state.export_csv(paths[0]);
+                            }
+                        }
+                    },
+                    _ => { },
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    void leave_edit() {
+        if (!state.editing) {
+            return;
+        }
+        if (state.mode == editor.MODE_CELL) {
+            state.commit(0, 0);
+        } else {
+            state.cancel_edit();
+        }
+    }
+
+    // Moves by one cell, or to the edge of a block of cells with `jump`.
+    void nav(i32 dc, i32 dr, bool extend, bool jump) {
+        if (!jump) {
+            state.step(dc, dr, extend);
+            return;
+        }
+        mut i32 c = state.cc;
+        mut i32 r = state.cr;
+        bool start_empty = state.book.raw_of(c + dc, r + dr).len == 0;
+        mut bool going = true;
+        while (going) {
+            i32 nc = c + dc;
+            i32 nr = r + dr;
+            if (nc < 0 || nr < 0 || nc >= values.COLS || nr >= values.ROWS) {
+                going = false;
+            } else {
+                bool empty = state.book.raw_of(nc, nr).len == 0;
+                if (start_empty) {
+                    c = nc;
+                    r = nr;
+                    if (!empty) {
+                        going = false;
+                    }
+                } else if (empty) {
+                    going = false;
+                } else {
+                    c = nc;
+                    r = nr;
+                }
+            }
+        }
+        state.move_to(c, r, extend);
+    }
+
+    void key(ui32 code, bool ctrl, bool shift_on) uses io {
+        follow = true;
+        if (state.editing) {
+            if (code == 13) {
+                state.commit(0, shift_on ? -1 : 1);
+            } else if (code == 9) {
+                state.commit(shift_on ? -1 : 1, 0);
+            } else if (code == 27) {
+                state.cancel_edit();
+            } else if (code == 8) {
+                state.backspace();
+            } else if (code == 127) {
+                state.delete_forward();
+            } else if (code == K_LEFT) {
+                state.caret_left();
+            } else if (code == K_RIGHT) {
+                state.caret_right();
+            } else if (code == K_HOME) {
+                state.caret_home();
+            } else if (code == K_END) {
+                state.caret_end();
+            } else if (code == K_UP && state.mode == editor.MODE_CELL) {
+                state.commit(0, -1);
+            } else if (code == K_DOWN && state.mode == editor.MODE_CELL) {
+                state.commit(0, 1);
+            } else if (ctrl && code == 118) {
+                mut Arena scratch = Arena.new(1 * MB);
+                defer scratch.free();
+                state.insert_text(text.replace(&scratch, text.replace(&scratch, app.clipboard(&scratch), "\r", ""), "\n", " "));
+            }
+            return;
+        }
+        if (code == K_LEFT) {
+            nav(-1, 0, shift_on, ctrl);
+        } else if (code == K_RIGHT) {
+            nav(1, 0, shift_on, ctrl);
+        } else if (code == K_UP) {
+            nav(0, -1, shift_on, ctrl);
+        } else if (code == K_DOWN) {
+            nav(0, 1, shift_on, ctrl);
+        } else if (code == K_PAGEUP) {
+            state.step(0, -20, shift_on);
+        } else if (code == K_PAGEDOWN) {
+            state.step(0, 20, shift_on);
+        } else if (code == K_HOME) {
+            state.move_to(0, ctrl ? 0 : state.cr, shift_on);
+        } else if (code == K_END) {
+            mut Arena scratch = Arena.new(1 * MB);
+            defer scratch.free();
+            editor.Rect used = state.used(&scratch);
+            state.move_to(used.c2, used.r2, shift_on);
+        } else if (code == 13) {
+            state.step(0, shift_on ? -1 : 1, false);
+        } else if (code == 9) {
+            state.step(shift_on ? -1 : 1, 0, false);
+        } else if (code == K_F2) {
+            state.start_edit(false);
+        } else if (code == K_F3) {
+            state.find_next();
+        } else if (code == 127 || code == 8) {
+            state.clear_contents();
+        } else if (ctrl) {
+            shortcut(code);
+        }
+    }
+
+    void shortcut(ui32 code) uses io {
+        if (code == 99 || code == 120) {
+            if (code == 99) {
+                state.copy();
+            } else {
+                state.cut();
+            }
+            push_clipboard();
+        } else if (code == 118) {
+            mut Arena scratch = Arena.new(1 * MB);
+            defer scratch.free();
+            state.paste(app.clipboard(&scratch));
+        } else if (code == 122) {
+            state.undo();
+        } else if (code == 121) {
+            state.redo();
+        } else if (code == 100) {
+            state.fill_down();
+        } else if (code == 114) {
+            state.fill_right();
+        } else if (code == 98) {
+            state.toggle_flag(calc.FLAG_BOLD);
+        } else if (code == 105) {
+            state.toggle_flag(calc.FLAG_ITALIC);
+        } else if (code == 117) {
+            state.toggle_flag(calc.FLAG_UNDERLINE);
+        } else if (code == 103) {
+            state.start_prompt(editor.MODE_GOTO);
+        } else if (code == 102) {
+            state.start_prompt(editor.MODE_FIND);
+        } else if (code == 115) {
+            state.ask_save();
+        } else if (code == 111) {
+            state.ask_open();
+        } else if (code == 110) {
+            state.new_document();
+        } else if (code == 97) {
+            state.select_all();
+        }
+    }
+
+    void push_clipboard() uses io {
+        if (state.clip_fresh) {
+            state.clip_fresh = false;
+            mut Arena scratch = Arena.new(1 * MB);
+            defer scratch.free();
+            app.set_clipboard(&scratch, state.clip_text);
+        }
+    }
+
+    void moved(f32 x, f32 y) {
+        if (drag == 1) {
+            if (y >= win_h - STATUS_H && state.top_row < values.ROWS - 1) {
+                state.top_row += 1;
+            } else if (y < GRID_Y && state.top_row > 0) {
+                state.top_row -= 1;
+            }
+            state.move_to(col_at(x), row_at(y < GRID_Y ? GRID_Y : y), true);
+        } else if (drag == 2) {
+            f32 w = x - drag_x;
+            state.book.set_width(drag_col, (w < 24.0 ? 24.0 : w > 600.0 ? 600.0 : w) as i32);
+            state.dirty = true;
+        } else if (drag == 3) {
+            state.select_column(col_at(x), true);
+        } else if (drag == 4) {
+            state.select_row(row_at(y < GRID_Y ? GRID_Y : y), true);
+        }
+    }
+
+    void press(f32 x, f32 y) {
+        if (y < TOOL_Y) {
+            return;
+        }
+        if (y < FORMULA_Y) {
+            leave_edit();
+            for (i32 id in 0..TOOLS) {
+                if (inside(x, y, tool_x(id), TOOL_Y + 3.0, tool_w(id), TOOL_H - 6.0)) {
+                    tool(id);
+                }
+            }
+        } else if (y < HEAD_Y) {
+            if (x < NAME_W + 8.0) {
+                leave_edit();
+                state.start_prompt(editor.MODE_GOTO);
+            } else if (!state.editing) {
+                state.start_edit(false);
+            }
+        } else if (y < GRID_Y) {
+            header_press(x);
+        } else if (y < win_h - STATUS_H) {
+            grid_press(x, y);
+        }
+    }
+
+    void header_press(f32 x) {
+        leave_edit();
+        if (x < ROWHEAD_W) {
+            state.select_all();
+            return;
+        }
+        mut f32 edge = ROWHEAD_W;
+        mut i32 c = state.left_col;
+        while (c < values.COLS && edge < win_w) {
+            f32 w = state.book.width_of(c) as f32;
+            if (x >= edge + w - 4.0 && x <= edge + w + 4.0) {
+                drag = 2;
+                drag_col = c;
+                drag_x = edge;
+                return;
+            }
+            edge += w;
+            c += 1;
+        }
+        state.select_column(col_at(x), shift);
+        drag = 3;
+    }
+
+    void grid_press(f32 x, f32 y) {
+        i32 r = row_at(y);
+        if (x < ROWHEAD_W) {
+            leave_edit();
+            state.select_row(r, shift);
+            drag = 4;
+            return;
+        }
+        i32 c = col_at(x);
+        if (state.editing) {
+            if (state.pointing()) {
+                state.point_at(c, r);
+                return;
+            }
+            leave_edit();
+        }
+        bool twice = now - last_click < 400 && c == last_c && r == last_r;
+        last_click = now;
+        last_c = c;
+        last_r = r;
+        if (twice) {
+            state.move_to(c, r, false);
+            state.start_edit(false);
+        } else {
+            state.move_to(c, r, shift);
+            drag = 1;
+        }
+    }
+
+    void tool(i32 id) {
+        editor.Snap s = state.snap_of(state.cc, state.cr);
+        if (id <= 2) {
+            state.toggle_flag(id == 0 ? calc.FLAG_BOLD : id == 1 ? calc.FLAG_ITALIC : calc.FLAG_UNDERLINE);
+        } else if (id <= 5) {
+            state.set_align(s.align == id - 2 ? 0 : id - 2);
+        } else if (id <= 12) {
+            state.set_format(id - 6);
+        } else if (id == 13) {
+            state.change_decimals(1);
+        } else if (id == 14) {
+            state.change_decimals(-1);
+        } else if (id == 15) {
+            fg_i = (fg_i + 1) % 7;
+            state.set_color(false, text_color(fg_i));
+        } else if (id == 16) {
+            bg_i = (bg_i + 1) % 7;
+            state.set_color(true, fill_color(bg_i));
+        } else if (id == 17) {
+            state.sort_rows(true);
+        } else if (id == 18) {
+            state.sort_rows(false);
+        } else if (id == 19) {
+            state.insert_rows();
+        } else if (id == 20) {
+            state.delete_rows();
+        } else if (id == 21) {
+            state.insert_columns();
+        } else if (id == 22) {
+            state.delete_columns();
+        } else if (id == 23) {
+            state.start_prompt(editor.MODE_FIND);
+        }
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        now = app.now_ms();
+        ui.clock(now);
+        win_w = surface.width as f32;
+        win_h = surface.height as f32;
+        state.book.now_unix = base_unix + ((now - base_ms) / 1000) as i64;
+        if (follow) {
+            follow = false;
+            state.ensure_visible(view_w() as i32, view_h() as i32);
+        }
+        if (state.status_seq != seen_seq) {
+            seen_seq = state.status_seq;
+            seen_at = now;
+        }
+        paint(surface);
+        push_clipboard();
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        i32 want = state.want;
+        state.want = 0;
+        if (want == 1) {
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.open_file(OPEN_TAG, filters(&scratch, 0), "");
+        } else if (want == 2) {
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.save_file(SAVE_TAG, filters(&scratch, 1), "");
+        } else if (want == 3) {
+            mut Arena scratch = Arena.new(4 * KB);
+            defer scratch.free();
+            dialogs.save_file(CSV_TAG, filters(&scratch, 2), "");
+        } else if (want == 4) {
+            state.save_document(state.path);
+        }
+    }
+
+    dialogs.Filter[] filters(Arena* arena, i32 kind) {
+        mut dialogs.Filter[] list = arena.alloc_slice(dialogs.Filter,         kind == 0 ? 3 : (kind == 1 ? 2 : 1));
+        if (kind == 0) {
+            list[0] = dialogs.Filter{ name: "Sheets", extensions: text.split(arena, "sheet", ",") };
+                    list[1] = dialogs.Filter{ name: "OpenDocument", extensions: text.split(arena, "ods", ",") };
+                    list[2] = dialogs.Filter{ name: "CSV files", extensions: text.split(arena, "csv", ",") };
+                } else if (kind == 1) {
+                    list[0] = dialogs.Filter{ name: "Sheets", extensions: text.split(arena, "sheet", ",") };
+                    list[1] = dialogs.Filter{ name: "OpenDocument", extensions: text.split(arena, "ods", ",") };
+        } else {
+            list[0] = dialogs.Filter{ name: "CSV files", extensions: text.split(arena, "csv", ",") };
+        }
+        return list;
+    }
+
+    // ----- text
+
+    truetype.Font*? font_for(i32 flags) {
+        bool b = (flags & calc.FLAG_BOLD) != 0;
+        bool i = (flags & calc.FLAG_ITALIC) != 0;
+        mut truetype.Font*? want = face;
+        if (b && i) {
+            want = bold_italic;
+        } else if (b) {
+            want = bold;
+        } else if (i) {
+            want = italic;
+        }
+        return match (want) {
+            some(f) => some(f),
+            none => face,
+        };
+    }
+
+    void say(canvas.Canvas* surface, i32 flags, f32 x, f32 y, str words, canvas.Color color) {
+        match (font_for(flags)) {
+            some(font) => {
+                surface.text_with(font, 13.0, x, y, words, color);
+            },
+            none => {
+                surface.text(x, y, words, color, 1);
+            },
+        }
+    }
+
+    f32 wide(i32 flags, str words) {
+        return match (font_for(flags)) {
+            some(font) => font.measure(words, 13.0),
+            none => words.len as f32 * 8.0,
+        };
+    }
+
+    // ----- drawing
+
+    void paint(canvas.Canvas* surface) {
+        mut Arena scratch = Arena.new(4 * MB);
+        defer scratch.free();
+        surface.clear(shade(24, 26, 36));
+        draw_toolbar(surface);
+        draw_formula(surface, &scratch);
+        draw_grid(surface, &scratch);
+        draw_status(surface, &scratch);
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Sheets(&f, state);
+        f.finish();
+    }
+
+    void draw_toolbar(canvas.Canvas* surface) {
+        surface.fill(canvas.Rect{ x: 0.0, y: TOOL_Y, w: win_w, h: TOOL_H }, shade(243, 245, 249));
+        editor.Snap s = state.snap_of(state.cc, state.cr);
+        for (i32 id in 0..TOOLS) {
+            f32 x = tool_x(id);
+            f32 w = tool_w(id);
+            canvas.Rect box = canvas.Rect{ x: x, y: TOOL_Y + 3.0, w: w, h: TOOL_H - 6.0 };
+            bool on = (id == 0 && (s.flags & calc.FLAG_BOLD) != 0) || (id == 1 && (s.flags & calc.FLAG_ITALIC) != 0) || (id == 2 && (s.flags & calc.FLAG_UNDERLINE) != 0) || (id >= 3 && id <= 5 && s.align == id - 2) || (id >= 6 && id <= 12 && s.fmt == id - 6);
+            bool hot = inside(mx, my, x, TOOL_Y + 3.0, w, TOOL_H - 6.0);
+            if (on) {
+                surface.fill_rounded(box, 4.0, shade(198, 216, 246));
+            } else if (hot) {
+                surface.fill_rounded(box, 4.0, shade(224, 230, 242));
+            }
+            i32 style = id == 0 ? calc.FLAG_BOLD : id == 1 ? calc.FLAG_ITALIC : 0;
+            f32 tw = wide(style, tool_label(id));
+            say(surface, style, x + (w - tw) / 2.0, TOOL_Y + 8.0, tool_label(id), shade(30, 34, 44));
+            if (id == 2) {
+                surface.fill(canvas.Rect{ x: x + (w - tw) / 2.0, y: TOOL_Y + 24.0, w: tw, h: 1.0 }, shade(30, 34, 44));
+            }
+            if (id == 15 || id == 16) {
+                ui32 c = id == 15 ? text_color(fg_i) : fill_color(bg_i);
+                surface.fill(canvas.Rect{ x: x + 6.0, y: TOOL_Y + 25.0, w: w - 12.0, h: 3.0 }, c == 0 ? shade(200, 204, 214) : rgb(c));
+            }
+        }
+        surface.fill(canvas.Rect{ x: 0.0, y: TOOL_Y + TOOL_H - 1.0, w: win_w, h: 1.0 }, shade(214, 218, 228));
+    }
+
+    str range_name(Arena* arena, editor.Rect r) {
+        if (r.c1 == r.c2 && r.r1 == r.r2) {
+            return values.cell_name(arena, r.c1, r.r1);
+        }
+        text.TextBuilder* b = text.builder(arena);
+        b.push(values.cell_name(arena, r.c1, r.r1));
+        b.push(":");
+        b.push(values.cell_name(arena, r.c2, r.r2));
+        return b.text();
+    }
+
+    void draw_formula(canvas.Canvas* surface, Arena* arena) {
+        surface.fill(canvas.Rect{ x: 0.0, y: FORMULA_Y, w: win_w, h: FORMULA_H }, shade(255, 255, 255));
+        canvas.Rect name = canvas.Rect{ x: 8.0, y: FORMULA_Y + 3.0, w: NAME_W, h: FORMULA_H - 6.0 };
+        surface.stroke(name, shade(190, 196, 210), 1.0);
+        mut str label = range_name(arena, state.selection());
+        if (state.editing && state.mode == editor.MODE_GOTO) {
+            label = "Go to:";
+        } else if (state.editing && state.mode == editor.MODE_FIND) {
+            label = "Find:";
+        }
+        surface.push_clip(name);
+        say(surface, 0, 14.0, FORMULA_Y + 7.0, label, shade(40, 44, 56));
+        surface.pop_clip();
+        say(surface, calc.FLAG_ITALIC, NAME_W + 20.0, FORMULA_Y + 7.0, "fx", shade(120, 126, 142));
+        f32 fx = NAME_W + 44.0;
+        str content = state.editing ? state.buffer_text() : state.book.raw_of(state.cc, state.cr);
+        canvas.Rect box = canvas.Rect{ x: fx - 6.0, y: FORMULA_Y + 3.0, w: win_w - fx - 2.0, h: FORMULA_H - 6.0 };
+        surface.stroke(box, state.editing ? shade(40, 110, 220) : shade(190, 196, 210), 1.0);
+        surface.push_clip(box);
+        say(surface, 0, fx, FORMULA_Y + 7.0, content, shade(20, 22, 30));
+        if (state.editing && (now / 500) % 2 == 0) {
+            f32 cx = fx + wide(0, text.slice(content, 0, state.caret));
+            surface.fill(canvas.Rect{ x: cx, y: FORMULA_Y + 6.0, w: 1.0, h: 16.0 }, shade(20, 22, 30));
+        }
+        surface.pop_clip();
+        surface.fill(canvas.Rect{ x: 0.0, y: HEAD_Y - 1.0, w: win_w, h: 1.0 }, shade(214, 218, 228));
+    }
+
+    void draw_grid(canvas.Canvas* surface, Arena* arena) {
+        f32 bottom = win_h - STATUS_H;
+        i32 rows = (view_h() / ROW) as i32 + 1;
+        editor.Rect sel = state.selection();
+        surface.fill(canvas.Rect{ x: ROWHEAD_W, y: GRID_Y, w: win_w - ROWHEAD_W, h: view_h() }, shade(255, 255, 255));
+        surface.push_clip(canvas.Rect{ x: ROWHEAD_W, y: GRID_Y, w: win_w - ROWHEAD_W, h: view_h() });
+        mut f32 x = ROWHEAD_W;
+        mut i32 c = state.left_col;
+        while (c < values.COLS && x < win_w) {
+            f32 w = state.book.width_of(c) as f32;
+            for (i32 k in 0..rows) {
+                i32 r = state.top_row + k;
+                if (r >= values.ROWS) {
+                    break;
+                }
+                match (state.book.find(c, r)) {
+                    some(cell) => {
+                        if (cell.bg != 0) {
+                            surface.fill(canvas.Rect{ x: x, y: GRID_Y + k as f32 * ROW, w: w, h: ROW }, rgb(cell.bg));
+                        }
+                    },
+                    none => { },
+                }
+            }
+            surface.fill(canvas.Rect{ x: x + w - 1.0, y: GRID_Y, w: 1.0, h: view_h() }, shade(218, 222, 230));
+            x += w;
+            c += 1;
+        }
+        for (i32 k in 0..rows) {
+            surface.fill(canvas.Rect{ x: ROWHEAD_W, y: GRID_Y + (k + 1) as f32 * ROW - 1.0, w: win_w - ROWHEAD_W, h: 1.0 }, shade(218, 222, 230));
+        }
+        x = ROWHEAD_W;
+        c = state.left_col;
+        while (c < values.COLS && x < win_w) {
+            f32 w = state.book.width_of(c) as f32;
+            for (i32 k in 0..rows) {
+                i32 r = state.top_row + k;
+                if (r >= values.ROWS) {
+                    break;
+                }
+                match (state.book.find(c, r)) {
+                    some(cell) => {
+                        draw_cell(surface, arena, cell, c, r, x, GRID_Y + k as f32 * ROW, w);
+                    },
+                    none => { },
+                }
+            }
+            x += w;
+            c += 1;
+        }
+        draw_selection(surface, sel);
+        if (state.editing && state.mode == editor.MODE_CELL) {
+            draw_editor(surface);
+        }
+        surface.pop_clip();
+        draw_headers(surface, sel, rows);
+        surface.fill(canvas.Rect{ x: 0.0, y: bottom, w: win_w, h: 1.0 }, shade(214, 218, 228));
+    }
+
+    void draw_cell(canvas.Canvas* surface, Arena* arena, calc.Cell* cell, i32 c, i32 r, f32 x, f32 y, f32 w) {
+        values.Value v = state.book.result(c, r);
+        if (v.kind == values.EMPTY) {
+            return;
+        }
+        str shown = values.display(arena, v, cell.fmt, cell.dec);
+        f32 tw = wide(cell.flags, shown);
+        i32 align = cell.align != 0 ? cell.align : v.kind == values.NUMBER ? 3 : v.kind == values.TEXT ? 1 : 2;
+        mut f32 room = w;
+        if (align == 1 && tw + 8.0 > w) {
+            mut i32 k = c + 1;
+            while (room < tw + 8.0 && k < values.COLS && state.book.raw_of(k, r).len == 0 && x + room < win_w) {
+                room += state.book.width_of(k) as f32;
+                k += 1;
+            }
+        }
+        f32 tx = align == 1 ? x + 4.0 : align == 2 ? x + (w - tw) / 2.0 : x + w - tw - 4.0;
+        canvas.Color color = cell.fg != 0 ? rgb(cell.fg) : v.kind == values.ERROR ? shade(192, 0, 0) : shade(20, 22, 30);
+        surface.push_clip(canvas.Rect{ x: x, y: y, w: room - 1.0, h: ROW - 1.0 });
+        say(surface, cell.flags, tx, y + 3.0, shown, color);
+        if ((cell.flags & calc.FLAG_UNDERLINE) != 0) {
+            surface.fill(canvas.Rect{ x: tx, y: y + ROW - 5.0, w: tw, h: 1.0 }, color);
+        }
+        surface.pop_clip();
+    }
+
+    // The cell being typed in, over the grid.
+    void draw_editor(canvas.Canvas* surface) {
+        if (state.cr < state.top_row || state.cc < state.left_col) {
+            return;
+        }
+        f32 x = col_x(state.cc);
+        f32 y = GRID_Y + (state.cr - state.top_row) as f32 * ROW;
+        str typed = state.buffer_text();
+        f32 w = state.book.width_of(state.cc) as f32;
+        f32 need = wide(0, typed) + 12.0;
+        canvas.Rect box = canvas.Rect{ x: x, y: y, w: need > w ? need : w, h: ROW };
+        surface.fill(box, shade(255, 255, 255));
+        surface.stroke(box, shade(40, 110, 220), 2.0);
+        say(surface, 0, x + 4.0, y + 3.0, typed, shade(20, 22, 30));
+        if ((now / 500) % 2 == 0) {
+            f32 cx = x + 4.0 + wide(0, text.slice(typed, 0, state.caret));
+            surface.fill(canvas.Rect{ x: cx, y: y + 3.0, w: 1.0, h: 16.0 }, shade(20, 22, 30));
+        }
+    }
+
+    void draw_selection(canvas.Canvas* surface, editor.Rect sel) {
+        i32 c1 = sel.c1 < state.left_col ? state.left_col : sel.c1;
+        i32 r1 = sel.r1 < state.top_row ? state.top_row : sel.r1;
+        if (sel.c2 < c1 || sel.r2 < r1) {
+            return;
+        }
+        f32 x = col_x(c1);
+        f32 y = GRID_Y + (r1 - state.top_row) as f32 * ROW;
+        f32 w = state.span(c1, sel.c2 + 1) as f32;
+        f32 h = (sel.r2 - r1 + 1) as f32 * ROW;
+        canvas.Rect box = canvas.Rect{ x: x, y: y, w: w, h: h };
+        if (!state.single()) {
+            surface.fill(box, canvas.Color{ r: 40, g: 110, b: 220, a: 36 });
+        }
+        if (!(state.editing && state.mode == editor.MODE_CELL)) {
+            surface.stroke(box, shade(40, 110, 220), 2.0);
+        }
+    }
+
+    void draw_headers(canvas.Canvas* surface, editor.Rect sel, i32 rows) {
+        surface.fill(canvas.Rect{ x: 0.0, y: HEAD_Y, w: win_w, h: HEAD_H }, shade(240, 242, 247));
+        surface.fill(canvas.Rect{ x: 0.0, y: GRID_Y, w: ROWHEAD_W, h: view_h() }, shade(240, 242, 247));
+        mut Arena names = Arena.new(64 * KB);
+        defer names.free();
+        mut f32 x = ROWHEAD_W;
+        mut i32 c = state.left_col;
+        while (c < values.COLS && x < win_w) {
+            f32 w = state.book.width_of(c) as f32;
+            bool hit = c >= sel.c1 && c <= sel.c2;
+            if (hit) {
+                surface.fill(canvas.Rect{ x: x, y: HEAD_Y, w: w, h: HEAD_H }, shade(205, 221, 246));
+            }
+            str name = values.col_name(&names, c);
+            say(surface, hit ? calc.FLAG_BOLD : 0, x + (w - wide(0, name)) / 2.0, HEAD_Y + 4.0, name, shade(50, 56, 72));
+            surface.fill(canvas.Rect{ x: x + w - 1.0, y: HEAD_Y, w: 1.0, h: HEAD_H }, shade(204, 208, 220));
+            x += w;
+            c += 1;
+        }
+        for (i32 k in 0..rows) {
+            i32 r = state.top_row + k;
+            if (r >= values.ROWS) {
+                break;
+            }
+            f32 y = GRID_Y + k as f32 * ROW;
+            bool hit = r >= sel.r1 && r <= sel.r2;
+            if (hit) {
+                surface.fill(canvas.Rect{ x: 0.0, y: y, w: ROWHEAD_W, h: ROW }, shade(205, 221, 246));
+            }
+            text.TextBuilder* b = text.builder(&names);
+            b.push_i64((r + 1) as i64);
+            str label = b.text();
+            say(surface, hit ? calc.FLAG_BOLD : 0, (ROWHEAD_W - wide(0, label)) / 2.0, y + 3.0, label, shade(50, 56, 72));
+            surface.fill(canvas.Rect{ x: 0.0, y: y + ROW - 1.0, w: ROWHEAD_W, h: 1.0 }, shade(204, 208, 220));
+        }
+        surface.fill(canvas.Rect{ x: ROWHEAD_W - 1.0, y: HEAD_Y, w: 1.0, h: win_h - HEAD_Y - STATUS_H }, shade(204, 208, 220));
+        surface.fill(canvas.Rect{ x: 0.0, y: GRID_Y - 1.0, w: win_w, h: 1.0 }, shade(204, 208, 220));
+    }
+
+    void draw_status(canvas.Canvas* surface, Arena* arena) {
+        f32 y = win_h - STATUS_H;
+        surface.fill(canvas.Rect{ x: 0.0, y: y, w: win_w, h: STATUS_H }, shade(243, 245, 249));
+        str left = now - seen_at < 5000 && state.status.len > 0 ? state.status : state.path.len > 0 ? state.path : "Ready";
+        say(surface, 0, 10.0, y + 5.0, left, shade(60, 66, 84));
+        editor.Stats s = state.stats();
+        if (s.count > 1 || s.numbers > 0 && !state.single()) {
+            text.TextBuilder* b = text.builder(arena);
+            b.push("Count: ");
+            b.push_i64(s.count);
+            if (s.numbers > 0) {
+                b.push("    Sum: ");
+                b.push(values.general(arena, s.sum));
+                b.push("    Average: ");
+                b.push(values.general(arena, s.sum / s.numbers as f64));
+                b.push("    Min: ");
+                b.push(values.general(arena, s.low));
+                b.push("    Max: ");
+                b.push(values.general(arena, s.high));
+            }
+            str info = b.text();
+            say(surface, 0, win_w - wide(0, info) - 16.0, y + 5.0, info, shade(60, 66, 84));
+        }
+    }
+}
+
+// Types `raw` in the cell `name`.
+void put(editor.Editor* m, str name, str raw) {
+    values.Ref r = values.parse_ref(name);
+    m.move_to(r.col, r.row, false);
+    m.start_edit(true);
+    m.insert_text(raw);
+    m.commit(0, 0);
+}
+
+void region(editor.Editor* m, i32 c1, i32 r1, i32 c2, i32 r2) {
+    m.move_to(c1, r1, false);
+    m.move_to(c2, r2, true);
+}
+
+// A small price list, for the snapshot.
+void demo(editor.Editor* m) {
+    put(m, "A1", "Product");
+    put(m, "B1", "Qty");
+    put(m, "C1", "Price");
+    put(m, "D1", "Total");
+    put(m, "A2", "Bolts");
+    put(m, "B2", "120");
+    put(m, "C2", "0.15");
+    put(m, "A3", "Nuts");
+    put(m, "B3", "300");
+    put(m, "C3", "0.08");
+    put(m, "A4", "Washers");
+    put(m, "B4", "450");
+    put(m, "C4", "0.03");
+    put(m, "A5", "Screws");
+    put(m, "B5", "80");
+    put(m, "C5", "0.22");
+    put(m, "A6", "Brackets");
+    put(m, "B6", "25");
+    put(m, "C6", "1.9");
+    put(m, "D2", "=B2*C2");
+    put(m, "D3", "=B3*C3");
+    put(m, "D4", "=B4*C4");
+    put(m, "D5", "=B5*C5");
+    put(m, "D6", "=B6*C6");
+    put(m, "A8", "Total");
+    put(m, "B8", "=SUM(B2:B6)");
+    put(m, "D8", "=SUM(D2:D6)");
+    put(m, "F1", "Statistics");
+    put(m, "F2", "Average");
+    put(m, "G2", "=AVERAGE(D2:D6)");
+    put(m, "F3", "Best seller");
+    put(m, "G3", "=INDEX(A2:A6,MATCH(MAX(D2:D6),D2:D6,0))");
+    put(m, "F4", "Budget");
+    put(m, "G4", "=IF(D8>100,\"Over budget\",\"OK\")");
+    put(m, "F5", "Rounded");
+    put(m, "G5", "=ROUND(D8/7,2)");
+    put(m, "F6", "Date");
+    put(m, "G6", "2026-10-29");
+    region(m, 0, 0, 3, 0);
+    m.toggle_flag(calc.FLAG_BOLD);
+    m.set_color(true, 0xFFBDD7EE);
+    region(m, 0, 7, 3, 7);
+    m.toggle_flag(calc.FLAG_BOLD);
+    m.set_color(true, 0xFFE2EFDA);
+    region(m, 5, 0, 5, 0);
+    m.toggle_flag(calc.FLAG_BOLD);
+    region(m, 2, 1, 3, 7);
+    m.set_format(3);
+    region(m, 6, 1, 6, 1);
+    m.set_format(3);
+    region(m, 6, 4, 6, 4);
+    m.set_format(3);
+    region(m, 6, 5, 6, 5);
+    m.set_format(5);
+    region(m, 6, 3, 6, 3);
+    m.toggle_flag(calc.FLAG_ITALIC);
+    m.set_color(false, 0xFFC00000);
+    m.move_to(1, 1, false);
+    m.path = "";
+}
+
+i32 snapshot(Arena* arena, App* handler, editor.Editor* m, str file, bool typing) uses io {
+    mut canvas.Canvas surface = canvas.create(arena, 1280, 800);
+    handler.ui.custom_title_bar = true;
+    handler.win_w = 1280.0;
+    handler.win_h = 800.0;
+    demo(m);
+    if (typing) {
+        m.move_to(7, 7, false);
+        m.start_edit(true);
+        m.insert_text("=SUM(B2:B6)*");
+    } else {
+        region(m, 1, 1, 3, 5);
+    }
+    m.book.recalc();
+    handler.ui.clock(0);
+    handler.paint(&surface);
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            io.print("written to {}", file);
+            return 0;
+        },
+        err(e) => {
+            io.print("cannot write {}", file);
+            return 1;
+        },
+    }
+}
+
+void load_font(Arena* arena, str file, bool main_face, App* handler, i32 slot) uses io {
+    match (app.read_asset(arena, file)) {
+        some(bytes) => {
+            match (truetype.parse(arena, bytes)) {
+                ok(font) => {
+                    if (slot == 0) {
+                        handler.ui.font = some(font);
+                        handler.face = some(font);
+                    } else if (slot == 1) {
+                        handler.bold = some(font);
+                    } else if (slot == 2) {
+                        handler.italic = some(font);
+                    } else {
+                        handler.bold_italic = some(font);
+                    }
+                },
+                err(e) => {
+                    io.print("{} is not readable: the regular font is used", file);
+                },
+            }
+        },
+        none => {
+            io.print("{} not found: the regular font is used", file);
+        },
+    }
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    editor.Editor* m = editor.new_editor(&arena);
+    App* handler = arena.new(App, m);
+    handler.base_unix = time.unix_seconds();
+    handler.base_ms = app.now_ms();
+    m.book.now_unix = handler.base_unix;
+    load_font(&arena, "assets/NotoSans-Regular.ttf", true, handler, 0);
+    load_font(&arena, "assets/NotoSans-Bold.ttf", false, handler, 1);
+    load_font(&arena, "assets/NotoSans-Italic.ttf", false, handler, 2);
+    load_font(&arena, "assets/NotoSans-BoldItalic.ttf", false, handler, 3);
+    str[] args = os.args(&arena);
+    if (args.len >= 2 && args[0] == "--snapshot") {
+        return snapshot(&arena, handler, m, args[1], args.len >= 3 && args[2] == "--edit");
+    }
+    if (args.len >= 3 && args[0] == "--convert") {
+        m.open_document(args[1]);
+        m.save_document(args[2]);
+        return 0;
+    }
+    if (args.len >= 1) {
+        m.open_document(args[0]);
+        m.open_document(args[0]);
+    }
+    widgets.Window window = screen.SheetsConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler*);
+}

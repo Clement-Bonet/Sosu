@@ -1,0 +1,263 @@
+import std.io;
+import crypto.hex;
+import testing.check;
+import std.vec;
+import db.db;
+import sqlite.sqlite;
+import vault.chacha;
+import vault.entry;
+import vault.gen;
+import vault.store;
+import vault.totp;
+import vault.kdf;
+import vault.rand;
+import vault.seal;
+
+ui8[] bytes_of(Arena* arena, str s) {
+    mut ui8[] out = arena.alloc_slice(ui8, s.len);
+    for (usize i in 0..s.len) {
+        out[i] = s.bytes[i];
+    }
+    return out;
+}
+
+str hex_of(Arena* arena, ui8[] b) {
+    return hex.encode(arena, b);
+}
+
+ui8[] counting_key(Arena* arena) {
+    mut ui8[] key = arena.alloc_slice(ui8, 32);
+    for (usize i in 0..32) {
+        key[i] = i as ui8;
+    }
+    return key;
+}
+
+test "chacha20: the key stream of RFC 8439 2.3.2" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut ui8[] nonce = arena.alloc_slice(ui8, 12);
+    nonce[3] = 9;
+    nonce[7] = 0x4a;
+    mut ui8[] stream = arena.alloc_slice(ui8, 16);
+    chacha.xor(counting_key(&arena), nonce, 1, stream);
+    assert(check.same_text(hex_of(&arena, stream), "10f1e7e4d13b5915500fdd1fa32071c4"));
+}
+
+test "chacha20: the encryption of RFC 8439 2.4.2, and back" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut ui8[] nonce = arena.alloc_slice(ui8, 12);
+    nonce[7] = 0x4a;
+    str text = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+    mut ui8[] data = bytes_of(&arena, text);
+    chacha.xor(counting_key(&arena), nonce, 1, data);
+    assert(check.same_text(hex_of(&arena, data[0..16]), "6e2e359a2568f98041ba0728dd0d6981"));
+    chacha.xor(counting_key(&arena), nonce, 1, data);
+    assert(check.same_bytes(data, bytes_of(&arena, text)));
+}
+
+test "pbkdf2-hmac-sha256: the known vectors" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut ui8[] out = arena.alloc_slice(ui8, 32);
+    kdf.pbkdf2(bytes_of(&arena, "password"), bytes_of(&arena, "salt"), 1, out);
+    assert(check.same_text(hex_of(&arena, out), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"));
+    kdf.pbkdf2(bytes_of(&arena, "password"), bytes_of(&arena, "salt"), 2, out);
+    assert(check.same_text(hex_of(&arena, out), "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"));
+}
+
+test "a sealed text opens with its keys, and only with them" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut seal.Keys keys = seal.derive(bytes_of(&arena, "correct horse"), bytes_of(&arena, "0123456789abcdef"), 2);
+    mut seal.Keys other = seal.derive(bytes_of(&arena, "wrong horse"), bytes_of(&arena, "0123456789abcdef"), 2);
+    ui8[] plain = bytes_of(&arena, "hunter2");
+    mut ui8[] blob = seal.seal(&arena, &keys, plain);
+    assert(blob.len == 12 + 7 + 32);
+    match (seal.open(&arena, &keys, blob)) {
+        some(text) => {
+            assert(check.same_bytes(text, plain));
+        },
+        none => {
+            assert(false);
+        },
+    }
+    assert(!opens(&arena, &other, blob));
+    blob[14] = blob[14] ^ 1;
+    assert(!opens(&arena, &keys, blob));
+}
+
+bool opens(Arena* arena, seal.Keys* keys, ui8[] blob) {
+    return match (seal.open(arena, keys, blob)) {
+        some(text) => true,
+        none => false,
+    };
+}
+
+test "two seals of the same text differ" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut seal.Keys keys = seal.derive(bytes_of(&arena, "pw"), bytes_of(&arena, "0123456789abcdef"), 1);
+    ui8[] plain = bytes_of(&arena, "same");
+    ui8[] a = seal.seal(&arena, &keys, plain);
+    ui8[] b = seal.seal(&arena, &keys, plain);
+    assert(hex_of(&arena, a) != hex_of(&arena, b));
+}
+
+test "random numbers stay in their bounds" {
+    mut i32 seen = 0;
+    for (i32 i in 0..200) {
+        usize n = rand.below(7);
+        assert(n < 7);
+        if (n == 6) {
+            seen += 1;
+        }
+    }
+    assert(seen > 0);
+}
+
+test "totp: the codes of RFC 6238" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    match (totp.decode_base32(&arena, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")) {
+        some(secret) => {
+            assert(check.same_bytes(secret, bytes_of(&arena, "12345678901234567890")));
+            assert(check.same_text(totp.code(&arena, secret, 59, 8), "94287082"));
+            assert(check.same_text(totp.code(&arena, secret, 1111111109, 8), "07081804"));
+            assert(check.same_text(totp.code(&arena, secret, 59, 6), "287082"));
+        },
+        none => {
+            assert(false);
+        },
+    }
+    assert(totp.seconds_left(59) == 1);
+    assert(totp.seconds_left(60) == 30);
+}
+
+test "totp: a secret that is not base32" {
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    assert(!decodes(&arena, "not base32!"));
+    assert(!decodes(&arena, ""));
+    assert(decodes(&arena, "gezd gnbv"));
+}
+
+bool decodes(Arena* arena, str text) {
+    return match (totp.decode_base32(arena, text)) {
+        some(b) => true,
+        none => false,
+    };
+}
+
+test "a generated password follows its rules" {
+    mut Arena arena = Arena.new(8 * KB);
+    defer arena.free();
+    mut gen.Rules rules = gen.Rules{ };
+    for (i32 round in 0..50) {
+        str p = gen.generate(&arena, &rules);
+        assert(p.len == 20);
+        assert(has_class(p, 97, 122) && has_class(p, 65, 90) && has_class(p, 48, 57));
+    }
+    rules.length = 12;
+    rules.upper = false;
+    rules.digits = false;
+    rules.symbols = false;
+    str plain = gen.generate(&arena, &rules);
+    assert(plain.len == 12);
+    assert(!has_class(plain, 65, 90) && !has_class(plain, 48, 57));
+    rules.length = 3;
+    assert(gen.generate(&arena, &rules).len == 8);
+    assert(gen.bits("aaaaaaaa") > 37.0 && gen.bits("aaaaaaaa") < 38.0);
+    assert(gen.bits("") == 0.0);
+}
+
+bool has_class(str s, ui8 low, ui8 high) {
+    for (ui8 b in s.bytes) {
+        if (b >= low && b <= high) {
+            return true;
+        }
+    }
+    return false;
+}
+
+test "an entry survives its bytes" {
+    mut Arena arena = Arena.new(8 * KB);
+    defer arena.free();
+    mut entry.Entry e = entry.Entry{ };
+    e.title.set("Bank");
+    e.user.set("zoeee");
+    e.url.set("https://bank.example");
+    e.password.set("p@ss word");
+    e.totp.set("GEZDGNBV");
+    e.notes.set("");
+    e.updated = 1700000000;
+    ui8[] bytes = entry.encode(&arena, &e);
+    mut entry.Entry back = entry.Entry{ };
+    assert(entry.decode(bytes, &back));
+    assert(back.title.text() == "Bank");
+    assert(back.user.text() == "zoeee");
+    assert(back.password.text() == "p@ss word");
+    assert(back.notes.text() == "");
+    assert(back.updated == 1700000000);
+    assert(!entry.decode(bytes[0..20], &back));
+}
+
+test "the store creates, unlocks, saves, loads, deletes and changes its password" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    match (store_scenario(&arena)) {
+        ok(done) => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+}
+
+bool!db.DbError store_scenario(Arena* arena) uses io {
+    db.Connection* c = try open_memory(arena);
+    defer c.close();
+    assert(!store.exists(arena, c));
+    mut seal.Keys keys = seal.Keys{ };
+    assert(store.create(arena, c, bytes_of(arena, "master"), 2, &keys));
+    assert(store.exists(arena, c));
+
+    mut seal.Keys again = seal.Keys{ };
+    assert(store.unlock(arena, c, bytes_of(arena, "master"), &again) == store.Opened.Yes);
+    assert(store.unlock(arena, c, bytes_of(arena, "Master"), &again) == store.Opened.WrongPassword);
+
+    mut entry.Entry a = entry.Entry{ };
+    a.title.set("Mail");
+    a.password.set("one");
+    mut entry.Entry b = entry.Entry{ };
+    b.title.set("Bank");
+    b.password.set("two");
+    assert(store.save(arena, c, &keys, &a));
+    assert(store.save(arena, c, &keys, &b));
+    assert(a.id > 0 && b.id > a.id);
+    a.password.set("changed");
+    assert(store.save(arena, c, &keys, &a));
+
+    vec.Vec<entry.Entry>* all = vec.new<entry.Entry>(arena);
+    assert(store.load_all(arena, c, &keys, all) == 0);
+    assert(all.len() == 2);
+    assert(all.at(0).password.text() == "changed");
+    assert(all.at(1).title.text() == "Bank");
+
+    assert(store.change_password(arena, c, all, bytes_of(arena, "better master"), 2, &keys));
+    assert(store.unlock(arena, c, bytes_of(arena, "master"), &again) == store.Opened.WrongPassword);
+    assert(store.unlock(arena, c, bytes_of(arena, "better master"), &again) == store.Opened.Yes);
+    vec.Vec<entry.Entry>* after = vec.new<entry.Entry>(arena);
+    assert(store.load_all(arena, c, &again, after) == 0);
+    assert(after.len() == 2);
+
+    assert(store.remove(c, a.id));
+    vec.Vec<entry.Entry>* last = vec.new<entry.Entry>(arena);
+    assert(store.load_all(arena, c, &again, last) == 0);
+    assert(last.len() == 1);
+    return ok(true);
+}
+
+db.Connection*!db.DbError open_memory(Arena* arena) uses io {
+    return store.open(arena, ":memory:");
+}

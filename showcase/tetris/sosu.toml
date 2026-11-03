@@ -1,0 +1,13 @@
+# Tetris: the falling blocks, written in Sosu. The rules are in src/board.sosu, with no window.
+[package]
+name = "tetris"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+image = { path = "../../packages/image" }
+testing = { path = "../../packages/testing" }
+
+[app]
+assets = ["assets/NotoSans-Regular.ttf"]

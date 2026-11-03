@@ -1,0 +1,345 @@
+// Vault: a password manager. The accounts are sealed one by one (ChaCha20, HMAC-SHA256) in a
+// SQLite file, under keys derived from the master password (PBKDF2): see README.md.
+// On Windows: run Sosu/packages/platform/fetch-sdl3.ps1 once, then `sosuc run Vault`.
+// `vault.exe [file]` opens `file` (`vault.db` by default). `--snapshot out.png` writes the window
+// in a picture, with demo accounts, in a vault that lives in memory.
+import std.io;
+import std.os;
+import std.time;
+import db.db;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import image.png;
+import ui.widgets;
+import vault.checks;
+import vault.entry;
+import vault.model;
+import vault.screen;
+import vault.seal;
+import vault.store;
+
+canvas.Color background() {
+    return canvas.Color{ r: 24, g: 26, b: 36 };
+}
+canvas.Color ink() {
+    return canvas.Color{ r: 238, g: 240, b: 248 };
+}
+canvas.Color dim() {
+    return canvas.Color{ r: 140, g: 146, b: 170 };
+}
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    model.Model* state;
+    mut truetype.Font*? face;
+    mut bool second;
+
+    void init(keeps model.Model* state) {
+        ui = widgets.Ui{ };
+        self.state = state;
+        face = none;
+        second = false;
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io {
+        state.touch();
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            TextInput(text) => {
+                if (state.locked) {
+                    type_master(text);
+                } else {
+                    ui.type_text(text);
+                }
+            },
+            Key(code, down, mods) => {
+                bool ctrl = mods.ctrl || mods.command;
+                if (state.locked) {
+                    if (down) {
+                        key_locked(code as i32, ctrl);
+                    }
+                } else if (down && ctrl && code == 118) {  // Ctrl+V
+                    mut Arena paste = Arena.new(4 * KB);
+                    defer paste.free();
+                    ui.type_text(app.clipboard(&paste));
+                } else {
+                    ui.key(code, down, mods.shift, ctrl);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                if (state.locked) {
+                    if (in_button(x, y)) {
+                        state.submit();
+                    }
+                } else {
+                    ui.mouse_button(true);
+                }
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    // The master password is typed in the field that has the focus: the first one, or the second
+    // when the vault is created (Tab goes from one to the other).
+    void type_master(str text) {
+        if (second && state.creating) {
+            state.confirm.append(text);
+        } else {
+            state.master.append(text);
+        }
+    }
+
+    void key_locked(i32 code, bool ctrl) uses io {
+        if (code == 13) {
+            if (state.creating && !second) {
+                second = true;
+            } else {
+                state.submit();
+            }
+        } else if (code == 9) {
+            second = state.creating && !second;
+        } else if (code == 8) {
+            if (second && state.creating) {
+                state.confirm.erase_last();
+            } else {
+                state.master.erase_last();
+            }
+        } else if (ctrl && code == 118) {
+            mut Arena paste = Arena.new(4 * KB);
+            defer paste.free();
+            type_master(app.clipboard(&paste));
+        }
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        ui.clock(app.now_ms());
+        mut Arena frame = Arena.new(16 * KB);
+        defer frame.free();
+        state.update(&frame, app.now_ms() as i64);
+        paint(surface);
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        match (ui.take_copied()) {  // Ctrl+C in a field
+            some(text) => {
+                state.copied.set(text);
+                state.want_copy = true;
+                state.clear_at = state.now + model.CLIPBOARD_MS;
+            },
+            none => { },
+        }
+        if (state.want_copy) {
+            state.want_copy = false;
+            mut Arena copy = Arena.new(4 * KB);
+            defer copy.free();
+            app.set_clipboard(&copy, state.copied.text());
+        }
+        if (state.clipboard_due()) {
+            mut Arena copy = Arena.new(1 * KB);
+            defer copy.free();
+            app.set_clipboard(&copy, "");
+        }
+    }
+
+    // The place of the button of the unlock screen.
+    canvas.Rect button_rect() {
+        return canvas.Rect{ x: 320.0, y: state.creating ? 372.0 : 312.0, w: 360.0, h: 40.0 };
+    }
+
+    bool in_button(f32 x, f32 y) {
+        canvas.Rect r = button_rect();
+        return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    }
+
+    void paint(canvas.Canvas* surface) uses io {
+        surface.clear(background());
+        if (state.locked) {
+            draw_unlock(surface);
+        }
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Vault(&f, state);
+        f.finish();
+    }
+
+    void say(canvas.Canvas* surface, f32 x, f32 y, f32 size, str text, canvas.Color color) {
+        match (face) {
+            some(font) => {
+                surface.text_with(font, size, x, y, text, color);
+            },
+            none => {
+                surface.text(x, y, text, color, 1);
+            },
+        }
+    }
+
+    void field(canvas.Canvas* surface, f32 y, str label, usize count, bool focus) {
+        say(surface, 320.0, y - 22.0, 13.0, label, dim());
+        canvas.Rect box = canvas.Rect{ x: 320.0, y: y, w: 360.0, h: 36.0 };
+        surface.fill(box, canvas.Color{ r: 34, g: 37, b: 52 });
+        surface.stroke(box, focus ? canvas.Color{ r: 96, g: 140, b: 230 } : canvas.Color{ r: 70, g: 76, b: 100 }, 1.0);
+        usize shown = count > 28 ? 28 : count;
+        mut widgets.TextBuffer line = widgets.TextBuffer{ };
+        for (usize i in 0..shown) {
+            line.append("•");
+        }
+        say(surface, 332.0, y + 8.0, 18.0, line.text(), ink());
+    }
+
+    void draw_unlock(canvas.Canvas* surface) {
+        say(surface, 320.0, 150.0, 30.0, "Vault", ink());
+        say(surface, 320.0, 192.0, 14.0, state.creating ? "Choose a master password. Nothing can recover it." : "Enter the master password.", dim());
+        field(surface, 250.0, "Master password", state.master.count(), !second);
+        if (state.creating) {
+            field(surface, 322.0, "Again", state.confirm.count(), second);
+        }
+        canvas.Rect b = button_rect();
+        surface.fill(b, canvas.Color{ r: 64, g: 100, b: 190 });
+        say(surface, b.x + 140.0, b.y + 10.0, 16.0, state.creating ? "Create" : "Unlock", ink());
+        say(surface, 320.0, b.y + 56.0, 14.0, state.message.text(), canvas.Color{ r: 230, g: 120, b: 110 });
+    }
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    bool snap = args.len >= 2 && args[0] == "--snapshot";
+    str path = snap ? ":memory:" : (args.len >= 1 ? args[0] : "vault.db");
+    db.Connection* conn = match (store.open(&arena, path)) {
+        ok(c) => c,
+        err(e) => {
+            io.print("cannot open {}", path);
+            return 1;
+        },
+    };
+    defer conn.close();
+    model.Model* m = arena.new(model.Model, &arena, conn);
+    m.unix_offset = time.unix_seconds() - (app.now_ms() / 1000) as i64;
+    App* handler = arena.new(App, m);
+    match (app.read_asset(&arena, "assets/NotoSans-Regular.ttf")) {
+        some(bytes) => {
+            match (truetype.parse(&arena, bytes)) {
+                ok(font) => {
+                    handler.ui.font = some(font);
+                    handler.face = some(font);
+                },
+                err(e) => {
+                    io.print("Noto Sans is not readable: the built-in font is used");
+                },
+            }
+        },
+        none => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    if (snap) {
+        if (args.len >= 3 && args[2] == "locked") {
+            return snapshot_locked(&arena, handler, m, args[1]);
+        }
+        return snapshot(&arena, handler, m, args[1]);
+    }
+    widgets.Window window = screen.VaultConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler*);
+}
+
+void demo(model.Model* m, str title, str user, str url, str password, str totp) uses io {
+    m.new_entry();
+    m.edit.title.set(title);
+    m.edit.user.set(user);
+    m.edit.url.set(url);
+    m.edit.password.set(password);
+    m.edit.totp.set(totp);
+    m.save();
+}
+
+// The unlock screen of a new vault, in a picture.
+i32 snapshot_locked(Arena* arena, App* handler, model.Model* m, str file) uses io {
+    m.master.set("a long master");
+    m.confirm.set("a long");
+    m.say("The two passwords differ.");
+    handler.second = true;
+    mut canvas.Canvas surface = canvas.create(arena, 1000, 680);
+    handler.ui.custom_title_bar = true;
+    handler.ui.clock(0);
+    handler.paint(&surface);
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            return 0;
+        },
+        err(e) => {
+            return 1;
+        },
+    }
+}
+
+// The window in a picture, with a few accounts in a vault in memory.
+i32 snapshot(Arena* arena, App* handler, model.Model* m, str file) uses io {
+    mut Arena scratch = Arena.new(256 * KB);
+    defer scratch.free();
+    if (!store.create(&scratch, m.conn, "demo password".bytes, 2, &m.keys)) {
+        return 1;
+    }
+    m.locked = false;
+    m.creating = false;
+    demo(m, "Bank", "ada@example.org", "https://bank.example", "Xk7#mQ2vL9pRw4Tn", "JBSWY3DPEHPK3PXP");
+    demo(m, "GitHub", "ada-lovelace", "https://github.com", "correct-horse-battery", "GEZDGNBVGY3TQOJQ");
+    demo(m, "Mail", "ada@example.org", "https://mail.example", "vN8-wE3+zK5&cH2j", "");
+    demo(m, "Router", "admin", "http://192.168.1.1", "Tq4=hB7?dF9@sM3x", "");
+    m.rebuild();
+    m.chosen = 1;
+    mut canvas.Canvas surface = canvas.create(arena, 1000, 680);
+    handler.ui.custom_title_bar = true;
+    handler.ui.clock(0);
+    m.update(&scratch, 1000);
+    handler.paint(&surface);
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            io.print("written to {}", file);
+            return 0;
+        },
+        err(e) => {
+            io.print("cannot write {}", file);
+            return 1;
+        },
+    }
+}

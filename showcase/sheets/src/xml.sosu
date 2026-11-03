@@ -1,0 +1,301 @@
+// sheets.xml: a small XML reader (elements, attributes, text, entities) and the escaping to write XML.
+import std.text;
+import std.vec;
+
+// An element (its `name` is the tag, with its prefix) or, when `name` is empty, a piece of text in `value`.
+pub class Node {
+    pub str name;
+    pub mut str value;
+    pub vec.Vec<str>* keys;
+    pub vec.Vec<str>* vals;
+    pub vec.Vec<Node*>* kids;
+
+    void init(Arena* arena, keeps str name) {
+        self.name = name;
+        self.value = "";
+        self.keys = vec.new<str>(arena);
+        self.vals = vec.new<str>(arena);
+        self.kids = vec.new<Node*>(arena);
+    }
+
+    // The value of an attribute, or "" when it is missing.
+    pub str attr(str key) {
+        str[] names = self.keys.items();
+        for (usize i in 0..names.len) {
+            if (names[i] == key) {
+                return self.vals.items()[i];
+            }
+        }
+        return "";
+    }
+
+    pub bool has(str key) {
+        str[] names = self.keys.items();
+        for (usize i in 0..names.len) {
+            if (names[i] == key) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// The first child element called `name`; when there is none, an element with an empty name.
+pub Node* first(Arena* arena, Node* n, str name) {
+    Node*[] list = n.kids.items();
+    for (usize i in 0..list.len) {
+        if (list[i].name == name) {
+            return list[i];
+        }
+    }
+    return arena.new(Node, arena, "");
+}
+
+bool is_space(ui8 b) {
+    return b == 32 || b == 9 || b == 10 || b == 13;
+}
+
+// The place of the byte `b` in `s` from `from`, or the length of `s`.
+usize find_byte(str s, ui8 b, usize from) {
+    mut usize i = from;
+    while (i < s.len && s.bytes[i] != b) {
+        i += 1;
+    }
+    return i;
+}
+
+// The place of `needle` in `s` from `from`, or the length of `s`.
+usize index_of(str s, str needle, usize from) {
+    if (from + needle.len > s.len) {
+        return s.len;
+    }
+    return match (text.find_from(s, needle, from)) {
+        some(p) => p,
+        none => s.len,
+    };
+}
+
+// The place after the next `needle`, or the length of `s`.
+usize after(str s, str needle, usize from) {
+    usize p = index_of(s, needle, from);
+    return p >= s.len ? s.len : p + needle.len;
+}
+
+bool starts_at(str s, usize i, str prefix) {
+    if (i + prefix.len > s.len) {
+        return false;
+    }
+    for (usize k in 0..prefix.len) {
+        if (s.bytes[i + k] != prefix.bytes[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool blank(str s) {
+    for (ui8 b in s.bytes) {
+        if (!is_space(b)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `s` with &lt; &gt; &amp; &quot; &apos; and &#...; replaced by what they stand for.
+pub str decode(Arena* arena, str s) {
+    if (!text.contains(s, "&")) {
+        return s;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    mut usize i = 0;
+    while (i < s.len) {
+        usize amp = find_byte(s, 38, i);
+        b.push(text.slice(s, i, amp));
+        if (amp >= s.len) {
+            break;
+        }
+        usize semi = find_byte(s, 59, amp);
+        if (semi >= s.len || semi - amp > 10) {
+            b.push("&");
+            i = amp + 1;
+            continue;
+        }
+        str name = text.slice(s, amp + 1, semi);
+        if (name == "lt") {
+            b.push("<");
+        } else if (name == "gt") {
+            b.push(">");
+        } else if (name == "amp") {
+            b.push("&");
+        } else if (name == "quot") {
+            b.push("\"");
+        } else if (name == "apos") {
+            b.push("'");
+        } else if (name.len > 1 && name.bytes[0] == 35) {
+            mut ui32 code = 0;
+            bool hex = name.bytes[1] == 120;
+            ui32 radix = hex ? 16 : 10;
+            mut usize k = hex ? 2 : 1;
+            mut bool good = k < name.len;
+            while (k < name.len) {
+                ui8 d = name.bytes[k];
+                if (d >= 48 && d <= 57) {
+                    code = code * radix + (d - 48) as ui32;
+                } else if (hex && d >= 97 && d <= 102) {
+                    code = code * 16 + (d - 87) as ui32;
+                } else if (hex && d >= 65 && d <= 70) {
+                    code = code * 16 + (d - 55) as ui32;
+                } else {
+                    good = false;
+                }
+                if (code > 0x10FFFF) {
+                    good = false;
+                    code = 0;
+                }
+                k += 1;
+            }
+            if (good && code > 0 && (code < 0xD800 || code > 0xDFFF)) {
+                b.push_char(text.char_of(code));
+            }
+        } else {
+            b.push(text.slice(s, amp, semi + 1));
+        }
+        i = semi + 1;
+    }
+    return b.text();
+}
+
+// `s` written inside a text or an attribute: the characters that XML forbids are dropped.
+pub void push_escaped(text.TextBuilder* b, str s) {
+    mut usize run = 0;
+    for (usize i in 0..s.len) {
+        ui8 c = s.bytes[i];
+        mut str entity = "";
+        mut bool special = false;
+        if (c == 38) {
+            entity = "&amp;";
+            special = true;
+        } else if (c == 60) {
+            entity = "&lt;";
+            special = true;
+        } else if (c == 62) {
+            entity = "&gt;";
+            special = true;
+        } else if (c == 34) {
+            entity = "&quot;";
+            special = true;
+        } else if (c < 32 && c != 9 && c != 10 && c != 13) {
+            special = true;
+        }
+        if (special) {
+            b.push(text.slice(s, run, i));
+            b.push(entity);
+            run = i + 1;
+        }
+    }
+    b.push(text.slice(s, run, s.len));
+}
+
+void add_text(Arena* arena, vec.Vec<Node*>* stack, keeps str raw) {
+    if (blank(raw)) {
+        return;
+    }
+    Node* node = arena.new(Node, arena, "");
+    node.value = decode(arena, raw);
+    stack.items()[stack.len() - 1].kids.push(node);
+}
+
+// The element that starts at `start` (the `<`), added to the one on top of `stack`; the place after the tag.
+usize open_tag(Arena* arena, str s, usize start, vec.Vec<Node*>* stack) {
+    mut usize i = start + 1;
+    usize name_start = i;
+    while (i < s.len && !is_space(s.bytes[i]) && s.bytes[i] != 62 && s.bytes[i] != 47) {
+        i += 1;
+    }
+    Node* node = arena.new(Node, arena, text.slice(s, name_start, i));
+    mut bool closed = false;
+    while (i < s.len) {
+        while (i < s.len && is_space(s.bytes[i])) {
+            i += 1;
+        }
+        if (i >= s.len) {
+            break;
+        }
+        ui8 c = s.bytes[i];
+        if (c == 62) {
+            i += 1;
+            break;
+        }
+        if (c == 47) {
+            closed = true;
+            i += 1;
+            continue;
+        }
+        usize key_start = i;
+        while (i < s.len && s.bytes[i] != 61 && !is_space(s.bytes[i]) && s.bytes[i] != 62 && s.bytes[i] != 47) {
+            i += 1;
+        }
+        str key = text.slice(s, key_start, i);
+        while (i < s.len && is_space(s.bytes[i])) {
+            i += 1;
+        }
+        if (i < s.len && s.bytes[i] == 61) {
+            i += 1;
+            while (i < s.len && is_space(s.bytes[i])) {
+                i += 1;
+            }
+            if (i < s.len && (s.bytes[i] == 34 || s.bytes[i] == 39)) {
+                ui8 quote = s.bytes[i];
+                i += 1;
+                usize value_start = i;
+                i = find_byte(s, quote, i);
+                node.keys.push(key);
+                node.vals.push(decode(arena, text.slice(s, value_start, i)));
+                if (i < s.len) {
+                    i += 1;
+                }
+            }
+        }
+    }
+    stack.items()[stack.len() - 1].kids.push(node);
+    if (!closed) {
+        stack.push(node);
+    }
+    return i;
+}
+
+// The document as a node called "#root", which holds the root element. What is not well formed is read as far as it can be.
+pub Node* parse(Arena* arena, str s) {
+    Node* root = arena.new(Node, arena, "#root");
+    vec.Vec<Node*>* stack = vec.new<Node*>(arena);
+    stack.push(root);
+    mut usize i = 0;
+    while (i < s.len) {
+        if (s.bytes[i] != 60) {
+            usize end = find_byte(s, 60, i);
+            add_text(arena, stack, text.slice(s, i, end));
+            i = end;
+        } else if (starts_at(s, i, "<!--")) {
+            i = after(s, "-->", i + 4);
+        } else if (starts_at(s, i, "<![CDATA[")) {
+            usize end = index_of(s, "]]>", i + 9);
+            Node* node = arena.new(Node, arena, "");
+            node.value = text.slice(s, i + 9, end);
+            stack.items()[stack.len() - 1].kids.push(node);
+            i = end >= s.len ? s.len : end + 3;
+        } else if (starts_at(s, i, "<?")) {
+            i = after(s, "?>", i + 2);
+        } else if (starts_at(s, i, "<!")) {
+            i = after(s, ">", i + 2);
+        } else if (i + 1 < s.len && s.bytes[i + 1] == 47) {
+            if (stack.len() > 1) {
+                stack.remove(stack.len() - 1);
+            }
+            i = after(s, ">", i + 2);
+        } else {
+            i = open_tag(arena, s, i, stack);
+        }
+    }
+    return root;
+}

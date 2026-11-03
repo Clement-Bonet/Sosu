@@ -329,7 +329,7 @@ i32 main() uses io {
 }
 
 // The window in a picture: the folder read at once, no mouse.
-i32 snapshot(Arena* arena, App* handler, model.Model* m, str file, keeps str folder) uses io {
+i32 snapshot(Arena* arena, App* handler, model.Model* m, str file, str folder) uses io {
     mut canvas.Canvas surface = canvas.create(arena, 1100, 720);
     handler.ui.custom_title_bar = true;
     m.open(folder);

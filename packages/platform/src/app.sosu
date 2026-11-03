@@ -198,6 +198,11 @@ pub str clipboard(Arena* arena) uses io {
     return sdl.clipboard_text(arena);
 }
 
+// Opens `url` (http, https) in the browser of the system.
+pub void open_url(Arena* arena, str url) uses io {
+    sdl.open_url(arena, url);
+}
+
 // Puts `text` on the clipboard (`arena` holds its C copy).
 pub void set_clipboard(Arena* arena, str text) uses io {
     sdl.set_clipboard_text(arena, text);

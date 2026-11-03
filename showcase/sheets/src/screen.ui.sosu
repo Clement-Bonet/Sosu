@@ -1,0 +1,20 @@
+// sheets.screen: the title bar, with the buttons of the file and of the history; the toolbar, the
+// grid and the status bar are drawn by `main`, since they are not widgets.
+import sheets.editor;
+
+window Sheets(editor.Editor* e) {
+    title: "Sosu Sheets"
+    width: 1280
+    height: 800
+
+    TitleBar(height: 40, gap: 8, padding: 4) {
+        Text(e.dirty ? "Sheets *" : "Sheets")
+        Button("New", on_click: e.new_document)
+        Button("Open", on_click: e.ask_open)
+        Button("Save", on_click: e.ask_save)
+        Button("Save as", on_click: e.ask_save_as)
+        Button("CSV", on_click: e.ask_csv)
+        Button("Undo", on_click: e.undo)
+        Button("Redo", on_click: e.redo)
+    }
+}

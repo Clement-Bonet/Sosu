@@ -181,7 +181,7 @@ class Database : db.Connection {
         return run(handle, stmt);
     }
 
-    override db.Rows*!db.DbError query(Arena* arena, keeps str sql, db.Value[] params) uses io {
+    override db.Rows*!db.DbError query(Arena* arena, str sql, db.Value[] params) uses io {
         ui8* stmt = try prepared(sql);
         match (bind(stmt, params)) {
             ok => { },
@@ -193,7 +193,7 @@ class Database : db.Connection {
         return ok(arena.new(Cursor, arena, self, stmt, true, none, 0) as db.Rows*);
     }
 
-    override db.Statement*!db.DbError prepare(Arena* arena, keeps str sql) uses io {
+    override db.Statement*!db.DbError prepare(Arena* arena, str sql) uses io {
         ui8* stmt = try prepared(sql);
         return ok(arena.new(Prepared, self, stmt) as db.Statement*);
     }

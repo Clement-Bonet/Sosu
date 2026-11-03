@@ -1,0 +1,70 @@
+// vault.totp: the six digit codes of two-factor authentication (RFC 6238, with HMAC-SHA1 of RFC 4226).
+// The secret is kept as the text sites give it, in base32.
+import crypto.hmac;
+
+// The bytes of the base32 `text` (RFC 4648): upper or lower case, spaces and `=` ignored; none if a
+// character is not base32 or nothing is left.
+pub ui8[]? decode_base32(Arena* arena, str text) {
+    mut ui8[] out = arena.alloc_slice(ui8, text.len * 5 / 8 + 1);
+    mut usize count = 0;
+    mut ui32 buffer = 0;
+    mut ui32 bits = 0;
+    for (ui8 c in text.bytes) {
+        if (c == 32 || c == 61 || c == 45) {
+            continue;
+        }
+        mut ui32 v = 0;
+        if (c >= 65 && c <= 90) {
+            v = (c - 65) as ui32;
+        } else if (c >= 97 && c <= 122) {
+            v = (c - 97) as ui32;
+        } else if (c >= 50 && c <= 55) {
+            v = (c - 50) as ui32 + 26;
+        } else {
+            return none;
+        }
+        buffer = (buffer << 5 | v) & 0xFFFF;
+        bits += 5;
+        if (bits >= 8) {
+            out[count] = (buffer >> (bits - 8) & 0xFF) as ui8;
+            count += 1;
+            bits -= 8;
+        }
+    }
+    if (count == 0) {
+        return none;
+    }
+    return some(out[0..count]);
+}
+
+// The code of `secret` at the time `unix_seconds`, `digits` digits (6 to 8), in `arena`.
+pub str code(Arena* arena, ui8[] secret, i64 unix_seconds, usize digits) {
+    mut ui8[8] counter = [0; 8];
+    mut ui64 step = (unix_seconds / 30) as ui64;
+    for (usize i in 0..8) {
+        counter[7 - i] = (step & 0xFF) as ui8;
+        step = step >> 8;
+    }
+    mut ui8[20] h = hmac.with_sha1(secret, counter[0..8]);
+    usize at = (h[19] & 0x0F) as usize;
+    ui32 binary = (h[at] & 0x7F) as ui32 << 24 | h[at + 1] as ui32 << 16 | h[at + 2] as ui32 << 8 | h[at + 3] as ui32;
+    mut ui32 modulus = 1;
+    for (usize i in 0..digits) {
+        modulus *= 10;
+    }
+    mut ui32 number = binary % modulus;
+    mut ui8[] text = arena.alloc_slice(ui8, digits);
+    for (usize i in 0..digits) {
+        text[digits - 1 - i] = 48 + (number % 10) as ui8;
+        number = number / 10;
+    }
+    return match (str.from_bytes(text)) {
+        ok(s) => s,
+        err(e) => "",
+    };
+}
+
+// Seconds left before the code changes.
+pub i64 seconds_left(i64 unix_seconds) {
+    return 30 - unix_seconds % 30;
+}
