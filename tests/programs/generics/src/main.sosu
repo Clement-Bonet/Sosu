@@ -58,7 +58,7 @@ class Stack<T> {
         count = 0;
     }
 
-    pub void push(T value) {
+    pub void push(keeps T value) {
         if (count == items.len) {
             mut T[] grown = items;
             unsafe {

@@ -3063,7 +3063,7 @@ pub struct Frame {
 
     // A tooltip for the widget placed last: `text`, after 500 ms over it without moving, near the
     // mouse, above everything (drawn by `finish()`).
-    pub void tooltip(str text) {
+    pub void tooltip(keeps str text) {
         canvas.Rect r = last;
         ui64 key = last_id != 0 ? last_id : mix(r.x as ui64 * 65536 + r.y as ui64, 0x7007);
         if (!over(r)) {
@@ -3105,7 +3105,7 @@ pub struct Frame {
     // Enter on a day chooses it, Escape closes it; with the keyboard, the arrows move the day,
     // Page Up and Page Down the month. Weeks start on Monday with `monday_first`. A date typed
     // that is not valid leaves the value as it was. Returns true when the date changed.
-    pub bool date_field(Date* date, f32 width, str format, bool monday_first) {
+    pub bool date_field(keeps Date* date, f32 width, str format, bool monday_first) {
         ui64 id = take_id();
         bool open = ui.open == id;
         mut bool changed = false;
@@ -3688,7 +3688,7 @@ pub struct Frame {
     }
 
     // The same, showing `placeholder`, dimmed, while no option is chosen.
-    pub void dropdown_with(f32 width, str placeholder) {
+    pub void dropdown_with(f32 width, keeps str placeholder) {
         ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, look(Dropdown, 0).height);
@@ -3772,7 +3772,7 @@ pub struct Frame {
     // An option of the dropdown being described, drawn in its box when `chosen`; returns
     // true when it is clicked in the open list (the program then chooses it, see `Option` in
     // .ui.sosu files).
-    pub bool option(str text, bool chosen) {
+    pub bool option(keeps str text, bool chosen) {
         if (dropdown_id == 0) {
             return false;  // not in a dropdown
         }
@@ -3909,7 +3909,7 @@ pub struct Frame {
     // under it; when a menu opened by its title is open, the mouse over another title opens
     // that one instead. In a menu, it is an entry that opens the submenu beside it, when the
     // mouse is over it. Menus go 4 levels deep; deeper ones are ignored.
-    pub void menu(str title) {
+    pub void menu(keeps str title) {
         ui64 id = take_id();
         if (menu_level >= 4) {
             menu_level += 1;
@@ -4020,19 +4020,19 @@ pub struct Frame {
     }
 
     // An item of the menu being described: returns true when it is clicked.
-    pub bool menu_item(str text) {
+    pub bool menu_item(keeps str text) {
         return menu_item_with(text, "", true);
     }
 
     // The same, dimmed and never clicked unless `enabled`.
-    pub bool menu_item_enabled(str text, bool enabled) {
+    pub bool menu_item_enabled(keeps str text, bool enabled) {
         return menu_item_with(text, "", enabled);
     }
 
     // The same, with a shortcut ("Ctrl+S", "Ctrl+Shift+Z", "F5", "Delete"; "" for none), shown at
     // its right, that works even with its menu closed. A shortcut without Ctrl does nothing
     // while a text field has the keyboard, unless it is a function key.
-    pub bool menu_item_with(str text, str shortcut, bool enabled) {
+    pub bool menu_item_with(keeps str text, keeps str shortcut, bool enabled) {
         if (menu_level == 0 || menu_level > 4) {
             return false;
         }
@@ -4096,7 +4096,7 @@ pub struct Frame {
 
     // An entry of the menu being described; its rectangle. The mouse over an item closes the
     // submenus open beside.
-    canvas.Rect add_entry(str label, str key, ui8 kind, bool enabled) {
+    canvas.Rect add_entry(keeps str label, keeps str key, ui8 kind, bool enabled) {
         Popup* p = &menu_popups[menu_level - 1];
         f32 h = kind == 1 ? 9.0 : 28.0;
         canvas.Rect r = canvas.Rect{ x: p.x, y: p.y + 4.0 + p.h, w: p.w, h: h };
@@ -4971,13 +4971,13 @@ pub struct Frame {
     // one chosen, whose widgets follow; then `end_tabs()`. `chosen` binds the index of the tab
     // chosen; none: the tabs keep it. A click, the keys of the row (Left, Right, Home, End) and
     // Ctrl+Tab choose at the next frame, so that one content only is described in a frame.
-    pub void tabs(i32*? chosen) {
+    pub void tabs(keeps i32*? chosen) {
         tabs_at(chosen, Top);
     }
 
     // The same, its row of tabs on the `side` of its content: below it, the row is at the bottom of
     // the room it has, or under the content of the last frame.
-    pub void tabs_at(i32*? chosen, Side side) {
+    pub void tabs_at(keeps i32*? chosen, Side side) {
         bool bottom = match (side) {
             Bottom => true,
             _ => false,
@@ -5610,7 +5610,7 @@ pub struct Frame {
     // `selected`, a click chooses an item and gives the list the keyboard; Up, Down, Home, End,
     // Page Up and Page Down move the choice, which comes into view; the item chosen is
     // highlighted.
-    pub void list(f32 width, f32 height, i32*? selected) {
+    pub void list(f32 width, f32 height, keeps i32*? selected) {
         begin_area(List, width, height, true, selected);
     }
 
@@ -5621,7 +5621,7 @@ pub struct Frame {
     // A long list of `count` items (spec §10.9), `width` by `height`: only the items in view are
     // described, those from `first_shown()` to `last_shown()` excluded, each as high as the first
     // one; then `end_list()`.
-    pub void list_of(i32 count, f32 width, f32 height_of, i32*? selected) {
+    pub void list_of(i32 count, f32 width, f32 height_of, keeps i32*? selected) {
         ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
@@ -5632,7 +5632,7 @@ pub struct Frame {
     // The next list or table allows several choices, kept in `chosen` (spec §10.10): Ctrl and a click
     // add or remove an item, Shift and a click extend from the anchor, Up and Down (with Shift:
     // extending), Ctrl+A for all, Space to add or remove the item of the keyboard.
-    pub void multiple(Selection* chosen) {
+    pub void multiple(keeps Selection* chosen) {
         next_multi = some(chosen);
     }
 
@@ -5710,7 +5710,7 @@ pub struct Frame {
     // `table_cell()`, then `end_table()`, true when a row was activated (Enter, a double click).
     // Rows are chosen as the items of a list; `sort`, when given, is set by a click on the title
     // of a sortable column (again: descending); the border between two titles can be dragged.
-    pub void table(i32 count, f32 width, f32 height_of, i32*? selected, Sort*? sort) {
+    pub void table(i32 count, f32 width, f32 height_of, keeps i32*? selected, keeps Sort*? sort) {
         ensure_cell();
         ui64 id = take_id();
         take_styles();
@@ -5721,7 +5721,7 @@ pub struct Frame {
 
     // A column of the table being described, 16 at most: its title, its width (pixels, `Auto`,
     // `Fill`), whether a click on its title sorts by it, and where its cells are aligned.
-    pub void table_column(str title, Size size, bool sortable, Align align) {
+    pub void table_column(keeps str title, Size size, bool sortable, Align align) {
         usize k = table_build.columns;
         if (k < 16) {
             table_build.titles[k] = title;
@@ -5901,7 +5901,7 @@ pub struct Frame {
     // (`leaf`), indented by their depth, until `end_tree()`. With `selected`, the index of the
     // item chosen among those shown; Up and Down move it, Right opens a branch or goes to its
     // first child, Left closes it or goes to its parent, Enter clicks a leaf.
-    pub void tree(f32 width, f32 height, i32*? selected) {
+    pub void tree(f32 width, f32 height, keeps i32*? selected) {
         begin_area(Tree, width, height, true, selected);
         if (layouts[depth].is_list) {
             layouts[depth].tree = true;
@@ -6007,7 +6007,7 @@ pub struct Frame {
     // A long tree (spec §10.10): `count` rows, a tree the program flattened into the rows it shows;
     // only those in view are described, `first_shown()` to `last_shown()`, each after `tree_row`,
     // then `end_tree()`.
-    pub void tree_of(i32 count, f32 width, f32 height_of, i32*? selected) {
+    pub void tree_of(i32 count, f32 width, f32 height_of, keeps i32*? selected) {
         list_of(count, width, height_of, selected);
         if (layouts[depth].is_list) {
             layouts[depth].tree = true;
@@ -6236,7 +6236,7 @@ pub struct Frame {
         }
     }
 
-    void begin_area(Kind kind, f32 width, f32 height_of, bool is_list, i32*? selected) {
+    void begin_area(Kind kind, f32 width, f32 height_of, bool is_list, keeps i32*? selected) {
         ui64 id = take_id();
         take_styles();
         canvas.Rect r = place(width, height_of);
@@ -6247,7 +6247,7 @@ pub struct Frame {
     // The area `r` of a `Scroll`, a list or a table: with `count` >= 0, a long list of that many items
     // as high as the first one, of which only those in view are described (`first_shown` to
     // `last_shown`).
-    void open_area(ui64 id, Kind kind, canvas.Rect r, bool is_list, i32*? selected, i32 count) {
+    void open_area(ui64 id, Kind kind, canvas.Rect r, bool is_list, keeps i32*? selected, i32 count) {
         Selection*? multi = next_multi;  // `multiple`: several items can be chosen
         next_multi = none;
         bool reorder = next_reorder;
@@ -8352,7 +8352,7 @@ test "a long list: 100 000 items, only those in view described" {
 
 // A table of 50 files, 3 columns (Name: Fill, Size: 100 aligned at the end, Kind: Auto), for the
 // test below; `cells` gets the rectangles of the cells of its first row. Returns its activation.
-bool table_frame(Ui* ui, canvas.Canvas* surface, i32* row, Sort* sort, canvas.Rect[3]* cells) {
+bool table_frame(Ui* ui, canvas.Canvas* surface, keeps i32* row, keeps Sort* sort, canvas.Rect[3]* cells) {
     mut Frame f = begin(ui, surface, 0.0, 0.0);
     f.table(50, 400.0, 200.0, some(row), some(sort));
     f.table_column("Name", Fill(1.0), true, Start);

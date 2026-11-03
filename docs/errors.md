@@ -114,7 +114,12 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0369 | invalid lambda | `auto g = (x) => x;` (the type of `x` is unknown), `n = x` in a lambda that captured `n`, a captured `Arena` (spec §5.5) |
 | E0370 | a lambda that captures variables leaves its function | `return (i32 x) => x + k;`, `S{ h: (x) => x + k }`, `g = (x) => x + k;`, a C function that takes a function used as a value (spec §5.5) |
 | E0371 | a returned pointer or view would point into the function | `return &x;` on a local or a parameter, `return &p.v;` on a local struct, `return a[0..2];` on a local array, also in `some(...)`, a literal or `?:`, or a variable that was given one (`p = &x; return p;`, `h.p = &x; return h;`) (spec §7.7); a pointer stored in memory that lasts longer is not followed |
-| E0372 | memory of a local arena used after its `free()` (a warning for now, spec §6.1) | `N* p = a.alloc(N); a.free(); return p.v;`, also through a variable or a struct that was given it, a free in a branch, or `defer a.free();` in an inner block whose pointer is kept outside |
+| E0372 | memory of a local arena used after its `free()` (spec §6.1) | `N* p = a.alloc(N); a.free(); return p.v;`, also through a variable or a struct that was given it, a free in a branch, or `defer a.free();` in an inner block whose pointer is kept outside |
+| E0373 | a returned value holds memory of a local arena (spec §6.1) | `Arena a = Arena.new(64); return a.alloc(N);`, also through a variable, a literal, `some(...)` or `?:`; not when the arena is returned with it (`return Doc{ arena: a, root: r };`, `return a.new(Counter, a);`) |
+| E0374 | a pointer stored where it may outlive what it points to (spec §6.1) | `h.n = some(a.alloc(N));` for a parameter `H* h` and a local arena `a`, `h.n = some(&x);`, memory of a local arena stored in another arena, memory of one `Arena*` parameter stored in another; also into `self` in a method, and what `a.closure(...)` captures |
+| E0375 | memory that ends sooner given to a `keeps` parameter (spec §6.1) | `put(h, a.alloc(N))` for `void put(H* h, keeps N* p)` and a local arena `a`, `put(h, &x)`, `b.set(a.alloc(N))`, `a.new(C, t.alloc(N))` whose `init` keeps it |
+| E0376 | a parameter stored beyond the call without `keeps` (spec §6.1) | `void f(H* h, N* q) { h.n = some(q); }`, `put(h, q)` with `q` not `keeps`, a closure of `a.closure(...)` that captures it |
+| E0377 | invalid `arena.closure` | `a.closure(5)`, `a.closure(f)` for a function in a variable: it takes a lambda written there (spec §6.1) |
 
 ## Code generation
 

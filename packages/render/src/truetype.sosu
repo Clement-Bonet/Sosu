@@ -476,7 +476,7 @@ pub class Font {
     // The font of the characters this one does not have (spec §10.10): none, or the next font.
     pub mut Font*? fallback;
 
-    void init(ui8[] data, Tables tables) {
+    void init(keeps ui8[] data, Tables tables) {
         self.data = data;
         t = tables;
         images = Arena.new(256 * KB);
@@ -786,7 +786,7 @@ pub class Font {
 }
 
 // A font from the bytes of a .ttf file, which must live as long as it.
-pub Font*!FontError parse(Arena* arena, ui8[] data) {
+pub Font*!FontError parse(Arena* arena, keeps ui8[] data) {
     ui32 version = u32_at(data, 0);
     if (data.len < 12 || version != 0x00010000 && version != 0x74727565) {  // 1.0, or "true"
         return err(NotTrueType);

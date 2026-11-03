@@ -20,7 +20,7 @@ class App : app.Handler {
     mut widgets.Ui ui;
     state.Demo* s;
 
-    void init(state.Demo* s) {
+    void init(keeps state.Demo* s) {
         ui = widgets.Ui{ };
         self.s = s;
     }

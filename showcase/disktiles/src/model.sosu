@@ -93,7 +93,7 @@ pub class Model {
     }
 
     // Starts reading `path`, in place of what was read.
-    pub void open(str path) uses io {
+    pub void open(keeps str path) uses io {
         scan_arena.free();
         scan_arena = Arena.new(1 * MB);
         root = text.repeat(&scan_arena, path, 1);

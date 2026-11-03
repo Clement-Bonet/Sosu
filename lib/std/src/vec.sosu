@@ -34,7 +34,7 @@ pub class Vec<T> {
         data = grown;
     }
 
-    pub void push(T value) {
+    pub void push(keeps T value) {
         reserve(count + 1);
         data[count] = value;
         count += 1;
@@ -62,12 +62,12 @@ pub class Vec<T> {
         return &items()[i];
     }
 
-    pub void set(usize i, T value) {
+    pub void set(usize i, keeps T value) {
         items()[i] = value;
     }
 
     // Puts `value` before the element `i` (`i == len()`: at the end).
-    pub void insert(usize i, T value) {
+    pub void insert(usize i, keeps T value) {
         assert(i <= count);
         reserve(count + 1);
         for (mut usize j = count; j > i; j -= 1) {

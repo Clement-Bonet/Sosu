@@ -72,7 +72,7 @@ class Reader {
     mut usize at;
     pub mut bool bad;
 
-    void init(ui8[] data) {
+    void init(keeps ui8[] data) {
         self.data = data;
         at = 0;
         bad = false;

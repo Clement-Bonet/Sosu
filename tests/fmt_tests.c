@@ -27,6 +27,7 @@ static void expect_format(const char *input, const char *expected) {
 static void test_canonical(void) {
     expect_format("struct  P{f32 x;f32 y;}", "struct P {\n    f32 x;\n    f32 y;\n}\n");
     expect_format("void f(){}", "void f() { }\n");
+    expect_format("void f(  keeps  T* x,mut keeps str s){}", "void f(keeps T* x, mut keeps str s) { }\n");
     expect_format("i32 f(){return (a+b)*c-(d-e);}", "i32 f() {\n    return (a + b) * c - (d - e);\n}\n");
     expect_format("i32 f(){return ((a*b))+(c);}", "i32 f() {\n    return a * b + c;\n}\n");
     expect_format("void f(){auto x=-(y as f32);auto p=(q as ui8*)+1;auto z=(a<b)==c;}",

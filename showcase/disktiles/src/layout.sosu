@@ -33,25 +33,23 @@ pub f32 HEADER = 14.0;
 pub class Layout {
     pub vec.Vec<Tile>* tiles;
     mut scan.Tree* tree;
-    mut Arena* scratch;
 
     void init(Arena* arena) {
         tiles = vec.new<Tile>(arena);
         tree = scan.scan(arena, "");  // replaced by `build`
-        scratch = arena;
     }
 
     // The tiles of the node `root` in a rectangle; the first is the node itself.
-    pub void build(scan.Tree* tree, i32 root, f32 x, f32 y, f32 w, f32 h) {
+    pub void build(keeps scan.Tree* tree, i32 root, f32 x, f32 y, f32 w, f32 h) {
         self.tree = tree;
         tiles.clear();
         mut Arena work = Arena.new(64 * KB);
         defer work.free();
-        scratch = &work;
-        place(root, x, y, w, h, 0);
+        place(&work, root, x, y, w, h, 0);
     }
 
-    void place(i32 index, f32 x, f32 y, f32 w, f32 h, i32 depth) {
+    // `scratch` holds what one call of `build` needs, and ends with it.
+    void place(Arena* scratch, i32 index, f32 x, f32 y, f32 w, f32 h, i32 depth) {
         scan.Node* n = tree.nodes.at(index as usize);
         usize slot = tiles.len();
         tiles.push(Tile{ node: index, x: x, y: y, w: w, h: h, depth: depth, leaf: true, kind: n.dir ? 0 : category(scratch, n.name) });
@@ -87,10 +85,10 @@ pub class Layout {
         }
         sort.sort_by(entries, (Entry a, Entry b) => a.size > b.size);
         tiles.at(slot).leaf = false;
-        squarify(entries, n.size, ix, iy, iw, ih, depth + 1);
+        squarify(scratch, entries, n.size, ix, iy, iw, ih, depth + 1);
     }
 
-    void squarify(Entry[] items, i64 total, f32 x0, f32 y0, f32 w0, f32 h0, i32 depth) {
+    void squarify(Arena* scratch, Entry[] items, i64 total, f32 x0, f32 y0, f32 w0, f32 h0, i32 depth) {
         f32 scale = w0 * h0 / total as f32;  // pixels of area for one byte
         mut f32 x = x0;
         mut f32 y = y0;
@@ -125,7 +123,7 @@ pub class Layout {
                 mut f32 cy = y;
                 for (usize k in i..j) {
                     f32 ch = items[k].size as f32 * scale / cw;
-                    place(items[k].node, x, cy, cw, ch, depth);
+                    place(scratch, items[k].node, x, cy, cw, ch, depth);
                     cy += ch;
                 }
                 x += cw;
@@ -135,7 +133,7 @@ pub class Layout {
                 mut f32 cx = x;
                 for (usize k in i..j) {
                     f32 cw = items[k].size as f32 * scale / rh;
-                    place(items[k].node, cx, y, cw, rh, depth);
+                    place(scratch, items[k].node, cx, y, cw, rh, depth);
                     cx += cw;
                 }
                 y += rh;

@@ -14,7 +14,7 @@ class App : app.Handler {
     mut widgets.Ui ui;
     state.Form* form;
 
-    void init(state.Form* form) {
+    void init(keeps state.Form* form) {
         ui = widgets.Ui{ };
         self.form = form;
     }

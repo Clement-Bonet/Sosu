@@ -635,6 +635,7 @@ static void fmt_params(Fmt *f, const Param *params, size_t count) {
     for (size_t i = 0; i < count; i++) {
         if (i) put(f, ", ");
         if (params[i].is_mut) put(f, "mut ");
+        if (params[i].is_keeps) put(f, "keeps ");
         fmt_type(f, params[i].type);
         put(f, " ");
         put_name(f, params[i].name);

@@ -302,7 +302,7 @@ class Screen {
     mut canvas.Canvas surface;
     mut sdl_c.SDL_Texture*? texture;
 
-    void init(Handler* handler, sdl_c.SDL_Renderer* renderer) {
+    void init(keeps Handler* handler, keeps sdl_c.SDL_Renderer* renderer) {
         self.handler = handler;
         self.renderer = renderer;
         pixels = Arena.new(1 * KB);

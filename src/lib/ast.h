@@ -217,6 +217,7 @@ struct Stmt {
 
 struct Param {
     bool is_mut;
+    bool is_keeps; /* `keeps`: the function may store it beyond the call (spec §6.1, rule 4) */
     TypeExpr *type;
     Name name;
 };
