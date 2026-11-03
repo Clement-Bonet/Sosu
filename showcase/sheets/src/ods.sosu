@@ -207,7 +207,7 @@ void push_color(text.TextBuilder* b, ui32 argb) {
     str digits = "0123456789abcdef";
     b.push("#");
     for (i32 k in 0..6) {
-        ui32 d = (argb >> ((5 - k) * 4) as ui32) & 15;
+        ui32 d = argb >> ((5 - k) * 4) as ui32 & 15;
         b.push(text.slice(digits, d as usize, d as usize + 1));
     }
 }
@@ -671,7 +671,7 @@ f64 duration_seconds(str s) {
         if (c == 84) {
             in_time = true;
             start = i + 1;
-        } else if (c == 68 || c == 72 || (c == 77 && in_time) || c == 83) {
+        } else if (c == 68 || c == 72 || c == 77 && in_time || c == 83) {
             f64 x = match (text.parse_f64(text.slice(s, start, i))) {
                 ok(v) => v,
                 err(e) => 0.0,
@@ -923,17 +923,7 @@ class Reader {
             some(x) => x,
             none => Fmt{ fmt: 0, dec: -1 },
         };
-        mut Item it = Item{
-            col: col,
-            raw: "",
-            flags: (look.bold == 1 ? calc.FLAG_BOLD : 0) | (look.italic == 1 ? calc.FLAG_ITALIC : 0) | (look.underline == 1 ? calc.FLAG_UNDERLINE : 0),
-            align: look.align > 0 ? look.align : 0,
-            fmt: f.fmt,
-            dec: f.dec,
-            fg: look.fg > 0 ? look.fg as ui32 : 0,
-            bg: look.bg > 0 ? look.bg as ui32 : 0,
-            keep: false,
-        };
+        mut Item it = Item{ col: col, raw: "", flags: (look.bold == 1 ? calc.FLAG_BOLD : 0) | (look.italic == 1 ? calc.FLAG_ITALIC : 0) | (look.underline == 1 ? calc.FLAG_UNDERLINE : 0), align: look.align > 0 ? look.align : 0, fmt: f.fmt, dec: f.dec, fg: look.fg > 0 ? look.fg as ui32 : 0, bg: look.bg > 0 ? look.bg as ui32 : 0, keep: false };
         str kind = n.attr("office:value-type");
         str formula = n.attr("table:formula");
         if (kind == "percentage" && it.fmt == 0) {

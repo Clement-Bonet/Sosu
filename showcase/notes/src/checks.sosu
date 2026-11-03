@@ -127,13 +127,25 @@ test "renaming a note rewrites the links to it" {
 test "a folder chosen replaces the notes shown" {
     mut Arena arena = Arena.new(256 * KB);
     defer arena.free();
+    // The test goes through the file of the real program, in the current folder: it gives it back.
+    mut str? remembered = none;
+    match (io.read_file(&arena, notes.LOCATION)) {
+        ok(body) => {
+            remembered = some(body);
+        },
+        err(e) => { },
+    }
     match (fs.create_dirs(&arena, "check-one")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-one/A.md", "# A\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     notes.Notes* m = arena.new(notes.Notes, &arena, "check-one");
     assert(m.find_exact("A") >= 0);
@@ -143,8 +155,12 @@ test "a folder chosen replaces the notes shown" {
     assert(m.find_exact("A") < 0);
     assert(!m.open);
     match (io.read_file(&arena, notes.LOCATION)) {
-        ok(body) => { assert(body == "check-two/Sub"); },
-        err(e) => { assert(false); },
+        ok(body) => {
+            assert(body == "check-two/Sub");
+        },
+        err(e) => {
+            assert(false);
+        },
     }
     m.free();
     for (str d in ["check-one", "check-two"]) {
@@ -152,6 +168,24 @@ test "a folder chosen replaces the notes shown" {
             ok() => { },
             err(e) => { },
         }
+    }
+    match (remembered) {
+        some(body) => {
+            match (io.write_file(&arena, notes.LOCATION, body)) {
+                ok() => { },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        },
+        none => {
+            match (fs.remove_file(&arena, notes.LOCATION)) {
+                ok() => { },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        },
     }
 }
 
@@ -161,15 +195,21 @@ test "a rename moves a note to a group and fixes the links" {
     str root = "check-notes";
     match (fs.create_dirs(&arena, root)) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-notes/A.md", "# A\nsee [[B]]\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-notes/B.md", "# B\nback to [[A]]\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     notes.Notes* m = arena.new(notes.Notes, &arena, root);
     m.load("B");
@@ -178,12 +218,20 @@ test "a rename moves a note to a group and fixes the links" {
     m.rename();
     assert(m.current.text() == "Work/Deep/B2");
     match (io.read_file(&arena, "check-notes/A.md")) {
-        ok(body) => { assert(body == "# A\nsee [[Work/Deep/B2]]\n"); },
-        err(e) => { assert(false); },
+        ok(body) => {
+            assert(body == "# A\nsee [[Work/Deep/B2]]\n");
+        },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.read_file(&arena, "check-notes/Work/Deep/B2.md")) {
-        ok(body) => { assert(body == "# B\nback to [[A]]\n"); },
-        err(e) => { assert(false); },
+        ok(body) => {
+            assert(body == "# B\nback to [[A]]\n");
+        },
+        err(e) => {
+            assert(false);
+        },
     }
     m.group.set("Work");
     m.new_folder();
@@ -220,15 +268,21 @@ test "a folded group hides its notes in the tree" {
     str root = "check-tree";
     match (fs.create_dirs(&arena, "check-tree/G")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-tree/G/N.md", "# N\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-tree/Top.md", "# Top\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     notes.Notes* m = arena.new(notes.Notes, &arena, root);
     assert(m.rows() == 3);
@@ -253,15 +307,21 @@ test "renaming a group moves its notes and fixes the links" {
     str root = "check-group";
     match (fs.create_dirs(&arena, "check-group/Old")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-group/Old/N.md", "# N\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     match (io.write_file(&arena, "check-group/Top.md", "see [[Old/N]]\n")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     notes.Notes* m = arena.new(notes.Notes, &arena, root);
     m.chosen = 0;
@@ -272,8 +332,12 @@ test "renaming a group moves its notes and fixes the links" {
     assert(m.find_exact("New/N") >= 0);
     assert(m.find_exact("Old/N") < 0);
     match (io.read_file(&arena, "check-group/Top.md")) {
-        ok(body) => { assert(body == "see [[New/N]]\n"); },
-        err(e) => { assert(false); },
+        ok(body) => {
+            assert(body == "see [[New/N]]\n");
+        },
+        err(e) => {
+            assert(false);
+        },
     }
     assert(!fs.exists(&arena, "check-group/Old"));
     m.free();
@@ -293,7 +357,7 @@ str dump(Arena* arena, str line) {
         b.push_i64(s.style as i64);
         b.push(":");
         b.push(text.slice(line, s.from, s.to));
-        if ((s.style & md.LINK) != 0) {
+        if (s.style & md.LINK != 0) {
             b.push(">");
             b.push(text.slice(line, s.link_from, s.link_to));
         }
@@ -348,7 +412,7 @@ test "web links, tables and the six levels of headings" {
     assert(out.at(1).style == md.LINK);
     assert(text.slice(line, out.at(1).from, out.at(1).to) == "site");
     assert(text.slice(line, out.at(1).link_from, out.at(1).link_to) == "https://x.org/p");
-    assert(out.at(3).style == (md.LINK | md.BOLD));
+    assert(out.at(3).style == md.LINK | md.BOLD);
     assert(text.slice(line, out.at(3).link_from, out.at(3).link_to) == "http://y");
     vec.Vec<md.Span>* open = vec.new<md.Span>(&arena);
     md.spans("[no link] and [a]b", 0, open);
@@ -375,7 +439,9 @@ test "the font cycles through the families of the program" {
     defer arena.free();
     match (fs.create_dirs(&arena, "check-font")) {
         ok() => { },
-        err(e) => { assert(false); },
+        err(e) => {
+            assert(false);
+        },
     }
     notes.Notes* m = arena.new(notes.Notes, &arena, "check-font");
     assert(m.family() == 0);
@@ -429,12 +495,15 @@ usize at_or_end(str s, str needle, usize from) {
 
 test "the examples of the CommonMark specification" {
     mut Arena arena = Arena.new(64 * KB);
+    // From this folder, or from the root of the repository (`make test`).
     mut str all = "";
-    match (io.read_file(&arena, "spec/spec.txt")) {
-        ok(body) => {
-            all = body;
-        },
-        err(x) => {},
+    for (str path in ["spec/spec.txt", "showcase/notes/spec/spec.txt"]) {
+        match (io.read_file(&arena, path)) {
+            ok(body) => {
+                all = body;
+            },
+            err(x) => { },
+        }
     }
     assert(all.len > 0);
     mut usize pos = 0;

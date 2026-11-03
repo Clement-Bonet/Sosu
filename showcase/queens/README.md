@@ -1,32 +1,35 @@
 # Queens
 
-Le casse-tête des reines, écrit en Sosu. Le plateau est découpé en autant de régions colorées qu'il a de lignes : il faut y poser une reine par ligne, par colonne et par région, sans que deux reines se touchent, même par un coin.
+The puzzle of the queens, written in [Sosu](https://github.com/Clement-Bonet/Sosu). The board is cut into as many coloured regions as it has rows: put one queen in each row, each column and each region, with no two queens touching, not even by a corner.
 
 ![Queens](screenshot.png)
 
-## Utilisation
+## How to play
 
-- Boutons **5** à **10** : la longueur du côté (une nouvelle partie commence).
-- **New game** : une nouvelle grille. **Clear** : vide le plateau. **Solution** : affiche la solution.
-- Clic gauche sur une case : croix (note « pas de reine ici »), puis reine, puis case vide.
-- Clic droit : pose ou retire une croix.
-- Clavier : `N` nouvelle partie, `C` vider, `S` solution, `Échap` quitter.
-- Le chronomètre démarre au premier clic et s'arrête quand la grille est résolue ou que la solution est affichée.
-- Les reines qui se gênent sont en rouge.
+- Buttons **5** to **10**: the length of a side (a new game starts).
+- **New game**: a new grid. **Clear**: empties the board. **Solution**: shows the solution.
+- Left click on a square: a cross (a note that says "no queen here"), then a queen, then empty.
+- Right click: puts or takes off a cross.
+- Keyboard: `N` new game, `C` clear, `S` solution, `Escape` quit.
+- The clock starts at the first click, and stops when the grid is solved or the solution is shown.
+- Queens that conflict are drawn in red.
 
-## Les grilles
+## The grids
 
-Chaque grille n'a qu'**une seule solution**. Le générateur (`src/board.sosu`) place des reines au hasard, fait grandir une région autour de chacune, puis déplace des cases d'une région à l'autre tant que cela ne crée pas de solutions en plus, jusqu'à n'en garder qu'une (comptée par un retour sur trace).
+Each grid has **one solution only**. The generator (`src/board.sosu`) places queens at random, grows a region around each one, then moves squares from one region to another as long as this adds no solution, until only one is left (counted by backtracking).
 
-## Fichiers
+## Build
 
-- `src/board.sosu` : les règles, sans fenêtre (génération, solveur, conflits, victoire).
-- `src/main.sosu` : la fenêtre, les boutons, le dessin.
-- `src/checks.sosu` : les tests (`sosuc test .`).
-- `assets/` : Noto Sans et Font Awesome Free, sous licence SIL OFL (`OFL.txt`, `FontAwesome-LICENSE.txt`).
+From this folder, with `sosuc` built at the root of the repository:
 
 ```
-sosuc test .
-sosuc run .
-.\build\queens.exe --snapshot out.png
+..\..\packages\platform\fetch-sdl3.ps1   # once, on Windows
+..\..\build\sosuc.exe test .
+..\..\build\sosuc.exe run .
 ```
+
+`.\build\queens.exe --snapshot out.png` writes the window in a picture. The fonts (`assets/`, Noto Sans and Font Awesome Free, SIL OFL, in `OFL.txt` and `FontAwesome-LICENSE.txt`) are read from `assets/`.
+
+## Files
+
+`src/board.sosu` (the rules, with no window: generator, solver, conflicts, victory), `src/main.sosu` (window, buttons, drawing), `src/checks.sosu` (tests).

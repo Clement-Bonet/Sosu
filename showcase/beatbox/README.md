@@ -24,12 +24,12 @@ opens as a dialog. A window made lower on the desktop shrinks the same way. Buil
 100 ms there, and the sound has to be mixed further in advance.
 
 Click a step to toggle it, its speaker button to mute a track. The list of a track changes its instrument. Click the note of
-a track to select it, then a key of the piano (C2 to C4) to change its note; the note is played at once.
+a track to select it, then a key of the piano (C2 to C4) to change its note; the note is played at once. A track is removed with its trash button.
 Space plays and pauses, Escape quits.
 
 The fonts (`assets/NotoSans-Regular.ttf`, SIL OFL, and `assets/fa-solid-900.ttf`, Font Awesome Free, SIL OFL, for
 the icons) are read from `assets/` when run from the project, or from beside the executable: to run
-`build/beatbox.exe` elsewhere, copy both fonts next to it, with `SDL3.dll`. A track is removed with its trash button.
+`build/beatbox.exe` elsewhere, copy both fonts next to it, with `SDL3.dll`.
 
 ## How it works
 
@@ -48,8 +48,10 @@ restarts; only a new tempo restarts it.
 
 ## Checked and not checked
 
-Checked in a Linux container (SDL dummy drivers): type checking, build, 5 tests, the window drawn by
-`--snapshot`, and the program running for several seconds without a fault.
+Checked: type checking, build and the 10 tests, on Windows, and by the CI on Linux and macOS (SDL dummy
+drivers); the window drawn by `--snapshot`; the program on an Android phone, built with `--release` (the
+sound, the dialog of its lists, landscape).
 
-Not checked: the sound through a real device (timing, level, the pans), the playhead against the audible
-beat (it follows the system clock, not the audio clock), Windows and macOS.
+Not measured: the timing, the level and the pans of the sound, and the playhead against the audible beat
+(it follows the system clock, not the audio clock). The window and the sound were not tried on Linux and
+macOS.

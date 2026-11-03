@@ -242,7 +242,7 @@ i32 main() uses io, time {
     defer arena.free();
     str[] args = os.args(&arena);
     bool snap = args.len >= 2 && args[0] == "--snapshot";
-    str path = snap ? ":memory:" : (args.len >= 1 ? args[0] : "vault.db");
+    str path = snap ? ":memory:" : args.len >= 1 ? args[0] : "vault.db";
     db.Connection* conn = match (store.open(&arena, path)) {
         ok(c) => c,
         err(e) => {

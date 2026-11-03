@@ -153,15 +153,13 @@ class App : app.Handler, app.TitleBar {
                     state.begin_rename();
                 } else if (down && code == 27 && state.renaming) {
                     state.cancel_rename();
-                } else if (down && ac_open && doc_focus && complete_key(code)) {
-                } else if (down && ctrl && doc_focus && code == 98) {  // Ctrl+B
+                } else if (down && ac_open && doc_focus && complete_key(code)) { } else if (down && ctrl && doc_focus && code == 98) {  // Ctrl+B
                     apply(0);
                 } else if (down && ctrl && doc_focus && code == 105) {  // Ctrl+I
                     apply(1);
                 } else if (down && ctrl && doc_focus && code == 107) {  // Ctrl+K
                     apply(9);
-                } else if (down && !ctrl && doc_focus && code == 13 && continue_list()) {
-                } else if (down && ctrl && code == 118) {  // Ctrl+V
+                } else if (down && !ctrl && doc_focus && code == 13 && continue_list()) { } else if (down && ctrl && code == 118) {  // Ctrl+V
                     mut Arena paste = Arena.new(64 * KB);
                     defer paste.free();
                     ui.type_text(app.clipboard(&paste));
@@ -191,7 +189,7 @@ class App : app.Handler, app.TitleBar {
                 mouse_y = y;
                 if (dragging) {
                     f32 share = (x - SIDE - MARGIN / 2.0) / (room - MARGIN);
-                    split = share < 0.2 ? 0.2 : (share > 0.8 ? 0.8 : share);
+                    split = share < 0.2 ? 0.2 : share > 0.8 ? 0.8 : share;
                 }
                 ui.mouse_move(x, y);
             },
@@ -216,8 +214,8 @@ class App : app.Handler, app.TitleBar {
             },
             Release(x, y, button) => {
                 dragging = false;
-        tip_at = -1;
-        tip_since = 0;
+                tip_at = -1;
+                tip_since = 0;
                 ui.mouse_move(x, y);
                 ui.mouse_button(false);
             },
@@ -503,7 +501,7 @@ class App : app.Handler, app.TitleBar {
         str d = state.doc.text();
         bool single = open.len == 1;
         mut bool on = from >= open.len && to + close.len <= d.len && text.slice(d, from - open.len, from) == open && text.slice(d, to, to + close.len) == close;
-        if (on && single && ((from >= 2 && d.bytes[from - 2] == d.bytes[from - 1]) || (to + 1 < d.len && d.bytes[to + 1] == d.bytes[to]))) {
+        if (on && single && (from >= 2 && d.bytes[from - 2] == d.bytes[from - 1] || to + 1 < d.len && d.bytes[to + 1] == d.bytes[to])) {
             on = false;  // "*" inside "**"
         }
         if (on) {
@@ -785,12 +783,12 @@ class App : app.Handler, app.TitleBar {
 
     // The face for a style, when the program has the real one: bold, italic, bold italic.
     truetype.Font*? styled_face(i32 style) {
-        bool b = (style & md.BOLD) != 0;
-        bool i = (style & md.ITALIC) != 0;
-        if (!styled || (style & md.CODE) != 0 || (!b && !i)) {
+        bool b = style & md.BOLD != 0;
+        bool i = style & md.ITALIC != 0;
+        if (!styled || style & md.CODE != 0 || !b && !i) {
             return none;
         }
-        return b && i ? face_bi : (b ? face_b : face_i);
+        return b && i ? face_bi : b ? face_b : face_i;
     }
 
     f32 width_styled(str words, f32 size, i32 style) {
@@ -864,21 +862,21 @@ class App : app.Handler, app.TitleBar {
         i32 look = heavy ? style | md.BOLD : style;
         f32 w = width_styled(piece, size, look);
         f32 lh = size * 1.5;
-        bool is_link = (style & md.LINK) != 0;
+        bool is_link = style & md.LINK != 0;
         mut canvas.Color color = tint;
-        if ((style & md.ITALIC) != 0) {
+        if (style & md.ITALIC != 0) {
             color = canvas.Color{ r: 206, g: 176, b: 255 };
         }
-        if ((style & md.CODE) != 0) {
+        if (style & md.CODE != 0) {
             surface.fill(canvas.Rect{ x: cx - 1.0, y: cy, w: w + 2.0, h: lh - 2.0 }, code_back());
             color = code_ink();
         } else if (is_link) {
-            color = (style & md.ITALIC) != 0 ? canvas.Color{ r: 170, g: 175, b: 255 } : accent();
+            color = style & md.ITALIC != 0 ? canvas.Color{ r: 170, g: 175, b: 255 } : accent();
         }
-        if ((deco & 2) != 0) {
+        if (deco & 2 != 0) {
             surface.fill(canvas.Rect{ x: cx, y: cy, w: w, h: lh - 2.0 }, canvas.Color{ r: 98, g: 84, b: 28 });
         }
-        if ((deco & 8) != 0) {
+        if (deco & 8 != 0) {
             surface.fill(canvas.Rect{ x: cx - 1.0, y: cy + 1.0, w: w + 2.0, h: lh - 4.0 }, canvas.Color{ r: 46, g: 54, b: 104 });
         }
         match (styled_face(look)) {
@@ -887,12 +885,12 @@ class App : app.Handler, app.TitleBar {
             },
             none => {
                 say(surface, cx, cy + size * 0.1, size, piece, color);
-                if ((look & md.BOLD) != 0) {
+                if (look & md.BOLD != 0) {
                     say(surface, cx + 0.7, cy + size * 0.1, size, piece, color);
                 }
             },
         }
-        if ((deco & 1) != 0) {
+        if (deco & 1 != 0) {
             surface.fill(canvas.Rect{ x: cx, y: cy + lh * 0.45, w: w, h: 1.0 }, color);
         }
         if (is_link) {
@@ -934,8 +932,7 @@ class App : app.Handler, app.TitleBar {
                 w += 6.0;
             } else if (k == cm.Kind.Link || k == cm.Kind.Image || k == cm.Kind.Strike || k == cm.Kind.Highlight) {
                 w += measure(c, size, style);
-            } else if (k == cm.Kind.Comment || k == cm.Kind.HardBreak) {
-            } else {
+            } else if (k == cm.Kind.Comment || k == cm.Kind.HardBreak) { } else {
                 w += width_styled(nd(c).lit, size, style);
             }
             c = nd(c).next;
@@ -1137,8 +1134,8 @@ class App : app.Handler, app.TitleBar {
             },
             Heading => {
                 i32 level = nd(id).level;
-                f32 size = level == 1 ? 30.0 : (level == 2 ? 24.0 : (level == 3 ? 20.0 : (level == 4 ? 18.0 : (level == 5 ? 16.0 : 14.0))));
-                canvas.Color head = level <= 3 ? canvas.Color{ r: 244, g: 246, b: 255 } : (level == 4 ? canvas.Color{ r: 206, g: 212, b: 236 } : (level == 5 ? accent() : dim()));
+                f32 size = level == 1 ? 30.0 : level == 2 ? 24.0 : level == 3 ? 20.0 : level == 4 ? 18.0 : level == 5 ? 16.0 : 14.0;
+                canvas.Color head = level <= 3 ? canvas.Color{ r: 244, g: 246, b: 255 } : level == 4 ? canvas.Color{ r: 206, g: 212, b: 236 } : level == 5 ? accent() : dim();
                 cy += level <= 2 ? 8.0 : 4.0;
                 cx = left;
                 inline_flow(surface, id, left, right, size, md.BOLD, head, "");
@@ -1288,7 +1285,7 @@ class App : app.Handler, app.TitleBar {
                     mut f32 shift = 0.0;
                     if (own < room_in) {
                         i32 side = aligns.bytes[c] as i32 - 48;
-                        shift = side == 3 ? (room_in - own) / 2.0 : (side == 2 ? room_in - own : 0.0);
+                        shift = side == 3 ? (room_in - own) / 2.0 : side == 2 ? room_in - own : 0.0;
                     }
                     cx = x + 10.0 + shift;
                     inline_flow(surface, cell, x + 10.0 + shift, x + w - 10.0, 15.0, head ? md.BOLD : 0, ink(), "");
@@ -1381,12 +1378,12 @@ class App : app.Handler, app.TitleBar {
 // The file of a face of a family of the program: style 0 regular, 1 bold, 2 italic, 3 bold italic.
 str asset_of(i32 family, i32 style) {
     if (family == 1) {
-        return style == 0 ? "assets/NotoSerif-Regular.ttf" : (style == 1 ? "assets/NotoSerif-Bold.ttf" : (style == 2 ? "assets/NotoSerif-Italic.ttf" : "assets/NotoSerif-BoldItalic.ttf"));
+        return style == 0 ? "assets/NotoSerif-Regular.ttf" : style == 1 ? "assets/NotoSerif-Bold.ttf" : style == 2 ? "assets/NotoSerif-Italic.ttf" : "assets/NotoSerif-BoldItalic.ttf";
     }
     if (family == 2) {
-        return style == 0 ? "assets/JetBrainsMono-Regular.ttf" : (style == 1 ? "assets/JetBrainsMono-Bold.ttf" : (style == 2 ? "assets/JetBrainsMono-Italic.ttf" : "assets/JetBrainsMono-BoldItalic.ttf"));
+        return style == 0 ? "assets/JetBrainsMono-Regular.ttf" : style == 1 ? "assets/JetBrainsMono-Bold.ttf" : style == 2 ? "assets/JetBrainsMono-Italic.ttf" : "assets/JetBrainsMono-BoldItalic.ttf";
     }
-    return style == 0 ? "assets/NotoSans-Regular.ttf" : (style == 1 ? "assets/NotoSans-Bold.ttf" : (style == 2 ? "assets/NotoSans-Italic.ttf" : "assets/NotoSans-BoldItalic.ttf"));
+    return style == 0 ? "assets/NotoSans-Regular.ttf" : style == 1 ? "assets/NotoSans-Bold.ttf" : style == 2 ? "assets/NotoSans-Italic.ttf" : "assets/NotoSans-BoldItalic.ttf";
 }
 
 usize MAXCOLS = 8;  // the columns of a table that are shown
@@ -1409,7 +1406,7 @@ i32 main() uses io {
     defer arena.free();
     str[] args = os.args(&arena);
     bool snap = args.len >= 2 && args[0] == "--snapshot";
-    str folder = snap ? "demo-notes" : (args.len >= 1 ? args[0] : saved_folder(&arena));
+    str folder = snap ? "demo-notes" : args.len >= 1 ? args[0] : saved_folder(&arena);
     if (snap) {
         write_demo(&arena, folder);
     } else {

@@ -149,12 +149,7 @@ pub class Editor {
     // ----- selection
 
     pub Rect selection() {
-        return Rect{
-            c1: self.cc < self.ac ? self.cc : self.ac,
-            r1: self.cr < self.ar ? self.cr : self.ar,
-            c2: self.cc < self.ac ? self.ac : self.cc,
-            r2: self.cr < self.ar ? self.ar : self.cr,
-        };
+        return Rect{ c1: self.cc < self.ac ? self.cc : self.ac, r1: self.cr < self.ar ? self.cr : self.ar, c2: self.cc < self.ac ? self.ac : self.cc, r2: self.cr < self.ar ? self.ar : self.cr };
     }
 
     pub bool single() {
@@ -343,7 +338,7 @@ pub class Editor {
                     self.book.cells.remove(calc.key_of(col, row));
                 }
             },
-            none => {},
+            none => { },
         }
     }
 
@@ -392,7 +387,7 @@ pub class Editor {
     // Every cell of the selection, creating them unless the selection is huge.
     vec.Vec<i64>* targets() {
         Rect r = self.selection();
-        i64 area = ((r.c2 - r.c1 + 1) as i64) * ((r.r2 - r.r1 + 1) as i64);
+        i64 area = (r.c2 - r.c1 + 1) as i64 * (r.r2 - r.r1 + 1) as i64;
         if (area > 20000) {
             return self.existing(r);
         }
@@ -485,7 +480,7 @@ pub class Editor {
             return;
         }
         mut usize from = self.caret - 1;
-        while (from > 0 && (self.buf.items()[from] & 192) == 128) {
+        while (from > 0 && self.buf.items()[from] & 192 == 128) {
             from -= 1;
         }
         for (usize i in from..self.caret) {
@@ -499,7 +494,7 @@ pub class Editor {
             return;
         }
         mut usize to = self.caret + 1;
-        while (to < self.buf.len() && (self.buf.items()[to] & 192) == 128) {
+        while (to < self.buf.len() && self.buf.items()[to] & 192 == 128) {
             to += 1;
         }
         for (usize i in self.caret..to) {
@@ -512,7 +507,7 @@ pub class Editor {
             return;
         }
         self.caret -= 1;
-        while (self.caret > 0 && (self.buf.items()[self.caret] & 192) == 128) {
+        while (self.caret > 0 && self.buf.items()[self.caret] & 192 == 128) {
             self.caret -= 1;
         }
     }
@@ -522,7 +517,7 @@ pub class Editor {
             return;
         }
         self.caret += 1;
-        while (self.caret < self.buf.len() && (self.buf.items()[self.caret] & 192) == 128) {
+        while (self.caret < self.buf.len() && self.buf.items()[self.caret] & 192 == 128) {
             self.caret += 1;
         }
     }
@@ -621,7 +616,7 @@ pub class Editor {
         for (usize i in 0..list.len()) {
             i64 k = list.items()[i];
             Snap s = self.snap_of((k % 256) as i32, (k / 256) as i32);
-            if (!s.has || (s.flags & flag) == 0) {
+            if (!s.has || s.flags & flag == 0) {
                 all = false;
             }
         }
@@ -631,7 +626,7 @@ pub class Editor {
             i32 row = (k / 256) as i32;
             self.touch(col, row);
             calc.Cell* c = self.book.make(self.arena, col, row);
-            c.flags = all ? (c.flags & (7 - flag)) : (c.flags | flag);
+            c.flags = all ? c.flags & 7 - flag : c.flags | flag;
             self.clean(col, row);
         }
         self.end();
@@ -678,7 +673,7 @@ pub class Editor {
             i32 row = (k / 256) as i32;
             self.touch(col, row);
             calc.Cell* c = self.book.make(self.arena, col, row);
-            i32 now = c.dec >= 0 ? c.dec : (c.fmt == 2 || c.fmt == 0 ? 0 : 2);
+            i32 now = c.dec >= 0 ? c.dec : c.fmt == 2 || c.fmt == 0 ? 0 : 2;
             i32 next = now + delta;
             c.dec = next < 0 ? 0 : next > 10 ? 10 : next;
             self.clean(col, row);
@@ -979,7 +974,7 @@ pub class Editor {
                 } else {
                     from = c >= at ? c + n : c;
                 }
-                bool fresh = (kind == 3 && c >= at && c < at + n) || from >= values.COLS;
+                bool fresh = kind == 3 && c >= at && c < at + n || from >= values.COLS;
                 self.book.set_width(c, fresh ? DEFAULT_WIDTH : widths[from as usize]);
             }
         }

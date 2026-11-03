@@ -317,7 +317,7 @@ test "formats on a selection" {
     e.change_decimals(1);
     assert(at(&arena, e, "A2") == "50.0%");
     e.toggle_flag(calc.FLAG_BOLD);
-    assert((e.snap_of(0, 1).flags & calc.FLAG_BOLD) != 0);
+    assert(e.snap_of(0, 1).flags & calc.FLAG_BOLD != 0);
     e.toggle_flag(calc.FLAG_BOLD);
     assert(e.snap_of(0, 1).flags == 0);
 }
@@ -399,7 +399,7 @@ test "opendocument round trip" {
     assert(at(&arena, f, "A2") == "€12.50");
     assert(at(&arena, f, "A3") == "25");
     assert(f.book.width_of(2) == 140);
-    assert((f.snap_of(1, 1).flags & calc.FLAG_BOLD) != 0);
+    assert(f.snap_of(1, 1).flags & calc.FLAG_BOLD != 0);
     assert(!f.decode_ods("PK nonsense".bytes));
 }
 
@@ -417,5 +417,5 @@ test "opendocument written by another program" {
     assert(at(&arena, f, "A2") == "6");
     assert(at(&arena, f, "A3") == "6");
     assert(at(&arena, f, "B2") == "x\ny");
-    assert((f.snap_of(2, 0).flags & calc.FLAG_BOLD) != 0);
+    assert(f.snap_of(2, 0).flags & calc.FLAG_BOLD != 0);
 }

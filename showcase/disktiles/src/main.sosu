@@ -247,7 +247,7 @@ class App : app.Handler, app.TitleBar {
             scan.Node* n = state.tree.nodes.at(t.node as usize);
             canvas.Rect whole = canvas.Rect{ x: t.x, y: t.y, w: t.w, h: t.h };
             if (!t.leaf) {
-                i32 shade = 36 + (t.depth % 6) * 7;
+                i32 shade = 36 + t.depth % 6 * 7;
                 surface.fill(whole, canvas.Color{ r: shade as ui8, g: (shade + 4) as ui8, b: (shade + 14) as ui8 });
                 if (t.h >= 40.0 && t.w >= 60.0) {
                     surface.push_clip(whole);

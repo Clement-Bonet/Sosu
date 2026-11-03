@@ -374,7 +374,7 @@ pub void cells(str line, vec.Vec<Span>* out) {
     usize stop = t.len > start && t.bytes[t.len - 1] == 124 && t.bytes[t.len - 2] != 92 ? t.len - 1 : t.len;
     mut usize i = start;
     while (i <= stop) {
-        if (i == stop || (t.bytes[i] == 124 && (i == 0 || t.bytes[i - 1] != 92))) {
+        if (i == stop || t.bytes[i] == 124 && (i == 0 || t.bytes[i - 1] != 92)) {
             str cell = text.trim(text.slice(t, start, i));
             mut usize from = start;
             while (from < i && t.bytes[from] == 32) {
@@ -425,7 +425,7 @@ void scan(str line, usize lo, usize hi, i32 style, usize lf, usize lt, vec.Vec<S
     mut usize plain = lo;
     while (i < hi) {
         ui8 b = line.bytes[i];
-        if (b == 91 && i + 1 < hi && line.bytes[i + 1] == 91 && (style & LINK) == 0) {
+        if (b == 91 && i + 1 < hi && line.bytes[i + 1] == 91 && style & LINK == 0) {
             match (text.find_from(line, "]]", i + 2)) {
                 some(close) => {
                     if (close + 2 <= hi) {
@@ -448,7 +448,7 @@ void scan(str line, usize lo, usize hi, i32 style, usize lf, usize lt, vec.Vec<S
                 none => { },
             }
         }
-        if (b == 91 && i + 1 < hi && line.bytes[i + 1] != 91 && (style & LINK) == 0) {
+        if (b == 91 && i + 1 < hi && line.bytes[i + 1] != 91 && style & LINK == 0) {
             match (text.find_from(line, "]", i + 1)) {
                 some(close) => {
                     if (close > i + 1 && close + 2 < hi && line.bytes[close + 1] == 40) {
