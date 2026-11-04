@@ -300,12 +300,14 @@ PER_PAGE = 10
 TRIM = 50  # the last granule position cuts the last block
 
 
-def ogg(comment_packet=None, setup_packet=None):
+def ogg(comment_packet=None, setup_packet=None, last_granule=None):
     pages = [page([identification()], 0, 0, 0x02),
              page([comment_packet or comment(), setup_packet or setup()], 0, 1, 0)]
     for start in range(0, PACKETS, PER_PAGE):
         end = start + PER_PAGE
         granule = (end - 1) * HALF - (TRIM if end == PACKETS else 0)
+        if end == PACKETS and last_granule is not None:
+            granule = last_granule
         packets = [audio_packet(p) for p in range(start, end)]
         pages.append(page(packets, granule, len(pages), 0x04 if end == PACKETS else 0))
     return b"".join(pages)
@@ -347,6 +349,7 @@ def ogg_files():
     damaged[len(tone) // 3] ^= 0xFF
     write("bad_crc.ogg", bytes(damaged))
     write("bad_not_vorbis.ogg", page([b"\x01theora" + b"\0" * 22], 0, 0, 0x02))
+    write("bad_long.ogg", ogg(last_granule=0x80000004))  # a length above INT_MAX (make fuzz-ogg)
 
 
 if __name__ == "__main__":

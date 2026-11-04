@@ -182,7 +182,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[22] names = [
+    str[23] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -200,6 +200,7 @@ test "damaged and hostile files" {
         "bad_huge_codebook.ogg",
         "bad_crc.ogg",
         "bad_not_vorbis.ogg",
+        "bad_long.ogg",
         "tone_decoded.wav",
         "pcm8.wav",
         "pcm24.wav",
