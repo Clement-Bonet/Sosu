@@ -1791,7 +1791,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 ### 11.3 Backends
 
-1. Step 1: `sosuc` generates C99, compiled by `cc` (or by the target platform's compiler). The generated C contains `#line` directives, so that errors and the debugger point to the lines of the `.sosu` files.
+1. Step 1: `sosuc` generates C99, compiled by `cc` (or by the target platform's compiler). The generated C contains `#line` directives, so that errors and the debugger point to the lines of the `.sosu` files. gcc and clang get `-fno-strict-aliasing`: a view and a `str` are read through each other in `unsafe` code, and a program may do the same with its own types.
 2. Step 2: custom x86-64 / ARM64 backend (ELF, Mach-O, PE) on the same IR.
 3. Step 3: self-hosting (Sosu compiles Sosu).
 
@@ -2050,7 +2050,7 @@ Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the librarie
 
 ### 13.1 Version 1.0
 
-Version 1.0 is a promise of stability: the language, `core`, `std` and the commands of `sosuc` no longer break the code written for them (a change that would is a 2.0). It does not need the native backend nor self-hosting: the C backend stays the path of phones anyway (§11.2), and steps 12 to 14 come after 1.0.
+Version 1.0 is a promise of stability: the language, `core`, `std` and the commands of `sosuc` no longer break the code written for them (a change that would is a 2.0). It does not need the native backend nor self-hosting: the C backend stays the path of phones anyway (§11.2), and steps 12 and 14 come after 1.0, as does `comptime` from step 13.
 
 What 1.0 holds, in the proposed order; how long each work may take is estimated in [ROADMAP.md](ROADMAP.md). Then 0.x versions tried by others than their authors, for a few weeks, before 1.0 is called stable.
 
@@ -2065,10 +2065,11 @@ What 1.0 holds, in the proposed order; how long each work may take is estimated 
 | 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 |
 | 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) |
 | 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries |
+| 10 | Memory safety | Outside `unsafe` and C, no dangling pointer: the regions (§6.1, done) also follow lambdas, calls through a value of function type and the memory of a local arena that was moved, and a pointer read from a field of the caller's memory can no longer outlive what it points to (the fourth decision of §6.1). How to close that last case without lifetimes in the types is an open question. This work can change the language, so it ends before the 0.x versions tried by others |
 
 - Android: the CI builds the APK of `examples/window` (arm64 and x86_64) on each push, but does not run it; running on the emulator or a phone, and touching the screen, is done by hand (§11.5). Supported in 1.0 once the examples of §10 have run on a phone.
 - iOS: supported in 1.0 once it has run on a device (it needs a Mac and an iPhone); until then, a preview, built by the CI for the simulator.
-- After 1.0 (2.x): the native backend (12), `comptime` and regions (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
+- After 1.0 (2.x): the native backend (12), `comptime` (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
 
 ### 13.2 Compatibility policy
 

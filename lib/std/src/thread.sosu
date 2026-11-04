@@ -7,9 +7,15 @@ extern "C" {
     void sosu_thread_join(ui8* handle) uses threads;
 }
 
+// What a thread runs. A field of a struct holds the code alone: storing a closure there stops the
+// program (spec §5.5), and a closure would read the variables of the thread that created it.
+struct Work<T: Send, R: Send> {
+    fn(Arena*, T) -> R run;
+}
+
 // A thread started by `spawn`: `join` waits for its end and gives what its function returned.
 pub class Thread<T: Send, R: Send> {
-    mut fn(Arena*, T) -> R work;
+    mut Work<T, R> work;
     T value;
     mut R result;  // written by the thread, read after `join`
     mut ui8*? handle;
@@ -35,17 +41,17 @@ pub class Thread<T: Send, R: Send> {
 }
 
 // Runs `work(arena, value)` on a new thread, with an arena of its own (freed when `work`
-// returns). `work` is a function or a lambda without captures: a closure would read the
-// variables of this thread. The `Thread` is created in `arena`; join it before freeing it.
+// returns). `work` is a function or a lambda without captures: a closure stops the program,
+// since it would read the variables of this thread. The `Thread` is created in `arena`; join it before freeing it.
 pub Thread<T, R>* spawn<T: Send, R: Send, uses E>(Arena* arena, fn(Arena*, T) -> R uses E work, T value) uses threads, E {
     Thread<T, R>* thread = arena.new(Thread<T, R>, value);
     unsafe {
-        thread.work = work as fn(Arena*, T) -> R;  // the thread has the effects of `work`: this function says them
+        thread.work = Work<T, R>{ run: work as fn(Arena*, T) -> R };  // the thread has the effects of `work`: this function says them
         thread.handle = some(sosu_thread_start((ui8* data) => {
             unsafe {
                 Thread<T, R>* running = data as Thread<T, R>*;
                 mut Arena own = Arena.new(64 * KB);
-                running.result = running.work(&own, running.value);
+                running.result = running.work.run(&own, running.value);
                 own.free();
             }
         }, thread as ui8*));
