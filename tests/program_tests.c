@@ -43,6 +43,7 @@ static const Case cases[] = {
     { "run", "iterators", "expected.txt", 0, NULL },
     { "run", "csources", "expected.txt", 0, NULL },
     { "run", "threads", "expected.txt", 0, NULL },
+    { "run", "thread_closure", "expected.txt", 101, NULL },
     { "run", "mathematics", "expected.txt", 0, NULL },
     { "run", "sorting", "expected.txt", 0, NULL },
     { "run", "texts", "expected.txt", 0, NULL },

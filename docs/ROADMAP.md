@@ -46,8 +46,9 @@ Estimated again from the pace above. The versions: `0.2.0` with the packages of 
 | 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
+| 10 | Memory safety | Added on November 4, 2026 (§13.1). The regions are done (§6.1); what they do not follow remains, and how to close it without lifetimes in the types is open | not estimated |
 
-In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work.
+In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work. This total and this date do not count work 10: its design has to be settled first.
 
 What tokens do not buy, and sets the pace as much:
 
@@ -56,3 +57,28 @@ What tokens do not buy, and sets the pace as much:
 - The 0.x versions tried by others than their authors, for a few weeks, before 1.0 (§13.1).
 
 A new session for each package or work spends much less than one long session, whose context is read again at each call.
+
+## After 1.0: moving away from C (November 4, 2026)
+
+Steps 12 and 14 of the specification (§13) come after 1.0 (§13.1). Their estimates are in weeks of full-time work with Claude Code, and they are not measured: nothing of this kind was written yet, and the pace of steps 1 to 11 does not apply, since a native backend is debugged at the level of instructions, for each target.
+
+| Work | Today | Weeks |
+|---|---|---|
+| Intermediate representation | `src/lib/codegen.c` (2,733 lines) goes to C with no IR of its own, although §11.3 names one | 1 to 2 |
+| x86-64 backend, for one system | Nothing: instruction selection, registers, calling conventions, object file | 3 to 4 |
+| ARM64 and the two other systems | ELF, PE and Mach-O, with linking | 3 to 4 |
+| Debug information | `#line` and the C compiler give it; DWARF and PDB would have to be written | 1 to 2 |
+| Runtime and `std` | 1,778 lines of C in `lib/runtime`, 10 modules of `std` with `extern "C"` | 1 |
+| Self-hosting | About 25,700 lines of C rewritten in Sosu, then the bootstrap | 1 to 2 |
+
+In all, 10 to 15 weeks, so 3 to 4 months, for a compiler without C on the desktop.
+
+What stays in C or depends on it:
+
+- SQLite (about 271,000 lines) stays as it is. SDL3 could only be replaced by a native layer for each system, several months more. `stb_vorbis` (about 5,700 lines) is replaced only if there is a need.
+- The C calling convention stays, to call these libraries. Without libc, Linux can use system calls directly; Windows goes through its system DLLs, and macOS through `libSystem`.
+- On mobile, the NDK, Xcode and signing remain mandatory (§11.2).
+
+The main cost is not in the table: the programs of a new backend will run slower than those of gcc, clang or MSVC with optimizations, for a long time. Self-hosting is the cheapest work and does not depend on the backend: `sosuc` would be written in Sosu and would still generate C.
+
+If the need is only to install no C compiler, shipping a small one with `sosuc` costs much less. TinyCC is the obvious candidate, not tried yet: it is under the LGPL, and covers macOS and ARM64 poorly.

@@ -1493,7 +1493,7 @@ pub class Thread<T: Send, R: Send>
 
 ### `spawn`
 
-Runs `work(arena, value)` on a new thread, with an arena of its own (freed when `work` returns). `work` is a function or a lambda without captures: a closure would read the variables of this thread. The `Thread` is created in `arena`; join it before freeing it.
+Runs `work(arena, value)` on a new thread, with an arena of its own (freed when `work` returns). `work` is a function or a lambda without captures: a closure stops the program, since it would read the variables of this thread. The `Thread` is created in `arena`; join it before freeing it.
 
 ```sosu
 pub Thread<T, R>* spawn<T: Send, R: Send, uses E>(Arena* arena, fn(Arena*, T) -> R uses E work, T value) uses threads, E
