@@ -1,5 +1,6 @@
 // The promotional poster of Sosu, drawn by a Sosu program into a render.Canvas and written as
-// examples/poster/build/poster.png (1536 by 1024). Run it from the root of the repository.
+// examples/poster/build/poster.png (1536 by 1024). With `--preview`, the image of a shared link instead:
+// examples/poster/build/preview.png (1280 by 640). Run it from the root of the repository.
 import std.io;
 import std.fs;
 import std.os;
@@ -12,6 +13,8 @@ import render.truetype;
 i32 W = 1536;
 i32 H = 1024;
 i32 HORIZON = 620;
+i32 PREVIEW_W = 1280;
+i32 PREVIEW_H = 640;
 
 struct Fonts {
     truetype.Font* logo;
@@ -64,7 +67,7 @@ f32 ridge(i32 x, ui64 seed) {
 void triangle(canvas.Canvas* cv, f32 x0, f32 y0, f32 x1, f32 y1, f32 x2, f32 y2, canvas.Color color) {
     f32 top = min(y0, min(y1, y2));
     f32 bottom = max(y0, max(y1, y2));
-    for (i32 y in (top as i32)..(bottom as i32 + 1)) {
+    for (i32 y in top as i32..bottom as i32 + 1) {
         f32 row = y as f32 + 0.5;
         mut f32 left = 100000.0;
         mut f32 right = -100000.0;
@@ -74,7 +77,7 @@ void triangle(canvas.Canvas* cv, f32 x0, f32 y0, f32 x1, f32 y1, f32 x2, f32 y2,
             usize n = (e + 1) % 3;
             f32 ay = ys[e];
             f32 by = ys[n];
-            if ((ay <= row && by > row) || (by <= row && ay > row)) {
+            if (ay <= row && by > row || by <= row && ay > row) {
                 f32 x = xs[e] + (row - ay) / (by - ay) * (xs[n] - xs[e]);
                 left = min(left, x);
                 right = max(right, x);
@@ -140,12 +143,12 @@ void landscape(canvas.Canvas* cv) {
     cv.fill_circle(465.0, HORIZON as f32 + 18.0, 34.0, rgb(255, 214, 120));
     cv.pop_clip();
     // the lake: the sky and the ridges upside down, darker and bluer
-    for (i32 d in 0..(H - HORIZON)) {
+    for (i32 d in 0..H - HORIZON) {
         i32 src = HORIZON - 1 - d;
         if (src < 0) {
             break;
         }
-        i32 wave = ((d / 6) % 5 - 2) * (1 + d / 120);
+        i32 wave = (d / 6 % 5 - 2) * (1 + d / 120);
         for (i32 x in 0..W) {
             ui32 p = cv.at(x + wave, src);
             i32 r = lerp((p >> 16 & 0xFF) as i32, 12, 0.45);
@@ -265,7 +268,7 @@ void badge_icon(canvas.Canvas* cv, i32 kind, f32 x, f32 y, f32 size, canvas.Colo
 // ---- The code window ----
 
 bool is_word(ui8 b) {
-    return (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+    return b >= 48 && b <= 57 || b >= 65 && b <= 90 || b >= 97 && b <= 122 || b == 95;
 }
 
 bool is_keyword(str w) {
@@ -302,7 +305,7 @@ void code_line(canvas.Canvas* cv, truetype.Font* font, f32 size, f32 x, f32 grou
         mut usize j = i + 1;
         mut canvas.Color color = gray;
         if (b >= 48 && b <= 57) {
-            while (j < line.len && (is_word(line.bytes[j]) || (line.bytes[j] == 46 && j + 1 < line.len && line.bytes[j + 1] >= 48 && line.bytes[j + 1] <= 57))) {
+            while (j < line.len && (is_word(line.bytes[j]) || line.bytes[j] == 46 && j + 1 < line.len && line.bytes[j + 1] >= 48 && line.bytes[j + 1] <= 57)) {
                 j += 1;
             }
             color = green;
@@ -499,6 +502,77 @@ truetype.Font* load_font(Arena* arena, str name, truetype.Font* fallback) uses i
     return fallback;
 }
 
+// ---- The image of a shared link (GitHub's social preview, 1280 by 640) ----
+
+// A mark under the bytes `from` to `to` of `line`, with `label` centered below it.
+void mark(canvas.Canvas* cv, Fonts* f, f32 size, f32 x, f32 ground, str line, usize from, usize to, str label, canvas.Color color) {
+    f32 left = x + f.mono.measure(text.slice(line, 0, from), size);
+    f32 width = f.mono.measure(text.slice(line, from, to), size);
+    cv.fill(box(left, ground + 18.0, width, 4.0), color);
+    f32 shift = (width - f.body.measure(label, 26.0)) / 2.0;
+    put(cv, f.body, 26.0, left + shift, ground + 58.0, label, color);
+}
+
+void preview(canvas.Canvas* cv, Fonts* f, image.Image icon, image.Image shot) {
+    for (i32 y in 0..PREVIEW_H) {
+        cv.fill(box(0.0, y as f32, PREVIEW_W as f32, 1.0), sky(y as f32 / PREVIEW_H as f32 * 0.55));
+    }
+    f32 icon_h = 104.0;
+    f32 icon_w = icon_h * icon.width as f32 / icon.height as f32;
+    cv.draw_image(icon, box(60.0, 48.0, icon_w, icon_h));
+    put_bold(cv, f.logo, f.faux_logo, 112.0, 60.0 + icon_w + 14.0, 140.0, "Sosu", rgb(255, 255, 255));
+    put_bold(cv, f.bold, f.faux_bold, 44.0, 62.0, 232.0, "What a function does", rgb(255, 255, 255));
+    put_bold(cv, f.bold, f.faux_bold, 44.0, 62.0, 288.0, "is in its signature.", rgb(255, 255, 255));
+
+    f32 shot_w = 460.0;
+    f32 shot_h = shot_w * shot.height as f32 / shot.width as f32;
+    cv.draw_image(shot, box(760.0, 40.0, shot_w, shot_h));
+    cv.stroke_rounded(box(760.0, 40.0, shot_w, shot_h), 6.0, rgba(120, 150, 220, 200), 2.0);
+
+    cv.fill_rounded(box(60.0, 340.0, 1160.0, 190.0), 14.0, rgba(6, 12, 32, 222));
+    cv.stroke_rounded(box(60.0, 340.0, 1160.0, 190.0), 14.0, rgba(70, 96, 160, 200), 2.0);
+    str line = "i64!ParseError total(Arena* arena, str line) uses io";
+    f32 size = 34.0;
+    f32 x = (PREVIEW_W as f32 - f.mono.measure(line, size)) / 2.0;
+    code_line(cv, f.mono, size, x, 412.0, line);
+    mark(cv, f, size, x, 412.0, line, 3, 14, "can fail", rgb(255, 160, 80));
+    mark(cv, f, size, x, 412.0, line, 21, 33, "allocates", rgb(64, 214, 200));
+    mark(cv, f, size, x, 412.0, line, 45, 52, "does I/O", rgb(120, 220, 110));
+
+    put(cv, f.body, 28.0, 62.0, 590.0, "A native, low-level language, compiled through C99", rgb(238, 242, 255));
+    str credit = "Drawn by a Sosu program";
+    put(cv, f.body, 22.0, 1218.0 - f.body.measure(credit, 22.0), 590.0, credit, rgb(160, 180, 220));
+}
+
+i32 write_preview(Arena* arena, Fonts* f, image.Image icon) uses io {
+    image.Image shot = match (png.load(arena, "showcase/beatbox/screenshot.png")) {
+        ok(img) => img,
+        err(e) => {
+            io.print("showcase/beatbox/screenshot.png not readable");
+            return 1;
+        },
+    };
+    mut canvas.Canvas cv = canvas.create(arena, PREVIEW_W, PREVIEW_H);
+    preview(&cv, f, icon, shot);
+    match (fs.create_dirs(arena, "examples/poster/build")) {
+        ok => { },
+        err(e) => {
+            io.print("cannot create examples/poster/build");
+            return 1;
+        },
+    }
+    match (png.save(arena, "examples/poster/build/preview.png", cv.image())) {
+        ok => {
+            io.print("wrote examples/poster/build/preview.png");
+            return 0;
+        },
+        err(e) => {
+            io.print("cannot write the preview");
+            return 1;
+        },
+    }
+}
+
 i32 main() uses io {
     mut Arena arena = Arena.new(16 * MB);
     defer arena.free();
@@ -520,10 +594,13 @@ i32 main() uses io {
             return 1;
         },
     };
+    str[] args = os.args(&arena);
+    if (args.len > 0 && args[0] == "--preview") {
+        return write_preview(&arena, &fonts, icon);
+    }
     mut canvas.Canvas cv = canvas.create(&arena, W, H);
     landscape(&cv);
     // The version in the badge: `sosuc run examples/poster -- v0.1.2` (the release workflow gives it).
-    str[] args = os.args(&arena);
     mut str version = "dev";
     if (args.len > 0) {
         version = args[0];

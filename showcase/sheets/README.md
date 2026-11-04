@@ -67,4 +67,4 @@ Bold, italic, underline, alignment (left, centre, right), formats (General, Numb
 
 One sheet only, no charts, no array formulas, no conditional formatting. Everything is calculated again at each change.
 
-The interface was checked with pictures (`--snapshot`) and by the tests, not in an interactive window.
+The interface was tried in a window on Windows, and checked with pictures (`--snapshot`) and by the tests. It was not tried on Linux and macOS.
