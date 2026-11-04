@@ -70,14 +70,6 @@ Desktop programs drawn by Sosu's own interface toolkit, with their tests. More i
 - **Safe by design.** Safety is a design rule: what is not checked yet is listed in spec §7.7, and memory safety is a goal for 1.0.
 - **Close to Zig and Odin in spirit** (explicit memory, C interop, a small core), Sosu adds effects in the types, contracts, classes with interfaces, and its own interface toolkit (`platform`, `render`, `ui`, `.ui.sosu` files).
 
-| | C | Zig | Odin | Rust | Sosu |
-|---|---|---|---|---|---|
-| Effects in the signature | no | no | no | no | yes |
-| Failures in the type | no | yes | by convention | yes | yes |
-| Allocations in the signature | no | by convention | no (implicit context) | no | yes |
-| Memory safe | no | no | no | yes, outside `unsafe` | not yet, a goal for 1.0 |
-| Compiled through | | LLVM or its own backends | LLVM | LLVM | C99 |
-
 English is the working language of the project: code, comments, compiler messages and documentation.
 
 ## How Sosu is made
