@@ -1,0 +1,386 @@
+// sheets.values: the values of cells, references like B7 or $C$3, number formats and dates.
+import std.math;
+import std.text;
+
+pub i32 COLS = 100;
+pub i32 ROWS = 2000;
+
+pub i32 EMPTY = 0;
+pub i32 NUMBER = 1;
+pub i32 TEXT = 2;
+pub i32 BOOL = 3;
+pub i32 ERROR = 4;
+
+// What a cell holds once computed: a number, a text, a boolean (1.0 or 0.0 in `num`) or an error
+// (its name, like #DIV/0!, in `text`).
+pub struct Value {
+    pub i32 kind;
+    pub f64 num;
+    pub str text;
+}
+
+pub Value vnum(f64 x) {
+    if (math.is_nan(x) || math.is_infinite(x)) {
+        return Value{ kind: ERROR, num: 0.0, text: "#NUM!" };
+    }
+    return Value{ kind: NUMBER, num: x, text: "" };
+}
+
+pub Value vtext(str s) {
+    return Value{ kind: TEXT, num: 0.0, text: s };
+}
+
+pub Value vbool(bool b) {
+    return Value{ kind: BOOL, num: b ? 1.0 : 0.0, text: "" };
+}
+
+pub Value verr(str s) {
+    return Value{ kind: ERROR, num: 0.0, text: s };
+}
+
+pub Value vempty() {
+    return Value{ kind: EMPTY, num: 0.0, text: "" };
+}
+
+pub struct Ref {
+    pub bool ok;
+    pub i32 col;
+    pub i32 row;
+    pub bool col_abs;
+    pub bool row_abs;
+}
+
+pub bool is_letter(ui8 b) {
+    return b >= 65 && b <= 90 || b >= 97 && b <= 122;
+}
+
+pub bool is_digit(ui8 b) {
+    return b >= 48 && b <= 57;
+}
+
+pub i32 upper_byte(ui8 b) {
+    i32 n = b as i32;
+    return n >= 97 && n <= 122 ? n - 32 : n;
+}
+
+pub Ref bad_ref() {
+    return Ref{ ok: false, col: 0, row: 0, col_abs: false, row_abs: false };
+}
+
+// The whole of `w` must be a reference: `$`, letters, `$`, digits. Columns and rows count from 0.
+pub Ref parse_ref(str w) {
+    mut usize i = 0;
+    mut bool col_abs = false;
+    mut bool row_abs = false;
+    if (w.len > 0 && w.bytes[0] == 36) {
+        col_abs = true;
+        i = 1;
+    }
+    mut i32 col = 0;
+    mut i32 letters = 0;
+    while (i < w.len && is_letter(w.bytes[i])) {
+        col = col * 26 + (upper_byte(w.bytes[i]) - 65) + 1;
+        letters += 1;
+        i += 1;
+    }
+    if (letters < 1 || letters > 2) {
+        return bad_ref();
+    }
+    if (i < w.len && w.bytes[i] == 36) {
+        row_abs = true;
+        i += 1;
+    }
+    mut i32 row = 0;
+    mut i32 digits = 0;
+    while (i < w.len && is_digit(w.bytes[i])) {
+        row = row * 10 + (w.bytes[i] as i32 - 48);
+        digits += 1;
+        i += 1;
+        if (digits > 5) {
+            return bad_ref();
+        }
+    }
+    if (digits == 0 || i != w.len) {
+        return bad_ref();
+    }
+    if (col - 1 >= COLS || row < 1 || row > ROWS) {
+        return bad_ref();
+    }
+    return Ref{ ok: true, col: col - 1, row: row - 1, col_abs: col_abs, row_abs: row_abs };
+}
+
+// A, B, ... Z, AA, ...
+pub str col_name(Arena* arena, i32 col) {
+    text.TextBuilder* b = text.builder(arena);
+    if (col >= 26) {
+        b.push_char(text.char_of((65 + col / 26 - 1) as ui32));
+    }
+    b.push_char(text.char_of((65 + col % 26) as ui32));
+    return b.text();
+}
+
+pub str cell_name(Arena* arena, i32 col, i32 row) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(col_name(arena, col));
+    b.push_i64((row + 1) as i64);
+    return b.text();
+}
+
+// A number written for people: at most 10 significant digits, no useless zeros.
+pub str general(Arena* arena, f64 x) {
+    if (x == 0.0) {
+        return "0";
+    }
+    f64 a = x < 0.0 ? -x : x;
+    if (a >= 1.0e15 || a < 1.0e-6) {
+        return text.format_f64_shortest(arena, x);
+    }
+    if (x == math.floor(x)) {
+        return text.format_f64(arena, x, 0);
+    }
+    f64 mag = math.floor(math.log10(a));
+    mut i32 decimals = 9 - mag as i32;
+    decimals = decimals < 0 ? 0 : decimals > 12 ? 12 : decimals;
+    return trim_zeros(arena, text.format_f64(arena, x, decimals as ui32));
+}
+
+// "12.500" is "12.5", "3.000" is "3".
+pub str trim_zeros(Arena* arena, str s) {
+    if (!text.contains(s, ".")) {
+        return s;
+    }
+    mut usize end = s.len;
+    while (end > 0 && s.bytes[end - 1] == 48) {
+        end -= 1;
+    }
+    if (end > 0 && s.bytes[end - 1] == 46) {
+        end -= 1;
+    }
+    return text.slice(s, 0, end);
+}
+
+// "1234567.5" is "1,234,567.5".
+pub str group(Arena* arena, str s) {
+    mut usize start = 0;
+    if (s.len > 0 && s.bytes[0] == 45) {
+        start = 1;
+    }
+    mut usize end = start;
+    while (end < s.len && is_digit(s.bytes[end])) {
+        end += 1;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    b.push(text.slice(s, 0, start));
+    usize count = end - start;
+    for (usize i in 0..count) {
+        if (i > 0 && (count - i) % 3 == 0) {
+            b.push(",");
+        }
+        b.push(text.slice(s, start + i, start + i + 1));
+    }
+    b.push(text.slice(s, end, s.len));
+    return b.text();
+}
+
+pub struct Ymd {
+    pub i64 year;
+    pub i64 month;
+    pub i64 day;
+}
+
+// Days since 1970-01-01 of a date of the calendar.
+pub i64 days_from_civil(i64 year, i64 month, i64 day) {
+    i64 y = month <= 2 ? year - 1 : year;
+    i64 era = (y >= 0 ? y : y - 399) / 400;
+    i64 yoe = y - era * 400;
+    i64 doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    i64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+pub Ymd civil_from_days(i64 days) {
+    i64 z = days + 719468;
+    i64 era = (z >= 0 ? z : z - 146096) / 146097;
+    i64 doe = z - era * 146097;
+    i64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    i64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    i64 mp = (5 * doy + 2) / 153;
+    i64 d = doy - (153 * mp + 2) / 5 + 1;
+    i64 m = mp < 10 ? mp + 3 : mp - 9;
+    i64 y = yoe + era * 400 + (m <= 2 ? 1 : 0);
+    return Ymd{ year: y, month: m, day: d };
+}
+
+// The serial number of a date, as in Excel: 25569 is 1970-01-01.
+pub f64 serial_of(i64 year, i64 month, i64 day) {
+    // months out of 1 to 12 carry into the year
+    i64 m0 = month - 1;
+    i64 y = year + (m0 >= 0 ? m0 / 12 : (m0 - 11) / 12);
+    i64 m = m0 - (m0 >= 0 ? m0 / 12 : (m0 - 11) / 12) * 12 + 1;
+    return (days_from_civil(y, m, 1) + (day - 1) + 25569) as f64;
+}
+
+pub Ymd date_of(f64 serial) {
+    return civil_from_days(math.floor(serial) as i64 - 25569);
+}
+
+// 0 for Sunday.
+pub i32 weekday_of(f64 serial) {
+    i64 days = math.floor(serial) as i64 - 25569;
+    i64 w = (days + 4) % 7;
+    return (w < 0 ? w + 7 : w) as i32;
+}
+
+void pad(text.TextBuilder* b, i64 n, i32 width) {
+    mut i32 digits = 1;
+    mut i64 t = n;
+    while (t >= 10) {
+        t = t / 10;
+        digits += 1;
+    }
+    for (i32 i in digits..width) {
+        b.push("0");
+    }
+    b.push_i64(n);
+}
+
+// A date as 2026-11-02.
+pub str date_text(Arena* arena, f64 serial) {
+    Ymd d = date_of(serial);
+    text.TextBuilder* b = text.builder(arena);
+    pad(b, d.year, 4);
+    b.push("-");
+    pad(b, d.month, 2);
+    b.push("-");
+    pad(b, d.day, 2);
+    return b.text();
+}
+
+// The formats of a number: 0 general, 1 number, 2 percent, 3 currency, 4 scientific, 5 date, 6 text.
+pub i32 FORMATS = 7;
+
+pub str format_name(i32 fmt) {
+    str[7] names = ["General", "Number", "Percent", "Currency", "Scientific", "Date", "Text"];
+    return names[fmt as usize];
+}
+
+// `x` with `dec` decimals (-1: the usual number for the format).
+pub str format_number(Arena* arena, f64 x, i32 fmt, i32 dec) {
+    if (fmt == 1) {
+        return group(arena, text.format_f64(arena, x, (dec < 0 ? 2 : dec) as ui32));
+    }
+    if (fmt == 2) {
+        text.TextBuilder* b = text.builder(arena);
+        b.push(text.format_f64(arena, x * 100.0, (dec < 0 ? 0 : dec) as ui32));
+        b.push("%");
+        return b.text();
+    }
+    if (fmt == 3) {
+        str body = group(arena, text.format_f64(arena, x < 0.0 ? -x : x, (dec < 0 ? 2 : dec) as ui32));
+        text.TextBuilder* b = text.builder(arena);
+        if (x < 0.0) {
+            b.push("-");
+        }
+        b.push("€");
+        b.push(body);
+        return b.text();
+    }
+    if (fmt == 4) {
+        if (x == 0.0) {
+            return text.format_f64(arena, 0.0, (dec < 0 ? 2 : dec) as ui32);
+        }
+        f64 a = x < 0.0 ? -x : x;
+        mut f64 e = math.floor(math.log10(a));
+        mut f64 m = x / math.pow(10.0, e);
+        if ((m < 0.0 ? -m : m) >= 9.9999999) {
+            m = m / 10.0;
+            e += 1.0;
+        }
+        text.TextBuilder* b = text.builder(arena);
+        b.push(text.format_f64(arena, m, (dec < 0 ? 2 : dec) as ui32));
+        b.push(e < 0.0 ? "E-" : "E+");
+        i64 n = (e < 0.0 ? -e : e) as i64;
+        pad(b, n, 2);
+        return b.text();
+    }
+    if (fmt == 5) {
+        return date_text(arena, x);
+    }
+    if (dec >= 0) {
+        return text.format_f64(arena, x, dec as ui32);
+    }
+    return general(arena, x);
+}
+
+// What the cell shows.
+pub str display(Arena* arena, Value v, i32 fmt, i32 dec) {
+    if (v.kind == NUMBER) {
+        return format_number(arena, v.num, fmt, dec);
+    }
+    if (v.kind == BOOL) {
+        return v.num != 0.0 ? "TRUE" : "FALSE";
+    }
+    if (v.kind == EMPTY) {
+        return "";
+    }
+    return v.text;
+}
+
+// The same as the cell shows, but a number is not rounded (it is what a text or a CSV file keeps).
+pub str plain(Arena* arena, Value v) {
+    if (v.kind == NUMBER) {
+        return general(arena, v.num);
+    }
+    return display(arena, v, 0, -1);
+}
+
+// The result of a function on a list of text, compared without the case of the letters.
+pub i32 compare_text(str a, str b) {
+    usize n = a.len < b.len ? a.len : b.len;
+    for (usize i in 0..n) {
+        i32 x = upper_byte(a.bytes[i]);
+        i32 y = upper_byte(b.bytes[i]);
+        if (x != y) {
+            return x < y ? -1 : 1;
+        }
+    }
+    if (a.len == b.len) {
+        return 0;
+    }
+    return a.len < b.len ? -1 : 1;
+}
+
+// `pattern` with * (any text) and ? (any letter) against `s`, without the case.
+pub bool wildcard(str pattern, str s) {
+    return wild_at(pattern, 0, s, 0);
+}
+
+bool wild_at(str p, usize pi, str s, usize si) {
+    mut usize i = pi;
+    mut usize j = si;
+    while (i < p.len) {
+        ui8 c = p.bytes[i];
+        if (c == 42) {
+            if (i + 1 == p.len) {
+                return true;
+            }
+            mut usize k = j;
+            while (k <= s.len) {
+                if (wild_at(p, i + 1, s, k)) {
+                    return true;
+                }
+                k += 1;
+            }
+            return false;
+        }
+        if (j >= s.len) {
+            return false;
+        }
+        if (c != 63 && upper_byte(c) != upper_byte(s.bytes[j])) {
+            return false;
+        }
+        i += 1;
+        j += 1;
+    }
+    return j == s.len;
+}

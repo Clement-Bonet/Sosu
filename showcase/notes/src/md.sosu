@@ -1,0 +1,624 @@
+// notes.md: the Markdown that the preview shows: what a line is (a heading, a list item...), the
+// spans inside a line (bold, italic, code, [[links]]), and the links of a text.
+import std.text;
+import std.vec;
+
+pub enum Block {
+    Blank,
+    Heading,  // level 1 to 6
+    Bullet,  // level: the indent, in steps of two spaces
+    Task,  // a bullet with a box, `done` when it is checked
+    Quote,
+    Rule,
+    Table,  // a row of a table: a line that begins with `|`
+    Fence,  // a line of three backticks, which opens or closes a block of code
+    Plain,
+}
+
+pub struct Line {
+    pub Block kind = Blank;
+    pub i32 level = 0;
+    pub bool done = false;
+    pub usize body = 0;  // where the text of the line begins, after the marks
+}
+
+pub struct Span {
+    pub usize from = 0;
+    pub usize to = 0;
+    pub i32 style = 0;  // a set of the flags BOLD, ITALIC, CODE and LINK
+    pub usize link_from = 0;  // for a link: the note it names
+    pub usize link_to = 0;
+}
+
+// The name of the file of the note `name`.
+pub str file_of(Arena* arena, str name) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(name);
+    b.push(".md");
+    return b.text();
+}
+
+pub ui8 lower(ui8 b) {
+    return b >= 65 && b <= 90 ? b + 32 : b;
+}
+
+// The same words, whatever the case of the letters?
+pub bool same(str a, str b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (usize i in 0..a.len) {
+        if (lower(a.bytes[i]) != lower(b.bytes[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Does `hay` hold `needle`, whatever the case of the letters?
+pub bool has(str hay, str needle) {
+    if (needle.len == 0) {
+        return true;
+    }
+    if (needle.len > hay.len) {
+        return false;
+    }
+    for (usize i in 0..hay.len - needle.len + 1) {
+        mut bool all = true;
+        for (usize j in 0..needle.len) {
+            if (lower(hay.bytes[i + j]) != lower(needle.bytes[j])) {
+                all = false;
+                break;
+            }
+        }
+        if (all) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A `/` comes first, so that a folder is followed by what it holds.
+ui8 key(ui8 b) {
+    return b == 47 ? 1 : lower(b);
+}
+
+// `a` before `b` in alphabetical order, without the case.
+pub bool before(str a, str b) {
+    usize n = a.len < b.len ? a.len : b.len;
+    for (usize i in 0..n) {
+        ui8 x = key(a.bytes[i]);
+        ui8 y = key(b.bytes[i]);
+        if (x != y) {
+            return x < y;
+        }
+    }
+    return a.len < b.len;
+}
+
+bool all_of(str s, ui8 c) {
+    for (ui8 b in s.bytes) {
+        if (b != c) {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub Line classify(str line) {
+    mut usize indent = 0;
+    while (indent < line.len && line.bytes[indent] == 32) {
+        indent += 1;
+    }
+    str rest = text.slice(line, indent, line.len);
+    str t = text.trim(rest);
+    if (t.len == 0) {
+        return Line{ };
+    }
+    if (t.bytes[0] == 124) {
+        return Line{ kind: Table, body: indent };
+    }
+    if (text.starts_with(rest, "```")) {
+        return Line{ kind: Fence, body: indent + 3 };
+    }
+    if (t.len >= 3 && (all_of(t, 45) || all_of(t, 42) || all_of(t, 95))) {
+        return Line{ kind: Rule };
+    }
+    if (rest.bytes[0] == 35) {
+        mut usize n = 0;
+        while (n < rest.len && rest.bytes[n] == 35) {
+            n += 1;
+        }
+        if (n <= 6 && n < rest.len && rest.bytes[n] == 32) {
+            return Line{ kind: Heading, level: n as i32, body: indent + n + 1 };
+        }
+    }
+    if (rest.bytes[0] == 62) {
+        usize skip = rest.len > 1 && rest.bytes[1] == 32 ? 2 : 1;
+        return Line{ kind: Quote, body: indent + skip };
+    }
+    if (text.starts_with(rest, "- [ ] ") || text.starts_with(rest, "* [ ] ")) {
+        return Line{ kind: Task, level: (indent / 2) as i32, body: indent + 6 };
+    }
+    if (text.starts_with(rest, "- [x] ") || text.starts_with(rest, "- [X] ") || text.starts_with(rest, "* [x] ")) {
+        return Line{ kind: Task, level: (indent / 2) as i32, done: true, body: indent + 6 };
+    }
+    if (rest.len >= 2 && (rest.bytes[0] == 45 || rest.bytes[0] == 42 || rest.bytes[0] == 43) && rest.bytes[1] == 32) {
+        return Line{ kind: Bullet, level: (indent / 2) as i32, body: indent + 2 };
+    }
+    return Line{ kind: Plain, body: indent };
+}
+
+// The name that a link `[[name|text]]` or `[[name#heading]]` points at: `inner` without the rest.
+pub str target_of(str inner) {
+    return text.trim(text.slice(inner, 0, cut_of(inner)));
+}
+
+// Where the name ends in the inside of a link: at the first `|` or `#`.
+pub usize cut_of(str inner) {
+    for (usize i in 0..inner.len) {
+        ui8 b = inner.bytes[i];
+        if (b == 124 || b == 35) {
+            return i;
+        }
+    }
+    return inner.len;
+}
+
+// `Projects/Plan` -> `Plan`
+pub str base_of(str path) {
+    match (text.find_last(path, "/")) {
+        some(i) => {
+            return text.slice(path, i + 1, path.len);
+        },
+        none => {
+            return path;
+        },
+    }
+}
+
+// `Projects/Plan` -> `Projects`; nothing for a note at the root.
+pub str parent_of(str path) {
+    match (text.find_last(path, "/")) {
+        some(i) => {
+            return text.slice(path, 0, i);
+        },
+        none => {
+            return "";
+        },
+    }
+}
+
+// Does a link to `target` name the note `path`? A full path, or the name alone.
+pub bool link_matches(str target, str path) {
+    if (same(target, path)) {
+        return true;
+    }
+    if (text.contains(target, "/")) {
+        return false;
+    }
+    return same(target, base_of(path));
+}
+
+// The line number `n` of `body`, from 0.
+pub str line_at(str body, usize n) {
+    mut usize at = 0;
+    mut usize k = 0;
+    while (at <= body.len) {
+        mut usize end = body.len;
+        match (text.find_from(body, "\n", at)) {
+            some(nl) => {
+                end = nl;
+            },
+            none => { },
+        }
+        if (k == n) {
+            return text.slice(body, at, end);
+        }
+        k += 1;
+        at = end + 1;
+    }
+    return "";
+}
+
+// A row of the directory of links: `source<TAB>target`.
+pub str src_of(str row) {
+    match (text.find(row, "\t")) {
+        some(i) => {
+            return text.slice(row, 0, i);
+        },
+        none => {
+            return row;
+        },
+    }
+}
+
+pub str dst_of(str row) {
+    match (text.find(row, "\t")) {
+        some(i) => {
+            return text.slice(row, i + 1, row.len);
+        },
+        none => {
+            return "";
+        },
+    }
+}
+
+// The rows of the directory for the note `src`: one for each target of its links.
+pub str index_lines(Arena* arena, str src, str body) {
+    text.TextBuilder* out = text.builder(arena);
+    mut usize at = 0;
+    while (at < body.len) {
+        match (text.find_from(body, "[[", at)) {
+            some(open) => {
+                match (text.find_from(body, "]]", open + 2)) {
+                    some(close) => {
+                        str t = target_of(text.slice(body, open + 2, close));
+                        if (t.len > 0 && !text.contains(t, "\n") && !text.contains(t, "\t")) {
+                            text.TextBuilder* row = text.builder(arena);
+                            row.push(src);
+                            row.push("\t");
+                            row.push(t);
+                            row.push("\n");
+                            if (!text.contains(out.text(), row.text())) {
+                                out.push(row.text());
+                            }
+                        }
+                        at = close + 2;
+                    },
+                    none => {
+                        at = body.len;
+                    },
+                }
+            },
+            none => {
+                at = body.len;
+            },
+        }
+    }
+    return out.text();
+}
+
+// `body` with the links to the note `from_path` made to point at `to_path`.
+pub str rename_links(Arena* arena, str body, str from_path, str to_path) {
+    text.TextBuilder* out = text.builder(arena);
+    mut usize at = 0;
+    while (at < body.len) {
+        match (text.find_from(body, "[[", at)) {
+            some(open) => {
+                match (text.find_from(body, "]]", open + 2)) {
+                    some(close) => {
+                        str inner = text.slice(body, open + 2, close);
+                        usize e = cut_of(inner);
+                        str raw = text.trim(text.slice(inner, 0, e));
+                        out.push(text.slice(body, at, open + 2));
+                        if (same(raw, from_path)) {
+                            out.push(to_path);
+                            out.push(text.slice(inner, e, inner.len));
+                        } else if (!text.contains(raw, "/") && same(raw, base_of(from_path))) {
+                            out.push(base_of(to_path));
+                            out.push(text.slice(inner, e, inner.len));
+                        } else {
+                            out.push(inner);
+                        }
+                        out.push("]]");
+                        at = close + 2;
+                    },
+                    none => {
+                        out.push(text.slice(body, at, body.len));
+                        at = body.len;
+                    },
+                }
+            },
+            none => {
+                out.push(text.slice(body, at, body.len));
+                at = body.len;
+            },
+        }
+    }
+    return out.text();
+}
+
+pub i32 BOLD = 1;
+pub i32 ITALIC = 2;
+pub i32 CODE = 4;
+pub i32 LINK = 8;
+
+void emit(vec.Vec<Span>* out, usize from, usize to, i32 style, usize link_from, usize link_to) {
+    if (to > from) {
+        out.push(Span{ from: from, to: to, style: style, link_from: link_from, link_to: link_to });
+    }
+}
+
+// The star that closes an italic: not one of a pair, which is a bold inside it.
+usize? close_star(str line, usize from, usize hi) {
+    mut usize j = from;
+    while (j < hi) {
+        if (line.bytes[j] == 42) {
+            if (j + 1 < hi && line.bytes[j + 1] == 42) {
+                j += 2;
+                continue;
+            }
+            return some(j);
+        }
+        j += 1;
+    }
+    return none;
+}
+
+// The pair of stars that closes a bold: the last two of a run (`**a *b***`).
+usize? close_bold(str line, usize from, usize hi) {
+    match (text.find_from(line, "**", from)) {
+        some(p) => {
+            mut usize q = p;
+            while (q + 2 < hi && line.bytes[q + 2] == 42) {
+                q += 1;
+            }
+            if (q + 2 <= hi) {
+                return some(q);
+            }
+            return none;
+        },
+        none => {
+            return none;
+        },
+    }
+}
+
+// The spans of `line` from `body` on, in order, covering all of it. `style` is a set of the flags
+// BOLD, ITALIC, CODE and LINK: the marks nest, so a link can be bold and a bold can hold a link.
+// The cells of a row of a table, as spans (from, to) of `line`, without the blanks around them.
+pub void cells(str line, vec.Vec<Span>* out) {
+    str t = text.trim(line);
+    mut usize start = t.len > 0 && t.bytes[0] == 124 ? 1 : 0;
+    usize stop = t.len > start && t.bytes[t.len - 1] == 124 && t.bytes[t.len - 2] != 92 ? t.len - 1 : t.len;
+    mut usize i = start;
+    while (i <= stop) {
+        if (i == stop || t.bytes[i] == 124 && (i == 0 || t.bytes[i - 1] != 92)) {
+            str cell = text.trim(text.slice(t, start, i));
+            mut usize from = start;
+            while (from < i && t.bytes[from] == 32) {
+                from += 1;
+            }
+            out.push(Span{ from: from, to: from + cell.len });
+            start = i + 1;
+        }
+        i += 1;
+    }
+}
+
+// The alignment of the column `col` given by the line of dashes: 0 left, 1 centre (`:--:`), 2 right (`--:`).
+pub i32 align_of(Arena* arena, str rule, usize col) {
+    vec.Vec<Span>* found = vec.new<Span>(arena);
+    cells(rule, found);
+    if (col >= found.len()) {
+        return 0;
+    }
+    Span s = *found.at(col);
+    str t = text.slice(text.trim(rule), s.from, s.to);
+    if (t.len == 0 || t.bytes[t.len - 1] != 58) {
+        return 0;
+    }
+    return t.bytes[0] == 58 ? 1 : 2;
+}
+
+// The line under the header of a table: `|---|:--:|`.
+pub bool is_table_rule(str line) {
+    str t = text.trim(line);
+    mut bool dash = false;
+    for (ui8 b in t.bytes) {
+        if (b == 45) {
+            dash = true;
+        } else if (b != 124 && b != 58 && b != 32) {
+            return false;
+        }
+    }
+    return dash && t.len > 0 && t.bytes[0] == 124;
+}
+
+pub void spans(str line, usize body, vec.Vec<Span>* out) {
+    scan(line, body, line.len, 0, 0, 0, out);
+}
+
+void scan(str line, usize lo, usize hi, i32 style, usize lf, usize lt, vec.Vec<Span>* out) {
+    mut usize i = lo;
+    mut usize plain = lo;
+    while (i < hi) {
+        ui8 b = line.bytes[i];
+        if (b == 91 && i + 1 < hi && line.bytes[i + 1] == 91 && style & LINK == 0) {
+            match (text.find_from(line, "]]", i + 2)) {
+                some(close) => {
+                    if (close + 2 <= hi) {
+                        emit(out, plain, i, style, lf, lt);
+                        str inner = text.slice(line, i + 2, close);
+                        mut usize shown = i + 2;
+                        mut usize name_end = close;
+                        for (usize k in 0..inner.len) {
+                            if (inner.bytes[k] == 124 && name_end == close) {
+                                shown = i + 2 + k + 1;
+                                name_end = i + 2 + k;
+                            }
+                        }
+                        scan(line, shown, close, style | LINK, i + 2, name_end, out);
+                        i = close + 2;
+                        plain = i;
+                        continue;
+                    }
+                },
+                none => { },
+            }
+        }
+        if (b == 91 && i + 1 < hi && line.bytes[i + 1] != 91 && style & LINK == 0) {
+            match (text.find_from(line, "]", i + 1)) {
+                some(close) => {
+                    if (close > i + 1 && close + 2 < hi && line.bytes[close + 1] == 40) {
+                        match (text.find_from(line, ")", close + 2)) {
+                            some(end) => {
+                                if (end > close + 2 && end < hi) {
+                                    emit(out, plain, i, style, lf, lt);
+                                    scan(line, i + 1, close, style | LINK, close + 2, end, out);
+                                    i = end + 1;
+                                    plain = i;
+                                    continue;
+                                }
+                            },
+                            none => { },
+                        }
+                    }
+                },
+                none => { },
+            }
+        }
+        if (b == 42 && i + 2 < hi && line.bytes[i + 1] == 42 && line.bytes[i + 2] == 42) {
+            match (text.find_from(line, "***", i + 3)) {
+                some(close) => {
+                    if (close + 3 <= hi) {
+                        emit(out, plain, i, style, lf, lt);
+                        scan(line, i + 3, close, style | BOLD | ITALIC, lf, lt, out);
+                        i = close + 3;
+                        plain = i;
+                        continue;
+                    }
+                },
+                none => { },
+            }
+        }
+        if (b == 42 && i + 1 < hi && line.bytes[i + 1] == 42) {
+            match (close_bold(line, i + 2, hi)) {
+                some(close) => {
+                    if (close > i + 2) {
+                        emit(out, plain, i, style, lf, lt);
+                        scan(line, i + 2, close, style | BOLD, lf, lt, out);
+                        i = close + 2;
+                        plain = i;
+                        continue;
+                    }
+                },
+                none => { },
+            }
+        }
+        if (b == 96 && i + 1 < hi && line.bytes[i + 1] != 32) {
+            match (text.find_from(line, "`", i + 1)) {
+                some(close) => {
+                    if (close > i + 1 && close < hi) {
+                        emit(out, plain, i, style, lf, lt);
+                        emit(out, i + 1, close, style | CODE, lf, lt);
+                        i = close + 1;
+                        plain = i;
+                        continue;
+                    }
+                },
+                none => { },
+            }
+        }
+        if (b == 42 && i + 1 < hi && line.bytes[i + 1] != 32) {
+            match (close_star(line, i + 1, hi)) {
+                some(close) => {
+                    if (close > i + 1) {
+                        emit(out, plain, i, style, lf, lt);
+                        scan(line, i + 1, close, style | ITALIC, lf, lt, out);
+                        i = close + 1;
+                        plain = i;
+                        continue;
+                    }
+                },
+                none => { },
+            }
+        }
+        i += 1;
+    }
+    emit(out, plain, hi, style, lf, lt);
+}
+// Does `body` hold a link `[[name]]` to the note `name`?
+pub bool links_to(str body, str name) {
+    mut usize at = 0;
+    while (at < body.len) {
+        match (text.find_from(body, "[[", at)) {
+            some(open) => {
+                match (text.find_from(body, "]]", open + 2)) {
+                    some(close) => {
+                        if (link_matches(target_of(text.slice(body, open + 2, close)), name)) {
+                            return true;
+                        }
+                        at = close + 2;
+                    },
+                    none => {
+                        return false;
+                    },
+                }
+            },
+            none => {
+                return false;
+            },
+        }
+    }
+    return false;
+}
+
+// The spaces that start a line.
+pub usize indent_of(str line) {
+    mut usize n = 0;
+    while (n < line.len && line.bytes[n] == 32) {
+        n += 1;
+    }
+    return n;
+}
+
+// The length of the mark that starts `line` (with no indent): "# ", "- ", "- [ ] ", "1. " or "> "; 0 if none.
+pub usize marker_len(str line) {
+    usize n = line.len;
+    if (n == 0) {
+        return 0;
+    }
+    ui8 b = line.bytes[0];
+    if (b == 35) {
+        mut usize k = 0;
+        while (k < n && line.bytes[k] == 35) {
+            k += 1;
+        }
+        if (k <= 6 && k < n && line.bytes[k] == 32) {
+            return k + 1;
+        }
+        return 0;
+    }
+    if (b == 62) {
+        if (n >= 2 && line.bytes[1] == 32) {
+            return 2;
+        }
+        return 0;
+    }
+    if (b == 45 || b == 42 || b == 43) {
+        if (n >= 6 && line.bytes[1] == 32 && line.bytes[2] == 91 && line.bytes[4] == 93 && line.bytes[5] == 32 && (line.bytes[3] == 32 || line.bytes[3] == 120 || line.bytes[3] == 88)) {
+            return 6;
+        }
+        if (n >= 2 && line.bytes[1] == 32) {
+            return 2;
+        }
+        return 0;
+    }
+    mut usize k = 0;
+    while (k < n && line.bytes[k] >= 48 && line.bytes[k] <= 57) {
+        k += 1;
+    }
+    if (k > 0 && k + 1 < n && line.bytes[k] == 46 && line.bytes[k + 1] == 32) {
+        return k + 2;
+    }
+    return 0;
+}
+
+// The start of the line that holds the byte `at` of `body`, and its end (before the newline).
+pub usize line_start(str body, usize at) {
+    mut usize i = at;
+    while (i > 0 && body.bytes[i - 1] != 10) {
+        i -= 1;
+    }
+    return i;
+}
+
+pub usize line_end(str body, usize at) {
+    mut usize i = at;
+    while (i < body.len && body.bytes[i] != 10) {
+        i += 1;
+    }
+    return i;
+}

@@ -7,20 +7,29 @@ under their own licenses.
 ## Noto Sans
 
 - Files: `packages/render/fonts/NotoSans-Regular.ttf`, and the same file in `assets/` of each
-  application of `showcase/` (with its `OFL.txt`)
+  application of `showcase/` (with its `OFL.txt`), with the Bold, Italic and BoldItalic faces in
+  `showcase/notes/assets/` and `showcase/sheets/assets/`, and the Bold face in `showcase/queens/assets/`
 - Source: <https://github.com/notofonts/notofonts.github.io> (unhinted TrueType)
 - Copyright 2022 The Noto Project Authors (<https://github.com/notofonts/latin-greek-cyrillic>)
 - License: SIL Open Font License, Version 1.1, in `packages/render/fonts/OFL.txt`. The font may
   be used, embedded and redistributed with programs; it may not be sold by itself, and a modified
   version must not use the name "Noto".
 
+## Noto Serif
+
+- Files: `showcase/notes/assets/NotoSerif-Regular.ttf`, `-Bold`, `-Italic` and `-BoldItalic`
+- Source: <https://github.com/notofonts/notofonts.github.io> (unhinted TrueType)
+- Copyright 2022 The Noto Project Authors (<https://github.com/notofonts/latin-greek-cyrillic>)
+- License: SIL Open Font License, Version 1.1, in `showcase/notes/assets/OFL.txt`
+
 ## Font Awesome Free
 
-- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox
+- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox, and
+  `showcase/queens/assets/fa-solid-900.ttf`, the icons of Queens
 - Source: <https://fontawesome.com> (Font Awesome Free, desktop font files)
 - Copyright (c) 2024 Fonticons, Inc., with the Reserved Font Name "Font Awesome"
 - License: SIL Open Font License, Version 1.1, for the font files, in
-  `showcase/beatbox/assets/FA-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
+  `showcase/beatbox/assets/FA-LICENSE.txt` and `showcase/queens/assets/FontAwesome-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
   the code under MIT; neither is given here)
 
 ## Montserrat
@@ -32,10 +41,12 @@ under their own licenses.
 
 ## JetBrains Mono
 
-- Files: `examples/poster/fonts/JetBrainsMono-Regular.ttf`
+- Files: `examples/poster/fonts/JetBrainsMono-Regular.ttf`, and
+  `showcase/notes/assets/JetBrainsMono-Regular.ttf`, `-Bold`, `-Italic` and `-BoldItalic`
 - Source: <https://github.com/JetBrains/JetBrainsMono> (static TrueType)
 - Copyright 2020 The JetBrains Mono Project Authors (<https://github.com/JetBrains/JetBrainsMono>)
-- License: SIL Open Font License, Version 1.1, in `examples/poster/fonts/OFL-JetBrainsMono.txt`
+- License: SIL Open Font License, Version 1.1, in `examples/poster/fonts/OFL-JetBrainsMono.txt` and
+  `showcase/notes/assets/OFL-JetBrainsMono.txt`
 
 ## font8x8
 
@@ -52,6 +63,15 @@ under their own licenses.
 - Copyright (C) 1997-2026 Sam Lantinga
 - License: zlib license (<https://www.libsdl.org/license.php>): free use, including in
   commercial programs, without having to publish their source.
+
+## CommonMark specification
+
+- Files: `showcase/notes/spec/spec.json`, and `showcase/notes/spec/spec.txt`, the same examples with
+  other separators; the test of the Markdown parser of Notes compares its output with them
+- Source: <https://spec.commonmark.org/0.31.2/>, version 0.31.2
+- Written by John MacFarlane
+- License: Creative Commons Attribution-ShareAlike 4.0 International
+  (<https://creativecommons.org/licenses/by-sa/4.0/>), for these two files only
 
 ## stb_vorbis
 

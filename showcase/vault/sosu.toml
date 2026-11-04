@@ -1,0 +1,17 @@
+# Vault: a password manager, written in Sosu. Encrypted SQLite file, ChaCha20 + HMAC-SHA256, PBKDF2.
+[package]
+name = "vault"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }
+image = { path = "../../packages/image" }
+crypto = { path = "../../packages/crypto" }
+db = { path = "../../packages/db" }
+sqlite = { path = "../../packages/sqlite" }
+testing = { path = "../../packages/testing" }
+
+[app]
+assets = ["assets/NotoSans-Regular.ttf"]

@@ -43,7 +43,7 @@ pub class Engine {
     mut i64 seen_bpm;
     mut ui64 seen_ms;
 
-    void init(Arena* arena, device.Player* player) {
+    void init(Arena* arena, keeps device.Player* player) {
         self.player = player;
         kit = [sounds.kick(arena), sounds.snare(arena), sounds.clap(arena), sounds.hat(arena), sounds.open_hat(arena), sounds.tom(arena), sounds.rim(arena), sounds.cowbell(arena), sounds.conga(arena), sounds.crash(arena), sounds.shaker(arena), sounds.bass(arena), sounds.pluck(arena), sounds.lead(arena), sounds.bell(arena), sounds.zap(arena)];
         room = audio.create(arena, sounds.RATE, 2, 16 * step_frames(machine.MIN_BPM));
@@ -87,7 +87,7 @@ pub class Engine {
                     usize next = min(from + 1, drum.frames() - 1);
                     f32 part = (pos - from as f64) as f32;
                     f32 v = drum.samples[from] * (1.0 - part) + drum.samples[next] * part;
-                    usize place = ((start + k) % n) * 2;  // the end of a sound goes round the loop
+                    usize place = (start + k) % n * 2;  // the end of a sound goes round the loop
                     room.samples[place] += v * left;
                     room.samples[place + 1] += v * right;
                 }

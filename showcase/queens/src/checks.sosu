@@ -1,0 +1,124 @@
+import testing.check;
+import queens.board;
+
+board.Game* new_game(Arena* arena, i32 size, ui64 seed) {
+    return arena.new(board.Game, size, seed);
+}
+
+// The solution has one queen by row, column and region, and none touch.
+bool valid_solution(board.Game* g) {
+    mut i32 cols = 0;
+    mut i32 regions = 0;
+    for (i32 y in 0..g.n) {
+        i32 c = g.answer[y as usize];
+        i32 r = g.region_of(c, y);
+        if (cols & 1 << c != 0 || regions & 1 << r != 0) {
+            return false;
+        }
+        cols |= 1 << c;
+        regions |= 1 << r;
+        if (y > 0) {
+            i32 d = c - g.answer[(y - 1) as usize];
+            if (d >= -1 && d <= 1) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+test "the solution of every size is valid" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    for (i32 size in board.MIN..board.MAX + 1) {
+        for (i32 seed in 1..6) {
+            board.Game* g = new_game(&arena, size, seed as ui64);
+            assert(g.n == size);
+            assert(valid_solution(g));
+        }
+    }
+}
+
+test "there are n regions, all used" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    for (i32 size in board.MIN..board.MAX + 1) {
+        board.Game* g = new_game(&arena, size, 7);
+        mut i32 seen = 0;
+        for (i32 i in 0..size * size) {
+            assert(g.region[i as usize] >= 0 && g.region[i as usize] < size);
+            seen |= 1 << g.region[i as usize];
+        }
+        assert(seen == (1 << size) - 1);
+    }
+}
+
+test "the puzzle has one solution only" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    for (i32 size in board.MIN..board.MAX + 1) {
+        for (i32 seed in 1..4) {
+            board.Game* g = new_game(&arena, size, seed as ui64);
+            assert(g.solutions() == 1);
+        }
+    }
+}
+
+test "a click goes from empty to a cross to a queen and back" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    board.Game* g = new_game(&arena, 6, 3);
+    assert(g.at(2, 3) == board.EMPTY);
+    g.cycle(2, 3);
+    assert(g.at(2, 3) == board.CROSS);
+    g.cycle(2, 3);
+    assert(g.at(2, 3) == board.QUEEN);
+    g.cycle(2, 3);
+    assert(g.at(2, 3) == board.EMPTY);
+}
+
+test "the solution wins, and clear empties the board" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    board.Game* g = new_game(&arena, 8, 11);
+    assert(!g.won());
+    g.show_solution();
+    assert(g.queens() == 8);
+    assert(!g.has_conflict());
+    assert(g.won());
+    g.clear();
+    assert(g.queens() == 0);
+    assert(!g.won());
+}
+
+test "queens in the same row, column, region or touching are in conflict" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    board.Game* g = new_game(&arena, 6, 5);
+    g.set(0, 0, board.QUEEN);
+    g.set(3, 0, board.QUEEN);
+    assert(g.conflict(0, 0) && g.conflict(3, 0));
+    g.clear();
+    g.set(1, 1, board.QUEEN);
+    g.set(1, 4, board.QUEEN);
+    assert(g.conflict(1, 1));
+    g.clear();
+    g.set(1, 1, board.QUEEN);
+    g.set(2, 2, board.QUEEN);
+    assert(g.conflict(1, 1) && g.conflict(2, 2));
+    g.clear();
+    g.set(1, 1, board.CROSS);
+    g.set(1, 2, board.CROSS);
+    assert(!g.conflict(1, 1));
+}
+
+test "a wrong full board does not win" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    board.Game* g = new_game(&arena, 5, 2);
+    for (i32 y in 0..5) {
+        g.set(0, y, board.QUEEN);
+    }
+    assert(g.queens() == 5);
+    assert(!g.won());
+}

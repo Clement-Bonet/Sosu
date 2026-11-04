@@ -32,7 +32,7 @@ class Widget {
 class Button : Widget, Shape {
     str label;
 
-    void init(str label) {
+    void init(keeps str label) {
         base.init(0.0, 7);
         self.label = label;
     }

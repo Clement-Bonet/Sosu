@@ -148,7 +148,7 @@ class Database : db.Connection {
     ui8* handle;
     mut bool open;
 
-    void init(ui8* handle) {
+    void init(keeps ui8* handle) {
         self.handle = handle;
         open = true;
     }
@@ -291,7 +291,7 @@ class Prepared : db.Statement {
     mut bool open;
     mut ui64 runs;  // the rows of an earlier run end when it runs again
 
-    void init(Database* database, ui8* stmt) {
+    void init(keeps Database* database, keeps ui8* stmt) {
         self.database = database;
         self.stmt = stmt;
         open = true;
@@ -340,7 +340,7 @@ class Cursor : db.Rows {
     mut bool done;
     mut bool row;  // on a row
 
-    void init(Arena* arena, Database* database, ui8* stmt, bool owned, Prepared*? statement, ui64 run) {
+    void init(Arena* arena, keeps Database* database, keeps ui8* stmt, bool owned, keeps Prepared*? statement, ui64 run) {
         self.arena = arena;
         self.database = database;
         self.stmt = stmt;

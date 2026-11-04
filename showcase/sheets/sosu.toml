@@ -1,0 +1,12 @@
+# Sosu Sheets: a spreadsheet, written in Sosu.
+[package]
+name = "sheets"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }
+testing = { path = "../../packages/testing" }
+image = { path = "../../packages/image" }
+compress = { path = "../../packages/compress" }

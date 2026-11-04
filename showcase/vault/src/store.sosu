@@ -1,0 +1,228 @@
+// vault.store: the vault in a SQLite file. `meta` holds the salt, the number of PBKDF2 rounds and a
+// sealed check text (a wrong password fails to open it); `entries` holds one sealed blob per account,
+// so the file shows how many accounts there are and nothing else.
+import std.vec;
+import db.db;
+import sqlite.sqlite;
+import vault.entry;
+import vault.rand;
+import vault.seal;
+
+pub i32 ROUNDS = 600000;
+
+pub enum Opened {
+    Yes,
+    WrongPassword,
+    Damaged,
+}
+
+pub db.Connection*!db.DbError open(Arena* arena, str path) uses io {
+    db.Connection* c = try sqlite.open(arena, path);
+    try c.script("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value); CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY AUTOINCREMENT, blob BLOB NOT NULL);");
+    return ok(c);
+}
+
+db.Value? read_meta(Arena* arena, db.Connection* c, str key) uses io {
+    mut db.Value[1] p = [db.Value.Text(key)];
+    return match (db.scalar(arena, c, "SELECT value FROM meta WHERE key = ?", p[0..1])) {
+        ok(found) => found,
+        err(e) => none,
+    };
+}
+
+bool write_meta(db.Connection* c, str key, db.Value value) uses io {
+    mut db.Value[2] p = [db.Value.Text(key), value];
+    return match (c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", p[0..2])) {
+        ok(n) => true,
+        err(e) => false,
+    };
+}
+
+// Whether the file already holds a vault (it has a salt).
+pub bool exists(Arena* arena, db.Connection* c) uses io {
+    return match (read_meta(arena, c, "salt")) {
+        some(v) => true,
+        none => false,
+    };
+}
+
+ui8[] check_text(Arena* arena) {
+    mut ui8[] out = arena.alloc_slice(ui8, 10);
+    str word = "sosu-vault";
+    for (usize i in 0..10) {
+        out[i] = word.bytes[i];
+    }
+    return out;
+}
+
+// Makes a vault for `password`: a new salt, and the keys, in `keys`. False if the file refuses it.
+pub bool create(Arena* arena, db.Connection* c, ui8[] password, i32 rounds, seal.Keys* keys) uses io {
+    mut ui8[] salt = arena.alloc_slice(ui8, 16);
+    rand.fill(salt);
+    *keys = seal.derive(password, salt, rounds);
+    ui8[] check = seal.seal(arena, keys, check_text(arena));
+    return write_meta(c, "salt", db.Value.Bytes(salt)) && write_meta(c, "rounds", db.Value.Integer(rounds as i64)) && write_meta(c, "check", db.Value.Bytes(check));
+}
+
+ui8[]? meta_bytes(Arena* arena, db.Connection* c, str key) uses io {
+    return match (read_meta(arena, c, key)) {
+        some(v) => db.as_bytes(v),
+        none => none,
+    };
+}
+
+// Derives the keys of `password`, and checks them against the check text of the file.
+pub Opened unlock(Arena* arena, db.Connection* c, ui8[] password, seal.Keys* keys) uses io {
+    mut ui8[] salt = arena.alloc_slice(ui8, 0);
+    mut ui8[] check = arena.alloc_slice(ui8, 0);
+    mut i32 rounds = 0;
+    mut i32 found = 0;
+    match (meta_bytes(arena, c, "salt")) {
+        some(b) => {
+            salt = b;
+            found += 1;
+        },
+        none => { },
+    }
+    match (meta_bytes(arena, c, "check")) {
+        some(b) => {
+            check = b;
+            found += 1;
+        },
+        none => { },
+    }
+    match (read_meta(arena, c, "rounds")) {
+        some(v) => {
+            match (db.as_i64(v)) {
+                some(n) => {
+                    rounds = n as i32;
+                    found += 1;
+                },
+                none => { },
+            }
+        },
+        none => { },
+    }
+    if (found < 3 || rounds < 1) {
+        return Opened.Damaged;
+    }
+    *keys = seal.derive(password, salt, rounds);
+    return match (seal.open(arena, keys, check)) {
+        some(text) => Opened.Yes,
+        none => Opened.WrongPassword,
+    };
+}
+
+bool more(db.Rows* rows) uses io {
+    return match (rows.next()) {
+        ok(yes) => yes,
+        err(e) => false,
+    };
+}
+
+// Opens every account into `out`; the number that could not be opened.
+pub i32 load_all(Arena* arena, db.Connection* c, seal.Keys* keys, vec.Vec<entry.Entry>* out) uses io {
+    mut i32 lost = 0;
+    match (db.select(arena, c, "SELECT id, blob FROM entries ORDER BY id")) {
+        ok(rows) => {
+            while (more(rows)) {
+                i64? id = db.as_i64(rows.value(arena, 0));
+                ui8[]? blob = db.as_bytes(rows.value(arena, 1));
+                mut bool good = false;
+                match (id) {
+                    some(row) => {
+                        match (blob) {
+                            some(bytes) => {
+                                match (seal.open(arena, keys, bytes)) {
+                                    some(plain) => {
+                                        mut entry.Entry e = entry.Entry{ };
+                                        if (entry.decode(plain, &e)) {
+                                            e.id = row;
+                                            out.push(e);
+                                            good = true;
+                                        }
+                                    },
+                                    none => { },
+                                }
+                            },
+                            none => { },
+                        }
+                    },
+                    none => { },
+                }
+                if (!good) {
+                    lost += 1;
+                }
+            }
+        },
+        err(e) => {
+            lost += 1;
+        },
+    }
+    return lost;
+}
+
+// Writes `e`: a new row if it has no id (which it gets), else the row it has.
+pub bool save(Arena* arena, db.Connection* c, seal.Keys* keys, entry.Entry* e) uses io {
+    ui8[] blob = seal.seal(arena, keys, entry.encode(arena, e));
+    if (e.id == 0) {
+        mut db.Value[1] p = [db.Value.Bytes(blob)];
+        match (c.execute("INSERT INTO entries (blob) VALUES (?)", p[0..1])) {
+            ok(n) => {
+                e.id = c.last_insert_id();
+                return true;
+            },
+            err(x) => {
+                return false;
+            },
+        }
+    }
+    mut db.Value[2] p = [db.Value.Bytes(blob), db.Value.Integer(e.id)];
+    return match (c.execute("UPDATE entries SET blob = ? WHERE id = ?", p[0..2])) {
+        ok(n) => true,
+        err(x) => false,
+    };
+}
+
+pub bool remove(db.Connection* c, i64 id) uses io {
+    mut db.Value[1] p = [db.Value.Integer(id)];
+    return match (c.execute("DELETE FROM entries WHERE id = ?", p[0..1])) {
+        ok(n) => true,
+        err(x) => false,
+    };
+}
+
+// A new master password: new salt and keys, and every account sealed again, all or nothing.
+pub bool change_password(Arena* arena, db.Connection* c, vec.Vec<entry.Entry>* all, ui8[] password, i32 rounds, seal.Keys* keys) uses io {
+    mut bool good = match (c.begin()) {
+        ok() => true,
+        err(e) => false,
+    };
+    if (!good) {
+        return false;
+    }
+    mut seal.Keys fresh = seal.Keys{ };
+    good = create(arena, c, password, rounds, &fresh);
+    for (usize k in 0..all.len()) {
+        if (good && !save(arena, c, &fresh, all.at(k))) {
+            good = false;
+        }
+    }
+    if (good) {
+        match (c.commit()) {
+            ok() => { },
+            err(e) => {
+                good = false;
+            },
+        }
+    }
+    if (!good) {
+        match (c.rollback()) {
+            ok() => { },
+            err(e) => { },
+        }
+        return false;
+    }
+    *keys = fresh;
+    return true;
+}

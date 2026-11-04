@@ -33,7 +33,7 @@ class App : app.Handler, app.TitleBar {
     mut f32 display_scale;
     mut f32 bars;
 
-    void init(machine.Machine* m, engine.Engine*? sound) {
+    void init(keeps machine.Machine* m, keeps engine.Engine*? sound) {
         ui = widgets.Ui{ };
         display_scale = 1.0;
         bars = 0.0;

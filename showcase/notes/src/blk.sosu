@@ -1,0 +1,1034 @@
+// notes.blk: the first phase of the parser: the blocks of a document (quotes, lists, paragraphs,
+// headings, code, HTML, tables), found one line after the other. The text of the leaves is
+// then read by notes.inl.
+import std.text;
+import std.vec;
+import notes.cm;
+import notes.inl;
+
+bool is_end(str s, usize i) {
+    i32 c = cm.ch(s, i);
+    return c < 0 || c == 32 || c == 9 || c == 10;
+}
+
+pub struct Doc {
+    pub vec.Vec<cm.Node>* nodes;
+    pub vec.Vec<cm.Ref>* refs;
+}
+
+struct Marker {
+    bool ok = false;
+    bool ordered = false;
+    i32 marker = 0;
+    i32 start = 0;
+    i32 len = 0;
+}
+
+pub str BLOCK_NAMES = "|address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul|";
+
+// The kind (1 to 7) of the HTML block that begins at `s`, or 0.
+i32 html_kind(str s, bool in_paragraph) {
+    if (cm.ch(s, 0) != 60) {
+        return 0;
+    }
+    i32 c = cm.ch(s, 1);
+    if (c == 33) {
+        if (cm.ch(s, 2) == 45 && cm.ch(s, 3) == 45) {
+            return 2;
+        }
+        if (text.starts_with(s, "<![CDATA[")) {
+            return 5;
+        }
+        return cm.is_alpha(cm.ch(s, 2)) ? 4 : 0;
+    }
+    if (c == 63) {
+        return 3;
+    }
+    usize e1 = cm.name_end(s, 1);
+    str name1 = text.slice(s, 1, e1);
+    if (cm.in_names("|script|pre|style|textarea|", name1) && (is_end(s, e1) || cm.ch(s, e1) == 62)) {
+        return 1;
+    }
+    usize from = c == 47 ? 2 : 1;
+    usize e = cm.name_end(s, from);
+    if (e > from && cm.in_names(BLOCK_NAMES, text.slice(s, from, e))) {
+        if (is_end(s, e) || cm.ch(s, e) == 62 || cm.ch(s, e) == 47 && cm.ch(s, e + 1) == 62) {
+            return 6;
+        }
+    }
+    if (!in_paragraph) {
+        usize end = cm.scan_tag(s, 0);
+        if (end > 0 && cm.is_blank(text.slice(s, end, s.len))) {
+            return 7;
+        }
+    }
+    return 0;
+}
+
+bool all_of(str s, i32 c) {
+    for (usize i in 0..s.len) {
+        if (s.bytes[i] as i32 != c) {
+            return false;
+        }
+    }
+    return s.len > 0;
+}
+
+// A thematic break: three or more `*`, `-` or `_`, with spaces between.
+bool is_break(str s) {
+    mut i32 mark = 0;
+    mut i32 n = 0;
+    for (usize i in 0..s.len) {
+        i32 c = s.bytes[i] as i32;
+        if (c == 32 || c == 9) {
+            continue;
+        }
+        if (c != 42 && c != 45 && c != 95) {
+            return false;
+        }
+        if (mark != 0 && c != mark) {
+            return false;
+        }
+        mark = c;
+        n += 1;
+    }
+    return n >= 3;
+}
+
+// The cells of a row of a table, between the `|`, and without the `\` of a `\|`.
+pub void cells_of(Arena* arena, str row, vec.Vec<str>* out) {
+    mut str r = text.trim(row);
+    if (cm.ch(r, 0) == 124) {
+        r = text.slice(r, 1, r.len);
+    }
+    if (r.len > 0 && cm.ch(r, r.len - 1) == 124 && (r.len < 2 || cm.ch(r, r.len - 2) != 92)) {
+        r = text.slice(r, 0, r.len - 1);
+    }
+    mut text.TextBuilder* b = text.builder(arena);
+    mut usize run = 0;
+    mut usize i = 0;
+    while (i < r.len) {
+        i32 c = cm.ch(r, i);
+        if (c == 92 && cm.ch(r, i + 1) == 124) {
+            b.push(text.slice(r, run, i));
+            run = i + 1;
+            i += 2;
+        } else if (c == 124) {
+            b.push(text.slice(r, run, i));
+            out.push(text.trim(b.text()));
+            b = text.builder(arena);
+            run = i + 1;
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    b.push(text.slice(r, run, r.len));
+    out.push(text.trim(b.text()));
+}
+
+// The alignments of a delimiter row (`|:--|--:|`) as digits (1 left, 2 right, 3 centre, 0 none), or "".
+str aligns_of(Arena* arena, str row) {
+    if (!text.contains(row, "|")) {
+        return "";
+    }
+    vec.Vec<str>* cells = vec.new<str>(arena);
+    cells_of(arena, row, cells);
+    text.TextBuilder* b = text.builder(arena);
+    for (usize i in 0..cells.len()) {
+        str c = *cells.at(i);
+        mut usize from = 0;
+        mut usize to = c.len;
+        mut i32 a = 0;
+        if (cm.ch(c, 0) == 58) {
+            a = 1;
+            from = 1;
+        }
+        if (to > from && cm.ch(c, to - 1) == 58) {
+            a += 2;
+            to -= 1;
+        }
+        if (to <= from || !all_of(text.slice(c, from, to), 45)) {
+            return "";
+        }
+        b.push(a == 0 ? "0" : a == 1 ? "1" : a == 2 ? "2" : "3");
+    }
+    return b.text();
+}
+
+pub class Parser {
+    pub Arena* arena;
+    pub bool ext;
+    pub mut vec.Vec<cm.Node>* nodes;
+    pub mut vec.Vec<cm.Ref>* refs;
+    mut vec.Vec<text.TextBuilder*>* bufs;
+    mut i32 doc;
+    mut i32 tip;
+    mut i32 oldtip;
+    mut i32 last_matched;
+    mut bool all_closed;
+    mut str line;
+    mut i32 offset;
+    mut i32 column;
+    mut i32 next_nonspace;
+    mut i32 next_col;
+    mut i32 indent;
+    mut bool indented;
+    mut bool blank;
+    mut bool partial_tab;
+    mut i32 line_no;
+
+    void init(Arena* arena, bool ext) {
+        self.arena = arena;
+        self.ext = ext;
+        nodes = vec.new<cm.Node>(arena);
+        refs = vec.new<cm.Ref>(arena);
+        bufs = vec.new<text.TextBuilder*>(arena);
+        line = "";
+        doc = new_node(Document);
+        tip = doc;
+        oldtip = doc;
+        last_matched = doc;
+        all_closed = true;
+        line_no = 0;
+    }
+
+    i32 new_node(cm.Kind kind) {
+        i32 id = cm.make(nodes, kind);
+        bufs.push(text.builder(arena));
+        return id;
+    }
+
+    cm.Node* at(i32 id) {
+        return nodes.at(id as usize);
+    }
+
+    cm.Kind kind_of(i32 id) {
+        return nodes.at(id as usize).kind;
+    }
+
+    bool is_leaf_text(cm.Kind k) {
+        return match (k) {
+            Paragraph => true,
+            CodeBlock => true,
+            HtmlBlock => true,
+            _ => false,
+        };
+    }
+
+    bool can_contain(cm.Kind parent, cm.Kind child) {
+        return match (parent) {
+            Document => child != Item,
+            BlockQuote => child != Item,
+            Item => child != Item,
+            Footnote => child != Item,
+            List => child == Item,
+            _ => false,
+        };
+    }
+
+    void find_next_nonspace() {
+        mut i32 i = offset;
+        mut i32 cols = column;
+        mut i32 c = 0;
+        while (true) {
+            c = cm.ch(line, i as usize);
+            if (c == 32) {
+                i += 1;
+                cols += 1;
+            } else if (c == 9) {
+                i += 1;
+                cols += 4 - cols % 4;
+            } else {
+                break;
+            }
+        }
+        blank = c < 0 || c == 10 || c == 13;
+        next_nonspace = i;
+        next_col = cols;
+        indent = cols - column;
+        indented = indent >= 4;
+    }
+
+    void advance_next_nonspace() {
+        offset = next_nonspace;
+        column = next_col;
+        partial_tab = false;
+    }
+
+    void advance_offset(i32 count, bool columns) {
+        mut i32 n = count;
+        while (n > 0 && offset < line.len as i32) {
+            i32 c = cm.ch(line, offset as usize);
+            if (c == 9) {
+                i32 to_tab = 4 - column % 4;
+                if (columns) {
+                    partial_tab = to_tab > n;
+                    i32 adv = to_tab < n ? to_tab : n;
+                    column += adv;
+                    offset += partial_tab ? 0 : 1;
+                    n -= adv;
+                } else {
+                    partial_tab = false;
+                    column += to_tab;
+                    offset += 1;
+                    n -= 1;
+                }
+            } else {
+                partial_tab = false;
+                offset += 1;
+                column += 1;
+                n -= 1;
+            }
+        }
+    }
+
+    str rest() {
+        return text.slice(line, offset as usize, line.len);
+    }
+
+    str rest_from_nonspace() {
+        return text.slice(line, next_nonspace as usize, line.len);
+    }
+
+    void add_line() {
+        text.TextBuilder* b = *bufs.at(tip as usize);
+        if (partial_tab) {
+            offset += 1;
+            i32 to_tab = 4 - column % 4;
+            for (i32 k in 0..to_tab) {
+                b.push(" ");
+            }
+        }
+        b.push(rest());
+        b.push("\n");
+    }
+
+    i32 add_child(cm.Kind kind) {
+        while (!can_contain(kind_of(tip), kind)) {
+            finalize(tip);
+        }
+        i32 id = new_node(kind);
+        at(id).line = line_no;
+        cm.append(nodes, tip, id);
+        tip = id;
+        return id;
+    }
+
+    void close_unmatched() {
+        if (!all_closed) {
+            while (oldtip != last_matched) {
+                i32 parent = at(oldtip).parent;
+                finalize(oldtip);
+                oldtip = parent;
+            }
+            all_closed = true;
+        }
+    }
+
+    bool ends_with_blank(i32 start) {
+        mut i32 b = start;
+        while (b >= 0) {
+            if (at(b).blank_end) {
+                return true;
+            }
+            cm.Kind k = kind_of(b);
+            if (!at(b).checked_end && (k == List || k == Item)) {
+                at(b).checked_end = true;
+                b = at(b).last;
+            } else {
+                at(b).checked_end = true;
+                break;
+            }
+        }
+        return false;
+    }
+
+    // The text of `s` without the lines at its end that are blank.
+    str strip_blank_end(str s, bool keep_newline) {
+        mut usize e = s.len;
+        mut bool found = false;
+        while (true) {
+            mut usize k = e;
+            while (k > 0 && cm.ch(s, k - 1) == 32) {
+                k -= 1;
+            }
+            if (k > 0 && cm.ch(s, k - 1) == 10) {
+                e = k - 1;
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if (!found) {
+            return s;
+        }
+        str head = text.slice(s, 0, e);
+        return keep_newline ? cm.cat(arena, head, "\n") : head;
+    }
+
+    void finalize(i32 id) {
+        i32 above = at(id).parent;
+        at(id).open = false;
+        cm.Kind k = kind_of(id);
+        str content = (*bufs.at(id as usize)).text();
+        if (k == Paragraph) {
+            mut str c = content;
+            while (cm.ch(c, 0) == 91) {
+                usize n = cm.parse_ref(arena, refs, c);
+                if (n == 0) {
+                    break;
+                }
+                c = text.slice(c, n, c.len);
+            }
+            at(id).lit = c;
+            if (cm.is_blank(c)) {
+                cm.unlink(nodes, id);
+            }
+        } else if (k == CodeBlock) {
+            if (at(id).fenced) {
+                mut usize nl = content.len;
+                match (text.find(content, "\n")) {
+                    some(n) => {
+                        nl = n;
+                    },
+                    none => { },
+                }
+                at(id).info = cm.unescape(arena, text.trim(text.slice(content, 0, nl)));
+                at(id).lit = nl + 1 <= content.len ? text.slice(content, nl + 1, content.len) : "";
+            } else {
+                at(id).lit = strip_blank_end(content, true);
+            }
+        } else if (k == HtmlBlock) {
+            at(id).lit = strip_blank_end(content, false);
+        } else if (k == Heading) {
+            at(id).lit = content;
+        } else if (k == List) {
+            mut bool tight = true;
+            mut i32 item = at(id).first;
+            while (item >= 0 && tight) {
+                if (ends_with_blank(item) && at(item).next >= 0) {
+                    tight = false;
+                    break;
+                }
+                mut i32 sub = at(item).first;
+                while (sub >= 0) {
+                    if (ends_with_blank(sub) && (at(item).next >= 0 || at(sub).next >= 0)) {
+                        tight = false;
+                        break;
+                    }
+                    sub = at(sub).next;
+                }
+                item = at(item).next;
+            }
+            at(id).tight = tight;
+        }
+        tip = above;
+    }
+
+    // ---- what continues a block ----
+
+    // 0: the line goes on with the block; 1: it does not; 2: the line is over.
+    i32 cont(i32 id) {
+        cm.Node n = *at(id);
+        match (n.kind) {
+            BlockQuote => {
+                if (!indented && cm.ch(line, next_nonspace as usize) == 62) {
+                    advance_next_nonspace();
+                    advance_offset(1, false);
+                    if (cm.is_space_tab(cm.ch(line, offset as usize))) {
+                        advance_offset(1, true);
+                    }
+                    return 0;
+                }
+                return 1;
+            },
+            Item => {
+                if (blank) {
+                    if (n.first < 0) {
+                        return 1;
+                    }
+                    advance_next_nonspace();
+                    return 0;
+                }
+                if (indent >= n.marker_off + n.pad) {
+                    advance_offset(n.marker_off + n.pad, true);
+                    return 0;
+                }
+                return 1;
+            },
+            Footnote => {
+                if (blank) {
+                    advance_next_nonspace();
+                    return 0;
+                }
+                if (indent >= 4) {
+                    advance_offset(4, true);
+                    return 0;
+                }
+                return 1;
+            },
+            Heading => {
+                return 1;
+            },
+            ThematicBreak => {
+                return 1;
+            },
+            CodeBlock => {
+                if (n.fenced) {
+                    str r = rest_from_nonspace();
+                    i32 c = cm.ch(r, 0);
+                    if (indent <= 3 && c == n.fence_char) {
+                        mut usize k = 0;
+                        while (cm.ch(r, k) == n.fence_char) {
+                            k += 1;
+                        }
+                        if (k as i32 >= n.fence_len && cm.is_blank(text.slice(r, k, r.len))) {
+                            finalize(id);
+                            return 2;
+                        }
+                    }
+                    mut i32 skip = n.fence_off;
+                    while (skip > 0 && cm.is_space_tab(cm.ch(line, offset as usize))) {
+                        advance_offset(1, true);
+                        skip -= 1;
+                    }
+                    return 0;
+                }
+                if (indent >= 4) {
+                    advance_offset(4, true);
+                } else if (blank) {
+                    advance_next_nonspace();
+                } else {
+                    return 1;
+                }
+                return 0;
+            },
+            HtmlBlock => {
+                return blank && (n.html_type == 6 || n.html_type == 7) ? 1 : 0;
+            },
+            Paragraph => {
+                return blank ? 1 : 0;
+            },
+            Table => {
+                return blank ? 1 : 0;
+            },
+            _ => {
+                return 0;
+            },
+        }
+    }
+
+    // ---- what begins a block: 0 no, 1 a container, 2 a leaf ----
+
+    i32 start_quote() {
+        if (!indented && cm.ch(line, next_nonspace as usize) == 62) {
+            advance_next_nonspace();
+            advance_offset(1, false);
+            if (cm.is_space_tab(cm.ch(line, offset as usize))) {
+                advance_offset(1, true);
+            }
+            close_unmatched();
+            add_child(BlockQuote);
+            return 1;
+        }
+        return 0;
+    }
+
+    i32 start_atx() {
+        if (indented || cm.ch(line, next_nonspace as usize) != 35) {
+            return 0;
+        }
+        str r = rest_from_nonspace();
+        mut usize n = 0;
+        while (cm.ch(r, n) == 35) {
+            n += 1;
+        }
+        if (n > 6 || !(n == r.len || cm.is_space_tab(cm.ch(r, n)))) {
+            return 0;
+        }
+        advance_next_nonspace();
+        advance_offset(n as i32, false);
+        mut usize skip = 0;
+        while (cm.is_space_tab(cm.ch(line, offset as usize + skip))) {
+            skip += 1;
+        }
+        advance_offset(skip as i32, true);
+        close_unmatched();
+        i32 id = add_child(Heading);
+        at(id).level = n as i32;
+        mut str content = rest();
+        content = text.trim_end(content);
+        // a closing sequence of `#`, which a space must set apart
+        mut usize e = content.len;
+        while (e > 0 && cm.ch(content, e - 1) == 35) {
+            e -= 1;
+        }
+        if (e < content.len && (e == 0 || cm.is_space_tab(cm.ch(content, e - 1)))) {
+            content = text.trim_end(text.slice(content, 0, e));
+        }
+        (*bufs.at(id as usize)).push(content);
+        advance_offset(line.len as i32 - offset, false);
+        return 2;
+    }
+
+    i32 start_fence() {
+        if (indented) {
+            return 0;
+        }
+        str r = rest_from_nonspace();
+        i32 c = cm.ch(r, 0);
+        if (c != 96 && c != 126) {
+            return 0;
+        }
+        mut usize n = 0;
+        while (cm.ch(r, n) == c) {
+            n += 1;
+        }
+        if (n < 3) {
+            return 0;
+        }
+        if (c == 96 && text.contains(text.slice(r, n, r.len), "`")) {
+            return 0;
+        }
+        close_unmatched();
+        i32 id = add_child(CodeBlock);
+        at(id).fenced = true;
+        at(id).fence_char = c;
+        at(id).fence_len = n as i32;
+        at(id).fence_off = indent;
+        advance_next_nonspace();
+        advance_offset(n as i32, false);
+        return 2;
+    }
+
+    i32 start_html(i32 container) {
+        if (indented || cm.ch(line, next_nonspace as usize) != 60) {
+            return 0;
+        }
+        bool in_par = !all_closed && !blank && kind_of(tip) == Paragraph;
+        i32 k = html_kind(rest_from_nonspace(), kind_of(container) == Paragraph || in_par);
+        if (k == 0) {
+            return 0;
+        }
+        close_unmatched();
+        i32 id = add_child(HtmlBlock);
+        at(id).html_type = k;
+        return 2;
+    }
+
+    i32 start_setext(i32 container) {
+        if (indented || kind_of(container) != Paragraph) {
+            return 0;
+        }
+        str r = rest_from_nonspace();
+        i32 c = cm.ch(r, 0);
+        if (c != 61 && c != 45) {
+            return 0;
+        }
+        mut usize k = 0;
+        while (cm.ch(r, k) == c) {
+            k += 1;
+        }
+        if (!cm.is_blank(text.slice(r, k, r.len))) {
+            return 0;
+        }
+        close_unmatched();
+        mut str content = (*bufs.at(container as usize)).text();
+        while (cm.ch(content, 0) == 91) {
+            usize n = cm.parse_ref(arena, refs, content);
+            if (n == 0) {
+                break;
+            }
+            content = text.slice(content, n, content.len);
+        }
+        if (content.len == 0) {
+            return 0;
+        }
+        i32 h = new_node(Heading);
+        at(h).level = c == 61 ? 1 : 2;
+        at(h).line = at(container).line;
+        (*bufs.at(h as usize)).push(text.trim_end(content));
+        cm.insert_after(nodes, container, h);
+        cm.unlink(nodes, container);
+        at(container).open = false;
+        tip = h;
+        advance_offset(line.len as i32 - offset, false);
+        return 2;
+    }
+
+    i32 start_table(i32 container) {
+        bool lazy = ext && !indented && container != tip && kind_of(tip) == Paragraph && !all_closed;
+        if (!ext || indented || !lazy && (kind_of(container) != Paragraph || container != tip)) {
+            return 0;
+        }
+        i32 para = tip;
+        str delim = rest_from_nonspace();
+        str aligns = aligns_of(arena, delim);
+        if (aligns.len == 0) {
+            return 0;
+        }
+        str content = (*bufs.at(para as usize)).text();
+        str body = text.slice(content, 0, content.len - 1);
+        mut usize start = 0;
+        match (text.find_last(body, "\n")) {
+            some(n) => {
+                start = n + 1;
+            },
+            none => { },
+        }
+        str head = text.slice(body, start, body.len);
+        vec.Vec<str>* hc = vec.new<str>(arena);
+        cells_of(arena, head, hc);
+        if (hc.len() != aligns.len) {
+            return 0;
+        }
+        if (lazy) {
+            text.TextBuilder* lb = text.builder(arena);
+            lb.push(text.slice(content, 0, start));
+            bufs.set(para as usize, lb);
+            close_unmatched();
+            i32 made = add_child(Table);
+            at(made).info = aligns;
+            add_row(made, head, true);
+            advance_offset(line.len as i32 - offset, false);
+            return 2;
+        }
+        close_unmatched();
+        mut i32 table = container;
+        if (start > 0) {
+            text.TextBuilder* b = text.builder(arena);
+            b.push(text.slice(content, 0, start));
+            bufs.set(container as usize, b);
+            finalize(container);
+            table = add_child(Table);
+        } else {
+            at(container).kind = Table;
+        }
+        at(table).info = aligns;
+        add_row(table, head, true);
+        advance_offset(line.len as i32 - offset, false);
+        return 2;
+    }
+
+    void add_row(i32 table, str row, bool head) {
+        i32 r = new_node(Row);
+        at(r).head = head;
+        at(r).open = false;
+        at(r).line = line_no;
+        cm.append(nodes, table, r);
+        vec.Vec<str>* cells = vec.new<str>(arena);
+        cells_of(arena, row, cells);
+        str aligns = at(table).info;
+        for (usize i in 0..aligns.len) {
+            i32 c = new_node(Cell);
+            at(c).head = head;
+            at(c).open = false;
+            at(c).level = aligns.bytes[i] as i32 - 48;
+            at(c).lit = i < cells.len() ? *cells.at(i) : "";
+            cm.append(nodes, r, c);
+        }
+    }
+
+    i32 start_break() {
+        if (!indented && is_break(rest_from_nonspace())) {
+            close_unmatched();
+            add_child(ThematicBreak);
+            advance_offset(line.len as i32 - offset, false);
+            return 2;
+        }
+        return 0;
+    }
+
+    i32 start_footnote() {
+        if (!ext || indented) {
+            return 0;
+        }
+        str r = rest_from_nonspace();
+        if (cm.ch(r, 0) != 91 || cm.ch(r, 1) != 94) {
+            return 0;
+        }
+        mut usize i = 2;
+        while (i < r.len && cm.ch(r, i) != 93 && !cm.is_ws(cm.ch(r, i)) && cm.ch(r, i) != 91) {
+            i += 1;
+        }
+        if (i == 2 || cm.ch(r, i) != 93 || cm.ch(r, i + 1) != 58) {
+            return 0;
+        }
+        close_unmatched();
+        i32 id = add_child(Footnote);
+        at(id).lit = text.slice(r, 2, i);
+        advance_next_nonspace();
+        advance_offset(i as i32 + 2, false);
+        mut usize skip = 0;
+        while (cm.is_space_tab(cm.ch(line, offset as usize + skip))) {
+            skip += 1;
+        }
+        advance_offset(skip as i32, true);
+        return 1;
+    }
+
+    Marker read_marker(i32 container) {
+        if (indent >= 4) {
+            return Marker{ };
+        }
+        usize p = next_nonspace as usize;
+        i32 c = cm.ch(line, p);
+        cm.Kind ck = kind_of(container);
+        if (c == 42 || c == 43 || c == 45) {
+            return Marker{ ok: true, marker: c, len: 1 };
+        }
+        if (cm.is_digit(c)) {
+            mut usize q = p;
+            mut i32 v = 0;
+            while (cm.is_digit(cm.ch(line, q)) && q - p < 9) {
+                v = v * 10 + (cm.ch(line, q) - 48);
+                q += 1;
+            }
+            i32 d = cm.ch(line, q);
+            if ((d == 46 || d == 41) && (ck != Paragraph || v == 1)) {
+                return Marker{ ok: true, ordered: true, marker: d, start: v, len: (q - p) as i32 + 1 };
+            }
+        }
+        return Marker{ };
+    }
+
+    i32 start_item(i32 container) {
+        if (indented && kind_of(container) != List) {
+            return 0;
+        }
+        Marker m = read_marker(container);
+        if (!m.ok) {
+            return 0;
+        }
+        usize after = next_nonspace as usize + m.len as usize;
+        i32 nc = cm.ch(line, after);
+        if (!(nc < 0 || nc == 9 || nc == 32)) {
+            return 0;
+        }
+        if (kind_of(container) == Paragraph && cm.is_blank(text.slice(line, after, line.len))) {
+            return 0;
+        }
+        i32 marker_off = indent;
+        advance_next_nonspace();
+        advance_offset(m.len, true);
+        i32 sc = column;
+        i32 so = offset;
+        while (true) {
+            advance_offset(1, true);
+            if (!(column - sc < 5 && cm.is_space_tab(cm.ch(line, offset as usize)))) {
+                break;
+            }
+        }
+        bool blank_item = cm.ch(line, offset as usize) < 0;
+        i32 after_spaces = column - sc;
+        mut i32 pad = m.len + after_spaces;
+        if (after_spaces >= 5 || after_spaces < 1 || blank_item) {
+            pad = m.len + 1;
+            column = sc;
+            offset = so;
+            if (cm.is_space_tab(cm.ch(line, offset as usize))) {
+                advance_offset(1, true);
+            }
+        }
+        close_unmatched();
+        bool same = kind_of(tip) == List && at(tip).ordered == m.ordered && at(tip).marker == m.marker;
+        if (!same) {
+            i32 l = add_child(List);
+            at(l).ordered = m.ordered;
+            at(l).marker = m.marker;
+            at(l).level = m.start;
+        }
+        i32 it = add_child(Item);
+        at(it).ordered = m.ordered;
+        at(it).marker = m.marker;
+        at(it).level = m.start;
+        at(it).pad = pad;
+        at(it).marker_off = marker_off;
+        return 1;
+    }
+
+    i32 start_indented() {
+        if (indented && kind_of(tip) != Paragraph && !blank) {
+            advance_offset(4, true);
+            close_unmatched();
+            add_child(CodeBlock);
+            return 2;
+        }
+        return 0;
+    }
+
+    i32 try_starts(i32 container) {
+        mut i32 r = start_quote();
+        if (r == 0) {
+            r = start_atx();
+        }
+        if (r == 0) {
+            r = start_fence();
+        }
+        if (r == 0) {
+            r = start_html(container);
+        }
+        if (r == 0) {
+            r = start_setext(container);
+        }
+        if (r == 0) {
+            r = start_table(container);
+        }
+        if (r == 0) {
+            r = start_break();
+        }
+        if (r == 0) {
+            r = start_footnote();
+        }
+        if (r == 0) {
+            r = start_item(container);
+        }
+        if (r == 0) {
+            r = start_indented();
+        }
+        return r;
+    }
+
+    // ---- a line ----
+
+    pub void feed(keeps str ln) {
+        line = ln;
+        line_no += 1;
+        offset = 0;
+        column = 0;
+        blank = false;
+        partial_tab = false;
+        mut i32 container = doc;
+        oldtip = tip;
+        mut bool all_matched = true;
+        while (at(container).last >= 0 && at(at(container).last).open) {
+            container = at(container).last;
+            find_next_nonspace();
+            i32 r = cont(container);
+            if (r == 1) {
+                all_matched = false;
+            } else if (r == 2) {
+                return;
+            }
+            if (!all_matched) {
+                container = at(container).parent;
+                break;
+            }
+        }
+        all_closed = container == oldtip;
+        last_matched = container;
+        cm.Kind ck = kind_of(container);
+        mut bool matched_leaf = ck != Paragraph && is_leaf_text(ck);
+        while (!matched_leaf) {
+            find_next_nonspace();
+            i32 r = try_starts(container);
+            if (r == 1) {
+                container = tip;
+            } else if (r == 2) {
+                container = tip;
+                matched_leaf = true;
+            } else {
+                advance_next_nonspace();
+                break;
+            }
+        }
+        if (!all_closed && !blank && kind_of(tip) == Paragraph) {
+            add_line();
+        } else {
+            close_unmatched();
+            if (blank && at(container).last >= 0) {
+                at(at(container).last).blank_end = true;
+            }
+            cm.Kind t = kind_of(container);
+            bool last_blank = blank && !(t == BlockQuote || t == CodeBlock && at(container).fenced || t == Item && at(container).first < 0 && at(container).line == line_no);
+            mut i32 c = container;
+            while (c >= 0) {
+                at(c).blank_end = last_blank;
+                c = at(c).parent;
+            }
+            if (t == Table) {
+                if (!blank && rest().len > 0) {
+                    add_row(container, rest(), false);
+                }
+            } else if (is_leaf_text(t)) {
+                add_line();
+                if (t == HtmlBlock) {
+                    i32 hk = at(container).html_type;
+                    str r = rest();
+                    if (hk == 1 && closes_1(r) || hk == 2 && text.contains(r, "-->") || hk == 3 && text.contains(r, "?>") || hk == 4 && text.contains(r, ">") || hk == 5 && text.contains(r, "]]>")) {
+                        finalize(container);
+                    }
+                }
+            } else if (offset < line.len as i32 && !blank) {
+                add_child(Paragraph);
+                advance_next_nonspace();
+                add_line();
+            }
+        }
+    }
+
+    bool closes_1(str r) {
+        str low = text.to_lower(arena, r);
+        return text.contains(low, "</script>") || text.contains(low, "</pre>") || text.contains(low, "</style>") || text.contains(low, "</textarea>");
+    }
+
+    pub void finish() {
+        while (tip >= 0) {
+            finalize(tip);
+        }
+    }
+}
+
+// The lines of a text: they end with `\n`, `\r\n` or `\r`.
+pub void split_lines(Arena* arena, str src, vec.Vec<str>* out) {
+    mut usize start = 0;
+    mut usize i = 0;
+    while (i < src.len) {
+        i32 c = cm.ch(src, i);
+        if (c == 10 || c == 13) {
+            out.push(text.slice(src, start, i));
+            if (c == 13 && cm.ch(src, i + 1) == 10) {
+                i += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if (start < src.len) {
+        out.push(text.slice(src, start, src.len));
+    }
+}
+
+// The tree of a document. With `ext`, the extensions are on: tables, strikethrough, task lists,
+// footnotes, automatic links, and the syntax of Obsidian.
+pub Doc parse(Arena* arena, str src, bool ext) {
+    Parser* p = arena.new(Parser, arena, ext);
+    vec.Vec<str>* lines = vec.new<str>(arena);
+    split_lines(arena, src, lines);
+    mut usize from = 0;
+    if (ext && lines.len() > 1 && text.trim_end(*lines.at(0)) == "---") {
+        for (usize i in 1..lines.len()) {
+            str l = text.trim_end(*lines.at(i));
+            if (l == "---" || l == "...") {
+                i32 fm = p.new_node(Frontmatter);
+                text.TextBuilder* b = text.builder(arena);
+                for (usize k in 1..i) {
+                    b.push(*lines.at(k));
+                    b.push("\n");
+                }
+                p.at(fm).lit = b.text();
+                p.at(fm).open = false;
+                cm.append(p.nodes, 0, fm);
+                from = i + 1;
+                break;
+            }
+        }
+    }
+    for (usize i in from..lines.len()) {
+        p.feed(*lines.at(i));
+    }
+    p.finish();
+    inl.process(arena, p.nodes, p.refs, ext);
+    return Doc{ nodes: p.nodes, refs: p.refs };
+}

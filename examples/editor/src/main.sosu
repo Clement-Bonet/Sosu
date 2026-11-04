@@ -17,7 +17,7 @@ class App : app.Handler, app.TitleBar {
     mut widgets.Ui ui;
     state.Editor* editor;
 
-    void init(state.Editor* editor) {
+    void init(keeps state.Editor* editor) {
         ui = widgets.Ui{ };
         self.editor = editor;
     }

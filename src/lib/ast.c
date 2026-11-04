@@ -405,6 +405,7 @@ static void print_params(Printer *pr, const Param *params, size_t count) {
     for (size_t i = 0; i < count; i++) {
         if (i) fputc(' ', pr->out);
         fputs(params[i].is_mut ? "(mut " : "(", pr->out);
+        if (params[i].is_keeps) fputs("keeps ", pr->out);
         print_type(pr, params[i].type);
         fputc(' ', pr->out);
         print_name(pr, params[i].name);

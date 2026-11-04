@@ -1,0 +1,60 @@
+// vault.seal: what is stored is sealed: ChaCha20 encrypts it, HMAC-SHA256 seals it (encrypt then
+// MAC). A sealed blob is the nonce (12 bytes), the encrypted text, and the tag (32 bytes). The
+// two keys come from the master password by PBKDF2 (vault.kdf), never from the password directly.
+// Written to show the cryptographic modules of Sosu: it has not been audited.
+import crypto.hmac;
+import vault.chacha;
+import vault.kdf;
+import vault.rand;
+
+pub struct Keys {
+    pub mut ui8[32] enc = [0; 32];
+    pub mut ui8[32] mac = [0; 32];
+}
+
+// The keys of `password` with `salt` (16 bytes), in `rounds` rounds.
+pub Keys derive(ui8[] password, ui8[] salt, i32 rounds) {
+    mut ui8[64] material = [0; 64];
+    kdf.pbkdf2(password, salt, rounds, material[0..64]);
+    mut Keys keys = Keys{ };
+    for (usize i in 0..32) {
+        keys.enc[i] = material[i];
+        keys.mac[i] = material[32 + i];
+    }
+    return keys;
+}
+
+// `plain` encrypted with a new nonce, and sealed, in `arena`.
+pub ui8[] seal(Arena* arena, Keys* keys, ui8[] plain) uses io {
+    usize size = 12 + plain.len;
+    mut ui8[] blob = arena.alloc_slice(ui8, size + 32);
+    rand.fill(blob[0..12]);
+    for (usize i in 0..plain.len) {
+        blob[12 + i] = plain[i];
+    }
+    chacha.xor(keys.enc[0..32], blob[0..12], 1, blob[12..size]);
+    mut ui8[32] tag = hmac.with_sha256(keys.mac[0..32], blob[0..size]);
+    for (usize i in 0..32) {
+        blob[size + i] = tag[i];
+    }
+    return blob;
+}
+
+// The text of a sealed blob, in `arena`; none if the seal is broken: a wrong password, or a blob
+// that was changed.
+pub ui8[]? open(Arena* arena, Keys* keys, ui8[] blob) {
+    if (blob.len < 44) {
+        return none;
+    }
+    usize size = blob.len - 32;
+    mut ui8[32] tag = hmac.with_sha256(keys.mac[0..32], blob[0..size]);
+    if (!hmac.equal(tag[0..32], blob[size..blob.len])) {
+        return none;
+    }
+    mut ui8[] plain = arena.alloc_slice(ui8, size - 12);
+    for (usize i in 0..size - 12) {
+        plain[i] = blob[12 + i];
+    }
+    chacha.xor(keys.enc[0..32], blob[0..12], 1, plain);
+    return some(plain);
+}

@@ -26,7 +26,7 @@ pub class Catalog {
     str rule;  // the expression of `Plural-Forms`, "" for the rule of English
     usize forms;  // how many plural forms the language has
 
-    void init(Entry[] entries, ui32[] table, str rule, usize forms) {
+    void init(keeps Entry[] entries, keeps ui32[] table, keeps str rule, usize forms) {
         self.entries = entries;
         self.table = table;
         self.rule = rule;

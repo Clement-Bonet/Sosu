@@ -1,0 +1,1412 @@
+// sheets.editor: what the person does to the sheet: selection, typing, formats, clipboard, sorting, undo and files.
+import sheets.values;
+import sheets.calc;
+import sheets.ods;
+import std.io;
+import std.map;
+import std.text;
+import std.vec;
+
+pub i32 ROW_H = 22;
+pub i32 DEFAULT_WIDTH = 88;
+pub i32 MODE_CELL = 0;
+pub i32 MODE_GOTO = 1;
+pub i32 MODE_FIND = 2;
+
+// The whole state of one cell, to put it back (undo) or to copy it.
+pub struct Snap {
+    pub i32 col;
+    pub i32 row;
+    pub bool has;
+    pub str raw;
+    pub i32 flags;
+    pub i32 align;
+    pub i32 fmt;
+    pub i32 dec;
+    pub ui32 fg;
+    pub ui32 bg;
+}
+
+pub class Step {
+    pub vec.Vec<Snap>* before;
+    pub vec.Vec<Snap>* after;
+
+    void init(Arena* arena) {
+        self.before = vec.new<Snap>(arena);
+        self.after = vec.new<Snap>(arena);
+    }
+}
+
+pub struct Stats {
+    pub mut i64 count;
+    pub mut i64 numbers;
+    pub mut f64 sum;
+    pub mut f64 low;
+    pub mut f64 high;
+}
+
+pub struct Rect {
+    pub i32 c1;
+    pub i32 r1;
+    pub i32 c2;
+    pub i32 r2;
+}
+
+bool same_snap(Snap a, Snap b) {
+    return a.has == b.has && a.raw == b.raw && a.flags == b.flags && a.align == b.align && a.fmt == b.fmt && a.dec == b.dec && a.fg == b.fg && a.bg == b.bg;
+}
+
+pub class Editor {
+    pub calc.Book* book;
+    Arena* arena;
+    pub mut i32 cc;
+    pub mut i32 cr;
+    pub mut i32 ac;
+    pub mut i32 ar;
+    pub mut i32 left_col;
+    pub mut i32 top_row;
+    pub mut bool editing;
+    pub mut i32 mode;
+    pub vec.Vec<ui8>* buf;
+    pub mut usize caret;
+    pub mut str status;
+    pub mut i32 status_seq;
+    pub mut str path;
+    pub mut bool dirty;
+    pub mut i32 want;  // a dialog the window must open: 1 open, 2 save as, 3 CSV, 4 save to the known path
+    pub mut str find_text;
+    pub mut str clip_text;
+    pub mut bool clip_fresh;
+    vec.Vec<Snap>* clip;
+    mut i32 clip_c0;
+    mut i32 clip_r0;
+    mut i32 clip_w;
+    mut i32 clip_h;
+    vec.Vec<Step*>* undos;
+    vec.Vec<Step*>* redos;
+    mut Step* pending;
+    map.HashMap<i64, bool>* seen;
+    mut bool recording;
+
+    void init(Arena* arena) {
+        self.arena = arena;
+        self.book = arena.new(calc.Book, arena);
+        self.cc = 0;
+        self.cr = 0;
+        self.ac = 0;
+        self.ar = 0;
+        self.left_col = 0;
+        self.top_row = 0;
+        self.editing = false;
+        self.mode = MODE_CELL;
+        self.buf = vec.new<ui8>(arena);
+        self.caret = 0;
+        self.status = "";
+        self.status_seq = 0;
+        self.path = "";
+        self.dirty = false;
+        self.want = 0;
+        self.find_text = "";
+        self.clip_text = "";
+        self.clip_fresh = false;
+        self.clip = vec.new<Snap>(arena);
+        self.clip_c0 = 0;
+        self.clip_r0 = 0;
+        self.clip_w = 0;
+        self.clip_h = 0;
+        self.undos = vec.new<Step*>(arena);
+        self.redos = vec.new<Step*>(arena);
+        self.pending = arena.new(Step, arena);
+        self.seen = map.new<i64, bool>(arena);
+        self.recording = false;
+    }
+
+    pub void ask_open() {
+        self.want = 1;
+    }
+
+    pub void ask_save() {
+        if (self.path.len > 0) {
+            self.want = 4;
+        } else {
+            self.want = 2;
+        }
+    }
+
+    pub void ask_save_as() {
+        self.want = 2;
+    }
+
+    pub void ask_csv() {
+        self.want = 3;
+    }
+
+    pub void say(keeps str msg) {
+        self.status = msg;
+        self.status_seq += 1;
+    }
+
+    // ----- selection
+
+    pub Rect selection() {
+        return Rect{ c1: self.cc < self.ac ? self.cc : self.ac, r1: self.cr < self.ar ? self.cr : self.ar, c2: self.cc < self.ac ? self.ac : self.cc, r2: self.cr < self.ar ? self.ar : self.cr };
+    }
+
+    pub bool single() {
+        return self.cc == self.ac && self.cr == self.ar;
+    }
+
+    pub void move_to(i32 col, i32 row, bool extend) {
+        self.cc = col < 0 ? 0 : col >= values.COLS ? values.COLS - 1 : col;
+        self.cr = row < 0 ? 0 : row >= values.ROWS ? values.ROWS - 1 : row;
+        if (!extend) {
+            self.ac = self.cc;
+            self.ar = self.cr;
+        }
+    }
+
+    pub void step(i32 dc, i32 dr, bool extend) {
+        self.move_to(self.cc + dc, self.cr + dr, extend);
+    }
+
+    pub void select_all() {
+        self.ac = 0;
+        self.ar = 0;
+        self.cc = values.COLS - 1;
+        self.cr = values.ROWS - 1;
+    }
+
+    pub void select_column(i32 col, bool extend) {
+        if (!extend) {
+            self.ac = col;
+        }
+        self.ar = 0;
+        self.cc = col;
+        self.cr = values.ROWS - 1;
+    }
+
+    pub void select_row(i32 row, bool extend) {
+        if (!extend) {
+            self.ar = row;
+        }
+        self.ac = 0;
+        self.cr = row;
+        self.cc = values.COLS - 1;
+    }
+
+    // Brings the active cell into the grid area (`view_w` by `view_h` pixels, headers excluded).
+    pub void ensure_visible(i32 view_w, i32 view_h) {
+        if (self.cr < self.top_row) {
+            self.top_row = self.cr;
+        }
+        i32 rows = view_h / ROW_H - 1;
+        if (self.cr > self.top_row + rows) {
+            self.top_row = self.cr - rows;
+        }
+        if (self.top_row < 0) {
+            self.top_row = 0;
+        }
+        if (self.cc < self.left_col) {
+            self.left_col = self.cc;
+        }
+        while (self.left_col < self.cc && self.span(self.left_col, self.cc + 1) > view_w) {
+            self.left_col += 1;
+        }
+    }
+
+    // The width in pixels of the columns from `from` up to (not including) `to`.
+    pub i32 span(i32 from, i32 to) {
+        mut i32 w = 0;
+        for (i32 c in from..to) {
+            w += self.book.width_of(c);
+        }
+        return w;
+    }
+
+    // ----- history
+
+    void begin() {
+        self.pending = self.arena.new(Step, self.arena);
+        self.seen.clear();
+        self.recording = true;
+    }
+
+    pub Snap snap_of(i32 col, i32 row) {
+        calc.Cell*? have = self.book.find(col, row);
+        return match (have) {
+            some(c) => Snap{ col: col, row: row, has: true, raw: c.raw, flags: c.flags, align: c.align, fmt: c.fmt, dec: c.dec, fg: c.fg, bg: c.bg },
+            none => Snap{ col: col, row: row, has: false, raw: "", flags: 0, align: 0, fmt: 0, dec: -1, fg: 0, bg: 0 },
+        };
+    }
+
+    void apply_snap(keeps Snap s) {
+        if (!s.has) {
+            self.book.cells.remove(calc.key_of(s.col, s.row));
+            return;
+        }
+        calc.Cell* c = self.book.make(self.arena, s.col, s.row);
+        c.raw = s.raw;
+        c.flags = s.flags;
+        c.align = s.align;
+        c.fmt = s.fmt;
+        c.dec = s.dec;
+        c.fg = s.fg;
+        c.bg = s.bg;
+    }
+
+    // Remembers the cell as it is now, once per action.
+    void touch(i32 col, i32 row) {
+        i64 k = calc.key_of(col, row);
+        if (self.seen.has(k)) {
+            return;
+        }
+        self.seen.put(k, true);
+        self.pending.before.push(self.snap_of(col, row));
+    }
+
+    void end() {
+        self.recording = false;
+        Step* st = self.pending;
+        usize n = st.before.len();
+        mut bool changed = false;
+        for (usize i in 0..n) {
+            Snap b = st.before.items()[i];
+            Snap a = self.snap_of(b.col, b.row);
+            st.after.push(a);
+            if (!same_snap(a, b)) {
+                changed = true;
+            }
+        }
+        if (!changed) {
+            return;
+        }
+        self.undos.push(st);
+        if (self.undos.len() > 100) {
+            self.undos.remove(0);
+        }
+        self.redos.clear();
+        self.dirty = true;
+        self.book.recalc();
+    }
+
+    pub void undo() {
+        if (self.undos.len() == 0) {
+            self.say("Nothing to undo");
+            return;
+        }
+        Step* st = self.undos.remove(self.undos.len() - 1);
+        self.replay(st, true);
+        self.redos.push(st);
+        self.say("Undone");
+    }
+
+    pub void redo() {
+        if (self.redos.len() == 0) {
+            self.say("Nothing to redo");
+            return;
+        }
+        Step* st = self.redos.remove(self.redos.len() - 1);
+        self.replay(st, false);
+        self.undos.push(st);
+        self.say("Redone");
+    }
+
+    void replay(Step* st, bool backwards) {
+        vec.Vec<Snap>* list = backwards ? st.before : st.after;
+        for (usize i in 0..list.len()) {
+            self.apply_snap(list.items()[i]);
+        }
+        self.dirty = true;
+        self.book.recalc();
+    }
+
+    pub bool can_undo() {
+        return self.undos.len() > 0;
+    }
+
+    pub bool can_redo() {
+        return self.redos.len() > 0;
+    }
+
+    // ----- writing cells
+
+    void clean(i32 col, i32 row) {
+        calc.Cell*? have = self.book.find(col, row);
+        match (have) {
+            some(c) => {
+                if (c.raw.len == 0 && c.flags == 0 && c.align == 0 && c.fmt == 0 && c.dec < 0 && c.fg == 0 && c.bg == 0) {
+                    self.book.cells.remove(calc.key_of(col, row));
+                }
+            },
+            none => { },
+        }
+    }
+
+    void write(i32 col, i32 row, str raw) {
+        self.touch(col, row);
+        if (raw.len == 0 && !self.book.cells.has(calc.key_of(col, row))) {
+            return;
+        }
+        calc.Cell* c = self.book.make(self.arena, col, row);
+        c.raw = self.book.keep(raw);
+        self.clean(col, row);
+    }
+
+    void write_snap(i32 col, i32 row, keeps Snap s, i32 dc, i32 dr) {
+        self.touch(col, row);
+        if (!s.has) {
+            self.book.cells.remove(calc.key_of(col, row));
+            return;
+        }
+        calc.Cell* c = self.book.make(self.arena, col, row);
+        bool formula = s.raw.len > 1 && s.raw.bytes[0] == 61;
+        c.raw = formula && (dc != 0 || dr != 0) ? self.book.keep(calc.remap(self.arena, s.raw, 0, dc, dr)) : s.raw;
+        c.flags = s.flags;
+        c.align = s.align;
+        c.fmt = s.fmt;
+        c.dec = s.dec;
+        c.fg = s.fg;
+        c.bg = s.bg;
+        self.clean(col, row);
+    }
+
+    // The cells of the selection that exist (a huge selection never creates cells).
+    vec.Vec<i64>* existing(Rect r) {
+        vec.Vec<i64>* out = vec.new<i64>(self.arena);
+        i64[] keys = self.book.cells.keys(self.arena);
+        for (usize i in 0..keys.len) {
+            i32 col = (keys[i] % 256) as i32;
+            i32 row = (keys[i] / 256) as i32;
+            if (col >= r.c1 && col <= r.c2 && row >= r.r1 && row <= r.r2) {
+                out.push(keys[i]);
+            }
+        }
+        return out;
+    }
+
+    // Every cell of the selection, creating them unless the selection is huge.
+    vec.Vec<i64>* targets() {
+        Rect r = self.selection();
+        i64 area = (r.c2 - r.c1 + 1) as i64 * (r.r2 - r.r1 + 1) as i64;
+        if (area > 20000) {
+            return self.existing(r);
+        }
+        vec.Vec<i64>* out = vec.new<i64>(self.arena);
+        for (i32 row in r.r1..r.r2 + 1) {
+            for (i32 col in r.c1..r.c2 + 1) {
+                out.push(calc.key_of(col, row));
+            }
+        }
+        return out;
+    }
+
+    pub void clear_contents() {
+        self.begin();
+        Rect r = self.selection();
+        vec.Vec<i64>* list = self.existing(r);
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            self.write((k % 256) as i32, (k / 256) as i32, "");
+        }
+        self.end();
+    }
+
+    pub void clear_all() {
+        self.begin();
+        Rect r = self.selection();
+        vec.Vec<i64>* list = self.existing(r);
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            self.touch(col, row);
+            self.book.cells.remove(k);
+        }
+        self.end();
+        self.say("Cleared");
+    }
+
+    // ----- typing
+
+    pub str buffer_text() {
+        usize n = self.buf.len();
+        if (n == 0) {
+            return "";
+        }
+        ui8[] copy = self.arena.alloc_slice(ui8, n);
+        for (usize i in 0..n) {
+            copy[i] = self.buf.items()[i];
+        }
+        return match (str.from_bytes(copy)) {
+            ok(s) => s,
+            err(e) => "",
+        };
+    }
+
+    pub void start_edit(bool replace) {
+        self.buf.clear();
+        self.mode = MODE_CELL;
+        self.editing = true;
+        if (!replace) {
+            str raw = self.book.raw_of(self.cc, self.cr);
+            for (usize i in 0..raw.len) {
+                self.buf.push(raw.bytes[i]);
+            }
+        }
+        self.caret = self.buf.len();
+    }
+
+    pub void start_prompt(i32 which) {
+        self.buf.clear();
+        self.mode = which;
+        self.editing = true;
+        if (which == MODE_FIND) {
+            for (usize i in 0..self.find_text.len) {
+                self.buf.push(self.find_text.bytes[i]);
+            }
+        }
+        self.caret = self.buf.len();
+    }
+
+    pub void insert_text(str s) {
+        for (usize i in 0..s.len) {
+            self.buf.insert(self.caret + i, s.bytes[i]);
+        }
+        self.caret += s.len;
+    }
+
+    pub void backspace() {
+        if (self.caret == 0) {
+            return;
+        }
+        mut usize from = self.caret - 1;
+        while (from > 0 && self.buf.items()[from] & 192 == 128) {
+            from -= 1;
+        }
+        for (usize i in from..self.caret) {
+            self.buf.remove(from);
+        }
+        self.caret = from;
+    }
+
+    pub void delete_forward() {
+        if (self.caret >= self.buf.len()) {
+            return;
+        }
+        mut usize to = self.caret + 1;
+        while (to < self.buf.len() && self.buf.items()[to] & 192 == 128) {
+            to += 1;
+        }
+        for (usize i in self.caret..to) {
+            self.buf.remove(self.caret);
+        }
+    }
+
+    pub void caret_left() {
+        if (self.caret == 0) {
+            return;
+        }
+        self.caret -= 1;
+        while (self.caret > 0 && self.buf.items()[self.caret] & 192 == 128) {
+            self.caret -= 1;
+        }
+    }
+
+    pub void caret_right() {
+        if (self.caret >= self.buf.len()) {
+            return;
+        }
+        self.caret += 1;
+        while (self.caret < self.buf.len() && self.buf.items()[self.caret] & 192 == 128) {
+            self.caret += 1;
+        }
+    }
+
+    pub void caret_home() {
+        self.caret = 0;
+    }
+
+    pub void caret_end() {
+        self.caret = self.buf.len();
+    }
+
+    pub void cancel_edit() {
+        self.editing = false;
+        self.buf.clear();
+        self.caret = 0;
+    }
+
+    // While a formula is being typed, clicking a cell writes its name instead of moving.
+    pub bool pointing() {
+        if (!self.editing || self.mode != MODE_CELL || self.buf.len() == 0 || self.buf.items()[0] != 61 || self.caret == 0) {
+            return false;
+        }
+        ui8 last = self.buf.items()[self.caret - 1];
+        return last == 61 || last == 40 || last == 44 || last == 59 || last == 43 || last == 45 || last == 42 || last == 47 || last == 94 || last == 38 || last == 60 || last == 62 || last == 58;
+    }
+
+    pub void point_at(i32 col, i32 row) {
+        self.insert_text(values.cell_name(self.arena, col, row));
+    }
+
+    // Validates what was typed and moves by (dc, dr).
+    pub void commit(i32 dc, i32 dr) {
+        str typed = self.buffer_text();
+        i32 which = self.mode;
+        self.cancel_edit();
+        if (which == MODE_GOTO) {
+            values.Ref r = values.parse_ref(text.trim(typed));
+            if (r.ok) {
+                self.move_to(r.col, r.row, false);
+            } else {
+                self.say("This is not a cell name");
+            }
+            return;
+        }
+        if (which == MODE_FIND) {
+            self.find_text = typed;
+            self.find_next();
+            return;
+        }
+        self.begin();
+        self.write(self.cc, self.cr, typed);
+        self.end();
+        self.move_to(self.cc + dc, self.cr + dr, false);
+    }
+
+    pub void find_next() {
+        if (self.find_text.len == 0) {
+            return;
+        }
+        i64[] keys = self.book.cells.keys(self.arena);
+        mut i64 best = -1;
+        mut i64 first = -1;
+        i64 here = calc.key_of(self.cc, self.cr);
+        for (usize i in 0..keys.len) {
+            i64 k = keys[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            str shown = values.display(self.arena, self.book.result(col, row), 0, -1);
+            bool hit = calc.index_of(shown, self.find_text, 0, true) >= 0 || calc.index_of(self.book.raw_of(col, row), self.find_text, 0, true) >= 0;
+            if (!hit) {
+                continue;
+            }
+            if (first < 0 || k < first) {
+                first = k;
+            }
+            if (k > here && (best < 0 || k < best)) {
+                best = k;
+            }
+        }
+        i64 pick = best >= 0 ? best : first;
+        if (pick < 0) {
+            self.say("Nothing found");
+            return;
+        }
+        self.move_to((pick % 256) as i32, (pick / 256) as i32, false);
+        self.say(best >= 0 ? "Found" : "Found (from the top)");
+    }
+
+    // ----- formats
+
+    pub void toggle_flag(i32 flag) {
+        self.begin();
+        vec.Vec<i64>* list = self.targets();
+        mut bool all = list.len() > 0;
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            Snap s = self.snap_of((k % 256) as i32, (k / 256) as i32);
+            if (!s.has || s.flags & flag == 0) {
+                all = false;
+            }
+        }
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            self.touch(col, row);
+            calc.Cell* c = self.book.make(self.arena, col, row);
+            c.flags = all ? c.flags & 7 - flag : c.flags | flag;
+            self.clean(col, row);
+        }
+        self.end();
+    }
+
+    pub void set_align(i32 align) {
+        self.begin();
+        vec.Vec<i64>* list = self.targets();
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            self.touch(col, row);
+            calc.Cell* c = self.book.make(self.arena, col, row);
+            c.align = align;
+            self.clean(col, row);
+        }
+        self.end();
+    }
+
+    pub void set_format(i32 fmt) {
+        self.begin();
+        vec.Vec<i64>* list = self.targets();
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            self.touch(col, row);
+            calc.Cell* c = self.book.make(self.arena, col, row);
+            c.fmt = fmt;
+            c.dec = -1;
+            self.clean(col, row);
+        }
+        self.end();
+        self.say(values.format_name(fmt));
+    }
+
+    pub void change_decimals(i32 delta) {
+        self.begin();
+        vec.Vec<i64>* list = self.targets();
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            self.touch(col, row);
+            calc.Cell* c = self.book.make(self.arena, col, row);
+            i32 now = c.dec >= 0 ? c.dec : c.fmt == 2 || c.fmt == 0 ? 0 : 2;
+            i32 next = now + delta;
+            c.dec = next < 0 ? 0 : next > 10 ? 10 : next;
+            self.clean(col, row);
+        }
+        self.end();
+    }
+
+    // `ground` false colors the text, true the background. 0 removes the color.
+    pub void set_color(bool ground, ui32 color) {
+        self.begin();
+        vec.Vec<i64>* list = self.targets();
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            i32 col = (k % 256) as i32;
+            i32 row = (k / 256) as i32;
+            self.touch(col, row);
+            calc.Cell* c = self.book.make(self.arena, col, row);
+            if (ground) {
+                c.bg = color;
+            } else {
+                c.fg = color;
+            }
+            self.clean(col, row);
+        }
+        self.end();
+    }
+
+    // ----- clipboard
+
+    pub void copy() {
+        Rect r = self.selection();
+        self.clip.clear();
+        self.clip_c0 = r.c1;
+        self.clip_r0 = r.r1;
+        self.clip_w = r.c2 - r.c1 + 1;
+        self.clip_h = r.r2 - r.r1 + 1;
+        mut i32 last_c = r.c2;
+        mut i32 last_r = r.r2;
+        if (self.clip_w * self.clip_h > 20000) {
+            Rect used = self.used(self.arena);
+            last_c = last_c < used.c2 ? last_c : used.c2;
+            last_r = last_r < used.r2 ? last_r : used.r2;
+            self.clip_w = last_c - r.c1 + 1;
+            self.clip_h = last_r - r.r1 + 1;
+        }
+        text.TextBuilder* out = text.builder(self.arena);
+        for (i32 row in r.r1..last_r + 1) {
+            for (i32 col in r.c1..last_c + 1) {
+                self.clip.push(self.snap_of(col, row));
+                if (col > r.c1) {
+                    out.push("\t");
+                }
+                out.push(values.plain(self.arena, self.book.result(col, row)));
+            }
+            out.push("\n");
+        }
+        self.clip_text = out.text();
+        self.clip_fresh = true;
+        self.say("Copied");
+    }
+
+    pub void cut() {
+        self.copy();
+        self.clear_contents();
+        self.say("Cut");
+    }
+
+    // `system` is the text of the system clipboard.
+    pub void paste(str system) {
+        Rect r = self.selection();
+        self.begin();
+        if (self.clip.len() > 0 && system == self.clip_text) {
+            bool fill = self.clip_w == 1 && self.clip_h == 1 && (r.c2 > r.c1 || r.r2 > r.r1);
+            i32 w = fill ? r.c2 - r.c1 + 1 : self.clip_w;
+            i32 h = fill ? r.r2 - r.r1 + 1 : self.clip_h;
+            for (i32 j in 0..h) {
+                for (i32 i in 0..w) {
+                    i32 sc = fill ? 0 : i;
+                    i32 sr = fill ? 0 : j;
+                    Snap s = self.clip.items()[(sr * self.clip_w + sc) as usize];
+                    i32 tc = r.c1 + i;
+                    i32 tr = r.r1 + j;
+                    if (tc < values.COLS && tr < values.ROWS) {
+                        self.write_snap(tc, tr, s, tc - s.col, tr - s.row);
+                    }
+                }
+            }
+            self.end();
+            self.say("Pasted");
+            return;
+        }
+        str[] lines = text.split(self.arena, system, "\n");
+        mut i32 row = r.r1;
+        mut i32 widest = 1;
+        mut i32 count = 0;
+        for (usize li in 0..lines.len) {
+            mut str line = lines[li];
+            if (line.len > 0 && line.bytes[line.len - 1] == 13) {
+                line = text.slice(line, 0, line.len - 1);
+            }
+            if (li + 1 == lines.len && line.len == 0 && lines.len > 1) {
+                break;
+            }
+            str[] fields = text.split(self.arena, line, "\t");
+            for (usize fi in 0..fields.len) {
+                i32 col = r.c1 + fi as i32;
+                if (col < values.COLS && row < values.ROWS) {
+                    self.write(col, row, fields[fi]);
+                }
+            }
+            widest = fields.len as i32 > widest ? fields.len as i32 : widest;
+            row += 1;
+            count += 1;
+        }
+        self.end();
+        if (count > 0) {
+            self.ac = r.c1;
+            self.ar = r.r1;
+            self.cc = r.c1 + widest - 1 < values.COLS ? r.c1 + widest - 1 : values.COLS - 1;
+            self.cr = r.r1 + count - 1 < values.ROWS ? r.r1 + count - 1 : values.ROWS - 1;
+        }
+        self.say("Pasted");
+    }
+
+    pub void fill_down() {
+        Rect r = self.selection();
+        if (r.r2 == r.r1) {
+            self.say("Select more than one row");
+            return;
+        }
+        self.begin();
+        for (i32 col in r.c1..r.c2 + 1) {
+            Snap s = self.snap_of(col, r.r1);
+            for (i32 row in r.r1 + 1..r.r2 + 1) {
+                self.write_snap(col, row, s, 0, row - r.r1);
+            }
+        }
+        self.end();
+        self.say("Filled down");
+    }
+
+    pub void fill_right() {
+        Rect r = self.selection();
+        if (r.c2 == r.c1) {
+            self.say("Select more than one column");
+            return;
+        }
+        self.begin();
+        for (i32 row in r.r1..r.r2 + 1) {
+            Snap s = self.snap_of(r.c1, row);
+            for (i32 col in r.c1 + 1..r.c2 + 1) {
+                self.write_snap(col, row, s, col - r.c1, 0);
+            }
+        }
+        self.end();
+        self.say("Filled right");
+    }
+
+    // ----- extent, statistics, sorting
+
+    pub Rect used(Arena* arena) {
+        values.Ref e = self.book.extent(arena);
+        return Rect{ c1: 0, r1: 0, c2: e.ok ? e.col : 0, r2: e.ok ? e.row : 0 };
+    }
+
+    pub Stats stats() {
+        Rect r = self.selection();
+        mut Stats s = Stats{ count: 0, numbers: 0, sum: 0.0, low: 0.0, high: 0.0 };
+        vec.Vec<i64>* list = self.existing(r);
+        for (usize i in 0..list.len()) {
+            i64 k = list.items()[i];
+            values.Value v = self.book.result((k % 256) as i32, (k / 256) as i32);
+            if (v.kind != values.EMPTY) {
+                s.count += 1;
+            }
+            if (v.kind == values.NUMBER) {
+                s.sum += v.num;
+                s.low = s.numbers == 0 || v.num < s.low ? v.num : s.low;
+                s.high = s.numbers == 0 || v.num > s.high ? v.num : s.high;
+                s.numbers += 1;
+            }
+        }
+        return s;
+    }
+
+    // Rows of the selection (the whole used area for a single cell) ordered by the column of the active cell.
+    pub void sort_rows(bool ascending) {
+        mut Rect r = self.selection();
+        if (self.single()) {
+            Rect u = self.used(self.arena);
+            r = Rect{ c1: 0, r1: 0, c2: u.c2, r2: u.r2 };
+        }
+        i32 key_col = self.cc >= r.c1 && self.cc <= r.c2 ? self.cc : r.c1;
+        i32 n = r.r2 - r.r1 + 1;
+        i32 w = r.c2 - r.c1 + 1;
+        if (n < 2) {
+            self.say("Nothing to sort");
+            return;
+        }
+        i32[] order = self.arena.alloc_slice(i32, n as usize);
+        for (i32 i in 0..n) {
+            order[i as usize] = i;
+        }
+        for (i32 i in 1..n) {
+            mut i32 j = i;
+            while (j > 0 && self.before(r.r1 + order[(j - 1) as usize], r.r1 + order[j as usize], key_col, ascending)) {
+                i32 tmp = order[j as usize];
+                order[j as usize] = order[(j - 1) as usize];
+                order[(j - 1) as usize] = tmp;
+                j -= 1;
+            }
+        }
+        vec.Vec<Snap>* snaps = vec.new<Snap>(self.arena);
+        for (i32 i in 0..n) {
+            for (i32 c in 0..w) {
+                snaps.push(self.snap_of(r.c1 + c, r.r1 + i));
+            }
+        }
+        self.begin();
+        for (i32 i in 0..n) {
+            i32 from = order[i as usize];
+            for (i32 c in 0..w) {
+                Snap s = snaps.items()[(from * w + c) as usize];
+                self.write_snap(r.c1 + c, r.r1 + i, s, 0, i - from);
+            }
+        }
+        self.end();
+        self.say(ascending ? "Sorted A to Z" : "Sorted Z to A");
+    }
+
+    // Should row `b` come before row `a` (they are swapped when this is true)?
+    bool before(i32 ra, i32 rb, i32 col, bool ascending) {
+        values.Value x = self.book.result(col, ra);
+        values.Value y = self.book.result(col, rb);
+        if (x.kind == values.EMPTY) {
+            return y.kind != values.EMPTY;
+        }
+        if (y.kind == values.EMPTY) {
+            return false;
+        }
+        i32 c = calc.compare(x, y);
+        return ascending ? c > 0 : c < 0;
+    }
+
+    // ----- inserting and deleting rows and columns
+
+    // kind: 1 insert rows, 2 delete rows, 3 insert columns, 4 delete columns, at `at`, `n` of them.
+    void restructure(i32 kind, i32 at, i32 n) {
+        vec.Vec<Snap>* all = vec.new<Snap>(self.arena);
+        i64[] keys = self.book.cells.keys(self.arena);
+        self.begin();
+        for (usize i in 0..keys.len) {
+            i32 col = (keys[i] % 256) as i32;
+            i32 row = (keys[i] / 256) as i32;
+            all.push(self.snap_of(col, row));
+            self.touch(col, row);
+            self.book.cells.remove(keys[i]);
+        }
+        for (usize i in 0..all.len()) {
+            Snap s = all.items()[i];
+            mut i32 nc = s.col;
+            mut i32 nr = s.row;
+            mut bool gone = false;
+            if (kind == 1) {
+                nr = s.row >= at ? s.row + n : s.row;
+            } else if (kind == 2) {
+                gone = s.row >= at && s.row < at + n;
+                nr = s.row >= at + n ? s.row - n : s.row;
+            } else if (kind == 3) {
+                nc = s.col >= at ? s.col + n : s.col;
+            } else {
+                gone = s.col >= at && s.col < at + n;
+                nc = s.col >= at + n ? s.col - n : s.col;
+            }
+            if (gone || nc >= values.COLS || nr >= values.ROWS) {
+                continue;
+            }
+            self.touch(nc, nr);
+            calc.Cell* c = self.book.make(self.arena, nc, nr);
+            bool formula = s.raw.len > 1 && s.raw.bytes[0] == 61;
+            c.raw = formula ? self.book.keep(calc.remap(self.arena, s.raw, kind, at, n)) : s.raw;
+            c.flags = s.flags;
+            c.align = s.align;
+            c.fmt = s.fmt;
+            c.dec = s.dec;
+            c.fg = s.fg;
+            c.bg = s.bg;
+        }
+        if (kind >= 3) {
+            i32[] widths = self.arena.alloc_slice(i32, values.COLS as usize);
+            for (i32 c in 0..values.COLS) {
+                widths[c as usize] = self.book.width_of(c);
+            }
+            for (i32 c in 0..values.COLS) {
+                mut i32 from = c;
+                if (kind == 3) {
+                    from = c >= at + n ? c - n : c;
+                } else {
+                    from = c >= at ? c + n : c;
+                }
+                bool fresh = kind == 3 && c >= at && c < at + n || from >= values.COLS;
+                self.book.set_width(c, fresh ? DEFAULT_WIDTH : widths[from as usize]);
+            }
+        }
+        self.end();
+    }
+
+    pub void insert_rows() {
+        Rect r = self.selection();
+        self.restructure(1, r.r1, r.r2 - r.r1 + 1);
+        self.say("Rows inserted");
+    }
+
+    pub void delete_rows() {
+        Rect r = self.selection();
+        self.restructure(2, r.r1, r.r2 - r.r1 + 1);
+        self.say("Rows deleted");
+    }
+
+    pub void insert_columns() {
+        Rect r = self.selection();
+        self.restructure(3, r.c1, r.c2 - r.c1 + 1);
+        self.say("Columns inserted");
+    }
+
+    pub void delete_columns() {
+        Rect r = self.selection();
+        self.restructure(4, r.c1, r.c2 - r.c1 + 1);
+        self.say("Columns deleted");
+    }
+
+    // ----- documents
+
+    pub void reset() {
+        self.book.cells.clear();
+        self.book.store.free();
+        self.book.store = Arena.new(1 * MB);
+        for (i32 c in 0..values.COLS) {
+            self.book.set_width(c, DEFAULT_WIDTH);
+        }
+        self.undos.clear();
+        self.redos.clear();
+        self.cancel_edit();
+        self.cc = 0;
+        self.cr = 0;
+        self.ac = 0;
+        self.ar = 0;
+        self.left_col = 0;
+        self.top_row = 0;
+        self.path = "";
+        self.dirty = false;
+        self.book.recalc();
+    }
+
+    pub void new_document() {
+        self.reset();
+        self.say("New sheet");
+    }
+
+    // The sheet as text: one line per cell.
+    pub str encode_native() {
+        text.TextBuilder* b = text.builder(self.arena);
+        b.push("SOSUCELLS1\n");
+        for (i32 c in 0..values.COLS) {
+            if (self.book.width_of(c) != DEFAULT_WIDTH) {
+                b.push("W;");
+                b.push_i64(c as i64);
+                b.push(";");
+                b.push_i64(self.book.width_of(c) as i64);
+                b.push("\n");
+            }
+        }
+        i64[] keys = self.book.cells.keys(self.arena);
+        sort_keys(keys);
+        for (usize i in 0..keys.len) {
+            Snap s = self.snap_of((keys[i] % 256) as i32, (keys[i] / 256) as i32);
+            b.push("C;");
+            b.push_i64(s.col as i64);
+            b.push(";");
+            b.push_i64(s.row as i64);
+            b.push(";");
+            b.push_i64(s.flags as i64);
+            b.push(";");
+            b.push_i64(s.align as i64);
+            b.push(";");
+            b.push_i64(s.fmt as i64);
+            b.push(";");
+            b.push_i64(s.dec as i64);
+            b.push(";");
+            b.push_i64(s.fg as i64);
+            b.push(";");
+            b.push_i64(s.bg as i64);
+            b.push(";");
+            b.push(escape(self.arena, s.raw));
+            b.push("\n");
+        }
+        return b.text();
+    }
+
+    // Replaces the sheet by the one in `data`. False (and nothing changed) when it is not a sheet.
+    pub bool decode_native(str data) {
+        str[] lines = text.split(self.arena, data, "\n");
+        if (lines.len == 0 || text.trim(lines[0]) != "SOSUCELLS1") {
+            return false;
+        }
+        self.reset();
+        for (usize li in 1..lines.len) {
+            mut str line = lines[li];
+            if (line.len > 0 && line.bytes[line.len - 1] == 13) {
+                line = text.slice(line, 0, line.len - 1);
+            }
+            if (line.len < 3) {
+                continue;
+            }
+            str[] parts = text.split(self.arena, line, ";");
+            if (line.bytes[0] == 87 && parts.len >= 3) {
+                i64 c = calc.int_of(parts[1]);
+                i64 w = calc.int_of(parts[2]);
+                if (c >= 0 && c < values.COLS as i64 && w >= 20 && w <= 600) {
+                    self.book.set_width(c as i32, w as i32);
+                }
+            } else if (line.bytes[0] == 67 && parts.len >= 10) {
+                i64 c = calc.int_of(parts[1]);
+                i64 r = calc.int_of(parts[2]);
+                if (c < 0 || c >= values.COLS as i64 || r < 0 || r >= values.ROWS as i64) {
+                    continue;
+                }
+                mut usize start = 0;
+                for (i32 k in 0..9) {
+                    start = start + parts[k as usize].len + 1;
+                }
+                calc.Cell* cell = self.book.make(self.arena, c as i32, r as i32);
+                cell.flags = calc.int_of(parts[3]) as i32;
+                cell.align = calc.int_of(parts[4]) as i32;
+                cell.fmt = calc.int_of(parts[5]) as i32;
+                cell.dec = calc.int_of(parts[6]) as i32;
+                cell.fg = calc.int_of(parts[7]) as ui32;
+                cell.bg = calc.int_of(parts[8]) as ui32;
+                cell.raw = self.book.keep(unescape(self.arena, text.slice(line, start, line.len)));
+            }
+        }
+        self.book.recalc();
+        self.dirty = false;
+        return true;
+    }
+
+    // The values of the sheet as CSV.
+    pub str encode_csv() {
+        Rect u = self.used(self.arena);
+        text.TextBuilder* b = text.builder(self.arena);
+        for (i32 row in 0..u.r2 + 1) {
+            for (i32 col in 0..u.c2 + 1) {
+                if (col > 0) {
+                    b.push(",");
+                }
+                str field = values.plain(self.arena, self.book.result(col, row));
+                bool quote = text.contains(field, ",") || text.contains(field, "\"") || text.contains(field, "\n");
+                if (quote) {
+                    b.push("\"");
+                    b.push(text.replace(self.arena, field, "\"", "\"\""));
+                    b.push("\"");
+                } else {
+                    b.push(field);
+                }
+            }
+            b.push("\n");
+        }
+        return b.text();
+    }
+
+    // Replaces the sheet by the cells of a CSV text (comma or semicolon).
+    pub void decode_csv(str data) {
+        self.reset();
+        mut i32 commas = 0;
+        mut i32 semis = 0;
+        mut usize end = 0;
+        while (end < data.len && data.bytes[end] != 10) {
+            if (data.bytes[end] == 44) {
+                commas += 1;
+            } else if (data.bytes[end] == 59) {
+                semis += 1;
+            }
+            end += 1;
+        }
+        ui8 delim = semis > commas ? 59 : 44;
+        mut i32 row = 0;
+        mut i32 col = 0;
+        mut bool quoted = false;
+        mut text.TextBuilder* field = text.builder(self.arena);
+        mut usize i = 0;
+        mut bool any = false;
+        while (i < data.len) {
+            ui8 c = data.bytes[i];
+            usize next = char_end(data, i);
+            if (quoted) {
+                if (c == 34) {
+                    if (i + 1 < data.len && data.bytes[i + 1] == 34) {
+                        field.push("\"");
+                        i += 2;
+                        continue;
+                    }
+                    quoted = false;
+                } else {
+                    field.push(text.slice(data, i, next));
+                }
+                i = next;
+                continue;
+            }
+            any = true;
+            if (c == 34) {
+                quoted = true;
+            } else if (c == delim || c == 10 || c == 13) {
+                self.csv_put(col, row, field.text());
+                field = text.builder(self.arena);
+                if (c == delim) {
+                    col += 1;
+                } else {
+                    if (c == 13 && i + 1 < data.len && data.bytes[i + 1] == 10) {
+                        i += 1;
+                    }
+                    col = 0;
+                    row += 1;
+                    any = false;
+                }
+            } else {
+                field.push(text.slice(data, i, next));
+            }
+            i = next;
+        }
+        if (any) {
+            self.csv_put(col, row, field.text());
+        }
+        self.book.recalc();
+        self.dirty = false;
+    }
+
+    void csv_put(i32 col, i32 row, str s) {
+        if (s.len == 0 || col >= values.COLS || row >= values.ROWS) {
+            return;
+        }
+        calc.Cell* c = self.book.make(self.arena, col, row);
+        c.raw = self.book.keep(s);
+    }
+
+    // Replaces the sheet by the one in the .ods file `bytes`. False (and nothing changed) when it is not one.
+    pub bool decode_ods(ui8[] bytes) {
+        mut Arena scratch = Arena.new(8 * MB);
+        defer scratch.free();
+        calc.Book* tmp = scratch.new(calc.Book, &scratch);
+        defer tmp.release();
+        if (!ods.decode(&scratch, tmp, bytes)) {
+            return false;
+        }
+        self.reset();
+        i64[] keys = tmp.cells.keys(&scratch);
+        for (usize i in 0..keys.len) {
+            calc.Cell*? have = tmp.cells.get(keys[i]);
+            match (have) {
+                some(src) => {
+                    calc.Cell* dst = self.book.make(self.arena, (keys[i] % 256) as i32, (keys[i] / 256) as i32);
+                    dst.raw = self.book.keep(src.raw);
+                    dst.flags = src.flags;
+                    dst.align = src.align;
+                    dst.fmt = src.fmt;
+                    dst.dec = src.dec;
+                    dst.fg = src.fg;
+                    dst.bg = src.bg;
+                },
+                none => { },
+            }
+        }
+        for (i32 c in 0..values.COLS) {
+            self.book.set_width(c, tmp.width_of(c));
+        }
+        self.book.recalc();
+        self.dirty = false;
+        return true;
+    }
+
+    pub void save_document(str target) uses io {
+        mut Arena scratch = Arena.new(8 * MB);
+        defer scratch.free();
+        if (text.ends_with(text.to_lower(&scratch, target), ".ods")) {
+            ui8[] bytes = ods.encode(&scratch, self.book);
+            match (io.open(&scratch, target, io.Mode.Write)) {
+                ok(file) => {
+                    defer file.close();
+                    match (file.write(bytes)) {
+                        ok() => {
+                            self.path = self.book.keep(target);
+                            self.dirty = false;
+                            self.say("Saved");
+                        },
+                        err(e) => {
+                            self.say("The file cannot be written");
+                        },
+                    }
+                },
+                err(e) => {
+                    self.say("The file cannot be written");
+                },
+            }
+            return;
+        }
+        str name = with_extension(&scratch, target, ".sheet");
+        match (io.write_file(&scratch, name, self.encode_native())) {
+            ok() => {
+                self.path = self.book.keep(name);
+                self.dirty = false;
+                self.say("Saved");
+            },
+            err(e) => {
+                self.say("The file cannot be written");
+            },
+        }
+    }
+
+    pub void open_document(str source) uses io {
+        mut Arena scratch = Arena.new(8 * MB);
+        defer scratch.free();
+        match (io.read_bytes(&scratch, source)) {
+            ok(bytes) => {
+                if (bytes.len > 1 && bytes[0] == 80 && bytes[1] == 75) {
+                    if (self.decode_ods(bytes)) {
+                        self.path = self.book.keep(source);
+                        self.say("Opened");
+                    } else {
+                        self.say("This is not an OpenDocument spreadsheet");
+                    }
+                    return;
+                }
+                str data = match (str.from_bytes(bytes)) {
+                    ok(s) => s,
+                    err(e) => "",
+                };
+                if (data.len > 0 && data.bytes[0] == 83 && self.decode_native(data)) {
+                    self.path = self.book.keep(source);
+                    self.say("Opened");
+                } else {
+                    self.decode_csv(data);
+                    self.say("Imported as CSV");
+                }
+            },
+            err(e) => {
+                self.say("This file cannot be read");
+            },
+        }
+    }
+
+    pub void export_csv(str target) uses io {
+        mut Arena scratch = Arena.new(1 * MB);
+        defer scratch.free();
+        match (io.write_file(&scratch, with_extension(&scratch, target, ".csv"), self.encode_csv())) {
+            ok() => {
+                self.say("CSV exported");
+            },
+            err(e) => {
+                self.say("The file cannot be written");
+            },
+        }
+    }
+}
+
+pub usize char_end(str s, usize i) {
+    return calc.char_end(s, i);
+}
+
+pub str with_extension(Arena* arena, str path, str ext) {
+    if (text.ends_with(text.to_lower(arena, path), ext)) {
+        return path;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    b.push(path);
+    b.push(ext);
+    return b.text();
+}
+
+// A line of the file holds one cell: new lines and backslashes in the text are written with a backslash.
+pub str escape(Arena* arena, str s) {
+    text.TextBuilder* b = text.builder(arena);
+    mut usize i = 0;
+    while (i < s.len) {
+        usize e = char_end(s, i);
+        ui8 c = s.bytes[i];
+        if (c == 92) {
+            b.push("\\\\");
+        } else if (c == 10) {
+            b.push("\\n");
+        } else if (c == 13) {
+            b.push("\\r");
+        } else {
+            b.push(text.slice(s, i, e));
+        }
+        i = e;
+    }
+    return b.text();
+}
+
+pub str unescape(Arena* arena, str s) {
+    text.TextBuilder* b = text.builder(arena);
+    mut usize i = 0;
+    while (i < s.len) {
+        ui8 c = s.bytes[i];
+        if (c == 92 && i + 1 < s.len) {
+            ui8 d = s.bytes[i + 1];
+            b.push(d == 110 ? "\n" : d == 114 ? "\r" : "\\");
+            i += 2;
+            continue;
+        }
+        usize e = char_end(s, i);
+        b.push(text.slice(s, i, e));
+        i = e;
+    }
+    return b.text();
+}
+
+void sort_keys(i64[] keys) {
+    mut usize n = keys.len;
+    for (usize i in 1..n) {
+        mut usize j = i;
+        while (j > 0 && keys[j - 1] > keys[j]) {
+            i64 tmp = keys[j];
+            keys[j] = keys[j - 1];
+            keys[j - 1] = tmp;
+            j -= 1;
+        }
+    }
+}
+
+pub Editor* new_editor(Arena* arena) {
+    Editor* e = arena.new(Editor, arena);
+    for (i32 c in 0..values.COLS) {
+        e.book.set_width(c, DEFAULT_WIDTH);
+    }
+    return e;
+}

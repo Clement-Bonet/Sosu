@@ -76,20 +76,20 @@ pub ui32 hsv_rgb(f32 h, f32 s, f32 v) {
         g = p;
         b = q;
     }
-    return 0xFF000000 | (byte_of(r) << 16) | (byte_of(g) << 8) | byte_of(b);
+    return 0xFF000000 | byte_of(r) << 16 | byte_of(g) << 8 | byte_of(b);
 }
 
 i32 top_channel(ui32 c) {
-    i32 r = ((c >> 16) & 0xFF) as i32;
-    i32 g = ((c >> 8) & 0xFF) as i32;
+    i32 r = (c >> 16 & 0xFF) as i32;
+    i32 g = (c >> 8 & 0xFF) as i32;
     i32 b = (c & 0xFF) as i32;
     i32 m = r > g ? r : g;
     return m > b ? m : b;
 }
 
 i32 low_channel(ui32 c) {
-    i32 r = ((c >> 16) & 0xFF) as i32;
-    i32 g = ((c >> 8) & 0xFF) as i32;
+    i32 r = (c >> 16 & 0xFF) as i32;
+    i32 g = (c >> 8 & 0xFF) as i32;
     i32 b = (c & 0xFF) as i32;
     i32 m = r < g ? r : g;
     return m < b ? m : b;
@@ -102,8 +102,8 @@ pub f32 rgb_value(ui32 c) {
 
 // One of cyan, magenta, yellow (0 to 2) or black (3) of an RGB color, from 0 to 1.
 pub f32 cmyk_part(ui32 c, i32 part) {
-    f32 r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    f32 g = ((c >> 8) & 0xFF) as f32 / 255.0;
+    f32 r = (c >> 16 & 0xFF) as f32 / 255.0;
+    f32 g = (c >> 8 & 0xFF) as f32 / 255.0;
     f32 b = (c & 0xFF) as f32 / 255.0;
     mut f32 m = r > g ? r : g;
     m = m > b ? m : b;
@@ -121,7 +121,7 @@ pub ui32 cmyk_rgb(f32 c, f32 m, f32 y, f32 k) {
     ui32 r = byte_of((1.0 - c) * (1.0 - k));
     ui32 g = byte_of((1.0 - m) * (1.0 - k));
     ui32 b = byte_of((1.0 - y) * (1.0 - k));
-    return (r << 16) | (g << 8) | b;
+    return r << 16 | g << 8 | b;
 }
 
 // The saturation (0 to 1) of a color.
@@ -135,8 +135,8 @@ pub f32 rgb_sat(ui32 c) {
 
 // The hue (0 to 360) of a color; 0 for a gray.
 pub f32 rgb_hue(ui32 c) {
-    f32 r = ((c >> 16) & 0xFF) as f32;
-    f32 g = ((c >> 8) & 0xFF) as f32;
+    f32 r = (c >> 16 & 0xFF) as f32;
+    f32 g = (c >> 8 & 0xFF) as f32;
     f32 b = (c & 0xFF) as f32;
     i32 top = top_channel(c);
     f32 d = (top - low_channel(c)) as f32;
@@ -157,10 +157,38 @@ pub f32 rgb_hue(ui32 c) {
 // The 32 colors of the palette (those of PICO-8).
 pub ui32 palette(i32 i) {
     ui32[32] colors = [
-        0xFF000000, 0xFF1D2B53, 0xFF7E2553, 0xFF008751, 0xFFAB5236, 0xFF5F574F, 0xFFC2C3C7, 0xFFFFF1E8,
-        0xFFFF004D, 0xFFFFA300, 0xFFFFEC27, 0xFF00E436, 0xFF29ADFF, 0xFF83769C, 0xFFFF77A8, 0xFFFFCCAA,
-        0xFF291814, 0xFF111D35, 0xFF422136, 0xFF125359, 0xFF742F29, 0xFF49333B, 0xFFA28879, 0xFFF3EF7D,
-        0xFFBE1250, 0xFFFF6C24, 0xFFA8E72E, 0xFF00B543, 0xFF065AB5, 0xFF754665, 0xFFFF6E59, 0xFFFF9D81
+        0xFF000000,
+        0xFF1D2B53,
+        0xFF7E2553,
+        0xFF008751,
+        0xFFAB5236,
+        0xFF5F574F,
+        0xFFC2C3C7,
+        0xFFFFF1E8,
+        0xFFFF004D,
+        0xFFFFA300,
+        0xFFFFEC27,
+        0xFF00E436,
+        0xFF29ADFF,
+        0xFF83769C,
+        0xFFFF77A8,
+        0xFFFFCCAA,
+        0xFF291814,
+        0xFF111D35,
+        0xFF422136,
+        0xFF125359,
+        0xFF742F29,
+        0xFF49333B,
+        0xFFA28879,
+        0xFFF3EF7D,
+        0xFFBE1250,
+        0xFFFF6C24,
+        0xFFA8E72E,
+        0xFF00B543,
+        0xFF065AB5,
+        0xFF754665,
+        0xFFFF6E59,
+        0xFFFF9D81,
     ];
     return colors[i as usize];
 }
@@ -351,7 +379,7 @@ pub class Editor {
         clip_h = 0;
     }
 
-    pub void say(str text) {
+    pub void say(keeps str text) {
         message = text;
         message_until = now + 3000;
     }
@@ -532,7 +560,7 @@ pub class Editor {
 
     // The pixel of the picture under a place of the window.
     i32 cell(f32 at, f32 origin) {
-        return (((at - origin) / zoom as f32 + 4096.0) as i32) - 4096;
+        return ((at - origin) / zoom as f32 + 4096.0) as i32 - 4096;
     }
 
     pub void move_to(f32 x, f32 y) {
@@ -734,7 +762,7 @@ pub class Editor {
         for (i32 j in 0..h) {
             for (i32 i in 0..w) {
                 ui32 c = pixels[(j * w + i) as usize];
-                if ((c >> 24) != 0) {
+                if (c >> 24 != 0) {
                     art.put(x + i, y + j, sheet.blend(c, art.get(x + i, y + j)));
                 }
             }
@@ -835,7 +863,7 @@ pub class Editor {
 
     void pick(i32 x, i32 y) {
         ui32 seen = art.seen(x, y);
-        if ((seen >> 24) != 0) {
+        if (seen >> 24 != 0) {
             color = seen;
         }
     }
@@ -879,7 +907,7 @@ pub class Editor {
     }
 
     // `art` becomes a new frame, just after the current one.
-    void insert_frame(sheet.Sheet* s, i32 delay) {
+    void insert_frame(keeps sheet.Sheet* s, i32 delay) {
         settle();
         frames.insert((current + 1) as usize, sheet.Frame{ art: s, delay: delay, drawn: -1 });
         current += 1;
@@ -999,8 +1027,8 @@ pub class Editor {
         for (i32 k in 0..frame_count()) {
             sheet.Sheet* s = frames.at(k as usize).art;
             s.flatten();
-            i32 ox = (k % cols) * (w + gap);
-            i32 oy = (k / cols) * (h + gap);
+            i32 ox = k % cols * (w + gap);
+            i32 oy = k / cols * (h + gap);
             for (i32 y in 0..h) {
                 for (i32 x in 0..w) {
                     img.pixels[((oy + y) * img.width + ox + x) as usize] = s.flat.pixels[(y * w + x) as usize];
@@ -1035,9 +1063,9 @@ pub class Editor {
             b.push("    { \"index\": ");
             b.push_i64(k as i64);
             b.push(", \"x\": ");
-            b.push_i64(((k % cols) * (w + gap)) as i64);
+            b.push_i64((k % cols * (w + gap)) as i64);
             b.push(", \"y\": ");
-            b.push_i64(((k / cols) * (h + gap)) as i64);
+            b.push_i64((k / cols * (h + gap)) as i64);
             b.push(", \"w\": ");
             b.push_i64(w as i64);
             b.push(", \"h\": ");
@@ -1184,7 +1212,7 @@ pub class Editor {
 
     // Writes the sprite sheet in `<name>.png` and its description in `<name>.json`.
     pub void export_sheet(str path) uses io {
-        if ((sheet_width() as i64) * (sheet_height() as i64) > MAX_SHEET) {
+        if (sheet_width() as i64 * sheet_height() as i64 > MAX_SHEET) {
             say("The sprite sheet is too large");
             return;
         }
@@ -1264,7 +1292,7 @@ pub class Editor {
                     if (k > 0) {
                         frames.push(sheet.Frame{ art: sheet.new_sheet(&sheet_arena, w, h), delay: 100, drawn: -1 });
                     }
-                    frames.at(k as usize).art.load_cell(img, (k % across) * (w + gap), (k / across) * (h + gap));
+                    frames.at(k as usize).art.load_cell(img, k % across * (w + gap), k / across * (h + gap));
                 }
                 art = frames.at(0).art;
                 columns = across < MAX_FRAMES ? across : MAX_FRAMES;
@@ -1374,7 +1402,7 @@ pub class Editor {
         if (alpha == 0 && !fading) {
             alpha = 255;
         }
-        color = ((alpha as ui32) << 24) | (hsv_rgb(hue, sat, val) & 0xFFFFFF);
+        color = alpha as ui32 << 24 | hsv_rgb(hue, sat, val) & 0xFFFFFF;
     }
 
     // `fx` and `fy` from 0 to 1, from the top left of the square of saturation and brightness.
@@ -1459,9 +1487,9 @@ pub class Editor {
         }
         if (model == 0) {
             if (k == 0) {
-                return ((s >> 16) & 0xFF) as i32;
+                return (s >> 16 & 0xFF) as i32;
             }
-            return k == 1 ? ((s >> 8) & 0xFF) as i32 : (s & 0xFF) as i32;
+            return k == 1 ? (s >> 8 & 0xFF) as i32 : (s & 0xFF) as i32;
         }
         if (model == 1) {
             return (cmyk_part(s, k) * 100.0 + 0.5) as i32;
@@ -1494,11 +1522,11 @@ pub class Editor {
         if (model == 0) {
             ui32 u = n as ui32;
             if (k == 0) {
-                packed = (u << 16) | (s & 0x00FFFF);
+                packed = u << 16 | s & 0x00FFFF;
             } else if (k == 1) {
-                packed = (u << 8) | (s & 0xFF00FF);
+                packed = u << 8 | s & 0xFF00FF;
             } else {
-                packed = u | (s & 0xFFFF00);
+                packed = u | s & 0xFFFF00;
             }
         } else {
             f32 f = n as f32 / 100.0;
@@ -1507,7 +1535,7 @@ pub class Editor {
         if (alpha == 0) {
             alpha = 255;
         }
-        color = ((alpha as ui32) << 24) | packed;
+        color = alpha as ui32 << 24 | packed;
         sync_picker();
     }
 
@@ -1568,7 +1596,7 @@ pub class Editor {
             if (alpha == 0) {
                 alpha = 255;
             }
-            color = ((alpha as ui32) << 24) | (typed as ui32);
+            color = alpha as ui32 << 24 | typed as ui32;
             sync_picker();
         }
         typing = false;

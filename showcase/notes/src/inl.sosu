@@ -1,0 +1,887 @@
+// notes.inl: the second phase of the parser: the inlines of a paragraph, a heading or a cell of a
+// table (emphasis, links, images, code, HTML, and the extensions) become nodes under their block.
+import std.text;
+import std.vec;
+import notes.cm;
+
+pub struct Delim {
+    pub mut i32 cc = 0;
+    pub mut i32 num = 0;
+    pub mut i32 orig = 0;
+    pub mut i32 node = -1;
+    pub mut i32 prev = -1;
+    pub mut i32 next = -1;
+    pub mut bool can_open = false;
+    pub mut bool can_close = false;
+}
+
+pub struct Brk {
+    pub mut i32 node = -1;
+    pub mut i32 prev = -1;
+    pub mut i32 prev_delim = -1;
+    pub mut usize index = 0;
+    pub mut bool image = false;
+    pub mut bool active = true;
+    pub mut bool after = false;  // another bracket was opened after this one
+}
+
+struct Flank {
+    i32 num = 0;
+    bool can_open = false;
+    bool can_close = false;
+}
+
+pub class Inl {
+    Arena* arena;
+    vec.Vec<cm.Node>* nodes;
+    vec.Vec<cm.Ref>* refs;
+    vec.Vec<str>* notes;
+    bool ext;
+    mut vec.Vec<Delim>* ds;
+    mut vec.Vec<Brk>* bs;
+    mut str s;
+    mut usize pos;
+    mut i32 dtop;
+    mut i32 btop;
+
+    void init(Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, keeps vec.Vec<str>* notes, bool ext) {
+        self.arena = arena;
+        self.nodes = nodes;
+        self.refs = refs;
+        self.notes = notes;
+        self.ext = ext;
+        ds = vec.new<Delim>(arena);
+        bs = vec.new<Brk>(arena);
+        s = "";
+        pos = 0;
+        dtop = -1;
+        btop = -1;
+    }
+
+    cm.Node* at(i32 id) {
+        return nodes.at(id as usize);
+    }
+
+    i32 add_text(i32 parent, keeps str lit) {
+        i32 id = cm.make(nodes, Text);
+        at(id).lit = lit;
+        cm.append(nodes, parent, id);
+        return id;
+    }
+
+    i32 add_node(i32 parent, cm.Kind kind, keeps str lit) {
+        i32 id = cm.make(nodes, kind);
+        at(id).lit = lit;
+        cm.append(nodes, parent, id);
+        return id;
+    }
+
+    bool has_note(str id) {
+        for (usize i in 0..notes.len()) {
+            if (*notes.at(i) == id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool is_special(usize i) {
+        i32 c = cm.ch(s, i);
+        if (c == 10 || c == 92 || c == 96 || c == 42 || c == 95 || c == 91 || c == 93 || c == 33 || c == 60 || c == 38) {
+            return true;
+        }
+        if (!ext) {
+            return false;
+        }
+        if (c == 126 || c == 61 || c == 36 || c == 37 || c == 35) {
+            return true;
+        }
+        return (c == 104 || c == 119) && (i == 0 || !cm.is_alnum(cm.ch(s, i - 1)));
+    }
+
+    void text_run(i32 parent) {
+        usize start = pos;
+        mut usize i = pos + cm.char_at(s, pos).len;
+        while (i < s.len && !is_special(i)) {
+            i += 1;
+        }
+        add_text(parent, text.slice(s, start, i));
+        pos = i;
+    }
+
+    // ---- line breaks, escapes, code, entities ----
+
+    void skip_spaces() {
+        while (cm.ch(s, pos) == 32) {
+            pos += 1;
+        }
+    }
+
+    void add_break(i32 parent, bool hard) {
+        if (hard) {
+            add_node(parent, HardBreak, "");
+        } else {
+            add_node(parent, SoftBreak, "");
+        }
+    }
+
+    void newline(i32 parent) {
+        pos += 1;
+        i32 last = at(parent).last;
+        mut bool hard = false;
+        if (last >= 0 && at(last).kind == Text) {
+            str t = at(last).lit;
+            if (cm.ch(t, t.len - 1) == 32) {
+                hard = t.len >= 2 && cm.ch(t, t.len - 2) == 32;
+                at(last).lit = text.trim_end(t);
+            }
+        }
+        add_break(parent, hard);
+        skip_spaces();
+    }
+
+    void backslash(i32 parent) {
+        i32 n = cm.ch(s, pos + 1);
+        if (n == 10) {
+            pos += 2;
+            add_break(parent, true);
+            skip_spaces();
+        } else if (cm.is_punct_ascii(n)) {
+            add_text(parent, text.slice(s, pos + 1, pos + 2));
+            pos += 2;
+        } else {
+            add_text(parent, "\\");
+            pos += 1;
+        }
+    }
+
+    void backticks(i32 parent) {
+        usize start = pos;
+        mut usize n = 0;
+        while (cm.ch(s, start + n) == 96) {
+            n += 1;
+        }
+        usize after = start + n;
+        mut usize i = after;
+        while (i < s.len) {
+            if (cm.ch(s, i) == 96) {
+                mut usize k = 0;
+                while (cm.ch(s, i + k) == 96) {
+                    k += 1;
+                }
+                if (k == n) {
+                    mut str c = text.slice(s, after, i);
+                    c = text.replace(arena, c, "\n", " ");
+                    if (c.len >= 2 && cm.ch(c, 0) == 32 && cm.ch(c, c.len - 1) == 32 && !cm.is_blank(c)) {
+                        c = text.slice(c, 1, c.len - 1);
+                    }
+                    add_node(parent, Code, c);
+                    pos = i + n;
+                    return;
+                }
+                i += k;
+            } else {
+                i += 1;
+            }
+        }
+        add_text(parent, text.slice(s, start, after));
+        pos = after;
+    }
+
+    void entity(i32 parent) {
+        cm.Ent e = cm.entity_at(s, pos);
+        if (e.len == 0) {
+            add_text(parent, "&");
+            pos += 1;
+            return;
+        }
+        text.TextBuilder* b = text.builder(arena);
+        cm.put_code(b, e.code);
+        add_text(parent, b.text());
+        pos += e.len;
+    }
+
+    // ---- automatic links and HTML ----
+
+    bool is_email_char(i32 c) {
+        return cm.is_alnum(c) || c == 46 || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 47 || c == 61 || c == 63 || c == 94 || c == 95 || c == 96 || c == 123 || c == 124 || c == 125 || c == 126 || c == 45;
+    }
+
+    bool angle(i32 parent) {
+        mut usize i = pos + 1;
+        if (cm.is_alpha(cm.ch(s, i))) {
+            i += 1;
+            while (i - pos <= 32 && (cm.is_alnum(cm.ch(s, i)) || cm.ch(s, i) == 43 || cm.ch(s, i) == 46 || cm.ch(s, i) == 45)) {
+                i += 1;
+            }
+            if (i - pos >= 3 && cm.ch(s, i) == 58) {
+                mut usize j = i + 1;
+                while (j < s.len && cm.ch(s, j) > 32 && cm.ch(s, j) != 60 && cm.ch(s, j) != 62) {
+                    j += 1;
+                }
+                if (cm.ch(s, j) == 62) {
+                    str url = text.slice(s, pos + 1, j);
+                    i32 l = add_node(parent, Link, "");
+                    at(l).dest = url;
+                    add_text(l, url);
+                    pos = j + 1;
+                    return true;
+                }
+            }
+        }
+        mut usize k = pos + 1;
+        while (is_email_char(cm.ch(s, k))) {
+            k += 1;
+        }
+        if (k > pos + 1 && cm.ch(s, k) == 64) {
+            mut usize j = k + 1;
+            mut bool ok = false;
+            while (cm.is_alnum(cm.ch(s, j)) || cm.ch(s, j) == 45 || cm.ch(s, j) == 46) {
+                j += 1;
+            }
+            if (j > k + 1 && cm.ch(s, j) == 62 && cm.is_alnum(cm.ch(s, k + 1)) && cm.is_alnum(cm.ch(s, j - 1))) {
+                ok = true;
+                mut usize m = k + 1;
+                mut usize run = 0;
+                while (m < j) {
+                    if (cm.ch(s, m) == 46) {
+                        if (run == 0 || cm.ch(s, m - 1) == 45) {
+                            ok = false;
+                        }
+                        run = 0;
+                    } else {
+                        run += 1;
+                        if (run > 63) {
+                            ok = false;
+                        }
+                    }
+                    m += 1;
+                }
+            }
+            if (ok) {
+                str addr = text.slice(s, pos + 1, j);
+                i32 l = add_node(parent, Link, "");
+                at(l).dest = cm.cat(arena, "mailto:", addr);
+                add_text(l, addr);
+                pos = j + 1;
+                return true;
+            }
+        }
+        usize e = cm.scan_html(s, pos);
+        if (e > 0) {
+            add_node(parent, HtmlInline, text.slice(s, pos, e));
+            pos = e;
+            return true;
+        }
+        return false;
+    }
+
+    bool bare_url(i32 parent) {
+        if (btop >= 0 && bs.at(btop as usize).active) {
+            return false;
+        }
+        mut usize plen = 0;
+        mut bool www = false;
+        if (cm.has_prefix_ci(s, pos, "http://")) {
+            plen = 7;
+        } else if (cm.has_prefix_ci(s, pos, "https://")) {
+            plen = 8;
+        } else if (cm.has_prefix_ci(s, pos, "www.")) {
+            plen = 4;
+            www = true;
+        } else {
+            return false;
+        }
+        mut usize end = pos + plen;
+        while (end < s.len && !cm.is_ws(cm.ch(s, end)) && cm.ch(s, end) != 60) {
+            end += 1;
+        }
+        while (end > pos + plen) {
+            i32 c = cm.ch(s, end - 1);
+            if (c == 63 || c == 33 || c == 46 || c == 44 || c == 58 || c == 42 || c == 95 || c == 126 || c == 39 || c == 34) {
+                end -= 1;
+            } else if (c == 41) {
+                mut i32 open = 0;
+                mut i32 close = 0;
+                for (usize k in pos..end) {
+                    if (cm.ch(s, k) == 40) {
+                        open += 1;
+                    } else if (cm.ch(s, k) == 41) {
+                        close += 1;
+                    }
+                }
+                if (close > open) {
+                    end -= 1;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if (end <= pos + plen) {
+            return false;
+        }
+        str url = text.slice(s, pos, end);
+        i32 l = add_node(parent, Link, "");
+        at(l).dest = www ? cm.cat(arena, "http://", url) : url;
+        add_text(l, url);
+        pos = end;
+        return true;
+    }
+
+    // ---- extensions of Obsidian ----
+
+    // `[[target#heading|alias]]` at `pos`, or `![[...]]` for an embed.
+    bool wiki(i32 parent, bool embed) {
+        usize start = pos + (embed ? 3 : 2);
+        mut usize e = start;
+        while (e < s.len && !(cm.ch(s, e) == 93 && cm.ch(s, e + 1) == 93) && cm.ch(s, e) != 10 && cm.ch(s, e) != 91) {
+            e += 1;
+        }
+        if (e >= s.len || cm.ch(s, e) != 93) {
+            return false;
+        }
+        str inner = text.slice(s, start, e);
+        if (cm.is_blank(inner)) {
+            return false;
+        }
+        mut str target = inner;
+        mut str alias = "";
+        match (text.find(inner, "|")) {
+            some(i) => {
+                target = text.slice(inner, 0, i);
+                alias = text.trim(text.slice(inner, i + 1, inner.len));
+            },
+            none => { },
+        }
+        mut str name = target;
+        mut str heading = "";
+        match (text.find(target, "#")) {
+            some(i) => {
+                name = text.slice(target, 0, i);
+                heading = text.trim(text.slice(target, i + 1, target.len));
+            },
+            none => { },
+        }
+        mut cm.Kind kind = Wiki;
+        if (embed) {
+            kind = Embed;
+        }
+        i32 id = add_node(parent, kind, alias.len > 0 ? alias : text.trim(target));
+        at(id).dest = text.trim(name);
+        at(id).info = heading;
+        pos = e + 2;
+        return true;
+    }
+
+    bool footref(i32 parent) {
+        mut usize i = pos + 2;
+        while (i < s.len && cm.ch(s, i) != 93 && !cm.is_ws(cm.ch(s, i)) && cm.ch(s, i) != 91) {
+            i += 1;
+        }
+        if (i == pos + 2 || cm.ch(s, i) != 93) {
+            return false;
+        }
+        str id = text.slice(s, pos + 2, i);
+        if (!has_note(id)) {
+            return false;
+        }
+        add_node(parent, FootRef, id);
+        pos = i + 1;
+        return true;
+    }
+
+    bool tag(i32 parent) {
+        if (pos > 0 && !cm.is_ws(cm.ch(s, pos - 1))) {
+            return false;
+        }
+        mut usize i = pos + 1;
+        mut bool word = false;
+        while (i < s.len) {
+            i32 c = cm.ch(s, i);
+            if (cm.is_alnum(c) || c == 95 || c == 45 || c == 47 || c >= 128) {
+                if (!cm.is_digit(c)) {
+                    word = true;
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if (!word) {
+            return false;
+        }
+        add_node(parent, Tag, text.slice(s, pos, i));
+        pos = i;
+        return true;
+    }
+
+    bool math(i32 parent) {
+        if (cm.ch(s, pos + 1) == 36) {
+            match (text.find_from(s, "$$", pos + 2)) {
+                some(e) => {
+                    i32 id = add_node(parent, Math, text.trim(text.slice(s, pos + 2, e)));
+                    at(id).level = 1;
+                    pos = e + 2;
+                    return true;
+                },
+                none => {
+                    return false;
+                },
+            }
+        }
+        i32 first = cm.ch(s, pos + 1);
+        if (first < 0 || cm.is_ws(first)) {
+            return false;
+        }
+        mut usize i = pos + 1;
+        while (i < s.len) {
+            i32 c = cm.ch(s, i);
+            if (c == 92) {
+                i += 2;
+            } else if (c == 10) {
+                return false;
+            } else if (c == 36) {
+                if (!cm.is_ws(cm.ch(s, i - 1)) && !cm.is_digit(cm.ch(s, i + 1)) && i > pos + 1) {
+                    add_node(parent, Math, text.slice(s, pos + 1, i));
+                    pos = i + 1;
+                    return true;
+                }
+                return false;
+            } else {
+                i += 1;
+            }
+        }
+        return false;
+    }
+
+    bool comment(i32 parent) {
+        if (cm.ch(s, pos + 1) != 37) {
+            return false;
+        }
+        match (text.find_from(s, "%%", pos + 2)) {
+            some(e) => {
+                add_node(parent, Comment, text.slice(s, pos + 2, e));
+                pos = e + 2;
+                return true;
+            },
+            none => {
+                return false;
+            },
+        }
+    }
+
+    // ---- emphasis ----
+
+    Flank scan_delims(i32 cc) {
+        usize start = pos;
+        mut usize n = 0;
+        while (cm.ch(s, start + n) == cc) {
+            n += 1;
+        }
+        i32 before = start == 0 ? 10 : cm.char_before(s, start);
+        i32 after = start + n >= s.len ? 10 : cm.char_at(s, start + n).code;
+        bool after_ws = cm.is_uni_space(after);
+        bool after_p = cm.is_uni_punct(after);
+        bool before_ws = cm.is_uni_space(before);
+        bool before_p = cm.is_uni_punct(before);
+        bool left = !after_ws && (!after_p || before_ws || before_p);
+        bool right = !before_ws && (!before_p || after_ws || after_p);
+        if (cc == 95) {
+            return Flank{ num: n as i32, can_open: left && (!right || before_p), can_close: right && (!left || after_p) };
+        }
+        return Flank{ num: n as i32, can_open: left, can_close: right };
+    }
+
+    void handle_delim(i32 parent, i32 cc) {
+        Flank f = scan_delims(cc);
+        usize start = pos;
+        pos += f.num as usize;
+        i32 node = add_text(parent, text.slice(s, start, pos));
+        bool usable = cc == 126 ? f.num <= 2 : cc == 61 ? f.num == 2 : true;
+        if (usable && (f.can_open || f.can_close)) {
+            ds.push(Delim{ cc: cc, num: f.num, orig: f.num, node: node, prev: dtop, can_open: f.can_open, can_close: f.can_close });
+            i32 id = (ds.len() - 1) as i32;
+            if (dtop >= 0) {
+                ds.at(dtop as usize).next = id;
+            }
+            dtop = id;
+        }
+    }
+
+    void remove_delim(i32 d) {
+        Delim x = *ds.at(d as usize);
+        if (x.prev >= 0) {
+            ds.at(x.prev as usize).next = x.next;
+        }
+        if (x.next < 0) {
+            dtop = x.prev;
+        } else {
+            ds.at(x.next as usize).prev = x.prev;
+        }
+    }
+
+    i32 slot(i32 cc, i32 orig, bool can_open) {
+        i32 k = cc == 95 ? 0 : cc == 42 ? 1 : cc == 126 ? 2 : 3;
+        return k * 6 + orig % 3 * 2 + (can_open ? 1 : 0);
+    }
+
+    void process_emphasis(i32 bottom) {
+        vec.Vec<i32>* ob = vec.new<i32>(arena);
+        for (i32 k in 0..24) {
+            ob.push(bottom);
+        }
+        mut i32 closer = dtop;
+        while (closer >= 0 && ds.at(closer as usize).prev != bottom) {
+            closer = ds.at(closer as usize).prev;
+        }
+        while (closer >= 0) {
+            Delim c = *ds.at(closer as usize);
+            if (!c.can_close) {
+                closer = c.next;
+                continue;
+            }
+            bool plain = c.cc == 42 || c.cc == 95;
+            i32 slot_i = slot(c.cc, c.orig, c.can_open);
+            mut i32 opener = c.prev;
+            mut bool found = false;
+            while (opener >= 0 && opener != bottom && opener != *ob.at(slot_i as usize)) {
+                Delim t = *ds.at(opener as usize);
+                bool odd = plain && (c.can_open || t.can_close) && c.orig % 3 != 0 && (t.orig + c.orig) % 3 == 0;
+                bool same = plain ? true : t.num == c.num;
+                if (t.cc == c.cc && t.can_open && !odd && same) {
+                    found = true;
+                    break;
+                }
+                opener = t.prev;
+            }
+            i32 old_closer = closer;
+            if (!found) {
+                closer = c.next;
+                ob.set(slot_i as usize, c.prev);
+                if (!c.can_open) {
+                    remove_delim(old_closer);
+                }
+                continue;
+            }
+            Delim op = *ds.at(opener as usize);
+            i32 take = plain ? c.num >= 2 && op.num >= 2 ? 2 : 1 : c.num;
+            i32 o_node = op.node;
+            i32 c_node = c.node;
+            ds.at(opener as usize).num = op.num - take;
+            ds.at(closer as usize).num = c.num - take;
+            str ol = at(o_node).lit;
+            str cl = at(c_node).lit;
+            at(o_node).lit = text.slice(ol, 0, ol.len - take as usize);
+            at(c_node).lit = text.slice(cl, 0, cl.len - take as usize);
+            mut cm.Kind kind = Emph;
+            if (c.cc == 126) {
+                kind = Strike;
+            } else if (c.cc == 61) {
+                kind = Highlight;
+            } else if (take == 2) {
+                kind = Strong;
+            }
+            i32 emph = cm.make(nodes, kind);
+            mut i32 tmp = at(o_node).next;
+            while (tmp >= 0 && tmp != c_node) {
+                i32 nx = at(tmp).next;
+                cm.append(nodes, emph, tmp);
+                tmp = nx;
+            }
+            cm.insert_after(nodes, o_node, emph);
+            if (ds.at(opener as usize).next != closer) {
+                ds.at(opener as usize).next = closer;
+                ds.at(closer as usize).prev = opener;
+            }
+            if (ds.at(opener as usize).num == 0) {
+                cm.unlink(nodes, o_node);
+                remove_delim(opener);
+            }
+            if (ds.at(closer as usize).num == 0) {
+                cm.unlink(nodes, c_node);
+                i32 nx = ds.at(closer as usize).next;
+                remove_delim(closer);
+                closer = nx;
+            }
+        }
+        while (dtop >= 0 && dtop != bottom) {
+            remove_delim(dtop);
+        }
+    }
+
+    // ---- links and images ----
+
+    void add_bracket(i32 node, usize index, bool image) {
+        if (btop >= 0) {
+            bs.at(btop as usize).after = true;
+        }
+        bs.push(Brk{ node: node, prev: btop, prev_delim: dtop, index: index, image: image });
+        btop = (bs.len() - 1) as i32;
+    }
+
+    void remove_bracket() {
+        btop = bs.at(btop as usize).prev;
+    }
+
+    void open_bracket(i32 parent) {
+        if (ext && cm.ch(s, pos + 1) == 91 && wiki(parent, false)) {
+            return;
+        }
+        if (ext && cm.ch(s, pos + 1) == 94 && footref(parent)) {
+            return;
+        }
+        usize start = pos;
+        pos += 1;
+        i32 node = add_text(parent, "[");
+        add_bracket(node, start, false);
+    }
+
+    void bang(i32 parent) {
+        if (cm.ch(s, pos + 1) == 91) {
+            if (ext && cm.ch(s, pos + 2) == 91 && wiki(parent, true)) {
+                return;
+            }
+            usize start = pos + 1;
+            pos += 2;
+            i32 node = add_text(parent, "![");
+            add_bracket(node, start, true);
+        } else {
+            pos += 1;
+            add_text(parent, "!");
+        }
+    }
+
+    void close_bracket(i32 parent) {
+        pos += 1;
+        usize startpos = pos;
+        if (btop < 0) {
+            add_text(parent, "]");
+            return;
+        }
+        Brk o = *bs.at(btop as usize);
+        if (!o.active) {
+            add_text(parent, "]");
+            remove_bracket();
+            return;
+        }
+        mut bool matched = false;
+        mut str dest = "";
+        mut str title = "";
+        if (cm.ch(s, pos) == 40) {
+            usize p = cm.skip_spnl(s, pos + 1);
+            cm.Scan d = cm.scan_dest(arena, s, p);
+            if (d.ok) {
+                mut usize p1 = cm.skip_spnl(s, d.end);
+                if (p1 > d.end) {
+                    cm.Scan t = cm.scan_title(arena, s, p1);
+                    if (t.ok) {
+                        title = t.text;
+                        p1 = t.end;
+                    }
+                }
+                usize p2 = cm.skip_spnl(s, p1);
+                if (cm.ch(s, p2) == 41) {
+                    matched = true;
+                    dest = d.text;
+                    pos = p2 + 1;
+                }
+            }
+        }
+        if (!matched) {
+            usize lend = cm.scan_label(s, startpos);
+            mut str label = "";
+            mut bool have = false;
+            if (lend > startpos + 2) {
+                label = text.slice(s, startpos + 1, lend - 1);
+                have = true;
+            } else if (!o.after) {
+                label = text.slice(s, o.index + 1, startpos - 1);
+                have = true;
+            }
+            if (have) {
+                i32 r = cm.find_ref(refs, cm.norm_label(arena, label));
+                if (r >= 0) {
+                    dest = refs.at(r as usize).dest;
+                    title = refs.at(r as usize).title;
+                    matched = true;
+                    if (lend > 0) {
+                        pos = lend;
+                    }
+                }
+            }
+        }
+        if (matched) {
+            mut cm.Kind kind = Link;
+            if (o.image) {
+                kind = Image;
+            }
+            i32 node = cm.make(nodes, kind);
+            at(node).dest = dest;
+            at(node).title = title;
+            mut i32 tmp = at(o.node).next;
+            while (tmp >= 0) {
+                i32 nx = at(tmp).next;
+                cm.append(nodes, node, tmp);
+                tmp = nx;
+            }
+            cm.append(nodes, parent, node);
+            process_emphasis(o.prev_delim);
+            remove_bracket();
+            cm.unlink(nodes, o.node);
+            if (!o.image) {
+                mut i32 b = btop;
+                while (b >= 0) {
+                    if (!bs.at(b as usize).image) {
+                        bs.at(b as usize).active = false;
+                    }
+                    b = bs.at(b as usize).prev;
+                }
+            }
+        } else {
+            remove_bracket();
+            pos = startpos;
+            add_text(parent, "]");
+        }
+    }
+
+    // ---- a block ----
+
+    void one(i32 parent) {
+        i32 c = cm.ch(s, pos);
+        if (c == 10) {
+            newline(parent);
+        } else if (c == 92) {
+            backslash(parent);
+        } else if (c == 96) {
+            backticks(parent);
+        } else if (c == 42 || c == 95) {
+            handle_delim(parent, c);
+        } else if (c == 91) {
+            open_bracket(parent);
+        } else if (c == 33) {
+            bang(parent);
+        } else if (c == 93) {
+            close_bracket(parent);
+        } else if (c == 60) {
+            if (!angle(parent)) {
+                pos += 1;
+                add_text(parent, "<");
+            }
+        } else if (c == 38) {
+            entity(parent);
+        } else if (ext && (c == 126 || c == 61)) {
+            handle_delim(parent, c);
+        } else {
+            mut bool done = false;
+            if (ext) {
+                if (c == 36) {
+                    done = math(parent);
+                } else if (c == 37) {
+                    done = comment(parent);
+                } else if (c == 35) {
+                    done = tag(parent);
+                } else if (c == 104 || c == 119) {
+                    done = bare_url(parent);
+                }
+            }
+            if (!done) {
+                text_run(parent);
+            }
+        }
+    }
+
+    void merge_text(i32 parent) {
+        mut i32 c = at(parent).first;
+        while (c >= 0) {
+            i32 nx = at(c).next;
+            if (at(c).kind == Text && nx >= 0 && at(nx).kind == Text) {
+                at(c).lit = cm.cat(arena, at(c).lit, at(nx).lit);
+                cm.unlink(nodes, nx);
+            } else {
+                c = nx;
+            }
+        }
+    }
+
+    pub void run(i32 block) {
+        s = text.trim(at(block).lit);
+        pos = 0;
+        dtop = -1;
+        btop = -1;
+        ds.clear();
+        bs.clear();
+        while (pos < s.len) {
+            one(block);
+        }
+        process_emphasis(-1);
+        merge_text(block);
+    }
+}
+
+// A callout `> [!note] Title` begins a quote: its type and its title are kept on the quote.
+void read_callout(Arena* arena, vec.Vec<cm.Node>* nodes, i32 par) {
+    i32 q = nodes.at(par as usize).parent;
+    str lit = nodes.at(par as usize).lit;
+    if (q < 0 || nodes.at(q as usize).kind != BlockQuote || nodes.at(q as usize).first != par || !text.starts_with(lit, "[!")) {
+        return;
+    }
+    mut usize i = 2;
+    while (cm.is_alnum(cm.ch(lit, i)) || cm.ch(lit, i) == 45) {
+        i += 1;
+    }
+    if (i == 2 || cm.ch(lit, i) != 93) {
+        return;
+    }
+    str kind = text.to_lower(arena, text.slice(lit, 2, i));
+    mut usize j = i + 1;
+    mut i32 fold = 0;
+    if (cm.ch(lit, j) == 43 || cm.ch(lit, j) == 45) {
+        fold = cm.ch(lit, j) == 43 ? 1 : 2;
+        j += 1;
+    }
+    mut usize e = lit.len;
+    match (text.find_from(lit, "\n", j)) {
+        some(n) => {
+            e = n;
+        },
+        none => { },
+    }
+    nodes.at(q as usize).info = kind;
+    nodes.at(q as usize).title = text.trim(text.slice(lit, j, e));
+    nodes.at(q as usize).level = fold;
+    nodes.at(par as usize).lit = e + 1 <= lit.len ? text.slice(lit, e + 1, lit.len) : "";
+}
+
+// Reads the text of every leaf block of the tree, into nodes.
+pub void process(Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, bool ext) {
+    usize count = nodes.len();
+    vec.Vec<str>* notes = vec.new<str>(arena);
+    for (usize i in 0..count) {
+        if (nodes.at(i).kind == Footnote) {
+            notes.push(nodes.at(i).lit);
+        }
+    }
+    Inl* inl = arena.new(Inl, arena, nodes, refs, notes, ext);
+    for (usize i in 0..count) {
+        cm.Kind k = nodes.at(i).kind;
+        if (k == Paragraph || k == Heading || k == Cell) {
+            if (ext && k == Paragraph) {
+                i32 par = nodes.at(i).parent;
+                if (par >= 0 && nodes.at(par as usize).kind == Item && nodes.at(par as usize).first == i as i32) {
+                    str lit = nodes.at(i).lit;
+                    if (text.starts_with(lit, "[ ]") && (lit.len == 3 || cm.ch(lit, 3) == 32)) {
+                        nodes.at(par as usize).task = 1;
+                        nodes.at(i).lit = lit.len > 4 ? text.slice(lit, 4, lit.len) : "";
+                    } else if ((text.starts_with(lit, "[x]") || text.starts_with(lit, "[X]")) && (lit.len == 3 || cm.ch(lit, 3) == 32)) {
+                        nodes.at(par as usize).task = 2;
+                        nodes.at(i).lit = lit.len > 4 ? text.slice(lit, 4, lit.len) : "";
+                    }
+                }
+                read_callout(arena, nodes, i as i32);
+            }
+            inl.run(i as i32);
+        }
+    }
+}

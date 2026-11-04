@@ -1,0 +1,426 @@
+// vault.model: the state of the window, and what its buttons do. The interface is in
+// screen.ui.sosu; the unlock screen and the clipboard are handled by main.sosu.
+import std.io;
+import std.text;
+import std.vec;
+import db.db;
+import ui.widgets;
+import vault.entry;
+import vault.gen;
+import vault.seal;
+import vault.store;
+import vault.totp;
+
+pub i64 IDLE_LOCK_MS = 300000;  // five minutes without input lock the vault
+pub i64 CLIPBOARD_MS = 30000;  // a copied secret leaves the clipboard after thirty seconds
+
+ui8 lower(ui8 b) {
+    return b >= 65 && b <= 90 ? b + 32 : b;
+}
+
+// Does `hay` hold `needle`, whatever the case of the letters?
+bool has(str hay, str needle) {
+    if (needle.len == 0) {
+        return true;
+    }
+    if (needle.len > hay.len) {
+        return false;
+    }
+    for (usize i in 0..hay.len - needle.len + 1) {
+        mut bool same = true;
+        for (usize j in 0..needle.len) {
+            if (lower(hay.bytes[i + j]) != lower(needle.bytes[j])) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool before(str a, str b) {
+    usize n = a.len < b.len ? a.len : b.len;
+    for (usize i in 0..n) {
+        ui8 x = lower(a.bytes[i]);
+        ui8 y = lower(b.bytes[i]);
+        if (x != y) {
+            return x < y;
+        }
+    }
+    return a.len < b.len;
+}
+
+pub class Model {
+    pub mut bool locked;
+    pub mut bool creating;  // the vault does not exist yet: the master password is chosen
+    pub mut widgets.TextBuffer master;
+    pub mut widgets.TextBuffer confirm;
+    pub mut widgets.TextBuffer message;
+    pub mut widgets.TextBuffer search;
+    pub mut widgets.TextBuffer code;  // the live two-factor code of the entry edited
+    pub mut widgets.TextBuffer copied;  // what main must put on the clipboard
+    pub mut bool want_copy;
+    pub mut i64 clear_at;  // when the clipboard is emptied, in ms; 0: nothing copied
+    pub mut i64 last_input;
+    pub mut i64 now;
+    pub mut i64 unix_offset;  // unix seconds at the start, minus the ms clock
+    pub mut vec.Vec<entry.Entry>* entries;
+    pub mut vec.Vec<i32>* view;  // the entries that match the search, by title
+    pub mut i32 chosen;  // the row of `view`, -1: none
+    pub mut i32 shown;  // the row loaded in `edit`
+    pub mut i32 at;  // the entry edited, in `entries`; -1: a new one
+    pub mut bool editing;
+    pub mut bool reveal;
+    pub mut entry.Entry edit;
+    pub mut gen.Rules rules;
+    pub mut i64 length;  // slider of the length
+    pub mut f64 strength;
+    pub mut widgets.TextBuffer length_label;
+    pub mut seal.Keys keys;
+    pub mut db.Connection* conn;
+    mut widgets.TextBuffer dots_text;
+    mut widgets.TextBuffer seen;  // the search of the last `rebuild`
+    Arena* arena;
+
+    void init(Arena* arena, keeps db.Connection* conn) uses io {
+        self.arena = arena;
+        self.conn = conn;
+        locked = true;
+        creating = false;
+        master = widgets.TextBuffer{ };
+        confirm = widgets.TextBuffer{ };
+        message = widgets.TextBuffer{ };
+        search = widgets.TextBuffer{ };
+        code = widgets.TextBuffer{ };
+        copied = widgets.TextBuffer{ };
+        seen = widgets.TextBuffer{ };
+        dots_text = widgets.TextBuffer{ };
+        want_copy = false;
+        clear_at = 0;
+        last_input = 0;
+        now = 0;
+        unix_offset = 0;
+        entries = vec.new<entry.Entry>(arena);
+        view = vec.new<i32>(arena);
+        chosen = -1;
+        shown = -1;
+        at = -1;
+        editing = false;
+        reveal = false;
+        edit = entry.Entry{ };
+        rules = gen.Rules{ };
+        length = 20;
+        length_label = widgets.TextBuffer{ };
+        strength = 0.0;
+        keys = seal.Keys{ };
+        creating = !store.exists(arena, conn);
+    }
+
+    pub i64 unix() {
+        return unix_offset + now / 1000;
+    }
+
+    pub void touch() {
+        last_input = now;
+    }
+
+    pub void say(str text) {
+        message.set(text);
+    }
+
+    // The master password typed; the vault is created or opened with it.
+    pub void submit() uses io {
+        if (!locked) {
+            return;
+        }
+        if (master.count() == 0) {
+            say("Type the master password.");
+            return;
+        }
+        mut Arena scratch = Arena.new(256 * KB);
+        defer scratch.free();
+        if (creating) {
+            if (master.count() < 8) {
+                say("At least 8 characters.");
+                return;
+            }
+            if (master.text() != confirm.text()) {
+                say("The two passwords differ.");
+                return;
+            }
+            if (!store.create(&scratch, conn, master.text().bytes, store.ROUNDS, &keys)) {
+                say("The vault cannot be created.");
+                return;
+            }
+            creating = false;
+            open_vault();
+            return;
+        }
+        match (store.unlock(&scratch, conn, master.text().bytes, &keys)) {
+            Yes => {
+                open_vault();
+            },
+            WrongPassword => {
+                say("Wrong master password.");
+                master.set("");
+            },
+            Damaged => {
+                say("This file is not a vault, or it is damaged.");
+            },
+        }
+    }
+
+    // The keys are good: the entries are read.
+    pub void open_vault() uses io {
+        mut Arena scratch = Arena.new(1024 * KB);
+        defer scratch.free();
+        entries.clear();
+        i32 lost = store.load_all(&scratch, conn, &keys, entries);
+        master.set("");
+        confirm.set("");
+        message.set("");
+        if (lost > 0) {
+            say("Some entries could not be read.");
+        }
+        locked = false;
+        touch();
+        seen.set("\u{1}");  // different from any search: the list is built
+        rebuild();
+        choose_none();
+    }
+
+    // Everything secret leaves the memory that the window keeps.
+    pub void lock() {
+        locked = true;
+        entries.clear();
+        view.clear();
+        edit = entry.Entry{ };
+        keys = seal.Keys{ };
+        master.set("");
+        confirm.set("");
+        search.set("");
+        code.set("");
+        copied.set("");
+        reveal = false;
+        editing = false;
+        chosen = -1;
+        shown = -1;
+        at = -1;
+        message.set("");
+        if (clear_at > 0) {
+            want_copy = true;  // an empty text: the clipboard is cleared at once
+            clear_at = 0;
+        }
+    }
+
+    void choose_none() {
+        chosen = -1;
+        shown = -1;
+        at = -1;
+        editing = false;
+        reveal = false;
+    }
+
+    // The rows of `view`: the entries that hold the search, in the order of their titles.
+    pub void rebuild() {
+        view.clear();
+        str needle = search.text();
+        for (usize i in 0..entries.len()) {
+            entry.Entry* e = entries.at(i);
+            if (has(e.title.text(), needle) || has(e.user.text(), needle) || has(e.url.text(), needle)) {
+                view.push(i as i32);
+            }
+        }
+        for (usize i in 1..view.len()) {  // insertion sort
+            i32 held = *view.at(i);
+            mut usize j = i;
+            while (j > 0 && before(entries.at(held as usize).title.text(), entries.at(*view.at(j - 1) as usize).title.text())) {
+                view.set(j, *view.at(j - 1));
+                j -= 1;
+            }
+            view.set(j, held);
+        }
+        seen.set(needle);
+        chosen = -1;
+        if (editing && at >= 0) {
+            for (usize r in 0..view.len()) {
+                if (*view.at(r) == at) {
+                    chosen = r as i32;
+                }
+            }
+        }
+        shown = chosen;
+    }
+
+    pub void new_entry() {
+        if (locked) {
+            return;
+        }
+        edit = entry.Entry{ };
+        at = -1;
+        chosen = -1;
+        shown = -1;
+        editing = true;
+        reveal = true;
+        length = rules.length as i64;
+        say("");
+    }
+
+    // At each frame: the selection of the list, the search, and the live code.
+    pub void update(Arena* frame, i64 now_ms) uses io {
+        now = now_ms;
+        if (locked) {
+            return;
+        }
+        if (search.text() != seen.text()) {
+            rebuild();
+        }
+        if (chosen != shown) {
+            shown = chosen;
+            if (chosen >= 0 && chosen < view.len() as i32) {
+                at = *view.at(chosen as usize);
+                edit = *entries.at(at as usize);
+                editing = true;
+                reveal = false;
+                say("");
+            }
+        }
+        rules.length = length as i32;
+        mut text.TextBuilder* b = text.builder(frame);
+        b.push_i64(length);
+        b.push(" chars");
+        length_label.set(b.text());
+        strength = gen.bits(edit.password.text());
+        code.set("");
+        if (editing) {
+            match (totp.decode_base32(frame, edit.totp.text())) {
+                some(secret) => {
+                    code.set(totp.code(frame, secret, unix(), 6));
+                },
+                none => { },
+            }
+        }
+        if (now - last_input > IDLE_LOCK_MS) {
+            lock();
+        }
+    }
+
+    pub i64 code_left() {
+        return totp.seconds_left(unix());
+    }
+
+    pub str strength_text() {
+        return edit.password.count() == 0 ? "" : gen.verdict(strength);
+    }
+
+    pub i32 rows() {
+        return view.len() as i32;
+    }
+
+    pub str title_at(i32 row) {
+        return entries.at(*view.at(row as usize) as usize).title.text();
+    }
+
+    pub str user_at(i32 row) {
+        return entries.at(*view.at(row as usize) as usize).user.text();
+    }
+
+    pub str dots() {
+        mut usize n = edit.password.count();
+        if (n > 24) {
+            n = 24;
+        }
+        dots_text.set("");
+        for (usize i in 0..n) {
+            dots_text.append("•");
+        }
+        return dots_text.text();
+    }
+
+    pub void toggle_reveal() {
+        reveal = !reveal;
+    }
+
+    pub void generate() uses io {
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        rules.length = length as i32;
+        edit.password.set(gen.generate(&scratch, &rules));
+        reveal = true;
+    }
+
+    pub void save() uses io {
+        if (!editing) {
+            return;
+        }
+        if (edit.title.count() == 0) {
+            say("The entry needs a title.");
+            return;
+        }
+        edit.updated = unix();
+        mut Arena scratch = Arena.new(64 * KB);
+        defer scratch.free();
+        if (!store.save(&scratch, conn, &keys, &edit)) {
+            say("The entry cannot be saved.");
+            return;
+        }
+        if (at < 0) {
+            entries.push(edit);
+            at = entries.len() as i32 - 1;
+        } else {
+            entries.set(at as usize, edit);
+        }
+        rebuild();
+        say("Saved.");
+    }
+
+    pub void remove_entry() uses io {
+        if (!editing) {
+            return;
+        }
+        if (at >= 0) {
+            if (!store.remove(conn, edit.id)) {
+                say("The entry cannot be deleted.");
+                return;
+            }
+            entries.remove(at as usize);
+        }
+        choose_none();
+        edit = entry.Entry{ };
+        rebuild();
+    }
+
+    void copy(str text) {
+        copied.set(text);
+        want_copy = true;
+        clear_at = now + CLIPBOARD_MS;
+    }
+
+    pub void copy_password() {
+        copy(edit.password.text());
+        say("Password copied; it leaves the clipboard in 30 s.");
+    }
+
+    pub void copy_user() {
+        copy(edit.user.text());
+        say("User copied.");
+    }
+
+    pub void copy_code() {
+        copy(code.text());
+        say("Code copied.");
+    }
+
+    // Is it time to empty the clipboard?
+    pub bool clipboard_due() {
+        if (clear_at > 0 && now >= clear_at) {
+            clear_at = 0;
+            copied.set("");
+            return true;
+        }
+        return false;
+    }
+}

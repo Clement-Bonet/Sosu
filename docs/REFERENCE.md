@@ -122,16 +122,16 @@ A command: its options and arguments, declared before `parse`.
 pub class Command
 ```
 
-- `pub void flag(str name, char short, str help)`  
+- `pub void flag(keeps str name, char short, keeps str help)`  
   An option without value, false unless given: `--name` or `-s`.
-- `pub void long_flag(str name, str help)`  
+- `pub void long_flag(keeps str name, keeps str help)`  
   The same, without a short name.
-- `pub void option(str name, char short, str value_name, str help, str default_value)`  
+- `pub void option(keeps str name, char short, keeps str value_name, keeps str help, keeps str default_value)`  
   An option with a value, `default_value` unless given; the help shows it as `value_name`.
-- `pub void long_option(str name, str value_name, str help, str default_value)`
-- `pub void argument(str name, str help)`  
+- `pub void long_option(keeps str name, keeps str value_name, keeps str help, keeps str default_value)`
+- `pub void argument(keeps str name, keeps str help)`  
   An argument that must be given, after those declared before it.
-- `pub void rest(str name, str help)`  
+- `pub void rest(keeps str name, keeps str help)`  
   The arguments after the declared ones, as many as given (none too).
 - `pub Matches*!CliError parse(str[] args)`  
   Reads `args` (without the name of the program: `os.args`).
@@ -166,7 +166,7 @@ pub class Matches
 A command named `name` (as the help shows it), doing what `about` says.
 
 ```sosu
-pub Command* command(Arena* arena, str name, str about)
+pub Command* command(Arena* arena, keeps str name, keeps str about)
 ```
 
 ## std.fs
@@ -643,7 +643,7 @@ Values found by their key, in the arena given at its creation (spec §5.4). Open
 pub class HashMap<K: Hash, V>
 ```
 
-- `pub void put(K key, V value)`  
+- `pub void put(keeps K key, keeps V value)`  
   Gives `key` the value `value`, in place of the one it had.
 - `pub V? get(K key)`
 - `pub V*? at(K key)`  
@@ -1649,15 +1649,15 @@ A list of values that grows, in the arena given at its creation (spec §5.4). Wh
 pub class Vec<T>
 ```
 
-- `pub void push(T value)`
+- `pub void push(keeps T value)`
 - `pub T? pop()`  
   The last element, taken away; none if the list is empty.
 - `pub T? get(usize i)`  
   The element `i`, or none out of range.
 - `pub T* at(usize i)`  
   The place of the element `i`; out of range, the program stops.
-- `pub void set(usize i, T value)`
-- `pub void insert(usize i, T value)`  
+- `pub void set(usize i, keeps T value)`
+- `pub void insert(usize i, keeps T value)`  
   Puts `value` before the element `i` (`i == len()`: at the end).
 - `pub T remove(usize i)`  
   Takes the element `i` away, and gives it.
@@ -1967,9 +1967,9 @@ pub class Mixer
 - `pub i32 channels`
 - `pub mut f32 volume`  
   of everything, 1 by default
-- `pub ui32 play(audio.Sound sound)`  
+- `pub ui32 play(keeps audio.Sound sound)`  
   Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
-- `pub ui32 play_with(audio.Sound sound, Play how) requires how.speed > 0.0`
+- `pub ui32 play_with(keeps audio.Sound sound, Play how) requires how.speed > 0.0`
 - `pub bool playing(ui32 id)`  
   Whether the sound `id` is still playing.
 - `pub void set_volume(ui32 id, f32 v)`
@@ -2798,7 +2798,7 @@ pub class Local
 
 - `pub db.Connection*!db.DbError take() uses io, threads`  
   A connection given back before, or else a new one, once the pool allows it (waiting while all of them are open in the threads). `Closed` once the pool is closed.
-- `pub void give(db.Connection* c) uses io`  
+- `pub void give(keeps db.Connection* c) uses io`  
   Gives back a connection taken from this `Local`, kept open for the next `take`. A transaction left open is rolled back.
 - `pub void close() uses io, threads`  
   Closes the connections given back, and lets the pool open as many in other threads. Those still taken stay open, and keep their place in the pool.
@@ -2810,7 +2810,7 @@ pub class Local
 The connections of `pool` in this thread, opened by `open` (a driver's, as `sqlite.connect`) in `arena`.
 
 ```sosu
-pub Local* local(Arena* arena, Pool pool, fn(Arena*, str) -> db.Connection*!db.DbError uses io open)
+pub Local* local(Arena* arena, Pool pool, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open)
 ```
 
 ## image.image
@@ -3483,7 +3483,7 @@ The dialogs of the system (spec §10.11), on SDL3. A file dialog does not wait: 
 
 ### struct `Filter`
 
-A filter of the file dialogs: a name for the user, and the extensions it keeps ("png", "jpg"; "*.png" and ".png" are read as "png"); no extension, or "*", keeps every file.
+A filter of the file dialogs: a name for the user, and the extensions it keeps ("png", "jpg"; "*.png" and ".png" are read as "png"); no extension, or "*", every file.
 
 ```sosu
 pub struct Filter

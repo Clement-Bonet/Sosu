@@ -20,10 +20,15 @@ typedef struct {
     int loop_depth;      /* loops around its declaration */
     bool closure;        /* holds a lambda of this function that captures variables (spec §5.5) */
     bool points_inside;  /* was given a pointer or a view into this function (spec §7.7, E0371) */
-    /* The regions, stage 1 (spec §6.1, E0372): the local arenas it was given memory of (their
-       declaration offsets; more than four are not followed), and whether one of them was freed. */
-    size_t origins[4];
+    /* The regions (spec §6.1): the origins of the memory it was given, as the declaration offsets
+       of the arenas (a local `Arena`, or an `Arena*` parameter) or ORIGIN_CALLER; more than eight
+       are not followed. Stage 1 (E0372): whether a local arena of them was freed. */
+    size_t origins[8];
     int origin_count;
+    size_t owned[8];     /* the local arenas moved into it (an object that owns its arena, spec §9.2) */
+    int owned_count;
+    bool is_param;
+    bool is_keeps;       /* a parameter marked `keeps` (spec §6.1, rule 4) */
     bool dangling;
     Name freed_arena;    /* the arena freed, and where */
     size_t freed_offset;
@@ -57,6 +62,7 @@ typedef struct {
     bool assigning;      /* the target of `=`: a moved variable may receive a new value */
     VEC(Local) locals;
     LambdaScope *lambda; /* the innermost lambda being checked, or NULL */
+    const FnDecl *fn_decl; /* the function or method whose body this is, or NULL */
 } Body;
 
 /* Type names for one message; freed by release_names. */
@@ -114,6 +120,9 @@ Diagnostic *sema_error_at(Body *b, const char *code, size_t offset, size_t lengt
 Diagnostic *sema_error_expr(Body *b, const char *code, const Expr *e, const char *fmt, ...);
 Diagnostic *sema_warning_expr(Body *b, const char *code, const Expr *e, const char *fmt, ...);
 void sema_arena_freed(Body *b, Expr *object, size_t offset);
+void sema_check_call_keeps(Body *b, const Expr *e);
+void sema_check_freed(Body *b, const Expr *e, const Local *local);
+void sema_check_closure_captures(Body *b, const Expr *arena, const Expr *lambda);
 Type *sema_error_type(Body *b);
 FieldInfo *sema_find_field(TypeInfo *info, Name name);
 Local *sema_find_local(Body *b, Name name);

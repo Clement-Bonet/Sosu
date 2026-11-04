@@ -1,0 +1,68 @@
+// vault.chacha: the ChaCha20 stream cipher (RFC 8439), written in Sosu. `xor` turns a text into
+// its encryption, and an encryption into the text, with the same key and nonce.
+
+ui32 rotl(ui32 x, ui32 n) {
+    return x << n | x >> 32 - n;
+}
+
+void quarter(ui32[] x, usize a, usize b, usize c, usize d) {
+    x[a] = wrapping_add(x[a], x[b]);
+    x[d] = rotl(x[d] ^ x[a], 16);
+    x[c] = wrapping_add(x[c], x[d]);
+    x[b] = rotl(x[b] ^ x[c], 12);
+    x[a] = wrapping_add(x[a], x[b]);
+    x[d] = rotl(x[d] ^ x[a], 8);
+    x[c] = wrapping_add(x[c], x[d]);
+    x[b] = rotl(x[b] ^ x[c], 7);
+}
+
+// Four bytes, least significant first.
+ui32 word(ui8[] b, usize at) {
+    return b[at] as ui32 | b[at + 1] as ui32 << 8 | b[at + 2] as ui32 << 16 | b[at + 3] as ui32 << 24;
+}
+
+// Combines `data` with the key stream of `key` (32 bytes) and `nonce` (12 bytes), from the block
+// `counter` (1 for the text of a message, as the RFC does). The bytes of `data` are replaced.
+pub void xor(ui8[] key, ui8[] nonce, ui32 counter, ui8[] data)
+    requires key.len == 32 && nonce.len == 12
+{
+    mut ui32[16] start = [0; 16];
+    start[0] = 0x61707865;
+    start[1] = 0x3320646e;
+    start[2] = 0x79622d32;
+    start[3] = 0x6b206574;
+    for (usize i in 0..8) {
+        start[4 + i] = word(key, 4 * i);
+    }
+    start[12] = counter;
+    for (usize i in 0..3) {
+        start[13 + i] = word(nonce, 4 * i);
+    }
+    mut usize done = 0;
+    while (done < data.len) {
+        mut ui32[16] w = [0; 16];
+        for (usize i in 0..16) {
+            w[i] = start[i];
+        }
+        for (i32 round in 0..10) {
+            quarter(w[0..16], 0, 4, 8, 12);
+            quarter(w[0..16], 1, 5, 9, 13);
+            quarter(w[0..16], 2, 6, 10, 14);
+            quarter(w[0..16], 3, 7, 11, 15);
+            quarter(w[0..16], 0, 5, 10, 15);
+            quarter(w[0..16], 1, 6, 11, 12);
+            quarter(w[0..16], 2, 7, 8, 13);
+            quarter(w[0..16], 3, 4, 9, 14);
+        }
+        for (usize i in 0..16) {
+            ui32 v = wrapping_add(w[i], start[i]);
+            for (usize j in 0..4) {
+                if (done < data.len) {
+                    data[done] = data[done] ^ (v >> (8 * j) as ui32 & 0xFF) as ui8;
+                    done += 1;
+                }
+            }
+        }
+        start[12] = wrapping_add(start[12], 1);
+    }
+}

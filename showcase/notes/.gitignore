@@ -1,0 +1,4 @@
+build/
+*.db
+demo-notes/
+notes-folder.txt

@@ -1,0 +1,41 @@
+// vault.rand: random bytes for keys, salts and passwords, from the system (crypto.secure).
+// The window calls it from its event handler, which may only have the effect `io`: the C function
+// of crypto.secure is declared again here with that effect (reading the random device is I/O).
+import crypto.secure;
+
+extern "C" {
+    i32 sosu_crypto_random(ui8* buffer, usize size) uses io;
+}
+
+// Fills `buffer` with random bytes. The system always gives them; if not, the program stops
+// rather than go on with a key that is not random.
+pub void fill(ui8[] buffer) uses io {
+    if (buffer.len == 0) {
+        return;
+    }
+    mut i32 done = 0;
+    unsafe {
+        done = sosu_crypto_random(&buffer[0], buffer.len);
+    }
+    assert(done == 1);
+}
+
+// A number in [0, bound), each as likely (`bound` > 0).
+pub usize below(usize bound) uses io
+    requires bound > 0
+{
+    ui64 limit = bound as ui64;
+    ui64 threshold = wrapping_sub(0 as ui64, limit) % limit;
+    mut ui8[8] bytes = [0; 8];
+    while (true) {
+        fill(bytes[0..8]);
+        mut ui64 n = 0;
+        for (ui8 b in bytes) {
+            n = n << 8 | b as ui64;
+        }
+        if (n >= threshold) {
+            return (n % limit) as usize;
+        }
+    }
+    return 0;
+}

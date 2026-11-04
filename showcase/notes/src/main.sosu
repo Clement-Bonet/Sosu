@@ -1,0 +1,1501 @@
+// Notes: a folder of Markdown notes, with a live preview and links between them. See README.md.
+// On Windows: run Sosu/packages/platform/fetch-sdl3.ps1 once, then `sosuc run Notes`.
+// `notes.exe [folder]` opens `folder` (`notes` by default, made if it is missing).
+// `--snapshot out.png` writes the window in a picture, with a few demo notes.
+import std.fs;
+import std.io;
+import std.os;
+import std.text;
+import std.vec;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import image.image;
+import image.png;
+import ui.widgets;
+import notes.checks;
+import notes.md;
+import notes.cm;
+import notes.blk;
+import notes.notes;
+import notes.screen;
+
+pub f32 SIDE = 244.0;  // the left of the editor: the margin, the list, the gap
+pub f32 TOP = 52.0;  // below the title bar
+pub f32 MARGIN = 12.0;
+pub f32 HEADER = 74.0;  // the tool bar and the title field above the text, and their gaps
+pub f32 ROW_H = 28.6;  // a line of the editor
+pub i32 TOOLS = 10;  // the buttons under the editor
+
+canvas.Color background() {
+    return canvas.Color{ r: 24, g: 26, b: 36 };
+}
+canvas.Color panel() {
+    return canvas.Color{ r: 30, g: 32, b: 46 };
+}
+canvas.Color ink() {
+    return canvas.Color{ r: 226, g: 229, b: 242 };
+}
+canvas.Color dim() {
+    return canvas.Color{ r: 140, g: 146, b: 170 };
+}
+canvas.Color accent() {
+    return canvas.Color{ r: 128, g: 172, b: 255 };
+}
+canvas.Color code_ink() {
+    return canvas.Color{ r: 240, g: 184, b: 124 };
+}
+canvas.Color code_back() {
+    return canvas.Color{ r: 42, g: 46, b: 66 };
+}
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    notes.Notes* state;
+    mut truetype.Font*? face;
+    mut truetype.Font*? face_b;  // Noto Sans Bold, Italic and Bold Italic: only with the font of the program
+    mut truetype.Font*? face_i;
+    mut truetype.Font*? face_bi;
+    mut bool styled;  // the three are loaded
+    mut f32 mouse_x;
+    mut f32 mouse_y;
+    mut f32 scroll;  // the preview, in pixels
+    mut f32 content;  // the height of what the preview shows
+    mut canvas.Rect view;  // where the preview is
+    mut vec.Vec<canvas.Rect>* hit_box;  // the links shown, in this frame
+    mut widgets.LongText hit_names;  // their targets, a line each
+    mut Arena font_arena;  // what the font in use needs
+    mut f32 cx;  // the pen of the preview
+    mut f32 cy;
+    mut bool doc_focus;  // the text of the note has the keyboard
+    mut f32 win_h;
+    mut i32 pick;  // the suggestion highlighted
+    mut bool ac_open;  // the suggestions of a link are shown, in `ac_box`
+    mut bool ac_off;  // Esc closed them, until this link is left
+    mut usize ac_from;  // where the name being typed starts, and where the cursor is
+    mut usize ac_to;
+    mut canvas.Rect ac_box;
+    mut f32 split;  // the share of the room that the editor takes
+    mut f32 room;  // the width of the editor and of the preview together, and the gap
+    mut bool dragging;  // the bar between them is held
+    mut i32 tip_at;  // the button under the mouse, -1: none
+    mut i64 tip_since;  // when the mouse came onto it
+    mut Arena pa;  // the tree of the note shown
+    mut str parsed;  // the text it was made from
+    mut vec.Vec<cm.Node>* tree;
+    mut i32 deco;  // decorations of the text being drawn: 1 struck, 2 highlighted, 8 tag
+    mut canvas.Color tone;  // the ink of the paragraphs
+
+    void init(keeps notes.Notes* state, Arena* arena) {
+        ui = widgets.Ui{ };
+        self.state = state;
+        face = none;
+        face_b = none;
+        face_i = none;
+        face_bi = none;
+        styled = false;
+        mouse_x = 0.0;
+        mouse_y = 0.0;
+        scroll = 0.0;
+        content = 0.0;
+        view = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        hit_box = vec.new<canvas.Rect>(arena);
+        hit_names = widgets.long_text();
+        font_arena = Arena.new(1 * MB);
+        cx = 0.0;
+        cy = 0.0;
+        doc_focus = false;
+        win_h = 720.0;
+        pick = 0;
+        ac_open = false;
+        ac_off = false;
+        ac_from = 0;
+        ac_to = 0;
+        ac_box = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        split = 0.5;
+        room = 0.0;
+        dragging = false;
+        tip_at = -1;
+        tip_since = 0;
+        pa = Arena.new(1 * MB);
+        parsed = "";
+        tree = blk.parse(&pa, "", true).nodes;
+        deco = 0;
+        tone = ink();
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    bool over_view(f32 x, f32 y) {
+        return state.preview && x >= view.x && x <= view.x + view.w && y >= view.y && y <= view.y + view.h;
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                state.save();
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Key(code, down, mods) => {
+                bool ctrl = mods.ctrl || mods.command;
+                if (down && code == 0x4000003B) {  // F2
+                    state.begin_rename();
+                } else if (down && code == 27 && state.renaming) {
+                    state.cancel_rename();
+                } else if (down && ac_open && doc_focus && complete_key(code)) { } else if (down && ctrl && doc_focus && code == 98) {  // Ctrl+B
+                    apply(0);
+                } else if (down && ctrl && doc_focus && code == 105) {  // Ctrl+I
+                    apply(1);
+                } else if (down && ctrl && doc_focus && code == 107) {  // Ctrl+K
+                    apply(9);
+                } else if (down && !ctrl && doc_focus && code == 13 && continue_list()) { } else if (down && ctrl && code == 118) {  // Ctrl+V
+                    mut Arena paste = Arena.new(64 * KB);
+                    defer paste.free();
+                    ui.type_text(app.clipboard(&paste));
+                } else if (down && ctrl && code == 115) {  // Ctrl+S
+                    state.save();
+                } else if (down && ctrl && code == 110) {  // Ctrl+N
+                    state.new_note();
+                } else {
+                    ui.key(code, down, mods.shift, ctrl);
+                }
+            },
+            Dialog(answer) => {
+                match (answer) {
+                    Chosen(tag, paths, filter) => {
+                        if (tag == notes.FOLDER_TAG && paths.len > 0) {
+                            state.open_folder(paths[0]);
+                        }
+                    },
+                    Cancelled(tag) => { },
+                    Failed(tag, message) => {
+                        state.say("The folder dialog is not available.");
+                    },
+                }
+            },
+            MouseMove(x, y) => {
+                mouse_x = x;
+                mouse_y = y;
+                if (dragging) {
+                    f32 share = (x - SIDE - MARGIN / 2.0) / (room - MARGIN);
+                    split = share < 0.2 ? 0.2 : share > 0.8 ? 0.8 : share;
+                }
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                if (over_bar(x, y)) {
+                    dragging = true;
+                } else if (ac_open && inside(ac_box, x, y)) {
+                    accept(((y - ac_box.y - 4.0) / 24.0) as i32);
+                } else if (state.open && tool_hit(x, y) >= 0) {
+                    apply(tool_hit(x, y));
+                } else if (over_view(x, y)) {
+                    click_link(x, y);
+                } else if (button == Right && x < SIDE) {
+                    doc_focus = false;
+                    ui.mouse_button(true);  // the row under the mouse is chosen, then its menu opens
+                    ui.right_button(true);
+                } else {
+                    doc_focus = in_editor(x, y);
+                    ui.mouse_button(true);
+                }
+            },
+            Release(x, y, button) => {
+                dragging = false;
+                tip_at = -1;
+                tip_since = 0;
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            Wheel(x, y) => {
+                if (over_view(mouse_x, mouse_y)) {
+                    scroll = scroll - y * 40.0;
+                } else {
+                    ui.scroll_wheel(y);
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    void click_link(f32 x, f32 y) uses io {
+        for (usize i in 0..hit_box.len()) {
+            canvas.Rect r = *hit_box.at(i);
+            if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+                mut widgets.TextBuffer target = widgets.TextBuffer{ };
+                target.set(md.line_at(hit_names.text(), i));
+                if (target.text().len == 0) {
+                    return;
+                }
+                if (text.starts_with(target.text(), "http://") || text.starts_with(target.text(), "https://")) {
+                    mut Arena scratch = Arena.new(4 * KB);
+                    defer scratch.free();
+                    app.open_url(&scratch, target.text());
+                    return;
+                }
+                state.follow(target.text());
+                scroll = 0.0;
+                return;
+            }
+        }
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        if (state.font_dirty) {
+            apply_font();
+        }
+        ui.clock(app.now_ms());
+        state.update(app.now_ms() as i64);
+        paint(surface);
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+        match (ui.take_copied()) {  // Ctrl+C in a field
+            some(text) => {
+                mut Arena copy = Arena.new(64 * KB);
+                defer copy.free();
+                app.set_clipboard(&copy, text);
+            },
+            none => { },
+        }
+    }
+
+    // The sizes of the editor and of the preview follow the window.
+    void layout(canvas.Canvas* surface) {
+        f32 w = surface.width as f32;
+        f32 h = surface.height as f32;
+        room = w - SIDE - MARGIN;
+        state.edit_w = state.preview ? (room - MARGIN) * split : room;
+        state.edit_rows = ((h - TOP - MARGIN - HEADER - 28.0) / (state.font_file().len == 0 ? ROW_H : ROW_H + 3.0)) as i32;
+        win_h = h;
+        view = canvas.Rect{ x: SIDE + state.edit_w + MARGIN, y: TOP, w: room - state.edit_w - MARGIN, h: h - TOP - MARGIN };
+    }
+
+    void paint(canvas.Canvas* surface) uses io {
+        surface.clear(background());
+        layout(surface);
+        hit_box.clear();
+        hit_names.set("");
+        if (state.preview && state.open) {
+            mut Arena frame = Arena.new(128 * KB);
+            defer frame.free();
+            draw_preview(surface, &frame);
+        }
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Notes(&f, state);
+        f.finish();
+        if (state.open) {
+            draw_status(surface);
+            draw_tools(surface);
+            draw_bar(surface);
+            complete(surface);
+        } else {
+            ac_open = false;
+        }
+    }
+
+    // ---- Help with typing: the tool bar under the editor, and the names of notes in a link ----
+
+    bool inside(canvas.Rect r, f32 x, f32 y) {
+        return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    }
+
+    bool over_bar(f32 x, f32 y) {
+        f32 left = SIDE + state.edit_w;
+        return state.preview && state.open && x >= left - 3.0 && x <= left + MARGIN + 3.0 && y >= TOP && y <= win_h - MARGIN;
+    }
+
+    void draw_bar(canvas.Canvas* surface) {
+        if (!state.preview || !state.open) {
+            return;
+        }
+        bool hot = dragging || over_bar(mouse_x, mouse_y);
+        surface.fill(canvas.Rect{ x: SIDE + state.edit_w + MARGIN / 2.0 - 2.0, y: TOP + 8.0, w: 4.0, h: win_h - TOP - MARGIN - 16.0 }, hot ? accent() : code_back());
+    }
+
+    bool in_editor(f32 x, f32 y) {
+        return state.open && x >= SIDE && x <= SIDE + state.edit_w && y >= TOP + HEADER && y <= win_h - 44.0 && !over_tools(x, y);
+    }
+
+    str tool_label(i32 i) {
+        if (i == 0) {
+            return "B";
+        }
+        if (i == 1) {
+            return "I";
+        }
+        if (i == 2) {
+            return "code";
+        }
+        if (i == 3) {
+            return "H1";
+        }
+        if (i == 4) {
+            return "H2";
+        }
+        if (i == 5) {
+            return "-";
+        }
+        if (i == 6) {
+            return "1.";
+        }
+        if (i == 7) {
+            return "[ ]";
+        }
+        if (i == 8) {
+            return ">";
+        }
+        return "[[ ]]";
+    }
+
+    str tool_tip(i32 i) {
+        if (i == 0) {
+            return "Bold (Ctrl+B)";
+        }
+        if (i == 1) {
+            return "Italic (Ctrl+I)";
+        }
+        if (i == 2) {
+            return "Code";
+        }
+        if (i == 3) {
+            return "Heading 1";
+        }
+        if (i == 4) {
+            return "Heading 2";
+        }
+        if (i == 5) {
+            return "Bulleted list";
+        }
+        if (i == 6) {
+            return "Numbered list";
+        }
+        if (i == 7) {
+            return "Task";
+        }
+        if (i == 8) {
+            return "Quote";
+        }
+        return "Link to a note (Ctrl+K)";
+    }
+    f32 tool_width(i32 i) {
+        return width_of(tool_label(i), 14.0) + 16.0;
+    }
+
+    canvas.Rect tool_rect(i32 i) {
+        mut f32 x = SIDE;
+        for (i32 k in 0..i) {
+            x += tool_width(k) + 4.0;
+        }
+        return canvas.Rect{ x: x, y: TOP, w: tool_width(i), h: 26.0 };
+    }
+
+    bool over_tools(f32 x, f32 y) {
+        return y < TOP + 30.0;
+    }
+
+    i32 tool_hit(f32 x, f32 y) {
+        for (i32 k in 0..TOOLS) {
+            if (inside(tool_rect(k), x, y)) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    void draw_tools(canvas.Canvas* surface) {
+        for (i32 k in 0..TOOLS) {
+            canvas.Rect r = tool_rect(k);
+            surface.fill(r, inside(r, mouse_x, mouse_y) ? canvas.Color{ r: 64, g: 70, b: 98 } : code_back());
+            say(surface, r.x + 8.0, r.y + 4.0, 14.0, tool_label(k), k == 0 || k == 1 ? accent() : ink());
+        }
+        i32 hit = tool_hit(mouse_x, mouse_y);
+        if (hit != tip_at) {
+            tip_at = hit;
+            tip_since = state.now;
+        }
+        if (hit >= 0 && !dragging && state.now - tip_since >= 500) {
+            canvas.Rect r = tool_rect(hit);
+            f32 w = width_of(tool_tip(hit), 13.0) + 16.0;
+            canvas.Rect box = canvas.Rect{ x: r.x, y: r.y + r.h + 4.0, w: w, h: 24.0 };
+            surface.fill(canvas.Rect{ x: box.x - 1.0, y: box.y - 1.0, w: box.w + 2.0, h: box.h + 2.0 }, accent());
+            surface.fill(box, background());
+            say(surface, box.x + 8.0, box.y + 4.0, 13.0, tool_tip(hit), ink());
+        }
+    }
+
+    usize cursor_now() {
+        usize len = state.doc.text().len;
+        usize c = ui.cursor_at();
+        return c > len ? len : c;
+    }
+
+    usize anchor_now() {
+        usize len = state.doc.text().len;
+        usize a = ui.anchor_at();
+        return a > len ? len : a;
+    }
+
+    // One of the buttons, or its key: 0 bold, 1 italic, 2 code, 3 and 4 headings, 5 list, 6 numbered
+    // list, 7 task, 8 quote, 9 link.
+    void apply(i32 i) {
+        if (!state.open || !doc_focus) {
+            state.say("Click in the text first.");
+            return;
+        }
+        usize c = cursor_now();
+        usize a = anchor_now();
+        usize from = a < c ? a : c;
+        usize to = a < c ? c : a;
+        if (i == 0) {
+            wrap("**", "**", from, to);
+        } else if (i == 1) {
+            wrap("*", "*", from, to);
+        } else if (i == 2) {
+            wrap("`", "`", from, to);
+        } else if (i == 9) {
+            wrap("[[", "]]", from, to);
+        } else if (i == 3) {
+            mark_line("# ", a, c);
+        } else if (i == 4) {
+            mark_line("## ", a, c);
+        } else if (i == 5) {
+            mark_line("- ", a, c);
+        } else if (i == 6) {
+            mark_line("1. ", a, c);
+        } else if (i == 7) {
+            mark_line("- [ ] ", a, c);
+        } else {
+            mark_line("> ", a, c);
+        }
+    }
+
+    // The selection between marks, or the marks taken off if they are there already.
+    void wrap(str open, str close, usize from, usize to) {
+        str d = state.doc.text();
+        bool single = open.len == 1;
+        mut bool on = from >= open.len && to + close.len <= d.len && text.slice(d, from - open.len, from) == open && text.slice(d, to, to + close.len) == close;
+        if (on && single && (from >= 2 && d.bytes[from - 2] == d.bytes[from - 1] || to + 1 < d.len && d.bytes[to + 1] == d.bytes[to])) {
+            on = false;  // "*" inside "**"
+        }
+        if (on) {
+            ui.select_later(to, to + close.len);
+            ui.key(8, true, false, false);
+            ui.select_later(from - open.len, from);
+            ui.key(8, true, false, false);
+            ui.select_later(from - open.len, to - open.len);
+            return;
+        }
+        ui.select_later(to, to);
+        ui.type_text(close);
+        ui.select_later(from, from);
+        ui.type_text(open);
+        ui.select_later(from + open.len, to + open.len);
+    }
+
+    // The mark of the line of the cursor becomes `marker`; the same mark again takes it off.
+    void mark_line(str marker, usize a, usize c) {
+        str d = state.doc.text();
+        usize ls = md.line_start(d, c);
+        usize at = ls + md.indent_of(text.slice(d, ls, md.line_end(d, ls)));
+        usize old = md.marker_len(text.slice(d, at, md.line_end(d, ls)));
+        str now = text.slice(d, at, at + old);
+        str next = now == marker ? "" : marker;
+        if (old > 0 || next.len > 0) {
+            ui.select_later(at, at + old);
+            if (next.len > 0) {
+                ui.type_text(next);
+            } else {
+                ui.key(8, true, false, false);
+            }
+        }
+        ui.select_later(shifted(a, at, old, next.len), shifted(c, at, old, next.len));
+    }
+
+    usize shifted(usize p, usize at, usize old, usize now) {
+        if (p >= at + old) {
+            return p + now - old;
+        }
+        return p > at ? at + now : p;
+    }
+
+    // Enter at the end of an item of a list: the next item starts, or the list ends on an empty one.
+    bool continue_list() {
+        if (ui.anchor_at() != ui.cursor_at()) {
+            return false;
+        }
+        str d = state.doc.text();
+        usize c = cursor_now();
+        usize ls = md.line_start(d, c);
+        str before = text.slice(d, ls, c);
+        usize indent = md.indent_of(before);
+        usize m = md.marker_len(text.slice(before, indent, before.len));
+        if (m == 0 || before.bytes[indent] == 35) {
+            return false;
+        }
+        if (indent + m == before.len) {
+            ui.select_later(ls, c);
+            ui.key(8, true, false, false);
+            return true;
+        }
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        text.TextBuilder* b = text.builder(&scratch);
+        str marker = text.slice(before, indent, indent + m);
+        b.push("\n");
+        b.push(text.slice(before, 0, indent));
+        if (marker.bytes[0] >= 48 && marker.bytes[0] <= 57) {
+            mut i64 n = 0;
+            for (ui8 ch in marker.bytes) {
+                if (ch < 48 || ch > 57) {
+                    break;
+                }
+                n = n * 10 + (ch - 48) as i64;
+            }
+            b.push_i64(n + 1);
+            b.push(". ");
+        } else if (m == 6) {
+            b.push("- [ ] ");
+        } else {
+            b.push(marker);
+        }
+        ui.type_text(b.text());
+        return true;
+    }
+
+    // While a link is typed (after "[["), the notes whose name holds what is typed.
+    void complete(canvas.Canvas* surface) {
+        ac_open = false;
+        if (!doc_focus || !ui.wants_text()) {
+            return;
+        }
+        usize c = ui.cursor_at();
+        str d = state.doc.text();
+        if (ui.anchor_at() != c || c > d.len) {
+            return;
+        }
+        usize low = c > 80 ? c - 80 : 0;
+        mut usize i = c;
+        mut bool found = false;
+        mut usize start = 0;
+        while (i > low) {
+            i -= 1;
+            ui8 b = d.bytes[i];
+            if (b == 10 || b == 93 || b == 124 || b == 35) {
+                break;
+            }
+            if (b == 91 && i > 0 && d.bytes[i - 1] == 91) {
+                found = true;
+                start = i + 1;
+                break;
+            }
+        }
+        if (!found) {
+            ac_off = false;
+            pick = 0;
+            return;
+        }
+        if (ac_off) {
+            return;
+        }
+        state.suggest(text.slice(d, start, c), 6);
+        i32 count = state.sugg_count;
+        if (count == 0) {
+            return;
+        }
+        if (pick >= count) {
+            pick = 0;
+        }
+        mut f32 w = 160.0;
+        for (i32 k in 0..count) {
+            f32 lw = width_of(md.line_at(state.sugg.text(), k as usize), 15.0) + 24.0;
+            w = lw > w ? lw : w;
+        }
+        canvas.Rect caret = ui.caret_area();
+        f32 h = count as f32 * 24.0 + 8.0;
+        f32 x = caret.x + w > surface.width as f32 - 8.0 ? surface.width as f32 - 8.0 - w : caret.x;
+        f32 y = caret.y + caret.h + 4.0 + h > win_h - 44.0 ? caret.y - h - 4.0 : caret.y + caret.h + 4.0;
+        ac_box = canvas.Rect{ x: x, y: y, w: w, h: h };
+        ac_from = start;
+        ac_to = c;
+        ac_open = true;
+        surface.fill(canvas.Rect{ x: x - 1.0, y: y - 1.0, w: w + 2.0, h: h + 2.0 }, accent());
+        surface.fill(ac_box, panel());
+        for (i32 k in 0..count) {
+            f32 ry = y + 4.0 + k as f32 * 24.0;
+            if (k == pick) {
+                surface.fill(canvas.Rect{ x: x + 2.0, y: ry, w: w - 4.0, h: 24.0 }, canvas.Color{ r: 60, g: 76, b: 120 });
+            }
+            say(surface, x + 10.0, ry + 3.0, 15.0, md.line_at(state.sugg.text(), k as usize), ink());
+        }
+    }
+
+    // The keys of the suggestions: false when the key is not theirs.
+    bool complete_key(ui32 code) {
+        i32 count = state.sugg_count;
+        if (count == 0) {
+            return false;
+        }
+        if (code == 0x40000051) {
+            pick = (pick + 1) % count;
+            return true;
+        }
+        if (code == 0x40000052) {
+            pick = (pick + count - 1) % count;
+            return true;
+        }
+        if (code == 13 || code == 9) {
+            accept(pick);
+            return true;
+        }
+        if (code == 27) {
+            ac_off = true;
+            ac_open = false;
+            return true;
+        }
+        return false;
+    }
+
+    // The name chosen takes the place of what was typed, and the link is closed.
+    void accept(i32 n) {
+        if (n < 0 || n >= state.sugg_count) {
+            return;
+        }
+        str name = md.line_at(state.sugg.text(), n as usize);
+        str d = state.doc.text();
+        bool closed = ac_to + 2 <= d.len && d.bytes[ac_to] == 93 && d.bytes[ac_to + 1] == 93;
+        ui.select_later(ac_from, ac_to);
+        ui.type_text(name);
+        if (closed) {
+            ui.select_later(ac_from + name.len + 2, ac_from + name.len + 2);
+        } else {
+            ui.type_text("]]");
+        }
+        ac_open = false;
+    }
+
+    void draw_status(canvas.Canvas* surface) {
+        mut widgets.TextBuffer line = widgets.TextBuffer{ };
+        line.append(state.message.text());
+        if (line.count() == 0) {
+            mut Arena scratch = Arena.new(1 * KB);
+            defer scratch.free();
+            text.TextBuilder* b = text.builder(&scratch);
+            b.push_i64(state.word_count() as i64);
+            b.push(" words");
+            line.append(b.text());
+        }
+        say(surface, SIDE, surface.height as f32 - 24.0, 13.0, line.text(), dim());
+    }
+
+    // The font of the model is loaded in a fresh arena; the old one is freed.
+    void apply_font() uses io {
+        state.font_dirty = false;
+        ui.font = none;
+        face = none;
+        face_b = none;
+        face_i = none;
+        face_bi = none;
+        styled = false;
+        font_arena.free();
+        font_arena = Arena.new(8 * MB);
+        str file = state.font_file();
+        if (!load_font(file)) {
+            if (file.len > 0) {
+                state.say("This font cannot be read.");
+                state.drop_font();
+                font_arena.free();
+                font_arena = Arena.new(8 * MB);
+                load_font("");
+            } else {
+                io.print("Noto Sans not found: the built-in font is used");
+            }
+        }
+    }
+
+    bool install(keeps ui8[] bytes) {
+        match (truetype.parse(&font_arena, bytes)) {
+            ok(font) => {
+                ui.font = some(font);
+                face = some(font);
+                return true;
+            },
+            err(e) => {
+                return false;
+            },
+        }
+    }
+
+    bool has(truetype.Font*? font) {
+        match (font) {
+            some(f) => {
+                return true;
+            },
+            none => {
+                return false;
+            },
+        }
+    }
+
+    truetype.Font*? variant(str asset) uses io {
+        match (app.read_asset(&font_arena, asset)) {
+            some(bytes) => {
+                match (truetype.parse(&font_arena, bytes)) {
+                    ok(font) => {
+                        return some(font);
+                    },
+                    err(e) => {
+                        return none;
+                    },
+                }
+            },
+            none => {
+                return none;
+            },
+        }
+    }
+
+    // The face for a style, when the program has the real one: bold, italic, bold italic.
+    truetype.Font*? styled_face(i32 style) {
+        bool b = style & md.BOLD != 0;
+        bool i = style & md.ITALIC != 0;
+        if (!styled || style & md.CODE != 0 || !b && !i) {
+            return none;
+        }
+        return b && i ? face_bi : b ? face_b : face_i;
+    }
+
+    f32 width_styled(str words, f32 size, i32 style) {
+        match (styled_face(style)) {
+            some(font) => {
+                return font.measure(words, size);
+            },
+            none => {
+                return width_of(words, size);
+            },
+        }
+    }
+
+    bool load_font(str file) uses io {
+        if (file.len == 0) {
+            i32 fam = state.family();
+            match (app.read_asset(&font_arena, asset_of(fam, 0))) {
+                some(bytes) => {
+                    bool ok = install(bytes);
+                    face_b = variant(asset_of(fam, 1));
+                    face_i = variant(asset_of(fam, 2));
+                    face_bi = variant(asset_of(fam, 3));
+                    styled = has(face_b) && has(face_i) && has(face_bi);
+                    return ok;
+                },
+                none => {
+                    return false;
+                },
+            }
+        }
+        match (io.read_file(&font_arena, file)) {
+            ok(body) => {
+                return install(body.bytes);
+            },
+            err(e) => {
+                return false;
+            },
+        }
+    }
+
+    void say(canvas.Canvas* surface, f32 x, f32 y, f32 size, str words, canvas.Color color) {
+        match (face) {
+            some(font) => {
+                surface.text_with(font, size, x, y, words, color);
+            },
+            none => {
+                surface.text(x, y, words, color, 1);
+            },
+        }
+    }
+
+    f32 width_of(str words, f32 size) {
+        match (face) {
+            some(font) => {
+                return font.measure(words, size);
+            },
+            none => {
+                return words.len as f32 * 8.0;
+            },
+        }
+    }
+
+    void add_hit(f32 x, f32 y, f32 w, f32 h, str name) {
+        hit_box.push(canvas.Rect{ x: x, y: y, w: w, h: h });
+        hit_names.insert(hit_names.text().len, name);
+        hit_names.insert(hit_names.text().len, "\n");
+    }
+
+    // One piece of text at the pen, with a style: a set of the flags of md (bold, italic, code, link).
+    void put(canvas.Canvas* surface, str piece, f32 size, i32 style, canvas.Color tint, bool heavy, str target) {
+        i32 look = heavy ? style | md.BOLD : style;
+        f32 w = width_styled(piece, size, look);
+        f32 lh = size * 1.5;
+        bool is_link = style & md.LINK != 0;
+        mut canvas.Color color = tint;
+        if (style & md.ITALIC != 0) {
+            color = canvas.Color{ r: 206, g: 176, b: 255 };
+        }
+        if (style & md.CODE != 0) {
+            surface.fill(canvas.Rect{ x: cx - 1.0, y: cy, w: w + 2.0, h: lh - 2.0 }, code_back());
+            color = code_ink();
+        } else if (is_link) {
+            color = style & md.ITALIC != 0 ? canvas.Color{ r: 170, g: 175, b: 255 } : accent();
+        }
+        if (deco & 2 != 0) {
+            surface.fill(canvas.Rect{ x: cx, y: cy, w: w, h: lh - 2.0 }, canvas.Color{ r: 98, g: 84, b: 28 });
+        }
+        if (deco & 8 != 0) {
+            surface.fill(canvas.Rect{ x: cx - 1.0, y: cy + 1.0, w: w + 2.0, h: lh - 4.0 }, canvas.Color{ r: 46, g: 54, b: 104 });
+        }
+        match (styled_face(look)) {
+            some(font) => {
+                surface.text_with(font, size, cx, cy + size * 0.1, piece, color);
+            },
+            none => {
+                say(surface, cx, cy + size * 0.1, size, piece, color);
+                if (look & md.BOLD != 0) {
+                    say(surface, cx + 0.7, cy + size * 0.1, size, piece, color);
+                }
+            },
+        }
+        if (deco & 1 != 0) {
+            surface.fill(canvas.Rect{ x: cx, y: cy + lh * 0.45, w: w, h: 1.0 }, color);
+        }
+        if (is_link) {
+            surface.fill(canvas.Rect{ x: cx, y: cy + lh - 3.0, w: w, h: 1.0 }, color);
+            add_hit(cx, cy, w, lh, target);
+        }
+        cx += w;
+    }
+    // ---- the preview draws the tree of the parser ----
+
+    cm.Node* nd(i32 id) {
+        return tree.at(id as usize);
+    }
+
+    // Parses the note again only when its text changed.
+    void reparse(str body) {
+        if (body == parsed) {
+            return;
+        }
+        pa.free();
+        pa = Arena.new(body.len * 64 + 1 * MB);
+        parsed = text.replace(&pa, body, "\r\n", "\n");
+        tree = blk.parse(&pa, parsed, true).nodes;
+    }
+
+    // The width of the inlines of a node on one line.
+    f32 measure(i32 id, f32 size, i32 style) {
+        mut f32 w = 0.0;
+        mut i32 c = nd(id).first;
+        while (c >= 0) {
+            cm.Kind k = nd(c).kind;
+            if (k == cm.Kind.Emph) {
+                w += measure(c, size, style | md.ITALIC);
+            } else if (k == cm.Kind.Strong) {
+                w += measure(c, size, style | md.BOLD);
+            } else if (k == cm.Kind.Code || k == cm.Kind.Math) {
+                w += width_styled(nd(c).lit, size, style | md.CODE);
+            } else if (k == cm.Kind.SoftBreak) {
+                w += 6.0;
+            } else if (k == cm.Kind.Link || k == cm.Kind.Image || k == cm.Kind.Strike || k == cm.Kind.Highlight) {
+                w += measure(c, size, style);
+            } else if (k == cm.Kind.Comment || k == cm.Kind.HardBreak) { } else {
+                w += width_styled(nd(c).lit, size, style);
+            }
+            c = nd(c).next;
+        }
+        return w;
+    }
+
+    void words(canvas.Canvas* surface, str lit, f32 left, f32 right, f32 size, i32 style, canvas.Color tint, str target) {
+        f32 lh = size * 1.5;
+        mut usize start = 0;
+        while (start < lit.len) {
+            mut usize end = lit.len;
+            match (text.find_from(lit, " ", start)) {
+                some(gap) => {
+                    end = gap + 1;
+                },
+                none => { },
+            }
+            str word = text.slice(lit, start, end);
+            f32 w = width_styled(text.trim_end(word), size, style);
+            if (cx + w > right && cx > left) {
+                cx = left;
+                cy += lh;
+            }
+            put(surface, word, size, style, tint, false, target);
+            start = end;
+        }
+    }
+
+    str callout_name(str kind) {
+        if (kind.len == 0) {
+            return "Note";
+        }
+        return cm.cat(&pa, text.to_upper(&pa, text.slice(kind, 0, 1)), text.slice(kind, 1, kind.len));
+    }
+
+    // Writes the inlines of a node from `left` to `right`, going on the next row at the end of a row.
+    void inline_flow(canvas.Canvas* surface, i32 id, f32 left, f32 right, f32 size, i32 style, canvas.Color tint, str target) {
+        mut i32 c = nd(id).first;
+        while (c >= 0) {
+            cm.Kind k = nd(c).kind;
+            str lit = nd(c).lit;
+            match (k) {
+                Text => {
+                    words(surface, lit, left, right, size, style, tint, target);
+                },
+                SoftBreak => {
+                    cx = left;
+                    cy += size * 1.5;
+                },
+                HardBreak => {
+                    cx = left;
+                    cy += size * 1.5;
+                },
+                Code => {
+                    words(surface, lit, left, right, size, style | md.CODE, tint, target);
+                },
+                Emph => {
+                    inline_flow(surface, c, left, right, size, style | md.ITALIC, tint, target);
+                },
+                Strong => {
+                    inline_flow(surface, c, left, right, size, style | md.BOLD, tint, target);
+                },
+                Strike => {
+                    i32 keep = deco;
+                    deco = deco | 1;
+                    inline_flow(surface, c, left, right, size, style, tint, target);
+                    deco = keep;
+                },
+                Highlight => {
+                    i32 keep = deco;
+                    deco = deco | 2;
+                    inline_flow(surface, c, left, right, size, style, tint, target);
+                    deco = keep;
+                },
+                Link => {
+                    inline_flow(surface, c, left, right, size, style | md.LINK, tint, nd(c).dest);
+                },
+                Image => {
+                    inline_flow(surface, c, left, right, size, style | md.LINK, dim(), nd(c).dest);
+                },
+                Wiki => {
+                    words(surface, lit, left, right, size, style | md.LINK, tint, nd(c).dest);
+                },
+                Embed => {
+                    words(surface, cm.cat(&pa, "Â» ", lit), left, right, size, style | md.LINK, tint, nd(c).dest);
+                },
+                Tag => {
+                    i32 keep = deco;
+                    deco = deco | 8;
+                    words(surface, lit, left, right, size, style, accent(), "");
+                    deco = keep;
+                },
+                Math => {
+                    words(surface, lit, left, right, size, style | md.CODE | md.ITALIC, tint, "");
+                },
+                Comment => { },
+                FootRef => {
+                    words(surface, cm.cat(&pa, "[", cm.cat(&pa, text.format_i64(&pa, foot_no(lit) as i64), "]")), left, right, size * 0.75, 0, accent(), "");
+                },
+                HtmlInline => {
+                    if (text.starts_with(lit, "<br")) {
+                        cx = left;
+                        cy += size * 1.5;
+                    } else {
+                        words(surface, lit, left, right, size, style, dim(), "");
+                    }
+                },
+                _ => {
+                    inline_flow(surface, c, left, right, size, style, tint, target);
+                },
+            }
+            c = nd(c).next;
+        }
+    }
+
+    // The number of a footnote: its place among the definitions.
+    i32 foot_no(str label) {
+        mut i32 n = 0;
+        mut i32 c = nd(0).first;
+        while (c >= 0) {
+            if (nd(c).kind == cm.Kind.Footnote) {
+                n += 1;
+                if (nd(c).lit == label) {
+                    return n;
+                }
+            }
+            c = nd(c).next;
+        }
+        return 0;
+    }
+
+    canvas.Color callout_color(str kind) {
+        if (kind == "tip" || kind == "hint" || kind == "important") {
+            return canvas.Color{ r: 80, g: 200, b: 210 };
+        }
+        if (kind == "success" || kind == "check" || kind == "done") {
+            return canvas.Color{ r: 90, g: 200, b: 120 };
+        }
+        if (kind == "warning" || kind == "caution" || kind == "attention") {
+            return canvas.Color{ r: 240, g: 170, b: 70 };
+        }
+        if (kind == "danger" || kind == "error" || kind == "failure" || kind == "fail" || kind == "missing" || kind == "bug") {
+            return canvas.Color{ r: 240, g: 100, b: 100 };
+        }
+        if (kind == "question" || kind == "help" || kind == "faq") {
+            return canvas.Color{ r: 235, g: 210, b: 90 };
+        }
+        if (kind == "quote" || kind == "cite" || kind == "example") {
+            return canvas.Color{ r: 160, g: 165, b: 190 };
+        }
+        return accent();
+    }
+
+    void children_of(canvas.Canvas* surface, i32 id, f32 left, f32 right, Arena* frame) {
+        mut bool tight = false;
+        if (nd(id).kind == cm.Kind.Item) {
+            tight = nd(nd(id).parent).tight;
+        }
+        mut i32 c = nd(id).first;
+        while (c >= 0) {
+            block(surface, c, left, right, frame);
+            cy += tight ? 2.0 : 8.0;
+            c = nd(c).next;
+        }
+    }
+
+    void code_lines(canvas.Canvas* surface, str body, f32 left, f32 right, canvas.Color tint, str label) {
+        str lines = text.trim_end(body);
+        mut usize at = 0;
+        mut bool first = true;
+        f32 top = cy;
+        while (at <= lines.len) {
+            mut usize end = lines.len;
+            match (text.find_from(lines, "\n", at)) {
+                some(nl) => {
+                    end = nl;
+                },
+                none => { },
+            }
+            surface.fill(canvas.Rect{ x: left - 6.0, y: cy, w: right - left + 12.0, h: 22.0 }, code_back());
+            say(surface, left, cy + 2.0, 14.0, text.slice(lines, at, end), tint);
+            cy += 22.0;
+            at = end + 1;
+            first = false;
+        }
+        if (label.len > 0) {
+            say(surface, right - width_of(label, 11.0) - 4.0, top + 2.0, 11.0, label, dim());
+        }
+    }
+
+    void block(canvas.Canvas* surface, i32 id, f32 left, f32 right, Arena* frame) {
+        cm.Kind k = nd(id).kind;
+        match (k) {
+            Paragraph => {
+                cx = left;
+                inline_flow(surface, id, left, right, 16.0, 0, tone, "");
+                cy += 24.0;
+            },
+            Heading => {
+                i32 level = nd(id).level;
+                f32 size = level == 1 ? 30.0 : level == 2 ? 24.0 : level == 3 ? 20.0 : level == 4 ? 18.0 : level == 5 ? 16.0 : 14.0;
+                canvas.Color head = level <= 3 ? canvas.Color{ r: 244, g: 246, b: 255 } : level == 4 ? canvas.Color{ r: 206, g: 212, b: 236 } : level == 5 ? accent() : dim();
+                cy += level <= 2 ? 8.0 : 4.0;
+                cx = left;
+                inline_flow(surface, id, left, right, size, md.BOLD, head, "");
+                cy += size * 1.5;
+                if (level == 1) {
+                    surface.fill(canvas.Rect{ x: left, y: cy, w: right - left, h: 1.0 }, canvas.Color{ r: 70, g: 76, b: 100 });
+                    cy += 6.0;
+                }
+            },
+            ThematicBreak => {
+                cy += 8.0;
+                surface.fill(canvas.Rect{ x: left, y: cy, w: right - left, h: 1.0 }, canvas.Color{ r: 70, g: 76, b: 100 });
+                cy += 10.0;
+            },
+            BlockQuote => {
+                str kind = nd(id).info;
+                canvas.Color bar = kind.len > 0 ? callout_color(kind) : accent();
+                f32 top = cy;
+                canvas.Color keep = tone;
+                if (kind.len > 0) {
+                    cx = left + 16.0;
+                    str title = nd(id).title.len > 0 ? nd(id).title : callout_name(kind);
+                    words(surface, title, left + 16.0, right, 16.0, md.BOLD, bar, "");
+                    cy += 26.0;
+                } else {
+                    tone = dim();
+                }
+                children_of(surface, id, left + 16.0, right, frame);
+                tone = keep;
+                surface.fill(canvas.Rect{ x: left + 2.0, y: top, w: 3.0, h: cy - top - 6.0 }, bar);
+            },
+            List => {
+                mut i32 n = nd(id).level;
+                mut i32 it = nd(id).first;
+                while (it >= 0) {
+                    f32 top = cy;
+                    mut f32 inner = left + (nd(id).ordered ? 30.0 : 22.0);
+                    if (nd(id).ordered) {
+                        say(surface, left, top + 1.0, 16.0, cm.cat(&pa, text.format_i64(&pa, n as i64), nd(id).marker == 41 ? ")" : "."), dim());
+                    } else if (nd(it).task == 0) {
+                        surface.fill(canvas.Rect{ x: left + 4.0, y: top + 10.0, w: 5.0, h: 5.0 }, accent());
+                    }
+                    if (nd(it).task != 0) {
+                        canvas.Rect box = canvas.Rect{ x: left + 2.0, y: top + 4.0, w: 14.0, h: 14.0 };
+                        if (nd(it).task == 2) {
+                            surface.fill(box, accent());
+                            surface.fill(canvas.Rect{ x: box.x + 4.0, y: box.y + 4.0, w: 6.0, h: 6.0 }, background());
+                        } else {
+                            surface.stroke(box, accent(), 1.5);
+                        }
+                        inner = left + (nd(id).ordered ? 52.0 : 26.0);
+                    }
+                    canvas.Color keep = tone;
+                    if (nd(it).task == 2) {
+                        tone = dim();
+                    }
+                    children_of(surface, it, inner, right, frame);
+                    tone = keep;
+                    n += 1;
+                    it = nd(it).next;
+                }
+            },
+            CodeBlock => {
+                str lang = nd(id).info;
+                mut usize e = 0;
+                while (e < lang.len && lang.bytes[e] != 32) {
+                    e += 1;
+                }
+                code_lines(surface, nd(id).lit, left, right, code_ink(), text.slice(lang, 0, e));
+                cy += 4.0;
+            },
+            HtmlBlock => {
+                code_lines(surface, nd(id).lit, left, right, dim(), "html");
+                cy += 4.0;
+            },
+            Frontmatter => {
+                code_lines(surface, nd(id).lit, left, right, dim(), "properties");
+                cy += 4.0;
+            },
+            Table => {
+                draw_table(surface, id, left, right, frame);
+            },
+            _ => { },
+        }
+    }
+
+    // The columns are as wide as their widest cell, and shrink together when the table is wider than
+    // the preview.
+    void draw_table(canvas.Canvas* surface, i32 id, f32 left, f32 right, Arena* frame) {
+        str aligns = nd(id).info;
+        usize columns = aligns.len;
+        if (columns == 0) {
+            return;
+        }
+        vec.Vec<i32>* cells = vec.new<i32>(frame);  // the cells, row after row, `columns` each
+        vec.Vec<bool>* heads = vec.new<bool>(frame);
+        mut i32 r = nd(id).first;
+        while (r >= 0) {
+            heads.push(nd(r).head);
+            mut i32 c = nd(r).first;
+            for (usize k in 0..columns) {
+                cells.push(c);
+                if (c >= 0) {
+                    c = nd(c).next;
+                }
+            }
+            r = nd(r).next;
+        }
+        usize count = heads.len();
+        vec.Vec<f32>* need = vec.new<f32>(frame);
+        for (usize c in 0..columns) {
+            mut f32 widest = 40.0;
+            for (usize row in 0..count) {
+                i32 cell = *cells.at(row * columns + c);
+                if (cell >= 0) {
+                    f32 w = measure(cell, 15.0, *heads.at(row) ? md.BOLD : 0);
+                    if (w > widest) {
+                        widest = w;
+                    }
+                }
+            }
+            need.push(widest + 20.0);
+        }
+        mut f32 total = 0.0;
+        for (usize c in 0..columns) {
+            total += *need.at(c);
+        }
+        f32 scale = total > right - left ? (right - left) / total : 1.0;
+        cy += 6.0;
+        mut f32 top = cy;
+        canvas.Color line = canvas.Color{ r: 70, g: 76, b: 100 };
+        surface.fill(canvas.Rect{ x: left, y: top - 1.0, w: total * scale, h: 1.0 }, line);
+        for (usize row in 0..count) {
+            bool head = *heads.at(row);
+            mut f32 x = left;
+            mut f32 bottom = top + 30.0;
+            if (head) {
+                surface.fill(canvas.Rect{ x: left, y: top, w: total * scale, h: 30.0 }, code_back());
+            }
+            for (usize c in 0..columns) {
+                f32 w = *need.at(c) * scale;
+                i32 cell = *cells.at(row * columns + c);
+                cy = top + 3.0;
+                if (cell >= 0) {
+                    f32 room_in = w - 20.0;
+                    f32 own = measure(cell, 15.0, head ? md.BOLD : 0);
+                    mut f32 shift = 0.0;
+                    if (own < room_in) {
+                        i32 side = aligns.bytes[c] as i32 - 48;
+                        shift = side == 3 ? (room_in - own) / 2.0 : side == 2 ? room_in - own : 0.0;
+                    }
+                    cx = x + 10.0 + shift;
+                    inline_flow(surface, cell, x + 10.0 + shift, x + w - 10.0, 15.0, head ? md.BOLD : 0, ink(), "");
+                    cy += 22.5;
+                }
+                if (cy + 3.0 > bottom) {
+                    bottom = cy + 3.0;
+                }
+                x += w;
+            }
+            surface.fill(canvas.Rect{ x: left, y: bottom, w: total * scale, h: 1.0 }, line);
+            mut f32 x2 = left;
+            for (usize c in 0..=columns) {
+                surface.fill(canvas.Rect{ x: x2, y: top, w: 1.0, h: bottom - top }, line);
+                if (c < columns) {
+                    x2 += *need.at(c) * scale;
+                }
+            }
+            top = bottom + 1.0;
+        }
+        cy = top + 8.0;
+    }
+
+    void draw_preview(canvas.Canvas* surface, Arena* frame) uses io {
+        surface.fill(view, panel());
+        surface.push_clip(view);
+        f32 max_scroll = content - view.h + 24.0;
+        if (scroll > max_scroll) {
+            scroll = max_scroll;
+        }
+        if (scroll < 0.0) {
+            scroll = 0.0;
+        }
+        f32 left = view.x + 16.0;
+        f32 right = view.x + view.w - 16.0;
+        cy = view.y + 14.0 - scroll;
+        reparse(state.doc.text());
+        deco = 0;
+        tone = ink();
+        mut i32 c = nd(0).first;
+        mut bool notes = false;
+        while (c >= 0) {
+            if (nd(c).kind == cm.Kind.Footnote) {
+                notes = true;
+            } else {
+                block(surface, c, left, right, frame);
+                cy += 8.0;
+            }
+            c = nd(c).next;
+        }
+        if (notes) {
+            cy += 6.0;
+            surface.fill(canvas.Rect{ x: left, y: cy, w: (right - left) * 0.3, h: 1.0 }, canvas.Color{ r: 70, g: 76, b: 100 });
+            cy += 10.0;
+            mut i32 n = 0;
+            c = nd(0).first;
+            while (c >= 0) {
+                if (nd(c).kind == cm.Kind.Footnote) {
+                    n += 1;
+                    say(surface, left, cy + 1.0, 14.0, cm.cat(&pa, text.format_i64(&pa, n as i64), "."), dim());
+                    tone = dim();
+                    children_of(surface, c, left + 26.0, right, frame);
+                    tone = ink();
+                }
+                c = nd(c).next;
+            }
+        }
+        draw_backlinks(surface, left, right);
+        content = cy + scroll - view.y;
+        surface.pop_clip();
+    }
+
+    void draw_backlinks(canvas.Canvas* surface, f32 left, f32 right) {
+        cy += 18.0;
+        surface.fill(canvas.Rect{ x: left, y: cy, w: right - left, h: 1.0 }, canvas.Color{ r: 70, g: 76, b: 100 });
+        cy += 10.0;
+        mut widgets.TextBuffer head = widgets.TextBuffer{ };
+        head.set(state.back_count == 0 ? "No backlinks" : "Linked from");
+        say(surface, left, cy, 14.0, head.text(), dim());
+        cy += 24.0;
+        for (i32 i in 0..state.back_count) {
+            cx = left;
+            str name = md.line_at(state.backlist.text(), i as usize);
+            put(surface, name, 15.0, md.LINK, accent(), false, name);
+            cy += 24.0;
+        }
+    }
+}
+
+// The file of a face of a family of the program: style 0 regular, 1 bold, 2 italic, 3 bold italic.
+str asset_of(i32 family, i32 style) {
+    if (family == 1) {
+        return style == 0 ? "assets/NotoSerif-Regular.ttf" : style == 1 ? "assets/NotoSerif-Bold.ttf" : style == 2 ? "assets/NotoSerif-Italic.ttf" : "assets/NotoSerif-BoldItalic.ttf";
+    }
+    if (family == 2) {
+        return style == 0 ? "assets/JetBrainsMono-Regular.ttf" : style == 1 ? "assets/JetBrainsMono-Bold.ttf" : style == 2 ? "assets/JetBrainsMono-Italic.ttf" : "assets/JetBrainsMono-BoldItalic.ttf";
+    }
+    return style == 0 ? "assets/NotoSans-Regular.ttf" : style == 1 ? "assets/NotoSans-Bold.ttf" : style == 2 ? "assets/NotoSans-Italic.ttf" : "assets/NotoSans-BoldItalic.ttf";
+}
+
+usize MAXCOLS = 8;  // the columns of a table that are shown
+
+// The folder chosen the last time, or `notes` beside the program.
+str saved_folder(Arena* arena) uses io {
+    match (io.read_file(arena, notes.LOCATION)) {
+        ok(body) => {
+            str found = text.trim(body);
+            return found.len > 0 ? found : "notes";
+        },
+        err(e) => {
+            return "notes";
+        },
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    bool snap = args.len >= 2 && args[0] == "--snapshot";
+    str folder = snap ? "demo-notes" : args.len >= 1 ? args[0] : saved_folder(&arena);
+    if (snap) {
+        write_demo(&arena, folder);
+    } else {
+        match (fs.create_dirs(&arena, folder)) {
+            ok() => { },
+            err(e) => {
+                io.print("cannot open the folder {}", folder);
+                return 1;
+            },
+        }
+    }
+    notes.Notes* m = arena.new(notes.Notes, &arena, folder);
+    defer m.free();
+    App* handler = arena.new(App, m, &arena);
+    handler.apply_font();
+    if (snap) {
+        i32 code = snapshot(&arena, handler, m, args[1]);
+        match (fs.remove_all(&arena, folder)) {
+            ok() => { },
+            err(e) => { },
+        }
+        return code;
+    }
+    widgets.Window window = screen.NotesConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    mut image.Image icon = image.Image{ width: 0, height: 0, pixels: arena.alloc_slice(ui32, 0) };
+    match (app.read_asset(&arena, window.icon)) {
+        some(bytes) => {
+            match (png.decode(&arena, bytes)) {
+                ok(found) => {
+                    icon = found;
+                },
+                err(e) => { },
+            }
+        },
+        none => { },
+    }
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar, icon: icon.width > 0 ? some(icon) : none };
+    return app.run(config, handler as app.Handler*);
+}
+
+void write_note(Arena* arena, str folder, str name, str body) uses io {
+    match (io.write_file(arena, fs.join(arena, folder, md.file_of(arena, name)), body)) {
+        ok() => { },
+        err(e) => { },
+    }
+}
+
+void write_demo(Arena* arena, str folder) uses io {
+    match (fs.create_dirs(arena, folder)) {
+        ok() => { },
+        err(e) => { },
+    }
+    write_note(arena, folder, "Welcome", "# Welcome\n\nNotes are plain **Markdown** files in one folder. Link them with double brackets, like [[Sosu language]] or [[Reading list|my books]], or [[Roadmap]] in a group, and the preview makes the links clickable.\n\n## What works\n\n- Headings, lists and *emphasis*\n- Inline `code`, and blocks of code\n- Styles combine: **bold [[Roadmap]]**, *italic [[Reading list]]*, ***both***\n- A [web link](https://www.google.com), and a table:\n\n| Style | Syntax | Level |\n|:---|:---:|---:|\n| **Bold** | two stars | 1 |\n| *Italic* | one star | 2 |\n| [[Roadmap]] | double brackets | 3 |\n\n#### Four\n\n##### Five\n\n###### Six\n\n- Tasks:\n  - [x] write a Markdown editor\n  - [ ] link every note to another\n\n> A note is a file. Nothing else to keep in step.\n\n---\n\nSearch looks in the titles and in the text.\n");
+    write_note(arena, folder, "Sosu language", "# Sosu language\n\nA small, statically typed language that compiles to C.\n\n```\ni32 main() uses io {\n    io.print(\"hello\");\n    return 0;\n}\n```\n\nSee [[Welcome]] for the tour, and [[Reading list]] for the books behind it.\n");
+    write_note(arena, folder, "Reading list", "# Reading list\n\n- [x] Crafting Interpreters\n- [ ] Types and Programming Languages\n- [ ] The C Programming Language\n\nBack to [[Sosu language]].\n");
+    match (fs.create_dirs(arena, fs.join(arena, folder, "Projects"))) {
+        ok() => { },
+        err(e) => { },
+    }
+    write_note(arena, folder, "Projects/Roadmap", "# Roadmap\n\nA note in the group Projects. It links to [[Welcome]], which lists it in its backlinks.\n");
+    write_note(arena, folder, "Markdown tour", "---\ntags: [demo]\nstatus: draft\n---\n# Markdown tour\n\nSetext heading\n--------------\n\n1. First\n2. Second\n   - nested *item*\n   - another ~~struck~~ one\n3. Third\n\n> quote\n> > nested quote\n\n> [!tip] A callout\n> It comes from Obsidian.\n\n~~~rust\nfn main() {}\n~~~\n\n    indented code\n\nA hard  \nbreak, an ==highlight==, a #tag, math $x^2$, an [autolink](<https://example.com>) and <https://sosu.dev>.\nA footnote[^1] and an image ![alt text](pic.png).\n\n[ref]: https://example.org \"Title\"\nSee [the reference][ref] and [[Welcome#What works|the tour]].\n\n| a | b |\n|---|---|\n| 1 \\| 2 | 3 |\n\n[^1]: The note of the foot.\n");
+    write_note(arena, folder, "Ideas", "# Ideas\n\n- A **tiny** web server\n- A chess engine\n");
+}
+
+// The window in a picture, with the demo notes.
+i32 snapshot(Arena* arena, App* handler, notes.Notes* m, str file) uses io {
+    m.follow("Welcome");
+    mut canvas.Canvas surface = canvas.create(arena, 1200, 720);
+    handler.ui.custom_title_bar = true;
+    handler.ui.clock(0);
+    handler.paint(&surface);
+    handler.paint(&surface);
+    handler.ui.mouse_move(400.0, 300.0);
+    handler.ui.mouse_button(true);
+    handler.doc_focus = true;
+    handler.paint(&surface);
+    handler.ui.mouse_button(false);
+    handler.paint(&surface);
+    handler.ui.select_later(m.doc.text().len, m.doc.text().len);
+    handler.ui.type_text("\n\nSee [[Ro");
+    handler.paint(&surface);
+    handler.paint(&surface);
+    match (png.save(arena, file, surface.image())) {
+        ok() => {
+            return 0;
+        },
+        err(e) => {
+            return 1;
+        },
+    }
+}

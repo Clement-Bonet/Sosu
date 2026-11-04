@@ -235,9 +235,9 @@ test "layers are flattened from the bottom, and can be hidden" {
 
 test "a half transparent pixel mixes with what is below" {
     ui32 mixed = sheet.blend(0x80FF0000, 0xFF0000FF);
-    assert((mixed >> 24) == 255);
-    assert(((mixed >> 16) & 0xFF) > 100);
-    assert((mixed & 0xFF) > 100);
+    assert(mixed >> 24 == 255);
+    assert(mixed >> 16 & 0xFF > 100);
+    assert(mixed & 0xFF > 100);
 }
 
 // The window place at the middle of a pixel, with the picture at the origin and a zoom of 8.
@@ -507,7 +507,7 @@ test "the numbers of the picker: RGB, CMYK and HSL, with the opacity" {
     e.set_model(1);
     assert(e.field_rows() == 5 && e.field_value(3) == 0 && e.field_value(1) == 50 && e.field_value(4) == 39);
     e.set_field(3, 100);
-    assert((e.color & 0xFFFFFF) == 0x000000 && e.alpha == 100);
+    assert(e.color & 0xFFFFFF == 0x000000 && e.alpha == 100);
     e.set_field(4, 100);
     e.set_field(3, 0);
     e.set_field(0, 100);
@@ -529,8 +529,8 @@ test "the onion skin shows the frames around, tinted and faint" {
     defer arena.free();
     assert(sheet.ghost(0, 0xFFFF0000) == 0);
     ui32 g = sheet.ghost(0xFFFFFFFF, 0xFFFF0000);
-    assert((g >> 24) > 0 && (g >> 24) < 255);
-    assert(((g >> 16) & 0xFF) > ((g >> 8) & 0xFF));
+    assert(g >> 24 > 0 && g >> 24 < 255);
+    assert(g >> 16 & 0xFF > g >> 8 & 0xFF);
     editor.Editor* e = editor.new_editor(&arena);
     e.new_doc(4);
     e.art.put(1, 1, 0xFF00FF00);
@@ -542,15 +542,14 @@ test "the onion skin shows the frames around, tinted and faint" {
     e.toggle_onion();
     e.update(1180, 780, 0);
     assert(e.has_before && e.has_after);
-    assert((e.ghost_before.pixels[5] >> 24) > 0);
+    assert(e.ghost_before.pixels[5] >> 24 > 0);
     assert(e.ghost_after.pixels[5] == 0);
     e.select_frame(0);
     e.art.put(2, 1, 0xFF00FF00);
     e.select_frame(1);
     e.update(1180, 780, 0);
-    assert((e.ghost_before.pixels[6] >> 24) > 0);
+    assert(e.ghost_before.pixels[6] >> 24 > 0);
     e.select_frame(0);
     e.update(1180, 780, 0);
     assert(!e.has_before && e.has_after);
 }
-

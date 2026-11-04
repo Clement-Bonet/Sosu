@@ -1,0 +1,597 @@
+import std.fs;
+import std.io;
+import std.text;
+import std.vec;
+import testing.check;
+import notes.md;
+import notes.cm;
+import notes.blk;
+import notes.html;
+import notes.notes;
+
+test "lines are classified" {
+    assert(md.classify("").kind == md.Block.Blank);
+    assert(md.classify("   ").kind == md.Block.Blank);
+    md.Line h = md.classify("## Title");
+    assert(h.kind == md.Block.Heading && h.level == 2 && h.body == 3);
+    assert(md.classify("#nospace").kind == md.Block.Plain);
+    assert(md.classify("####### seven").kind == md.Block.Plain);
+    md.Line b = md.classify("  - item");
+    assert(b.kind == md.Block.Bullet && b.level == 1 && b.body == 4);
+    md.Line t = md.classify("- [x] done");
+    assert(t.kind == md.Block.Task && t.done && t.body == 6);
+    assert(!md.classify("- [ ] todo").done);
+    assert(md.classify("> quote").kind == md.Block.Quote);
+    assert(md.classify("---").kind == md.Block.Rule);
+    assert(md.classify("```sosu").kind == md.Block.Fence);
+    assert(md.classify("plain text").kind == md.Block.Plain);
+    assert(md.classify("-not a bullet").kind == md.Block.Plain);
+}
+
+test "spans cut a line into styles" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    str line = "a **bold** and *it* and `code` and [[Note|shown]] end";
+    vec.Vec<md.Span>* out = vec.new<md.Span>(&arena);
+    md.spans(line, 0, out);
+    mut i32 bold = 0;
+    mut i32 italic = 0;
+    mut i32 code = 0;
+    mut i32 links = 0;
+    for (usize i in 0..out.len()) {
+        md.Span s = *out.at(i);
+        if (s.style == 1) {
+            bold += 1;
+            assert(piece(line, s.from, s.to) == "bold");
+        }
+        if (s.style == 2) {
+            italic += 1;
+            assert(piece(line, s.from, s.to) == "it");
+        }
+        if (s.style == 4) {
+            code += 1;
+            assert(piece(line, s.from, s.to) == "code");
+        }
+        if (s.style == 8) {
+            links += 1;
+            assert(piece(line, s.from, s.to) == "shown");
+            assert(piece(line, s.link_from, s.link_to) == "Note");
+        }
+    }
+    assert(bold == 1 && italic == 1 && code == 1 && links == 1);
+}
+
+test "a mark that is not closed stays text" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    vec.Vec<md.Span>* out = vec.new<md.Span>(&arena);
+    md.spans("2 * 3 and **open and [[open", 0, out);
+    assert(out.len() == 1);
+    assert(out.at(0).style == 0);
+}
+
+str piece(str line, usize from, usize to) {
+    return text.slice(line, from, to);
+}
+
+test "links of a text" {
+    str body = "see [[Ideas]] and [[Plan#Goals]] and [[Other|x]]";
+    assert(md.links_to(body, "ideas"));
+    assert(md.links_to(body, "Plan"));
+    assert(md.links_to(body, "Other"));
+    assert(!md.links_to(body, "Goals"));
+    assert(!md.links_to("no links [[open", "open"));
+}
+
+test "words are compared without the case" {
+    assert(md.same("Ideas", "iDEAS"));
+    assert(!md.same("a", "ab"));
+    assert(md.has("Weekly Review", "review"));
+    assert(md.before("apple", "Banana"));
+    assert(!md.before("b", "a"));
+}
+
+test "paths and links to a note in a folder" {
+    assert(md.base_of("Projects/Plan") == "Plan");
+    assert(md.base_of("Plan") == "Plan");
+    assert(md.parent_of("a/b/c") == "a/b");
+    assert(md.parent_of("c") == "");
+    assert(md.link_matches("plan", "Projects/Plan"));
+    assert(md.link_matches("projects/plan", "Projects/Plan"));
+    assert(!md.link_matches("Other/Plan", "Projects/Plan"));
+    assert(md.links_to("see [[Plan]]", "Projects/Plan"));
+    assert(md.before("A", "A/x"));
+    assert(md.before("A/x", "A b"));
+}
+
+test "the directory of links" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    str rows = md.index_lines(&arena, "Home", "a [[One]] b [[Two|x]] c [[One#h]] [[open");
+    assert(md.line_at(rows, 0) == "Home\tOne");
+    assert(md.line_at(rows, 1) == "Home\tTwo");
+    assert(md.line_at(rows, 2) == "");
+    assert(md.src_of("Home\tOne") == "Home");
+    assert(md.dst_of("Home\tOne") == "One");
+}
+
+test "renaming a note rewrites the links to it" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    str body = "[[Plan]] and [[plan|the plan]] and [[Plan#Goals]] and [[Other]]";
+    assert(md.rename_links(&arena, body, "Plan", "Work/Roadmap") == "[[Work/Roadmap]] and [[Work/Roadmap|the plan]] and [[Work/Roadmap#Goals]] and [[Other]]");
+    str short = "[[Plan]] [[Work/Plan]]";
+    assert(md.rename_links(&arena, short, "Work/Plan", "Work/Map") == "[[Map]] [[Work/Map]]");
+    assert(md.rename_links(&arena, "no [[open", "a", "b") == "no [[open");
+}
+test "a folder chosen replaces the notes shown" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    // The test goes through the file of the real program, in the current folder: it gives it back.
+    mut str? remembered = none;
+    match (io.read_file(&arena, notes.LOCATION)) {
+        ok(body) => {
+            remembered = some(body);
+        },
+        err(e) => { },
+    }
+    match (fs.create_dirs(&arena, "check-one")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-one/A.md", "# A\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    notes.Notes* m = arena.new(notes.Notes, &arena, "check-one");
+    assert(m.find_exact("A") >= 0);
+    m.open_folder("check-two/Sub");
+    assert(m.dir.text() == "check-two/Sub");
+    assert(fs.is_dir(&arena, "check-two/Sub"));
+    assert(m.find_exact("A") < 0);
+    assert(!m.open);
+    match (io.read_file(&arena, notes.LOCATION)) {
+        ok(body) => {
+            assert(body == "check-two/Sub");
+        },
+        err(e) => {
+            assert(false);
+        },
+    }
+    m.free();
+    for (str d in ["check-one", "check-two"]) {
+        match (fs.remove_all(&arena, d)) {
+            ok() => { },
+            err(e) => { },
+        }
+    }
+    match (remembered) {
+        some(body) => {
+            match (io.write_file(&arena, notes.LOCATION, body)) {
+                ok() => { },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        },
+        none => {
+            match (fs.remove_file(&arena, notes.LOCATION)) {
+                ok() => { },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        },
+    }
+}
+
+test "a rename moves a note to a group and fixes the links" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    str root = "check-notes";
+    match (fs.create_dirs(&arena, root)) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-notes/A.md", "# A\nsee [[B]]\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-notes/B.md", "# B\nback to [[A]]\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    notes.Notes* m = arena.new(notes.Notes, &arena, root);
+    m.load("B");
+    assert(m.back_count == 1);
+    m.title.set("Work/Deep/B2");
+    m.rename();
+    assert(m.current.text() == "Work/Deep/B2");
+    match (io.read_file(&arena, "check-notes/A.md")) {
+        ok(body) => {
+            assert(body == "# A\nsee [[Work/Deep/B2]]\n");
+        },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.read_file(&arena, "check-notes/Work/Deep/B2.md")) {
+        ok(body) => {
+            assert(body == "# B\nback to [[A]]\n");
+        },
+        err(e) => {
+            assert(false);
+        },
+    }
+    m.group.set("Work");
+    m.new_folder();
+    assert(m.renaming);
+    assert(m.ren_name.text() == "Work/New group");
+    assert(fs.is_dir(&arena, "check-notes/Work/New group"));
+    assert(m.find_exact("Work/Deep/B2") >= 0);
+    m.free();
+    match (fs.remove_all(&arena, root)) {
+        ok() => { },
+        err(e) => { },
+    }
+}
+
+test "the marks of a line" {
+    assert(md.marker_len("# Title") == 2);
+    assert(md.marker_len("### Title") == 4);
+    assert(md.marker_len("####### Title") == 0);
+    assert(md.marker_len("- item") == 2);
+    assert(md.marker_len("- [ ] task") == 6);
+    assert(md.marker_len("- [x] task") == 6);
+    assert(md.marker_len("12. step") == 4);
+    assert(md.marker_len("> quote") == 2);
+    assert(md.marker_len("**bold**") == 0);
+    assert(md.marker_len("---") == 0);
+    assert(md.indent_of("   x") == 3);
+    assert(md.line_start("ab\ncd", 4) == 3);
+    assert(md.line_end("ab\ncd", 0) == 2);
+}
+
+test "a folded group hides its notes in the tree" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    str root = "check-tree";
+    match (fs.create_dirs(&arena, "check-tree/G")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-tree/G/N.md", "# N\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-tree/Top.md", "# Top\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    notes.Notes* m = arena.new(notes.Notes, &arena, root);
+    assert(m.rows() == 3);
+    assert(m.is_branch(0));
+    assert(m.is_open_row(0));
+    assert(m.depth_at(1) == 1);
+    m.toggle(0);
+    assert(m.rows() == 2);
+    assert(!m.is_open_row(0));
+    m.toggle(0);
+    assert(m.rows() == 3);
+    m.free();
+    match (fs.remove_all(&arena, root)) {
+        ok() => { },
+        err(e) => { },
+    }
+}
+
+test "renaming a group moves its notes and fixes the links" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    str root = "check-group";
+    match (fs.create_dirs(&arena, "check-group/Old")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-group/Old/N.md", "# N\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    match (io.write_file(&arena, "check-group/Top.md", "see [[Old/N]]\n")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    notes.Notes* m = arena.new(notes.Notes, &arena, root);
+    m.chosen = 0;
+    m.begin_rename();
+    assert(m.renaming);
+    m.ren_name.set("New");
+    m.commit_rename();
+    assert(m.find_exact("New/N") >= 0);
+    assert(m.find_exact("Old/N") < 0);
+    match (io.read_file(&arena, "check-group/Top.md")) {
+        ok(body) => {
+            assert(body == "see [[New/N]]\n");
+        },
+        err(e) => {
+            assert(false);
+        },
+    }
+    assert(!fs.exists(&arena, "check-group/Old"));
+    m.free();
+    match (fs.remove_all(&arena, root)) {
+        ok() => { },
+        err(e) => { },
+    }
+}
+
+// The spans of a line as `style:text|` pieces, with `>name` after a link piece.
+str dump(Arena* arena, str line) {
+    vec.Vec<md.Span>* out = vec.new<md.Span>(arena);
+    md.spans(line, 0, out);
+    text.TextBuilder* b = text.builder(arena);
+    for (usize i in 0..out.len()) {
+        md.Span s = *out.at(i);
+        b.push_i64(s.style as i64);
+        b.push(":");
+        b.push(text.slice(line, s.from, s.to));
+        if (s.style & md.LINK != 0) {
+            b.push(">");
+            b.push(text.slice(line, s.link_from, s.link_to));
+        }
+        b.push("|");
+    }
+    return b.text();
+}
+
+test "styles combine with each other and with links" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    assert(dump(&arena, "**[[A]]**") == "9:A>A|");
+    assert(dump(&arena, "*[[A]]*") == "10:A>A|");
+    assert(dump(&arena, "***[[A]]***") == "11:A>A|");
+    assert(dump(&arena, "**[[A|shown]]**") == "9:shown>A|");
+    assert(dump(&arena, "x **[[A]]** y") == "0:x |9:A>A|0: y|");
+    assert(dump(&arena, "[[A|**b**]]") == "9:b>A|");
+    assert(dump(&arena, "[[A|*i*]]") == "10:i>A|");
+    assert(dump(&arena, "[[A|a **b** c]]") == "8:a >A|9:b>A|8: c>A|");
+    assert(dump(&arena, "**a [[A]] b**") == "1:a |9:A>A|1: b|");
+    assert(dump(&arena, "*a [[A]] b*") == "2:a |10:A>A|2: b|");
+    assert(dump(&arena, "***both***") == "3:both|");
+    assert(dump(&arena, "**bold *and italic* bold**") == "1:bold |3:and italic|1: bold|");
+    assert(dump(&arena, "*italic **and bold** italic*") == "2:italic |3:and bold|2: italic|");
+    assert(dump(&arena, "**a *b***") == "1:a |3:b|");
+    assert(dump(&arena, "*a **b***") == "2:a |3:b|");
+    assert(dump(&arena, "**`code`**") == "5:code|");
+    assert(dump(&arena, "*`code`*") == "6:code|");
+    assert(dump(&arena, "`**not bold**`") == "4:**not bold**|");
+    assert(dump(&arena, "`[[A]]`") == "4:[[A]]|");
+    assert(dump(&arena, "[[A|`c`]]") == "12:c>A|");
+    assert(dump(&arena, "**a** and *b* and ***c***") == "1:a|0: and |2:b|0: and |3:c|");
+    assert(dump(&arena, "**[[A]]** and *[[B]]*") == "9:A>A|0: and |10:B>B|");
+    assert(dump(&arena, "[[A]] [[B]]") == "8:A>A|0: |8:B>B|");
+}
+
+test "a mark left open inside another stays text" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    assert(dump(&arena, "**a *b**") == "1:a *b|");
+    assert(dump(&arena, "**[[A**") == "1:[[A|");
+    assert(dump(&arena, "*a [[A]*") == "2:a [[A]|");
+}
+
+test "web links, tables and the six levels of headings" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    vec.Vec<md.Span>* out = vec.new<md.Span>(&arena);
+    str line = "a [site](https://x.org/p) and **[b](http://y)**";
+    md.spans(line, 0, out);
+    assert(out.len() == 4);
+    assert(out.at(1).style == md.LINK);
+    assert(text.slice(line, out.at(1).from, out.at(1).to) == "site");
+    assert(text.slice(line, out.at(1).link_from, out.at(1).link_to) == "https://x.org/p");
+    assert(out.at(3).style == md.LINK | md.BOLD);
+    assert(text.slice(line, out.at(3).link_from, out.at(3).link_to) == "http://y");
+    vec.Vec<md.Span>* open = vec.new<md.Span>(&arena);
+    md.spans("[no link] and [a]b", 0, open);
+    assert(open.len() == 1);
+    assert(md.classify("| a | b |").kind == md.Block.Table);
+    assert(md.is_table_rule("|---|:--:|"));
+    assert(!md.is_table_rule("| a | b |"));
+    vec.Vec<md.Span>* cells = vec.new<md.Span>(&arena);
+    str row = "| one | **two** |  |";
+    md.cells(row, cells);
+    assert(cells.len() == 3);
+    assert(text.slice(row, cells.at(0).from, cells.at(0).to) == "one");
+    assert(text.slice(row, cells.at(1).from, cells.at(1).to) == "**two**");
+    assert(cells.at(2).to == cells.at(2).from);
+    for (i32 n in 4..7) {
+        assert(md.classify("###### x").level == 6);
+    }
+    assert(md.classify("#### x").level == 4);
+    assert(md.classify("##### x").level == 5);
+}
+
+test "the font cycles through the families of the program" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    match (fs.create_dirs(&arena, "check-font")) {
+        ok() => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    notes.Notes* m = arena.new(notes.Notes, &arena, "check-font");
+    assert(m.family() == 0);
+    m.font_next();
+    assert(m.family() == 1);
+    assert(m.font_label.text() == "Noto Serif");
+    m.font_next();
+    assert(m.family() == 2);
+    assert(m.font_label.text() == "JetBrains Mono");
+    m.font_prev();
+    m.font_prev();
+    assert(m.family() == 0);
+    assert(m.font_file() == "");
+    m.font_prev();
+    assert(m.family() == 0 && m.font_label.text() != "Noto Sans" || m.font_file().len > 0 || m.family() == 2);
+    m.free();
+    match (fs.remove_all(&arena, "check-font")) {
+        ok() => { },
+        err(e) => { },
+    }
+}
+
+test "the alignment of the columns of a table" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str rule = "|:--|:-:|--:|---|";
+    assert(md.align_of(&arena, rule, 0) == 0);
+    assert(md.align_of(&arena, rule, 1) == 1);
+    assert(md.align_of(&arena, rule, 2) == 2);
+    assert(md.align_of(&arena, rule, 3) == 0);
+    assert(md.align_of(&arena, rule, 9) == 0);
+}
+
+str render(Arena* arena, str src, bool ext) {
+    blk.Doc d = blk.parse(arena, src, ext);
+    html.Out* o = arena.new(html.Out, arena, d.nodes);
+    o.node(0);
+    return o.result();
+}
+
+usize at_or_end(str s, str needle, usize from) {
+    match (text.find_from(s, needle, from)) {
+        some(i) => {
+            return i;
+        },
+        none => {
+            return s.len;
+        },
+    }
+}
+
+test "the examples of the CommonMark specification" {
+    mut Arena arena = Arena.new(64 * KB);
+    // From this folder, or from the root of the repository (`make test`).
+    mut str all = "";
+    for (str path in ["spec/spec.txt", "showcase/notes/spec/spec.txt"]) {
+        match (io.read_file(&arena, path)) {
+            ok(body) => {
+                all = body;
+            },
+            err(x) => { },
+        }
+    }
+    assert(all.len > 0);
+    mut usize pos = 0;
+    mut i32 n = 0;
+    mut i32 ok = 0;
+    mut i32 shown = 0;
+    while (pos < all.len) {
+        usize m = at_or_end(all, "@@@M\n", pos);
+        if (m >= all.len) {
+            break;
+        }
+        usize h = at_or_end(all, "@@@H\n", m);
+        usize e = at_or_end(all, "@@@E\n", h);
+        str md = text.slice(all, m + 5, h);
+        str want = text.slice(all, h + 5, e);
+        pos = e + 5;
+        n += 1;
+        mut Arena one = Arena.new(1 * MB);
+        str got = render(&one, md, false);
+        if (got == want) {
+            ok += 1;
+        } else if (shown < 40) {
+            shown += 1;
+            io.print("FAIL {}\n", n);
+        }
+    }
+    io.print("{} of {} examples\n", ok, n);
+    assert(n == 652);
+}
+i32 count(Arena* arena, str src, cm.Kind kind) {
+    blk.Doc d = blk.parse(arena, src, true);
+    mut i32 n = 0;
+    for (usize i in 0..d.nodes.len()) {
+        if (d.nodes.at(i).kind == kind) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+test "the extensions of GitHub: tables, tasks, strikethrough, bare links, footnotes" {
+    mut Arena a = Arena.new(1 * MB);
+    assert(count(&a, "| a | b |\n|:--|--:|\n| 1 \\| 2 | 3 |\n| 4 |\n", cm.Kind.Row) == 3);
+    assert(count(&a, "| a | b |\n|:--|--:|\n| 1 \\| 2 | 3 |\n", cm.Kind.Cell) == 4);
+    assert(count(&a, "a | b\n--|--\n1 | 2\n", cm.Kind.Table) == 1);
+    assert(count(&a, "- [x] done\n- [ ] todo\n", cm.Kind.Item) == 2);
+    assert(count(&a, "~~gone~~ and ~one~", cm.Kind.Strike) == 2);
+    assert(count(&a, "see https://example.com/a and www.example.org.", cm.Kind.Link) == 2);
+    assert(count(&a, "text[^1]\n\n[^1]: note\n", cm.Kind.FootRef) == 1);
+    assert(count(&a, "text[^2]\n", cm.Kind.FootRef) == 0);
+}
+
+test "the extensions of Obsidian: links, embeds, tags, highlights, math, comments, callouts, properties" {
+    mut Arena a = Arena.new(1 * MB);
+    assert(count(&a, "go [[Note#Part|here]] and [[Other]]", cm.Kind.Wiki) == 2);
+    assert(count(&a, "![[Picture.png]]", cm.Kind.Embed) == 1);
+    assert(count(&a, "a #tag and #two/levels, not a#b or #123", cm.Kind.Tag) == 2);
+    assert(count(&a, "a ==b== c", cm.Kind.Highlight) == 1);
+    assert(count(&a, "$x^2$ and $$y$$ but 5$ and 6$", cm.Kind.Math) == 2);
+    assert(count(&a, "a %%hidden%% b", cm.Kind.Comment) == 1);
+    assert(count(&a, "---\ntitle: x\n---\n# H\n", cm.Kind.Frontmatter) == 1);
+    blk.Doc d = blk.parse(&a, "> [!warning]- Careful\n> body\n", true);
+    mut bool found = false;
+    for (usize i in 0..d.nodes.len()) {
+        if (d.nodes.at(i).kind == cm.Kind.BlockQuote) {
+            found = d.nodes.at(i).info == "warning" && d.nodes.at(i).title == "Careful" && d.nodes.at(i).level == 2;
+        }
+    }
+    assert(found);
+}
+
+test "the pure standard does not know the extensions" {
+    mut Arena a = Arena.new(1 * MB);
+    blk.Doc d = blk.parse(&a, "~~a~~ ==b== [[c]]\n", false);
+    mut bool plain = true;
+    for (usize i in 0..d.nodes.len()) {
+        cm.Kind k = d.nodes.at(i).kind;
+        if (k == cm.Kind.Strike || k == cm.Kind.Highlight || k == cm.Kind.Wiki) {
+            plain = false;
+        }
+    }
+    assert(plain);
+}
+test "a table right after a list needs no blank line" {
+    mut Arena a = Arena.new(1 * MB);
+    str src = "* 2\n[Lien](https://x.org)\n| a | b |\n|:--|--:|\n| 1 | 2 |\n";
+    assert(count(&a, src, cm.Kind.Table) == 1);
+    assert(count(&a, src, cm.Kind.Row) == 2);
+    assert(count(&a, src, cm.Kind.Link) == 1);
+    assert(count(&a, "| a | b |\n|:--|--:|\n| 1 | 2 |\n", cm.Kind.Table) == 1);
+}

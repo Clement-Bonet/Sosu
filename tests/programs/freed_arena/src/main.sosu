@@ -1,5 +1,6 @@
 // A pointer kept past the `free()` of its arena (spec §7.7): in debug, reading through it stops
-// the program, since the pages of a freed arena are made unreadable (lib/runtime/sosu_rt.c).
+// the program, since the pages of a freed arena are made unreadable (lib/runtime/sosu_rt.c). The
+// compiler refuses such a use (E0372, spec §6.1): `unsafe` turns the rule off, to reach the stop.
 import std.io;
 
 i32 main() uses io {
@@ -8,6 +9,8 @@ i32 main() uses io {
     *p = 7;
     io.print("before: {}", *p);
     arena.free();
-    io.print("after: {}", *p);
+    unsafe {
+        io.print("after: {}", *p);
+    }
     return 0;
 }

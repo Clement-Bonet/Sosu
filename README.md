@@ -1,7 +1,9 @@
 # Sosu
 
-A native, low-level, statically typed language, and its compiler `sosuc` (C99, libc only).
-The specification is in [docs/SPEC.md](docs/SPEC.md).
+A native, low-level language where what a function does is in its signature: its effects, its failures and its allocations.
+Its compiler, `sosuc`, is written in C99 with libc only, and generates C. Sosu is young (0.x) and not memory safe yet.
+
+**[Playground](https://clement-bonet.github.io/Sosu/)** · **[Releases](https://github.com/Clement-Bonet/Sosu/releases)** · [Written in Sosu](#written-in-sosu) · [Specification](docs/SPEC.md) · [Library reference](docs/REFERENCE.md) · [How Sosu is made](#how-sosu-is-made)
 
 ```sosu
 import std.io;
@@ -50,6 +52,15 @@ This program prints `12.0` and `total: 42`; it is tested as `tests/programs/read
 - Installed: the [releases](https://github.com/Clement-Bonet/Sosu/releases) have `sosuc` for Windows, Linux (x64, ARM64) and macOS, with the library. Unpack the archive, put its `bin/` in the `PATH`, and run `sosuc run` in a package folder. A C compiler is needed: MSVC on Windows, `cc` (gcc or clang) elsewhere.
 - From the sources: see [Building](#building).
 
+## Written in Sosu
+
+Desktop programs drawn by Sosu's own interface toolkit, with their tests. More in [showcase/](showcase).
+
+| [Beatbox](showcase/beatbox) | [DiskTiles](showcase/disktiles) | [Pixel Forge](showcase/pixelforge) |
+|---|---|---|
+| [![Beatbox](showcase/beatbox/screenshot.png)](showcase/beatbox) | [![DiskTiles](showcase/disktiles/screenshot.png)](showcase/disktiles) | [![Pixel Forge](showcase/pixelforge/screenshot.png)](showcase/pixelforge) |
+| A drum machine, its 16 instruments synthesized in code | The size of files and folders, as tiles | A pixel art editor with layers and animation |
+
 ## Why Sosu
 
 - **Native through C.** `sosuc` writes C99 and calls the C compiler of the system: a program runs wherever there is one, phones included, and calls C libraries directly (`extern "C"`, `sosuc bindgen`).
@@ -58,6 +69,14 @@ This program prints `12.0` and `total: 42`; it is tested as `tests/programs/read
 - **Memory without a garbage collector.** Arenas, `defer` and moves. **Not memory safe yet:** there is no borrow checker as in Rust, so some dangling pointers (to a freed arena or a dead local, kept in a variable) are not caught, and using one is undefined behaviour ([docs/SPEC.md](docs/SPEC.md) §7.7).
 - **Safe by design.** Safety is a design rule: what is not checked yet is listed in spec §7.7, and memory safety is a goal for 1.0.
 - **Close to Zig and Odin in spirit** (explicit memory, C interop, a small core), Sosu adds effects in the types, contracts, classes with interfaces, and its own interface toolkit (`platform`, `render`, `ui`, `.ui.sosu` files).
+
+| | C | Zig | Odin | Rust | Sosu |
+|---|---|---|---|---|---|
+| Effects in the signature | no | no | no | no | yes |
+| Failures in the type | no | yes | by convention | yes | yes |
+| Allocations in the signature | no | by convention | no (implicit context) | no | yes |
+| Memory safe | no | no | no | yes, outside `unsafe` | not yet, a goal for 1.0 |
+| Compiled through | | LLVM or its own backends | LLVM | LLVM | C99 |
 
 English is the working language of the project: code, comments, compiler messages and documentation.
 
@@ -180,7 +199,8 @@ examples/     window (shapes, keyboard and mouse), form (widgets), editor and wo
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
               trees, inputs), poster (the poster of the project, drawn with `render` into a PNG)
 showcase/     whole applications: beatbox (a drum machine), disktiles (the sizes of a disk as tiles),
-              pixelforge (a pixel art editor)
+              notes (Markdown notes), pixelforge (a pixel art editor), queens (a puzzle),
+              sheets (a spreadsheet), vault (a password manager)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification, error codes, library reference, roadmap
@@ -254,7 +274,11 @@ folder (`../../build/sosuc run .`):
 - `showcase/beatbox`: a drum machine, its 16 instruments synthesized in code, on a 16-step grid;
 - `showcase/disktiles`: the sizes of the files and folders of a disk as tiles (a treemap), read
   while the window stays alive;
-- `showcase/pixelforge`: a pixel art editor, with layers, frames, onion skin and sprite sheets.
+- `showcase/notes`: a folder of Markdown notes, with a live preview, links between notes and backlinks;
+- `showcase/pixelforge`: a pixel art editor, with layers, frames, onion skin and sprite sheets;
+- `showcase/queens`: the puzzle of the queens and the coloured regions, each grid with one solution;
+- `showcase/sheets`: a spreadsheet with about 120 functions, reading and writing `.ods` and `.csv`;
+- `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software).
 
 On Windows:
 

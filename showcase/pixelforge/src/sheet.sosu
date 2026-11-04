@@ -47,10 +47,10 @@ pub ui32 blend(ui32 over, ui32 below) {
     }
     ui32 weight = da * (255 - sa) / 255;
     ui32 oa = sa + weight;
-    ui32 r = (((over >> 16) & 0xFF) * sa + ((below >> 16) & 0xFF) * weight) / oa;
-    ui32 g = (((over >> 8) & 0xFF) * sa + ((below >> 8) & 0xFF) * weight) / oa;
+    ui32 r = ((over >> 16 & 0xFF) * sa + (below >> 16 & 0xFF) * weight) / oa;
+    ui32 g = ((over >> 8 & 0xFF) * sa + (below >> 8 & 0xFF) * weight) / oa;
     ui32 b = ((over & 0xFF) * sa + (below & 0xFF) * weight) / oa;
-    return (oa << 24) | (r << 16) | (g << 8) | b;
+    return oa << 24 | r << 16 | g << 8 | b;
 }
 
 // A pixel as the onion skin shows it: tinted and faint (`tint` is 0xAARRGGBB, its alpha is not used).
@@ -59,10 +59,10 @@ pub ui32 ghost(ui32 c, ui32 tint) {
     if (a == 0) {
         return 0;
     }
-    ui32 r = (((c >> 16) & 0xFF) + ((tint >> 16) & 0xFF) * 2) / 3;
-    ui32 g = (((c >> 8) & 0xFF) + ((tint >> 8) & 0xFF) * 2) / 3;
+    ui32 r = ((c >> 16 & 0xFF) + (tint >> 16 & 0xFF) * 2) / 3;
+    ui32 g = ((c >> 8 & 0xFF) + (tint >> 8 & 0xFF) * 2) / 3;
     ui32 b = ((c & 0xFF) + (tint & 0xFF) * 2) / 3;
-    return ((a * 120 / 255) << 24) | (r << 16) | (g << 8) | b;
+    return a * 120 / 255 << 24 | r << 16 | g << 8 | b;
 }
 
 pub class Sheet {

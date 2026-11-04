@@ -550,7 +550,7 @@ static bool zeroable(const Type *type) {
     }
 }
 
-static Type *call_arena(Body *b, Expr *e, Name name) {
+static Type *call_arena(Body *b, Expr *e, Name name, Type *expected) {
     Expr *callee = e->as.call.callee;
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
@@ -564,13 +564,26 @@ static Type *call_arena(Body *b, Expr *e, Name name) {
         if (callee->kind == EXPR_FIELD) sema_arena_freed(b, callee->as.field.object, e->offset);
         return sema_void_type(b);
     }
+    if (sema_name_is(name, "closure")) {
+        /* a.closure(lambda): what it captures is copied into the arena (spec §6.1, rule 5) */
+        callee->target = "arena.closure";
+        if (count != 1 || args[0]->kind != EXPR_LAMBDA) {
+            Diagnostic *d = sema_error_expr(b, "E0377", count ? args[0] : e, "`closure` takes a lambda, written there");
+            diag_help(d, "e.g. `arena.closure((i32 x) => x + k)`");
+            check_args_loosely(b, e);
+            return sema_error_type(b);
+        }
+        Type *type = sema_check_expr(b, args[0], expected && expected->tag == T_FN ? expected : NULL);
+        sema_check_closure_captures(b, callee->as.field.object, args[0]);
+        return type;
+    }
     bool is_alloc = sema_name_is(name, "alloc");
     bool is_try = sema_name_is(name, "try_alloc");
     bool is_new = sema_name_is(name, "new");
     bool is_slice = sema_name_is(name, "alloc_slice");
     if (!is_alloc && !is_try && !is_new && !is_slice) {
         Diagnostic *d = sema_error_at(b, "E0337", name.offset, name.length, "`Arena` has no method `%.*s`", NAME_ARGS(name));
-        diag_help(d, "the methods of an arena are `alloc`, `alloc_slice`, `try_alloc`, `new` and `free` (spec §6)");
+        diag_help(d, "the methods of an arena are `alloc`, `alloc_slice`, `try_alloc`, `new`, `closure` and `free` (spec §6)");
         check_args_loosely(b, e);
         return sema_error_type(b);
     }
@@ -691,7 +704,7 @@ static Type *call_method(Body *b, Expr *e, Type *expected) {
         check_args_loosely(b, e);
         return base;
     }
-    if (base->tag == T_ARENA) return call_arena(b, e, name);
+    if (base->tag == T_ARENA) return call_arena(b, e, name, expected);
     if (base->tag == T_STR && sema_name_is(name, "to_cstr")) {
         /* s.to_cstr(arena): a NUL-terminated copy for C (spec §4.1) */
         callee->resolution = RESOLVED_BUILTIN;
@@ -768,6 +781,7 @@ Type *sema_check_call(Body *b, Expr *e, Type *expected) {
     case REF_FIELD: {
         Type *type = ref.kind == REF_LOCAL ? ref.local->type : ref.field->type;
         callee->type = type;
+        if (ref.kind == REF_LOCAL) sema_check_freed(b, callee, ref.local); /* a closure kept in a freed arena */
         if (type->tag == T_FN || sema_is_error(type)) return call_with(b, e, type, name, false);
         TypeNames n = {0};
         sema_error_expr(b, "E0338", callee, "`%.*s` is a `%s`, not a function", NAME_ARGS(name), sema_tn(&n, type));

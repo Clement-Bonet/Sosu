@@ -1,0 +1,421 @@
+import sheets.values;
+import sheets.calc;
+import sheets.editor;
+import sheets.ods;
+import sheets.xml;
+import sheets.zip;
+import std.text;
+import std.vec;
+import testing.check;
+
+// A sheet filled from lines like "A1=5" or "B2==A1*2".
+calc.Book* sheet(Arena* arena, str spec) {
+    str[] cells = text.split(arena, spec, "|");
+    calc.Book* b = arena.new(calc.Book, arena);
+    for (usize i in 0..cells.len) {
+        str line = cells[i];
+        mut usize eq = 0;
+        while (line.bytes[eq] != 61) {
+            eq += 1;
+        }
+        values.Ref r = values.parse_ref(text.slice(line, 0, eq));
+        b.set_raw(arena, r.col, r.row, text.slice(line, eq + 1, line.len));
+    }
+    b.recalc();
+    return b;
+}
+
+str shown(Arena* arena, calc.Book* b, str name) {
+    values.Ref r = values.parse_ref(name);
+    calc.Cell*? have = b.find(r.col, r.row);
+    return match (have) {
+        some(c) => values.display(arena, c.val, c.fmt, c.dec),
+        none => "",
+    };
+}
+
+bool is(Arena* arena, str cells, str at, str want) {
+    calc.Book* b = sheet(arena, cells);
+    defer b.release();
+    return shown(arena, b, at) == want;
+}
+
+bool ix(Arena* arena, str data, str more, str at, str want) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(data);
+    b.push("|");
+    b.push(more);
+    return is(arena, b.text(), at, want);
+}
+
+test "arithmetic follows the usual priorities" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    assert(is(&arena, "A1==1+2*3", "A1", "7"));
+    assert(is(&arena, "A1==(1+2)*3", "A1", "9"));
+    assert(is(&arena, "A1==-2^2", "A1", "4"));
+    assert(is(&arena, "A1==2^3^2", "A1", "64"));
+    assert(is(&arena, "A1==50%", "A1", "0.5"));
+    assert(is(&arena, "A1==10/4", "A1", "2.5"));
+    assert(is(&arena, "A1==1/3", "A1", "0.3333333333"));
+    assert(is(&arena, "A1==1/0", "A1", "#DIV/0!"));
+    assert(is(&arena, "A1==1+", "A1", "#SYNTAX!"));
+    assert(is(&arena, "A1==FOO(1)", "A1", "#NAME?"));
+}
+
+test "references, ranges and cycles" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    str cells = "A1=5|A2=7|A3==A1+A2|B1==SUM(A1:A3)|C1==C2|C2==C1|D1==$A$1*2";
+    assert(is(&arena, cells, "A3", "12"));
+    assert(is(&arena, cells, "B1", "24"));
+    assert(is(&arena, cells, "C1", "#CIRC!"));
+    assert(is(&arena, cells, "D1", "10"));
+}
+
+test "long chains are computed" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    calc.Book* b = arena.new(calc.Book, &arena);
+    defer b.release();
+    b.set_raw(&arena, 0, 0, "1");
+    for (i32 r in 1..600) {
+        text.TextBuilder* f = text.builder(&arena);
+        f.push("=A");
+        f.push_i64(r as i64);
+        f.push("+1");
+        b.set_raw(&arena, 0, r, f.text());
+    }
+    b.recalc();
+    assert(shown(&arena, b, "A600") == "600");
+}
+
+test "statistics and math functions" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    str d = "A1=4|A2=8|A3=15|A4=16|A5=23|A6=42|A7=text";
+    assert(ix(&arena, d, "B1==SUM(A1:A7)", "B1", "108"));
+    assert(ix(&arena, d, "B1==AVERAGE(A1:A6)", "B1", "18"));
+    assert(ix(&arena, d, "B1==MIN(A1:A7)", "B1", "4"));
+    assert(ix(&arena, d, "B1==MAX(A1:A7)", "B1", "42"));
+    assert(ix(&arena, d, "B1==COUNT(A1:A7)", "B1", "6"));
+    assert(ix(&arena, d, "B1==COUNTA(A1:A7)", "B1", "7"));
+    assert(ix(&arena, d, "B1==MEDIAN(A1:A6)", "B1", "15.5"));
+    assert(ix(&arena, d, "B1==LARGE(A1:A6;2)", "B1", "23"));
+    assert(ix(&arena, d, "B1==SMALL(A1:A6,2)", "B1", "8"));
+    assert(ix(&arena, d, "B1==RANK(16,A1:A6)", "B1", "3"));
+    assert(ix(&arena, d, "B1==SUMPRODUCT(A1:A2,A3:A4)", "B1", "188"));
+    assert(is(&arena, "A1==ROUND(2.675,2)", "A1", "2.68"));
+    assert(is(&arena, "A1==ROUND(-1.5,0)", "A1", "-2"));
+    assert(is(&arena, "A1==ROUNDDOWN(2.99,1)", "A1", "2.9"));
+    assert(is(&arena, "A1==MOD(-7,3)", "A1", "2"));
+    assert(is(&arena, "A1==POWER(2,10)", "A1", "1024"));
+    assert(is(&arena, "A1==FACT(5)", "A1", "120"));
+    assert(is(&arena, "A1==GCD(12,18)", "A1", "6"));
+    assert(is(&arena, "A1==LCM(4,6)", "A1", "12"));
+    assert(is(&arena, "A1==COMBIN(5,2)", "A1", "10"));
+    assert(is(&arena, "A1==SQRT(-1)", "A1", "#NUM!"));
+    assert(is(&arena, "A1==INT(-1.5)", "A1", "-2"));
+    assert(is(&arena, "A1==ABS(-3)+SIGN(-9)", "A1", "2"));
+}
+
+test "logic functions" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    assert(is(&arena, "A1==IF(1<2,\"yes\",\"no\")", "A1", "yes"));
+    assert(is(&arena, "A1==IF(1>2,1/0,5)", "A1", "5"));
+    assert(is(&arena, "A1==IFERROR(1/0,\"oops\")", "A1", "oops"));
+    assert(is(&arena, "A1==IFERROR(7,1/0)", "A1", "7"));
+    assert(is(&arena, "A1==AND(TRUE,1=1,2>1)", "A1", "TRUE"));
+    assert(is(&arena, "A1==OR(FALSE,1>2)", "A1", "FALSE"));
+    assert(is(&arena, "A1==NOT(FALSE)", "A1", "TRUE"));
+    assert(is(&arena, "A1==IFS(1>2,\"a\",2>1,\"b\")", "A1", "b"));
+    assert(is(&arena, "A1==SWITCH(2,1,\"one\",2,\"two\",\"many\")", "A1", "two"));
+    assert(is(&arena, "A1==CHOOSE(2,\"x\",\"y\",\"z\")", "A1", "y"));
+    assert(is(&arena, "A1==ISNUMBER(5)&ISTEXT(\"a\")", "A1", "TRUETRUE"));
+    assert(is(&arena, "A1=3|B1==ISBLANK(A2)", "B1", "TRUE"));
+    assert(is(&arena, "A1==ISERROR(1/0)", "A1", "TRUE"));
+    assert(is(&arena, "A1==ISEVEN(4)", "A1", "TRUE"));
+    assert(is(&arena, "B2==ROW()*100+COLUMN()", "B2", "202"));
+    assert(is(&arena, "A1=1|A2=2|A3==\"x\"&A1+A2", "A3", "x3"));
+    assert(is(&arena, "A1==\"a\"<\"B\"", "A1", "TRUE"));
+}
+
+test "text functions" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    assert(is(&arena, "A1==LEN(\"h�llo\")", "A1", "5"));
+    assert(is(&arena, "A1==LEFT(\"abcdef\",2)&RIGHT(\"abcdef\",2)", "A1", "abef"));
+    assert(is(&arena, "A1==MID(\"abcdef\",3,2)", "A1", "cd"));
+    assert(is(&arena, "A1==UPPER(\"abc\")&LOWER(\"DEF\")", "A1", "ABCdef"));
+    assert(is(&arena, "A1==PROPER(\"hello big world\")", "A1", "Hello Big World"));
+    assert(is(&arena, "A1==TRIM(\"  a   b  \")", "A1", "a b"));
+    assert(is(&arena, "A1==CONCAT(\"a\",1,\"b\")", "A1", "a1b"));
+    assert(is(&arena, "A1==TEXTJOIN(\"-\",TRUE,\"a\",\"\",\"b\")", "A1", "a-b"));
+    assert(is(&arena, "A1==REPT(\"ab\",3)", "A1", "ababab"));
+    assert(is(&arena, "A1==FIND(\"c\",\"abcabc\")", "A1", "3"));
+    assert(is(&arena, "A1==SEARCH(\"C\",\"abcabc\",4)", "A1", "6"));
+    assert(is(&arena, "A1==SUBSTITUTE(\"a-b-c\",\"-\",\"+\")", "A1", "a+b+c"));
+    assert(is(&arena, "A1==SUBSTITUTE(\"a-b-c\",\"-\",\"+\",2)", "A1", "a-b+c"));
+    assert(is(&arena, "A1==REPLACE(\"abcdef\",2,3,\"X\")", "A1", "aXef"));
+    assert(is(&arena, "A1==EXACT(\"a\",\"A\")", "A1", "FALSE"));
+    assert(is(&arena, "A1==VALUE(\"12.5\")+1", "A1", "13.5"));
+    assert(is(&arena, "A1==TEXT(1234.5,\"#,##0.00\")", "A1", "1,234.50"));
+    assert(is(&arena, "A1==TEXT(0.256,\"0.0%\")", "A1", "25.6%"));
+    assert(is(&arena, "A1==CHAR(65)&CODE(\"a\")", "A1", "A97"));
+}
+
+test "lookup and conditional functions" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    str d = "A1=apple|B1=3|A2=pear|B2=5|A3=apricot|B3=7";
+    assert(ix(&arena, d, "C1==VLOOKUP(\"pear\",A1:B3,2,FALSE)", "C1", "5"));
+    assert(ix(&arena, d, "C1==VLOOKUP(\"kiwi\",A1:B3,2,FALSE)", "C1", "#N/A"));
+    assert(ix(&arena, d, "C1==INDEX(A1:B3,3,2)", "C1", "7"));
+    assert(ix(&arena, d, "C1==MATCH(\"pear\",A1:A3,0)", "C1", "2"));
+    assert(ix(&arena, d, "C1==SUMIF(A1:A3,\"ap*\",B1:B3)", "C1", "10"));
+    assert(ix(&arena, d, "C1==COUNTIF(B1:B3,\">3\")", "C1", "2"));
+    assert(ix(&arena, d, "C1==AVERAGEIF(B1:B3,\"<>5\")", "C1", "5"));
+    assert(ix(&arena, d, "C1==SUMIFS(B1:B3,A1:A3,\"a*\",B1:B3,\">3\")", "C1", "7"));
+    assert(ix(&arena, d, "C1==COUNTIFS(A1:A3,\"a*\",B1:B3,\">=3\")", "C1", "2"));
+    assert(is(&arena, "A1=10|A2=20|A3=30|B1==VLOOKUP(25,A1:A3,1)", "B1", "20"));
+}
+
+test "references move with copies, insertions and deletions" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    assert(calc.remap(&arena, "=A1+$B$2+C$3", 0, 1, 2) == "=B3+$B$2+D$3");
+    assert(calc.remap(&arena, "=SUM(A1:B2)&\"A1\"", 0, 0, 1) == "=SUM(A2:B3)&\"A1\"");
+    assert(calc.remap(&arena, "=1E5+A1", 0, 1, 0) == "=1E5+B1");
+    assert(calc.remap(&arena, "=A1+A5", 1, 2, 1) == "=A1+A6");
+    assert(calc.remap(&arena, "=A1+A5", 2, 0, 1) == "=#REF!+A4");
+    assert(calc.remap(&arena, "=B1+D1", 3, 2, 1) == "=B1+E1");
+    assert(calc.remap(&arena, "=A1", 0, -1, 0) == "=#REF!");
+    assert(is(&arena, "A1==#REF!+1", "A1", "#REF!"));
+}
+
+test "number formats" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    assert(values.format_number(&arena, 1234567.891, 1, -1) == "1,234,567.89");
+    assert(values.format_number(&arena, 0.256, 2, 1) == "25.6%");
+    assert(values.format_number(&arena, -1234.5, 3, -1) == "-€1,234.50");
+    assert(values.format_number(&arena, 12345.0, 4, -1) == "1.23E+04");
+    assert(values.format_number(&arena, 0.00012, 4, 1) == "1.2E-04");
+    assert(values.format_number(&arena, 3.14159, 0, 2) == "3.14");
+    assert(values.general(&arena, 100.0) == "100");
+    assert(values.general(&arena, 0.1 + 0.2) == "0.3");
+    assert(values.general(&arena, 123456.789) == "123456.789");
+    assert(values.general(&arena, 1.0e20) != "");
+    assert(values.col_name(&arena, 0) == "A");
+    assert(values.col_name(&arena, 27) == "AB");
+    assert(values.cell_name(&arena, 99, 1999) == "CV2000");
+    assert(!values.parse_ref("CW1").ok);
+    assert(!values.parse_ref("A2001").ok);
+    assert(values.parse_ref("$c$7").row == 6);
+}
+
+pub editor.Editor* typed(Arena* arena, str spec) {
+    editor.Editor* e = editor.new_editor(arena);
+    str[] cells = text.split(arena, spec, "|");
+    for (usize i in 0..cells.len) {
+        str line = cells[i];
+        mut usize eq = 0;
+        while (line.bytes[eq] != 61) {
+            eq += 1;
+        }
+        values.Ref r = values.parse_ref(text.slice(line, 0, eq));
+        e.move_to(r.col, r.row, false);
+        e.start_edit(true);
+        e.insert_text(text.slice(line, eq + 1, line.len));
+        e.commit(0, 0);
+    }
+    return e;
+}
+
+str at(Arena* arena, editor.Editor* e, str name) {
+    return shown(arena, e.book, name);
+}
+
+test "typing, undo and redo" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    editor.Editor* e = typed(&arena, "A1=5|A2=7|A3==A1+A2");
+    defer e.book.release();
+    assert(at(&arena, e, "A3") == "12");
+    e.move_to(0, 0, false);
+    e.start_edit(false);
+    e.insert_text("0");
+    e.commit(0, 1);
+    assert(e.cr == 1);
+    assert(at(&arena, e, "A3") == "57");
+    e.undo();
+    assert(at(&arena, e, "A3") == "12");
+    e.redo();
+    assert(at(&arena, e, "A3") == "57");
+    e.undo();
+    e.undo();
+    e.undo();
+    e.undo();
+    assert(at(&arena, e, "A3") == "");
+    assert(!e.can_undo());
+}
+
+test "copy, paste and fill move the references" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    editor.Editor* e = typed(&arena, "A1=1|B1==A1*2");
+    defer e.book.release();
+    e.move_to(1, 0, false);
+    e.copy();
+    e.move_to(1, 2, false);
+    e.paste(e.clip_text);
+    assert(e.book.raw_of(1, 2) == "=A3*2");
+    e.move_to(1, 0, false);
+    e.move_to(1, 4, true);
+    e.fill_down();
+    assert(e.book.raw_of(1, 4) == "=A5*2");
+    e.move_to(0, 0, false);
+    e.paste("x\ty\n1\t2\n");
+    assert(at(&arena, e, "A1") == "x");
+    assert(at(&arena, e, "B2") == "2");
+}
+
+test "sorting and inserting rows" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    editor.Editor* e = typed(&arena, "A1=pear|B1=3|A2=apple|B2=9|A3=fig|B3=1|C1==B1*2");
+    defer e.book.release();
+    e.move_to(0, 0, false);
+    e.sort_rows(true);
+    assert(at(&arena, e, "A1") == "apple");
+    assert(at(&arena, e, "B3") == "3");
+    assert(at(&arena, e, "C3") == "6");
+    e.move_to(0, 1, false);
+    e.insert_rows();
+    assert(at(&arena, e, "A3") == "fig");
+    assert(e.book.raw_of(2, 3) == "=B4*2");
+    e.undo();
+    assert(e.book.raw_of(2, 2) == "=B3*2");
+    e.redo();
+    e.move_to(0, 1, false);
+    e.delete_rows();
+    assert(e.book.raw_of(2, 2) == "=B3*2");
+}
+
+test "formats on a selection" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    editor.Editor* e = typed(&arena, "A1=1234.5|A2=0.5");
+    defer e.book.release();
+    e.move_to(0, 0, false);
+    e.move_to(0, 1, true);
+    e.set_format(1);
+    assert(at(&arena, e, "A1") == "1,234.50");
+    e.set_format(2);
+    assert(at(&arena, e, "A2") == "50%");
+    e.change_decimals(1);
+    assert(at(&arena, e, "A2") == "50.0%");
+    e.toggle_flag(calc.FLAG_BOLD);
+    assert(e.snap_of(0, 1).flags & calc.FLAG_BOLD != 0);
+    e.toggle_flag(calc.FLAG_BOLD);
+    assert(e.snap_of(0, 1).flags == 0);
+}
+
+test "files round trip" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    editor.Editor* e = typed(&arena, "A1=hello; world|B2==\"a\"&A1|C3=3");
+    defer e.book.release();
+    e.book.set_width(2, 140);
+    e.move_to(2, 2, false);
+    e.set_format(3);
+    str data = e.encode_native();
+    editor.Editor* f = editor.new_editor(&arena);
+    defer f.book.release();
+    assert(f.decode_native(data));
+    assert(at(&arena, f, "B2") == "ahello; world");
+    assert(at(&arena, f, "C3") == "€3.00");
+    assert(f.book.width_of(2) == 140);
+    assert(!f.decode_native("nonsense"));
+    str csv = e.encode_csv();
+    assert(text.starts_with(csv, "hello; world,,\n,ahello; world,\n,,3\n"));
+    editor.Editor* g = editor.new_editor(&arena);
+    defer g.book.release();
+    g.decode_csv("name;qty\nbolt;4\n\"a;b\";5\n");
+    assert(at(&arena, g, "B2") == "4");
+    assert(at(&arena, g, "A3") == "a;b");
+}
+
+test "dates" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    assert(values.serial_of(1970, 1, 1) == 25569.0);
+    assert(values.date_text(&arena, 45000.0) == "2023-03-15");
+    assert(is(&arena, "A1==DATE(2024,2,29)+1", "A1", "45352"));
+    assert(is(&arena, "A1==YEAR(DATE(2024,14,1))", "A1", "2025"));
+    assert(is(&arena, "A1==MONTH(DATE(2024,14,1))", "A1", "2"));
+    assert(is(&arena, "A1==DAY(\"2024-03-15\")", "A1", "15"));
+    assert(is(&arena, "A1==DAYS(\"2024-03-15\",\"2024-03-01\")", "A1", "14"));
+    assert(is(&arena, "A1==WEEKDAY(DATE(2024,3,15))", "A1", "6"));
+}
+
+test "archives and xml" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    mut zip.Entry[] list = arena.alloc_slice(zip.Entry, 2);
+    list[0] = zip.Entry{ name: "mimetype", data: "text/plain".bytes, pack: false };
+    list[1] = zip.Entry{ name: "a/b.txt", data: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".bytes, pack: true };
+    ui8[] packed = zip.write(&arena, list);
+    vec.Vec<zip.Entry>* back = arena.new(vec.Vec<zip.Entry>, &arena);
+    assert(zip.read(&arena, packed, back));
+    assert(back.len() == 2);
+    assert(back.at(0).name == "mimetype");
+    assert(back.at(1).data.len == 76);
+    assert(!zip.read(&arena, "not a zip".bytes, back));
+    xml.Node* root = xml.parse(&arena, "<?xml version=\"1.0\"?><a k=\"x&amp;y\"><b>1 &lt; 2</b><c/></a>");
+    xml.Node* a = xml.first(&arena, root, "a");
+    assert(a.attr("k") == "x&y");
+    assert(xml.first(&arena, a, "b").kids.len() == 1);
+    assert(ods.to_odf(&arena, "=SUM(A1:B2,3)") == "of:=SUM([.A1:.B2];3)");
+    assert(ods.from_odf(&arena, "of:=SUM([.A1:.B2];3)") == "=SUM(A1:B2,3)");
+}
+
+test "opendocument round trip" {
+    mut Arena arena = Arena.new(8 * MB);
+    defer arena.free();
+    editor.Editor* e = typed(&arena, "A1=hello & <b>|A2=12.5|A3==A2*2|B1=2024-03-15|B2=true|C3=line");
+    defer e.book.release();
+    e.book.set_width(2, 140);
+    e.move_to(1, 1, false);
+    e.toggle_flag(calc.FLAG_BOLD);
+    e.move_to(0, 1, false);
+    e.set_format(3);
+    ui8[] file = ods.encode(&arena, e.book);
+    editor.Editor* f = editor.new_editor(&arena);
+    defer f.book.release();
+    assert(f.decode_ods(file));
+    assert(at(&arena, f, "A1") == "hello & <b>");
+    assert(at(&arena, f, "A2") == "€12.50");
+    assert(at(&arena, f, "A3") == "25");
+    assert(f.book.width_of(2) == 140);
+    assert(f.snap_of(1, 1).flags & calc.FLAG_BOLD != 0);
+    assert(!f.decode_ods("PK nonsense".bytes));
+}
+
+test "opendocument written by another program" {
+    mut Arena arena = Arena.new(8 * MB);
+    defer arena.free();
+    str doc = "<?xml version=\"1.0\"?><office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" xmlns:fo=\"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0\" xmlns:number=\"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0\"><office:automatic-styles><style:style style:name=\"ce1\" style:family=\"table-cell\" style:parent-style-name=\"Default\"><style:text-properties fo:font-weight=\"bold\"/></style:style></office:automatic-styles><office:body><office:spreadsheet><table:table table:name=\"Sheet1\"><table:table-column table:number-columns-repeated=\"3\"/><table:table-row><table:table-cell office:value-type=\"float\" office:value=\"4\"><text:p>4</text:p></table:table-cell><table:table-cell table:number-columns-repeated=\"2\" office:value-type=\"float\" office:value=\"1\" table:style-name=\"ce1\"><text:p>1</text:p></table:table-cell></table:table-row><table:table-row table:number-rows-repeated=\"2\"><table:table-cell table:formula=\"of:=SUM([.A1:.C1])\" office:value-type=\"float\" office:value=\"6\"><text:p>6</text:p></table:table-cell><table:table-cell office:value-type=\"string\"><text:p>x</text:p><text:p>y</text:p></table:table-cell></table:table-row></office:spreadsheet></office:body></office:document-content>";
+    mut zip.Entry[] list = arena.alloc_slice(zip.Entry, 1);
+    list[0] = zip.Entry{ name: "content.xml", data: doc.bytes, pack: true };
+    ui8[] file = zip.write(&arena, list);
+    editor.Editor* f = editor.new_editor(&arena);
+    defer f.book.release();
+    assert(f.decode_ods(file));
+    assert(at(&arena, f, "A1") == "4");
+    assert(at(&arena, f, "A2") == "6");
+    assert(at(&arena, f, "A3") == "6");
+    assert(at(&arena, f, "B2") == "x\ny");
+    assert(f.snap_of(2, 0).flags & calc.FLAG_BOLD != 0);
+}

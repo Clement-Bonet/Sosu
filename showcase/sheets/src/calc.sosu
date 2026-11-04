@@ -1,0 +1,2200 @@
+// sheets.calc: the cells of a sheet and the formulas that compute them.
+import sheets.values;
+import std.map;
+import std.math;
+import std.sort;
+import std.text;
+import std.vec;
+
+pub i32 FLAG_BOLD = 1;
+pub i32 FLAG_ITALIC = 2;
+pub i32 FLAG_UNDERLINE = 4;
+
+pub class Cell {
+    pub mut str raw;
+    pub mut i32 flags;
+    pub mut i32 align;
+    pub mut i32 fmt;
+    pub mut i32 dec;
+    pub mut ui32 fg;
+    pub mut ui32 bg;
+    pub mut i32 state;
+    pub mut values.Value val;
+
+    void init(keeps str raw) {
+        self.raw = raw;
+        self.flags = 0;
+        self.align = 0;
+        self.fmt = 0;
+        self.dec = -1;
+        self.fg = 0;
+        self.bg = 0;
+        self.state = 0;
+        self.val = values.vempty();
+    }
+}
+
+pub i64 key_of(i32 col, i32 row) {
+    return row as i64 * 256 + col as i64;
+}
+
+pub class Book {
+    pub mut Arena store;
+    pub mut Arena temp;
+    pub map.HashMap<i64, Cell*>* cells;
+    pub vec.Vec<i32>* widths;
+    pub mut i32 depth;
+    pub mut i64 defers;
+    pub mut i64 seed;
+    pub mut i64 now_unix;
+
+    void init(Arena* arena) {
+        self.store = Arena.new(1 * MB);
+        self.temp = Arena.new(1 * MB);
+        self.cells = map.new<i64, Cell*>(arena);
+        self.widths = vec.new<i32>(arena);
+        for (i32 i in 0..values.COLS) {
+            self.widths.push(88);
+        }
+        self.depth = 0;
+        self.defers = 0;
+        self.seed = 12345;
+        self.now_unix = 1788000000;
+    }
+
+    pub void release() {
+        self.store.free();
+        self.temp.free();
+    }
+
+    pub Cell*? find(i32 col, i32 row) {
+        return self.cells.get(key_of(col, row));
+    }
+
+    pub Cell* make(Arena* arena, i32 col, i32 row) {
+        i64 k = key_of(col, row);
+        Cell*? have = self.cells.get(k);
+        match (have) {
+            some(c) => {
+                return c;
+            },
+            none => {
+                Cell* c = arena.new(Cell, "");
+                self.cells.put(k, c);
+                return c;
+            },
+        }
+    }
+
+    pub str raw_of(i32 col, i32 row) {
+        Cell*? have = self.cells.get(key_of(col, row));
+        match (have) {
+            some(c) => {
+                return c.raw;
+            },
+            none => {
+                return "";
+            },
+        }
+    }
+
+    // A copy of `s` that lives as long as the book.
+    pub str keep(str s) {
+        if (s.len == 0) {
+            return "";
+        }
+        Arena* a = &self.store;
+        ui8[] copy = a.alloc_slice(ui8, s.len);
+        for (usize i in 0..s.len) {
+            copy[i] = s.bytes[i];
+        }
+        return match (str.from_bytes(copy)) {
+            ok(x) => x,
+            err(e) => "",
+        };
+    }
+
+    pub values.Value value(i32 col, i32 row) {
+        if (col < 0 || col >= values.COLS || row < 0 || row >= values.ROWS) {
+            return values.verr("#REF!");
+        }
+        Cell*? have = self.cells.get(key_of(col, row));
+        match (have) {
+            some(c) => {
+                return self.compute(c, col, row);
+            },
+            none => {
+                return values.vempty();
+            },
+        }
+    }
+
+    pub values.Value compute(Cell* c, i32 col, i32 row) {
+        if (c.state == 2) {
+            return c.val;
+        }
+        if (c.state == 1) {
+            return values.verr("#CIRC!");
+        }
+        if (self.depth > 60) {
+            self.defers += 1;
+            return values.verr("#REF!");
+        }
+        c.state = 1;
+        self.depth += 1;
+        i64 before = self.defers;
+        Arena* t = &self.temp;
+        mut values.Value v = values.vempty();
+        if (c.raw.len > 1 && c.raw.bytes[0] == 61 && c.fmt != 6) {
+            Parser* p = t.new(Parser, self, t, c.raw, col, row);
+            v = p.run();
+        } else {
+            v = literal(t, c.raw, c.fmt);
+        }
+        self.depth -= 1;
+        c.val = v;
+        c.state = self.defers == before ? 2 : 0;
+        return v;
+    }
+
+    // Computes every cell again.
+    pub void recalc() {
+        self.temp.free();
+        self.temp = Arena.new(1 * MB);
+        self.defers = 0;
+        self.depth = 0;
+        Arena* t = &self.temp;
+        Cell*[] all = self.cells.values(t);
+        for (usize i in 0..all.len) {
+            all[i].state = 0;
+        }
+        i64[] keys = self.cells.keys(t);
+        sort.sort(keys);
+        mut bool again = true;
+        mut i32 guard = 0;
+        while (again && guard < 4000) {
+            i64 before = self.defers;
+            for (usize i in 0..keys.len) {
+                i32 col = (keys[i] % 256) as i32;
+                i32 row = (keys[i] / 256) as i32;
+                self.value(col, row);
+            }
+            again = self.defers != before;
+            guard += 1;
+        }
+    }
+
+    pub void set_raw(Arena* arena, i32 col, i32 row, str raw) {
+        Cell* c = self.make(arena, col, row);
+        c.raw = self.keep(raw);
+    }
+
+    pub values.Value result(i32 col, i32 row) {
+        Cell*? have = self.cells.get(key_of(col, row));
+        match (have) {
+            some(c) => {
+                return c.val;
+            },
+            none => {
+                return values.vempty();
+            },
+        }
+    }
+
+    pub i32 width_of(i32 col) {
+        return self.widths.items()[col as usize];
+    }
+
+    pub void set_width(i32 col, i32 w) {
+        self.widths.set(col as usize, w);
+    }
+
+    // The last used column and row, as (col, row), or (-1, -1) when the sheet is empty.
+    pub values.Ref extent(Arena* arena) {
+        mut i32 mc = -1;
+        mut i32 mr = -1;
+        i64[] keys = self.cells.keys(arena);
+        for (usize i in 0..keys.len) {
+            Cell*? have = self.cells.get(keys[i]);
+            match (have) {
+                some(c) => {
+                    if (c.raw.len > 0) {
+                        i32 col = (keys[i] % 256) as i32;
+                        i32 row = (keys[i] / 256) as i32;
+                        mc = col > mc ? col : mc;
+                        mr = row > mr ? row : mr;
+                    }
+                },
+                none => { },
+            }
+        }
+        return values.Ref{ ok: mc >= 0, col: mc, row: mr, col_abs: false, row_abs: false };
+    }
+}
+
+// What a typed text means: a number, a percentage, a date, TRUE or FALSE, or just text.
+pub values.Value literal(Arena* arena, str raw, i32 fmt) {
+    if (raw.len == 0) {
+        return values.vempty();
+    }
+    if (fmt == 6) {
+        return values.vtext(raw);
+    }
+    if (raw.bytes[0] == 39) {
+        return values.vtext(text.slice(raw, 1, raw.len));
+    }
+    str t = text.trim(raw);
+    if (t.len == 0) {
+        return values.vtext(raw);
+    }
+    if (text.to_upper(arena, t) == "TRUE") {
+        return values.vbool(true);
+    }
+    if (text.to_upper(arena, t) == "FALSE") {
+        return values.vbool(false);
+    }
+    ui8 first = t.bytes[0];
+    ui8 last = t.bytes[t.len - 1];
+    bool starts = values.is_digit(first) || first == 45 || first == 43 || first == 46;
+    bool ends = values.is_digit(last) || last == 37 || last == 46;
+    if (starts && ends) {
+        if (last == 37) {
+            return match (text.parse_f64(text.slice(t, 0, t.len - 1))) {
+                ok(x) => values.vnum(x / 100.0),
+                err(e) => values.vtext(raw),
+            };
+        }
+        if (t.len == 10 && t.bytes[4] == 45 && t.bytes[7] == 45) {
+            return date_literal(t, raw);
+        }
+        return match (text.parse_f64(t)) {
+            ok(x) => values.vnum(x),
+            err(e) => values.vtext(raw),
+        };
+    }
+    return values.vtext(raw);
+}
+
+pub i64 int_of(str s) {
+    return match (text.parse_i64(s)) {
+        ok(x) => x,
+        err(e) => -1,
+    };
+}
+
+values.Value date_literal(str t, str raw) {
+    i64 y = int_of(text.slice(t, 0, 4));
+    i64 m = int_of(text.slice(t, 5, 7));
+    i64 d = int_of(text.slice(t, 8, 10));
+    if (y < 0 || m < 1 || m > 12 || d < 1 || d > 31) {
+        return values.vtext(raw);
+    }
+    return values.vnum(values.serial_of(y, m, d));
+}
+
+// Rewrites the references of a formula: kind 0 moves the relative ones by (a, n) columns and rows (copy and paste);
+// 1 and 2 insert or delete n rows at row a; 3 and 4 do the same with columns.
+pub str remap(Arena* arena, str f, i32 kind, i32 a, i32 n) {
+    text.TextBuilder* out = text.builder(arena);
+    mut usize i = 0;
+    while (i < f.len) {
+        ui8 c = f.bytes[i];
+        if (c == 34) {
+            mut usize j = i + 1;
+            while (j < f.len) {
+                if (f.bytes[j] == 34) {
+                    if (j + 1 < f.len && f.bytes[j + 1] == 34) {
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                j = char_end(f, j);
+            }
+            usize stop = j + 1 > f.len ? f.len : j + 1;
+            out.push(text.slice(f, i, stop));
+            i = stop;
+            continue;
+        }
+        bool word = values.is_letter(c) || c == 36 || values.is_digit(c) || c == 46;
+        if (word) {
+            mut usize j = i;
+            while (j < f.len && (values.is_letter(f.bytes[j]) || values.is_digit(f.bytes[j]) || f.bytes[j] == 36 || f.bytes[j] == 95 || f.bytes[j] == 46)) {
+                j += 1;
+            }
+            str w = text.slice(f, i, j);
+            bool is_call = j < f.len && f.bytes[j] == 40;
+            values.Ref r = values.parse_ref(w);
+            if (is_call || !r.ok || values.is_digit(c)) {
+                out.push(w);
+            } else {
+                out.push(moved_ref(arena, r, kind, a, n));
+            }
+            i = j;
+            continue;
+        }
+        usize e = char_end(f, i);
+        out.push(text.slice(f, i, e));
+        i = e;
+    }
+    return out.text();
+}
+
+str moved_ref(Arena* arena, values.Ref r, i32 kind, i32 a, i32 n) {
+    mut i32 col = r.col;
+    mut i32 row = r.row;
+    if (kind == 0) {
+        col = r.col_abs ? col : col + a;
+        row = r.row_abs ? row : row + n;
+    } else if (kind == 1) {
+        row = row >= a ? row + n : row;
+    } else if (kind == 2) {
+        if (row >= a && row < a + n) {
+            return "#REF!";
+        }
+        row = row >= a + n ? row - n : row;
+    } else if (kind == 3) {
+        col = col >= a ? col + n : col;
+    } else {
+        if (col >= a && col < a + n) {
+            return "#REF!";
+        }
+        col = col >= a + n ? col - n : col;
+    }
+    if (col < 0 || col >= values.COLS || row < 0 || row >= values.ROWS) {
+        return "#REF!";
+    }
+    text.TextBuilder* out = text.builder(arena);
+    out.push(r.col_abs ? "$" : "");
+    out.push(values.col_name(arena, col));
+    out.push(r.row_abs ? "$" : "");
+    out.push_i64((row + 1) as i64);
+    return out.text();
+}
+
+pub struct Arg {
+    pub bool range;
+    pub values.Value v;
+    pub i32 c1;
+    pub i32 r1;
+    pub i32 c2;
+    pub i32 r2;
+}
+
+pub values.Value coerce(Arena* arena, values.Value v) {
+    if (v.kind == values.NUMBER || v.kind == values.ERROR) {
+        return v;
+    }
+    if (v.kind == values.EMPTY) {
+        return values.vnum(0.0);
+    }
+    if (v.kind == values.BOOL) {
+        return values.vnum(v.num);
+    }
+    str t = text.trim(v.text);
+    if (t.len == 0) {
+        return values.verr("#VALUE!");
+    }
+    return literal_number(arena, t);
+}
+
+values.Value literal_number(Arena* arena, str t) {
+    values.Value v = literal(arena, t, 0);
+    if (v.kind == values.NUMBER) {
+        return v;
+    }
+    return values.verr("#VALUE!");
+}
+
+// The text of a value, as a formula sees it.
+pub str as_text(Arena* arena, values.Value v) {
+    if (v.kind == values.NUMBER) {
+        return values.general(arena, v.num);
+    }
+    if (v.kind == values.BOOL) {
+        return v.num != 0.0 ? "TRUE" : "FALSE";
+    }
+    return v.text;
+}
+
+pub bool truthy(Arena* arena, values.Value v) {
+    if (v.kind == values.TEXT) {
+        return text.to_upper(arena, v.text) == "TRUE";
+    }
+    return v.num != 0.0;
+}
+
+// -1, 0 or 1. Numbers come before texts, texts before booleans; empty cells take the type of the other side.
+pub i32 compare(values.Value a, values.Value b) {
+    mut values.Value x = a;
+    mut values.Value y = b;
+    if (x.kind == values.EMPTY) {
+        x = y.kind == values.TEXT ? values.vtext("") : y.kind == values.BOOL ? values.vbool(false) : values.vnum(0.0);
+    }
+    if (y.kind == values.EMPTY) {
+        y = x.kind == values.TEXT ? values.vtext("") : x.kind == values.BOOL ? values.vbool(false) : values.vnum(0.0);
+    }
+    if (x.kind != y.kind) {
+        return x.kind < y.kind ? -1 : 1;
+    }
+    if (x.kind == values.TEXT) {
+        return values.compare_text(x.text, y.text);
+    }
+    return x.num < y.num ? -1 : x.num > y.num ? 1 : 0;
+}
+
+// Does `v` satisfy a criterion like ">5", "<>x", "a*" or a plain value?
+pub bool criterion_matches(Arena* arena, values.Value v, values.Value crit) {
+    if (crit.kind == values.NUMBER) {
+        return v.kind == values.NUMBER && v.num == crit.num;
+    }
+    if (crit.kind == values.BOOL) {
+        return v.kind == values.BOOL && v.num == crit.num;
+    }
+    str s = crit.text;
+    mut usize op = 0;
+    mut i32 kind = 0;  // 0 =, 1 <>, 2 <, 3 <=, 4 >, 5 >=
+    if (s.len >= 2 && s.bytes[0] == 60 && s.bytes[1] == 62) {
+        kind = 1;
+        op = 2;
+    } else if (s.len >= 2 && s.bytes[0] == 60 && s.bytes[1] == 61) {
+        kind = 3;
+        op = 2;
+    } else if (s.len >= 2 && s.bytes[0] == 62 && s.bytes[1] == 61) {
+        kind = 5;
+        op = 2;
+    } else if (s.len >= 1 && s.bytes[0] == 60) {
+        kind = 2;
+        op = 1;
+    } else if (s.len >= 1 && s.bytes[0] == 62) {
+        kind = 4;
+        op = 1;
+    } else if (s.len >= 1 && s.bytes[0] == 61) {
+        op = 1;
+    }
+    str rest = text.slice(s, op, s.len);
+    values.Value operand = literal(arena, rest, 0);
+    if (operand.kind == values.NUMBER) {
+        if (v.kind != values.NUMBER) {
+            return kind == 1;
+        }
+        return order_ok(kind, v.num < operand.num ? -1 : v.num > operand.num ? 1 : 0);
+    }
+    if (kind >= 2) {
+        if (v.kind != values.TEXT) {
+            return false;
+        }
+        return order_ok(kind, values.compare_text(v.text, rest));
+    }
+    mut bool same = false;
+    if (rest.len == 0 && (kind == 0 || kind == 1)) {
+        same = v.kind == values.EMPTY || v.kind == values.TEXT && v.text.len == 0;
+    } else if (v.kind == values.TEXT) {
+        same = values.wildcard(rest, v.text);
+    }
+    return kind == 1 ? !same : same;
+}
+
+bool order_ok(i32 kind, i32 c) {
+    if (kind == 0) {
+        return c == 0;
+    }
+    if (kind == 1) {
+        return c != 0;
+    }
+    if (kind == 2) {
+        return c < 0;
+    }
+    if (kind == 3) {
+        return c <= 0;
+    }
+    if (kind == 4) {
+        return c > 0;
+    }
+    return c >= 0;
+}
+
+pub class Parser {
+    Book* book;
+    Arena* t;
+    str s;
+    mut usize pos;
+    mut bool live;
+    i32 col;
+    i32 row;
+
+    void init(keeps Book* book, Arena* t, keeps str s, i32 col, i32 row) {
+        self.book = book;
+        self.t = t;
+        self.s = s;
+        self.pos = 1;
+        self.live = true;
+        self.col = col;
+        self.row = row;
+    }
+
+    pub values.Value run() {
+        values.Value v = self.expr();
+        self.skip();
+        if (v.kind == values.ERROR) {
+            return v;
+        }
+        if (self.pos < self.s.len) {
+            return values.verr("#SYNTAX!");
+        }
+        if (v.kind == values.EMPTY) {
+            return values.vnum(0.0);
+        }
+        return v;
+    }
+
+    void skip() {
+        while (self.pos < self.s.len && self.s.bytes[self.pos] == 32) {
+            self.pos += 1;
+        }
+    }
+
+    // The next byte after the spaces, or 0 at the end.
+    ui8 peek() {
+        self.skip();
+        if (self.pos >= self.s.len) {
+            return 0;
+        }
+        return self.s.bytes[self.pos];
+    }
+
+    ui8 at(usize k) {
+        if (self.pos + k >= self.s.len) {
+            return 0;
+        }
+        return self.s.bytes[self.pos + k];
+    }
+
+    values.Value expr() {
+        mut values.Value left = self.concat();
+        while (true) {
+            ui8 c = self.peek();
+            ui8 d = self.at(1);
+            mut i32 op = -1;
+            mut usize n = 1;
+            if (c == 61) {
+                op = 0;
+            } else if (c == 60 && d == 62) {
+                op = 1;
+                n = 2;
+            } else if (c == 60 && d == 61) {
+                op = 3;
+                n = 2;
+            } else if (c == 62 && d == 61) {
+                op = 5;
+                n = 2;
+            } else if (c == 60) {
+                op = 2;
+            } else if (c == 62) {
+                op = 4;
+            }
+            if (op < 0) {
+                break;
+            }
+            self.pos += n;
+            values.Value right = self.concat();
+            if (left.kind == values.ERROR) {
+                continue;
+            }
+            if (right.kind == values.ERROR) {
+                left = right;
+                continue;
+            }
+            left = values.vbool(order_ok(op, compare(left, right)));
+        }
+        return left;
+    }
+
+    values.Value concat() {
+        mut values.Value left = self.add();
+        while (self.peek() == 38) {
+            self.pos += 1;
+            values.Value right = self.add();
+            if (left.kind == values.ERROR) {
+                continue;
+            }
+            if (right.kind == values.ERROR) {
+                left = right;
+                continue;
+            }
+            text.TextBuilder* b = text.builder(self.t);
+            b.push(as_text(self.t, left));
+            b.push(as_text(self.t, right));
+            left = values.vtext(b.text());
+        }
+        return left;
+    }
+
+    values.Value add() {
+        mut values.Value left = self.mul();
+        while (true) {
+            ui8 c = self.peek();
+            if (c != 43 && c != 45) {
+                break;
+            }
+            self.pos += 1;
+            values.Value right = self.mul();
+            values.Value a = coerce(self.t, left);
+            values.Value b = coerce(self.t, right);
+            if (a.kind == values.ERROR) {
+                left = a;
+            } else if (b.kind == values.ERROR) {
+                left = b;
+            } else {
+                left = values.vnum(c == 43 ? a.num + b.num : a.num - b.num);
+            }
+        }
+        return left;
+    }
+
+    values.Value mul() {
+        mut values.Value left = self.powr();
+        while (true) {
+            ui8 c = self.peek();
+            if (c != 42 && c != 47) {
+                break;
+            }
+            self.pos += 1;
+            values.Value right = self.powr();
+            values.Value a = coerce(self.t, left);
+            values.Value b = coerce(self.t, right);
+            if (a.kind == values.ERROR) {
+                left = a;
+            } else if (b.kind == values.ERROR) {
+                left = b;
+            } else if (c == 42) {
+                left = values.vnum(a.num * b.num);
+            } else if (b.num == 0.0) {
+                left = self.live ? values.verr("#DIV/0!") : values.vnum(0.0);
+            } else {
+                left = values.vnum(a.num / b.num);
+            }
+        }
+        return left;
+    }
+
+    values.Value powr() {
+        mut values.Value left = self.unary();
+        while (self.peek() == 94) {
+            self.pos += 1;
+            values.Value right = self.unary();
+            values.Value a = coerce(self.t, left);
+            values.Value b = coerce(self.t, right);
+            if (a.kind == values.ERROR) {
+                left = a;
+            } else if (b.kind == values.ERROR) {
+                left = b;
+            } else {
+                left = values.vnum(math.pow(a.num, b.num));
+            }
+        }
+        return left;
+    }
+
+    values.Value unary() {
+        ui8 c = self.peek();
+        if (c == 45 || c == 43) {
+            self.pos += 1;
+            values.Value v = coerce(self.t, self.unary());
+            if (c == 45 && v.kind == values.NUMBER) {
+                return values.vnum(-v.num);
+            }
+            return v;
+        }
+        return self.postfix();
+    }
+
+    values.Value postfix() {
+        mut values.Value v = self.primary();
+        while (self.peek() == 37) {
+            self.pos += 1;
+            values.Value a = coerce(self.t, v);
+            v = a.kind == values.NUMBER ? values.vnum(a.num / 100.0) : a;
+        }
+        return v;
+    }
+
+    // A name, a reference or a number: letters, digits, $, _ and . stuck together.
+    str word() {
+        usize start = self.pos;
+        while (self.pos < self.s.len) {
+            ui8 c = self.s.bytes[self.pos];
+            if (values.is_letter(c) || values.is_digit(c) || c == 36 || c == 95 || c == 46) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        return text.slice(self.s, start, self.pos);
+    }
+
+    values.Value primary() {
+        ui8 c = self.peek();
+        if (c == 0) {
+            return values.verr("#SYNTAX!");
+        }
+        if (c == 40) {
+            self.pos += 1;
+            values.Value v = self.expr();
+            if (self.peek() != 41) {
+                return v.kind == values.ERROR ? v : values.verr("#SYNTAX!");
+            }
+            self.pos += 1;
+            return v;
+        }
+        if (c == 34) {
+            return self.string_literal();
+        }
+        if (c == 35) {
+            usize start = self.pos;
+            self.pos += 1;
+            while (self.pos < self.s.len && (values.is_letter(self.s.bytes[self.pos]) || values.is_digit(self.s.bytes[self.pos]) || self.s.bytes[self.pos] == 47 || self.s.bytes[self.pos] == 33 || self.s.bytes[self.pos] == 63)) {
+                self.pos += 1;
+            }
+            return values.verr(text.slice(self.s, start, self.pos));
+        }
+        if (values.is_digit(c) || c == 46) {
+            return self.number_literal();
+        }
+        if (values.is_letter(c) || c == 36) {
+            usize start = self.pos;
+            str w = self.word();
+            if (self.at(0) == 40) {
+                self.pos += 1;
+                return self.call(text.to_upper(self.t, w));
+            }
+            values.Ref r = values.parse_ref(w);
+            if (r.ok) {
+                if (self.at(0) == 58) {
+                    self.pos += 1;
+                    str w2 = self.word();
+                    values.Ref r2 = values.parse_ref(w2);
+                    if (!r2.ok) {
+                        return values.verr("#REF!");
+                    }
+                    return self.live ? self.book.value(r.col, r.row) : values.vempty();
+                }
+                return self.live ? self.book.value(r.col, r.row) : values.vempty();
+            }
+            str up = text.to_upper(self.t, w);
+            if (up == "TRUE") {
+                return values.vbool(true);
+            }
+            if (up == "FALSE") {
+                return values.vbool(false);
+            }
+            self.pos = start + w.len;
+            return values.verr("#NAME?");
+        }
+        return values.verr("#SYNTAX!");
+    }
+
+    values.Value string_literal() {
+        self.pos += 1;
+        text.TextBuilder* b = text.builder(self.t);
+        while (true) {
+            if (self.pos >= self.s.len) {
+                return values.verr("#SYNTAX!");
+            }
+            ui8 c = self.s.bytes[self.pos];
+            if (c == 34) {
+                if (self.at(1) == 34) {
+                    b.push("\"");
+                    self.pos += 2;
+                    continue;
+                }
+                self.pos += 1;
+                break;
+            }
+            usize start = self.pos;
+            self.pos = char_end(self.s, self.pos);
+            b.push(text.slice(self.s, start, self.pos));
+        }
+        return values.vtext(b.text());
+    }
+
+    values.Value number_literal() {
+        usize start = self.pos;
+        while (self.pos < self.s.len && (values.is_digit(self.s.bytes[self.pos]) || self.s.bytes[self.pos] == 46)) {
+            self.pos += 1;
+        }
+        ui8 e = self.at(0);
+        if (e == 69 || e == 101) {
+            ui8 n1 = self.at(1);
+            ui8 n2 = self.at(2);
+            if (values.is_digit(n1) || (n1 == 43 || n1 == 45) && values.is_digit(n2)) {
+                self.pos += 2;
+                while (self.pos < self.s.len && values.is_digit(self.s.bytes[self.pos])) {
+                    self.pos += 1;
+                }
+            }
+        }
+        return match (text.parse_f64(text.slice(self.s, start, self.pos))) {
+            ok(x) => values.vnum(x),
+            err(er) => values.verr("#SYNTAX!"),
+        };
+    }
+
+    // One argument: a reference or a range stays one, anything else is a computed value.
+    Arg arg() {
+        usize start = self.pos;
+        self.skip();
+        ui8 c = self.peek();
+        if (values.is_letter(c) || c == 36) {
+            str w = self.word();
+            values.Ref r = values.parse_ref(w);
+            if (r.ok && self.at(0) != 40) {
+                mut Arg a = Arg{ range: true, v: values.vempty(), c1: r.col, r1: r.row, c2: r.col, r2: r.row };
+                if (self.at(0) == 58) {
+                    usize save = self.pos;
+                    self.pos += 1;
+                    values.Ref r2 = values.parse_ref(self.word());
+                    if (r2.ok) {
+                        a = Arg{ range: true, v: values.vempty(), c1: r.col < r2.col ? r.col : r2.col, r1: r.row < r2.row ? r.row : r2.row, c2: r.col < r2.col ? r2.col : r.col, r2: r.row < r2.row ? r2.row : r.row };
+                    } else {
+                        self.pos = save;
+                    }
+                }
+                ui8 n = self.peek();
+                if (n == 44 || n == 59 || n == 41) {
+                    return a;
+                }
+            }
+        }
+        self.pos = start;
+        values.Value v = self.expr();
+        return Arg{ range: false, v: v, c1: 0, r1: 0, c2: 0, r2: 0 };
+    }
+
+    values.Value call(str name) {
+        if (name == "IF" || name == "IFERROR" || name == "IFNA") {
+            return self.lazy(name);
+        }
+        vec.Vec<Arg>* args = vec.new<Arg>(self.t);
+        if (self.peek() == 41) {
+            self.pos += 1;
+        } else {
+            while (true) {
+                args.push(self.arg());
+                ui8 c = self.peek();
+                if (c == 44 || c == 59) {
+                    self.pos += 1;
+                    continue;
+                }
+                if (c == 41) {
+                    self.pos += 1;
+                    break;
+                }
+                return values.verr("#SYNTAX!");
+            }
+        }
+        if (!self.live) {
+            return values.vempty();
+        }
+        Arg[] a = args.items();
+        if (a.len < min_args(name) as usize) {
+            return values.verr("#N/A");
+        }
+        return dispatch(self, name, a);
+    }
+
+    // IF, IFERROR and IFNA compute only the branch they need.
+    values.Value lazy(str name) {
+        mut bool was = self.live;
+        values.Value first = self.expr();
+        mut values.Value chosen = values.vempty();
+        mut i32 have = 1;
+        ui8 c = self.peek();
+        if (c != 44 && c != 59) {
+            return values.verr("#N/A");
+        }
+        self.pos += 1;
+        mut bool take_first = false;
+        if (name == "IF") {
+            values.Value cond = coerce_bool(self.t, first);
+            if (cond.kind == values.ERROR) {
+                take_first = false;
+                self.live = false;
+                self.expr();
+                self.live = was;
+                return self.finish_lazy(cond, 2);
+            }
+            self.live = was && cond.num != 0.0;
+            values.Value yes = self.expr();
+            self.live = was;
+            mut values.Value no = values.vbool(false);
+            if (self.peek() == 44 || self.peek() == 59) {
+                self.pos += 1;
+                self.live = was && cond.num == 0.0;
+                no = self.expr();
+                self.live = was;
+            }
+            return self.finish_lazy(cond.num != 0.0 ? yes : no, 0);
+        }
+        bool trap = name == "IFERROR" ? first.kind == values.ERROR : first.kind == values.ERROR && first.text == "#N/A";
+        self.live = was && trap;
+        values.Value fallback = self.expr();
+        self.live = was;
+        return self.finish_lazy(trap ? fallback : first, 0);
+    }
+
+    values.Value finish_lazy(values.Value v, i32 mode) {
+        while (self.peek() == 44 || self.peek() == 59) {
+            self.pos += 1;
+            mut bool was = self.live;
+            self.live = false;
+            self.expr();
+            self.live = was;
+        }
+        if (self.peek() != 41) {
+            return values.verr("#SYNTAX!");
+        }
+        self.pos += 1;
+        if (!self.live) {
+            return values.vempty();
+        }
+        return v;
+    }
+}
+
+values.Value coerce_bool(Arena* arena, values.Value v) {
+    if (v.kind == values.ERROR) {
+        return v;
+    }
+    if (v.kind == values.TEXT) {
+        str u = text.to_upper(arena, text.trim(v.text));
+        if (u == "TRUE") {
+            return values.vnum(1.0);
+        }
+        if (u == "FALSE") {
+            return values.vnum(0.0);
+        }
+        return values.verr("#VALUE!");
+    }
+    return values.vnum(v.num != 0.0 ? 1.0 : 0.0);
+}
+
+// Fewer arguments than this is an error (#N/A).
+pub i32 min_args(str name) {
+    str[9] none = ["PI", "TRUE", "FALSE", "NOW", "TODAY", "RAND", "NA", "ROW", "COLUMN"];
+    for (usize i in 0..9) {
+        if (name == none[i]) {
+            return 0;
+        }
+    }
+    str[22] two = ["ROUND", "ROUNDUP", "ROUNDDOWN", "MOD", "POWER", "ATAN2", "QUOTIENT", "LARGE", "SMALL", "RANK", "FIND", "SEARCH", "EXACT", "REPT", "INDEX", "MATCH", "SUMIF", "COUNTIF", "AVERAGEIF", "COUNTIFS", "DAYS", "COMBIN"];
+    for (usize i in 0..22) {
+        if (name == two[i]) {
+            return 2;
+        }
+    }
+    str[10] three = ["MID", "SUBSTITUTE", "VLOOKUP", "HLOOKUP", "SUMIFS", "DATE", "TEXTJOIN", "SWITCH", "CHOOSE", "IFS"];
+    for (usize i in 0..10) {
+        if (name == three[i]) {
+            return name == "CHOOSE" || name == "IFS" ? 2 : 3;
+        }
+    }
+    if (name == "REPLACE") {
+        return 4;
+    }
+    if (name == "RANDBETWEEN") {
+        return 2;
+    }
+    return 1;
+}
+
+pub values.Value dispatch(Parser* p, str name, Arg[] a) {
+    return call_function(p.book, p.t, p.col, p.row, name, a);
+}
+
+pub values.Value call_function(Book* b, Arena* t, i32 col, i32 row, str name, Arg[] a) {
+    mut values.Value v = agg_fn(b, t, name, a);
+    if (v.kind >= 0) {
+        return v;
+    }
+    v = math_fn(b, t, name, a);
+    if (v.kind >= 0) {
+        return v;
+    }
+    v = logic_fn(b, t, col, row, name, a);
+    if (v.kind >= 0) {
+        return v;
+    }
+    v = text_fn(b, t, name, a);
+    if (v.kind >= 0) {
+        return v;
+    }
+    v = lookup_fn(b, t, name, a);
+    if (v.kind >= 0) {
+        return v;
+    }
+    v = date_fn(b, t, name, a);
+    if (v.kind >= 0) {
+        return v;
+    }
+    return values.verr("#NAME?");
+}
+
+values.Value nofn() {
+    return values.Value{ kind: -1, num: 0.0, text: "" };
+}
+
+values.Value av(Book* b, Arg x) {
+    return x.range ? b.value(x.c1, x.r1) : x.v;
+}
+
+values.Value nm(Book* b, Arena* t, Arg x) {
+    return coerce(t, av(b, x));
+}
+
+values.Value tx(Book* b, Arena* t, Arg x) {
+    values.Value v = av(b, x);
+    if (v.kind == values.ERROR) {
+        return v;
+    }
+    return values.vtext(as_text(t, v));
+}
+
+bool is_err(values.Value v) {
+    return v.kind == values.ERROR;
+}
+
+// Pushes the numbers of the arguments from `from` on: in a range only the numbers count, a lone value must be a number.
+// The byte after the character that starts at `i`.
+pub usize char_end(str s, usize i) {
+    mut usize j = i + 1;
+    while (j < s.len && s.bytes[j] & 192 == 128) {
+        j += 1;
+    }
+    return j;
+}
+
+// The base for argument lists: values.verr
+values.Value collect(Book* b, Arena* t, Arg[] a, usize from, usize to, vec.Vec<f64>* out) {
+    for (usize i in from..to) {
+        Arg x = a[i];
+        if (x.range) {
+            for (i32 r in x.r1..x.r2 + 1) {
+                for (i32 c in x.c1..x.c2 + 1) {
+                    values.Value v = b.value(c, r);
+                    if (is_err(v)) {
+                        return v;
+                    }
+                    if (v.kind == values.NUMBER) {
+                        out.push(v.num);
+                    }
+                }
+            }
+        } else {
+            if (is_err(x.v)) {
+                return x.v;
+            }
+            if (x.v.kind == values.EMPTY) {
+                continue;
+            }
+            values.Value n = coerce(t, x.v);
+            if (is_err(n)) {
+                return n;
+            }
+            out.push(n.num);
+        }
+    }
+    return values.vempty();
+}
+
+values.Value agg_fn(Book* b, Arena* t, str name, Arg[] a) {
+    if (name == "COUNT" || name == "COUNTA" || name == "COUNTBLANK") {
+        mut i64 n = 0;
+        for (usize i in 0..a.len) {
+            Arg x = a[i];
+            if (!x.range) {
+                if (name == "COUNT" && !is_err(coerce(t, x.v)) && x.v.kind != values.EMPTY) {
+                    n += 1;
+                } else if (name == "COUNTA" && x.v.kind != values.EMPTY) {
+                    n += 1;
+                }
+                continue;
+            }
+            for (i32 r in x.r1..x.r2 + 1) {
+                for (i32 c in x.c1..x.c2 + 1) {
+                    values.Value v = b.value(c, r);
+                    if (name == "COUNT" && v.kind == values.NUMBER) {
+                        n += 1;
+                    } else if (name == "COUNTA" && v.kind != values.EMPTY) {
+                        n += 1;
+                    } else if (name == "COUNTBLANK" && (v.kind == values.EMPTY || v.kind == values.TEXT && v.text.len == 0)) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        return values.vnum(n as f64);
+    }
+    if (name == "SUMPRODUCT") {
+        Arg first = a[0];
+        if (!first.range) {
+            return values.verr("#VALUE!");
+        }
+        i32 w = first.c2 - first.c1 + 1;
+        i32 h = first.r2 - first.r1 + 1;
+        for (usize k in 1..a.len) {
+            if (!a[k].range || a[k].c2 - a[k].c1 + 1 != w || a[k].r2 - a[k].r1 + 1 != h) {
+                return values.verr("#VALUE!");
+            }
+        }
+        mut f64 sum = 0.0;
+        for (i32 r in 0..h) {
+            for (i32 c in 0..w) {
+                mut f64 prod = 1.0;
+                for (usize k in 0..a.len) {
+                    values.Value v = b.value(a[k].c1 + c, a[k].r1 + r);
+                    if (is_err(v)) {
+                        return v;
+                    }
+                    prod = prod * (v.kind == values.NUMBER ? v.num : 0.0);
+                }
+                sum += prod;
+            }
+        }
+        return values.vnum(sum);
+    }
+    if (name == "LARGE" || name == "SMALL" || name == "RANK") {
+        vec.Vec<f64>* xs = vec.new<f64>(t);
+        values.Value e = name == "RANK" ? collect(b, t, a, 1, 2, xs) : collect(b, t, a, 0, 1, xs);
+        if (is_err(e)) {
+            return e;
+        }
+        f64[] v = xs.items();
+        values.Value k = nm(b, t, name == "RANK" ? a[0] : a[1]);
+        if (is_err(k)) {
+            return k;
+        }
+        if (name == "RANK") {
+            mut bool ascending = false;
+            if (a.len > 2) {
+                values.Value o = nm(b, t, a[2]);
+                ascending = o.kind == values.NUMBER && o.num != 0.0;
+            }
+            mut i64 rank = 1;
+            mut bool found = false;
+            for (usize i in 0..v.len) {
+                if (v[i] == k.num) {
+                    found = true;
+                }
+                if (ascending ? v[i] < k.num : v[i] > k.num) {
+                    rank += 1;
+                }
+            }
+            return found ? values.vnum(rank as f64) : values.verr("#N/A");
+        }
+        mut i64 idx = k.num as i64;
+        if (idx < 1 || idx as usize > v.len) {
+            return values.verr("#NUM!");
+        }
+        sort.sort(v);
+        return values.vnum(name == "LARGE" ? v[v.len - idx as usize] : v[idx as usize - 1]);
+    }
+    if (name == "SUM" || name == "AVERAGE" || name == "MIN" || name == "MAX" || name == "PRODUCT" || name == "MEDIAN" || name == "STDEV" || name == "STDEVP" || name == "VAR" || name == "VARP" || name == "SUMSQ" || name == "MODE") {
+        vec.Vec<f64>* xs = vec.new<f64>(t);
+        values.Value e = collect(b, t, a, 0, a.len, xs);
+        if (is_err(e)) {
+            return e;
+        }
+        f64[] v = xs.items();
+        usize n = v.len;
+        mut f64 s = 0.0;
+        if (name == "PRODUCT") {
+            s = 1.0;
+        }
+        for (usize i in 0..n) {
+            if (name == "PRODUCT") {
+                s = s * v[i];
+            } else if (name == "SUMSQ") {
+                s += v[i] * v[i];
+            } else {
+                s += v[i];
+            }
+        }
+        if (name == "SUM" || name == "PRODUCT" || name == "SUMSQ") {
+            return values.vnum(s);
+        }
+        if (name == "MIN" || name == "MAX") {
+            if (n == 0) {
+                return values.vnum(0.0);
+            }
+            mut f64 best = v[0];
+            for (usize i in 1..n) {
+                if (name == "MIN" ? v[i] < best : v[i] > best) {
+                    best = v[i];
+                }
+            }
+            return values.vnum(best);
+        }
+        if (n == 0) {
+            return values.verr(name == "MODE" ? "#N/A" : "#DIV/0!");
+        }
+        if (name == "AVERAGE") {
+            return values.vnum(s / n as f64);
+        }
+        if (name == "MEDIAN") {
+            sort.sort(v);
+            if (n % 2 == 1) {
+                return values.vnum(v[n / 2]);
+            }
+            return values.vnum((v[n / 2 - 1] + v[n / 2]) / 2.0);
+        }
+        if (name == "MODE") {
+            sort.sort(v);
+            mut usize best_count = 1;
+            mut f64 best = v[0];
+            mut usize run = 1;
+            for (usize i in 1..n) {
+                run = v[i] == v[i - 1] ? run + 1 : 1;
+                if (run > best_count) {
+                    best_count = run;
+                    best = v[i];
+                }
+            }
+            return best_count > 1 ? values.vnum(best) : values.verr("#N/A");
+        }
+        f64 mean = s / n as f64;
+        mut f64 sq = 0.0;
+        for (usize i in 0..n) {
+            sq += (v[i] - mean) * (v[i] - mean);
+        }
+        bool sample = name == "STDEV" || name == "VAR";
+        if (sample && n < 2) {
+            return values.verr("#DIV/0!");
+        }
+        f64 var = sq / (sample ? (n - 1) as f64 : n as f64);
+        return values.vnum(name == "STDEV" || name == "STDEVP" ? math.sqrt(var) : var);
+    }
+    return nofn();
+}
+
+f64 round_to(f64 x, i32 digits, i32 mode) {
+    f64 p = math.pow(10.0, digits as f64);
+    f64 ax = x < 0.0 ? -x : x;
+    f64 scaled = ax * p;
+    mut f64 r = 0.0;
+    if (mode == 0) {
+        r = math.floor(scaled * (1.0 + 1.0e-15) + 0.5);
+    } else if (mode == 1) {
+        r = math.ceil(scaled * (1.0 - 1.0e-15));
+    } else {
+        r = math.floor(scaled * (1.0 + 1.0e-15));
+    }
+    return (x < 0.0 ? -r : r) / p;
+}
+
+i64 gcd(i64 x, i64 y) {
+    mut i64 p = x < 0 ? -x : x;
+    mut i64 q = y < 0 ? -y : y;
+    while (q != 0) {
+        i64 r = p % q;
+        p = q;
+        q = r;
+    }
+    return p;
+}
+
+values.Value math_fn(Book* b, Arena* t, str name, Arg[] a) {
+    if (name == "PI") {
+        return values.vnum(math.PI);
+    }
+    if (name == "RAND" || name == "RANDBETWEEN") {
+        b.seed = (b.seed * 1103515245 + 12345) % 2147483648;
+        f64 u = b.seed as f64 / 2147483648.0;
+        if (name == "RAND") {
+            return values.vnum(u);
+        }
+        values.Value lo = nm(b, t, a[0]);
+        values.Value hi = nm(b, t, a[1]);
+        if (is_err(lo)) {
+            return lo;
+        }
+        if (is_err(hi)) {
+            return hi;
+        }
+        if (hi.num < lo.num) {
+            return values.verr("#NUM!");
+        }
+        return values.vnum(math.floor(lo.num + u * (hi.num - lo.num + 1.0)));
+    }
+    if (name == "GCD" || name == "LCM") {
+        vec.Vec<f64>* xs = vec.new<f64>(t);
+        values.Value e = collect(b, t, a, 0, a.len, xs);
+        if (is_err(e)) {
+            return e;
+        }
+        f64[] v = xs.items();
+        mut i64 acc = name == "GCD" ? 0 : 1;
+        for (usize i in 0..v.len) {
+            if (v[i] < 0.0) {
+                return values.verr("#NUM!");
+            }
+            i64 n = v[i] as i64;
+            if (name == "GCD") {
+                acc = gcd(acc, n);
+            } else {
+                i64 g = gcd(acc, n);
+                acc = g == 0 ? 0 : acc / g * n;
+            }
+        }
+        return values.vnum(acc as f64);
+    }
+    if (a.len == 0) {
+        return nofn();
+    }
+    values.Value x = nm(b, t, a[0]);
+    values.Value y = a.len > 1 ? nm(b, t, a[1]) : values.vnum(0.0);
+    bool known = name == "ABS" || name == "SQRT" || name == "EXP" || name == "LN" || name == "LOG" || name == "LOG10" || name == "SIN" || name == "COS" || name == "TAN" || name == "ASIN" || name == "ACOS" || name == "ATAN" || name == "ATAN2" || name == "DEGREES" || name == "RADIANS" || name == "INT" || name == "TRUNC" || name == "ROUND" || name == "ROUNDUP" || name == "ROUNDDOWN" || name == "CEILING" || name == "FLOOR" || name == "MOD" || name == "POWER" || name == "SIGN" || name == "FACT" || name == "QUOTIENT" || name == "COMBIN";
+    if (!known) {
+        return nofn();
+    }
+    if (is_err(x)) {
+        return x;
+    }
+    if (is_err(y)) {
+        return y;
+    }
+    f64 n = x.num;
+    if (name == "ABS") {
+        return values.vnum(n < 0.0 ? -n : n);
+    }
+    if (name == "SQRT") {
+        return n < 0.0 ? values.verr("#NUM!") : values.vnum(math.sqrt(n));
+    }
+    if (name == "EXP") {
+        return values.vnum(math.exp(n));
+    }
+    if (name == "LN") {
+        return n <= 0.0 ? values.verr("#NUM!") : values.vnum(math.log(n));
+    }
+    if (name == "LOG10") {
+        return n <= 0.0 ? values.verr("#NUM!") : values.vnum(math.log10(n));
+    }
+    if (name == "LOG") {
+        f64 radix = a.len > 1 ? y.num : 10.0;
+        if (n <= 0.0 || radix <= 0.0 || radix == 1.0) {
+            return values.verr("#NUM!");
+        }
+        return values.vnum(math.log(n) / math.log(radix));
+    }
+    if (name == "SIN") {
+        return values.vnum(math.sin(n));
+    }
+    if (name == "COS") {
+        return values.vnum(math.cos(n));
+    }
+    if (name == "TAN") {
+        return values.vnum(math.tan(n));
+    }
+    if (name == "ASIN") {
+        return n < -1.0 || n > 1.0 ? values.verr("#NUM!") : values.vnum(math.asin(n));
+    }
+    if (name == "ACOS") {
+        return n < -1.0 || n > 1.0 ? values.verr("#NUM!") : values.vnum(math.acos(n));
+    }
+    if (name == "ATAN") {
+        return values.vnum(math.atan(n));
+    }
+    if (name == "ATAN2") {
+        return values.vnum(math.atan2(y.num, n));
+    }
+    if (name == "DEGREES") {
+        return values.vnum(n * 180.0 / math.PI);
+    }
+    if (name == "RADIANS") {
+        return values.vnum(n * math.PI / 180.0);
+    }
+    if (name == "INT") {
+        return values.vnum(math.floor(n));
+    }
+    if (name == "SIGN") {
+        return values.vnum(n < 0.0 ? -1.0 : n > 0.0 ? 1.0 : 0.0);
+    }
+    if (name == "TRUNC") {
+        return values.vnum(round_to(n, a.len > 1 ? y.num as i32 : 0, 2));
+    }
+    if (name == "ROUND") {
+        return values.vnum(round_to(n, y.num as i32, 0));
+    }
+    if (name == "ROUNDUP") {
+        return values.vnum(round_to(n, y.num as i32, 1));
+    }
+    if (name == "ROUNDDOWN") {
+        return values.vnum(round_to(n, y.num as i32, 2));
+    }
+    if (name == "CEILING" || name == "FLOOR") {
+        f64 sig = a.len > 1 ? y.num : 1.0;
+        if (sig == 0.0) {
+            return values.vnum(0.0);
+        }
+        return values.vnum(sig * (name == "CEILING" ? math.ceil(n / sig) : math.floor(n / sig)));
+    }
+    if (name == "MOD") {
+        if (y.num == 0.0) {
+            return values.verr("#DIV/0!");
+        }
+        return values.vnum(n - y.num * math.floor(n / y.num));
+    }
+    if (name == "QUOTIENT") {
+        if (y.num == 0.0) {
+            return values.verr("#DIV/0!");
+        }
+        return values.vnum(math.trunc(n / y.num));
+    }
+    if (name == "POWER") {
+        return values.vnum(math.pow(n, y.num));
+    }
+    if (name == "FACT") {
+        if (n < 0.0 || n > 170.0) {
+            return values.verr("#NUM!");
+        }
+        mut f64 f = 1.0;
+        for (i64 i in 2..n as i64 + 1) {
+            f = f * i as f64;
+        }
+        return values.vnum(f);
+    }
+    // COMBIN
+    if (n < 0.0 || y.num < 0.0 || y.num > n) {
+        return values.verr("#NUM!");
+    }
+    mut f64 r = 1.0;
+    i64 top = n as i64;
+    i64 pick = y.num as i64;
+    for (i64 i in 1..pick + 1) {
+        r = r * (top - pick + i) as f64 / i as f64;
+    }
+    return values.vnum(math.round(r));
+}
+
+values.Value logic_fn(Book* b, Arena* t, i32 col, i32 row, str name, Arg[] a) {
+    if (name == "TRUE") {
+        return values.vbool(true);
+    }
+    if (name == "FALSE") {
+        return values.vbool(false);
+    }
+    if (name == "NA") {
+        return values.verr("#N/A");
+    }
+    if (name == "ROW" || name == "COLUMN") {
+        if (a.len == 0) {
+            return values.vnum((name == "ROW" ? row : col) as f64 + 1.0);
+        }
+        if (!a[0].range) {
+            return values.verr("#VALUE!");
+        }
+        return values.vnum((name == "ROW" ? a[0].r1 : a[0].c1) as f64 + 1.0);
+    }
+    if (name == "ROWS" || name == "COLUMNS") {
+        if (!a[0].range) {
+            return values.vnum(1.0);
+        }
+        return values.vnum((name == "ROWS" ? a[0].r2 - a[0].r1 + 1 : a[0].c2 - a[0].c1 + 1) as f64);
+    }
+    if (name == "AND" || name == "OR" || name == "XOR") {
+        mut i32 yes = 0;
+        mut i32 seen = 0;
+        for (usize i in 0..a.len) {
+            Arg x = a[i];
+            i32 r1 = x.range ? x.r1 : 0;
+            i32 r2 = x.range ? x.r2 : 0;
+            i32 c1 = x.range ? x.c1 : 0;
+            i32 c2 = x.range ? x.c2 : 0;
+            for (i32 r in r1..r2 + 1) {
+                for (i32 c in c1..c2 + 1) {
+                    values.Value v = x.range ? b.value(c, r) : x.v;
+                    if (is_err(v)) {
+                        return v;
+                    }
+                    if (v.kind == values.EMPTY || x.range && v.kind == values.TEXT) {
+                        continue;
+                    }
+                    values.Value q = coerce_bool(t, v);
+                    if (is_err(q)) {
+                        return q;
+                    }
+                    seen += 1;
+                    if (q.num != 0.0) {
+                        yes += 1;
+                    }
+                }
+            }
+        }
+        if (seen == 0) {
+            return values.verr("#VALUE!");
+        }
+        if (name == "AND") {
+            return values.vbool(yes == seen);
+        }
+        if (name == "OR") {
+            return values.vbool(yes > 0);
+        }
+        return values.vbool(yes % 2 == 1);
+    }
+    if (name == "NOT") {
+        values.Value q = coerce_bool(t, av(b, a[0]));
+        return is_err(q) ? q : values.vbool(q.num == 0.0);
+    }
+    if (name == "IFS") {
+        mut usize i = 0;
+        while (i + 1 < a.len) {
+            values.Value q = coerce_bool(t, av(b, a[i]));
+            if (is_err(q)) {
+                return q;
+            }
+            if (q.num != 0.0) {
+                return av(b, a[i + 1]);
+            }
+            i += 2;
+        }
+        return values.verr("#N/A");
+    }
+    if (name == "SWITCH") {
+        values.Value target = av(b, a[0]);
+        if (is_err(target)) {
+            return target;
+        }
+        mut usize i = 1;
+        while (i + 1 < a.len) {
+            if (compare(target, av(b, a[i])) == 0) {
+                return av(b, a[i + 1]);
+            }
+            i += 2;
+        }
+        return i < a.len ? av(b, a[i]) : values.verr("#N/A");
+    }
+    if (name == "CHOOSE") {
+        values.Value k = nm(b, t, a[0]);
+        if (is_err(k)) {
+            return k;
+        }
+        i64 idx = k.num as i64;
+        if (idx < 1 || idx as usize >= a.len) {
+            return values.verr("#VALUE!");
+        }
+        return av(b, a[idx as usize]);
+    }
+    bool is_info = name == "ISNUMBER" || name == "ISTEXT" || name == "ISBLANK" || name == "ISERROR" || name == "ISERR" || name == "ISNA" || name == "ISLOGICAL" || name == "ISEVEN" || name == "ISODD" || name == "N";
+    if (!is_info) {
+        return nofn();
+    }
+    values.Value v = av(b, a[0]);
+    if (name == "ISNUMBER") {
+        return values.vbool(v.kind == values.NUMBER);
+    }
+    if (name == "ISTEXT") {
+        return values.vbool(v.kind == values.TEXT);
+    }
+    if (name == "ISBLANK") {
+        return values.vbool(v.kind == values.EMPTY);
+    }
+    if (name == "ISERROR") {
+        return values.vbool(is_err(v));
+    }
+    if (name == "ISERR") {
+        return values.vbool(is_err(v) && v.text != "#N/A");
+    }
+    if (name == "ISNA") {
+        return values.vbool(is_err(v) && v.text == "#N/A");
+    }
+    if (name == "ISLOGICAL") {
+        return values.vbool(v.kind == values.BOOL);
+    }
+    if (name == "N") {
+        return v.kind == values.NUMBER || v.kind == values.BOOL ? values.vnum(v.num) : is_err(v) ? v : values.vnum(0.0);
+    }
+    values.Value n = coerce(t, v);
+    if (is_err(n)) {
+        return values.vbool(false);
+    }
+    bool even = math.fmod(math.floor(n.num), 2.0) == 0.0;
+    return values.vbool(name == "ISEVEN" ? even : !even);
+}
+
+// Characters, not bytes: the byte offset of the n-th character of `s`.
+usize char_off(str s, usize n) {
+    mut usize seen = 0;
+    mut usize i = 0;
+    while (i < s.len) {
+        if (s.bytes[i] & 192 != 128) {
+            if (seen == n) {
+                return i;
+            }
+            seen += 1;
+        }
+        i += 1;
+    }
+    return s.len;
+}
+
+usize char_count(str s) {
+    mut usize n = 0;
+    for (usize i in 0..s.len) {
+        if (s.bytes[i] & 192 != 128) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// The byte index of `needle` in `hay` from `from`, or -1.
+pub i64 index_of(str hay, str needle, usize from, bool any_case) {
+    if (needle.len > hay.len) {
+        return -1;
+    }
+    mut usize i = from;
+    while (i + needle.len <= hay.len) {
+        mut bool same = true;
+        for (usize j in 0..needle.len) {
+            ui8 x = hay.bytes[i + j];
+            ui8 y = needle.bytes[j];
+            if (any_case ? values.upper_byte(x) != values.upper_byte(y) : x != y) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            return i as i64;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+str text_format(Arena* t, f64 x, str f) {
+    str lower = text.to_lower(t, f);
+    if (text.contains(lower, "yy") || text.contains(lower, "dd")) {
+        return values.date_text(t, x);
+    }
+    bool pct = text.contains(f, "%");
+    bool grouped = text.contains(f, ",");
+    mut i32 decimals = 0;
+    str dot = ".";
+    i64 at = index_of(f, dot, 0, false);
+    if (at >= 0) {
+        mut usize i = at as usize + 1;
+        while (i < f.len && (f.bytes[i] == 48 || f.bytes[i] == 35)) {
+            decimals += 1;
+            i += 1;
+        }
+    }
+    str body = text.format_f64(t, pct ? x * 100.0 : x, decimals as ui32);
+    text.TextBuilder* out = text.builder(t);
+    out.push(grouped ? values.group(t, body) : body);
+    if (pct) {
+        out.push("%");
+    }
+    return out.text();
+}
+
+values.Value text_fn(Book* b, Arena* t, str name, Arg[] a) {
+    bool known = name == "LEN" || name == "LEFT" || name == "RIGHT" || name == "MID" || name == "UPPER" || name == "LOWER" || name == "PROPER" || name == "TRIM" || name == "CONCAT" || name == "CONCATENATE" || name == "TEXTJOIN" || name == "REPT" || name == "FIND" || name == "SEARCH" || name == "SUBSTITUTE" || name == "REPLACE" || name == "EXACT" || name == "VALUE" || name == "TEXT" || name == "CHAR" || name == "CODE" || name == "T";
+    if (!known) {
+        return nofn();
+    }
+    if (name == "CONCAT" || name == "CONCATENATE" || name == "TEXTJOIN") {
+        text.TextBuilder* out = text.builder(t);
+        usize from = name == "TEXTJOIN" ? 2 : 0;
+        values.Value sep = name == "TEXTJOIN" ? tx(b, t, a[0]) : values.vtext("");
+        if (is_err(sep)) {
+            return sep;
+        }
+        bool skip_empty = name == "TEXTJOIN" && truthy(t, av(b, a[1]));
+        mut bool first = true;
+        for (usize i in from..a.len) {
+            Arg x = a[i];
+            i32 r1 = x.range ? x.r1 : 0;
+            i32 r2 = x.range ? x.r2 : 0;
+            i32 c1 = x.range ? x.c1 : 0;
+            i32 c2 = x.range ? x.c2 : 0;
+            for (i32 r in r1..r2 + 1) {
+                for (i32 c in c1..c2 + 1) {
+                    values.Value v = x.range ? b.value(c, r) : x.v;
+                    if (is_err(v)) {
+                        return v;
+                    }
+                    str piece = as_text(t, v);
+                    if (skip_empty && piece.len == 0) {
+                        continue;
+                    }
+                    if (!first) {
+                        out.push(sep.text);
+                    }
+                    first = false;
+                    out.push(piece);
+                }
+            }
+        }
+        return values.vtext(out.text());
+    }
+    values.Value sv = tx(b, t, a[0]);
+    if (name == "CHAR") {
+        values.Value n = nm(b, t, a[0]);
+        if (is_err(n)) {
+            return n;
+        }
+        if (n.num < 1.0 || n.num > 255.0) {
+            return values.verr("#VALUE!");
+        }
+        text.TextBuilder* out = text.builder(t);
+        out.push_char(text.char_of(n.num as ui32));
+        return values.vtext(out.text());
+    }
+    if (name == "T") {
+        values.Value v = av(b, a[0]);
+        return v.kind == values.TEXT ? v : is_err(v) ? v : values.vtext("");
+    }
+    if (is_err(sv)) {
+        return sv;
+    }
+    str s = sv.text;
+    if (name == "LEN") {
+        return values.vnum(char_count(s) as f64);
+    }
+    if (name == "UPPER") {
+        return values.vtext(text.to_upper(t, s));
+    }
+    if (name == "LOWER") {
+        return values.vtext(text.to_lower(t, s));
+    }
+    if (name == "CODE") {
+        return s.len == 0 ? values.verr("#VALUE!") : values.vnum(s.bytes[0] as f64);
+    }
+    if (name == "VALUE") {
+        values.Value n = coerce(t, values.vtext(s));
+        return n;
+    }
+    if (name == "TRIM") {
+        text.TextBuilder* out = text.builder(t);
+        mut bool space = false;
+        mut bool started = false;
+        mut usize i = 0;
+        while (i < s.len) {
+            usize e = char_end(s, i);
+            if (s.bytes[i] == 32) {
+                space = started;
+            } else {
+                if (space) {
+                    out.push(" ");
+                    space = false;
+                }
+                started = true;
+                out.push(text.slice(s, i, e));
+            }
+            i = e;
+        }
+        return values.vtext(out.text());
+    }
+    if (name == "PROPER") {
+        text.TextBuilder* out = text.builder(t);
+        mut bool start = true;
+        mut usize i = 0;
+        while (i < s.len) {
+            ui8 c = s.bytes[i];
+            usize e = char_end(s, i);
+            str ch = text.slice(s, i, e);
+            if (values.is_letter(c)) {
+                out.push(start ? text.to_upper(t, ch) : text.to_lower(t, ch));
+                start = false;
+            } else {
+                out.push(ch);
+                start = true;
+            }
+            i = e;
+        }
+        return values.vtext(out.text());
+    }
+    if (name == "EXACT") {
+        values.Value o = tx(b, t, a[1]);
+        return is_err(o) ? o : values.vbool(o.text == s);
+    }
+    if (name == "TEXT") {
+        values.Value n = nm(b, t, a[0]);
+        values.Value f = tx(b, t, a[1]);
+        if (is_err(f)) {
+            return f;
+        }
+        if (is_err(n)) {
+            return values.vtext(s);
+        }
+        return values.vtext(text_format(t, n.num, f.text));
+    }
+    if (name == "REPT") {
+        values.Value n = nm(b, t, a[1]);
+        if (is_err(n)) {
+            return n;
+        }
+        if (n.num < 0.0 || n.num * s.len as f64 > 100000.0) {
+            return values.verr("#VALUE!");
+        }
+        text.TextBuilder* out = text.builder(t);
+        for (i64 i in 0..n.num as i64) {
+            out.push(s);
+        }
+        return values.vtext(out.text());
+    }
+    if (name == "FIND" || name == "SEARCH") {
+        values.Value hay = tx(b, t, a[1]);
+        if (is_err(hay)) {
+            return hay;
+        }
+        mut usize from = 0;
+        if (a.len > 2) {
+            values.Value st = nm(b, t, a[2]);
+            if (is_err(st)) {
+                return st;
+            }
+            if (st.num < 1.0) {
+                return values.verr("#VALUE!");
+            }
+            from = char_off(hay.text, st.num as usize - 1);
+        }
+        i64 at = index_of(hay.text, s, from, name == "SEARCH");
+        if (at < 0) {
+            return values.verr("#VALUE!");
+        }
+        return values.vnum(char_count(text.slice(hay.text, 0, at as usize)) as f64 + 1.0);
+    }
+    if (name == "SUBSTITUTE") {
+        values.Value old = tx(b, t, a[1]);
+        values.Value rep = tx(b, t, a[2]);
+        if (is_err(old)) {
+            return old;
+        }
+        if (is_err(rep)) {
+            return rep;
+        }
+        mut i64 which = 0;
+        if (a.len > 3) {
+            values.Value w = nm(b, t, a[3]);
+            if (is_err(w)) {
+                return w;
+            }
+            which = w.num as i64;
+        }
+        if (old.text.len == 0) {
+            return values.vtext(s);
+        }
+        text.TextBuilder* out = text.builder(t);
+        mut usize i = 0;
+        mut i64 count = 0;
+        while (i < s.len) {
+            i64 at = index_of(s, old.text, i, false);
+            if (at < 0) {
+                break;
+            }
+            count += 1;
+            out.push(text.slice(s, i, at as usize));
+            if (which == 0 || which == count) {
+                out.push(rep.text);
+            } else {
+                out.push(old.text);
+            }
+            i = at as usize + old.text.len;
+        }
+        out.push(text.slice(s, i, s.len));
+        return values.vtext(out.text());
+    }
+    // LEFT, RIGHT, MID and REPLACE count characters.
+    values.Value n1 = a.len > 1 ? nm(b, t, a[1]) : values.vnum(1.0);
+    values.Value n2 = a.len > 2 ? nm(b, t, a[2]) : values.vnum(0.0);
+    if (is_err(n1)) {
+        return n1;
+    }
+    if (is_err(n2)) {
+        return n2;
+    }
+    if (n1.num < 0.0 || n2.num < 0.0 || name == "MID" && n1.num < 1.0) {
+        return values.verr("#VALUE!");
+    }
+    usize total = char_count(s);
+    if (name == "LEFT") {
+        return values.vtext(text.slice(s, 0, char_off(s, n1.num as usize)));
+    }
+    if (name == "RIGHT") {
+        usize k = n1.num as usize;
+        return values.vtext(text.slice(s, k >= total ? 0 : char_off(s, total - k), s.len));
+    }
+    if (name == "MID") {
+        usize from = char_off(s, n1.num as usize - 1);
+        usize to = char_off(s, n1.num as usize - 1 + n2.num as usize);
+        return values.vtext(text.slice(s, from, to));
+    }
+    // REPLACE(text, start, count, new)
+    values.Value rep = tx(b, t, a[3]);
+    if (is_err(rep)) {
+        return rep;
+    }
+    if (n1.num < 1.0) {
+        return values.verr("#VALUE!");
+    }
+    usize from = char_off(s, n1.num as usize - 1);
+    usize to = char_off(s, n1.num as usize - 1 + n2.num as usize);
+    text.TextBuilder* out = text.builder(t);
+    out.push(text.slice(s, 0, from));
+    out.push(rep.text);
+    out.push(text.slice(s, to, s.len));
+    return values.vtext(out.text());
+}
+
+// Position (0-based) of the first cell of `x` that equals `v`, or -1.
+values.Value lookup_fn(Book* b, Arena* t, str name, Arg[] a) {
+    if (name == "VLOOKUP" || name == "HLOOKUP") {
+        Arg r = a[1];
+        if (!r.range) {
+            return values.verr("#VALUE!");
+        }
+        values.Value key = av(b, a[0]);
+        if (is_err(key)) {
+            return key;
+        }
+        values.Value k = nm(b, t, a[2]);
+        if (is_err(k)) {
+            return k;
+        }
+        bool vertical = name == "VLOOKUP";
+        i32 n = vertical ? r.r2 - r.r1 + 1 : r.c2 - r.c1 + 1;
+        i32 width = vertical ? r.c2 - r.c1 + 1 : r.r2 - r.r1 + 1;
+        if (k.num < 1.0) {
+            return values.verr("#VALUE!");
+        }
+        if (k.num as i32 > width) {
+            return values.verr("#REF!");
+        }
+        mut bool approx = true;
+        if (a.len > 3) {
+            approx = truthy(t, coerce_bool(t, av(b, a[3])));
+        }
+        mut i32 hit = -1;
+        for (i32 i in 0..n) {
+            values.Value cell = vertical ? b.value(r.c1, r.r1 + i) : b.value(r.c1 + i, r.r1);
+            if (is_err(cell)) {
+                continue;
+            }
+            if (!approx) {
+                if (cell.kind != values.EMPTY && compare(key, cell) == 0) {
+                    hit = i;
+                    break;
+                }
+            } else if (cell.kind != values.EMPTY && cell.kind == key.kind && compare(cell, key) <= 0) {
+                hit = i;
+            } else if (cell.kind != values.EMPTY && cell.kind == key.kind) {
+                break;
+            }
+        }
+        if (hit < 0) {
+            return values.verr("#N/A");
+        }
+        i32 off = k.num as i32 - 1;
+        return vertical ? b.value(r.c1 + off, r.r1 + hit) : b.value(r.c1 + hit, r.r1 + off);
+    }
+    if (name == "INDEX") {
+        Arg r = a[0];
+        if (!r.range) {
+            return values.verr("#VALUE!");
+        }
+        values.Value i = nm(b, t, a[1]);
+        values.Value j = a.len > 2 ? nm(b, t, a[2]) : values.vnum(0.0);
+        if (is_err(i)) {
+            return i;
+        }
+        if (is_err(j)) {
+            return j;
+        }
+        mut i32 ri = i.num as i32;
+        mut i32 ci = j.num as i32;
+        if (a.len < 3 && r.r1 == r.r2) {
+            ci = ri;
+            ri = 1;
+        } else if (a.len < 3 && r.c1 == r.c2) {
+            ci = 1;
+        }
+        if (ri < 1 || ci < 1 || r.r1 + ri - 1 > r.r2 || r.c1 + ci - 1 > r.c2) {
+            return values.verr("#REF!");
+        }
+        return b.value(r.c1 + ci - 1, r.r1 + ri - 1);
+    }
+    if (name == "MATCH") {
+        Arg r = a[1];
+        if (!r.range) {
+            return values.verr("#VALUE!");
+        }
+        values.Value key = av(b, a[0]);
+        if (is_err(key)) {
+            return key;
+        }
+        mut i32 mode = 1;
+        if (a.len > 2) {
+            values.Value m = nm(b, t, a[2]);
+            if (is_err(m)) {
+                return m;
+            }
+            mode = m.num < 0.0 ? -1 : m.num > 0.0 ? 1 : 0;
+        }
+        bool vertical = r.c1 == r.c2;
+        i32 n = vertical ? r.r2 - r.r1 + 1 : r.c2 - r.c1 + 1;
+        mut i32 hit = -1;
+        for (i32 i in 0..n) {
+            values.Value cell = vertical ? b.value(r.c1, r.r1 + i) : b.value(r.c1 + i, r.r1);
+            if (cell.kind == values.EMPTY) {
+                continue;
+            }
+            if (mode == 0) {
+                if (cell.kind == values.TEXT && key.kind == values.TEXT ? values.wildcard(key.text, cell.text) : compare(key, cell) == 0) {
+                    hit = i;
+                    break;
+                }
+            } else if (cell.kind == key.kind) {
+                i32 c = compare(cell, key);
+                if (mode == 1 ? c <= 0 : c >= 0) {
+                    hit = i;
+                } else {
+                    break;
+                }
+            }
+        }
+        return hit < 0 ? values.verr("#N/A") : values.vnum((hit + 1) as f64);
+    }
+    if (name == "SUMIF" || name == "COUNTIF" || name == "AVERAGEIF" || name == "SUMIFS" || name == "COUNTIFS") {
+        bool multi = name == "SUMIFS" || name == "COUNTIFS";
+        usize first = name == "SUMIFS" ? 1 : 0;
+        Arg shape = a[first];
+        if (!shape.range) {
+            return values.verr("#VALUE!");
+        }
+        i32 w = shape.c2 - shape.c1 + 1;
+        i32 h = shape.r2 - shape.r1 + 1;
+        mut Arg sum = shape;
+        if (name == "SUMIFS") {
+            sum = a[0];
+        } else if (!multi && a.len > 2) {
+            sum = a[2];
+        }
+        if (!sum.range || sum.c2 - sum.c1 + 1 != w || sum.r2 - sum.r1 + 1 != h) {
+            if (name != "COUNTIF" && name != "COUNTIFS") {
+                return values.verr("#VALUE!");
+            }
+        }
+        usize pairs = multi ? (a.len - first) / 2 : 1;
+        vec.Vec<values.Value>* crits = vec.new<values.Value>(t);
+        for (usize p in 0..pairs) {
+            usize at = multi ? first + p * 2 : 1;
+            if (!a[at - (multi ? 0 : 1)].range) {
+                return values.verr("#VALUE!");
+            }
+            Arg rr = a[at - (multi ? 0 : 1)];
+            if (rr.c2 - rr.c1 + 1 != w || rr.r2 - rr.r1 + 1 != h) {
+                return values.verr("#VALUE!");
+            }
+            crits.push(av(b, a[at + (multi ? 1 : 0)]));
+        }
+        mut f64 total = 0.0;
+        mut i64 count = 0;
+        for (i32 r in 0..h) {
+            for (i32 c in 0..w) {
+                mut bool ok = true;
+                for (usize p in 0..pairs) {
+                    usize at = multi ? first + p * 2 : 0;
+                    Arg rr = a[at];
+                    values.Value cell = b.value(rr.c1 + c, rr.r1 + r);
+                    values.Value crit = crits.items()[p];
+                    if (is_err(crit)) {
+                        return crit;
+                    }
+                    if (!criterion_matches(t, cell, crit)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    continue;
+                }
+                count += 1;
+                if (name != "COUNTIF" && name != "COUNTIFS") {
+                    values.Value sv = b.value(sum.c1 + c, sum.r1 + r);
+                    if (is_err(sv)) {
+                        return sv;
+                    }
+                    if (sv.kind == values.NUMBER) {
+                        total += sv.num;
+                    }
+                }
+            }
+        }
+        if (name == "COUNTIF" || name == "COUNTIFS") {
+            return values.vnum(count as f64);
+        }
+        if (name == "AVERAGEIF") {
+            return count == 0 ? values.verr("#DIV/0!") : values.vnum(total / count as f64);
+        }
+        return values.vnum(total);
+    }
+    return nofn();
+}
+
+values.Value date_fn(Book* b, Arena* t, str name, Arg[] a) {
+    if (name == "TODAY" || name == "NOW") {
+        f64 days = b.now_unix as f64 / 86400.0;
+        return values.vnum(name == "TODAY" ? math.floor(days) + 25569.0 : days + 25569.0);
+    }
+    if (name == "DATE") {
+        values.Value y = nm(b, t, a[0]);
+        values.Value m = nm(b, t, a[1]);
+        values.Value d = nm(b, t, a[2]);
+        if (is_err(y)) {
+            return y;
+        }
+        if (is_err(m)) {
+            return m;
+        }
+        if (is_err(d)) {
+            return d;
+        }
+        return values.vnum(values.serial_of(y.num as i64, m.num as i64, d.num as i64));
+    }
+    if (name == "DAYS") {
+        values.Value e = nm(b, t, a[0]);
+        values.Value s = nm(b, t, a[1]);
+        if (is_err(e)) {
+            return e;
+        }
+        if (is_err(s)) {
+            return s;
+        }
+        return values.vnum(math.floor(e.num) - math.floor(s.num));
+    }
+    if (name == "YEAR" || name == "MONTH" || name == "DAY" || name == "WEEKDAY") {
+        values.Value s = nm(b, t, a[0]);
+        if (is_err(s)) {
+            return s;
+        }
+        if (name == "WEEKDAY") {
+            mut i32 kind = 1;
+            if (a.len > 1) {
+                values.Value k = nm(b, t, a[1]);
+                kind = k.num as i32;
+            }
+            i32 w = values.weekday_of(s.num);
+            if (kind == 2) {
+                return values.vnum((w == 0 ? 7 : w) as f64);
+            }
+            if (kind == 3) {
+                return values.vnum(((w + 6) % 7) as f64);
+            }
+            return values.vnum((w + 1) as f64);
+        }
+        values.Ymd ymd = values.date_of(s.num);
+        return values.vnum((name == "YEAR" ? ymd.year : name == "MONTH" ? ymd.month : ymd.day) as f64);
+    }
+    return nofn();
+}
