@@ -197,7 +197,8 @@ packages/     platform (window and events, on SDL3), render (pixels, shapes, tex
               i18n (catalogs of translations)
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
-              trees, inputs), poster (the poster of the project, drawn with `render` into a PNG)
+              trees, inputs), poster (the poster of the project and the image of its shared links,
+              drawn with `render` into PNGs)
 showcase/     whole applications: beatbox (a drum machine), disktiles (the sizes of a disk as tiles),
               notes (Markdown notes), pixelforge (a pixel art editor), queens (a puzzle),
               sheets (a spreadsheet), vault (a password manager)
