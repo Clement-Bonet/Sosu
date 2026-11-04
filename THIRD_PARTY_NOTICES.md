@@ -87,9 +87,11 @@ under their own licenses.
 - Written by Sean Barrett (2007) and its contributors, named in the file
 - License: public domain (the Unlicense), or the MIT license (Copyright (c) 2017 Sean Barrett),
   at your option; both are at the end of the file
-- Changed by Sosu: one line, marked `// Sosu:`. `get_window` compares a length with half of the
-  block sizes instead of shifting it, which was undefined for the negative length of a hostile file
-  (found by `make fuzz-ogg`; the window was not found either way). `ogg.c` bounds its memory and
+- Changed by Sosu: two places, marked `// Sosu:`, both found by `make fuzz-ogg`. `get_window`
+  compares a length with half of the block sizes instead of shifting it, which was undefined for
+  the negative length of a hostile file (the window was not found either way).
+  `fixup_current_playback_loc` does not cut the samples to a stream length above `INT_MAX`, which
+  overflowed an `int` and gave a negative number of samples. `ogg.c` bounds its memory and
   compiles it without the comment header (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read;
   the CI fuzzes it. A fault found later in it is fixed by taking the new commit of that branch, or
   here when that branch has none (`SECURITY.md`).

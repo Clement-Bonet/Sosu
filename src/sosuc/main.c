@@ -694,7 +694,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         (void)cc; /* SOSU_CC: read by desktop_compiler */
         Command command = {0};
         ok = desktop_compiler(target, &command);
-        const char *options[] = { "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", NULL };
+        const char *options[] = { "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", "-fno-strict-aliasing", NULL };
         add_all(&command, options);
         if (!optimize) command_add(&command, "-DSOSU_DEBUG");
         command_addf(&command, "-I%s", runtime);
@@ -1112,7 +1112,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
 #endif
     {
         const char *compiler = cc && cc[0] ? cc : "cc";
-        const char *options[] = { compiler, "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", "-fPIC", NULL };
+        const char *options[] = { compiler, "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", "-fno-strict-aliasing", "-fPIC", NULL };
         if (shared) {
 #ifdef __APPLE__
             const char *kind = "-dynamiclib";
@@ -1309,7 +1309,7 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
         if (clang) {
             *built = sosu_format("%s/libmain.so", out_dir);
             Command command = {0};
-            const char *options[] = { clang, "-std=c99", "-g", level, "-w", "-fPIC", "-shared", "-fvisibility=hidden",
+            const char *options[] = { clang, "-std=c99", "-g", level, "-w", "-fno-strict-aliasing", "-fPIC", "-shared", "-fvisibility=hidden",
                                       "-DSOSU_SDL_MAIN", NULL };
             add_all(&command, options);
             if (!optimize) command_add(&command, "-DSOSU_DEBUG");
@@ -1337,7 +1337,7 @@ static bool compile_mobile(const char *out_dir, const char *c_file, const char *
         for (size_t i = 0; i < 2 && ok; i++) {
             Command command = {0};
             const char *options[] = { "xcrun", "--sdk", sdk, "clang", "-arch", "arm64", minimum, "-std=c99", "-g", level,
-                                      "-w", NULL };
+                                      "-w", "-fno-strict-aliasing", NULL };
             add_all(&command, options);
             if (!optimize) command_add(&command, "-DSOSU_DEBUG");
             if (i == 0) command_add(&command, "-DSOSU_SDL_MAIN");

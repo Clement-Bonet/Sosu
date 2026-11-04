@@ -1,0 +1,13 @@
+// A closure given to a thread would read the variables of `main`: it stops the program (code 101).
+import std.io;
+import std.thread;
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut i64 n = 40;
+    io.print("before");
+    auto t = thread.spawn(&arena, (Arena* own, i64 v) => v + n, 2 as i64);
+    io.print("not reached: {}", t.join());
+    return 0;
+}

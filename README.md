@@ -5,7 +5,7 @@ Its compiler, `sosuc`, is written in C99 with libc only, and generates C. Sosu i
 
 **[Playground](https://clement-bonet.github.io/Sosu/)** · **[Releases](https://github.com/Clement-Bonet/Sosu/releases)** · [Written in Sosu](#written-in-sosu) · [Specification](docs/SPEC.md) · [Library reference](docs/REFERENCE.md) · [How Sosu is made](#how-sosu-is-made)
 
-```sosu
+```csharp
 import std.io;
 import std.text;
 

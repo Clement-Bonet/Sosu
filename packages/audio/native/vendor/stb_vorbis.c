@@ -5447,7 +5447,8 @@ static int fixup_current_playback_loc(stb_vorbis *f, int n)
 
    f->current_playback_loc += n;
    lgs = stb_vorbis_stream_length_in_samples(f);
-   if (lgs != 0 && lgs != SAMPLE_unknown && f->current_playback_loc > (int)lgs) {
+   // Sosu: a length above INT_MAX (a hostile file) is not cut to, `(int)lgs` would be negative
+   if (lgs != 0 && lgs != SAMPLE_unknown && lgs <= 0x7FFFFFFF && f->current_playback_loc > (int)lgs) {
        int r = n - (f->current_playback_loc - (int)lgs);
        f->current_playback_loc = lgs;
        return r;
