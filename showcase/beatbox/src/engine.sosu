@@ -43,7 +43,7 @@ pub class Engine {
     mut i64 seen_bpm;
     mut ui64 seen_ms;
 
-    void init(Arena* arena, keeps device.Player* player) {
+    void init(keeps Arena* arena, keeps device.Player* player) {
         self.player = player;
         kit = [sounds.kick(arena), sounds.snare(arena), sounds.clap(arena), sounds.hat(arena), sounds.open_hat(arena), sounds.tom(arena), sounds.rim(arena), sounds.cowbell(arena), sounds.conga(arena), sounds.crash(arena), sounds.shaker(arena), sounds.bass(arena), sounds.pluck(arena), sounds.lead(arena), sounds.bell(arena), sounds.zap(arena)];
         room = audio.create(arena, sounds.RATE, 2, 16 * step_frames(machine.MIN_BPM));

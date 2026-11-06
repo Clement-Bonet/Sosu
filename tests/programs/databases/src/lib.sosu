@@ -52,12 +52,12 @@ bool absent<T>(T? x) {
 }
 
 // Stops the test on an error, with what the database said.
-void failed(Arena* arena, db.Connection* c, db.DbError e) uses io {
+void failed(Arena* arena, keeps db.Connection* c, db.DbError e) uses io {
     io.print("error: {} ({})", db.message(e), c.message(arena));
     assert(false);
 }
 
-void succeeded(Arena* arena, db.Connection* c, bool!db.DbError r) uses io {
+void succeeded(Arena* arena, keeps db.Connection* c, bool!db.DbError r) uses io {
     match (r) {
         ok(b) => assert(b),
         err(e) => {
@@ -74,7 +74,7 @@ bool refused(i64!db.DbError r, db.DbError expected) {
 }
 
 // The rows of a query, one line each, the values as SQL writes them.
-str listed(Arena* arena, db.Connection* c, str sql) uses io {
+str listed(Arena* arena, keeps db.Connection* c, str sql) uses io {
     text.TextBuilder* b = text.builder(arena);
     match (db.select(arena, c, sql)) {
         ok(rows) => {
@@ -96,20 +96,20 @@ str listed(Arena* arena, db.Connection* c, str sql) uses io {
     return b.text();
 }
 
-bool more(Arena* arena, db.Connection* c, db.Rows* rows) uses io {
+bool more(Arena* arena, keeps db.Connection* c, db.Rows* rows) uses io {
     return match (rows.next()) {
         ok(m) => m,
         err(e) => stop_rows(arena, c, e),
     };
 }
 
-bool stop_rows(Arena* arena, db.Connection* c, db.DbError e) uses io {
+bool stop_rows(Arena* arena, keeps db.Connection* c, db.DbError e) uses io {
     failed(arena, c, e);
     return false;
 }
 
 // The number of rows of `table` (-1 on an error).
-i64 count(Arena* arena, db.Connection* c, str table) uses io {
+i64 count(Arena* arena, keeps db.Connection* c, str table) uses io {
     text.TextBuilder* b = text.builder(arena);
     b.push("SELECT count(*) FROM ");
     b.push(table);
@@ -126,7 +126,7 @@ i64 count(Arena* arena, db.Connection* c, str table) uses io {
     };
 }
 
-bool!db.DbError values_of_each_type(Arena* arena, db.Connection* c) uses io {
+bool!db.DbError values_of_each_type(Arena* arena, keeps db.Connection* c) uses io {
     mut ui8[4] photo = [0, 1, 254, 255];
     // a quote and a statement in a parameter stay a text: nothing is joined to the query
     mut db.Value[4] ada = [
@@ -211,7 +211,7 @@ test "values of each type, written and read again" {
     assert(sqlite.version(&arena) == "3.54.1");
 }
 
-bool!db.DbError statements_run_again(Arena* arena, db.Connection* c) uses io {
+bool!db.DbError statements_run_again(Arena* arena, keeps db.Connection* c) uses io {
     db.Statement* insert = try c.prepare(arena, INSERT);
     defer insert.close();
     for (i64 i in 0..50) {
@@ -268,7 +268,7 @@ test "statements prepared once, run again" {
     succeeded(&arena, c, statements_run_again(&arena, c));
 }
 
-bool!db.DbError transactions(Arena* arena, db.Connection* c) uses io {
+bool!db.DbError transactions(Arena* arena, keeps db.Connection* c) uses io {
     mut db.Value[4] ada = [db.Value.Text("Ada"), db.Value.Integer(1815), db.Value.Null, db.Value.Null];
     mut db.Value[4] alan = [db.Value.Text("Alan"), db.Value.Integer(1912), db.Value.Null, db.Value.Null];
     try c.begin();

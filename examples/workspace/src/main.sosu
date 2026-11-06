@@ -96,7 +96,7 @@ class App : app.Handler, app.TitleBar {
     mut bool dark;  // the theme of the system, unless SOSU_THEME chooses
     mut bool forced;
 
-    void init(keeps state.Workspace* w, Arena* arena) {
+    void init(keeps state.Workspace* w, keeps Arena* arena) {
         ui = widgets.Ui{ };
         self.w = w;
         self.arena = arena;

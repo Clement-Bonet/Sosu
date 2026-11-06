@@ -7,7 +7,7 @@ pub class Vec<T> {
     mut usize count;
     Arena* arena;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         unsafe {
             data = arena.alloc_slice(T, 0);  // given before it holds values: read up to `count` only

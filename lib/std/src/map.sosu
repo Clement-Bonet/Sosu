@@ -9,7 +9,7 @@ pub class HashMap<K: Hash, V> {
     mut usize count;
     Arena* arena;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         count = 0;
         make_slots(8);
@@ -124,7 +124,7 @@ pub class HashMap<K: Hash, V> {
     }
 
     // Its keys, in no particular order: a copy in `into`.
-    pub K[] keys(Arena* into) {
+    pub K[] keys(Arena* into) keeps self {
         mut K[] all = slot_keys;
         unsafe {
             all = into.alloc_slice(K, count);
@@ -140,7 +140,7 @@ pub class HashMap<K: Hash, V> {
     }
 
     // Its values, in the order of `keys`: a copy in `into`.
-    pub V[] values(Arena* into) {
+    pub V[] values(Arena* into) keeps self {
         mut V[] all = slot_values;
         unsafe {
             all = into.alloc_slice(V, count);

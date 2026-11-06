@@ -622,7 +622,7 @@ pub class TextBuilder {
     mut usize count;
     Arena* arena;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         data = arena.alloc_slice(ui8, 0);
         count = 0;

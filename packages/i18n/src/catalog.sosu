@@ -575,7 +575,7 @@ void add_piece(Reading* r, usize start, usize stop) {
 }
 
 // Ends the entry being read: kept unless it is fuzzy or the header (whose plural rule is read).
-usize flush(Arena* arena, str file, Reading* r, Entry[] entries, usize count, PluralForms* plurals) {
+usize flush(keeps Arena* arena, str file, Reading* r, Entry[] entries, usize count, PluralForms* plurals) {
     if (!r.id.present) {
         *r = Reading{ };
         return count;

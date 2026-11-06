@@ -82,7 +82,7 @@ static bool same_structure(const Type *a, const Type *b) {
         return a->as.result.value == b->as.result.value && a->as.result.error == b->as.result.error;
     case T_FN:
         if (a->as.fn.param_count != b->as.fn.param_count || a->as.fn.ret != b->as.fn.ret ||
-            a->as.fn.effects != b->as.fn.effects) {
+            a->as.fn.effects != b->as.fn.effects || a->as.fn.keeps != b->as.fn.keeps) {
             return false;
         }
         for (size_t i = 0; i < a->as.fn.param_count; i++) {
@@ -107,7 +107,7 @@ static uint64_t structure_hash(const Type *type) {
     case T_ARRAY: return mix(mix(h, (uintptr_t)type->as.array.element), type->as.array.size);
     case T_RESULT: return mix(mix(h, (uintptr_t)type->as.result.value), (uintptr_t)type->as.result.error);
     case T_FN:
-        h = mix(mix(h, (uintptr_t)type->as.fn.ret), type->as.fn.effects);
+        h = mix(mix(mix(h, (uintptr_t)type->as.fn.ret), type->as.fn.effects), (uintptr_t)type->as.fn.keeps);
         for (size_t i = 0; i < type->as.fn.param_count; i++) h = mix(h, (uintptr_t)type->as.fn.params[i]);
         return h;
     default:
@@ -180,13 +180,14 @@ Type *type_result(TypeTable *table, Type *value, Type *error) {
     return intern(table, &probe);
 }
 
-Type *type_fn(TypeTable *table, Type **params, size_t param_count, Type *ret, unsigned effects) {
+Type *type_fn(TypeTable *table, Type **params, size_t param_count, Type *ret, unsigned effects, uint64_t keeps) {
     Type probe = {0};
     probe.tag = T_FN;
     probe.as.fn.params = params;
     probe.as.fn.param_count = param_count;
     probe.as.fn.ret = ret;
     probe.as.fn.effects = effects;
+    probe.as.fn.keeps = keeps;
     return intern(table, &probe);
 }
 
@@ -243,6 +244,7 @@ static void append_type(Buffer *buffer, const Type *type) {
         append_text(buffer, "fn(");
         for (size_t i = 0; i < type->as.fn.param_count; i++) {
             if (i) append_text(buffer, ", ");
+            if (i < 64 && (type->as.fn.keeps >> i & 1)) append_text(buffer, "keeps ");
             append_type(buffer, type->as.fn.params[i]);
         }
         append_text(buffer, ") -> ");

@@ -149,7 +149,7 @@ pub class Player {
     mut ui64 last_ms;  // the time of the last `update()`
     mut bool closed;
 
-    void init(Arena* arena, keeps Opened opened, Output output) {
+    void init(keeps Arena* arena, keeps Opened opened, Output output) {
         sounds = mixer.create(arena, output.rate, output.channels);
         self.opened = opened;
         buffer = arena.alloc_slice(f32, BLOCK * output.channels as usize);

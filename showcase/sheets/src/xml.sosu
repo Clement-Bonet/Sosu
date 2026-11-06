@@ -10,7 +10,7 @@ pub class Node {
     pub vec.Vec<str>* vals;
     pub vec.Vec<Node*>* kids;
 
-    void init(Arena* arena, keeps str name) {
+    void init(keeps Arena* arena, keeps str name) {
         self.name = name;
         self.value = "";
         self.keys = vec.new<str>(arena);
@@ -197,7 +197,7 @@ pub void push_escaped(text.TextBuilder* b, str s) {
     b.push(text.slice(s, run, s.len));
 }
 
-void add_text(Arena* arena, vec.Vec<Node*>* stack, keeps str raw) {
+void add_text(keeps Arena* arena, vec.Vec<Node*>* stack, keeps str raw) {
     if (blank(raw)) {
         return;
     }
@@ -207,7 +207,7 @@ void add_text(Arena* arena, vec.Vec<Node*>* stack, keeps str raw) {
 }
 
 // The element that starts at `start` (the `<`), added to the one on top of `stack`; the place after the tag.
-usize open_tag(Arena* arena, keeps str s, usize start, vec.Vec<Node*>* stack) {
+usize open_tag(keeps Arena* arena, keeps str s, usize start, vec.Vec<Node*>* stack) {
     mut usize i = start + 1;
     usize name_start = i;
     while (i < s.len && !is_space(s.bytes[i]) && s.bytes[i] != 62 && s.bytes[i] != 47) {

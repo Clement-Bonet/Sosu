@@ -422,13 +422,15 @@ static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition 
     }
     case TYPE_FN: {
         VEC(Type *) params = {0};
+        uint64_t keeps = 0;
         for (size_t i = 0; i < te->as.fn.param_count; i++) {
             Type *param = resolve_type(s, unit, te->as.fn.params[i], POSITION_VALUE);
             SOSU_VEC_PUSH(&params, param);
+            if (i < 64 && te->as.fn.keeps[i]) keeps |= (uint64_t)1 << i;
         }
         Type *ret = resolve_type(s, unit, te->as.fn.ret, POSITION_RETURN);
         unsigned effects = resolve_effects(s, unit, te->as.fn.effects);
-        Type *type = type_fn(&s->types, params.items, params.count, ret, effects);
+        Type *type = type_fn(&s->types, params.items, params.count, ret, effects, keeps);
         free(params.items);
         return type;
     }
@@ -524,16 +526,18 @@ static bool check_unique(Sema *s, Unit *unit, const Name *names, size_t count, N
 
 static Type *function_type(Sema *s, Unit *unit, const FnDecl *fn) {
     VEC(Type *) params = {0};
+    uint64_t keeps = 0;
     VEC(Name) names = {0};
     for (size_t i = 0; i < fn->param_count; i++) {
         check_unique(s, unit, names.items, names.count, fn->params[i].name, "the parameter");
         SOSU_VEC_PUSH(&names, fn->params[i].name);
         Type *param = resolve_type(s, unit, fn->params[i].type, POSITION_VALUE);
         SOSU_VEC_PUSH(&params, param);
+        if (i < 64 && fn->params[i].is_keeps) keeps |= (uint64_t)1 << i;
     }
     Type *ret = resolve_type(s, unit, fn->ret, POSITION_RETURN);
     unsigned effects = resolve_effects(s, unit, fn->effects);
-    Type *type = type_fn(&s->types, params.items, params.count, ret, effects);
+    Type *type = type_fn(&s->types, params.items, params.count, ret, effects, keeps);
     free(params.items);
     free(names.items);
     return type;
@@ -778,6 +782,15 @@ static void check_override(Sema *s, TypeInfo *cls, MethodInfo *method) {
         free(expected);
         return;
     }
+    if ((method->decl->keeps_self && !target->decl->keeps_self) ||
+        (method->type->tag == T_FN && target->type->tag == T_FN && (method->type->as.fn.keeps & ~target->type->as.fn.keeps))) {
+        Diagnostic *d = error_at(s, cls->unit, "E0316", name.offset, name.length,
+                                 "`%.*s` keeps a parameter that `%.*s.%.*s` does not", NAME_ARGS(name),
+                                 NAME_ARGS(target->owner->name), NAME_ARGS(name));
+        diag_help(d, "a caller of `%.*s.%.*s` knows only its signature: write `keeps` there too (spec §6.1)",
+                  NAME_ARGS(target->owner->name), NAME_ARGS(name));
+        return;
+    }
     unsigned added = method->type->as.fn.effects & ~target->type->as.fn.effects;
     if (added) {
         unsigned bit = added & (~added + 1); /* lowest added effect */
@@ -983,7 +996,7 @@ Type *sema_subst(Sema *s, Type *type, Type **from, Type **to, size_t count, cons
             }
             mask = own;
         }
-        Type *result = type_fn(&s->types, params.items, params.count, ret, mask);
+        Type *result = type_fn(&s->types, params.items, params.count, ret, mask, type->as.fn.keeps);
         free(params.items);
         return result;
     }

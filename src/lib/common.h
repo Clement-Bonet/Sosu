@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SOSU_VERSION "0.3.4"
+#define SOSU_VERSION "0.3.5"
 
 /* Stops sosuc with a message: memory could not be had (exit code 3). */
 void sosu_out_of_memory(void);

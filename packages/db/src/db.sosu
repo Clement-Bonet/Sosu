@@ -34,9 +34,9 @@ pub interface Connection {
     // Runs a statement that gives no rows; gives the number of rows it changed.
     i64!DbError execute(str sql, Value[] params) uses io;
     // Runs a statement that gives rows, read one by one by `Rows.next`.
-    Rows*!DbError query(Arena* arena, str sql, Value[] params) uses io;
+    Rows*!DbError query(Arena* arena, str sql, Value[] params) keeps self uses io;
     // A statement read once, then run many times with other parameters.
-    Statement*!DbError prepare(Arena* arena, str sql) uses io;
+    Statement*!DbError prepare(Arena* arena, str sql) keeps self uses io;
     // Statements without parameters, separated by `;` (a schema).
     void!DbError script(str sql) uses io;
     // A transaction: what runs until `commit` is kept all together, or not at all (`rollback`).
@@ -55,7 +55,7 @@ pub interface Connection {
 pub interface Statement {
     i64!DbError execute(Value[] params) uses io;
     // The rows of the statement, which it gives until they are closed or it runs again.
-    Rows*!DbError query(Arena* arena, Value[] params) uses io;
+    Rows*!DbError query(Arena* arena, Value[] params) keeps self uses io;
     void close() uses io;
 }
 
@@ -80,13 +80,13 @@ pub i64!DbError run(Connection* c, str sql) uses io {
 }
 
 // The rows of a query without parameters.
-pub Rows*!DbError select(Arena* arena, Connection* c, str sql) uses io {
+pub Rows*!DbError select(Arena* arena, keeps Connection* c, str sql) uses io {
     mut Value[1] nothing = [Null];
     return c.query(arena, sql, nothing[0..0]);
 }
 
 // The first column of the first row of a query (`SELECT count(*) ...`), none without rows.
-pub Value?!DbError scalar(Arena* arena, Connection* c, str sql, Value[] params) uses io {
+pub Value?!DbError scalar(Arena* arena, keeps Connection* c, str sql, Value[] params) uses io {
     Rows* rows = try c.query(arena, sql, params);
     defer rows.close();
     if (!try rows.next() || rows.columns() == 0) {

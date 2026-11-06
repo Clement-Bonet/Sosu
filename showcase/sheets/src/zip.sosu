@@ -113,7 +113,7 @@ usize get32(ui8[] data, usize at) {
 }
 
 // Reads the files of the archive `data` into `into`. False when it is not an archive, or damaged.
-pub bool read(Arena* arena, keeps ui8[] data, vec.Vec<Entry>* into) {
+pub bool read(keeps Arena* arena, keeps ui8[] data, vec.Vec<Entry>* into) {
     if (data.len < 22) {
         return false;
     }

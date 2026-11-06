@@ -62,7 +62,7 @@ What makes the code simple to read makes it longer to write.
 When goals conflict, these are the choices Sosu makes today.
 
 1. **Reading comes before writing.** A longer signature is accepted if it saves opening the body.
-2. **Simple signatures come before complete guarantees.** There are no lifetimes in the types: the regions catch less than lifetimes would, which is why Sosu is not memory safe yet. Closing that gap without making signatures harder to read is the hardest open question.
+2. **Simple signatures come before complete guarantees.** There are no lifetimes in the types: the regions catch less than lifetimes would, which is why Sosu is not memory safe, and does not aim to be.
 3. **Speed comes before some checks.** Bounds stay checked in release, unless `--checks=off` is given, but overflows and contracts are not checked by default.
 4. **Reaching every platform comes before independence.** Sosu depends on a C compiler, because it brings the same code to every system.
 
@@ -82,7 +82,7 @@ With version 1.0, many sorts of applications will be possible:
 ## What it does not claim
 
 - **It is not ready for production.** Sosu is young (0.x), the language can still change, and it has no outside users yet.
-- **It is not memory safe yet.** The regions refuse a pointer that outlives its arena or its function, but they do not follow `unsafe`, C, lambdas or a call through a value of function type. A program can still have undefined behaviour. Memory safety is a goal for 1.0, and what is not checked yet is listed in [spec §7.7](docs/SPEC.md).
+- **It is not memory safe.** The regions refuse a pointer that outlives its arena or its function, but they do not follow `unsafe` or C, and without lifetimes they cannot prove every case. A program can still have undefined behaviour. What is not checked is listed in [spec §7.7](docs/SPEC.md).
 - **It does not replace Rust today.**
 - **It does not remove the C compiler.** `sosuc` needs one to produce a program.
 
@@ -94,7 +94,7 @@ I designed Sosu. Much of the compiler, the standard library and the documentatio
 
 ## Where it is going
 
-The next goal is version 1.0, whose content and order are in [spec §13.1](docs/SPEC.md). Memory safety is one of its goals.
+The next goal is version 1.0, whose content and order are in [spec §13.1](docs/SPEC.md).
 
 ## What I hope for
 

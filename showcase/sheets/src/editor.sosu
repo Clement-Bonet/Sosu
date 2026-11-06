@@ -31,7 +31,7 @@ pub class Step {
     pub vec.Vec<Snap>* before;
     pub vec.Vec<Snap>* after;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.before = vec.new<Snap>(arena);
         self.after = vec.new<Snap>(arena);
     }
@@ -88,7 +88,7 @@ pub class Editor {
     map.HashMap<i64, bool>* seen;
     mut bool recording;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         self.book = arena.new(calc.Book, arena);
         self.cc = 0;
@@ -311,7 +311,7 @@ pub class Editor {
         self.say("Redone");
     }
 
-    void replay(Step* st, bool backwards) {
+    void replay(keeps Step* st, bool backwards) {
         vec.Vec<Snap>* list = backwards ? st.before : st.after;
         for (usize i in 0..list.len()) {
             self.apply_snap(list.items()[i]);
@@ -834,7 +834,7 @@ pub class Editor {
 
     // ----- extent, statistics, sorting
 
-    pub Rect used(Arena* arena) {
+    pub Rect used(Arena* arena) keeps self {
         values.Ref e = self.book.extent(arena);
         return Rect{ c1: 0, r1: 0, c2: e.ok ? e.col : 0, r2: e.ok ? e.row : 0 };
     }

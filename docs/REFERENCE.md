@@ -133,7 +133,7 @@ pub class Command
   An argument that must be given, after those declared before it.
 - `pub void rest(keeps str name, keeps str help)`  
   The arguments after the declared ones, as many as given (none too).
-- `pub Matches*!CliError parse(str[] args)`  
+- `pub Matches*!CliError parse(keeps str[] args)`  
   Reads `args` (without the name of the program: `os.args`).
 - `pub str help(Arena* arena)`  
   The help: how the command is written, what it does, its arguments and its options.
@@ -653,9 +653,9 @@ pub class HashMap<K: Hash, V>
   Takes `key` away, and gives its value. The keys placed after it move back, so that each stays reachable from its hash.
 - `pub usize len()`
 - `pub void clear()`
-- `pub K[] keys(Arena* into)`  
+- `pub K[] keys(Arena* into) keeps self`  
   Its keys, in no particular order: a copy in `into`.
-- `pub V[] values(Arena* into)`  
+- `pub V[] values(Arena* into) keeps self`  
   Its values, in the order of `keys`: a copy in `into`.
 
 ### `new`
@@ -2598,9 +2598,9 @@ pub interface Connection
 
 - `i64!DbError execute(str sql, Value[] params) uses io`  
   Runs a statement that gives no rows; gives the number of rows it changed.
-- `Rows*!DbError query(Arena* arena, str sql, Value[] params) uses io`  
+- `Rows*!DbError query(Arena* arena, str sql, Value[] params) keeps self uses io`  
   Runs a statement that gives rows, read one by one by `Rows.next`.
-- `Statement*!DbError prepare(Arena* arena, str sql) uses io`  
+- `Statement*!DbError prepare(Arena* arena, str sql) keeps self uses io`  
   A statement read once, then run many times with other parameters.
 - `void!DbError script(str sql) uses io`  
   Statements without parameters, separated by `;` (a schema).
@@ -2624,7 +2624,7 @@ pub interface Statement
 ```
 
 - `i64!DbError execute(Value[] params) uses io`
-- `Rows*!DbError query(Arena* arena, Value[] params) uses io`  
+- `Rows*!DbError query(Arena* arena, Value[] params) keeps self uses io`  
   The rows of the statement, which it gives until they are closed or it runs again.
 - `void close() uses io`
 
@@ -2659,7 +2659,7 @@ pub i64!DbError run(Connection* c, str sql) uses io
 The rows of a query without parameters.
 
 ```sosu
-pub Rows*!DbError select(Arena* arena, Connection* c, str sql) uses io
+pub Rows*!DbError select(Arena* arena, keeps Connection* c, str sql) uses io
 ```
 
 ### `scalar`
@@ -2667,7 +2667,7 @@ pub Rows*!DbError select(Arena* arena, Connection* c, str sql) uses io
 The first column of the first row of a query (`SELECT count(*) ...`), none without rows.
 
 ```sosu
-pub Value?!DbError scalar(Arena* arena, Connection* c, str sql, Value[] params) uses io
+pub Value?!DbError scalar(Arena* arena, keeps Connection* c, str sql, Value[] params) uses io
 ```
 
 ### `column`
@@ -2810,7 +2810,7 @@ pub class Local
 The connections of `pool` in this thread, opened by `open` (a driver's, as `sqlite.connect`) in `arena`.
 
 ```sosu
-pub Local* local(Arena* arena, Pool pool, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open)
+pub Local* local(keeps Arena* arena, Pool pool, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open)
 ```
 
 ## image.image

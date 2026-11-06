@@ -178,7 +178,7 @@ pub class Parser {
     mut bool partial_tab;
     mut i32 line_no;
 
-    void init(Arena* arena, bool ext) {
+    void init(keeps Arena* arena, bool ext) {
         self.arena = arena;
         self.ext = ext;
         nodes = vec.new<cm.Node>(arena);

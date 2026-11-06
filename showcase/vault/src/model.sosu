@@ -85,7 +85,7 @@ pub class Model {
     mut widgets.TextBuffer seen;  // the search of the last `rebuild`
     Arena* arena;
 
-    void init(Arena* arena, keeps db.Connection* conn) uses io {
+    void init(keeps Arena* arena, keeps db.Connection* conn) uses io {
         self.arena = arena;
         self.conn = conn;
         locked = true;

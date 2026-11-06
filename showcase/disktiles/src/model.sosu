@@ -41,7 +41,7 @@ pub class Model {
     mut i32 laid_w;
     mut i32 laid_h;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         scan_arena = Arena.new(64 * KB);
         tree = scan.scan(&scan_arena, "");

@@ -81,7 +81,7 @@ pub class Sheet {
     mut i64 seq_now;  // the order given to the action in progress
     mut i32 made;  // layers created, for their names
 
-    void init(Arena* arena, i32 width, i32 height) {
+    void init(keeps Arena* arena, i32 width, i32 height) {
         self.arena = arena;
         self.width = width;
         self.height = height;
@@ -444,7 +444,7 @@ pub struct Frame {
 }
 
 // A copy of `src` with its layers, and an empty history.
-pub Sheet* duplicate(Arena* arena, Sheet* src) {
+pub Sheet* duplicate(Arena* arena, keeps Sheet* src) {
     Sheet* s = new_sheet(arena, src.width, src.height);
     s.layers.clear();
     for (usize k in 0..src.layers.len()) {
