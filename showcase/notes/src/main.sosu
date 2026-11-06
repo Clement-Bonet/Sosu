@@ -86,7 +86,7 @@ class App : app.Handler, app.TitleBar {
     mut i32 deco;  // decorations of the text being drawn: 1 struck, 2 highlighted, 8 tag
     mut canvas.Color tone;  // the ink of the paragraphs
 
-    void init(keeps notes.Notes* state, Arena* arena) {
+    void init(keeps notes.Notes* state, keeps Arena* arena) {
         ui = widgets.Ui{ };
         self.state = state;
         face = none;

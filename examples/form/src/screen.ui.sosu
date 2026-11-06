@@ -2,7 +2,7 @@
 // `Greeter` (the widgets, at each frame) and `GreeterConfig` (the window).
 import form.state;
 
-window Greeter(state.Form* form) {
+window Greeter(keeps state.Form* form) {
     title: "Sosu form"
     width: 420
     height: 640

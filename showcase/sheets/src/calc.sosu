@@ -48,7 +48,7 @@ pub class Book {
     pub mut i64 seed;
     pub mut i64 now_unix;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.store = Arena.new(1 * MB);
         self.temp = Arena.new(1 * MB);
         self.cells = map.new<i64, Cell*>(arena);
@@ -71,7 +71,7 @@ pub class Book {
         return self.cells.get(key_of(col, row));
     }
 
-    pub Cell* make(Arena* arena, i32 col, i32 row) {
+    pub Cell* make(keeps Arena* arena, i32 col, i32 row) {
         i64 k = key_of(col, row);
         Cell*? have = self.cells.get(k);
         match (have) {
@@ -129,7 +129,7 @@ pub class Book {
         }
     }
 
-    pub values.Value compute(Cell* c, i32 col, i32 row) {
+    pub values.Value compute(keeps Cell* c, i32 col, i32 row) keeps self {
         if (c.state == 2) {
             return c.val;
         }
@@ -184,7 +184,7 @@ pub class Book {
         }
     }
 
-    pub void set_raw(Arena* arena, i32 col, i32 row, str raw) {
+    pub void set_raw(keeps Arena* arena, i32 col, i32 row, str raw) {
         Cell* c = self.make(arena, col, row);
         c.raw = self.keep(raw);
     }
@@ -210,7 +210,7 @@ pub class Book {
     }
 
     // The last used column and row, as (col, row), or (-1, -1) when the sheet is empty.
-    pub values.Ref extent(Arena* arena) {
+    pub values.Ref extent(Arena* arena) keeps self {
         mut i32 mc = -1;
         mut i32 mr = -1;
         i64[] keys = self.cells.keys(arena);
@@ -523,7 +523,7 @@ pub class Parser {
     i32 col;
     i32 row;
 
-    void init(keeps Book* book, Arena* t, keeps str s, i32 col, i32 row) {
+    void init(keeps Book* book, keeps Arena* t, keeps str s, i32 col, i32 row) {
         self.book = book;
         self.t = t;
         self.s = s;
@@ -1008,11 +1008,11 @@ pub i32 min_args(str name) {
     return 1;
 }
 
-pub values.Value dispatch(Parser* p, str name, Arg[] a) {
+pub values.Value dispatch(keeps Parser* p, str name, keeps Arg[] a) {
     return call_function(p.book, p.t, p.col, p.row, name, a);
 }
 
-pub values.Value call_function(Book* b, Arena* t, i32 col, i32 row, str name, Arg[] a) {
+pub values.Value call_function(keeps Book* b, Arena* t, i32 col, i32 row, str name, keeps Arg[] a) {
     mut values.Value v = agg_fn(b, t, name, a);
     if (v.kind >= 0) {
         return v;
@@ -1948,7 +1948,7 @@ values.Value text_fn(Book* b, Arena* t, str name, Arg[] a) {
 }
 
 // Position (0-based) of the first cell of `x` that equals `v`, or -1.
-values.Value lookup_fn(Book* b, Arena* t, str name, Arg[] a) {
+values.Value lookup_fn(keeps Book* b, Arena* t, str name, keeps Arg[] a) {
     if (name == "VLOOKUP" || name == "HLOOKUP") {
         Arg r = a[1];
         if (!r.range) {

@@ -46,7 +46,7 @@ Estimated again from the pace above. The versions: `0.2.0` with the packages of 
 | 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`). Remains: the guide from the first program to a window, the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
-| 10 | Memory safety | Added on November 4, 2026 (§13.1). The regions are done (§6.1); what they do not follow remains, and how to close it without lifetimes in the types is open | not estimated |
+| 10 | Dangling pointers | Added on November 4, 2026 (§13.1), and reduced on November 6, 2026: Sosu does not promise memory safety. Done on November 6, 2026 (§6.1, §7.7) | 0 |
 
 In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work. This total and this date do not count work 10: its design has to be settled first.
 

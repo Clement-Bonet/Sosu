@@ -78,7 +78,7 @@ class App : app.Handler, app.TitleBar {
     mut image.Image tri;  // the triangle for the hue `tri_hue`
     mut f32 tri_hue;
 
-    void init(keeps editor.Editor* state, Arena* arena) {
+    void init(keeps editor.Editor* state, keeps Arena* arena) {
         ui = widgets.Ui{ };
         self.state = state;
         ring = image.create(arena, 300, 300);

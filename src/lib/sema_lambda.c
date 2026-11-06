@@ -131,7 +131,13 @@ Type *sema_check_lambda(Body *b, Expr *e, Type *expected, FnInfo *generic, Type 
     b->unsafe_depth = 0;
     b->loop_depth = 0;
     b->defer_depth = 0;
-    for (size_t i = 0; i < count; i++) sema_declare_local(b, e->as.lambda.params[i].name, params[i], false);
+    uint64_t keeps = pattern ? pattern->as.fn.keeps : 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t before = b->locals.count;
+        if (i < 64 && e->as.lambda.params[i].is_keeps) keeps |= (uint64_t)1 << i;
+        sema_declare_local(b, e->as.lambda.params[i].name, params[i], false);
+        if (b->locals.count > before) sema_lambda_param(b, i < 64 && (keeps >> i & 1));
+    }
 
     if (e->as.lambda.block) {
         sema_check_block(b, e->as.lambda.block);
@@ -173,5 +179,5 @@ Type *sema_check_lambda(Body *b, Expr *e, Type *expected, FnInfo *generic, Type 
     }
     free(scope.captures.items);
     if (wrong_count) return sema_error_type(b); /* already reported */
-    return type_fn(&b->s->types, params, count, ret, fx);
+    return type_fn(&b->s->types, params, count, ret, fx, keeps);
 }

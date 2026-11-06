@@ -28,7 +28,7 @@ Button* make(Arena* arena, i32 start) {
     return arena.new(Button, arena.closure(() => k + 1));
 }
 
-void wire(Arena* arena, keeps Counter* c, i32 step) {
+void wire(keeps Arena* arena, keeps Counter* c, i32 step) {
     c.add = arena.closure((i32 n) => {
         c.total += n * step;
     });

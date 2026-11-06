@@ -67,7 +67,7 @@ struct Type {
         Type *inner; /* POINTER, OPTION, SLICE */
         struct { Type *element; uint64_t size; } array;
         struct { Type *value; Type *error; } result;
-        struct { Type **params; size_t param_count; Type *ret; unsigned effects; } fn;
+        struct { Type **params; size_t param_count; Type *ret; unsigned effects; uint64_t keeps; } fn; /* keeps: bit i, the parameter i is marked `keeps` */
         TypeInfo *info; /* STRUCT, CLASS, INTERFACE, ENUM */
         struct { uint32_t index; uint32_t constraints; TypeInfo *bound; } param; /* PARAM; bound: an interface */
     } as;
@@ -92,7 +92,7 @@ Type *type_option(TypeTable *table, Type *inner);
 Type *type_slice(TypeTable *table, Type *inner);
 Type *type_array(TypeTable *table, Type *element, uint64_t size);
 Type *type_result(TypeTable *table, Type *value, Type *error);
-Type *type_fn(TypeTable *table, Type **params, size_t param_count, Type *ret, unsigned effects);
+Type *type_fn(TypeTable *table, Type **params, size_t param_count, Type *ret, unsigned effects, uint64_t keeps);
 
 /* Source form of a type, e.g. "Vec2*" or "fn(i32) -> i32 uses io". New string. */
 char *type_to_string(const Type *type);

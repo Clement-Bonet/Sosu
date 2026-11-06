@@ -62,7 +62,7 @@ pub class Notes {
     mut widgets.TextBuffer seen_search;
     mut Arena* arena;
 
-    void init(Arena* arena, str folder) uses io {
+    void init(keeps Arena* arena, str folder) uses io {
         self.arena = arena;
         dir = widgets.TextBuffer{ };
         dir.set(folder);

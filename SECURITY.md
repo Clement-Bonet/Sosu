@@ -13,10 +13,11 @@ the system, and the steps or the file that show the problem.
 
 ## What to know before using it
 
-- Sosu is **not memory safe yet**: some dangling pointers are not caught (spec §7.7, in
+- Sosu is **not memory safe**, by choice: some dangling pointers are not caught (spec §7.7, in
   [docs/SPEC.md](docs/SPEC.md)). A program can have undefined behaviour without `unsafe`. The
-  compiler follows where arena memory goes (the regions, spec §6.1: E0372 to E0377), but not
-  through `unsafe`, C, lambdas, or a call through a value of function type; a debug build stops
+  compiler follows where arena memory goes (the regions, spec §6.1: E0372 to E0378), but not
+  through `unsafe`, C, or a pointer kept in a field
+  across the free of its arena; a debug build stops
   on a pointer read after the `free()` of its arena, and says so: test in debug before a release.
 - Building a package runs code of its author: `sosuc` compiles the C sources and applies the
   `[link]` settings of its `sosu.toml`, and of the `sosu.toml` of its git dependencies. Add a git

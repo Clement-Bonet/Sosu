@@ -12,10 +12,17 @@
 typedef struct MethodInfo MethodInfo;
 typedef struct FnInfo FnInfo;
 
+/* A field of arena of the same value that a field was given memory of (spec §6.1, rule 1). */
+typedef struct ArenaLink {
+    Name arena;
+    struct ArenaLink *next;
+} ArenaLink;
+
 typedef struct {
     Name name;
     Type *type;
     const Field *decl;
+    ArenaLink *arenas; /* found by the pass that makes the summaries, in the whole program */
 } FieldInfo;
 
 struct MethodInfo {
@@ -121,6 +128,15 @@ typedef struct {
     size_t slot_cap;
 } Scope;
 
+/* An arena in a field of a parameter, as a function sees it: `root` is the index of the parameter,
+   or -1 for `self`; `names` is the path from it, empty for an `Arena*` parameter. */
+typedef struct ArenaPath {
+    int root;
+    const Name *names;
+    int count;
+    struct ArenaPath *next;
+} ArenaPath;
+
 /* What a function returns of its parameters (spec §6.1, stage 4): the origins of what a call to it
    gives are those of these arguments only. Bit i stands for the parameter i (64 at most). */
 typedef struct {
@@ -128,6 +144,14 @@ typedef struct {
     uint64_t through; /* what is reached through it */
     bool receiver;    /* memory of `self` */
     bool complete;    /* its body was checked to its end: otherwise a call takes every argument */
+    ArenaPath *frees;   /* the arenas it frees, also through what it calls (rule 1) */
+    ArenaPath *returns; /* the arenas in fields whose memory it returns */
+    ArenaPath *kills;   /* the fields it leaves holding memory of an arena it freed */
+    ArenaPath *writes;  /* the fields it gives a value */
+    int grew_pass;      /* the last pass that added to these lists */
+    size_t *calls;      /* the summaries of the functions it calls */
+    size_t call_count;
+    size_t call_cap;
 } ReturnSummary;
 
 typedef struct {
@@ -149,6 +173,8 @@ typedef struct {
     PtrMap summary_index;
     struct { ReturnSummary *items; size_t count; size_t cap; } summaries;
     bool summarizing;
+    bool summary_grew; /* an `ArenaPath` was added: the summaries are made again, for its callers */
+    int summary_pass;  /* from 1; after the first, only the callers of a summary that grew are checked */
 } Sema;
 
 /* Checks a loaded program; errors go to program->diags. Returns true if there were none. */

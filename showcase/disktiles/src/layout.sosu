@@ -34,7 +34,7 @@ pub class Layout {
     pub vec.Vec<Tile>* tiles;
     mut scan.Tree* tree;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         tiles = vec.new<Tile>(arena);
         tree = scan.scan(arena, "");  // replaced by `build`
     }

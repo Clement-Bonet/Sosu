@@ -3,7 +3,7 @@
 import themes.look;
 import themes.state;
 
-window Themes(state.Demo* s) {
+window Themes(keeps state.Demo* s) {
     title: "Themes"
     width: 900
     height: 600

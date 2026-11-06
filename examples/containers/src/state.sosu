@@ -59,7 +59,7 @@ pub class Demo {
     pub image.Image file_icon;
     mut ui8[12] digits;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         page = 0;
         folder_icon = icon(arena, true);
         file_icon = icon(arena, false);

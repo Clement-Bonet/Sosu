@@ -75,7 +75,9 @@ pub void stable_sort_by<T, uses E>(Arena* arena, T[] items, fn(T, T) -> bool use
     }
     if (from.len != 0 && &from[0] != &items[0]) {  // the last pass wrote into `room`
         for (usize i in 0..items.len) {
-            items[i] = from[i];
+            unsafe {
+                items[i] = from[i];  // the elements of `items`, in their order
+            }
         }
     }
 }
@@ -250,15 +252,20 @@ void sift_down<T, uses E>(T[] items, usize root, usize end, fn(T, T) -> bool use
 
 // Merges the sorted runs `from[left..middle]` and `from[middle..right]` into `to[left..right]`;
 // on equal elements, the left one first.
+// `unsafe`: `from` and `to` swap, and an element only moves between them (spec §6.1).
 void merge<T, uses E>(T[] from, T[] to, usize left, usize middle, usize right, fn(T, T) -> bool uses E less) uses E {
     mut usize i = left;
     mut usize j = middle;
     for (usize k in left..right) {
         if (i < middle && (j >= right || !less(from[j], from[i]))) {
-            to[k] = from[i];
+            unsafe {
+                to[k] = from[i];
+            }
             i += 1;
         } else {
-            to[k] = from[j];
+            unsafe {
+                to[k] = from[j];
+            }
             j += 1;
         }
     }

@@ -11,7 +11,7 @@ pub class Out {
     mut bool nl;
     mut i32 alt;
 
-    void init(Arena* arena, keeps vec.Vec<cm.Node>* nodes) {
+    void init(keeps Arena* arena, keeps vec.Vec<cm.Node>* nodes) {
         self.arena = arena;
         self.nodes = nodes;
         b = text.builder(arena);
