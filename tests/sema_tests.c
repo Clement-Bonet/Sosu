@@ -651,6 +651,89 @@ static void test_returned_arena(void) {
                 "struct (spec §6.1)");
 }
 
+/* Spec §6.1: the regions follow every origin of a value, however many it has, and the arguments
+   of a call after the 64th, which a summary does not name. */
+static void test_many_origins(void) {
+    const char *head = "struct N { i32 v; }\nstruct H { mut N*? n; }\n";
+    const char *keeps = "bool c, keeps N* q1, keeps N* q2, keeps N* q3, keeps N* q4, keeps N* q5, keeps N* q6, keeps N* q7, "
+                        "keeps N* q8";
+    const char *chain = "c ? q1 : c ? q2 : c ? q3 : c ? q4 : c ? q5 : c ? q6 : c ? q7 : c ? q8";
+    char text[2048];
+
+    snprintf(text, sizeof text, "%sN* f(%s) { mut Arena a = Arena.new(64); return %s : a.alloc(N); }\n", head, keeps, chain);
+    expect_codes(text, "E0373");
+    snprintf(text, sizeof text, "%svoid f(H* h, %s) { mut Arena a = Arena.new(64); N* p = %s : a.alloc(N); h.n = some(p); }\n",
+             head, keeps, chain);
+    expect_codes(text, "E0374");
+    snprintf(text, sizeof text, "%si32 f(%s) { mut Arena a = Arena.new(64); mut N* p = q1; p = q2; p = q3; p = q4; p = q5; "
+             "p = q6; p = q7; p = q8; p = a.alloc(N); a.free(); return p.v; }\n", head, keeps);
+    expect_codes(text, "E0372");
+
+    /* the ninth arena moved into a value is known too: its memory may be returned with it */
+    expect_codes("struct N { i32 v; }\n"
+                 "struct D { Arena a1; Arena a2; Arena a3; Arena a4; Arena a5; Arena a6; Arena a7; Arena a8; Arena a9; N* p; }\n"
+                 "D f(Arena a1, Arena a2, Arena a3, Arena a4, Arena a5, Arena a6, Arena a7, Arena a8) {\n"
+                 "    mut Arena a9 = Arena.new(64);\n"
+                 "    N* p = a9.alloc(N);\n"
+                 "    return D{ a1: a1, a2: a2, a3: a3, a4: a4, a5: a5, a6: a6, a7: a7, a8: a8, a9: a9, p: p };\n"
+                 "}\n", "");
+
+    /* the 65th argument, returned by the function */
+    size_t used = (size_t)snprintf(text, sizeof text, "%sN* g(", head);
+    for (int i = 0; i < 64; i++) used += (size_t)snprintf(text + used, sizeof text - used, "N* p%d, ", i);
+    used += (size_t)snprintf(text + used, sizeof text - used, "N* last) { return last; }\n"
+                             "N* f(N* q) { mut Arena a = Arena.new(64); return g(");
+    for (int i = 0; i < 64; i++) used += (size_t)snprintf(text + used, sizeof text - used, "q, ");
+    snprintf(text + used, sizeof text - used, "a.alloc(N)); }\n");
+    expect_codes(text, "E0373");
+}
+
+/* Spec §6.1, the fourth decision: a part of a parameter is in its memory, nothing was read from it,
+   so it is stored only with `keeps`; a pointer read from that memory is the caller's. */
+static void test_parts_of_parameters(void) {
+    const char *head = "struct In { mut i32 v; }\nstruct A { mut i32[4] v; }\nstruct W { mut i32* p; }\n"
+                       "struct H { mut i32* p; mut i32[] i; }\n";
+    char text[512];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "void f(H* h, i32[] s) { h.i = s; }", "E0376" },
+        { "void f(H* h, i32[] s) { h.i = s[0..2]; }", "E0376" },
+        { "void f(H* h, i32[] s) { h.p = &s[0]; }", "E0376" },
+        { "void f(H* h, In* q) { h.p = &q.v; }", "E0376" },
+        { "void f(H* h, A* q) { h.i = q.v[0..2]; }", "E0376" },
+        { "i32[] g(i32[] s) { return s[0..2]; }\nvoid f(H* h, i32[] s) { h.i = g(s); }", "E0376" },
+        { "void f(H* h, keeps i32[] s) { h.i = s[0..2]; }", "" },
+        { "void f(H* h, keeps In* q) { h.p = &q.v; }", "" },
+        { "void f(H* h, W* q) { h.p = q.p; }", "" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%s%s\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
+}
+
+/* Spec §6.1, rule 1: an arena in a field, or received as a parameter, is followed by its path in
+   the function. */
+static void test_freed_arena_in_field(void) {
+    const char *head = "struct S { mut Arena arena; }\nstruct D { mut S inner; }\n"
+                       "i32* make(Arena* a) { return a.alloc(i32); }\n";
+    char text[512];
+    static const struct { const char *body; const char *codes; } cases[] = {
+        { "i32 f(S* s) { i32* q = s.arena.alloc(i32); s.arena.free(); return *q; }", "E0372" },
+        { "i32 f(D* d) { i32* q = d.inner.arena.alloc(i32); d.inner.arena.free(); return *q; }", "E0372" },
+        { "i32 f(S* s) { i32* q = make(&s.arena); s.arena.free(); return *q; }", "E0372" },
+        { "class C { mut Arena temp; i32 m() { i32* q = temp.alloc(i32); self.temp.free(); return *q; } }", "E0372" },
+        { "i32 f(Arena* a) { i32* q = a.alloc(i32); a.free(); return *q; }", "E0372" },
+        /* another arena; a new arena after the free; a variable given something else */
+        { "i32 f(S* s, S* t) { i32* q = s.arena.alloc(i32); t.arena.free(); return *q; }", "" },
+        { "i32 f(S* s) { s.arena.free(); s.arena = Arena.new(64); i32* q = s.arena.alloc(i32); return *q; }", "" },
+        { "i32 f(S* s, i32* r) { mut i32* q = s.arena.alloc(i32); s.arena.free(); q = r; return *q; }", "" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(text, sizeof text, "%s%s\n", head, cases[i].body);
+        expect_codes(text, cases[i].codes);
+    }
+}
+
 /* Spec §6.1, stage 3: a pointer is stored only where it lasts no longer than what it points to
    (E0374). */
 static void test_stored_pointer(void) {
@@ -795,6 +878,9 @@ int main(void) {
     test_dangling();
     test_freed_arena();
     test_returned_arena();
+    test_many_origins();
+    test_parts_of_parameters();
+    test_freed_arena_in_field();
     test_stored_pointer();
     test_keeps();
     test_closures_in_arena();

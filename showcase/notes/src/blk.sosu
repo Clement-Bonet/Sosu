@@ -981,7 +981,7 @@ pub class Parser {
 }
 
 // The lines of a text: they end with `\n`, `\r\n` or `\r`.
-pub void split_lines(Arena* arena, str src, vec.Vec<str>* out) {
+pub void split_lines(Arena* arena, keeps str src, vec.Vec<str>* out) {
     mut usize start = 0;
     mut usize i = 0;
     while (i < src.len) {
@@ -1002,7 +1002,7 @@ pub void split_lines(Arena* arena, str src, vec.Vec<str>* out) {
 
 // The tree of a document. With `ext`, the extensions are on: tables, strikethrough, task lists,
 // footnotes, automatic links, and the syntax of Obsidian.
-pub Doc parse(Arena* arena, str src, bool ext) {
+pub Doc parse(Arena* arena, keeps str src, bool ext) {
     Parser* p = arena.new(Parser, arena, ext);
     vec.Vec<str>* lines = vec.new<str>(arena);
     split_lines(arena, src, lines);

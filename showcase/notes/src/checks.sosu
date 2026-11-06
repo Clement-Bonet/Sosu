@@ -475,7 +475,7 @@ test "the alignment of the columns of a table" {
     assert(md.align_of(&arena, rule, 9) == 0);
 }
 
-str render(Arena* arena, str src, bool ext) {
+str render(Arena* arena, keeps str src, bool ext) {
     blk.Doc d = blk.parse(arena, src, ext);
     html.Out* o = arena.new(html.Out, arena, d.nodes);
     o.node(0);
@@ -533,7 +533,7 @@ test "the examples of the CommonMark specification" {
     io.print("{} of {} examples\n", ok, n);
     assert(n == 652);
 }
-i32 count(Arena* arena, str src, cm.Kind kind) {
+i32 count(Arena* arena, keeps str src, cm.Kind kind) {
     blk.Doc d = blk.parse(arena, src, true);
     mut i32 n = 0;
     for (usize i in 0..d.nodes.len()) {

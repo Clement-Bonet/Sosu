@@ -11,6 +11,13 @@
 #define ALL_EFFECTS (EFFECT_IO | EFFECT_TIME | EFFECT_RANDOM | EFFECT_THREADS)
 #define EFFECT_UNBOUND 0xFFFFFFFFu /* a generic effect parameter not inferred yet (sema_call.c) */
 
+/* A set of origins, of any size, in the arena of Sema. Two copies of a `Local` must not both grow it. */
+typedef struct {
+    size_t *items;
+    int count;
+    int cap;
+} OriginSet;
+
 typedef struct {
     Name name;
     Type *type;
@@ -21,12 +28,10 @@ typedef struct {
     bool closure;        /* holds a lambda of this function that captures variables (spec §5.5) */
     bool points_inside;  /* was given a pointer or a view into this function (spec §7.7, E0371) */
     /* The regions (spec §6.1): the origins of the memory it was given, as the declaration offsets
-       of the arenas (a local `Arena`, or an `Arena*` parameter) or ORIGIN_CALLER; more than eight
-       are not followed. Stage 1 (E0372): whether a local arena of them was freed. */
-    size_t origins[8];
-    int origin_count;
-    size_t owned[8];     /* the local arenas moved into it (an object that owns its arena, spec §9.2) */
-    int owned_count;
+       of the arenas (a local `Arena`, or an `Arena*` parameter) or ORIGIN_CALLER. Stage 1 (E0372):
+       whether a local arena of them was freed. */
+    OriginSet origins;
+    OriginSet owned;     /* the local arenas moved into it (an object that owns its arena, spec §9.2) */
     bool is_param;
     bool is_keeps;       /* a parameter marked `keeps` (spec §6.1, rule 4) */
     bool dangling;
@@ -45,6 +50,15 @@ typedef struct LambdaScope {
     unsigned used;
 } LambdaScope;
 
+/* An arena in a field, as the function names it (`self.temp`, `doc.arena`): an origin of its own
+   (spec §6.1, rule 1). */
+typedef struct ArenaPlace {
+    const Expr *path;
+    size_t root; /* the declaration of the variable it starts from, or SIZE_MAX for `self` */
+    size_t index;
+    struct ArenaPlace *next;
+} ArenaPlace;
+
 typedef struct {
     Sema *s;
     Unit *unit;
@@ -61,6 +75,8 @@ typedef struct {
     bool taking_address; /* `&x`: the checks of assignment apply */
     bool assigning;      /* the target of `=`: a moved variable may receive a new value */
     VEC(Local) locals;
+    ArenaPlace *places;
+    size_t place_count;
     LambdaScope *lambda; /* the innermost lambda being checked, or NULL */
     const FnDecl *fn_decl; /* the function or method whose body this is, or NULL */
 } Body;

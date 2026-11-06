@@ -2,7 +2,7 @@
 // are drawn by main.sosu, at the right of the editor.
 import notes.notes;
 
-window Notes(notes.Notes* m) uses io {
+window Notes(keeps notes.Notes* m) uses io {
     title: "Notes"
     width: 1200
     height: 720

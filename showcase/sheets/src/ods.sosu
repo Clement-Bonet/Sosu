@@ -1031,7 +1031,7 @@ class Reader {
 }
 
 // Reads the .ods file `bytes` into `book`, an empty book. False when it is not an OpenDocument spreadsheet.
-pub bool decode(Arena* arena, keeps calc.Book* book, ui8[] bytes) {
+pub bool decode(Arena* arena, keeps calc.Book* book, keeps ui8[] bytes) {
     vec.Vec<zip.Entry>* files = vec.new<zip.Entry>(arena);
     if (!zip.read(arena, bytes, files)) {
         return false;

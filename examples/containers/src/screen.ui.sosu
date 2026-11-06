@@ -2,7 +2,7 @@
 // the window; the grid of the first one, its width.
 import containers.state;
 
-window Containers(state.Demo* s) {
+window Containers(keeps state.Demo* s) {
     title: "Containers"
     width: 960
     height: 640
@@ -37,7 +37,7 @@ window Containers(state.Demo* s) {
 
 // Numbers, money, a date, a slider and a progress bar, a text area; tooltips and letters with
 // Alt (spec §10.9).
-component Inputs(state.Demo* s) {
+component Inputs(keeps state.Demo* s) {
     Grid(columns: [Auto, Fill], gap: 12) {
         Text("Quantity")
         NumberField(bind: s.quantity, min: 1, max: 99, width: 120, tooltip: "From 1 to 99: Up and Down change it")
@@ -123,7 +123,7 @@ component Groups(state.Demo* s) {
 }
 
 // A tree of folders, as deep as they go, and what it opened.
-component Files(state.Demo* s) {
+component Files(keeps state.Demo* s) {
     Row(gap: 8) {
         Button("Open all", on_click: s.open_all(true))
         Button("Close all", on_click: s.open_all(false))
@@ -136,7 +136,7 @@ component Files(state.Demo* s) {
 
 // A long tree (spec §10.10): 1 000 folders of 100 files, 101 000 rows when all are open; the
 // program gives its rows flat, and only those in view are described.
-component LongTree(state.Demo* s) {
+component LongTree(keeps state.Demo* s) {
     Row(gap: 8) {
         Button("Open all", on_click: s.open_big(true))
         Button("Close all", on_click: s.open_big(false))

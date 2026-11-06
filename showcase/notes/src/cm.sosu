@@ -529,7 +529,7 @@ pub i32 find_ref(vec.Vec<Ref>* refs, str label) {
 
 // A definition `[label]: /url "title"` at the start of `s`: how many bytes it takes, or 0. It is
 // kept in `refs` when no definition has that label.
-pub usize parse_ref(Arena* arena, vec.Vec<Ref>* refs, str s) {
+pub usize parse_ref(Arena* arena, vec.Vec<Ref>* refs, keeps str s) {
     usize end_label = scan_label(s, 0);
     if (end_label == 0) {
         return 0;
