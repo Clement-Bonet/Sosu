@@ -1177,7 +1177,8 @@ void sema_check_call_keeps(Body *b, const Expr *e) {
     size_t param_count = decl ? decl->param_count : fn->as.fn.param_count;
     for (size_t i = 0; i < param_count && first + i < e->as.call.arg_count; i++) {
         if (decl ? !decl->params[i].is_keeps : i >= 64 || !(fn->as.fn.keeps >> i & 1)) continue;
-        Name param_name = decl ? decl->params[i].name : (Name){ "0123456789" + i % 10, 1, 0 }; /* its place */
+        static const char digits[] = "0123456789";
+        Name param_name = decl ? decl->params[i].name : (Name){ &digits[i % 10], 1, 0 }; /* its place */
         const Expr *arg = e->as.call.args[first + i];
         if (!arg->type || sema_is_send(arg->type)) continue;
         Local kept = {0};
@@ -1272,7 +1273,7 @@ void sema_arena_freed(Body *b, Expr *object, size_t offset) {
     if (b->s->summarizing && b->fn_decl && !b->lambda) {
         ReturnSummary *summary = summary_of(b->s, b->fn_decl, true);
         if (arena) summarize_path(b, summary, &summary->frees, arena->name.offset, NULL, 0);
-        else summarize_path(b, summary, &summary->frees, place->root, place->names, place->count);
+        else if (place) summarize_path(b, summary, &summary->frees, place->root, place->names, place->count);
     }
     if (arena) {
         if (b->defer_depth > 0) {
