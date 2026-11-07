@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,6 +216,79 @@ static void test_bindgen(const char *sosuc) {
     free(deep_module);
 }
 
+/* docs/GUIDE.md says what it shows: each block after a mark is a package of its own. `run` compiles
+   and runs it, and the `text` block after it is what it prints; `check` and `test` must pass;
+   `error E0000` must be refused with that code first. */
+static void test_guide(const char *sosuc) {
+    char *guide = read_text("docs/GUIDE.md");
+    CHECK(guide != NULL, "cannot read docs/GUIDE.md");
+    if (!guide) return;
+    int count = 0;
+    for (char *at = strstr(guide, "<!-- "); at; at = strstr(at + 1, "<!-- ")) {
+        char kind[32] = "";
+        char *line_end = strchr(at, '\n');
+        if (!line_end || sscanf(at, "<!-- %31[^-]-->", kind) != 1) continue;
+        char *code = strstr(line_end, "```csharp\n");
+        if (code != line_end + 1) continue;
+        code += strlen("```csharp\n");
+        char *end = strstr(code, "```\n");
+        if (!end) break;
+        count++;
+
+        char dir[64], path[96], command[1024];
+        snprintf(dir, sizeof dir, "build/guide%d", count);
+        snprintf(path, sizeof path, "mkdir \"build/guide%d/src\" 2> nul", count);
+#ifdef _WIN32
+        for (char *c = path; *c; c++) {
+            if (*c == '/') *c = '\\';
+        }
+#else
+        snprintf(path, sizeof path, "mkdir -p %s/src", dir);
+#endif
+        run(path);
+        snprintf(path, sizeof path, "%s/sosu.toml", dir);
+        FILE *file = fopen(path, "w");
+        CHECK(file != NULL, "cannot write %s", path);
+        if (!file) break;
+        fprintf(file, "[package]\nname = \"guide%d\"\nversion = \"0.1.0\"\n", count);
+        fclose(file);
+        snprintf(path, sizeof path, "%s/src/main.sosu", dir);
+        file = fopen(path, "w");
+        CHECK(file != NULL, "cannot write %s", path);
+        if (!file) break;
+        fwrite(code, 1, (size_t)(end - code), file);
+        *end = '\0';
+        if (!strstr(code, "i32 main(")) fputs("\ni32 main() {\n    return 0;\n}\n", file);
+        *end = '`';
+        fclose(file);
+
+        bool refused = strncmp(kind, "error ", 6) == 0;
+        const char *verb = strncmp(kind, "run", 3) == 0 ? "run" : strncmp(kind, "test", 4) == 0 ? "test" : "check";
+        snprintf(command, sizeof command, "%s %s %s > %s/out.txt 2> %s/err.txt", sosuc, verb, dir, dir, dir);
+        int status = run(command);
+        snprintf(path, sizeof path, "%s/%s", dir, refused ? "err.txt" : "out.txt");
+        char *output = read_text(path);
+        if (refused) {
+            char want[32];
+            sscanf(kind + 6, "%31s", want);
+            const char *first = output ? strstr(output, "error[") : NULL;
+            CHECK(status != 0 && first && strncmp(first + 6, want, strlen(want)) == 0, "guide block %d: not refused with %s", count, want);
+        } else {
+            CHECK(status == 0, "guide block %d (%s): failed, see %s", count, verb, dir);
+            const char *after = end + strlen("```\n");
+            if (strcmp(verb, "run") == 0 && strncmp(after, "\n```text\n", 9) == 0) {
+                const char *text = after + 9;
+                size_t length = (size_t)(strstr(text, "```\n") - text);
+                CHECK(output && strlen(output) == length && strncmp(output, text, length) == 0,
+                      "guide block %d prints something else, see %s", count, dir);
+            }
+        }
+        free(output);
+    }
+    CHECK(count > 30, "only %d blocks found in docs/GUIDE.md", count);
+    free(guide);
+}
+
 /* `sosuc package` (spec §11.6): the program of tests/programs/packaged in build/package/, with its
    archive; run from another folder, it reads its asset next to itself. */
 static void test_package(const char *sosuc) {
@@ -302,6 +376,7 @@ int main(int argc, char **argv) {
 
     test_library(argv[1]);
     test_bindgen(argv[1]);
+    test_guide(argv[1]);
     test_freed_arena(argv[1]);
     test_stack_overflow(argv[1]);
     test_package(argv[1]);
