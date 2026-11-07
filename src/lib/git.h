@@ -46,6 +46,9 @@ const char *git_check_source(const char *url, const char *ref);
 /* True for a URL that names a folder (not `https://...` nor `user@host:path`). */
 bool git_is_local(const char *url);
 
+/* The folder of a dependency already checked out at `commit`, or NULL. Runs nothing. */
+char *git_cached(const char *deps_dir, const char *name, const char *commit);
+
 /* Clones `url` into `deps_dir/<name>-<commit>` and checks out `commit` if it is not NULL,
    else the tag or rev. Nothing is fetched when that folder already holds a package.
    Returns the folder and sets *commit_out; on failure, returns NULL and sets *error. */

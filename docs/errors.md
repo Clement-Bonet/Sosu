@@ -138,7 +138,7 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0402 | unknown section or key | `[tools]`, `[link.beos]`, `author = "..."`, `branch = "main"` in a dependency |
 | E0403 | missing section or key | no `[package]`, no `name` or `version` |
 | E0404 | invalid dependency | `x = "../x"`, no source, `path` and `git` together, `git` without `tag` or `rev`, a `"` or `$` in the URL or tag |
-| E0405 | cannot fetch a git dependency | wrong URL, no such tag or rev, `git` not installed |
+| E0405 | cannot fetch a git dependency | wrong URL, no such tag or rev, `git` not installed; in the language server, a dependency not fetched yet |
 | E0406 | the package is not named like its dependency key | `geo = { path = "../geometry" }` |
 | E0407 | circular dependency between packages | `a` depends on `b`, which depends on `a` |
 | E0408 | duplicate key, dependency or section | `name` written twice, `[link]` twice |

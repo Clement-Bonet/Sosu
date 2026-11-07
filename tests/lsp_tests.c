@@ -117,6 +117,12 @@ static void test_session(void) {
     published = answer(main_uri);
     CHECK(published && strstr(published, "\"diagnostics\":[]"), "no more errors: %s", published ? published : "nothing");
 
+    /* a position out of any range is the start of the file, or its end */
+    char *odd = sosu_format("{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"%s\"},\"position\":{\"line\":-1,\"character\":1e300}}}", main_uri);
+    exchange(odd);
+    free(odd);
+    CHECK(answer("\"id\":90"), "an answer to a position out of range");
+
     /* hover */
     request("textDocument/hover", good, "count + 1", 2);
     CHECK(answer("i32 count"), "hover on a local: %s", out.count ? out.items[0] : "nothing");
@@ -194,6 +200,13 @@ static void test_uris(void) {
     CHECK(path && strcmp(path, "/home/ada/app/main.sosu") == 0, "POSIX URI");
     free(path);
     CHECK(lsp_uri_to_path("untitled:Untitled-1") == NULL, "not a file");
+    size_t length = 0;
+    CHECK(lsp_content_length(" 42\r\n", &length) && length == 42, "a length");
+    CHECK(!lsp_content_length(" 18446744073709551615\r\n", &length), "the size of a pointer");
+    CHECK(!lsp_content_length(" 99999999999999999999999\r\n", &length), "more than a number");
+    CHECK(!lsp_content_length(" -1\r\n", &length), "negative");
+    CHECK(!lsp_content_length(" 12x\r\n", &length), "not a number");
+    CHECK(!lsp_content_length("\r\n", &length), "nothing");
     char *uri = lsp_path_to_uri("D:/Docs/My App/é.sosu");
     CHECK(strcmp(uri, "file:///D%3A/Docs/My%20App/%C3%A9.sosu") == 0, "path to URI: %s", uri);
     free(uri);

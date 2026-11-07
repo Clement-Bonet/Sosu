@@ -186,6 +186,13 @@ static bool holds_package(const char *dir) {
     return found;
 }
 
+char *git_cached(const char *deps_dir, const char *name, const char *commit) {
+    char *dir = checkout_dir(deps_dir, name, commit);
+    if (holds_package(dir)) return dir;
+    free(dir);
+    return NULL;
+}
+
 char *git_fetch(const char *deps_dir, const char *name, const char *url, const char *kind, const char *ref,
                 const char *commit, char **commit_out, char **error) {
     *commit_out = NULL;

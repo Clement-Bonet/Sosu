@@ -189,6 +189,30 @@ static void test_bindgen(const char *sosuc) {
     char *warnings = read_text("build/bindgen.err");
     CHECK(warnings && strstr(warnings, "`clib_long` uses `long`"), "bindgen of long.h: no warning about `long`");
     free(warnings);
+
+    /* a header nested beyond any stack: what is too deep is left out, and the rest is read */
+    FILE *deep = fopen("build/deep.h", "w");
+    CHECK(deep != NULL, "cannot write build/deep.h");
+    if (!deep) return;
+    fputs("#define DEEP ", deep);
+    for (int i = 0; i < 300000; i++) fputc('(', deep);
+    fputc('1', deep);
+    for (int i = 0; i < 300000; i++) fputc(')', deep);
+    fputs("\nint ", deep);
+    for (int i = 0; i < 100000; i++) fputc('(', deep);
+    fputs("*x", deep);
+    for (int i = 0; i < 100000; i++) fputc(')', deep);
+    fputs(";\n", deep);
+    for (int i = 0; i < 20000; i++) fputs("struct A { ", deep);
+    fputs("int x; ", deep);
+    for (int i = 0; i < 20000; i++) fputs("} a; ", deep);
+    fputs("\nint after(int x);\n", deep);
+    fclose(deep);
+    snprintf(command, sizeof command, "%s bindgen build/deep.h -o build/deep.sosu > build/bindgen.out 2> build/bindgen.err", sosuc);
+    CHECK(run(command) == 0, "bindgen of deep.h failed (see build/bindgen.err)");
+    char *deep_module = read_text("build/deep.sosu");
+    CHECK(deep_module && strstr(deep_module, "after"), "bindgen of deep.h: what follows is read");
+    free(deep_module);
 }
 
 /* `sosuc package` (spec §11.6): the program of tests/programs/packaged in build/package/, with its
