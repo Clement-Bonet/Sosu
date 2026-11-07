@@ -26,6 +26,10 @@ void lsp_free(LspServer *server);
    the server to exit: lsp_exit_code then gives the exit status. */
 bool lsp_handle(LspServer *server, const char *text, size_t length, LspMessages *out);
 int lsp_exit_code(const LspServer *server);
+
+/* The value of a `Content-Length:` header. False if it is not a number of bytes, or more than a
+   message can be: the length comes from outside, and is allocated. */
+bool lsp_content_length(const char *value, size_t *length);
 void lsp_messages_free(LspMessages *messages);
 
 /* The normalized path of a `file://` URI (NULL for another scheme), and back. New strings. */

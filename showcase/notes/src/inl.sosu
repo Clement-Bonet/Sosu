@@ -44,7 +44,7 @@ pub class Inl {
     mut i32 dtop;
     mut i32 btop;
 
-    void init(Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, keeps vec.Vec<str>* notes, bool ext) {
+    void init(keeps Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, keeps vec.Vec<str>* notes, bool ext) {
         self.arena = arena;
         self.nodes = nodes;
         self.refs = refs;
@@ -821,7 +821,7 @@ pub class Inl {
 }
 
 // A callout `> [!note] Title` begins a quote: its type and its title are kept on the quote.
-void read_callout(Arena* arena, vec.Vec<cm.Node>* nodes, i32 par) {
+void read_callout(keeps Arena* arena, vec.Vec<cm.Node>* nodes, i32 par) {
     i32 q = nodes.at(par as usize).parent;
     str lit = nodes.at(par as usize).lit;
     if (q < 0 || nodes.at(q as usize).kind != BlockQuote || nodes.at(q as usize).first != par || !text.starts_with(lit, "[!")) {
@@ -855,7 +855,7 @@ void read_callout(Arena* arena, vec.Vec<cm.Node>* nodes, i32 par) {
 }
 
 // Reads the text of every leaf block of the tree, into nodes.
-pub void process(Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, bool ext) {
+pub void process(keeps Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, bool ext) {
     usize count = nodes.len();
     vec.Vec<str>* notes = vec.new<str>(arena);
     for (usize i in 0..count) {

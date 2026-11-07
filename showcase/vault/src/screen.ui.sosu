@@ -2,7 +2,7 @@
 // screen is drawn by `main`, since the master password is typed in a field of dots.
 import vault.model;
 
-window Vault(model.Model* m) uses io {
+window Vault(keeps model.Model* m) uses io {
     title: "Vault"
     width: 1000
     height: 680

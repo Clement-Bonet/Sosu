@@ -55,7 +55,7 @@ void list_devices(Arena* arena) uses io {
     }
 }
 
-void play_chord(Arena* arena, device.Player* player) uses io, time {
+void play_chord(keeps Arena* arena, device.Player* player) uses io, time {
     io.print("a chord, from the left to the right");
     mut ui32[3] ids = [0, 0, 0];
     mut i32[3] notes = [0, 4, 7];  // A major
@@ -83,7 +83,7 @@ void play_file(Arena* arena, device.Player* player, str path) uses io, time {
     }
 }
 
-void play_melody(Arena* arena, device.Player* player) uses io, time {
+void play_melody(keeps Arena* arena, device.Player* player) uses io, time {
     io.print("a melody");
     mut i32[8] notes = [0, 4, 7, 12, 7, 4, 0, -12];
     for (i32 n in notes) {
@@ -93,7 +93,7 @@ void play_melody(Arena* arena, device.Player* player) uses io, time {
     wait_end(player);
 }
 
-void record(Arena* arena, device.Player* player) uses io, time {
+void record(keeps Arena* arena, device.Player* player) uses io, time {
     device.Recorder* recorder = match (device.open_recorder(arena, device.Input{ rate: RATE })) {
         some(r) => r,
         none => {

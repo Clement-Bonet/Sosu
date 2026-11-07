@@ -87,7 +87,7 @@ pub class Local {
     vec.Vec<Held>* idle;
     mut i32 opened;  // by this thread, idle or taken
 
-    void init(Pool pool, Arena* arena, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open) {
+    void init(Pool pool, keeps Arena* arena, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open) {
         self.pool = pool;
         self.arena = arena;
         self.open = open;
@@ -161,6 +161,6 @@ pub class Local {
 
 // The connections of `pool` in this thread, opened by `open` (a driver's, as `sqlite.connect`)
 // in `arena`.
-pub Local* local(Arena* arena, Pool pool, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open) {
+pub Local* local(keeps Arena* arena, Pool pool, keeps fn(Arena*, str) -> db.Connection*!db.DbError uses io open) {
     return arena.new(Local, pool, arena, open);
 }

@@ -2377,7 +2377,11 @@ static int command_lsp(const char *argv0) {
             }
             if (line[0] == '\r' || line[0] == '\n') break;
             if (strncmp(line, "Content-Length:", 15) == 0) {
-                length = (size_t)strtoul(line + 15, NULL, 10);
+                if (!lsp_content_length(line + 15, &length)) {
+                    fprintf(stderr, "sosuc: invalid Content-Length\n");
+                    running = false;
+                    break;
+                }
                 has_length = true;
             }
         }

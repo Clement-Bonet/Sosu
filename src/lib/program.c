@@ -57,6 +57,15 @@ static char *fetch_git(Program *program, Package *package, const Dependency *dep
     /* A local URL is relative to the package, like a `path`. */
     char *url = git_is_local(dep->git) ? normalized_join(package->root, dep->git) : sosu_strdup(dep->git);
     const LockEntry *locked = lock_find(&program->lock, dep->name, dep->git, kind, ref);
+    if (program->cached) {
+        char *cached = locked ? git_cached(program->deps_dir, dep->name, locked->commit) : NULL;
+        free(url);
+        if (!cached) {
+            Diagnostic *d = report(program, "E0405", file, dep->offset, dep->length, "the dependency `%s` is not fetched yet", dep->name);
+            diag_help(d, "run `sosuc check` in a terminal: the language server does not fetch anything");
+        }
+        return cached;
+    }
     char *commit;
     char *error;
     char *root = git_fetch(program->deps_dir, dep->name, url, kind, ref, locked ? locked->commit : NULL, &commit, &error);
@@ -321,8 +330,9 @@ static void load_prelude(Program *program) {
     free(root);
 }
 
-bool program_load(Program *program, const char *dir, const char *lib_dir) {
+static bool load_from(Program *program, const char *dir, const char *lib_dir, bool cached) {
     memset(program, 0, sizeof *program);
+    program->cached = cached;
     program->lib_dir = path_normalize(lib_dir);
     char *root = path_normalize(dir);
     char *lock_path = path_join(root, "sosu.lock");
@@ -334,7 +344,7 @@ bool program_load(Program *program, const char *dir, const char *lib_dir) {
     if (!package) program->fatal = sosu_format("no sosu.toml in `%s`", root);
     free(root);
     /* The lock follows the git dependencies, unless a dependency has an error. */
-    if (package && program->diags.error_count == 0 && !lock_equal(&program->lock, &program->used) &&
+    if (package && !program->cached && program->diags.error_count == 0 && !lock_equal(&program->lock, &program->used) &&
         (program->used.count || shell_file_exists(lock_path)) && !lock_write(&program->used, lock_path)) {
         program->fatal = sosu_format("cannot write `%s`", lock_path);
     }
@@ -360,6 +370,14 @@ bool program_load(Program *program, const char *dir, const char *lib_dir) {
     /* Resolving imports loads new units, which are resolved in turn. */
     for (size_t i = 0; i < program->units.count; i++) resolve_imports(program, program->units.items[i]);
     return program->diags.error_count == 0;
+}
+
+bool program_load(Program *program, const char *dir, const char *lib_dir) {
+    return load_from(program, dir, lib_dir, false);
+}
+
+bool program_load_cached(Program *program, const char *dir, const char *lib_dir) {
+    return load_from(program, dir, lib_dir, true);
 }
 
 bool program_load_text(Program *program, const char *text, const char *lib_dir) {

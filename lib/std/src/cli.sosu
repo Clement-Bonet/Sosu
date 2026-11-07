@@ -49,7 +49,7 @@ pub class Command {
     mut str rest_name;  // "" without `rest`
     mut str rest_help;
 
-    void init(Arena* arena, keeps str name, keeps str about) {
+    void init(keeps Arena* arena, keeps str name, keeps str about) {
         self.arena = arena;
         self.name = name;
         self.about = about;
@@ -90,7 +90,7 @@ pub class Command {
     }
 
     // Reads `args` (without the name of the program: `os.args`).
-    pub Matches*!CliError parse(str[] args) {
+    pub Matches*!CliError parse(keeps str[] args) {
         Matches* m = arena.new(Matches, arena);
         mut bool options_done = false;
         mut usize i = 0;
@@ -317,7 +317,7 @@ pub class Matches {
     vec.Vec<str>* positionals;
     mut Command*? command;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         given = vec.new(arena);
         positionals = vec.new(arena);

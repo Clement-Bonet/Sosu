@@ -55,7 +55,7 @@ pub class Mixer {
     vec.Vec<Voice>* voices;
     mut ui32 next_id;
 
-    void init(Arena* arena, i32 rate, i32 channels)
+    void init(keeps Arena* arena, i32 rate, i32 channels)
         requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2)
     {
         self.rate = rate;

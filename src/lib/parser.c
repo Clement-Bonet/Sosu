@@ -491,15 +491,21 @@ static TypeExpr *parse_base_type(Parser *p) {
         advance(p);
         advance(p);
         VEC(TypeExpr *) params = {0};
+        VEC(bool) keeps = {0};
         if (!check(p, TOK_RPAREN)) {
             do {
+                /* no name follows here: `keeps` is the word before a type, not a type */
+                bool kept = token_is(p, cur(p), "keeps") && (kind_at(p, 1) == TOK_IDENT || kind_at(p, 1) == TOK_LPAREN);
+                if (kept) advance(p);
                 TypeExpr *param = parse_type(p, false);
                 SOSU_VEC_PUSH(&params, param);
+                SOSU_VEC_PUSH(&keeps, kept);
             } while (parser_accept(p, TOK_COMMA));
         }
         expect_closing(p, TOK_RPAREN);
         type->as.fn.param_count = params.count;
         type->as.fn.params = FINISH(p, params);
+        type->as.fn.keeps = FINISH(p, keeps);
         expect(p, TOK_ARROW);
         type->as.fn.ret = parse_type(p, false);
         if (parser_accept(p, TOK_KW_USES)) type->as.fn.effects = parse_effects(p, true);
@@ -759,6 +765,8 @@ static Expr *parse_array(Parser *p) {
     return close_expr(p, expr);
 }
 
+static bool at_keeps(const Parser *p);
+
 /* `(...) =>` starts a lambda (spec §5.5). */
 static bool at_lambda(const Parser *p) {
     size_t depth = 0;
@@ -784,6 +792,10 @@ static Expr *parse_lambda(Parser *p) {
             Param param = {0};
             const Token *mut = cur(p);
             if (parser_accept(p, TOK_KW_MUT)) error_at(p, "E0212", mut->offset, mut->length, "`mut` is not allowed here");
+            if (at_keeps(p)) {
+                advance(p);
+                param.is_keeps = true;
+            }
             if (!(check(p, TOK_IDENT) && (kind_at(p, 1) == TOK_COMMA || kind_at(p, 1) == TOK_RPAREN))) {
                 param.type = parse_type(p, false);
             }
@@ -1351,6 +1363,11 @@ static void parse_function(Parser *p, FnDecl *fn, bool signature) {
     expect_name(p, &fn->name, "a function name");
     parse_type_params(p, &fn->type_params);
     parse_params(p, &fn->params, &fn->param_count, true);
+    if (token_is(p, cur(p), "keeps") && kind_at(p, 1) == TOK_KW_SELF) {
+        advance(p);
+        advance(p);
+        fn->keeps_self = true;
+    }
     if (parser_accept(p, TOK_KW_USES)) fn->effects = parse_effects(p, false);
 
     if (signature) {

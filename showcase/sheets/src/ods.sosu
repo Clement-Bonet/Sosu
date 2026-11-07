@@ -427,7 +427,7 @@ str px_cm(Arena* arena, i32 px) {
 }
 
 // The sheet as an .ods file.
-pub ui8[] encode(Arena* arena, calc.Book* book) {
+pub ui8[] encode(Arena* arena, keeps calc.Book* book) {
     book.recalc();
     i64[] cells = book.cells.keys(arena);
     sort_keys(cells);
@@ -742,7 +742,7 @@ class Reader {
     mut i64 col;
     mut i64 row;
 
-    void init(Arena* arena, keeps calc.Book* book) {
+    void init(keeps Arena* arena, keeps calc.Book* book) {
         self.arena = arena;
         self.book = book;
         self.looks = map.new<str, Look>(arena);
@@ -757,7 +757,7 @@ class Reader {
         self.row = 0;
     }
 
-    void add_styles(xml.Node* box) {
+    void add_styles(keeps xml.Node* box) {
         xml.Node*[] list = box.kids.items();
         for (usize i in 0..list.len) {
             xml.Node* n = list[i];
@@ -769,7 +769,7 @@ class Reader {
         }
     }
 
-    void add_style(xml.Node* n) {
+    void add_style(keeps xml.Node* n) {
         str name = n.attr("style:name");
         if (name.len == 0) {
             return;
@@ -817,7 +817,7 @@ class Reader {
         self.looks.put(name, look);
     }
 
-    void add_data_style(xml.Node* n) {
+    void add_data_style(keeps xml.Node* n) {
         str name = n.attr("style:name");
         if (name.len == 0) {
             return;
@@ -880,7 +880,7 @@ class Reader {
         return r;
     }
 
-    void walk(xml.Node* t) {
+    void walk(keeps xml.Node* t) {
         xml.Node*[] kids = t.kids.items();
         for (usize i in 0..kids.len) {
             xml.Node* k = kids[i];
@@ -894,7 +894,7 @@ class Reader {
         }
     }
 
-    void add_columns(xml.Node* n) {
+    void add_columns(keeps xml.Node* n) {
         i64 rep = repeat_of(n, "table:number-columns-repeated");
         i32 px = match (self.widths.get(n.attr("table:style-name"))) {
             some(w) => w,
@@ -978,7 +978,7 @@ class Reader {
         return it;
     }
 
-    void add_row(xml.Node* n) {
+    void add_row(keeps xml.Node* n) {
         i64 rep = repeat_of(n, "table:number-rows-repeated");
         if (self.row >= values.ROWS as i64) {
             return;
@@ -1031,7 +1031,7 @@ class Reader {
 }
 
 // Reads the .ods file `bytes` into `book`, an empty book. False when it is not an OpenDocument spreadsheet.
-pub bool decode(Arena* arena, keeps calc.Book* book, ui8[] bytes) {
+pub bool decode(keeps Arena* arena, keeps calc.Book* book, keeps ui8[] bytes) {
     vec.Vec<zip.Entry>* files = vec.new<zip.Entry>(arena);
     if (!zip.read(arena, bytes, files)) {
         return false;

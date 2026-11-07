@@ -219,6 +219,7 @@ static void fmt_type(Fmt *f, const TypeExpr *type) {
         put(f, "fn(");
         for (size_t i = 0; i < type->as.fn.param_count; i++) {
             if (i) put(f, ", ");
+            if (type->as.fn.keeps[i]) put(f, "keeps ");
             fmt_type(f, type->as.fn.params[i]);
         }
         put(f, ") -> ");
@@ -475,6 +476,7 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         for (size_t i = 0; i < e->as.lambda.param_count; i++) {
             const Param *param = &e->as.lambda.params[i];
             if (i) put(f, ", ");
+            if (param->is_keeps) put(f, "keeps ");
             if (param->type) {
                 fmt_type(f, param->type);
                 put(f, " ");
@@ -655,6 +657,7 @@ static void fmt_function(Fmt *f, const FnDecl *fn) {
     put_name(f, fn->name);
     fmt_type_params(f, fn->type_params);
     fmt_params(f, fn->params, fn->param_count);
+    if (fn->keeps_self) put(f, " keeps self");
     fmt_effects(f, fn->effects);
     if (!fn->body) {
         put(f, ";");

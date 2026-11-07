@@ -50,7 +50,7 @@ class Stack<T> {
     mut usize count;
     Arena* arena;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         unsafe {
             items = arena.alloc_slice(T, 2);

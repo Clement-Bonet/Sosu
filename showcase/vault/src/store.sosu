@@ -22,7 +22,7 @@ pub db.Connection*!db.DbError open(Arena* arena, str path) uses io {
     return ok(c);
 }
 
-db.Value? read_meta(Arena* arena, db.Connection* c, str key) uses io {
+db.Value? read_meta(Arena* arena, keeps db.Connection* c, str key) uses io {
     mut db.Value[1] p = [db.Value.Text(key)];
     return match (db.scalar(arena, c, "SELECT value FROM meta WHERE key = ?", p[0..1])) {
         ok(found) => found,
@@ -39,7 +39,7 @@ bool write_meta(db.Connection* c, str key, db.Value value) uses io {
 }
 
 // Whether the file already holds a vault (it has a salt).
-pub bool exists(Arena* arena, db.Connection* c) uses io {
+pub bool exists(Arena* arena, keeps db.Connection* c) uses io {
     return match (read_meta(arena, c, "salt")) {
         some(v) => true,
         none => false,
@@ -64,7 +64,7 @@ pub bool create(Arena* arena, db.Connection* c, ui8[] password, i32 rounds, seal
     return write_meta(c, "salt", db.Value.Bytes(salt)) && write_meta(c, "rounds", db.Value.Integer(rounds as i64)) && write_meta(c, "check", db.Value.Bytes(check));
 }
 
-ui8[]? meta_bytes(Arena* arena, db.Connection* c, str key) uses io {
+ui8[]? meta_bytes(Arena* arena, keeps db.Connection* c, str key) uses io {
     return match (read_meta(arena, c, key)) {
         some(v) => db.as_bytes(v),
         none => none,
@@ -72,7 +72,7 @@ ui8[]? meta_bytes(Arena* arena, db.Connection* c, str key) uses io {
 }
 
 // Derives the keys of `password`, and checks them against the check text of the file.
-pub Opened unlock(Arena* arena, db.Connection* c, ui8[] password, seal.Keys* keys) uses io {
+pub Opened unlock(Arena* arena, keeps db.Connection* c, ui8[] password, seal.Keys* keys) uses io {
     mut ui8[] salt = arena.alloc_slice(ui8, 0);
     mut ui8[] check = arena.alloc_slice(ui8, 0);
     mut i32 rounds = 0;
@@ -121,7 +121,7 @@ bool more(db.Rows* rows) uses io {
 }
 
 // Opens every account into `out`; the number that could not be opened.
-pub i32 load_all(Arena* arena, db.Connection* c, seal.Keys* keys, vec.Vec<entry.Entry>* out) uses io {
+pub i32 load_all(Arena* arena, keeps db.Connection* c, seal.Keys* keys, vec.Vec<entry.Entry>* out) uses io {
     mut i32 lost = 0;
     match (db.select(arena, c, "SELECT id, blob FROM entries ORDER BY id")) {
         ok(rows) => {

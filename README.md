@@ -1,7 +1,7 @@
 # Sosu
 
 A native, low-level language where what a function does is in its signature: its effects, its failures and its allocations.
-Its compiler, `sosuc`, is written in C99 with libc only, and generates C. Sosu is young (0.x) and not memory safe yet.
+Its compiler, `sosuc`, is written in C99 with libc only, and generates C. Sosu is young (0.x) and not memory safe.
 
 **[Playground](https://clement-bonet.github.io/Sosu/)** · **[Releases](https://github.com/Clement-Bonet/Sosu/releases)** · [Written in Sosu](#written-in-sosu) · [Specification](docs/SPEC.md) · [Library reference](docs/REFERENCE.md) · [How Sosu is made](#how-sosu-is-made)
 
@@ -66,8 +66,8 @@ Desktop programs drawn by Sosu's own interface toolkit, with their tests. More i
 - **Native through C.** `sosuc` writes C99 and calls the C compiler of the system: a program runs wherever there is one, phones included, and calls C libraries directly (`extern "C"`, `sosuc bindgen`).
 - **Few surprises in the code you read.** No implicit conversion, no overloading, no macros, no exceptions, no null pointer; integer overflow, bounds and contracts are checked (in debug, bounds in release too); `match` is exhaustive.
 - **What a function does is in its signature.** Its effects (`uses io`, `time`, `random`, `threads`), its failures (`T!E`) and its allocations (an `Arena*` parameter).
-- **Memory without a garbage collector.** Arenas, `defer` and moves. **Not memory safe yet:** there are no lifetimes in the types. The regions ([docs/SPEC.md](docs/SPEC.md) §6.1) refuse a pointer that outlives its arena or its function, but they do not follow `unsafe`, C, lambdas or a call through a value of function type, so a program can still have undefined behaviour. In debug, using a pointer after the `free()` of its arena stops the program (§7.7).
-- **Safe by design.** Safety is a design rule: what is not checked yet is listed in spec §7.7, and memory safety is a goal for 1.0.
+- **Memory without a garbage collector.** Arenas, `defer` and moves. **Not memory safe:** there are no lifetimes in the types, by choice. The regions ([docs/SPEC.md](docs/SPEC.md) §6.1) refuse a pointer that outlives its arena or its function, but they do not follow `unsafe` or C, and without lifetimes they cannot prove every case, so a program can still have undefined behaviour. In debug, using a pointer after the `free()` of its arena stops the program (§7.7).
+- **Safe by design.** Safety is a design rule: what the compiler does not check is listed in spec §7.7, and a debug build stops on a pointer used after the `free()` of its arena.
 - **Close to Zig and Odin in spirit** (explicit memory, C interop, a small core), Sosu adds effects in the types, contracts, classes with interfaces, and its own interface toolkit (`platform`, `render`, `ui`, `.ui.sosu` files).
 
 English is the working language of the project: code, comments, compiler messages and documentation.

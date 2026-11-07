@@ -114,9 +114,17 @@ void sema_consume(Body *b, Expr *e) {
 }
 
 /* Checks `e` and reports it if its type is not `expected`. */
+/* True if a function of type `from` can be given where `to` is expected: they differ only by
+   `keeps`, and it keeps no parameter that the callers do not know of (spec §6.1). */
+static bool fn_fits(Body *b, const Type *from, const Type *to) {
+    if (from->tag != T_FN || to->tag != T_FN || (from->as.fn.keeps & ~to->as.fn.keeps)) return false;
+    return type_fn(&b->s->types, from->as.fn.params, from->as.fn.param_count, from->as.fn.ret, from->as.fn.effects,
+                   to->as.fn.keeps) == to;
+}
+
 Type *sema_check_expect(Body *b, Expr *e, Type *expected) {
     Type *type = sema_check_expr(b, e, expected);
-    if (type != expected) sema_report_mismatch(b, e, expected, type);
+    if (type != expected && !fn_fits(b, type, expected)) sema_report_mismatch(b, e, expected, type);
     return expected;
 }
 
@@ -265,7 +273,18 @@ static Local *param_arena(Body *b, const Expr *object) {
 /* What is reached through the parameter `i` (< 64): the caller's, but it says which argument. */
 #define ORIGIN_VIA(i) (SIZE_MAX - 1 - (size_t)(i))
 
+static const FnDecl *called(const Expr *e, const Expr **receiver, bool *self_receiver, size_t *first);
+static void add_origins(Body *b, Local *to, const Expr *e);
+static ReturnSummary *summary_of(Sema *s, const FnDecl *decl, bool create);
+static void summarize_path(Body *b, ReturnSummary *summary, ArenaPath **list, size_t root, const Name *names, int count);
+static void add_path(Sema *s, ReturnSummary *summary, ArenaPath **list, int param, const Name *names, int count);
+
+/* An arena in a field: the place `i` of the function. */
+#define ORIGIN_PLACE(i) (SIZE_MAX - 65 - (size_t)(i))
+
 static bool is_via(size_t origin) { return origin != ORIGIN_CALLER && origin >= SIZE_MAX - 64; }
+
+static bool is_place_origin(size_t origin) { return origin > SIZE_MAX / 2 && origin < SIZE_MAX - 64; }
 
 typedef enum {
     ORIGIN_OTHER,
@@ -283,6 +302,7 @@ static bool is_arena_pointer(const Type *type) {
 static OriginKind origin_kind(Body *b, size_t origin, const Local **local) {
     *local = NULL;
     if (origin == ORIGIN_CALLER || is_via(origin)) return ORIGIN_IS_CALLER;
+    if (is_place_origin(origin)) return ORIGIN_OTHER; /* only the free rule looks at it */
     for (size_t i = 0; i < b->locals.count; i++) {
         if (b->locals.items[i].name.offset == origin) *local = &b->locals.items[i];
     }
@@ -291,14 +311,294 @@ static OriginKind origin_kind(Body *b, size_t origin, const Local **local) {
     return is_arena_pointer((*local)->type) ? ORIGIN_PARAM_ARENA : ORIGIN_PARAM_VALUE;
 }
 
-static void add_to(size_t *set, int *count, size_t arena) {
-    for (int i = 0; i < *count; i++) {
-        if (set[i] == arena) return;
+static void add_to(Body *b, OriginSet *set, size_t arena) {
+    for (int i = 0; i < set->count; i++) {
+        if (set->items[i] == arena) return;
     }
-    if (*count < 8) set[(*count)++] = arena;
+    if (set->count == set->cap) {
+        int cap = set->cap ? set->cap * 2 : 4;
+        size_t *items = arena_alloc(&b->s->arena, (size_t)cap * sizeof *items);
+        if (set->count) memcpy(items, set->items, (size_t)set->count * sizeof *items);
+        set->items = items;
+        set->cap = cap;
+    }
+    set->items[set->count++] = arena;
 }
 
-static void add_origin(Local *to, size_t arena) { add_to(to->origins, &to->origin_count, arena); }
+static void add_origin(Body *b, Local *to, size_t arena) { add_to(b, &to->origins, arena); }
+
+/* The local just declared is a parameter of a lambda: an origin of its own, as for a function. */
+void sema_lambda_param(Body *b, bool is_keeps) {
+    Local *param = &b->locals.items[b->locals.count - 1];
+    param->is_param = true;
+    param->is_keeps = is_keeps;
+    if (param->type->tag != T_ARENA && !sema_is_send(param->type)) add_origin(b, param, param->name.offset);
+}
+
+/* The last step of the path `e`: `f` in `x.f`, or in `f` for a field of `self`. */
+static bool path_step(const Expr *e, Name *name, const Expr **rest) {
+    if (e && e->kind == EXPR_FIELD) {
+        *name = e->as.field.name;
+        *rest = e->as.field.object;
+        return true;
+    }
+    if (e && e->kind == EXPR_NAME && e->resolution == RESOLVED_SELF_FIELD) {
+        *name = e->as.name;
+        *rest = NULL;
+        return true;
+    }
+    return false;
+}
+
+/* The path of `e`, as a variable or `self` and the fields from it: `s.a.b`, `self.a`, `&s.a`.
+   A variable given a path when it was declared stands for that path. */
+static bool expr_path(Body *b, const Expr *e, size_t *root, const Name **names, int *count) {
+    while (e->kind == EXPR_UNARY && (e->as.unary.op == TOK_AMP || e->as.unary.op == TOK_STAR)) e = e->as.unary.operand;
+    const Expr *start = e;
+    Name name;
+    int steps = 0;
+    while (path_step(start, &name, &start)) steps++;
+    const Name *prefix = NULL;
+    int before = 0;
+    *root = SIZE_MAX;
+    if (start && start->kind != EXPR_SELF) {
+        if (start->kind != EXPR_NAME || start->resolution != RESOLVED_LOCAL) return false;
+        const Local *local = sema_find_local(b, start->as.name);
+        if (!local) return false;
+        *root = local->name.offset;
+        if (local->aliased) {
+            *root = local->alias_root;
+            prefix = local->alias_names;
+            before = local->alias_count;
+        }
+    }
+    *count = before + steps;
+    Name *path = *count ? arena_alloc(&b->s->arena, (size_t)*count * sizeof *path) : NULL;
+    if (before) memcpy(path, prefix, (size_t)before * sizeof *path);
+    start = e;
+    for (int i = *count - 1; i >= before; i--) path_step(start, &path[i], &start);
+    *names = path;
+    return true;
+}
+
+static ArenaPlace *find_place(Body *b, size_t root, const Name *names, int count) {
+    for (ArenaPlace *place = b->places; place; place = place->next) {
+        bool same = place->root == root && place->count == count;
+        for (int i = 0; same && i < count; i++) same = sema_name_eq(place->names[i], names[i]);
+        if (same) return place;
+    }
+    ArenaPlace *place = arena_alloc(&b->s->arena, sizeof *place);
+    place->root = root;
+    place->names = names;
+    place->count = count;
+    place->index = b->place_count++;
+    place->next = b->places;
+    b->places = place;
+    return place;
+}
+
+/* The place of the arena in a field that `e` names, or NULL: `self.temp`, `doc.pages.arena`. */
+static ArenaPlace *place_of(Body *b, const Expr *e) {
+    if (!e->type || e->type->tag != T_ARENA) return NULL;
+    size_t root;
+    const Name *names;
+    int count;
+    if (!expr_path(b, e, &root, &names, &count) || count == 0) return NULL;
+    return find_place(b, root, names, count);
+}
+
+static size_t place_origin(Body *b, const Expr *e) {
+    const ArenaPlace *place = place_of(b, e);
+    return place ? ORIGIN_PLACE(place->index) : 0;
+}
+
+/* Which parameter the variable declared at `root` is: its index, -1 for `self`, or -2. */
+static int root_param(const Body *b, size_t root) {
+    if (root == SIZE_MAX) return -1;
+    for (size_t i = 0; i < b->locals.count && b->locals.items[i].is_param; i++) {
+        if (b->locals.items[i].name.offset == root) return (int)i;
+    }
+    return -2;
+}
+
+static bool same_names(const Name *x, const Name *y, int count) {
+    for (int i = 0; i < count; i++) {
+        if (!sema_name_eq(x[i], y[i])) return false;
+    }
+    return true;
+}
+
+/* The class or struct reached by the first `count` names from `root`, or NULL. */
+static TypeInfo *holder_info(Body *b, size_t root, const Name *names, int count) {
+    const Type *type = NULL;
+    TypeInfo *info = root == SIZE_MAX ? b->self_info : NULL;
+    for (size_t i = 0; root != SIZE_MAX && i < b->locals.count; i++) {
+        if (b->locals.items[i].name.offset == root) type = b->locals.items[i].type;
+    }
+    for (int i = 0;; i++) {
+        while (type && type->tag == T_POINTER) type = type->as.inner;
+        if (type) info = type->tag == T_STRUCT || type->tag == T_CLASS ? type->as.info : NULL;
+        if (!info || i == count) return info;
+        FieldInfo *field = sema_find_field(info, names[i]);
+        if (!field) return NULL;
+        type = field->type;
+    }
+}
+
+/* The fields of a value that hold memory of its arena `root`, `names`, freed at `offset`, are dead. */
+static void kill_fields(Body *b, size_t root, const Name *names, int count, size_t offset) {
+    for (const TypeInfo *t = holder_info(b, root, names, count - 1); t; t = t->parent) {
+        for (size_t i = 0; i < t->field_count; i++) {
+            for (const ArenaLink *link = t->fields[i].arenas; link; link = link->next) {
+                if (!sema_name_eq(link->arena, names[count - 1])) continue;
+                DeadField *dead = arena_alloc(&b->s->arena, sizeof *dead);
+                Name *path = arena_alloc(&b->s->arena, (size_t)count * sizeof *path);
+                memcpy(path, names, (size_t)(count - 1) * sizeof *path);
+                path[count - 1] = t->fields[i].name;
+                dead->root = root;
+                dead->names = path;
+                dead->count = count;
+                dead->arena = names[count - 1];
+                dead->offset = offset;
+                dead->next = b->dead;
+                b->dead = dead;
+                break;
+            }
+        }
+    }
+}
+
+/* `e` is read: a field of a freed arena cannot be, until it is given a value (spec §6.1, rule 1). */
+void sema_check_dead(Body *b, const Expr *e) {
+    if (!b->dead || e == b->assign_target || b->lambda || b->unsafe_depth > 0) return;
+    size_t root;
+    const Name *names;
+    int count;
+    if (!expr_path(b, e, &root, &names, &count)) return;
+    for (const DeadField *dead = b->dead; dead; dead = dead->next) {
+        if (dead->root != root || dead->count != count || !same_names(dead->names, names, count)) continue;
+        Diagnostic *d = dead->arena.length
+            ? sema_error_expr(b, "E0372", e, "`%.*s` holds memory of the arena `%.*s`, freed on line %zu",
+                              NAME_ARGS(names[count - 1]), NAME_ARGS(dead->arena), sema_line_of(b->unit, dead->offset))
+            : sema_error_expr(b, "E0372", e, "`%.*s` holds memory of an arena freed by the call on line %zu",
+                              NAME_ARGS(names[count - 1]), sema_line_of(b->unit, dead->offset));
+        diag_help(d, "give it a value first, in memory of a new arena (spec §6.1)");
+        return;
+    }
+}
+
+/* The field at this path gets a value: it is no longer dead; if it is an arena, the fields of that
+   arena must get one too. */
+static void dead_written(Body *b, size_t root, const Name *names, int count) {
+    Name last = names[count - 1];
+    for (DeadField **dead = &b->dead; *dead;) {
+        bool same = (*dead)->root == root && (*dead)->count == count && same_names((*dead)->names, names, count - 1);
+        if (same && sema_name_eq((*dead)->names[count - 1], last)) {
+            *dead = (*dead)->next;
+            continue;
+        }
+        if (same && sema_name_eq((*dead)->arena, last)) (*dead)->renewed = true;
+        dead = &(*dead)->next;
+    }
+}
+
+/* Adds this path to what the function being summarized writes. A field written is no reason to
+   make the summaries of its callers again: that would check nearly every function twice. */
+static void summarize_write(Body *b, size_t root, const Name *names, int count) {
+    if (!b->s->summarizing || !b->fn_decl || b->lambda) return;
+    ReturnSummary *summary = summary_of(b->s, b->fn_decl, true);
+    bool grew = b->s->summary_grew;
+    int pass = summary->grew_pass;
+    summarize_path(b, summary, &summary->writes, root, names, count);
+    b->s->summary_grew = grew;
+    summary->grew_pass = pass;
+}
+
+/* `target` = `value`, into a field; in the pass that makes the summaries, a field given memory of
+   an arena of the same value belongs to that arena. A field that is an array is not followed: its
+   elements come and go on their own (a flag says which are in use). */
+static void field_written(Body *b, const Expr *target, const Expr *value) {
+    size_t root;
+    const Name *names;
+    int count;
+    Name last;
+    const Expr *rest;
+    if (!path_step(target, &last, &rest) || !expr_path(b, target, &root, &names, &count) || count == 0) return;
+    dead_written(b, root, names, count);
+    summarize_write(b, root, names, count);
+    if (!b->s->summarizing || !value->type || sema_is_send(value->type)) return;
+    TypeInfo *info = holder_info(b, root, names, count - 1);
+    FieldInfo *field = info ? sema_find_field(info, last) : NULL;
+    if (!field || field->type->tag == T_ARRAY) return;
+    Local held = {0};
+    add_origins(b, &held, value);
+    for (const ArenaPlace *place = b->places; place; place = place->next) {
+        bool here = false;
+        for (int i = 0; i < held.origins.count; i++) here = here || held.origins.items[i] == ORIGIN_PLACE(place->index);
+        if (!here || place->root != root || place->count != count || !same_names(place->names, names, count - 1)) continue;
+        Name arena = place->names[count - 1];
+        bool known = false;
+        for (const ArenaLink *link = field->arenas; link; link = link->next) known = known || sema_name_eq(link->arena, arena);
+        if (known) continue;
+        ArenaLink *link = arena_alloc(&b->s->arena, sizeof *link);
+        link->arena = arena;
+        link->next = field->arenas;
+        field->arenas = link;
+    }
+}
+
+/* Adds to the summary list `list` the arena at this path, if it starts from a parameter. */
+static void summarize_path(Body *b, ReturnSummary *summary, ArenaPath **list, size_t root, const Name *names, int count) {
+    int param = root_param(b, root);
+    if (param == -2 || count > 8) return; /* a recursive call would make the path grow */
+    add_path(b->s, summary, list, param, names, count);
+}
+
+static void add_path(Sema *s, ReturnSummary *summary, ArenaPath **list, int param, const Name *names, int count) {
+    for (const ArenaPath *path = *list; path; path = path->next) {
+        bool same = path->root == param && path->count == count;
+        for (int i = 0; same && i < count; i++) same = sema_name_eq(path->names[i], names[i]);
+        if (same) return;
+    }
+    ArenaPath *path = arena_alloc(&s->arena, sizeof *path);
+    path->root = param;
+    path->names = names;
+    path->count = count;
+    path->next = *list;
+    *list = path;
+    summary->grew_pass = s->summary_pass;
+    s->summary_grew = true;
+}
+
+/* The arena that `path`, of the function that `e` calls, is at the call: its place in this function. */
+static bool path_at_call(Body *b, const Expr *e, const ArenaPath *path, size_t *root, const Name **names, int *count) {
+    const Expr *receiver;
+    bool self_receiver;
+    size_t first;
+    called(e, &receiver, &self_receiver, &first);
+    const Name *base = NULL;
+    int steps = 0;
+    if (path->root == -1 && self_receiver) {
+        *root = SIZE_MAX;
+    } else {
+        const Expr *from = path->root == -1 ? (first ? NULL : receiver)
+                         : first + (size_t)path->root < e->as.call.arg_count ? e->as.call.args[first + (size_t)path->root] : NULL;
+        if (!from || !expr_path(b, from, root, &base, &steps)) return false;
+    }
+    *count = steps + path->count;
+    Name *all = *count ? arena_alloc(&b->s->arena, (size_t)*count * sizeof *all) : NULL;
+    if (steps) memcpy(all, base, (size_t)steps * sizeof *all);
+    if (path->count) memcpy(all + steps, path->names, (size_t)path->count * sizeof *all);
+    *names = all;
+    return true;
+}
+
+/* The local arena `origin` left this function, for memory that outlasts it. */
+static void arena_left(Body *b, size_t origin) {
+    for (size_t i = 0; i < b->locals.count; i++) {
+        if (b->locals.items[i].name.offset == origin) b->locals.items[i].moved_out = true;
+    }
+}
 
 /* Gives `to` the local arenas that `e` holds by value, moved into it: the arena `a` itself, a
    variable that holds some, also inside a literal, `some`, `ok`, `err` or `?:`; and those given to
@@ -307,6 +607,7 @@ static void add_owned(Body *b, Local *to, const Expr *e) {
     if (e->kind == EXPR_CALL && e->as.call.callee->kind == EXPR_FIELD && e->as.call.callee->resolution == RESOLVED_BUILTIN &&
         e->as.call.callee->target && strcmp((const char *)e->as.call.callee->target, "arena.new") == 0) {
         for (size_t i = 1; i < e->as.call.arg_count; i++) add_owned(b, to, e->as.call.args[i]);
+        for (int i = 0; i < to->owned.count; i++) arena_left(b, to->owned.items[i]); /* into an arena */
         return;
     }
     if (!e->type || !type_owns_resource(e->type)) return;
@@ -314,8 +615,8 @@ static void add_owned(Body *b, Local *to, const Expr *e) {
     case EXPR_NAME: {
         const Local *local = e->resolution == RESOLVED_LOCAL ? sema_find_local(b, e->as.name) : NULL;
         if (!local || local == to) return;
-        if (local->type->tag == T_ARENA) add_to(to->owned, &to->owned_count, local->name.offset);
-        for (int i = 0; i < local->owned_count; i++) add_to(to->owned, &to->owned_count, local->owned[i]);
+        if (local->type->tag == T_ARENA) add_to(b, &to->owned, local->name.offset);
+        for (int i = 0; i < local->owned.count; i++) add_to(b, &to->owned, local->owned.items[i]);
         return;
     }
     case EXPR_CALL: {
@@ -346,14 +647,13 @@ static void add_owned(Body *b, Local *to, const Expr *e) {
    allocations of `a`, what is reached through it (`p.next`, `v[i]`, `*p`), a variable that was
    given some, also inside `some`, `ok`, `err`, a literal or `?:`. A value of a type without
    pointers holds none; neither does what a function returns (stage 4). */
-static void add_origins(Body *b, Local *to, const Expr *e);
 
 /* The summary of `decl`, made (empty, not complete) when `create`; NULL if there is none. */
 static ReturnSummary *summary_of(Sema *s, const FnDecl *decl, bool create) {
     size_t *index = ptrmap_get(&s->summary_index, decl);
     if (index) return &s->summaries.items[*index];
     if (!create) return NULL;
-    ReturnSummary empty = { 0, 0, false, false };
+    ReturnSummary empty = {0};
     SOSU_VEC_PUSH(&s->summaries, empty);
     ptrmap_put(&s->summary_index, decl, s->summaries.count - 1);
     return &s->summaries.items[s->summaries.count - 1];
@@ -371,33 +671,53 @@ static const FnDecl *called_decl(const Expr *e) {
     }
 }
 
+/* Gives `to` the origins of the memory that the place `e` is in: `&e` and `e[a..b]` are in that
+   memory, they read nothing from it. So `&p.f` and `v[a..b]` have the origins of `p` and of `v`,
+   a parameter staying that parameter, where the value of `p.f` or `v[i]` is the caller's. */
+static void add_place(Body *b, Local *to, const Expr *e) {
+    size_t place = place_origin(b, e);
+    if (place) add_origin(b, to, place); /* `&self.temp` */
+    const Expr *object = NULL;
+    if (e->kind == EXPR_FIELD) object = e->as.field.object;
+    if (e->kind == EXPR_INDEX) object = e->as.index.object;
+    if (e->kind == EXPR_UNARY && e->as.unary.op == TOK_STAR) {
+        add_origins(b, to, e->as.unary.operand);
+    } else if (!object) {
+        add_origins(b, to, e);
+    } else if (object->type && (object->type->tag == T_POINTER || object->type->tag == T_SLICE)) {
+        add_origins(b, to, object);
+    } else {
+        add_place(b, to, object);
+    }
+}
+
 /* Gives `to` the origins of what is reached through the pointer or view `e`: those of `e`, a
    parameter becoming the caller (what is read in the memory of the caller is the caller's). */
 static void add_through(Body *b, Local *to, const Expr *e) {
     Local held = {0};
     add_origins(b, &held, e);
-    for (int i = 0; i < held.origin_count; i++) {
+    for (int i = 0; i < held.origins.count; i++) {
         const Local *local;
-        if (origin_kind(b, held.origins[i], &local) != ORIGIN_PARAM_VALUE) {
-            add_origin(to, held.origins[i]);
+        if (origin_kind(b, held.origins.items[i], &local) != ORIGIN_PARAM_VALUE) {
+            add_origin(b, to, held.origins.items[i]);
             continue;
         }
         size_t index = (size_t)(local - b->locals.items); /* the parameters come first */
-        add_origin(to, index < 64 ? ORIGIN_VIA(index) : ORIGIN_CALLER);
+        add_origin(b, to, index < 64 ? ORIGIN_VIA(index) : ORIGIN_CALLER);
     }
 }
 
 static void add_origins(Body *b, Local *to, const Expr *e) {
     if (!e->type || sema_is_send(e->type)) return;
     switch (e->kind) {
-    case EXPR_SELF: add_origin(to, ORIGIN_CALLER); return;
+    case EXPR_SELF: add_origin(b, to, ORIGIN_CALLER); return;
     case EXPR_NAME: {
         if (e->resolution == RESOLVED_SELF_FIELD) {
-            add_origin(to, ORIGIN_CALLER);
+            add_origin(b, to, ORIGIN_CALLER);
             return;
         }
         const Local *local = e->resolution == RESOLVED_LOCAL ? sema_find_local(b, e->as.name) : NULL;
-        for (int i = 0; local && local != to && i < local->origin_count; i++) add_origin(to, local->origins[i]);
+        for (int i = 0; local && local != to && i < local->origins.count; i++) add_origin(b, to, local->origins.items[i]);
         return;
     }
     case EXPR_FIELD: {
@@ -408,7 +728,8 @@ static void add_origins(Body *b, Local *to, const Expr *e) {
     }
     case EXPR_INDEX: {
         const Expr *object = e->as.index.object;
-        if (object->type && (object->type->tag == T_POINTER || object->type->tag == T_SLICE)) add_through(b, to, object);
+        if (e->as.index.index->kind == EXPR_RANGE) add_place(b, to, e);
+        else if (object->type && (object->type->tag == T_POINTER || object->type->tag == T_SLICE)) add_through(b, to, object);
         else add_origins(b, to, object);
         return;
     }
@@ -419,7 +740,8 @@ static void add_origins(Body *b, Local *to, const Expr *e) {
             return;
         }
         const Local *arena = e->as.unary.op == TOK_AMP ? local_arena(b, operand) : NULL;
-        if (arena) add_origin(to, arena->name.offset); /* `&a`: what is allocated through it is of `a` */
+        if (arena) add_origin(b, to, arena->name.offset); /* `&a`: what is allocated through it is of `a` */
+        else if (e->as.unary.op == TOK_AMP) add_place(b, to, operand);
         else add_origins(b, to, operand);
         return;
     }
@@ -431,8 +753,13 @@ static void add_origins(Body *b, Local *to, const Expr *e) {
             const Expr *object = callee->as.field.object;
             const Local *arena = local_arena(b, object);
             if (!arena) arena = param_arena(b, object);
-            if (arena) add_origin(to, arena->name.offset);
-            else add_origins(b, to, object); /* an `Arena*` given another way: where it points */
+            if (arena) {
+                add_origin(b, to, arena->name.offset);
+                return;
+            }
+            size_t place = place_origin(b, object);
+            if (place) add_origin(b, to, place);
+            add_origins(b, to, object); /* an `Arena*` given another way: where it points */
             return;
         }
         if (callee->resolution == RESOLVED_FN && callee->target && ((const FnInfo *)callee->target)->is_extern) return;
@@ -448,14 +775,22 @@ static void add_origins(Body *b, Local *to, const Expr *e) {
                 if (object->type && object->type->tag == T_POINTER) add_through(b, to, object);
                 else add_origins(b, to, object);
             } else if (callee->resolution == RESOLVED_SELF_METHOD) {
-                add_origin(to, ORIGIN_CALLER);
+                add_origin(b, to, ORIGIN_CALLER);
             }
         }
         for (size_t i = 0; i < e->as.call.arg_count; i++) {
             const Expr *arg = e->as.call.args[i];
             uint64_t bit = i < 64 ? (uint64_t)1 << i : 0;
-            if (!complete || (summary->values & bit)) add_origins(b, to, arg);
+            if (!complete || i >= 64 || (summary->values & bit)) add_origins(b, to, arg); /* a summary names 64 */
             if (complete && (summary->through & bit)) add_through(b, to, arg);
+        }
+        for (const ArenaPath *path = summary ? summary->returns : NULL; path; path = path->next) {
+            size_t root;
+            const Name *names;
+            int count;
+            if (path_at_call(b, e, path, &root, &names, &count) && count) {
+                add_origin(b, to, ORIGIN_PLACE(find_place(b, root, names, count)->index));
+            }
         }
         return;
     }
@@ -475,34 +810,60 @@ static void add_origins(Body *b, Local *to, const Expr *e) {
     }
 }
 
-/* The memory of `arena` is gone: the variables below `end` that hold some can no longer be used. */
-static void free_origin(Body *b, const Local *arena, size_t end, size_t offset) {
+/* The memory of the arena `origin`, named `name`, is gone: the variables below `end` that hold
+   some can no longer be used. */
+static void free_origin(Body *b, size_t origin, Name name, size_t end, size_t offset) {
     for (size_t i = 0; i < end; i++) {
         Local *local = &b->locals.items[i];
-        for (int j = 0; j < local->origin_count; j++) {
-            if (local->origins[j] != arena->name.offset) continue;
+        for (int j = 0; j < local->origins.count; j++) {
+            if (local->origins.items[j] != origin) continue;
             local->dangling = true;
-            local->freed_arena = arena->name;
+            local->freed_arena = name;
             local->freed_offset = offset;
         }
     }
 }
 
-/* In the pass that makes the summaries: what `value`, returned, holds of the parameters. More
-   origins than a variable keeps make it take everything. */
+/* The arena `name` was freed, and with it what was moved into it: `set`. */
+static void free_moved(Body *b, const OriginSet *set, Name name, size_t end, size_t offset) {
+    for (int i = 0; i < set->count; i++) free_origin(b, set->items[i], name, end, offset);
+}
+
+/* The arena at this path was freed: the local arenas moved into the value it starts from too. */
+static void free_held(Body *b, const ArenaPlace *place, size_t end, size_t offset) {
+    Name name = place->names[place->count - 1];
+    free_moved(b, &place->owned, name, end, offset);
+    for (size_t i = 0; i < b->locals.count; i++) {
+        if (b->locals.items[i].name.offset == place->root) free_moved(b, &b->locals.items[i].owned, name, end, offset);
+    }
+}
+
+/* `target` = `value`, where `target` is not memory of the function: the local arenas in `value`
+   leave it; an arena in a field goes on with them. */
+static void arena_moved(Body *b, const Expr *target, const Expr *value) {
+    if (!value->type || !type_owns_resource(value->type) || storage_local(b, target)) return;
+    Local moved = {0};
+    add_owned(b, &moved, value);
+    ArenaPlace *place = place_of(b, target);
+    for (int i = 0; i < moved.owned.count; i++) {
+        arena_left(b, moved.owned.items[i]);
+        if (place) add_to(b, &place->owned, moved.owned.items[i]);
+    }
+}
+
+/* In the pass that makes the summaries: what `value`, returned, holds of the parameters. */
 static void record_return(Body *b, const Expr *value) {
     if (!b->s->summarizing || !b->fn_decl || b->lambda) return;
     ReturnSummary *summary = summary_of(b->s, b->fn_decl, true);
     Local held = {0};
     add_origins(b, &held, value);
-    if (held.origin_count >= 8) {
-        summary->values = summary->through = ~(uint64_t)0;
-        summary->receiver = true;
-        return;
-    }
-    for (int i = 0; i < held.origin_count; i++) {
-        size_t origin = held.origins[i];
-        if (origin == ORIGIN_CALLER) {
+    for (int i = 0; i < held.origins.count; i++) {
+        size_t origin = held.origins.items[i];
+        if (is_place_origin(origin)) {
+            for (const ArenaPlace *place = b->places; place; place = place->next) {
+                if (ORIGIN_PLACE(place->index) == origin) summarize_path(b, summary, &summary->returns, place->root, place->names, place->count);
+            }
+        } else if (origin == ORIGIN_CALLER) {
             summary->receiver = true;
         } else if (is_via(origin)) {
             summary->through |= (uint64_t)1 << (SIZE_MAX - 1 - origin);
@@ -515,19 +876,40 @@ static void record_return(Body *b, const Expr *value) {
     }
 }
 
+/* True if `local` was declared in the innermost lambda being checked, or if there is none: what a
+   lambda returns may be memory of its function, which it does not outlive (E0370). */
+static bool in_this_body(const Body *b, const Local *local) {
+    return !b->lambda || (size_t)(local - b->locals.items) >= b->lambda->base;
+}
+
+/* True if a `defer` already met frees the arena `origin`, a parameter or an arena in a field. */
+static bool freed_by_defer(const Body *b, size_t origin, const Local *arena) {
+    if (arena && arena->is_param) return arena->free_deferred;
+    for (const ArenaPlace *place = b->places; place; place = place->next) {
+        if (ORIGIN_PLACE(place->index) == origin) return place->free_deferred;
+    }
+    return false;
+}
+
 /* Regions, stage 2 (spec §6.1, rule 2, E0373): a returned value does not hold
    memory of a local arena, which ends with the function, unless that arena is returned with it
-   (an object that owns its arena). Not followed in a lambda, nor in `unsafe`. */
+   (an object that owns its arena). Not followed in `unsafe`. */
 static void check_returned_arena(Body *b, const Expr *value) {
-    if (b->lambda || b->unsafe_depth > 0) return;
+    if (b->unsafe_depth > 0) return;
     Local held = {0};
     add_origins(b, &held, value);
     add_owned(b, &held, value);
-    for (int i = 0; i < held.origin_count; i++) {
+    for (int i = 0; i < held.origins.count; i++) {
         bool owned = false;
-        for (int j = 0; j < held.owned_count; j++) owned = owned || held.owned[j] == held.origins[i];
+        for (int j = 0; j < held.owned.count; j++) owned = owned || held.owned.items[j] == held.origins.items[i];
         const Local *arena;
-        if (owned || origin_kind(b, held.origins[i], &arena) != ORIGIN_LOCAL_ARENA) continue;
+        OriginKind kind = origin_kind(b, held.origins.items[i], &arena);
+        if (freed_by_defer(b, held.origins.items[i], arena)) {
+            Diagnostic *d = sema_error_expr(b, "E0373", value, "the returned value holds memory of an arena that a `defer` of this function frees");
+            diag_help(d, "free the arena in the caller, or allocate what is returned in another arena (spec §6.1)");
+            return;
+        }
+        if (owned || kind != ORIGIN_LOCAL_ARENA || (arena && !in_this_body(b, arena))) continue;
         Diagnostic *d = arena ? sema_error_expr(b, "E0373", value, "the returned value holds memory of `%.*s`, an arena of this function",
                                                   NAME_ARGS(arena->name))
                               : sema_error_expr(b, "E0373", value, "the returned value holds memory of an arena of this function");
@@ -542,11 +924,11 @@ static void check_returned_arena(Body *b, const Expr *value) {
 static bool add_destination(Body *b, Local *to, const Expr *target) {
     switch (target->kind) {
     case EXPR_SELF:
-        add_origin(to, ORIGIN_CALLER);
+        add_origin(b, to, ORIGIN_CALLER);
         return true;
     case EXPR_NAME:
         if (target->resolution != RESOLVED_SELF_FIELD) return false;
-        add_origin(to, ORIGIN_CALLER);
+        add_origin(b, to, ORIGIN_CALLER);
         return true;
     case EXPR_FIELD: {
         const Expr *object = target->as.field.object;
@@ -574,13 +956,34 @@ static bool add_destination(Body *b, Local *to, const Expr *target) {
     }
 }
 
+/* The parameter not marked `keeps` that `origin` was read through, if `dest` is memory that outlives
+   the call and not reached through that parameter: what a parameter reaches is stored elsewhere
+   only with `keeps` (spec §6.1). */
+static const Local *read_unkept(Body *b, size_t origin, size_t dest) {
+    if (!is_via(origin) || origin == dest) return NULL;
+    const Local *param = &b->locals.items[SIZE_MAX - 1 - origin];
+    const Local *into;
+    OriginKind kind = origin_kind(b, dest, &into);
+    if (param->is_keeps || kind == ORIGIN_OTHER || kind == ORIGIN_LOCAL_ARENA || into == param) return NULL;
+    return param;
+}
+
+/* True if `origin`, read through `self`, goes to memory `dest` that is not reached through `self`,
+   in a method that does not say `keeps self`. */
+static bool self_unkept(Body *b, size_t origin, size_t dest) {
+    if (origin != ORIGIN_CALLER || dest == ORIGIN_CALLER || !b->self_info || !b->fn_decl || b->fn_decl->keeps_self) return false;
+    const Local *into;
+    OriginKind kind = origin_kind(b, dest, &into);
+    return kind == ORIGIN_IS_CALLER || kind == ORIGIN_PARAM_ARENA || kind == ORIGIN_PARAM_VALUE;
+}
+
 /* Regions, stage 3 (spec §6.1, rule 3, E0374): a pointer is stored only where
    it lasts no longer than what it points to. Into memory of the caller or of an arena, never
    memory of the function; into memory of the caller or of another arena, never memory of a
-   local arena (unless that arena was moved: where it went is not followed); and not from one
-   `Arena*` parameter into another. Not followed in a lambda, nor in `unsafe`. */
+   local arena (unless that arena went into such memory); and not from one
+   `Arena*` parameter into another. Not followed in `unsafe`. */
 static void check_store(Body *b, const Expr *target, const Expr *value) {
-    if (b->lambda || b->unsafe_depth > 0 || !value->type || sema_is_send(value->type)) return;
+    if (b->unsafe_depth > 0 || !value->type || sema_is_send(value->type)) return;
     Local dest = {0};
     if (!add_destination(b, &dest, target)) return;
     Local held = {0};
@@ -588,9 +991,9 @@ static void check_store(Body *b, const Expr *target, const Expr *value) {
     bool inside = dangling_part(b, value) != NULL;
     const char *help = "store it in memory that lasts no longer than what it points to: a variable of this function, "
                        "or memory of the same arena (spec §6.1)";
-    for (int i = 0; i < dest.origin_count; i++) {
+    for (int i = 0; i < dest.origins.count; i++) {
         const Local *to_arena;
-        OriginKind to = origin_kind(b, dest.origins[i], &to_arena);
+        OriginKind to = origin_kind(b, dest.origins.items[i], &to_arena);
         if (to == ORIGIN_OTHER) continue;
         if (to == ORIGIN_PARAM_VALUE) to = ORIGIN_IS_CALLER; /* memory the caller gave */
         if (inside) {
@@ -598,11 +1001,11 @@ static void check_store(Body *b, const Expr *target, const Expr *value) {
             diag_help(d, "%s", help);
             return;
         }
-        for (int j = 0; j < held.origin_count; j++) {
+        for (int j = 0; j < held.origins.count; j++) {
             const Local *from_arena;
-            OriginKind from = origin_kind(b, held.origins[j], &from_arena);
-            bool same = held.origins[j] == dest.origins[i];
-            if (from == ORIGIN_LOCAL_ARENA && !same && !(from_arena && from_arena->moved)) {
+            OriginKind from = origin_kind(b, held.origins.items[j], &from_arena);
+            bool same = held.origins.items[j] == dest.origins.items[i];
+            if (from == ORIGIN_LOCAL_ARENA && !same && !(from_arena && from_arena->moved_out)) {
                 Diagnostic *d = from_arena
                     ? sema_error_expr(b, "E0374", value, "memory of `%.*s`, an arena of this function, is stored where it may outlive it",
                                         NAME_ARGS(from_arena->name))
@@ -613,6 +1016,24 @@ static void check_store(Body *b, const Expr *target, const Expr *value) {
             if (from == ORIGIN_PARAM_VALUE && !from_arena->is_keeps && to != ORIGIN_LOCAL_ARENA) {
                 Diagnostic *d = sema_error_expr(b, "E0376", value, "the parameter `%.*s` is stored beyond the call, but it is not marked `keeps`",
                                                   NAME_ARGS(from_arena->name));
+                diag_help(d, "write `keeps` before its type, so that callers give it memory that lives as long (spec §6.1)");
+                return;
+            }
+            if (from == ORIGIN_PARAM_ARENA && to == ORIGIN_IS_CALLER && !from_arena->is_keeps) {
+                Diagnostic *d = sema_error_expr(b, "E0376", value, "the memory of the parameter `%.*s` is stored beyond the call, but it is not marked `keeps`",
+                                                  NAME_ARGS(from_arena->name));
+                diag_help(d, "write `keeps` before its type, so that callers know the arena must outlive what they give (spec §6.1)");
+                return;
+            }
+            if (self_unkept(b, held.origins.items[j], dest.origins.items[i])) {
+                Diagnostic *d = sema_error_expr(b, "E0376", value, "what `self` reaches is stored beyond the call, but the method does not say `keeps self`");
+                diag_help(d, "write `keeps self` after its parameters, so that callers give it what lives as long (spec §6.1)");
+                return;
+            }
+            const Local *read = read_unkept(b, held.origins.items[j], dest.origins.items[i]);
+            if (read) {
+                Diagnostic *d = sema_error_expr(b, "E0376", value, "what the parameter `%.*s` reaches is stored beyond the call, but it is not marked `keeps`",
+                                                  NAME_ARGS(read->name));
                 diag_help(d, "write `keeps` before its type, so that callers give it memory that lives as long (spec §6.1)");
                 return;
             }
@@ -670,13 +1091,74 @@ static bool may_receive_pointer(const Type *type) {
 
 /* Gives `to` the memory that the callee may store into: the receiver (an arena for `a.new`). */
 static void add_receiver(Body *b, Local *to, const Expr *receiver, bool self_receiver) {
-    if (self_receiver) add_origin(to, ORIGIN_CALLER);
+    if (self_receiver) add_origin(b, to, ORIGIN_CALLER);
     if (!receiver || !receiver->type) return;
     const Local *arena = local_arena(b, receiver);
     if (!arena) arena = param_arena(b, receiver);
-    if (arena) add_origin(to, arena->name.offset);
+    if (arena) add_origin(b, to, arena->name.offset);
     else if (receiver->type->tag == T_POINTER) add_through(b, to, receiver);
     /* a value of the function: what it stores lasts no longer than the function */
+}
+
+/* A value marked `keeps`, of origins `kept`, may be stored in `others`: reports what ends sooner. */
+static bool kept_too_short(Body *b, const Expr *where, Name param_name, const Local *kept, bool inside, const Local *others,
+                           const Local *direct, size_t own_arena) {
+    for (int k = 0; k < others->origins.count; k++) {
+        const Local *into;
+        OriginKind to = origin_kind(b, others->origins.items[k], &into);
+        if (to == ORIGIN_OTHER) continue;
+        /* the caller, an `Arena*` or another parameter; a local arena ends with the function too,
+           and where the callee stores the value among the arguments is not known */
+        bool outlives_call = to != ORIGIN_LOCAL_ARENA;
+        if (inside && outlives_call) {
+            Diagnostic *d = sema_error_expr(b, "E0375", where, "a pointer into this function is given to the `keeps` parameter `%.*s`, which may store it where it outlives the function",
+                                              NAME_ARGS(param_name));
+            diag_help(d, "give it memory of an arena that lives as long as the other arguments (spec §6.1)");
+            return true;
+        }
+        for (int m = 0; m < kept->origins.count; m++) {
+            const Local *from;
+            OriginKind kind = origin_kind(b, kept->origins.items[m], &from);
+            if (kept->origins.items[m] == own_arena) continue;
+            if (kind == ORIGIN_LOCAL_ARENA && kept->origins.items[m] != others->origins.items[k] && !(from && from->moved_out)) {
+                Diagnostic *d = from
+                    ? sema_error_expr(b, "E0375", where, "memory of `%.*s`, an arena of this function, is given to the `keeps` parameter `%.*s`, which may store it where it outlives the arena",
+                                        NAME_ARGS(from->name), NAME_ARGS(param_name))
+                    : sema_error_expr(b, "E0375", where, "memory of an arena of this function is given to the `keeps` parameter `%.*s`, which may store it where it outlives the arena",
+                                        NAME_ARGS(param_name));
+                diag_help(d, "give it memory of the arena of the other arguments (spec §6.1)");
+                return true;
+            }
+            if (kind == ORIGIN_PARAM_ARENA && !from->is_keeps && outlives_call && kept->origins.items[m] != others->origins.items[k]) {
+                Diagnostic *d = sema_error_expr(b, "E0376", where, "the memory of the parameter `%.*s` is given to the `keeps` parameter `%.*s`, but it is not marked `keeps` itself",
+                                                  NAME_ARGS(from->name), NAME_ARGS(param_name));
+                diag_help(d, "write `keeps` before its type, so that callers know the arena must outlive what they give (spec §6.1)");
+                return true;
+            }
+            const Local *read = read_unkept(b, kept->origins.items[m], others->origins.items[k]);
+            bool reached = false; /* what `self` reaches, stored in a local given by `&x`, stays here */
+            for (int d = 0; d < direct->origins.count; d++) reached = reached || direct->origins.items[d] == others->origins.items[k];
+            if (reached && self_unkept(b, kept->origins.items[m], others->origins.items[k])) {
+                Diagnostic *d = sema_error_expr(b, "E0376", where, "what `self` reaches is given to the `keeps` parameter `%.*s`, but the method does not say `keeps self`",
+                                                  NAME_ARGS(param_name));
+                diag_help(d, "write `keeps self` after its parameters (spec §6.1)");
+                return true;
+            }
+            if (read) {
+                Diagnostic *d = sema_error_expr(b, "E0376", where, "what the parameter `%.*s` reaches is given to the `keeps` parameter `%.*s`, but it is not marked `keeps` itself",
+                                                  NAME_ARGS(read->name), NAME_ARGS(param_name));
+                diag_help(d, "write `keeps` before its type, so that callers give it memory that lives as long (spec §6.1)");
+                return true;
+            }
+            if (kind == ORIGIN_PARAM_VALUE && !from->is_keeps && outlives_call && kept->origins.items[m] != others->origins.items[k]) {
+                Diagnostic *d = sema_error_expr(b, "E0376", where, "the parameter `%.*s` is given to the `keeps` parameter `%.*s`, but it is not marked `keeps` itself",
+                                                  NAME_ARGS(from->name), NAME_ARGS(param_name));
+                diag_help(d, "write `keeps` before its type, so that callers give it memory that lives as long (spec §6.1)");
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 /* Regions, stage 4 (spec §6.1, rule 4, E0375 and E0376): a `keeps` parameter
@@ -684,58 +1166,51 @@ static void add_receiver(Body *b, Local *to, const Expr *receiver, bool self_rec
    memory that ends sooner: of the function, of a local arena (unless the others are of that
    arena), nor a parameter not marked `keeps` itself. */
 void sema_check_call_keeps(Body *b, const Expr *e) {
-    if (b->lambda || b->unsafe_depth > 0 || e->kind != EXPR_CALL) return;
+    if (b->unsafe_depth > 0 || e->kind != EXPR_CALL) return;
     const Expr *receiver;
     bool self_receiver;
     size_t first;
     const FnDecl *decl = called(e, &receiver, &self_receiver, &first);
-    if (!decl) return;
-    for (size_t i = 0; i < decl->param_count && first + i < e->as.call.arg_count; i++) {
-        if (!decl->params[i].is_keeps) continue;
+    /* through a value of function type, the type says it; where it stores is unknown: the caller's */
+    const Type *fn = decl ? NULL : e->as.call.callee->type;
+    if (!decl && (!fn || fn->tag != T_FN || !fn->as.fn.keeps)) return;
+    size_t param_count = decl ? decl->param_count : fn->as.fn.param_count;
+    for (size_t i = 0; i < param_count && first + i < e->as.call.arg_count; i++) {
+        if (decl ? !decl->params[i].is_keeps : i >= 64 || !(fn->as.fn.keeps >> i & 1)) continue;
+        static const char digits[] = "0123456789";
+        Name param_name = decl ? decl->params[i].name : (Name){ &digits[i % 10], 1, 0 }; /* its place */
         const Expr *arg = e->as.call.args[first + i];
         if (!arg->type || sema_is_send(arg->type)) continue;
         Local kept = {0};
         add_origins(b, &kept, arg);
         bool inside = dangling_part(b, arg) != NULL;
         Local others = {0}; /* the memory it may be stored into */
+        Local direct = {0}; /* the same, without what is held by a local given as `&x` */
         add_receiver(b, &others, receiver, self_receiver);
+        add_receiver(b, &direct, receiver, self_receiver);
+        /* `a.new(T, a, ...)`: `init` keeps its arena in the new object, which is in that arena */
+        size_t own_arena = first && others.origins.count ? others.origins.items[0] : 0;
+        if (!decl) add_origin(b, &others, ORIGIN_CALLER);
+        if (!decl) add_origin(b, &direct, ORIGIN_CALLER);
         for (size_t j = first; j < e->as.call.arg_count; j++) {
             const Expr *other = e->as.call.args[j];
-            if (j != first + i && other->type && may_receive_pointer(other->type)) add_origins(b, &others, other);
+            if (j == first + i || !other->type || !may_receive_pointer(other->type)) continue;
+            add_origins(b, &others, other);
+            if (other->kind != EXPR_UNARY || other->as.unary.op != TOK_AMP || !storage_local(b, other->as.unary.operand)) add_origins(b, &direct, other);
         }
-        for (int k = 0; k < others.origin_count; k++) {
-            const Local *into;
-            OriginKind to = origin_kind(b, others.origins[k], &into);
-            if (to == ORIGIN_OTHER) continue;
-            /* the caller, an `Arena*` or another parameter; a local arena ends with the function too,
-               and where the callee stores the value among the arguments is not known */
-            bool outlives_call = to != ORIGIN_LOCAL_ARENA;
-            if (inside && outlives_call) {
-                Diagnostic *d = sema_error_expr(b, "E0375", arg, "a pointer into this function is given to the `keeps` parameter `%.*s`, which may store it where it outlives the function",
-                                                  NAME_ARGS(decl->params[i].name));
-                diag_help(d, "give it memory of an arena that lives as long as the other arguments (spec §6.1)");
-                return;
-            }
-            for (int m = 0; m < kept.origin_count; m++) {
-                const Local *from;
-                OriginKind kind = origin_kind(b, kept.origins[m], &from);
-                if (kind == ORIGIN_LOCAL_ARENA && kept.origins[m] != others.origins[k] && !(from && from->moved)) {
-                    Diagnostic *d = from
-                        ? sema_error_expr(b, "E0375", arg, "memory of `%.*s`, an arena of this function, is given to the `keeps` parameter `%.*s`, which may store it where it outlives the arena",
-                                            NAME_ARGS(from->name), NAME_ARGS(decl->params[i].name))
-                        : sema_error_expr(b, "E0375", arg, "memory of an arena of this function is given to the `keeps` parameter `%.*s`, which may store it where it outlives the arena",
-                                            NAME_ARGS(decl->params[i].name));
-                    diag_help(d, "give it memory of the arena of the other arguments (spec §6.1)");
-                    return;
-                }
-                if (kind == ORIGIN_PARAM_VALUE && !from->is_keeps && outlives_call && kept.origins[m] != others.origins[k]) {
-                    Diagnostic *d = sema_error_expr(b, "E0376", arg, "the parameter `%.*s` is given to the `keeps` parameter `%.*s`, but it is not marked `keeps` itself",
-                                                      NAME_ARGS(from->name), NAME_ARGS(decl->params[i].name));
-                    diag_help(d, "write `keeps` before its type, so that callers give it memory that lives as long (spec §6.1)");
-                    return;
-                }
-            }
+        if (kept_too_short(b, arg, param_name, &kept, inside, &others, &direct, own_arena)) return;
+    }
+    /* `keeps self`: the receiver may be stored in the arguments */
+    if (decl && decl->keeps_self && !first) {
+        Local kept = {0};
+        if (self_receiver) add_origin(b, &kept, ORIGIN_CALLER);
+        else if (receiver) add_origins(b, &kept, receiver);
+        Local others = {0};
+        for (size_t j = 0; j < e->as.call.arg_count; j++) {
+            const Expr *other = e->as.call.args[j];
+            if (other->type && may_receive_pointer(other->type)) add_origins(b, &others, other);
         }
+        kept_too_short(b, e, (Name){ "self", 4, 0 }, &kept, receiver && dangling_part(b, receiver) != NULL, &others, &others, 0);
     }
 }
 
@@ -744,7 +1219,7 @@ void sema_check_call_keeps(Body *b, const Expr *e) {
    local arena other than `arena`, nor a parameter not marked `keeps` when the arena outlives the
    call. */
 void sema_check_closure_captures(Body *b, const Expr *arena, const Expr *lambda) {
-    if (b->lambda || b->unsafe_depth > 0) return;
+    if (b->unsafe_depth > 0) return;
     const Local *into = local_arena(b, arena);
     if (!into) into = param_arena(b, arena);
     const Local *ignored;
@@ -760,10 +1235,10 @@ void sema_check_closure_captures(Body *b, const Expr *arena, const Expr *lambda)
             diag_help(d, "capture memory of the arena the closure goes into (spec §6.1)");
             return;
         }
-        for (int k = 0; k < local->origin_count; k++) {
+        for (int k = 0; k < local->origins.count; k++) {
             const Local *from;
-            OriginKind kind = origin_kind(b, local->origins[k], &from);
-            if (kind == ORIGIN_LOCAL_ARENA && (!into || local->origins[k] != into->name.offset) && !(from && from->moved)) {
+            OriginKind kind = origin_kind(b, local->origins.items[k], &from);
+            if (kind == ORIGIN_LOCAL_ARENA && (!into || local->origins.items[k] != into->name.offset) && !(from && from->moved_out)) {
                 Diagnostic *d = sema_error_expr(b, "E0374", lambda, "the closure captures `%.*s`, which holds memory of another arena than the one it is kept in",
                                                   NAME_ARGS(c->name));
                 diag_help(d, "capture memory of the arena the closure goes into (spec §6.1)");
@@ -788,15 +1263,124 @@ void sema_check_freed(Body *b, const Expr *e, const Local *local) {
 }
 
 /* `object.free()`, at `offset`: in a `defer`, it runs when the block of the arena ends. A free in
-   a lambda is not followed, since the lambda may never be called. */
+   a lambda is followed for an arena of the lambda only, since the lambda may never be called. */
 void sema_arena_freed(Body *b, Expr *object, size_t offset) {
     Local *arena = local_arena(b, object);
-    if (!arena || b->lambda) return;
-    if (b->defer_depth > 0) {
-        arena->free_deferred = true;
+    if (!arena) arena = param_arena(b, object);
+    if (b->lambda && (!arena || !in_this_body(b, arena))) return;
+    ArenaPlace *place = arena ? NULL : place_of(b, object);
+    if (!arena && !place) return;
+    if (b->s->summarizing && b->fn_decl && !b->lambda) {
+        ReturnSummary *summary = summary_of(b->s, b->fn_decl, true);
+        if (arena) summarize_path(b, summary, &summary->frees, arena->name.offset, NULL, 0);
+        else if (place) summarize_path(b, summary, &summary->frees, place->root, place->names, place->count);
+    }
+    if (arena) {
+        if (b->defer_depth > 0) {
+            arena->free_deferred = true;
+        } else {
+            free_origin(b, arena->name.offset, arena->name, b->locals.count, offset);
+            free_moved(b, &arena->owned, arena->name, b->locals.count, offset);
+        }
         return;
     }
-    free_origin(b, arena, b->locals.count, offset);
+    if (b->defer_depth > 0) {
+        place->free_deferred = true;
+        place->defer_block = b->block_depth;
+        return;
+    }
+    free_origin(b, ORIGIN_PLACE(place->index), place->names[place->count - 1], b->locals.count, offset);
+    free_held(b, place, b->locals.count, offset);
+    kill_fields(b, place->root, place->names, place->count, offset);
+}
+
+/* In the pass that makes the summaries: the function being checked calls `decl`. */
+static void note_call(Body *b, const FnDecl *decl) {
+    Sema *s = b->s;
+    summary_of(s, decl, true);
+    size_t callee = *ptrmap_get(&s->summary_index, decl);
+    ReturnSummary *summary = summary_of(s, b->fn_decl, true);
+    for (size_t i = 0; i < summary->call_count; i++) {
+        if (summary->calls[i] == callee) return;
+    }
+    if (summary->call_count == summary->call_cap) {
+        size_t cap = summary->call_cap ? summary->call_cap * 2 : 8;
+        size_t *calls = arena_alloc(&s->arena, cap * sizeof *calls);
+        if (summary->call_count) memcpy(calls, summary->calls, summary->call_count * sizeof *calls);
+        summary->calls = calls;
+        summary->call_cap = cap;
+    }
+    summary->calls[summary->call_count++] = callee;
+}
+
+/* True if the summary of `fn` must be made in this pass: the first one, or what it calls has grown
+   since it was last made. */
+static bool summary_is_stale(Sema *s, const FnDecl *fn) {
+    if (s->summary_pass == 1) return true;
+    const ReturnSummary *summary = summary_of(s, fn, true);
+    for (size_t i = 0; i < summary->call_count; i++) {
+        if (s->summaries.items[summary->calls[i]].grew_pass >= s->summary_pass - 1) return true;
+    }
+    return false;
+}
+
+/* The arenas that the function called by `e` frees are gone (spec §6.1, rule 1). */
+void sema_call_frees(Body *b, const Expr *e) {
+    if (e->kind != EXPR_CALL) return;
+    const FnDecl *decl = called_decl(e);
+    if (decl && b->s->summarizing && b->fn_decl) note_call(b, decl);
+    const ReturnSummary *summary = decl ? summary_of(b->s, decl, false) : NULL;
+    for (const ArenaPath *path = summary ? summary->frees : NULL; path; path = path->next) {
+        size_t root;
+        const Name *names;
+        int count;
+        if (!path_at_call(b, e, path, &root, &names, &count)) continue;
+        if (b->lambda) { /* the call runs if the lambda does: only what ends with it is followed */
+            const Local *local;
+            if (count || origin_kind(b, root, &local) != ORIGIN_LOCAL_ARENA || !local || !in_this_body(b, local)) continue;
+        }
+        if (b->s->summarizing && b->fn_decl && !b->lambda) {
+            ReturnSummary *own = summary_of(b->s, b->fn_decl, true);
+            summarize_path(b, own, &own->frees, root, names, count);
+        }
+        ArenaPlace *place = count ? find_place(b, root, names, count) : NULL;
+        if (b->defer_depth > 0) {
+            if (place) {
+                place->free_deferred = true;
+                place->defer_block = b->block_depth;
+            }
+            continue;
+        }
+        const Local *arena;
+        if (place) {
+            free_origin(b, ORIGIN_PLACE(place->index), names[count - 1], b->locals.count, e->offset);
+            free_held(b, place, b->locals.count, e->offset);
+        } else if (origin_kind(b, root, &arena) != ORIGIN_OTHER && arena) {
+            free_origin(b, root, arena->name, b->locals.count, e->offset);
+            free_moved(b, &arena->owned, arena->name, b->locals.count, e->offset);
+        }
+    }
+    for (const ArenaPath *path = summary && b->defer_depth == 0 && !b->lambda ? summary->kills : NULL; path; path = path->next) {
+        size_t root;
+        const Name *names;
+        int count;
+        if (!path_at_call(b, e, path, &root, &names, &count) || count == 0) continue;
+        DeadField *dead = arena_alloc(&b->s->arena, sizeof *dead);
+        dead->root = root;
+        dead->names = names;
+        dead->count = count;
+        dead->offset = e->offset;
+        dead->next = b->dead;
+        b->dead = dead;
+    }
+    for (const ArenaPath *path = summary && !b->lambda ? summary->writes : NULL; path; path = path->next) {
+        size_t root;
+        const Name *names;
+        int count;
+        if (!path_at_call(b, e, path, &root, &names, &count) || count == 0) continue;
+        dead_written(b, root, names, count);
+        summarize_write(b, root, names, count);
+    }
 }
 
 /* True if `local` is a copy held by the innermost lambda being checked. */
@@ -1033,7 +1617,9 @@ static Type *value_of_ref(Body *b, Expr *e, Ref ref, Type *expected) {
         }
         if (!b->assigning) sema_check_freed(b, e, ref.local);
         return ref.local->type;
-    case REF_FIELD: return ref.field->type;
+    case REF_FIELD:
+        sema_check_dead(b, e);
+        return ref.field->type;
     case REF_CONST: return ref.constant->type ? ref.constant->type : sema_error_type(b);
     case REF_FN:
         if (ref.fn->param_count || ref.fn->effect_param_count) {
@@ -1378,6 +1964,7 @@ static Type *check_field(Body *b, Expr *e, Type *expected) {
     if (base->tag == T_STRUCT || base->tag == T_CLASS) {
         FieldInfo *field = sema_find_field(base->as.info, name);
         if (field) {
+            sema_check_dead(b, e);
             if (base->as.info->unit != b->unit && !field->decl->is_pub) {
                 Diagnostic *d = sema_error_at(b, "E0305", name.offset, name.length, "the field `%.*s` of `%.*s` is private",
                                          NAME_ARGS(name), NAME_ARGS(base->name));
@@ -1754,6 +2341,7 @@ static Type *check_expr_kind(Body *b, Expr *e, Type *expected) {
     case EXPR_CALL: {
         Type *type = sema_check_call(b, e, expected);
         sema_check_call_keeps(b, e);
+        sema_call_frees(b, e);
         return type;
     }
     case EXPR_INDEX:
@@ -1881,8 +2469,10 @@ static void check_assign(Body *b, Stmt *stmt) {
     Expr *value = stmt->as.assign.value;
     TokenKind op = stmt->as.assign.op;
     b->assigning = op == TOK_EQ && target->kind == EXPR_NAME; /* a moved variable can get a new value */
+    b->assign_target = op == TOK_EQ ? target : NULL;
     Type *tt = sema_check_expr(b, target, NULL);
     b->assigning = false;
+    b->assign_target = NULL;
     check_assignable(b, target);
     if (op == TOK_EQ) {
         sema_check_expect(b, value, tt);
@@ -1892,7 +2482,7 @@ static void check_assign(Body *b, Stmt *stmt) {
                                    : "stored there");
         if (target->kind == EXPR_NAME && target->resolution == RESOLVED_LOCAL) {
             Local *local = sema_find_local(b, target->as.name);
-            if (local) local->moved = local->dangling = false;
+            if (local) local->moved = local->moved_out = local->dangling = false;
         }
         /* `p = &x;` or `h.p = &x;`: never cleared, since the order of the branches is not followed */
         Local *holder = storage_local(b, target);
@@ -1901,6 +2491,8 @@ static void check_assign(Body *b, Stmt *stmt) {
             add_origins(b, holder, value);
             add_owned(b, holder, value);
         }
+        arena_moved(b, target, value);
+        field_written(b, target, value);
         check_store(b, target, value);
         return;
     }
@@ -1993,9 +2585,20 @@ bool sema_always_returns(const Stmt *stmt) {
 
 void sema_check_block(Body *b, Stmt *block) {
     size_t mark = b->locals.count;
+    b->block_depth++;
     for (size_t i = 0; i < block->as.block.count; i++) check_stmt(b, block->as.block.items[i]);
+    for (ArenaPlace *place = b->places; place; place = place->next) {
+        if (!place->free_deferred || b->defer_depth > 0 || place->defer_block < b->block_depth) continue;
+        place->free_deferred = false;
+        free_origin(b, ORIGIN_PLACE(place->index), place->names[place->count - 1], mark, block->offset + block->length - 1);
+        free_held(b, place, mark, block->offset + block->length - 1);
+    }
+    b->block_depth--;
     for (size_t i = mark; i < b->locals.count; i++) { /* the `defer`s run: `defer a.free();` */
-        if (b->locals.items[i].free_deferred) free_origin(b, &b->locals.items[i], mark, block->offset + block->length - 1);
+        if (b->locals.items[i].free_deferred) {
+            free_origin(b, b->locals.items[i].name.offset, b->locals.items[i].name, mark, block->offset + block->length - 1);
+            free_moved(b, &b->locals.items[i].owned, b->locals.items[i].name, mark, block->offset + block->length - 1);
+        }
     }
     b->locals.count = mark;
 }
@@ -2019,8 +2622,12 @@ static void check_var(Body *b, Stmt *stmt) {
     if (!sema_name_is(stmt->as.var.name, "_")) {
         b->locals.items[b->locals.count - 1].closure = closure;
         b->locals.items[b->locals.count - 1].points_inside = points_inside;
-        add_origins(b, &b->locals.items[b->locals.count - 1], init);
-        add_owned(b, &b->locals.items[b->locals.count - 1], init);
+        Local *local = &b->locals.items[b->locals.count - 1];
+        add_origins(b, local, init);
+        add_owned(b, local, init);
+        if (!local->is_mut && type->tag == T_POINTER && init->kind != EXPR_CALL) {
+            local->aliased = expr_path(b, init, &local->alias_root, &local->alias_names, &local->alias_count);
+        }
     }
 }
 
@@ -2119,6 +2726,7 @@ static void check_return(Body *b, Stmt *stmt) {
             sema_consume(b, value);
             sema_check_escape(b, value, "returned");
             check_dangling(b, value);
+            check_returned_arena(b, value);
         }
         return;
     }
@@ -2209,6 +2817,31 @@ static void check_stmt(Body *b, Stmt *stmt) {
 
 /* ---- Functions ---- */
 
+/* A call through a parent or an interface knows the method it names: its summary also says what
+   the methods that redefine it do. */
+static void merge_overrides(Sema *s) {
+    for (size_t i = 0; i < s->type_infos.count; i++) {
+        const TypeInfo *info = s->type_infos.items[i];
+        for (size_t j = 0; j < info->method_count; j++) {
+            const MethodInfo *method = &info->methods[j];
+            if (!method->overridden) continue;
+            ReturnSummary *to = summary_of(s, method->overridden->decl, true);
+            const ReturnSummary *from = summary_of(s, method->decl, false);
+            if (!from) continue;
+            for (const ArenaPath *path = from->frees; path; path = path->next) add_path(s, to, &to->frees, path->root, path->names, path->count);
+            for (const ArenaPath *path = from->returns; path; path = path->next) add_path(s, to, &to->returns, path->root, path->names, path->count);
+            for (const ArenaPath *path = from->kills; path; path = path->next) add_path(s, to, &to->kills, path->root, path->names, path->count);
+            if ((from->values & ~to->values) || (from->through & ~to->through) || (from->receiver && !to->receiver)) {
+                to->values |= from->values;
+                to->through |= from->through;
+                to->receiver = to->receiver || from->receiver;
+                to->grew_pass = s->summary_pass;
+                s->summary_grew = true;
+            }
+        }
+    }
+}
+
 static void init_body(Body *b, Sema *s, Unit *unit, TypeInfo *self_info, Name fn_name, Type *ret, unsigned effects) {
     memset(b, 0, sizeof *b);
     b->s = s;
@@ -2220,12 +2853,16 @@ static void init_body(Body *b, Sema *s, Unit *unit, TypeInfo *self_info, Name fn
 }
 
 static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self_info, Type *type) {
-    if (!fn->body) return;
+    if (!fn->body || (s->summarizing && !summary_is_stale(s, fn))) return;
     Body b;
     bool typed = type->tag == T_FN;
     init_body(&b, s, unit, self_info, fn->name, typed ? type->as.fn.ret : s->types.error, typed ? type->as.fn.effects : 0);
     b.in_init = self_info && sema_name_is(fn->name, "init");
     b.fn_decl = fn;
+    if (fn->keeps_self && !self_info) {
+        Diagnostic *d = sema_error_at(&b, "E0379", fn->name.offset, fn->name.length, "`%.*s` is not a method: it has no `self` to keep", NAME_ARGS(fn->name));
+        diag_help(d, "`keeps self` is for a method (spec §6.1)");
+    }
     if (s->summarizing) summary_of(s, fn, true);
     for (size_t i = 0; i < fn->param_count; i++) {
         Local param = {0};
@@ -2234,7 +2871,7 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
         param.is_mut = fn->params[i].is_mut;
         param.is_param = true;
         param.is_keeps = fn->params[i].is_keeps;
-        if (param.type->tag != T_ARENA && !sema_is_send(param.type)) add_origin(&param, param.name.offset);
+        if (param.type->tag != T_ARENA && !sema_is_send(param.type)) add_origin(&b, &param, param.name.offset);
         SOSU_VEC_PUSH(&b.locals, param); /* duplicates were reported with the declarations (E0319) */
     }
     for (size_t i = 0; i < fn->contract_count; i++) {
@@ -2247,6 +2884,17 @@ static void check_function(Sema *s, Unit *unit, const FnDecl *fn, TypeInfo *self
         Diagnostic *d = sema_error_at(&b, "E0346", fn->name.offset, fn->name.length,
                                  "`%.*s` does not return a value on every path", NAME_ARGS(fn->name));
         diag_help(d, "end each path with `return ...;`");
+    }
+    for (const DeadField *dead = b.dead; dead; dead = dead->next) {
+        if (s->summarizing) {
+            ReturnSummary *summary = summary_of(s, fn, true);
+            summarize_path(&b, summary, &summary->kills, dead->root, dead->names, dead->count);
+        } else if (dead->renewed) {
+            Diagnostic *d = sema_error_at(&b, "E0378", dead->offset, dead->arena.length,
+                                            "`%.*s` holds memory of the arena `%.*s`, which gets a new value here, but `%.*s` does not",
+                                            NAME_ARGS(dead->names[dead->count - 1]), NAME_ARGS(dead->arena), NAME_ARGS(dead->names[dead->count - 1]));
+            diag_help(d, "give `%.*s` a value in the new arena in this function (spec §6.1)", NAME_ARGS(dead->names[dead->count - 1]));
+        }
     }
     if (s->summarizing) summary_of(s, fn, true)->complete = true;
     free(b.locals.items);
@@ -2344,24 +2992,30 @@ void sema_check_bodies(Sema *s) {
     bool quiet = s->quiet;
     s->quiet = true;
     s->summarizing = true;
-    for (size_t i = 0; i < s->fns.count; i++) {
-        FnInfo *fn = s->fns.items[i];
-        s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;
-        if (!fn->is_extern) check_function(s, fn->unit, fn->decl, NULL, fn->type);
-        s->env = NULL;
-    }
-    for (size_t i = 0; i < s->type_infos.count; i++) {
-        TypeInfo *info = s->type_infos.items[i];
-        s->env = info->param_count ? sema_info_env(s, info, info->params) : NULL;
-        const TypeEnv *env = s->env;
-        for (size_t j = 0; j < info->method_count; j++) {
-            FnInfo *generic = info->methods[j].generic;
-            if (generic) s->env = sema_method_env(s, env, generic, generic->params, NULL);
-            check_function(s, info->unit, info->methods[j].decl, info, info->methods[j].type);
-            s->env = env;
+    s->summary_pass = 0;
+    do { /* what a function frees or returns of an arena reaches its callers: until nothing is added */
+        s->summary_pass++;
+        s->summary_grew = false;
+        for (size_t i = 0; i < s->fns.count; i++) {
+            FnInfo *fn = s->fns.items[i];
+            s->env = fn->param_count || fn->effect_param_count ? sema_fn_env(s, fn, fn->params, NULL) : NULL;
+            if (!fn->is_extern) check_function(s, fn->unit, fn->decl, NULL, fn->type);
+            s->env = NULL;
         }
-        s->env = NULL;
-    }
+        for (size_t i = 0; i < s->type_infos.count; i++) {
+            TypeInfo *info = s->type_infos.items[i];
+            s->env = info->param_count ? sema_info_env(s, info, info->params) : NULL;
+            const TypeEnv *env = s->env;
+            for (size_t j = 0; j < info->method_count; j++) {
+                FnInfo *generic = info->methods[j].generic;
+                if (generic) s->env = sema_method_env(s, env, generic, generic->params, NULL);
+                check_function(s, info->unit, info->methods[j].decl, info, info->methods[j].type);
+                s->env = env;
+            }
+            s->env = NULL;
+        }
+        merge_overrides(s);
+    } while (s->summary_grew);
     s->summarizing = false;
     s->quiet = quiet;
 

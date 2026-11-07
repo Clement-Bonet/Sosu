@@ -285,7 +285,7 @@ pub class Editor {
     pub mut i32 clip_w;
     pub mut i32 clip_h;
 
-    void init(Arena* arena) {
+    void init(keeps Arena* arena) {
         self.arena = arena;
         sheet_arena = Arena.new(1 * MB);
         art = sheet.new_sheet(&sheet_arena, 32, 32);

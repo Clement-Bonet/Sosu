@@ -74,6 +74,17 @@ static bool same_path(const char *a, const char *b) {
 #endif
 }
 
+bool lsp_content_length(const char *value, size_t *length) {
+    while (*value == ' ' || *value == '\t') value++;
+    if (*value < '0' || *value > '9') return false;
+    char *end;
+    unsigned long long n = strtoull(value, &end, 10);
+    if (*end != '\0' && *end != '\r' && *end != '\n' && *end != ' ') return false;
+    if (n > (unsigned long long)1 << 30) return false; /* 1 GB; strtoull saturates */
+    *length = (size_t)n;
+    return true;
+}
+
 static int hex_value(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -376,7 +387,7 @@ static void analysis_free(Analysis *a) {
 static void analysis_run(LspServer *s, Analysis *a, const char *root) {
     memset(a, 0, sizeof *a);
     a->root = sosu_strdup(root);
-    bool ok = program_load(&a->program, root, s->lib_dir);
+    bool ok = program_load_cached(&a->program, root, s->lib_dir);
     a->loaded = true;
     if (ok) {
         a->checked = true;
@@ -1031,14 +1042,20 @@ typedef struct {
     size_t character;
 } Position;
 
+/* A line or a column sent by the client: any number, which a cast to size_t would not take. */
+static size_t position_part(const Json *value) {
+    double n = json_number(value, 0);
+    return n <= 0 ? 0 : n >= 1e9 ? (size_t)1000000000 : (size_t)n;
+}
+
 static bool read_position(LspServer *s, const Json *params, Position *p) {
     const Json *document = json_get(params, "textDocument");
     const Json *position = json_get(params, "position");
     char *path = lsp_uri_to_path(json_string(json_get(document, "uri"), ""));
     p->doc = path ? find_document(s, path) : NULL;
     free(path);
-    p->line = (size_t)json_number(json_get(position, "line"), 0);
-    p->character = (size_t)json_number(json_get(position, "character"), 0);
+    p->line = position_part(json_get(position, "line"));
+    p->character = position_part(json_get(position, "character"));
     return p->doc != NULL;
 }
 

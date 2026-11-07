@@ -5,7 +5,7 @@
 // grid that follows the size of the window.
 import workspace.state;
 
-window Workspace(state.Workspace* w) {
+window Workspace(keeps state.Workspace* w) {
     title: "Sosu workspace"
     width: 1280
     height: 720
@@ -116,7 +116,7 @@ window Workspace(state.Workspace* w) {
 }
 
 // The details of the file chosen, edited until Save or Revert: in two tabs.
-component Details(state.Workspace* w) {
+component Details(keeps state.Workspace* w) {
     Tabs(bind: w.page) {
         Tab("General") {
             General(w)
@@ -159,7 +159,7 @@ component FileItem(state.Workspace* w, i32 i) {
 }
 
 // Several files chosen at once: Ctrl+click adds or removes one, Shift+click a range, Ctrl+A all.
-component Selection(state.Workspace* w) {
+component Selection(keeps state.Workspace* w) {
     Text("{count} file chosen", plural: "{count} files chosen", count: w.picked_count())
     List(count: w.count, item: i, selection: w.picked, width: Fill, height: 220) {
         FileItem(w, i)

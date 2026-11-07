@@ -48,7 +48,7 @@ struct TypeExpr {
         TypeExpr *inner; /* POINTER, OPTION, SLICE */
         struct { TypeExpr *element; uint64_t size; Path size_name; } array; /* size_name: `ui8[NAME]` */
         struct { TypeExpr *value; TypeExpr *error; } result;
-        struct { TypeExpr **params; size_t param_count; TypeExpr *ret; Path effects; } fn;
+        struct { TypeExpr **params; bool *keeps; size_t param_count; TypeExpr *ret; Path effects; } fn; /* keeps: `keeps` before a parameter */
     } as;
 };
 
@@ -255,6 +255,7 @@ typedef struct {
     bool is_pub;
     bool is_unsafe;
     bool is_export; /* `export "C"`: offered to other languages under its own name (spec §9.2) */
+    bool keeps_self; /* `keeps self`: what `self` reaches may be stored beyond the call (spec §6.1) */
     MethodKind method_kind;
     TypeExpr *ret;
     Name name;

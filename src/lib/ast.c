@@ -111,6 +111,7 @@ static void print_type(Printer *pr, const TypeExpr *type) {
         fputs("fn(", pr->out);
         for (size_t i = 0; i < type->as.fn.param_count; i++) {
             if (i) fputs(", ", pr->out);
+            if (type->as.fn.keeps[i]) fputs("keeps ", pr->out);
             print_type(pr, type->as.fn.params[i]);
         }
         fputs(") -> ", pr->out);
@@ -428,6 +429,7 @@ static void print_fn(Printer *pr, const FnDecl *fn, int indent) {
     print_type_params(pr, fn->type_params);
     fputc(' ', out);
     print_params(pr, fn->params, fn->param_count);
+    if (fn->keeps_self) fputs(" keeps self", pr->out);
     if (fn->effects.count) {
         fputs(" (uses", out);
         for (size_t i = 0; i < fn->effects.count; i++) {

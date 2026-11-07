@@ -242,7 +242,7 @@ struct Decoder {
     }
 
     // Reads the frame header (SOF0 or SOF1) at `body`, of `length` bytes.
-    image.ImageError? frame_header(Arena* arena, usize body, usize length, usize end) {
+    image.ImageError? frame_header(keeps Arena* arena, usize body, usize length, usize end) {
         if (frame || length < 6) {
             return some(image.ImageError.Damaged);
         }

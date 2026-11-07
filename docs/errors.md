@@ -118,8 +118,10 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0373 | a returned value holds memory of a local arena (spec §6.1) | `Arena a = Arena.new(64); return a.alloc(N);`, also through a variable, a literal, `some(...)` or `?:`; not when the arena is returned with it (`return Doc{ arena: a, root: r };`, `return a.new(Counter, a);`) |
 | E0374 | a pointer stored where it may outlive what it points to (spec §6.1) | `h.n = some(a.alloc(N));` for a parameter `H* h` and a local arena `a`, `h.n = some(&x);`, memory of a local arena stored in another arena, memory of one `Arena*` parameter stored in another; also into `self` in a method, and what `a.closure(...)` captures |
 | E0375 | memory that ends sooner given to a `keeps` parameter (spec §6.1) | `put(h, a.alloc(N))` for `void put(H* h, keeps N* p)` and a local arena `a`, `put(h, &x)`, `b.set(a.alloc(N))`, `a.new(C, t.alloc(N))` whose `init` keeps it |
-| E0376 | a parameter stored beyond the call without `keeps` (spec §6.1) | `void f(H* h, N* q) { h.n = some(q); }`, `put(h, q)` with `q` not `keeps`, a closure of `a.closure(...)` that captures it |
+| E0376 | a parameter, what it reaches, or the memory of an `Arena*` parameter, stored beyond the call without `keeps` (spec §6.1) | `void f(H* h, N* q) { h.n = some(q); }`, `h.n = some(q.next)`, `put(h, q)` with `q` not `keeps`, a closure of `a.closure(...)` that captures it |
 | E0377 | invalid `arena.closure` | `a.closure(5)`, `a.closure(f)` for a function in a variable: it takes a lambda written there (spec §6.1) |
+| E0378 | a field left in the old memory of an arena that gets a new value (spec §6.1) | `a.free(); a = Arena.new(64);` in a method, with no new value for the field `p` given memory of `a` |
+| E0379 | `keeps self` on a function that is not a method (spec §6.1) | `void f() keeps self { }` |
 
 ## Code generation
 
@@ -136,7 +138,7 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0402 | unknown section or key | `[tools]`, `[link.beos]`, `author = "..."`, `branch = "main"` in a dependency |
 | E0403 | missing section or key | no `[package]`, no `name` or `version` |
 | E0404 | invalid dependency | `x = "../x"`, no source, `path` and `git` together, `git` without `tag` or `rev`, a `"` or `$` in the URL or tag |
-| E0405 | cannot fetch a git dependency | wrong URL, no such tag or rev, `git` not installed |
+| E0405 | cannot fetch a git dependency | wrong URL, no such tag or rev, `git` not installed; in the language server, a dependency not fetched yet |
 | E0406 | the package is not named like its dependency key | `geo = { path = "../geometry" }` |
 | E0407 | circular dependency between packages | `a` depends on `b`, which depends on `a` |
 | E0408 | duplicate key, dependency or section | `name` written twice, `[link]` twice |
