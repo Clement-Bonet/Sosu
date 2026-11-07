@@ -327,6 +327,15 @@ static void test_git(void) {
     CHECK(strncmp(lock, "# ", 2) == 0 && strstr(lock, "\nshapes ../shapes tag v1 "), "sosu.lock written:\n%s", lock);
     free(lock);
 
+    /* The language server reads what is there. */
+    Program cached;
+    program_load_cached(&cached, "build/git_test/app", "lib");
+    check_codes("cached, already fetched", &cached.diags, "");
+    char *found = shapes_root(&cached);
+    CHECK(strcmp(found, first) == 0, "the same folder: %s", found);
+    free(found);
+    program_free(&cached);
+
     /* The tag moves: the lock keeps the first commit. */
     write_text("build/git_test/shapes/src/lib.sosu", "pub i32 sides() {\n    return 4;\n}\n");
     CHECK(git("commit --quiet -am two") && git("tag -f v1") && git("tag v2"), "second commit");
@@ -335,6 +344,15 @@ static void test_git(void) {
 
     /* Another tag: fetched, and the lock follows. */
     write_app("git = \"../shapes\", tag = \"v2\"");
+    /* not fetched by the language server, which leaves the lock alone */
+    char *before = read_lock();
+    program_load_cached(&cached, "build/git_test/app", "lib");
+    check_codes("cached, not fetched", &cached.diags, "E0405");
+    program_free(&cached);
+    char *after = read_lock();
+    CHECK(strcmp(before, after) == 0, "sosu.lock untouched:\n%s", after);
+    free(before);
+    free(after);
     char *second = load_shapes("git tag changed", "");
     CHECK(second[0] && strcmp(first, second) != 0, "a new tag gives a new commit: %s", second);
     lock = read_lock();

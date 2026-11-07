@@ -54,6 +54,7 @@ typedef struct {
     char *deps_dir; /* where git dependencies are cloned: `build/deps` of the root package */
     LockFile lock;  /* sosu.lock of the root package, as read */
     LockFile used;  /* the commits of the git dependencies loaded */
+    bool cached;    /* nothing is fetched and nothing written: see program_load_cached */
 } Program;
 
 /* Loads the package in `dir`, its dependencies and its modules, starting from
@@ -63,6 +64,11 @@ typedef struct {
 bool program_load(Program *program, const char *dir, const char *lib_dir);
 /* A program made of one module (`test.main`, file `test.sosu`) given as text; it can
    import `core` and `std`. Used by the tests. */
+/* The same for a tool that only reads the package, the language server: git is not run, and
+   neither `build/deps` nor `sosu.lock` is touched, since opening a file is not asking for that.
+   A git dependency not fetched yet is an error (E0405). */
+bool program_load_cached(Program *program, const char *dir, const char *lib_dir);
+
 bool program_load_text(Program *program, const char *text, const char *lib_dir);
 void program_free(Program *program);
 

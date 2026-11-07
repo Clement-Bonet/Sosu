@@ -28,6 +28,10 @@ static void test_canonical(void) {
     expect_format("struct  P{f32 x;f32 y;}", "struct P {\n    f32 x;\n    f32 y;\n}\n");
     expect_format("void f(){}", "void f() { }\n");
     expect_format("void f(  keeps  T* x,mut keeps str s){}", "void f(keeps T* x, mut keeps str s) { }\n");
+    expect_format("void f(fn(  keeps  T*,i32,keeps  U)->void g){}", "void f(fn(keeps T*, i32, keeps U) -> void g) { }\n");
+    expect_format("void f(){auto g=(  keeps  T* x,y)=>x;}", "void f() {\n    auto g = (keeps T* x, y) => x;\n}\n");
+    expect_format("void m()  keeps   self  uses io{}", "void m() keeps self uses io { }\n");
+    expect_format("interface I{void m()keeps self;}", "interface I {\n    void m() keeps self;\n}\n");
     expect_format("i32 f(){return (a+b)*c-(d-e);}", "i32 f() {\n    return (a + b) * c - (d - e);\n}\n");
     expect_format("i32 f(){return ((a*b))+(c);}", "i32 f() {\n    return a * b + c;\n}\n");
     expect_format("void f(){auto x=-(y as f32);auto p=(q as ui8*)+1;auto z=(a<b)==c;}",

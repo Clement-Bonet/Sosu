@@ -470,6 +470,7 @@ typedef struct {
     Files files;
     size_t pos;
     bool failed; /* the current declaration could not be read */
+    int depth;   /* of the recursion below: a header can nest as much as it wants */
     struct { Typedef *items; size_t count; size_t cap; } typedefs;
     struct { Record **items; size_t count; size_t cap; } records;
     struct { EnumDef **items; size_t count; size_t cap; } enums;
@@ -530,6 +531,19 @@ static bool accept(P *p, const char *text) {
 static bool at_eof(P *p) { return cur(p)->kind == TK_EOF; }
 static char *tok_dup(const Tok *t) { return dup_n(t->text, t->length); }
 static bool tok_own(P *p, const Tok *t) { return t->file >= 0 && p->files.items[t->file].own; }
+
+/* One more level of recursion. Beyond the limit, the same as in the parser of Sosu (spec §12), the
+   declaration is not read. */
+#define MAX_DEPTH 512
+
+static bool deeper(P *p) {
+    if (p->depth >= MAX_DEPTH) {
+        p->failed = true;
+        return false;
+    }
+    p->depth++;
+    return true;
+}
 
 /* Skips a balanced `( ... )`, `[ ... ]` or `{ ... }` starting at the current token. */
 static void skip_balanced(P *p) {
@@ -913,7 +927,16 @@ static bool eval_primary(P *p, Value *v) {
     return false;
 }
 
+static bool eval_unary_level(P *p, Value *v);
+
 static bool eval_unary(P *p, Value *v) {
+    if (!deeper(p)) return false;
+    bool ok = eval_unary_level(p, v);
+    p->depth--;
+    return ok;
+}
+
+static bool eval_unary_level(P *p, Value *v) {
     if (is(p, "(") && (starts_type_at(p, 1))) {
         /* a cast */
         p->pos++;
@@ -1119,7 +1142,23 @@ static Record *new_record(P *p, char *tag, bool is_union) {
 static CType *parse_declarator(P *p, CType *base, const Tok **name);
 static CType *parse_specifiers(P *p, bool *is_typedef, bool *is_static);
 
+static void parse_record_body_level(P *p, Record *r);
+
+/* Inside the `{` of the record. */
 static void parse_record_body(P *p, Record *r) {
+    if (deeper(p)) {
+        parse_record_body_level(p, r);
+        p->depth--;
+        return;
+    }
+    while (!at_eof(p) && !is(p, "}")) {
+        if (is(p, "{")) skip_balanced(p);
+        else p->pos++;
+    }
+    accept(p, "}");
+}
+
+static void parse_record_body_level(P *p, Record *r) {
     RField *fields = NULL;
     size_t count = 0, cap = 0;
     while (!at_eof(p) && !is(p, "}")) {
@@ -1492,8 +1531,17 @@ static bool nested_declarator(P *p) {
     return !is_type_word(t) && !find_typedef(p, t);
 }
 
+static CType *parse_declarator_level(P *p, CType *base, const Tok **name);
+
 static CType *parse_declarator(P *p, CType *base, const Tok **name) {
     *name = NULL;
+    if (!deeper(p)) return base;
+    CType *type = parse_declarator_level(p, base, name);
+    p->depth--;
+    return type;
+}
+
+static CType *parse_declarator_level(P *p, CType *base, const Tok **name) {
     skip_ignored(p);
     while (accept(p, "*") || accept(p, "^")) {
         base = pointer_to(p, base);
