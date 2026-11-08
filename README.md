@@ -141,6 +141,7 @@ sosuc check tests/packages/app      # checks without compiling
 sosuc fmt packages/platform         # formats in place (spec §7.6); --check only reports
 sosuc i18n extract examples/workspace -o examples/workspace/locales/messages.locale.default.sosu   # the texts to translate (spec §10.7)
 sosuc lsp                           # the language server of editors (spec §11.4), on stdin and stdout
+sosuc doc packages/math             # the reference of the public API of a package, in build/doc/math.md
 sosuc lex tests/samples/hello.sosu  # tokens of a file (debugging)
 sosuc parse tests/samples/hello.sosu --format=json   # syntax tree; JSON diagnostics on stderr
 ```
@@ -179,11 +180,12 @@ src/lib/      libsosu: library shared by all the tools (spec §11.4)
   sema_lambda lambdas and the variables they capture
   codegen     C code generation
   json        JSON reader and writer (for the language server)
-  lsp         the language server: diagnostics while typing, hover, definition, completion
+  lsp         the language server: diagnostics while typing, hover, definition, references, rename, completion
+  docgen      the reference of the public API of a package, from its comments (`sosuc doc`, `make doc`)
   i18n        the texts to translate of a package, for its catalogs (`sosuc i18n extract`)
 src/sosuc/    command-line driver
 src/playground/  the entry points of the compiler in WebAssembly, for playground/ (the page)
-src/docgen/   the generator of docs/REFERENCE.md
+src/docgen/   the generator of docs/REFERENCE.md (`make doc`), on src/lib/docgen
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 packages/     platform (window and events, on SDL3), render (pixels, shapes, text, PNG images), ui (widgets),
               i18n (catalogs of translations)

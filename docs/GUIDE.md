@@ -126,6 +126,7 @@ sosuc run
 | `sosuc package [folder]` | makes a release folder and archive; `--target android` or `ios-sim` |
 | `sosuc bindgen header.h -o file.sosu` | writes Sosu declarations from a C header |
 | `sosuc i18n extract` | writes the template of the translations of a package |
+| `sosuc doc [folder]` | writes the reference of the public API of a package, from its comments, to `build/doc/` |
 | `sosuc lsp` | runs the language server, for editors |
 
 Options of `build`, `run` and `test`:
@@ -144,7 +145,7 @@ Options of `build`, `run` and `test`:
 
 ### 1.5 Editors
 
-`sosuc lsp` speaks the Language Server Protocol: errors as you type, hover, go to definition and completion. It reads what is on the disk and fetches nothing: after cloning a project with git dependencies, run `sosuc check` once in a terminal, or the editor reports them as not fetched (E0405).
+`sosuc lsp` speaks the Language Server Protocol: errors as you type, hover, go to definition, find references, rename and completion. It reads what is on the disk and fetches nothing: after cloning a project with git dependencies, run `sosuc check` once in a terminal, or the editor reports them as not fetched (E0405).
 
 ## 2. Lexical Structure
 
@@ -2190,9 +2191,28 @@ A code keeps its meaning across versions; the messages may improve. [errors.md](
 
 - four spaces; `{` at the end of the line; a non-empty block on several lines, an empty one as `{ }`;
 - spaces around binary operators and after commas, none inside brackets;
-- struct literals on one line: `Point{ x: 1.0, y: 2.0 }`;
+- struct literals on one line when it fits: `Point{ x: 1.0, y: 2.0 }`;
 - parentheses only where precedence needs them;
-- `requires` and `ensures` on their own lines, `{` alone below them.
+- `requires` and `ensures` on their own lines, `{` alone below them;
+- an array written over several lines keeps its lines (tables of data);
+- a line longer than 120 characters is broken: a chain of `&&`, `||`, `+`... goes on over the next lines, each starting with its operator; else the arguments, the parameters or the fields go one per line:
+
+```csharp
+draw_rectangle(
+    target_surface,
+    first_corner_x,
+    first_corner_y,
+    second_corner_x,
+    second_corner_y,
+    line_color
+);
+if (first_condition_holds && second_condition_holds && third_condition_holds
+        || fourth_condition_holds) {
+    return;
+}
+```
+
+A string literal is never broken.
 
 `sosuc fmt --check` reports the files that would change, for continuous integration.
 

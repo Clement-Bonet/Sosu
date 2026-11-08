@@ -278,6 +278,12 @@ i32 main() uses io {
         some(c) => c.text(window.title),
         none => window.title,
     };
-    app.Config config = app.Config{ title: title, width: window.width, height: window.height, title_bar: bar, icon: icon.width > 0 ? some(icon) : none };
+    app.Config config = app.Config{
+        title: title,
+        width: window.width,
+        height: window.height,
+        title_bar: bar,
+        icon: icon.width > 0 ? some(icon) : none
+    };
     return app.run(config, handler as app.Handler*);
 }

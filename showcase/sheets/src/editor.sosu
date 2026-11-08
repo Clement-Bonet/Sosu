@@ -53,7 +53,8 @@ pub struct Rect {
 }
 
 bool same_snap(Snap a, Snap b) {
-    return a.has == b.has && a.raw == b.raw && a.flags == b.flags && a.align == b.align && a.fmt == b.fmt && a.dec == b.dec && a.fg == b.fg && a.bg == b.bg;
+    return a.has == b.has && a.raw == b.raw && a.flags == b.flags && a.align == b.align && a.fmt == b.fmt
+            && a.dec == b.dec && a.fg == b.fg && a.bg == b.bg;
 }
 
 pub class Editor {
@@ -149,7 +150,12 @@ pub class Editor {
     // ----- selection
 
     pub Rect selection() {
-        return Rect{ c1: self.cc < self.ac ? self.cc : self.ac, r1: self.cr < self.ar ? self.cr : self.ar, c2: self.cc < self.ac ? self.ac : self.cc, r2: self.cr < self.ar ? self.ar : self.cr };
+        return Rect{
+            c1: self.cc < self.ac ? self.cc : self.ac,
+            r1: self.cr < self.ar ? self.cr : self.ar,
+            c2: self.cc < self.ac ? self.ac : self.cc,
+            r2: self.cr < self.ar ? self.ar : self.cr
+        };
     }
 
     pub bool single() {
@@ -234,7 +240,18 @@ pub class Editor {
     pub Snap snap_of(i32 col, i32 row) {
         calc.Cell*? have = self.book.find(col, row);
         return match (have) {
-            some(c) => Snap{ col: col, row: row, has: true, raw: c.raw, flags: c.flags, align: c.align, fmt: c.fmt, dec: c.dec, fg: c.fg, bg: c.bg },
+            some(c) => Snap{
+                col: col,
+                row: row,
+                has: true,
+                raw: c.raw,
+                flags: c.flags,
+                align: c.align,
+                fmt: c.fmt,
+                dec: c.dec,
+                fg: c.fg,
+                bg: c.bg
+            },
             none => Snap{ col: col, row: row, has: false, raw: "", flags: 0, align: 0, fmt: 0, dec: -1, fg: 0, bg: 0 },
         };
     }
@@ -334,7 +351,8 @@ pub class Editor {
         calc.Cell*? have = self.book.find(col, row);
         match (have) {
             some(c) => {
-                if (c.raw.len == 0 && c.flags == 0 && c.align == 0 && c.fmt == 0 && c.dec < 0 && c.fg == 0 && c.bg == 0) {
+                if (c.raw.len == 0 && c.flags == 0 && c.align == 0 && c.fmt == 0 && c.dec < 0 && c.fg == 0
+                        && c.bg == 0) {
                     self.book.cells.remove(calc.key_of(col, row));
                 }
             },
@@ -538,11 +556,13 @@ pub class Editor {
 
     // While a formula is being typed, clicking a cell writes its name instead of moving.
     pub bool pointing() {
-        if (!self.editing || self.mode != MODE_CELL || self.buf.len() == 0 || self.buf.items()[0] != 61 || self.caret == 0) {
+        if (!self.editing || self.mode != MODE_CELL || self.buf.len() == 0 || self.buf.items()[0] != 61
+                || self.caret == 0) {
             return false;
         }
         ui8 last = self.buf.items()[self.caret - 1];
-        return last == 61 || last == 40 || last == 44 || last == 59 || last == 43 || last == 45 || last == 42 || last == 47 || last == 94 || last == 38 || last == 60 || last == 62 || last == 58;
+        return last == 61 || last == 40 || last == 44 || last == 59 || last == 43 || last == 45 || last == 42
+                || last == 47 || last == 94 || last == 38 || last == 60 || last == 62 || last == 58;
     }
 
     pub void point_at(i32 col, i32 row) {
@@ -587,7 +607,8 @@ pub class Editor {
             i32 col = (k % 256) as i32;
             i32 row = (k / 256) as i32;
             str shown = values.display(self.arena, self.book.result(col, row), 0, -1);
-            bool hit = calc.index_of(shown, self.find_text, 0, true) >= 0 || calc.index_of(self.book.raw_of(col, row), self.find_text, 0, true) >= 0;
+            bool hit = calc.index_of(shown, self.find_text, 0, true) >= 0
+                    || calc.index_of(self.book.raw_of(col, row), self.find_text, 0, true) >= 0;
             if (!hit) {
                 continue;
             }

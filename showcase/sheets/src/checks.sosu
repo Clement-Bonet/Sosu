@@ -365,7 +365,11 @@ test "archives and xml" {
     defer arena.free();
     mut zip.Entry[] list = arena.alloc_slice(zip.Entry, 2);
     list[0] = zip.Entry{ name: "mimetype", data: "text/plain".bytes, pack: false };
-    list[1] = zip.Entry{ name: "a/b.txt", data: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".bytes, pack: true };
+    list[1] = zip.Entry{
+        name: "a/b.txt",
+        data: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".bytes,
+        pack: true
+    };
     ui8[] packed = zip.write(&arena, list);
     vec.Vec<zip.Entry>* back = arena.new(vec.Vec<zip.Entry>, &arena);
     assert(zip.read(&arena, packed, back));

@@ -104,7 +104,7 @@ Look at this signature: `uses io` says that `main` touches the outside world. Re
 
 `sosuc run --release` gives an optimized program.
 
-> **Tip:** `sosuc lsp` is a language server. It gives your editor the errors, hover, go to definition and completion. It reads what is there and fetches nothing, so run `sosuc check` once in a terminal after cloning a project with git dependencies.
+> **Tip:** `sosuc lsp` is a language server. It gives your editor the errors, hover, go to definition, references, rename and completion. It reads what is there and fetches nothing, so run `sosuc check` once in a terminal after cloning a project with git dependencies.
 
 ## 2. Values and Types
 

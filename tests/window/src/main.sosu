@@ -47,7 +47,12 @@ i32 main() uses io {
     mut Arena arena = Arena.new(1 * KB);
     defer arena.free();
     Once* once = arena.new(Once);
-    app.Config config = app.Config{ title: "Sosu test", width: 320, height: 240, title_bar: some(once as app.TitleBar*) };
+    app.Config config = app.Config{
+        title: "Sosu test",
+        width: 320,
+        height: 240,
+        title_bar: some(once as app.TitleBar*)
+    };
     i32 status = app.run(config, once as app.Handler*);
     io.print("window closed ({}), frames: {}, drawn: {}", status, once.frames, once.drawn);
     return once.drawn && once.frames == 1 && once.told == 1 ? status : 1;

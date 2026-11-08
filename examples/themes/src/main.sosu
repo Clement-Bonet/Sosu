@@ -109,5 +109,8 @@ i32 main() uses io {
         },
     }
     widgets.Window window = screen.ThemesConfig();
-    return app.run(app.Config{ title: window.title, width: window.width, height: window.height }, handler as app.Handler*);
+    return app.run(
+        app.Config{ title: window.title, width: window.width, height: window.height },
+        handler as app.Handler*
+    );
 }

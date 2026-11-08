@@ -42,7 +42,7 @@ Estimated again from the pace above. The versions: `0.2.0` with the packages of 
 |---|---|---|---|
 | 4 | Standard library | Done (§8.0, §8.3, §10.11), the dialogs and the sound tried by hand on Windows 11 | 0 |
 | 5 | Quality | Done (§13.1, §13.2): the CI of 0.3.0 passes on Linux (gcc, clang), macOS (with the iOS simulator), Windows and Android, with the fuzzing (`make fuzz`, and `make fuzz-ogg` for stb_vorbis) and `make bench` | 0 |
-| 6 | Tooling | Begun: the reference of `core`, `std` and the packages of `packages/` is generated (`src/docgen`, not yet `sosuc doc` for any package); the rest unchanged | 200 to 350 k |
+| 6 | Tooling | Begun: references and rename in `sosuc lsp`, `sosuc doc` for any package (the generator of `docs/REFERENCE.md` is now in `src/lib/docgen.c`), long lines broken by `sosuc fmt` at 120 characters, and the VS Code extension 0.2.0 (its own repository: references, rename, `sosuc doc`). Remains: releasing them | 200 to 350 k |
 | 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`), the guide from the first program to a window (`docs/QUICK_GUIDE.md`), and the complete guide (`docs/GUIDE.md`), both run by `tests/program_tests.c`. Remains: the examples of the packages of §8.2 | 150 to 300 k |
 | 8 | Interface | unchanged | 150 to 250 k |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |

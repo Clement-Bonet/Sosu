@@ -75,7 +75,8 @@ bool same(widgets.TextBuffer a, widgets.TextBuffer b) {
 }
 
 bool same_file(File a, File b) {
-    return same(a.name, b.name) && same(a.size, b.size) && same(a.date, b.date) && same(a.price, b.price) && a.kind == b.kind && a.encoding == b.encoding && a.read_only == b.read_only && a.hidden == b.hidden;
+    return same(a.name, b.name) && same(a.size, b.size) && same(a.date, b.date) && same(a.price, b.price)
+            && a.kind == b.kind && a.encoding == b.encoding && a.read_only == b.read_only && a.hidden == b.hidden;
 }
 
 File file(str name, str size, str date, Kind kind) {

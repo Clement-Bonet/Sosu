@@ -28,7 +28,8 @@ pub i32 MAX_PIXELS = 67108864;
 
 // Whether an image of `width` by `height` pixels is within the bounds of the readers.
 pub bool fits(i64 width, i64 height) {
-    return width >= 0 && height >= 0 && width <= MAX_SIDE as i64 && height <= MAX_SIDE as i64 && width * height <= MAX_PIXELS as i64;
+    return width >= 0 && height >= 0 && width <= MAX_SIDE as i64 && height <= MAX_SIDE as i64
+            && width * height <= MAX_PIXELS as i64;
 }
 
 // `width * height` pixels, row by row, each 0xAARRGGBB (alpha not premultiplied, except in what

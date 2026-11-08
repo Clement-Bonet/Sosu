@@ -1,0 +1,21 @@
+// doc.geometry.circle: circles of the plane. Only what is `pub` is documented.
+
+// A circle centered on the origin.
+pub struct Circle {
+    // Its radius, in meters.
+    pub f32 radius;
+
+    // The surface it covers.
+    pub f32 area() {
+        return square(self.radius) * 3.14159;
+    }
+}
+
+// The circle of radius 1.
+pub Circle unit() {
+    return Circle{ radius: 1.0 };
+}
+
+f32 square(f32 x) {
+    return x * x;
+}

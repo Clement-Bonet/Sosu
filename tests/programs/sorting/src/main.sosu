@@ -25,7 +25,19 @@ void show(i32[] items) uses io {
 i32 main() uses io {
     mut i32[10] small = [5, 3, 9, 1, 5, 7, 2, 8, 0, 6];
     sort.sort(small[0..10]);
-    io.print("{} {} {} {} {} {} {} {} {} {}", small[0], small[1], small[2], small[3], small[4], small[5], small[6], small[7], small[8], small[9]);
+    io.print(
+        "{} {} {} {} {} {} {} {} {} {}",
+        small[0],
+        small[1],
+        small[2],
+        small[3],
+        small[4],
+        small[5],
+        small[6],
+        small[7],
+        small[8],
+        small[9]
+    );
     sort.sort_descending(small[0..10]);
     io.print("{} {} {}", small[0], small[1], small[9]);
     sort.reverse(small[0..10]);
@@ -94,7 +106,13 @@ i32 main() uses io {
     // binary search
     mut i32[7] sorted = [1, 3, 3, 3, 5, 8, 13];
     i32[] view = sorted[0..7];
-    io.print("{} {} {} {}", sort.lower_bound(view, 3), sort.upper_bound(view, 3), sort.lower_bound(view, 0), sort.lower_bound(view, 99));
+    io.print(
+        "{} {} {} {}",
+        sort.lower_bound(view, 3),
+        sort.upper_bound(view, 3),
+        sort.lower_bound(view, 0),
+        sort.lower_bound(view, 99)
+    );
     match (sort.search(view, 8)) {
         some(place) => io.print("8 at {}", place),
         none => io.print("8 not found"),

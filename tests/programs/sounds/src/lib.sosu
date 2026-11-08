@@ -104,8 +104,14 @@ test "WAV files of Python's wave module, read and written byte for byte the same
     assert(check.near(largest_difference(pcm24.samples, pcm16.samples), 0.0, 128.0 / 8388608.0));
     // written by Sosu: the bytes of `wave`
     assert(check.same_bytes(wav.encode(&arena, pcm16), fixture.read_bytes(&arena, "tests/data/pcm16.wav")));
-    assert(check.same_bytes(wav.encode_as(&arena, pcm8, wav.Encoding.Pcm8), fixture.read_bytes(&arena, "tests/data/pcm8.wav")));
-    assert(check.same_bytes(wav.encode_as(&arena, pcm24, wav.Encoding.Pcm24), fixture.read_bytes(&arena, "tests/data/pcm24.wav")));
+    assert(check.same_bytes(
+        wav.encode_as(&arena, pcm8, wav.Encoding.Pcm8),
+        fixture.read_bytes(&arena, "tests/data/pcm8.wav")
+    ));
+    assert(check.same_bytes(
+        wav.encode_as(&arena, pcm24, wav.Encoding.Pcm24),
+        fixture.read_bytes(&arena, "tests/data/pcm24.wav")
+    ));
     // floats read back as they were, and out of range cut
     audio.Sound loud = mono(&arena, 8000, list(&arena, "0.25 -1.5 2.0 -0.125"));
     audio.Sound floats = match (wav.decode(&arena, wav.encode_as(&arena, loud, wav.Encoding.Float32))) {
@@ -159,7 +165,8 @@ test "an Ogg Vorbis file, as the specification decodes it" {
 // What reading a file gives: its rate, channels and frames, or the error.
 str outcome(Arena* arena, str name) uses io {
     ui8[] data = fixture.read_bytes(arena, join(arena, "tests/data/", name));
-    audio.Sound!audio.AudioError read = text.ends_with(name, ".ogg") ? ogg.decode(arena, data) : wav.decode(arena, data);
+    audio.Sound!audio.AudioError read = text.ends_with(name, ".ogg") ? ogg.decode(arena, data)
+            : wav.decode(arena, data);
     text.TextBuilder* b = text.builder(arena);
     b.push(name);
     b.push(": ");
@@ -327,12 +334,17 @@ test "sounds: channels, parts, fades and tones" {
     assert(check.same_items(audio.with_channels(&arena, pair, 1).samples, list(&arena, "0.375 -0.5 0.75")));
     audio.Sound wide = audio.with_channels(&arena, audio.with_channels(&arena, pair, 1), 2);
     assert(check.same_items(wide.samples, list(&arena, "0.375 0.375 -0.5 -0.5 0.75 0.75")));
-    assert(check.same_items(audio.with_channels(&arena, pair, 3).samples, list(&arena, "0.5 0.25 0.0 -1.0 0.0 0.0 0.75 0.75 0.0")));
-    assert(check.same_items(audio.part(pair, 1, 9).samples, list(&arena, "-1.0 0.0 0.75 0.75")) && audio.part(pair, 5, 2).frames() == 0);
+    assert(check.same_items(
+        audio.with_channels(&arena, pair, 3).samples,
+        list(&arena, "0.5 0.25 0.0 -1.0 0.0 0.0 0.75 0.75 0.0")
+    ));
+    assert(check.same_items(audio.part(pair, 1, 9).samples, list(&arena, "-1.0 0.0 0.75 0.75"))
+            && audio.part(pair, 5, 2).frames() == 0);
     assert(pair.at(2, 1) == 0.75 && pair.at(3, 0) == 0.0 && pair.at(0, 2) == 0.0);
     audio.Sound a = audio.tone(&arena, 8000, 1000.0, 0.01, 0.5);
     assert(a.frames() == 80 && a.samples[0] == 0.0 && check.near(a.samples[2] as f64, 0.5, 0.000001));
     audio.Sound soft = audio.faded(&arena, mono(&arena, 8000, list(&arena, "1.0 1.0 1.0 1.0 1.0 1.0")), 2);
     assert(check.same_items(soft.samples, list(&arena, "0.0 0.5 1.0 1.0 0.5 0.0")));
-    assert(audio.fits(48000, 2, 1000) && !audio.fits(48000, 9, 1) && !audio.fits(500, 1, 1) && !audio.fits(48000, 2, audio.MAX_SAMPLES));
+    assert(audio.fits(48000, 2, 1000) && !audio.fits(48000, 9, 1) && !audio.fits(500, 1, 1)
+            && !audio.fits(48000, 2, audio.MAX_SAMPLES));
 }

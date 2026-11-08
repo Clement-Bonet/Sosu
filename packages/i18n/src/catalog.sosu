@@ -147,7 +147,8 @@ struct Rule {
             return false;
         }
         if (b == 0) {
-            bool doubled = at + 1 < text.len && (text.bytes[at + 1] == 61 || text.bytes[at + 1] == a && (a == 38 || a == 124));
+            bool doubled = at + 1 < text.len
+                    && (text.bytes[at + 1] == 61 || text.bytes[at + 1] == a && (a == 38 || a == 124));
             if (doubled) {  // `<` is not `<=`, `!` is not `!=`, `&` alone is not `&&`
                 return false;
             }
@@ -531,7 +532,8 @@ pub Catalog*!I18nError parse(Arena* arena, str file) {
                     r.last = 2;
                 } else if (same(keyword, "msgstr")) {
                     r.last = 3;
-                } else if (keyword.len == 9 && starts_with(keyword, 0, "msgstr[") && keyword.bytes[8] == 93 && keyword.bytes[7] >= 48 && keyword.bytes[7] <= 55) {
+                } else if (keyword.len == 9 && starts_with(keyword, 0, "msgstr[") && keyword.bytes[8] == 93
+                        && keyword.bytes[7] >= 48 && keyword.bytes[7] <= 55) {
                     r.last = 3 + (keyword.bytes[7] - 48) as i32;  // msgstr[0] to msgstr[7]
                 } else {
                     return err(Damaged(line));
@@ -679,13 +681,19 @@ test "a catalog: texts, contexts, plurals, strings on several lines, escapes" {
 test "plural rules of other languages" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
-    Catalog* russian = parsed(&arena, "msgid \"\"\nmsgstr \"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\\n\"\n");
+    Catalog* russian = parsed(
+        &arena,
+        "msgid \"\"\nmsgstr \"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\\n\"\n"
+    );
     i64[8] ns = [1, 2, 5, 11, 21, 22, 25, 111];
     usize[8] ru = [0, 1, 2, 2, 0, 1, 2, 2];
     for (usize i in 0..8) {
         assert(russian.plural_form(ns[i]) == ru[i]);
     }
-    Catalog* arabic = parsed(&arena, "msgid \"\"\nmsgstr \"Plural-Forms: nplurals=6; plural=(n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 && n%100<=10 ? 3 : n%100>=11 ? 4 : 5);\\n\"\n");
+    Catalog* arabic = parsed(
+        &arena,
+        "msgid \"\"\nmsgstr \"Plural-Forms: nplurals=6; plural=(n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 && n%100<=10 ? 3 : n%100>=11 ? 4 : 5);\\n\"\n"
+    );
     i64[6] an = [0, 1, 2, 3, 11, 100];
     usize[6] ar = [0, 1, 2, 3, 4, 5];
     for (usize i in 0..6) {

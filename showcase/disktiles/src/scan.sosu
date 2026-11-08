@@ -106,7 +106,15 @@ pub class Tree {
                         skipped += 1;
                     } else {
                         i32 child = nodes.len() as i32;
-                        nodes.push(Node{ name: name, parent: index, size: size, first: 0, count: 0, dir: kind == 1, read: false });
+                        nodes.push(Node{
+                            name: name,
+                            parent: index,
+                            size: size,
+                            first: 0,
+                            count: 0,
+                            dir: kind == 1,
+                            read: false
+                        });
                         added += 1;
                         if (kind == 1) {
                             folders += 1;

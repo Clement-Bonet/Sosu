@@ -1228,7 +1228,11 @@ pub class Editor {
                 return;
             },
         }
-        match (io.write_file(&scratch, with_ext(&scratch, root, ".json"), sheet_json(&scratch, with_ext(&scratch, file_name(root), ".png")))) {
+        match (io.write_file(
+            &scratch,
+            with_ext(&scratch, root, ".json"),
+            sheet_json(&scratch, with_ext(&scratch, file_name(root), ".png"))
+        )) {
             ok() => {
                 say("Sprite sheet saved (png and json)");
             },
@@ -1530,7 +1534,12 @@ pub class Editor {
             }
         } else {
             f32 f = n as f32 / 100.0;
-            packed = cmyk_rgb(k == 0 ? f : cmyk_part(s, 0), k == 1 ? f : cmyk_part(s, 1), k == 2 ? f : cmyk_part(s, 2), k == 3 ? f : cmyk_part(s, 3));
+            packed = cmyk_rgb(
+                k == 0 ? f : cmyk_part(s, 0),
+                k == 1 ? f : cmyk_part(s, 1),
+                k == 2 ? f : cmyk_part(s, 2),
+                k == 3 ? f : cmyk_part(s, 3)
+            );
         }
         if (alpha == 0) {
             alpha = 255;

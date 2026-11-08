@@ -86,10 +86,18 @@ i32 main() uses io {
     mut Arena arena = Arena.new(16 * MB);
     defer arena.free();
 
-    io.print("adler32: {}, crc32: {}", checksum.adler32("Wikipedia".bytes) == 0x11E60398, checksum.crc32("123456789".bytes) == 0xCBF43926);
+    io.print(
+        "adler32: {}, crc32: {}",
+        checksum.adler32("Wikipedia".bytes) == 0x11E60398,
+        checksum.crc32("123456789".bytes) == 0xCBF43926
+    );
     mut checksum.Crc32Table table = checksum.crc32_table();
     ui32 parts = checksum.crc32_from(&table, checksum.crc32("12345".bytes), "6789".bytes);
-    io.print("crc32 by parts: {}, adler32 by parts: {}", parts == 0xCBF43926, checksum.adler32_from(checksum.adler32("Wiki".bytes), "pedia".bytes) == 0x11E60398);
+    io.print(
+        "crc32 by parts: {}, adler32 by parts: {}",
+        parts == 0xCBF43926,
+        checksum.adler32_from(checksum.adler32("Wiki".bytes), "pedia".bytes) == 0x11E60398
+    );
 
     // written here, read back
     levels(&arena, "empty", "".bytes);
@@ -111,8 +119,19 @@ i32 main() uses io {
     // written by zlib and by the command gzip (a name in the header, two members)
     read_zlib(&arena, "zlib", bytes_of_hex(&arena, "789ccb48cdc9c90700062c0215"));
     read_gzip(&arena, "gzip", bytes_of_hex(&arena, "1f8b0800000000000003cb48cdc9c9070086a6103605000000"));
-    read_gzip(&arena, "gzip with a name", bytes_of_hex(&arena, "1f8b08082154e26a00036e616d65642e74787400cb48cdc9c957c8402701e3513d8d17000000"));
-    read_gzip(&arena, "two members", bytes_of_hex(&arena, "1f8b08000000000000034b4c4a0600c2412435030000001f8b08000000000000034b494d030061e1c40c03000000"));
+    read_gzip(
+        &arena,
+        "gzip with a name",
+        bytes_of_hex(&arena, "1f8b08082154e26a00036e616d65642e74787400cb48cdc9c957c8402701e3513d8d17000000")
+    );
+    read_gzip(
+        &arena,
+        "two members",
+        bytes_of_hex(
+            &arena,
+            "1f8b08000000000000034b4c4a0600c2412435030000001f8b08000000000000034b494d030061e1c40c03000000"
+        )
+    );
     // 1000 members of 3 bytes each, as a file written by parts (bgzip) holds
     ui8[] member = gzip.compress(&arena, "abc".bytes);
     mut ui8[] members = arena.alloc_slice(ui8, member.len * 1000);

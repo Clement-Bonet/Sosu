@@ -79,7 +79,12 @@ i32 main() uses io, random {
     io.print("hmac-sha256 {}", hex.encode(&arena, m6[0..32]));
     io.print("hmac-sha1   {}", hex.encode(&arena, s2[0..20]));
     mut ui8[32] again = hmac.with_sha256("Jefe".bytes, "what do ya want for nothing?".bytes);
-    io.print("equal {} {} {}", hmac.equal(m2[0..32], again[0..32]), hmac.equal(m1[0..32], m2[0..32]), hmac.equal(m1[0..32], m1[0..31]));
+    io.print(
+        "equal {} {} {}",
+        hmac.equal(m2[0..32], again[0..32]),
+        hmac.equal(m1[0..32], m2[0..32]),
+        hmac.equal(m1[0..32], m1[0..31])
+    );
 
     // base64: RFC 4648, section 10
     round_trip(&arena, "");

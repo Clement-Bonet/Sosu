@@ -588,7 +588,8 @@ pub usize marker_len(str line) {
         return 0;
     }
     if (b == 45 || b == 42 || b == 43) {
-        if (n >= 6 && line.bytes[1] == 32 && line.bytes[2] == 91 && line.bytes[4] == 93 && line.bytes[5] == 32 && (line.bytes[3] == 32 || line.bytes[3] == 120 || line.bytes[3] == 88)) {
+        if (n >= 6 && line.bytes[1] == 32 && line.bytes[2] == 91 && line.bytes[4] == 93 && line.bytes[5] == 32
+                && (line.bytes[3] == 32 || line.bytes[3] == 120 || line.bytes[3] == 88)) {
             return 6;
         }
         if (n >= 2 && line.bytes[1] == 32) {

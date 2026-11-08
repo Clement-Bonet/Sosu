@@ -35,7 +35,11 @@ pub bool same_text(str actual, str expected) uses io {
         }
         return false;
     }
-    io.print("    texts differ only by their line ends (\\r\\n or a last \\n): {} bytes, expected {}", actual.len, expected.len);
+    io.print(
+        "    texts differ only by their line ends (\\r\\n or a last \\n): {} bytes, expected {}",
+        actual.len,
+        expected.len
+    );
     return false;
 }
 

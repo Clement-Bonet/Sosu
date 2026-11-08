@@ -153,7 +153,9 @@ f64 kernel(Filter filter, f64 x) {
     f64 d = abs(x);
     return match (filter) {
         Bilinear => d < 1.0 ? 1.0 - d : 0.0,
-        Lanczos => d < 0.0000001 ? 1.0 : d < 3.0 ? 3.0 * math.sin(math.PI * d) * math.sin(math.PI * d / 3.0) / (math.PI * math.PI * d * d) : 0.0,
+        Lanczos => d < 0.0000001 ? 1.0
+                : d < 3.0 ? 3.0 * math.sin(math.PI * d) * math.sin(math.PI * d / 3.0) / (math.PI * math.PI * d * d)
+                : 0.0,
     };
 }
 
@@ -179,7 +181,12 @@ Weights weights(Arena* arena, i32 source, i32 size, Filter filter) {
     f64 stretch = max(scale, 1.0);
     f64 support = radius(filter) * stretch;
     i32 taps = math.ceil(support) as i32 * 2 + 1;
-    mut Weights ws = Weights{ first: arena.alloc_slice(i32, size as usize), count: arena.alloc_slice(i32, size as usize), w: arena.alloc_slice(f32, size as usize * taps as usize), taps: taps };
+    mut Weights ws = Weights{
+        first: arena.alloc_slice(i32, size as usize),
+        count: arena.alloc_slice(i32, size as usize),
+        w: arena.alloc_slice(f32, size as usize * taps as usize),
+        taps: taps
+    };
     for (i32 i in 0..size) {
         f64 center = (i as f64 + 0.5) * scale;
         i32 left = max(math.floor(center - support + 0.5) as i32, 0);
@@ -273,7 +280,8 @@ test "crop, cut to the image" {
     defer arena.free();
     image.Image img = numbered(&arena, 4, 3);
     image.Image part = crop(&arena, img, 1, 1, 2, 5);
-    assert(part.width == 2 && part.height == 2 && part.at(0, 0) == image.rgba(1, 1, 0, 255) && part.at(1, 1) == image.rgba(2, 2, 0, 255));
+    assert(part.width == 2 && part.height == 2 && part.at(0, 0) == image.rgba(1, 1, 0, 255)
+            && part.at(1, 1) == image.rgba(2, 2, 0, 255));
     image.Image none = crop(&arena, img, 9, -4, 3, 3);
     assert(none.width == 0 && none.height == 0 && none.pixels.len == 0);
     image.Image all = crop(&arena, img, -2, -2, 100, 100);
@@ -299,7 +307,8 @@ test "flips and quarter turns" {
         same = same && twice.pixels[i] == half.pixels[i];
     }
     assert(same);
-    assert(rotate(&arena, img, 90.0).at(2, 0) == right.at(2, 0) && rotate(&arena, img, -90.0).at(0, 0) == left.at(0, 0));
+    assert(rotate(&arena, img, 90.0).at(2, 0) == right.at(2, 0)
+            && rotate(&arena, img, -90.0).at(0, 0) == left.at(0, 0));
     assert(rotate(&arena, img, 720.0).at(3, 2) == img.at(3, 2));
 }
 
@@ -352,7 +361,8 @@ test "resize, bilinear and Lanczos" {
     two.set(0, 0, 0xFF000000);
     two.set(1, 0, 0xFFC80000);
     image.Image four = resize(&arena, two, 4, 1, Filter.Bilinear);
-    assert(four.at(0, 0) == 0xFF000000 && four.at(1, 0) == 0xFF320000 && four.at(2, 0) == 0xFF960000 && four.at(3, 0) == 0xFFC80000);
+    assert(four.at(0, 0) == 0xFF000000 && four.at(1, 0) == 0xFF320000 && four.at(2, 0) == 0xFF960000
+            && four.at(3, 0) == 0xFFC80000);
     // a transparent pixel lends no color: half of white, half of transparent black, shrunk
     two.set(0, 0, 0xFFFFFFFF);
     two.set(1, 0, 0x00000000);

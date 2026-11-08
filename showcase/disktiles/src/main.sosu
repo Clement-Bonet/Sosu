@@ -211,14 +211,20 @@ class App : app.Handler, app.TitleBar {
         }
         f32 x = state.menu_x;
         f32 y = state.menu_y;
-        surface.fill(canvas.Rect{ x: x - 1.0, y: y - 1.0, w: model.MENU_W + 2.0, h: model.MENU_H + 2.0 }, canvas.Color{ r: 90, g: 96, b: 120 });
+        surface.fill(
+            canvas.Rect{ x: x - 1.0, y: y - 1.0, w: model.MENU_W + 2.0, h: model.MENU_H + 2.0 },
+            canvas.Color{ r: 90, g: 96, b: 120 }
+        );
         surface.fill(canvas.Rect{ x: x, y: y, w: model.MENU_W, h: model.MENU_H }, canvas.Color{ r: 34, g: 37, b: 52 });
         i32 over = state.menu_item_at(state.mouse_x, state.mouse_y);
         str[2] labels = ["Show in file manager", "Go up"];
         for (i32 i in 0..2) {
             f32 top = y + i as f32 * model.ITEM_H;
             if (i == over) {
-                surface.fill(canvas.Rect{ x: x, y: top, w: model.MENU_W, h: model.ITEM_H }, canvas.Color{ r: 64, g: 90, b: 160 });
+                surface.fill(
+                    canvas.Rect{ x: x, y: top, w: model.MENU_W, h: model.ITEM_H },
+                    canvas.Color{ r: 64, g: 90, b: 160 }
+                );
             }
             say(surface, x + 12.0, top + 6.0, 14.0, labels[i as usize], ink());
         }
@@ -259,12 +265,22 @@ class App : app.Handler, app.TitleBar {
             canvas.Color color = n.dir ? canvas.Color{ r: 70, g: 80, b: 112 } : color_of(t.kind);
             canvas.Rect inner = canvas.Rect{ x: t.x + 0.5, y: t.y + 0.5, w: t.w - 1.0, h: t.h - 1.0 };
             surface.fill(inner, color);
-            surface.fill(canvas.Rect{ x: inner.x, y: inner.y, w: inner.w, h: 1.0 }, canvas.Color{ r: 255, g: 255, b: 255, a: 40 });
+            surface.fill(
+                canvas.Rect{ x: inner.x, y: inner.y, w: inner.w, h: 1.0 },
+                canvas.Color{ r: 255, g: 255, b: 255, a: 40 }
+            );
             if (t.w >= 64.0 && t.h >= 16.0) {
                 surface.push_clip(inner);
                 say(surface, t.x + 4.0, t.y + 2.0, 11.0, n.name, ink());
                 if (t.h >= 32.0) {
-                    say(surface, t.x + 4.0, t.y + 15.0, 10.0, model.size_text(frame, n.size), canvas.Color{ r: 238, g: 240, b: 248, a: 170 });
+                    say(
+                        surface,
+                        t.x + 4.0,
+                        t.y + 15.0,
+                        10.0,
+                        model.size_text(frame, n.size),
+                        canvas.Color{ r: 238, g: 240, b: 248, a: 170 }
+                    );
                 }
                 surface.pop_clip();
             }
@@ -277,7 +293,10 @@ class App : app.Handler, app.TitleBar {
 
     void draw_status(canvas.Canvas* surface, Arena* frame) {
         f32 top = surface.height as f32 - model.BOTTOM;
-        surface.fill(canvas.Rect{ x: 0.0, y: top, w: surface.width as f32, h: model.BOTTOM }, canvas.Color{ r: 18, g: 19, b: 28 });
+        surface.fill(
+            canvas.Rect{ x: 0.0, y: top, w: surface.width as f32, h: model.BOTTOM },
+            canvas.Color{ r: 18, g: 19, b: 28 }
+        );
         say(surface, 10.0, top + 5.0, 13.0, state.status(frame), ink());
         // the legend, from the right
         mut f32 right = surface.width as f32 - 10.0;

@@ -38,13 +38,28 @@ i32 main() uses io {
     state.Editor* editor = arena.new(state.Editor);
 
     widgets.Window window = screen.EditorConfig();
-    io.print("window: {} {}x{}, custom title bar: {}", window.title, window.width, window.height, window.custom_title_bar);
+    io.print(
+        "window: {} {}x{}, custom title bar: {}",
+        window.title,
+        window.width,
+        window.height,
+        window.custom_title_bar
+    );
     ui.custom_title_bar = true;  // what `platform.app` says with `CustomTitleBar(true)`
     frame(&ui, &surface, editor);
 
     // The bar, 40 high, its widgets 32 high from y 4: the label x 4-68, the field 76-236, the
     // dropdown 244-364, Run 372-452, then the window buttons 462-600.
-    io.print("drag: label {}, field {}, dropdown {}, button {}, empty {}, window buttons {}, under {}", ui.is_drag_area(30.0, 20.0), ui.is_drag_area(100.0, 20.0), ui.is_drag_area(300.0, 20.0), ui.is_drag_area(400.0, 20.0), ui.is_drag_area(457.0, 20.0), ui.is_drag_area(500.0, 20.0), ui.is_drag_area(300.0, 100.0));
+    io.print(
+        "drag: label {}, field {}, dropdown {}, button {}, empty {}, window buttons {}, under {}",
+        ui.is_drag_area(30.0, 20.0),
+        ui.is_drag_area(100.0, 20.0),
+        ui.is_drag_area(300.0, 20.0),
+        ui.is_drag_area(400.0, 20.0),
+        ui.is_drag_area(457.0, 20.0),
+        ui.is_drag_area(500.0, 20.0),
+        ui.is_drag_area(300.0, 100.0)
+    );
 
     click(&ui, 100.0, 20.0);  // the field takes the keyboard
     ui.type_text("main");

@@ -108,10 +108,21 @@ i32 main() uses io {
     }
     names(&arena, fs.join(&arena, sandbox, "a"));
     match (fs.info(&arena, note)) {
-        ok(i) => io.print("info: file {}, {} bytes, recent {}", i.kind == fs.Kind.File, i.size, i.modified > 1700000000),
+        ok(i) => io.print(
+            "info: file {}, {} bytes, recent {}",
+            i.kind == fs.Kind.File,
+            i.size,
+            i.modified > 1700000000
+        ),
         err(e) => io.print("info: {}", describe(e)),
     }
-    io.print("is_dir {} {}, is_file {} {}", fs.is_dir(&arena, sandbox), fs.is_dir(&arena, note), fs.is_file(&arena, note), fs.is_file(&arena, sandbox));
+    io.print(
+        "is_dir {} {}, is_file {} {}",
+        fs.is_dir(&arena, sandbox),
+        fs.is_dir(&arena, note),
+        fs.is_file(&arena, note),
+        fs.is_file(&arena, sandbox)
+    );
     match (fs.copy(&arena, note, fs.join(&arena, sandbox, "copy.txt"))) {
         ok => io.print("copy: ok"),
         err(e) => io.print("copy: {}", describe(e)),
@@ -212,7 +223,13 @@ i32 main() uses io {
         };
         io.print("[{}] extension [{}] stem [{}]", p, ext, fs.stem(p));
     }
-    io.print("{} {} {} {}", fs.is_absolute("/x"), fs.is_absolute("C:\\x"), fs.is_absolute("x/y"), fs.is_absolute("C:x"));
+    io.print(
+        "{} {} {} {}",
+        fs.is_absolute("/x"),
+        fs.is_absolute("C:\\x"),
+        fs.is_absolute("x/y"),
+        fs.is_absolute("C:x")
+    );
     io.print("current is absolute: {}", fs.is_absolute(fs.current_dir(&arena)));
     os.exit(3);
     return 0;

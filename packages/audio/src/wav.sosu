@@ -71,7 +71,13 @@ Format!audio.AudioError format_of(ui8[] data, usize at, usize size) {
         }
         tag = le16(data, at + 24);
     }
-    Format f = Format{ tag: tag, channels: le16(data, at + 2), rate: le32(data, at + 4), block: le16(data, at + 12), bits: bits };
+    Format f = Format{
+        tag: tag,
+        channels: le16(data, at + 2),
+        rate: le32(data, at + 4),
+        block: le16(data, at + 12),
+        bits: bits
+    };
     if (f.tag != 1 && f.tag != 3) {
         return err(audio.AudioError.Unsupported);  // compressed: ADPCM, mu-law...
     }
