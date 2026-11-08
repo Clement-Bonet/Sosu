@@ -112,6 +112,39 @@ build/fuzz_manifest: $(LIB_SRC) $(LIB_HDR) tests/fuzz_manifest.c | build
 	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
 		-o $@ $(LIB_SRC) tests/fuzz_manifest.c
 
+# The interface files (tests/fuzz_ui.c), from every .ui.sosu file of the repository.
+fuzz-ui: build/fuzz_ui
+	mkdir -p build/fuzz_ui_corpus build/fuzz_ui_seeds build/fuzz_crashes
+	n=0; for f in $$(git ls-files '*.ui.sosu'); do n=$$((n + 1)); cp "$$f" build/fuzz_ui_seeds/$$n.ui.sosu; done
+	./build/fuzz_ui -max_total_time=$(FUZZ_TIME) -max_len=16384 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-dict=tests/fuzz.dict -print_final_stats=1 -artifact_prefix=build/fuzz_crashes/ui- build/fuzz_ui_corpus build/fuzz_ui_seeds
+
+build/fuzz_ui: $(LIB_SRC) $(LIB_HDR) tests/fuzz_ui.c | build
+	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+		-o $@ $(LIB_SRC) tests/fuzz_ui.c
+
+# sosuc bindgen (tests/fuzz_bindgen.c), from the C headers of the repository, read as if preprocessed,
+# and the inputs that crashed it once (tests/fuzz_bindgen/).
+fuzz-bindgen: build/fuzz_bindgen
+	mkdir -p build/fuzz_bindgen_corpus build/fuzz_bindgen_seeds build/fuzz_crashes
+	cp tests/programs/bindgen/c/*.h tests/fuzz_bindgen/* src/lib/*.h lib/runtime/sosu_rt.h build/fuzz_bindgen_seeds/
+	./build/fuzz_bindgen -max_total_time=$(FUZZ_TIME) -max_len=16384 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-print_final_stats=1 -artifact_prefix=build/fuzz_crashes/bindgen- build/fuzz_bindgen_corpus build/fuzz_bindgen_seeds
+
+build/fuzz_bindgen: $(LIB_SRC) $(LIB_HDR) tests/fuzz_bindgen.c | build
+	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+		-o $@ $(LIB_SRC) tests/fuzz_bindgen.c
+
+# The language server (tests/fuzz_lsp.c): messages cut at each NUL byte, from the sessions of tests/fuzz_lsp.
+fuzz-lsp: build/fuzz_lsp
+	mkdir -p build/fuzz_lsp_corpus build/fuzz_crashes
+	./build/fuzz_lsp -max_total_time=$(FUZZ_TIME) -max_len=16384 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-dict=tests/fuzz.dict -print_final_stats=1 -artifact_prefix=build/fuzz_crashes/lsp- build/fuzz_lsp_corpus tests/fuzz_lsp
+
+build/fuzz_lsp: $(LIB_SRC) $(LIB_HDR) tests/fuzz_lsp.c | build
+	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+		-o $@ $(LIB_SRC) tests/fuzz_lsp.c
+
 build/fuzz_replay: $(LIB_SRC) $(LIB_HDR) tests/fuzz.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DSOSU_FUZZ_MAIN -o $@ $(LIB_SRC) tests/fuzz.c
 
@@ -145,4 +178,4 @@ build/docgen: src/docgen/docgen.c | build
 clean:
 	rm -rf build
 
-.PHONY: all test clean playground doc fuzz-ogg fuzz-manifest
+.PHONY: all test clean playground doc fuzz-ogg fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp

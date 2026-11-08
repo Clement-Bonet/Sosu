@@ -23,6 +23,9 @@ jobs:
             build/fuzz_corpus
             build/fuzz_ogg_corpus
             build/fuzz_manifest_corpus
+            build/fuzz_ui_corpus
+            build/fuzz_bindgen_corpus
+            build/fuzz_lsp_corpus
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - name: Fuzz the compiler
@@ -36,6 +39,18 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: make fuzz-manifest FUZZ_TIME=1800
+      - name: Fuzz the interface files
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-ui FUZZ_TIME=1800
+      - name: Fuzz bindgen
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-bindgen FUZZ_TIME=1800
+      - name: Fuzz the language server
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-lsp FUZZ_TIME=1800
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

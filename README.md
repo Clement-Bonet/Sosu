@@ -3,7 +3,7 @@
 A native, low-level language where what a function does is in its signature: its effects, its failures and its allocations.
 Its compiler, `sosuc`, is written in C99 with libc only, and generates C. Sosu is young (0.x) and not memory safe.
 
-**[Playground](https://clement-bonet.github.io/Sosu/)** · **[Releases](https://github.com/Clement-Bonet/Sosu/releases)** · [Guide](docs/GUIDE.md) · [Written in Sosu](#written-in-sosu) · [Specification](docs/SPEC.md) · [Library reference](docs/REFERENCE.md) · [How Sosu is made](#how-sosu-is-made)
+**[Playground](https://clement-bonet.github.io/Sosu/)** · **[Releases](https://github.com/Clement-Bonet/Sosu/releases)** · [Quick guide](docs/QUICK_GUIDE.md) · [Guide](docs/GUIDE.md) · [Written in Sosu](#written-in-sosu) · [Specification](docs/SPEC.md) · [Library reference](docs/REFERENCE.md) · [How Sosu is made](#how-sosu-is-made)
 
 ```csharp
 import std.io;
@@ -322,7 +322,8 @@ merged only once it builds and passes the tests everywhere.
   widgets, input methods and touch screens (§10.9), the full grammar (§12), decisions and open
   questions (§14).
 - [docs/errors.md](docs/errors.md): every error code, with an example.
-- [docs/GUIDE.md](docs/GUIDE.md): a quick guide to the language, from a first program to a window; its examples are run by the tests.
+- [docs/QUICK_GUIDE.md](docs/QUICK_GUIDE.md): a quick guide to the language, from a first program to a window; its examples are run by the tests.
+- [docs/GUIDE.md](docs/GUIDE.md): the complete guide to the language and its tools, in 26 chapters; its examples are run by the tests too.
 - [docs/REFERENCE.md](docs/REFERENCE.md): the public API of `core` and `std`, generated from their
   comments (`make doc`).
 - [docs/ROADMAP.md](docs/ROADMAP.md): the works left before 1.0, and their estimates.

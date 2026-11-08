@@ -470,6 +470,7 @@ typedef struct {
     Files files;
     size_t pos;
     bool failed; /* the current declaration could not be read */
+    struct { char **items; size_t count; size_t cap; } strings; /* the bytes of string values, freed at the end */
     int depth;   /* of the recursion below: a header can nest as much as it wants */
     struct { Typedef *items; size_t count; size_t cap; } typedefs;
     struct { Record **items; size_t count; size_t cap; } records;
@@ -513,7 +514,8 @@ static bool strips_to(CType *t, CKind kind) {
     return s && s->kind == kind;
 }
 
-static const Tok *cur(P *p) { return &p->toks.items[p->pos]; }
+/* The current token; past the end, the last one, TK_EOF, so that no reader goes beyond the list. */
+static const Tok *cur(P *p) { return &p->toks.items[p->pos < p->toks.count ? p->pos : p->toks.count - 1]; }
 static const Tok *at(P *p, size_t k) {
     size_t i = p->pos + k;
     return &p->toks.items[i < p->toks.count ? i : p->toks.count - 1];
@@ -896,6 +898,7 @@ static bool eval_primary(P *p, Value *v) {
         v->kind = V_STRING;
         v->s_length = bytes.length;
         v->s = buf_take(&bytes);
+        SOSU_VEC_PUSH(&p->strings, v->s); /* a value may be dropped anywhere: the list owns it */
         return ok;
     }
     if (tok_is(t, "sizeof")) {
@@ -1211,6 +1214,9 @@ static void parse_record_body_level(P *p, Record *r) {
         }
     }
     accept(p, "}");
+    /* a record read twice, as a struct declared again inside itself: the first fields go */
+    for (size_t j = 0; j < r->field_count; j++) free(r->fields[j].name);
+    free(r->fields);
     r->fields = fields;
     r->field_count = count;
     r->complete = true;
@@ -2234,7 +2240,6 @@ bool bindgen_generate(const BindgenInput *in, BindgenOutput *out) {
         Value v;
         if (!eval_macro(&p, m, &v)) continue;
         write_constant(&p, &o, m->name, &v, NULL, out);
-        if (v.kind == V_STRING) free(v.s);
     }
     for (size_t i = 0; i < p.enums.count; i++) {
         EnumDef *e = p.enums.items[i];
@@ -2311,6 +2316,8 @@ bool bindgen_generate(const BindgenInput *in, BindgenOutput *out) {
         free(r);
     }
     free(p.records.items);
+    for (size_t i = 0; i < p.strings.count; i++) free(p.strings.items[i]);
+    free(p.strings.items);
     for (size_t i = 0; i < p.enums.count; i++) {
         EnumDef *e = p.enums.items[i];
         for (size_t j = 0; j < e->count; j++) free(e->items[j].name);
