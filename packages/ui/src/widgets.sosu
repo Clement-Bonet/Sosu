@@ -2192,6 +2192,7 @@ pub struct Frame {
     mut str[64] layer_options = [""; 64];
     mut usize layer_count = 0;
     mut i32 layer_chosen = -1;
+    mut Look layer_look = default_look(Dropdown, 0);  // the look of the dropdown whose list it is
     mut bool dropdown_pressed = false;  // a press went to a dropdown or to one of its options
     // The menus being described, one per level (`menu_level` of them), and those open, drawn by
     // `finish()`; a press that went to a menu, a right press that opened a context menu.
@@ -3886,6 +3887,7 @@ pub struct Frame {
                 layer_options = options;
                 layer_count = option_count;
                 layer_chosen = option_chosen;
+                layer_look = drop_look;
                 f32 row = option_height();
                 f32 full = layer.h;
                 if (ui.touch_screen) {  // a dialog: in the middle of the safe area, with a margin
@@ -4331,13 +4333,19 @@ pub struct Frame {
     }
 
     // The open list of a dropdown, over everything else.
+    // The open list of a dropdown, in the look of its box: its background, its text and its
+    // accent, from the theme; the option chosen as the selection of a list.
     void draw_layer() {
-        Look m = look(Menu, 0);
+        Look m = layer_look;
+        canvas.Color background = m.background.a > 0 ? m.background : look(Menu, 0).background;
+        Look list = look(List, 0);
+        canvas.Color chosen = list.selection.a > 0 ? list.selection : look(Menu, 0).selection;
+        canvas.Color under_mouse = canvas.Color{ r: m.color.r, g: m.color.g, b: m.color.b, a: 28 };
         f32 row = option_height();
         if (ui.touch_screen) {  // a dialog: the window dimmed under it
             surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: surface.width as f32, h: surface.height as f32 }, canvas.Color{ r: 0, g: 0, b: 0, a: 128 });
         }
-        surface.fill_rounded(layer, m.radius, face(false, false));
+        surface.fill_rounded(layer, m.radius, background);
         surface.push_clip(layer);
         for (usize i in 0..layer_count) {
             canvas.Rect r = canvas.Rect{ x: layer.x, y: layer.y + i as f32 * row - ui.drop_scroll, w: layer.w, h: row };
@@ -4345,12 +4353,12 @@ pub struct Frame {
                 continue;
             }
             if (i as i32 == layer_chosen) {
-                surface.fill(r, m.selection);
+                surface.fill(r, chosen);
             }
             if (i as i32 == ui.highlight && !ui.touch_screen) {  // with the keyboard
                 surface.stroke(r, m.accent, 2.0);
             } else if (contains(r, ui.mouse_x, ui.mouse_y)) {
-                surface.fill(r, canvas.Color{ r: 205, g: 214, b: 244, a: 18 });
+                surface.fill(r, under_mouse);
             }
             if (ui.touch_screen) {  // a radio button, filled for the option chosen
                 f32 s = ui.scale;
@@ -7001,6 +7009,23 @@ Frame two_dropdowns_frame(Ui* ui, canvas.Canvas* surface) {
     }
     f.finish();
     return f;
+}
+
+test "the open list of a dropdown takes the colors of the theme" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 200);
+    mut Ui ui = Ui{ };
+    mut i32 choice = 1;
+    ui.theme = some(light_theme());
+    dropdown_frame(&ui, &surface, &choice);
+    click_at(&ui, 20.0, 10.0);  // opens the list: 32 pixels a row, from y 32
+    dropdown_frame(&ui, &surface, &choice);
+    assert(ui.open != 0);
+    // the third option, neither chosen nor under the mouse, away from its text: the field of the theme
+    assert(surface.at(150, 112) == canvas.pack(rgb(255, 255, 255, 255)));
+    // the option chosen, the second: not the dark face of the default look
+    assert(surface.at(150, 80) != canvas.pack(face(false, false)));
 }
 
 test "the open list shows its own dropdown's choice, not the one of a dropdown described after it" {
