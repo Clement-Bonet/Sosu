@@ -216,12 +216,12 @@ static void test_bindgen(const char *sosuc) {
     free(deep_module);
 }
 
-/* docs/GUIDE.md says what it shows: each block after a mark is a package of its own. `run` compiles
+/* The guides say what they show (docs/QUICK_GUIDE.md, docs/GUIDE.md): each block after a mark is a package of its own. `run` compiles
    and runs it, and the `text` block after it is what it prints; `check` and `test` must pass;
    `error E0000` must be refused with that code first. */
-static void test_guide(const char *sosuc) {
-    char *guide = read_text("docs/GUIDE.md");
-    CHECK(guide != NULL, "cannot read docs/GUIDE.md");
+static void test_guide(const char *sosuc, const char *name, const char *path_of_guide, int minimum) {
+    char *guide = read_text(path_of_guide);
+    CHECK(guide != NULL, "cannot read %s", path_of_guide);
     if (!guide) return;
     int count = 0;
     for (char *at = strstr(guide, "<!-- "); at; at = strstr(at + 1, "<!-- ")) {
@@ -236,8 +236,8 @@ static void test_guide(const char *sosuc) {
         count++;
 
         char dir[64], path[96], command[1024];
-        snprintf(dir, sizeof dir, "build/guide%d", count);
-        snprintf(path, sizeof path, "mkdir \"build/guide%d/src\" 2> nul", count);
+        snprintf(dir, sizeof dir, "build/%s%d", name, count);
+        snprintf(path, sizeof path, "mkdir \"build/%s%d/src\" 2> nul", name, count);
 #ifdef _WIN32
         for (char *c = path; *c; c++) {
             if (*c == '/') *c = '\\';
@@ -250,7 +250,7 @@ static void test_guide(const char *sosuc) {
         FILE *file = fopen(path, "w");
         CHECK(file != NULL, "cannot write %s", path);
         if (!file) break;
-        fprintf(file, "[package]\nname = \"guide%d\"\nversion = \"0.1.0\"\n", count);
+        fprintf(file, "[package]\nname = \"%s%d\"\nversion = \"0.1.0\"\n", name, count);
         fclose(file);
         snprintf(path, sizeof path, "%s/src/main.sosu", dir);
         file = fopen(path, "w");
@@ -272,20 +272,20 @@ static void test_guide(const char *sosuc) {
             char want[32];
             sscanf(kind + 6, "%31s", want);
             const char *first = output ? strstr(output, "error[") : NULL;
-            CHECK(status != 0 && first && strncmp(first + 6, want, strlen(want)) == 0, "guide block %d: not refused with %s", count, want);
+            CHECK(status != 0 && first && strncmp(first + 6, want, strlen(want)) == 0, "%s block %d: not refused with %s", path_of_guide, count, want);
         } else {
-            CHECK(status == 0, "guide block %d (%s): failed, see %s", count, verb, dir);
+            CHECK(status == 0, "%s block %d (%s): failed, see %s", path_of_guide, count, verb, dir);
             const char *after = end + strlen("```\n");
             if (strcmp(verb, "run") == 0 && strncmp(after, "\n```text\n", 9) == 0) {
                 const char *text = after + 9;
                 size_t length = (size_t)(strstr(text, "```\n") - text);
                 CHECK(output && strlen(output) == length && strncmp(output, text, length) == 0,
-                      "guide block %d prints something else, see %s", count, dir);
+                      "%s block %d prints something else, see %s", path_of_guide, count, dir);
             }
         }
         free(output);
     }
-    CHECK(count > 30, "only %d blocks found in docs/GUIDE.md", count);
+    CHECK(count >= minimum, "only %d blocks found in %s", count, path_of_guide);
     free(guide);
 }
 
@@ -376,7 +376,8 @@ int main(int argc, char **argv) {
 
     test_library(argv[1]);
     test_bindgen(argv[1]);
-    test_guide(argv[1]);
+    test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);
+    test_guide(argv[1], "guide", "docs/GUIDE.md", 55);
     test_freed_arena(argv[1]);
     test_stack_overflow(argv[1]);
     test_package(argv[1]);
