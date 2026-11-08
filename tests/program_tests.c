@@ -89,6 +89,38 @@ static int run(const char *command) {
     return status;
 }
 
+#ifdef _WIN32
+/* The FILETYPE of the version resource of `path` (1: a program, 2: a DLL), found by the signature
+   of its VS_FIXEDFILEINFO; 0 when there is none. */
+static unsigned file_type(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    unsigned char window[40] = {0};
+    unsigned type = 0;
+    int c;
+    while (!type && (c = fgetc(file)) != EOF) {
+        memmove(window, window + 1, sizeof window - 1);
+        window[sizeof window - 1] = (unsigned char)c;
+        /* dwSignature 0xFEEF04BD, then eight fields, then dwFileType */
+        if (memcmp(window, "\xBD\x04\xEF\xFE", 4) == 0) type = window[36] | (unsigned)window[37] << 8;
+    }
+    fclose(file);
+    return type;
+}
+
+/* The fields of the "Details" of the properties of `path`, as Windows reads them, one per line. */
+static char *version_info(const char *path) {
+    char command[1024];
+    snprintf(command, sizeof command,
+             "powershell -NoProfile -Command \"$v = (Get-Item '%s').VersionInfo; $v.FileDescription; $v.FileVersion; "
+             "$v.ProductName; $v.ProductVersion; $v.LegalCopyright; $v.OriginalFilename; "
+             "($v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.FilePrivatePart) -join ','\" > build\\version.out",
+             path);
+    if (run(command) != 0) return NULL;
+    return read_text("build/version.out");
+}
+#endif
+
 /* A library for other languages (spec §9.2): built static, then shared, each used by a C host
    compiled with the compiler of these tests (cl, or cc). */
 static void test_library(const char *sosuc) {
@@ -128,6 +160,15 @@ static void test_library(const char *sosuc) {
         free(actual);
         free(expected);
     }
+#ifdef _WIN32
+    /* the version of the DLL, in the properties of the file: from [package], without [app] */
+    CHECK(file_type("tests/programs/library/build/geom.dll") == 2, "geom.dll: no version resource of a DLL");
+    char *details = version_info("tests\\programs\\library\\build\\geom.dll");
+    const char *expected = "geom\n0.1.0\ngeom\n0.1.0\n\ngeom.dll\n0,1,0,0\n";
+    CHECK(details && strcmp(details, expected) == 0, "geom.dll: version\n--- got:\n%s--- expected:\n%s",
+          details ? details : "(none)\n", expected);
+    free(details);
+#endif
 }
 
 /* The text of a file after its first `lines` lines. */
@@ -137,6 +178,22 @@ static const char *after_lines(const char *text, int lines) {
         if (text) text++;
     }
     return text ? text : "";
+}
+
+/* `sosuc doc`: the reference of tests/packages/doc, a module in a subfolder, its private
+   function left out. */
+static void test_doc(const char *sosuc) {
+    char command[512];
+    snprintf(command, sizeof command, "%s doc tests/packages/doc -o build/doc.md > build/doc.out 2> build/doc.err", sosuc);
+    CHECK(run(command) == 0, "sosuc doc failed (see build/doc.err)");
+    char *actual = read_text("build/doc.md");
+    char *expected = read_text("tests/packages/doc/expected.md");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "sosuc doc: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+    snprintf(command, sizeof command, "%s doc tests/packages/doc --html > build/doc.out 2> build/doc.err", sosuc);
+    CHECK(run(command) == 2, "sosuc doc: an unknown option is refused");
 }
 
 /* `sosuc bindgen` (spec §11.6): the module of tests/programs/bindgen, written again from its header
@@ -216,12 +273,12 @@ static void test_bindgen(const char *sosuc) {
     free(deep_module);
 }
 
-/* docs/GUIDE.md says what it shows: each block after a mark is a package of its own. `run` compiles
+/* The guides say what they show (docs/QUICK_GUIDE.md, docs/GUIDE.md): each block after a mark is a package of its own. `run` compiles
    and runs it, and the `text` block after it is what it prints; `check` and `test` must pass;
    `error E0000` must be refused with that code first. */
-static void test_guide(const char *sosuc) {
-    char *guide = read_text("docs/GUIDE.md");
-    CHECK(guide != NULL, "cannot read docs/GUIDE.md");
+static void test_guide(const char *sosuc, const char *name, const char *path_of_guide, int minimum) {
+    char *guide = read_text(path_of_guide);
+    CHECK(guide != NULL, "cannot read %s", path_of_guide);
     if (!guide) return;
     int count = 0;
     for (char *at = strstr(guide, "<!-- "); at; at = strstr(at + 1, "<!-- ")) {
@@ -236,8 +293,8 @@ static void test_guide(const char *sosuc) {
         count++;
 
         char dir[64], path[96], command[1024];
-        snprintf(dir, sizeof dir, "build/guide%d", count);
-        snprintf(path, sizeof path, "mkdir \"build/guide%d/src\" 2> nul", count);
+        snprintf(dir, sizeof dir, "build/%s%d", name, count);
+        snprintf(path, sizeof path, "mkdir \"build/%s%d/src\" 2> nul", name, count);
 #ifdef _WIN32
         for (char *c = path; *c; c++) {
             if (*c == '/') *c = '\\';
@@ -250,7 +307,7 @@ static void test_guide(const char *sosuc) {
         FILE *file = fopen(path, "w");
         CHECK(file != NULL, "cannot write %s", path);
         if (!file) break;
-        fprintf(file, "[package]\nname = \"guide%d\"\nversion = \"0.1.0\"\n", count);
+        fprintf(file, "[package]\nname = \"%s%d\"\nversion = \"0.1.0\"\n", name, count);
         fclose(file);
         snprintf(path, sizeof path, "%s/src/main.sosu", dir);
         file = fopen(path, "w");
@@ -272,20 +329,20 @@ static void test_guide(const char *sosuc) {
             char want[32];
             sscanf(kind + 6, "%31s", want);
             const char *first = output ? strstr(output, "error[") : NULL;
-            CHECK(status != 0 && first && strncmp(first + 6, want, strlen(want)) == 0, "guide block %d: not refused with %s", count, want);
+            CHECK(status != 0 && first && strncmp(first + 6, want, strlen(want)) == 0, "%s block %d: not refused with %s", path_of_guide, count, want);
         } else {
-            CHECK(status == 0, "guide block %d (%s): failed, see %s", count, verb, dir);
+            CHECK(status == 0, "%s block %d (%s): failed, see %s", path_of_guide, count, verb, dir);
             const char *after = end + strlen("```\n");
             if (strcmp(verb, "run") == 0 && strncmp(after, "\n```text\n", 9) == 0) {
                 const char *text = after + 9;
                 size_t length = (size_t)(strstr(text, "```\n") - text);
                 CHECK(output && strlen(output) == length && strncmp(output, text, length) == 0,
-                      "guide block %d prints something else, see %s", count, dir);
+                      "%s block %d prints something else, see %s", path_of_guide, count, dir);
             }
         }
         free(output);
     }
-    CHECK(count > 30, "only %d blocks found in docs/GUIDE.md", count);
+    CHECK(count >= minimum, "only %d blocks found in %s", count, path_of_guide);
     free(guide);
 }
 
@@ -321,6 +378,17 @@ static void test_package(const char *sosuc) {
     CHECK(actual && strstr(actual, "Read next to the program."), "the packaged program did not find its asset: %s",
           actual ? actual : "(nothing)");
     free(actual);
+#ifdef _WIN32
+    /* the version of the program and the texts of [app], in the properties of the file */
+    const char *exe = "tests\\programs\\packaged\\build\\package\\packaged\\packaged.exe";
+    CHECK(file_type(exe) == 1, "packaged.exe: no version resource of a program");
+    char *details = version_info(exe);
+    const char *expected = "A packaged test program\n0.1.0\nPackaged\n0.1.0\nCopyright 2026 The Sosu authors\n"
+                           "packaged.exe\n0,1,0,0\n";
+    CHECK(details && strcmp(details, expected) == 0, "packaged.exe: version\n--- got:\n%s--- expected:\n%s",
+          details ? details : "(none)\n", expected);
+    free(details);
+#endif
 }
 
 /* A program for Android (spec §11.5): `libmain.so` for the emulator, an ELF library for x86_64.
@@ -376,7 +444,9 @@ int main(int argc, char **argv) {
 
     test_library(argv[1]);
     test_bindgen(argv[1]);
-    test_guide(argv[1]);
+    test_doc(argv[1]);
+    test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);
+    test_guide(argv[1], "guide", "docs/GUIDE.md", 55);
     test_freed_arena(argv[1]);
     test_stack_overflow(argv[1]);
     test_package(argv[1]);

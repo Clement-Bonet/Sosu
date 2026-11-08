@@ -119,7 +119,12 @@ test "renaming a note rewrites the links to it" {
     mut Arena arena = Arena.new(4 * KB);
     defer arena.free();
     str body = "[[Plan]] and [[plan|the plan]] and [[Plan#Goals]] and [[Other]]";
-    assert(md.rename_links(&arena, body, "Plan", "Work/Roadmap") == "[[Work/Roadmap]] and [[Work/Roadmap|the plan]] and [[Work/Roadmap#Goals]] and [[Other]]");
+    assert(md.rename_links(
+        &arena,
+        body,
+        "Plan",
+        "Work/Roadmap"
+    ) == "[[Work/Roadmap]] and [[Work/Roadmap|the plan]] and [[Work/Roadmap#Goals]] and [[Other]]");
     str short = "[[Plan]] [[Work/Plan]]";
     assert(md.rename_links(&arena, short, "Work/Plan", "Work/Map") == "[[Map]] [[Work/Map]]");
     assert(md.rename_links(&arena, "no [[open", "a", "b") == "no [[open");

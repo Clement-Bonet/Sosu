@@ -15,9 +15,18 @@
    - parentheses only where the precedence needs them;
    - at most one blank line, where the source has one;
    - comments stay where they are: on their own line, or at the end of a line after two spaces;
-   - long lines are not broken (v0). */
+   - a line longer than LINE_WIDTH is broken at its outermost list or chain of operators (see
+     "Long lines"). */
 
 #define NAME_ARGS(name) (int)(name).length, (name).text
+
+/* The longest line, in characters, before the formatter breaks it where it can. */
+#define LINE_WIDTH 120
+
+/* The constructs a line can be broken at: a list (arguments, parameters, the fields of a struct
+   literal, the items of an array), or a chain of the same operator. */
+enum { BREAK_LIST, BREAK_CHAIN };
+#define MAX_BREAKS 64
 
 typedef struct {
     char *items;
@@ -43,6 +52,15 @@ typedef struct {
     size_t comment_count;
     size_t next_comment;
     bool block_start; /* just after `{` or at the start of the file: no blank line */
+    /* The line being written (see "Long lines"): */
+    int wrap;                         /* the construct to break, by its order on the line; -1: none */
+    int breaks;                       /* the constructs met so far on the line, outside lists */
+    int depth;                        /* the lists open on the line */
+    unsigned char kinds[MAX_BREAKS];  /* BREAK_LIST or BREAK_CHAIN, by order */
+    size_t widest;                    /* the widest line the broken construct went on to */
+    size_t close_at;                  /* the end of the broken list, or 0 */
+    size_t limit;                     /* the width a broken chain or array keeps to */
+    size_t end_at;                    /* the end of the broken chain, or 0 */
 } Fmt;
 
 static void fmt_stmt(Fmt *f, const Stmt *stmt);
@@ -128,6 +146,199 @@ static void begin_item(Fmt *f, size_t offset) {
     flush_comments(f, offset);
     if (blank_before(f, offset)) blank_line(f);
     f->block_start = false;
+}
+
+/* ---- Long lines ----
+
+   A line is written whole first. If it is longer than LINE_WIDTH, it is written again with one
+   of its constructs broken: the constructs that are not inside a list of the line, a chain of
+   operators or a conditional (`c ? a : b`) first, then the lists from the last one to the first,
+   until the lines it makes fit (or
+   else the one whose widest line is the shortest, if it is shorter than the line whole). A broken list puts each item on its own line, one level
+   deeper, and its closing symbol on a line of its own; each item is a line of its own, broken in
+   turn if it is too long. A broken chain goes on over the next lines, two levels deeper, each
+   starting with its operator; a broken conditional puts each `:` at the start of a line. Comments and string literals are never broken. The result depends
+   on the syntax tree only, so formatting twice changes nothing. */
+
+typedef struct {
+    size_t count;
+    size_t next_comment;
+    bool block_start;
+    int indent;
+} Mark;
+
+static Mark mark_of(const Fmt *f) {
+    Mark m = { f->out.count, f->next_comment, f->block_start, f->indent };
+    return m;
+}
+
+static void rewind_to(Fmt *f, Mark m) {
+    f->out.count = m.count;
+    f->out.items[m.count] = '\0';
+    f->next_comment = m.next_comment;
+    f->block_start = m.block_start;
+    f->indent = m.indent;
+}
+
+/* The width in characters of the line that holds the output at `at`, up to `at`. */
+static size_t width_to(const Fmt *f, size_t at) {
+    size_t start = at;
+    while (start > 0 && f->out.items[start - 1] != '\n') start--;
+    size_t width = 0;
+    for (size_t i = start; i < at; i++) {
+        if (((unsigned char)f->out.items[i] & 0xC0) != 0x80) width++; /* not a continuation byte of UTF-8 */
+    }
+    return width;
+}
+
+/* The width of the line that holds the output at `from`, up to the end of the output or the
+   first line end after `from`. */
+static size_t line_width(const Fmt *f, size_t from) {
+    size_t end = from;
+    while (end < f->out.count && f->out.items[end] != '\n') end++;
+    return width_to(f, end);
+}
+
+/* Starts a construct that can be broken; true if it is the one to break on this line. */
+static bool enter_break(Fmt *f, int kind) {
+    if (f->depth > 0) return false;
+    int index = f->breaks++;
+    if (index < MAX_BREAKS) f->kinds[index] = (unsigned char)kind;
+    return index == f->wrap;
+}
+
+typedef void (*LineFn)(Fmt *f, const void *what);
+
+/* Writes a line, breaking construct `wrap`; returns the width of its widest line among the first
+   one and those the broken construct made. */
+static size_t write_line(Fmt *f, LineFn print, const void *what, const char *suffix, int wrap, size_t from,
+                         size_t limit) {
+    f->wrap = wrap;
+    f->limit = limit;
+    f->breaks = 0;
+    f->depth = 0;
+    f->widest = 0;
+    f->close_at = 0;
+    f->end_at = 0;
+    print(f, what);
+    if (suffix) put(f, suffix);
+    size_t width = line_width(f, from);
+    if (f->widest > width) width = f->widest;
+    if (f->close_at) {
+        size_t closing = line_width(f, f->close_at);
+        if (closing > width) width = closing;
+    }
+    return width;
+}
+
+/* Writes a line with `print` (from its indentation, without its line end), then `suffix`;
+   broken if it is too long. */
+static void fit_line(Fmt *f, LineFn print, const void *what, const char *suffix) {
+    int saved_wrap = f->wrap, saved_breaks = f->breaks, saved_depth = f->depth;
+    size_t saved_widest = f->widest, saved_close = f->close_at, saved_limit = f->limit, saved_end = f->end_at;
+    unsigned char saved_kinds[MAX_BREAKS];
+    memcpy(saved_kinds, f->kinds, sizeof saved_kinds);
+    Mark mark = mark_of(f);
+    size_t best_width = write_line(f, print, what, suffix, -1, mark.count, LINE_WIDTH);
+    int count = f->breaks < MAX_BREAKS ? f->breaks : MAX_BREAKS;
+    if (best_width > LINE_WIDTH && count > 0) {
+        unsigned char kinds[MAX_BREAKS];
+        memcpy(kinds, f->kinds, (size_t)count);
+        int order[MAX_BREAKS], n = 0;
+        for (int i = 0; i < count; i++) {
+            if (kinds[i] == BREAK_CHAIN) order[n++] = i;
+        }
+        for (int i = count - 1; i >= 0; i--) {
+            if (kinds[i] == BREAK_LIST) order[n++] = i;
+        }
+        int best = -1;
+        size_t best_limit = LINE_WIDTH;
+        bool fits = false;
+        for (int k = 0; k < n && !fits; k++) {
+            /* what follows the construct on its last line may not fit: then it keeps narrower */
+            size_t limit = LINE_WIDTH;
+            for (int attempt = 0; attempt < 2 && !fits; attempt++) {
+                rewind_to(f, mark);
+                size_t width = write_line(f, print, what, suffix, order[k], mark.count, limit);
+                fits = width <= LINE_WIDTH;
+                if (width < best_width) {
+                    best_width = width;
+                    best = order[k];
+                    best_limit = limit;
+                }
+                if (width <= LINE_WIDTH || !f->end_at) break;
+                size_t tail = line_width(f, f->end_at) - width_to(f, f->end_at);
+                if (tail == 0 || tail >= LINE_WIDTH / 2) break;
+                limit = LINE_WIDTH - tail;
+            }
+        }
+        if (!fits) {
+            rewind_to(f, mark);
+            write_line(f, print, what, suffix, best, mark.count, best_limit);
+        }
+    }
+    f->wrap = saved_wrap;
+    f->breaks = saved_breaks;
+    f->depth = saved_depth;
+    f->widest = saved_widest;
+    f->close_at = saved_close;
+    f->limit = saved_limit;
+    f->end_at = saved_end;
+    memcpy(f->kinds, saved_kinds, sizeof saved_kinds);
+}
+
+/* Prints item `i` of a list. */
+typedef void (*ItemFn)(Fmt *f, const void *items, size_t i);
+
+typedef struct {
+    const void *items;
+    size_t i;
+    ItemFn print;
+} ItemRef;
+
+static void item_line(Fmt *f, const void *what) {
+    const ItemRef *ref = what;
+    start_line(f);
+    ref->print(f, ref->items, ref->i);
+}
+
+/* `open`, the items separated by `, `, `close` (with a space inside when `spaced`); or, when it
+   is the construct broken, each item on its own line, followed by `,` (the last one too when
+   `trailing`). */
+static void fmt_list(Fmt *f, const char *open, const char *close, bool spaced, const void *items, size_t count,
+                     ItemFn print, bool trailing) {
+    if (count == 1) { /* one item: what breaks is inside it, `f(g(` ... `))` */
+        put(f, open);
+        if (spaced) put(f, " ");
+        print(f, items, 0);
+        if (spaced) put(f, " ");
+        put(f, close);
+        return;
+    }
+    bool broken = count > 0 && enter_break(f, BREAK_LIST);
+    f->depth++;
+    put(f, open);
+    if (!broken) {
+        if (spaced) put(f, " ");
+        for (size_t i = 0; i < count; i++) {
+            if (i) put(f, ", ");
+            print(f, items, i);
+        }
+        if (spaced) put(f, " ");
+    } else {
+        end_line(f);
+        f->indent++;
+        for (size_t i = 0; i < count; i++) {
+            ItemRef ref = { items, i, print };
+            fit_line(f, item_line, &ref, i + 1 < count || trailing ? "," : NULL);
+            end_line(f);
+        }
+        f->indent--;
+        start_line(f);
+    }
+    put(f, close);
+    if (broken) f->close_at = f->out.count;
+    f->depth--;
 }
 
 /* ---- Types ---- */
@@ -290,11 +501,113 @@ static void fmt_operand(Fmt *f, const Expr *e, bool parens) {
     if (parens) put(f, ")");
 }
 
-static void fmt_args(Fmt *f, Expr **args, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        if (i) put(f, ", ");
-        fmt_expr(f, args[i]);
+static void expr_item(Fmt *f, const void *items, size_t i) { fmt_expr(f, ((Expr *const *)items)[i]); }
+
+static void field_item(Fmt *f, const void *items, size_t i) {
+    const FieldInit *field = &((const FieldInit *)items)[i];
+    put_name(f, field->name);
+    put(f, ": ");
+    fmt_expr(f, field->value);
+}
+
+/* An array broken over several lines: its items go on a line while they fit. */
+static void fmt_array_fill(Fmt *f, const Expr *e) {
+    f->depth++;
+    put(f, "[");
+    end_line(f);
+    f->indent++;
+    start_line(f);
+    for (size_t i = 0; i < e->as.array.count; i++) {
+        Mark mark = mark_of(f);
+        if (i) put(f, " ");
+        fmt_expr(f, e->as.array.items[i]);
+        put(f, ",");
+        if (i && line_width(f, mark.count) > f->limit) {
+            rewind_to(f, mark);
+            end_line(f);
+            start_line(f);
+            fmt_expr(f, e->as.array.items[i]);
+            put(f, ",");
+        }
     }
+    end_line(f);
+    f->indent--;
+    start_line(f);
+    put(f, "]");
+    f->depth--;
+}
+
+/* True if `op` makes chains broken over several lines when they are too long. */
+static bool chains(TokenKind op) {
+    int p = binary_precedence(op);
+    return p != P_COMPARE; /* `a < b < c` does not parse */
+}
+
+/* `op` and an operand at the start of a new line, two levels deeper than `indent`. */
+static void chain_line(Fmt *f, int indent, const char *op, const Expr *operand, bool parens) {
+    end_line(f);
+    f->indent = indent + 2;
+    start_line(f);
+    size_t start = f->out.count;
+    put(f, op);
+    put(f, " ");
+    fmt_operand(f, operand, parens);
+    size_t width = line_width(f, start);
+    if (width > f->widest) f->widest = width;
+}
+
+/* ` op ` and an operand; in a broken chain, on the next line, two levels deeper than `indent`,
+   when it does not fit on this one. */
+static void chain_part(Fmt *f, bool broken, int indent, const char *op, const Expr *operand, bool parens) {
+    Mark mark = mark_of(f);
+    put(f, " ");
+    put(f, op);
+    put(f, " ");
+    fmt_operand(f, operand, parens);
+    if (broken && line_width(f, mark.count) > f->limit) {
+        rewind_to(f, mark);
+        chain_line(f, indent, op, operand, parens);
+    }
+}
+
+/* `a && b && c`: the operands of the binary operators of the same precedence on the left of
+   `e`, from the first; at most `max`. Returns how many there are, or 0 if there are more. */
+static size_t chain_of(const Expr *e, const Expr **nodes, size_t max) {
+    int p = binary_precedence(e->as.binary.op);
+    size_t n = 0;
+    for (const Expr *node = e;; node = node->as.binary.left) {
+        if (n == max) return 0;
+        nodes[n++] = node;
+        const Expr *left = node->as.binary.left;
+        if (left->kind != EXPR_BINARY || binary_precedence(left->as.binary.op) != p || open_cast(left)) break;
+    }
+    for (size_t i = 0; i < n / 2; i++) { /* from the first operator */
+        const Expr *t = nodes[i];
+        nodes[i] = nodes[n - 1 - i];
+        nodes[n - 1 - i] = t;
+    }
+    return n;
+}
+
+/* A chain of binary operators of the same precedence: on one line, or, when it is the construct
+   broken, going on over the next lines while its operands do not fit. False if `e` is not one. */
+static bool fmt_chain(Fmt *f, const Expr *e) {
+    const Expr *nodes[256];
+    size_t n = chains(e->as.binary.op) ? chain_of(e, nodes, sizeof nodes / sizeof *nodes) : 0;
+    if (n == 0) return false;
+    int p = binary_precedence(e->as.binary.op);
+    bool broken = enter_break(f, BREAK_CHAIN);
+    const Expr *first = nodes[0]->as.binary.left;
+    fmt_operand(f, first, precedence(first) < p || open_cast(first));
+    int indent = f->indent;
+    for (size_t i = 0; i < n; i++) {
+        const Expr *right = nodes[i]->as.binary.right;
+        chain_part(f, broken, indent, token_kind_spelling(nodes[i]->as.binary.op), right,
+                   precedence(right) <= p || open_cast(right));
+    }
+    f->indent = indent;
+    if (broken) f->end_at = f->out.count;
+    return true;
 }
 
 static void fmt_pattern(Fmt *f, const Pattern *pattern) {
@@ -312,6 +625,15 @@ static void fmt_pattern(Fmt *f, const Pattern *pattern) {
     put(f, ")");
 }
 
+static void arm_line(Fmt *f, const void *what) {
+    const MatchArm *arm = what;
+    start_line(f);
+    fmt_pattern(f, &arm->pattern);
+    put(f, " => ");
+    if (arm->block) fmt_block(f, arm->block);
+    else fmt_expr(f, arm->expr);
+}
+
 static void fmt_match(Fmt *f, const Expr *e) {
     put(f, "match (");
     fmt_expr(f, e->as.match.subject);
@@ -322,12 +644,7 @@ static void fmt_match(Fmt *f, const Expr *e) {
     for (size_t i = 0; i < e->as.match.arm_count; i++) {
         const MatchArm *arm = &e->as.match.arms[i];
         begin_item(f, arm->pattern.offset);
-        start_line(f);
-        fmt_pattern(f, &arm->pattern);
-        put(f, " => ");
-        if (arm->block) fmt_block(f, arm->block);
-        else fmt_expr(f, arm->expr);
-        put(f, ",");
+        fit_line(f, arm_line, arm, ",");
         end_line(f);
     }
     flush_comments(f, e->offset + e->length - 1);
@@ -336,23 +653,33 @@ static void fmt_match(Fmt *f, const Expr *e) {
     put(f, "}");
 }
 
-/* An array literal written over several lines: one element per line (tables of data). */
+/* An array literal written over several lines (tables of data): its lines stay, each with the
+   items that start on it. */
 static void fmt_array_lines(Fmt *f, const Expr *e) {
+    f->depth++;
     put(f, "[");
     end_line(f);
     f->indent++;
     f->block_start = true;
     for (size_t i = 0; i < e->as.array.count; i++) {
-        begin_item(f, e->as.array.items[i]->offset);
-        start_line(f);
-        fmt_expr(f, e->as.array.items[i]);
+        const Expr *item = e->as.array.items[i];
+        if (i > 0 && line_number(f, item->offset) == line_number(f, e->as.array.items[i - 1]->offset) &&
+            !comment_before(f, item->offset)) {
+            put(f, " ");
+        } else {
+            if (i > 0) end_line(f);
+            begin_item(f, item->offset);
+            start_line(f);
+        }
+        fmt_expr(f, item);
         put(f, ",");
-        end_line(f);
     }
+    end_line(f);
     flush_comments(f, e->offset + e->length - 1);
     f->indent--;
     start_line(f);
     put(f, "]");
+    f->depth--;
 }
 
 static void fmt_expr(Fmt *f, const Expr *e) {
@@ -388,6 +715,7 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         fmt_operand(f, e->as.inner, precedence(e->as.inner) < P_PREFIX || is_cast(e->as.inner));
         break;
     case EXPR_BINARY: {
+        if (fmt_chain(f, e)) break;
         int p = binary_precedence(e->as.binary.op);
         const Expr *left = e->as.binary.left;
         const Expr *right = e->as.binary.right;
@@ -406,13 +734,32 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         put(f, e->kind == EXPR_CAST ? " as " : " as? ");
         fmt_type(f, e->as.cast.type);
         break;
-    case EXPR_TERNARY:
-        fmt_operand(f, e->as.ternary.cond, precedence(e->as.ternary.cond) <= P_TERNARY || open_cast(e->as.ternary.cond));
-        put(f, " ? ");
-        fmt_expr(f, e->as.ternary.then_expr);
-        put(f, " : ");
-        fmt_expr(f, e->as.ternary.else_expr);
+    case EXPR_TERNARY: {
+        /* broken: `: c2 ? b` at the start of each line, for `c1 ? a : c2 ? b : d` */
+        bool broken = enter_break(f, BREAK_CHAIN);
+        int indent = f->indent;
+        const Expr *node = e;
+        const Expr *cond = node->as.ternary.cond;
+        fmt_operand(f, cond, precedence(cond) <= P_TERNARY || open_cast(cond));
+        for (;;) {
+            chain_part(f, broken, indent, "?", node->as.ternary.then_expr, false);
+            const Expr *other = node->as.ternary.else_expr;
+            if (!broken) {
+                chain_part(f, false, indent, ":", other, false);
+                break;
+            }
+            if (other->kind != EXPR_TERNARY) {
+                chain_line(f, indent, ":", other, false);
+                break;
+            }
+            cond = other->as.ternary.cond;
+            chain_line(f, indent, ":", cond, precedence(cond) <= P_TERNARY || open_cast(cond));
+            node = other;
+        }
+        f->indent = indent;
+        if (broken) f->end_at = f->out.count;
         break;
+    }
     case EXPR_RANGE:
         fmt_operand(f, e->as.range.start, precedence(e->as.range.start) < P_OR);
         put(f, e->as.range.inclusive ? "..=" : "..");
@@ -420,9 +767,7 @@ static void fmt_expr(Fmt *f, const Expr *e) {
         break;
     case EXPR_CALL:
         fmt_operand(f, e->as.call.callee, precedence(e->as.call.callee) < P_POSTFIX);
-        put(f, "(");
-        fmt_args(f, e->as.call.args, e->as.call.arg_count);
-        put(f, ")");
+        fmt_list(f, "(", ")", false, e->as.call.args, e->as.call.arg_count, expr_item, false);
         break;
     case EXPR_INDEX:
         fmt_operand(f, e->as.index.object, precedence(e->as.index.object) < P_POSTFIX);
@@ -442,14 +787,7 @@ static void fmt_expr(Fmt *f, const Expr *e) {
             put(f, "{ }");
             break;
         }
-        put(f, "{ ");
-        for (size_t i = 0; i < e->as.struct_lit.field_count; i++) {
-            if (i) put(f, ", ");
-            put_name(f, e->as.struct_lit.fields[i].name);
-            put(f, ": ");
-            fmt_expr(f, e->as.struct_lit.fields[i].value);
-        }
-        put(f, " }");
+        fmt_list(f, "{", "}", true, e->as.struct_lit.fields, e->as.struct_lit.field_count, field_item, false);
         break;
     case EXPR_MATCH:
         fmt_match(f, e);
@@ -460,16 +798,25 @@ static void fmt_expr(Fmt *f, const Expr *e) {
             fmt_array_lines(f, e);
             break;
         }
-        put(f, "[");
         if (e->as.array.repeat) {
             char count[32];
+            put(f, "[");
             fmt_expr(f, e->as.array.repeat);
             snprintf(count, sizeof count, "; %llu", (unsigned long long)e->as.array.repeat_count);
             put(f, count);
+            put(f, "]");
+        } else if (e->as.array.count > 0 && enter_break(f, BREAK_LIST)) {
+            fmt_array_fill(f, e);
         } else {
-            fmt_args(f, e->as.array.items, e->as.array.count);
+            f->depth++;
+            put(f, "[");
+            for (size_t i = 0; i < e->as.array.count; i++) {
+                if (i) put(f, ", ");
+                fmt_expr(f, e->as.array.items[i]);
+            }
+            put(f, "]");
+            f->depth--;
         }
-        put(f, "]");
         break;
     case EXPR_LAMBDA:
         put(f, "(");
@@ -538,6 +885,11 @@ static void fmt_simple(Fmt *f, const Stmt *stmt) {
     }
 }
 
+static void fmt_if(Fmt *f, const Stmt *stmt);
+
+/* `if (...) {` after `} else `: measured as a line of its own. */
+static void else_if_line(Fmt *f, const void *what) { fmt_if(f, what); }
+
 static void fmt_if(Fmt *f, const Stmt *stmt) {
     put(f, "if (");
     fmt_expr(f, stmt->as.if_.cond);
@@ -546,12 +898,12 @@ static void fmt_if(Fmt *f, const Stmt *stmt) {
     const Stmt *other = stmt->as.if_.else_stmt;
     if (!other) return;
     put(f, " else ");
-    if (other->kind == STMT_IF) fmt_if(f, other);
+    if (other->kind == STMT_IF) fit_line(f, else_if_line, other, NULL);
     else fmt_block(f, other);
 }
 
-static void fmt_stmt(Fmt *f, const Stmt *stmt) {
-    begin_item(f, stmt->offset);
+static void stmt_line(Fmt *f, const void *what) {
+    const Stmt *stmt = what;
     start_line(f);
     switch (stmt->kind) {
     case STMT_BLOCK:
@@ -627,25 +979,38 @@ static void fmt_stmt(Fmt *f, const Stmt *stmt) {
         fmt_block(f, stmt->as.inner);
         break;
     }
+}
+
+static void fmt_stmt(Fmt *f, const Stmt *stmt) {
+    begin_item(f, stmt->offset);
+    fit_line(f, stmt_line, stmt, NULL);
     end_line(f);
 }
 
 /* ---- Declarations ---- */
 
-static void fmt_params(Fmt *f, const Param *params, size_t count) {
-    put(f, "(");
-    for (size_t i = 0; i < count; i++) {
-        if (i) put(f, ", ");
-        if (params[i].is_mut) put(f, "mut ");
-        if (params[i].is_keeps) put(f, "keeps ");
-        fmt_type(f, params[i].type);
-        put(f, " ");
-        put_name(f, params[i].name);
-    }
-    put(f, ")");
+static void param_item(Fmt *f, const void *items, size_t i) {
+    const Param *param = &((const Param *)items)[i];
+    if (param->is_mut) put(f, "mut ");
+    if (param->is_keeps) put(f, "keeps ");
+    fmt_type(f, param->type);
+    put(f, " ");
+    put_name(f, param->name);
 }
 
-static void fmt_function(Fmt *f, const FnDecl *fn) {
+static void fmt_params(Fmt *f, const Param *params, size_t count) {
+    fmt_list(f, "(", ")", false, params, count, param_item, false);
+}
+
+static void contract_line(Fmt *f, const void *what) {
+    const Contract *contract = what;
+    start_line(f);
+    put(f, contract->kind == CONTRACT_REQUIRES ? "requires " : "ensures ");
+    fmt_expr(f, contract->expr);
+}
+
+static void function_line(Fmt *f, const void *what) {
+    const FnDecl *fn = what;
     start_line(f);
     if (fn->is_export) put(f, "export \"C\" ");
     else if (fn->is_pub) put(f, "pub ");
@@ -661,7 +1026,6 @@ static void fmt_function(Fmt *f, const FnDecl *fn) {
     fmt_effects(f, fn->effects);
     if (!fn->body) {
         put(f, ";");
-        end_line(f);
         return;
     }
     if (fn->contract_count == 0) {
@@ -670,15 +1034,17 @@ static void fmt_function(Fmt *f, const FnDecl *fn) {
         end_line(f);
         f->indent++;
         for (size_t i = 0; i < fn->contract_count; i++) {
-            start_line(f);
-            put(f, fn->contracts[i].kind == CONTRACT_REQUIRES ? "requires " : "ensures ");
-            fmt_expr(f, fn->contracts[i].expr);
+            fit_line(f, contract_line, &fn->contracts[i], NULL);
             end_line(f);
         }
         f->indent--;
         start_line(f);
     }
     fmt_block(f, fn->body);
+}
+
+static void fmt_function(Fmt *f, const FnDecl *fn) {
+    fit_line(f, function_line, fn, NULL);
     end_line(f);
 }
 
@@ -688,6 +1054,20 @@ typedef struct {
     const Field *field;
     const FnDecl *method;
 } Member;
+
+static void field_line(Fmt *f, const void *what) {
+    const Field *field = what;
+    start_line(f);
+    if (field->is_pub) put(f, "pub ");
+    if (field->is_mut) put(f, "mut ");
+    fmt_type(f, field->type);
+    put(f, " ");
+    put_name(f, field->name);
+    if (field->init) {
+        put(f, " = ");
+        fmt_expr(f, field->init);
+    }
+}
 
 static void fmt_members(Fmt *f, const Decl *decl) {
     size_t count = decl->as.type.field_count + decl->as.type.method_count;
@@ -728,18 +1108,7 @@ static void fmt_members(Fmt *f, const Decl *decl) {
             fmt_function(f, members[i].method);
             continue;
         }
-        const Field *field = members[i].field;
-        start_line(f);
-        if (field->is_pub) put(f, "pub ");
-        if (field->is_mut) put(f, "mut ");
-        fmt_type(f, field->type);
-        put(f, " ");
-        put_name(f, field->name);
-        if (field->init) {
-            put(f, " = ");
-            fmt_expr(f, field->init);
-        }
-        put(f, ";");
+        fit_line(f, field_line, members[i].field, ";");
         end_line(f);
     }
     flush_comments(f, end);
@@ -791,6 +1160,17 @@ static void fmt_enum(Fmt *f, const Decl *decl) {
     start_line(f);
     put(f, "}");
     end_line(f);
+}
+
+static void const_line(Fmt *f, const void *what) {
+    const Decl *decl = what;
+    start_line(f);
+    if (decl->is_pub) put(f, "pub ");
+    fmt_type(f, decl->as.const_.type);
+    put(f, " ");
+    put_name(f, decl->as.const_.name);
+    put(f, " = ");
+    fmt_expr(f, decl->as.const_.value);
 }
 
 static void fmt_decl(Fmt *f, const Decl *decl) {
@@ -859,14 +1239,7 @@ static void fmt_decl(Fmt *f, const Decl *decl) {
         end_line(f);
         break;
     case DECL_CONST:
-        start_line(f);
-        if (decl->is_pub) put(f, "pub ");
-        fmt_type(f, decl->as.const_.type);
-        put(f, " ");
-        put_name(f, decl->as.const_.name);
-        put(f, " = ");
-        fmt_expr(f, decl->as.const_.value);
-        put(f, ";");
+        fit_line(f, const_line, decl, ";");
         end_line(f);
         break;
     }
@@ -1003,6 +1376,8 @@ char *format_source(const SourceFile *file, DiagList *diags) {
         f.comments = comments.items;
         f.comment_count = comments.count;
         f.block_start = true;
+        f.wrap = -1;
+        f.limit = LINE_WIDTH;
         put(&f, "");
         for (size_t i = 0; i < module->count; i++) fmt_decl(&f, module->decls[i]);
         flush_comments(&f, file->length + 1);

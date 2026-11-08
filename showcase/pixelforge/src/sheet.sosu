@@ -214,7 +214,9 @@ pub class Sheet {
             for (i32 x in 0..width) {
                 i32 sx = ox + x;
                 i32 sy = oy + y;
-                l.pixels[(y * width + x) as usize] = sx < img.width && sy < img.height ? img.pixels[(sy * img.width + sx) as usize] : 0;
+                l.pixels[(y * width + x) as usize] = sx < img.width && sy < img.height
+                        ? img.pixels[(sy * img.width + sx) as usize]
+                        : 0;
             }
         }
         forget();

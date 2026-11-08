@@ -1,0 +1,6 @@
+import doc.geometry.circle;
+
+i32 main() {
+    circle.Circle c = circle.unit();
+    return c.area() > 3.0 ? 0 : 1;
+}

@@ -319,7 +319,8 @@ pub str remap(Arena* arena, str f, i32 kind, i32 a, i32 n) {
         bool word = values.is_letter(c) || c == 36 || values.is_digit(c) || c == 46;
         if (word) {
             mut usize j = i;
-            while (j < f.len && (values.is_letter(f.bytes[j]) || values.is_digit(f.bytes[j]) || f.bytes[j] == 36 || f.bytes[j] == 95 || f.bytes[j] == 46)) {
+            while (j < f.len && (values.is_letter(f.bytes[j]) || values.is_digit(f.bytes[j]) || f.bytes[j] == 36
+                    || f.bytes[j] == 95 || f.bytes[j] == 46)) {
                 j += 1;
             }
             str w = text.slice(f, i, j);
@@ -753,7 +754,9 @@ pub class Parser {
         if (c == 35) {
             usize start = self.pos;
             self.pos += 1;
-            while (self.pos < self.s.len && (values.is_letter(self.s.bytes[self.pos]) || values.is_digit(self.s.bytes[self.pos]) || self.s.bytes[self.pos] == 47 || self.s.bytes[self.pos] == 33 || self.s.bytes[self.pos] == 63)) {
+            while (self.pos < self.s.len && (values.is_letter(self.s.bytes[self.pos])
+                    || values.is_digit(self.s.bytes[self.pos]) || self.s.bytes[self.pos] == 47
+                    || self.s.bytes[self.pos] == 33 || self.s.bytes[self.pos] == 63)) {
                 self.pos += 1;
             }
             return values.verr(text.slice(self.s, start, self.pos));
@@ -855,7 +858,14 @@ pub class Parser {
                     self.pos += 1;
                     values.Ref r2 = values.parse_ref(self.word());
                     if (r2.ok) {
-                        a = Arg{ range: true, v: values.vempty(), c1: r.col < r2.col ? r.col : r2.col, r1: r.row < r2.row ? r.row : r2.row, c2: r.col < r2.col ? r2.col : r.col, r2: r.row < r2.row ? r2.row : r.row };
+                        a = Arg{
+                            range: true,
+                            v: values.vempty(),
+                            c1: r.col < r2.col ? r.col : r2.col,
+                            r1: r.row < r2.row ? r.row : r2.row,
+                            c2: r.col < r2.col ? r2.col : r.col,
+                            r2: r.row < r2.row ? r2.row : r.row
+                        };
                     } else {
                         self.pos = save;
                     }
@@ -987,13 +997,18 @@ pub i32 min_args(str name) {
             return 0;
         }
     }
-    str[22] two = ["ROUND", "ROUNDUP", "ROUNDDOWN", "MOD", "POWER", "ATAN2", "QUOTIENT", "LARGE", "SMALL", "RANK", "FIND", "SEARCH", "EXACT", "REPT", "INDEX", "MATCH", "SUMIF", "COUNTIF", "AVERAGEIF", "COUNTIFS", "DAYS", "COMBIN"];
+    str[22] two = [
+        "ROUND", "ROUNDUP", "ROUNDDOWN", "MOD", "POWER", "ATAN2", "QUOTIENT", "LARGE", "SMALL", "RANK", "FIND",
+        "SEARCH", "EXACT", "REPT", "INDEX", "MATCH", "SUMIF", "COUNTIF", "AVERAGEIF", "COUNTIFS", "DAYS", "COMBIN",
+    ];
     for (usize i in 0..22) {
         if (name == two[i]) {
             return 2;
         }
     }
-    str[10] three = ["MID", "SUBSTITUTE", "VLOOKUP", "HLOOKUP", "SUMIFS", "DATE", "TEXTJOIN", "SWITCH", "CHOOSE", "IFS"];
+    str[10] three = [
+        "MID", "SUBSTITUTE", "VLOOKUP", "HLOOKUP", "SUMIFS", "DATE", "TEXTJOIN", "SWITCH", "CHOOSE", "IFS",
+    ];
     for (usize i in 0..10) {
         if (name == three[i]) {
             return name == "CHOOSE" || name == "IFS" ? 2 : 3;
@@ -1127,7 +1142,8 @@ values.Value agg_fn(Book* b, Arena* t, str name, Arg[] a) {
                         n += 1;
                     } else if (name == "COUNTA" && v.kind != values.EMPTY) {
                         n += 1;
-                    } else if (name == "COUNTBLANK" && (v.kind == values.EMPTY || v.kind == values.TEXT && v.text.len == 0)) {
+                    } else if (name == "COUNTBLANK"
+                            && (v.kind == values.EMPTY || v.kind == values.TEXT && v.text.len == 0)) {
                         n += 1;
                     }
                 }
@@ -1199,7 +1215,9 @@ values.Value agg_fn(Book* b, Arena* t, str name, Arg[] a) {
         sort.sort(v);
         return values.vnum(name == "LARGE" ? v[v.len - idx as usize] : v[idx as usize - 1]);
     }
-    if (name == "SUM" || name == "AVERAGE" || name == "MIN" || name == "MAX" || name == "PRODUCT" || name == "MEDIAN" || name == "STDEV" || name == "STDEVP" || name == "VAR" || name == "VARP" || name == "SUMSQ" || name == "MODE") {
+    if (name == "SUM" || name == "AVERAGE" || name == "MIN" || name == "MAX" || name == "PRODUCT" || name == "MEDIAN"
+            || name == "STDEV" || name == "STDEVP" || name == "VAR" || name == "VARP" || name == "SUMSQ"
+            || name == "MODE") {
         vec.Vec<f64>* xs = vec.new<f64>(t);
         values.Value e = collect(b, t, a, 0, a.len, xs);
         if (is_err(e)) {
@@ -1353,7 +1371,12 @@ values.Value math_fn(Book* b, Arena* t, str name, Arg[] a) {
     }
     values.Value x = nm(b, t, a[0]);
     values.Value y = a.len > 1 ? nm(b, t, a[1]) : values.vnum(0.0);
-    bool known = name == "ABS" || name == "SQRT" || name == "EXP" || name == "LN" || name == "LOG" || name == "LOG10" || name == "SIN" || name == "COS" || name == "TAN" || name == "ASIN" || name == "ACOS" || name == "ATAN" || name == "ATAN2" || name == "DEGREES" || name == "RADIANS" || name == "INT" || name == "TRUNC" || name == "ROUND" || name == "ROUNDUP" || name == "ROUNDDOWN" || name == "CEILING" || name == "FLOOR" || name == "MOD" || name == "POWER" || name == "SIGN" || name == "FACT" || name == "QUOTIENT" || name == "COMBIN";
+    bool known = name == "ABS" || name == "SQRT" || name == "EXP" || name == "LN" || name == "LOG" || name == "LOG10"
+            || name == "SIN" || name == "COS" || name == "TAN" || name == "ASIN" || name == "ACOS" || name == "ATAN"
+            || name == "ATAN2" || name == "DEGREES" || name == "RADIANS" || name == "INT" || name == "TRUNC"
+            || name == "ROUND" || name == "ROUNDUP" || name == "ROUNDDOWN" || name == "CEILING" || name == "FLOOR"
+            || name == "MOD" || name == "POWER" || name == "SIGN" || name == "FACT" || name == "QUOTIENT"
+            || name == "COMBIN";
     if (!known) {
         return nofn();
     }
@@ -1584,7 +1607,8 @@ values.Value logic_fn(Book* b, Arena* t, i32 col, i32 row, str name, Arg[] a) {
         }
         return av(b, a[idx as usize]);
     }
-    bool is_info = name == "ISNUMBER" || name == "ISTEXT" || name == "ISBLANK" || name == "ISERROR" || name == "ISERR" || name == "ISNA" || name == "ISLOGICAL" || name == "ISEVEN" || name == "ISODD" || name == "N";
+    bool is_info = name == "ISNUMBER" || name == "ISTEXT" || name == "ISBLANK" || name == "ISERROR" || name == "ISERR"
+            || name == "ISNA" || name == "ISLOGICAL" || name == "ISEVEN" || name == "ISODD" || name == "N";
     if (!is_info) {
         return nofn();
     }
@@ -1698,7 +1722,11 @@ str text_format(Arena* t, f64 x, str f) {
 }
 
 values.Value text_fn(Book* b, Arena* t, str name, Arg[] a) {
-    bool known = name == "LEN" || name == "LEFT" || name == "RIGHT" || name == "MID" || name == "UPPER" || name == "LOWER" || name == "PROPER" || name == "TRIM" || name == "CONCAT" || name == "CONCATENATE" || name == "TEXTJOIN" || name == "REPT" || name == "FIND" || name == "SEARCH" || name == "SUBSTITUTE" || name == "REPLACE" || name == "EXACT" || name == "VALUE" || name == "TEXT" || name == "CHAR" || name == "CODE" || name == "T";
+    bool known = name == "LEN" || name == "LEFT" || name == "RIGHT" || name == "MID" || name == "UPPER"
+            || name == "LOWER" || name == "PROPER" || name == "TRIM" || name == "CONCAT" || name == "CONCATENATE"
+            || name == "TEXTJOIN" || name == "REPT" || name == "FIND" || name == "SEARCH" || name == "SUBSTITUTE"
+            || name == "REPLACE" || name == "EXACT" || name == "VALUE" || name == "TEXT" || name == "CHAR"
+            || name == "CODE" || name == "T";
     if (!known) {
         return nofn();
     }
@@ -2050,7 +2078,8 @@ values.Value lookup_fn(keeps Book* b, Arena* t, str name, keeps Arg[] a) {
                 continue;
             }
             if (mode == 0) {
-                if (cell.kind == values.TEXT && key.kind == values.TEXT ? values.wildcard(key.text, cell.text) : compare(key, cell) == 0) {
+                if (cell.kind == values.TEXT && key.kind == values.TEXT ? values.wildcard(key.text, cell.text)
+                        : compare(key, cell) == 0) {
                     hit = i;
                     break;
                 }

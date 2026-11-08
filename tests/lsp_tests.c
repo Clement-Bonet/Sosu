@@ -76,6 +76,34 @@ static void request(const char *method, const char *text, const char *needle, si
     free(message);
 }
 
+/* How many times `needle` is in the first message sent back. */
+static size_t times(const char *needle) {
+    size_t n = 0;
+    for (const char *at = out.count ? strstr(out.items[0], needle) : NULL; at; at = strstr(at + 1, needle)) n++;
+    return n;
+}
+
+/* A request on the place of `needle` in `text`, with more parameters after the position. */
+static void request_with(const char *method, const char *text, const char *needle, size_t delta, const char *more) {
+    const char *at = strstr(text, needle);
+    CHECK(at != NULL, "`%s` is in the text", needle);
+    if (!at) return;
+    size_t line = 0, character = 0;
+    for (const char *c = text; c < at; c++) {
+        if (*c == '\n') {
+            line++;
+            character = 0;
+        } else {
+            character++;
+        }
+    }
+    char *message = sosu_format("{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"%s\",\"params\":{\"textDocument\":{\"uri\":\"%s\"},"
+                                "\"position\":{\"line\":%zu,\"character\":%zu}%s}}",
+                                method, main_uri, line, character + delta, more);
+    exchange(message);
+    free(message);
+}
+
 static const char *const good =
     "import std.io;\n"
     "import app.shapes;\n"
@@ -103,7 +131,9 @@ static const char *const good =
 
 static void test_session(void) {
     exchange("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}");
-    CHECK(answer("\"hoverProvider\":true") && answer("\"id\":1"), "initialize: %s", out.count ? out.items[0] : "nothing");
+    CHECK(answer("\"hoverProvider\":true") && answer("\"renameProvider\":true") && answer("\"referencesProvider\":true") &&
+              answer("\"id\":1"),
+          "initialize: %s", out.count ? out.items[0] : "nothing");
     exchange("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
     CHECK(out.count == 0, "initialized needs no answer");
 
@@ -184,7 +214,26 @@ static void test_session(void) {
     request("textDocument/completion", constants, "SIZE;", 0);
     CHECK(answer("\"label\":\"SIZE\",\"kind\":21"), "a constant completed: %s", out.count ? out.items[0] : "nothing");
 
-    exchange("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"textDocument/rename\",\"params\":{}}");
+    /* references: the declaration and every use, in every file of the program */
+    change_main(good);
+    request_with("textDocument/references", good, "count + 1", 0, ",\"context\":{\"includeDeclaration\":true}");
+    CHECK(times("\"uri\"") == 3 && answer("\"start\":{\"line\":18,\"character\":8}"), "a local: its declaration and two uses: %s",
+          out.count ? out.items[0] : "nothing");
+    request_with("textDocument/references", good, "count + 1", 0, ",\"context\":{\"includeDeclaration\":false}");
+    CHECK(times("\"uri\"") == 2, "without the declaration: %s", out.count ? out.items[0] : "nothing");
+    request_with("textDocument/references", good, "Vec2 origin", 1, ",\"context\":{\"includeDeclaration\":true}");
+    CHECK(answer("geometry/src/vector.sosu") && times("\"uri\"") >= 4, "a type, in its module and in the program: %s",
+          out.count ? out.items[0] : "nothing");
+
+    /* rename: every reference gets the new name; a keyword or a name of std is refused */
+    request_with("textDocument/rename", good, "count + 1", 0, ",\"newName\":\"total\"");
+    CHECK(answer("\"changes\"") && times("\"newText\":\"total\"") == 3, "a local renamed: %s", out.count ? out.items[0] : "nothing");
+    request_with("textDocument/rename", good, "count + 1", 0, ",\"newName\":\"return\"");
+    CHECK(answer("-32602") && answer("not a name"), "a keyword is not a name: %s", out.count ? out.items[0] : "nothing");
+    request_with("textDocument/rename", good, "origin();", 0, ",\"newName\":\"zero\"");
+    CHECK(times("\"newText\":\"zero\"") == 2, "a function, declared and called: %s", out.count ? out.items[0] : "nothing");
+
+    exchange("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"textDocument/codeLens\",\"params\":{}}");
     CHECK(answer("-32601"), "an unknown request is an error");
     exchange("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"shutdown\"}");
     CHECK(answer("\"id\":10,\"result\":null"), "shutdown");

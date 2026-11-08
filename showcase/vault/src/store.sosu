@@ -61,7 +61,8 @@ pub bool create(Arena* arena, db.Connection* c, ui8[] password, i32 rounds, seal
     rand.fill(salt);
     *keys = seal.derive(password, salt, rounds);
     ui8[] check = seal.seal(arena, keys, check_text(arena));
-    return write_meta(c, "salt", db.Value.Bytes(salt)) && write_meta(c, "rounds", db.Value.Integer(rounds as i64)) && write_meta(c, "check", db.Value.Bytes(check));
+    return write_meta(c, "salt", db.Value.Bytes(salt)) && write_meta(c, "rounds", db.Value.Integer(rounds as i64))
+            && write_meta(c, "check", db.Value.Bytes(check));
 }
 
 ui8[]? meta_bytes(Arena* arena, keeps db.Connection* c, str key) uses io {
@@ -193,7 +194,14 @@ pub bool remove(db.Connection* c, i64 id) uses io {
 }
 
 // A new master password: new salt and keys, and every account sealed again, all or nothing.
-pub bool change_password(Arena* arena, db.Connection* c, vec.Vec<entry.Entry>* all, ui8[] password, i32 rounds, seal.Keys* keys) uses io {
+pub bool change_password(
+    Arena* arena,
+    db.Connection* c,
+    vec.Vec<entry.Entry>* all,
+    ui8[] password,
+    i32 rounds,
+    seal.Keys* keys
+) uses io {
     mut bool good = match (c.begin()) {
         ok() => true,
         err(e) => false,

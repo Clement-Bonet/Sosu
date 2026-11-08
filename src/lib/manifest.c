@@ -364,7 +364,7 @@ static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
     parse_string_array(t, list);
 }
 
-/* `id = "org.sosu.window"`, `name`, `version`, `icon`, `assets = [...]` in [app]. */
+/* `id = "org.sosu.window"`, `name`, `version`, `icon`, `description`, `copyright`, `assets = [...]` in [app]. */
 static void parse_app_entry(Toml *t, size_t key_start, size_t key_length) {
     AppSection *app = &t->manifest->app;
     if (key_is(t, key_start, key_length, "assets")) {
@@ -379,18 +379,22 @@ static void parse_app_entry(Toml *t, size_t key_start, size_t key_length) {
                  : key_is(t, key_start, key_length, "name")    ? &app->name
                  : key_is(t, key_start, key_length, "version") ? &app->version
                  : key_is(t, key_start, key_length, "icon")    ? &app->icon
+                 : key_is(t, key_start, key_length, "description") ? &app->description
+                 : key_is(t, key_start, key_length, "copyright")   ? &app->copyright
                  : NULL;
     if (!field) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [app]", (int)key_length,
                                  t->s + key_start);
-        diag_help(d, "[app] contains `id`, `name`, `version`, `icon` and `assets` (spec §11.5)");
+        diag_help(d, "[app] contains `id`, `name`, `version`, `icon`, `description`, `copyright` and `assets` "
+                     "(spec §11.5)");
         return;
     }
     if (*field) {
         error_at(t, "E0408", key_start, key_length, "duplicate key `%.*s`", (int)key_length, t->s + key_start);
         return;
     }
-    t->free_text = field == &app->name;  /* shown under the icon */
+    /* texts shown (under the icon, in the properties of the file), escaped where they are written */
+    t->free_text = field == &app->name || field == &app->description || field == &app->copyright;
     *field = parse_string(t);
     t->free_text = false;
 }
@@ -522,6 +526,8 @@ void manifest_free(Manifest *manifest) {
     free(manifest->app.name);
     free(manifest->app.version);
     free(manifest->app.icon);
+    free(manifest->app.description);
+    free(manifest->app.copyright);
     for (size_t i = 0; i < manifest->app.assets.count; i++) free(manifest->app.assets.items[i]);
     free(manifest->app.assets.items);
     memset(manifest, 0, sizeof *manifest);

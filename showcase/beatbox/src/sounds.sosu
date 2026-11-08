@@ -153,7 +153,8 @@ audio.Sound tone(Arena* arena, f64 seconds, f64 freq, f64 decay, i32 shape) {
         } else if (shape == 2) {
             v = (math.fmod(phase, math.TAU) / math.PI - 1.0) * 0.5;
         } else {
-            v = math.sin(phase) * math.exp(-t * 3.0) + 0.4 * math.sin(2.76 * phase) * math.exp(-t * 7.0) + 0.2 * math.sin(5.4 * phase) * math.exp(-t * 11.0);
+            v = math.sin(phase) * math.exp(-t * 3.0) + 0.4 * math.sin(2.76 * phase) * math.exp(-t * 7.0)
+                    + 0.2 * math.sin(5.4 * phase) * math.exp(-t * 11.0);
         }
         f64 attack = min(1.0, t * 400.0);
         s.samples[i] = (v * attack * math.exp(-t * decay) * 0.8) as f32;

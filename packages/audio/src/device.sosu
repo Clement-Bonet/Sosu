@@ -230,7 +230,8 @@ pub class Player {
 
 // A player on the device of `output`, or none if it cannot be opened (`last_error` says why).
 pub Player*? open_player(Arena* arena, Output output) uses io
-    requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE && (output.channels == 1 || output.channels == 2) && output.ahead_ms > 0 && output.ahead_ms <= 2000
+    requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE
+            && (output.channels == 1 || output.channels == 2) && output.ahead_ms > 0 && output.ahead_ms <= 2000
 {
     return match (open_stream(output.device, output.rate, output.channels)) {
         some(o) => some(arena.new(Player, arena, o, output)),
@@ -314,7 +315,8 @@ pub class Recorder {
 
 // A recorder on the device of `input`, or none if it cannot be opened (`last_error` says why).
 pub Recorder*? open_recorder(Arena* arena, Input input) uses io
-    requires input.rate >= audio.MIN_RATE && input.rate <= audio.MAX_RATE && input.channels >= 1 && input.channels <= audio.MAX_CHANNELS
+    requires input.rate >= audio.MIN_RATE && input.rate <= audio.MAX_RATE && input.channels >= 1
+            && input.channels <= audio.MAX_CHANNELS
 {
     return match (open_stream(input.device, input.rate, input.channels)) {
         some(o) => some(arena.new(Recorder, o, input)),

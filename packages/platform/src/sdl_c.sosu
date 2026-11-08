@@ -3246,7 +3246,12 @@ pub extern "C" {
     void SDL_free(ui8* mem) uses io;
     void SDL_GetOriginalMemoryFunctions(ui8* malloc_func, ui8* calloc_func, ui8* realloc_func, ui8* free_func) uses io;
     void SDL_GetMemoryFunctions(ui8* malloc_func, ui8* calloc_func, ui8* realloc_func, ui8* free_func) uses io;
-    bool SDL_SetMemoryFunctions(fn(usize) -> ui8* uses io malloc_func, fn(usize, usize) -> ui8* uses io calloc_func, fn(ui8*, usize) -> ui8* uses io realloc_func, fn(ui8*) -> void uses io free_func) uses io;
+    bool SDL_SetMemoryFunctions(
+        fn(usize) -> ui8* uses io malloc_func,
+        fn(usize, usize) -> ui8* uses io calloc_func,
+        fn(ui8*, usize) -> ui8* uses io realloc_func,
+        fn(ui8*) -> void uses io free_func
+    ) uses io;
     ui8* SDL_aligned_alloc(usize alignment, usize size) uses io;
     void SDL_aligned_free(ui8* mem) uses io;
     i32 SDL_GetNumAllocations() uses io;
@@ -3263,8 +3268,21 @@ pub extern "C" {
     i32 SDL_unsetenv_unsafe(ui8* name) uses io;
     void SDL_qsort(ui8* base_, usize nmemb, usize size, fn(ui8*, ui8*) -> i32 uses io compare) uses io;
     ui8* SDL_bsearch(ui8* key, ui8* base_, usize nmemb, usize size, fn(ui8*, ui8*) -> i32 uses io compare) uses io;
-    void SDL_qsort_r(ui8* base_, usize nmemb, usize size, fn(ui8*, ui8*, ui8*) -> i32 uses io compare, ui8* userdata) uses io;
-    ui8* SDL_bsearch_r(ui8* key, ui8* base_, usize nmemb, usize size, fn(ui8*, ui8*, ui8*) -> i32 uses io compare, ui8* userdata) uses io;
+    void SDL_qsort_r(
+        ui8* base_,
+        usize nmemb,
+        usize size,
+        fn(ui8*, ui8*, ui8*) -> i32 uses io compare,
+        ui8* userdata
+    ) uses io;
+    ui8* SDL_bsearch_r(
+        ui8* key,
+        ui8* base_,
+        usize nmemb,
+        usize size,
+        fn(ui8*, ui8*, ui8*) -> i32 uses io compare,
+        ui8* userdata
+    ) uses io;
     i32 SDL_abs(i32 x) uses io;
     i32 SDL_isalpha(i32 x) uses io;
     i32 SDL_isalnum(i32 x) uses io;
@@ -3412,8 +3430,22 @@ pub extern "C" {
     void SDL_ResetAssertionReport() uses io;
     SDL_AsyncIO* SDL_AsyncIOFromFile(ui8* file, ui8* mode) uses io;
     i64 SDL_GetAsyncIOSize(SDL_AsyncIO* asyncio) uses io;
-    bool SDL_ReadAsyncIO(SDL_AsyncIO* asyncio, ui8* ptr, ui64 offset, ui64 size, SDL_AsyncIOQueue* queue, ui8* userdata) uses io;
-    bool SDL_WriteAsyncIO(SDL_AsyncIO* asyncio, ui8* ptr, ui64 offset, ui64 size, SDL_AsyncIOQueue* queue, ui8* userdata) uses io;
+    bool SDL_ReadAsyncIO(
+        SDL_AsyncIO* asyncio,
+        ui8* ptr,
+        ui64 offset,
+        ui64 size,
+        SDL_AsyncIOQueue* queue,
+        ui8* userdata
+    ) uses io;
+    bool SDL_WriteAsyncIO(
+        SDL_AsyncIO* asyncio,
+        ui8* ptr,
+        ui64 offset,
+        ui64 size,
+        SDL_AsyncIOQueue* queue,
+        ui8* userdata
+    ) uses io;
     bool SDL_CloseAsyncIO(SDL_AsyncIO* asyncio, bool flush, SDL_AsyncIOQueue* queue, ui8* userdata) uses io;
     SDL_AsyncIOQueue* SDL_CreateAsyncIOQueue() uses io;
     void SDL_DestroyAsyncIOQueue(SDL_AsyncIOQueue* queue) uses io;
@@ -3447,7 +3479,13 @@ pub extern "C" {
     bool SDL_CopyProperties(ui32 src, ui32 dst) uses io;
     bool SDL_LockProperties(ui32 props) uses io;
     void SDL_UnlockProperties(ui32 props) uses io;
-    bool SDL_SetPointerPropertyWithCleanup(ui32 props, ui8* name, ui8* value, fn(ui8*, ui8*) -> void uses io cleanup, ui8* userdata) uses io;
+    bool SDL_SetPointerPropertyWithCleanup(
+        ui32 props,
+        ui8* name,
+        ui8* value,
+        fn(ui8*, ui8*) -> void uses io cleanup,
+        ui8* userdata
+    ) uses io;
     bool SDL_SetPointerProperty(ui32 props, ui8* name, ui8* value) uses io;
     bool SDL_SetStringProperty(ui32 props, ui8* name, ui8* value) uses io;
     bool SDL_SetNumberProperty(ui32 props, ui8* name, i64 value) uses io;
@@ -3463,8 +3501,18 @@ pub extern "C" {
     bool SDL_ClearProperty(ui32 props, ui8* name) uses io;
     bool SDL_EnumerateProperties(ui32 props, fn(ui8*, ui32, ui8*) -> void uses io callback, ui8* userdata) uses io;
     void SDL_DestroyProperties(ui32 props) uses io;
-    SDL_Thread* SDL_CreateThreadRuntime(fn(ui8*) -> i32 uses io fn_, ui8* name, ui8* data, fn() -> void uses io pfnBeginThread, fn() -> void uses io pfnEndThread) uses io;
-    SDL_Thread* SDL_CreateThreadWithPropertiesRuntime(ui32 props, fn() -> void uses io pfnBeginThread, fn() -> void uses io pfnEndThread) uses io;
+    SDL_Thread* SDL_CreateThreadRuntime(
+        fn(ui8*) -> i32 uses io fn_,
+        ui8* name,
+        ui8* data,
+        fn() -> void uses io pfnBeginThread,
+        fn() -> void uses io pfnEndThread
+    ) uses io;
+    SDL_Thread* SDL_CreateThreadWithPropertiesRuntime(
+        ui32 props,
+        fn() -> void uses io pfnBeginThread,
+        fn() -> void uses io pfnEndThread
+    ) uses io;
     ui8* SDL_GetThreadName(SDL_Thread* thread) uses io;
     ui64 SDL_GetCurrentThreadID() uses io;
     ui64 SDL_GetThreadID(SDL_Thread* thread) uses io;
@@ -3585,8 +3633,19 @@ pub extern "C" {
     bool SDL_SetAudioStreamInputChannelMap(SDL_AudioStream* stream, i32* chmap, i32 count) uses io;
     bool SDL_SetAudioStreamOutputChannelMap(SDL_AudioStream* stream, i32* chmap, i32 count) uses io;
     bool SDL_PutAudioStreamData(SDL_AudioStream* stream, ui8* buf, i32 len) uses io;
-    bool SDL_PutAudioStreamDataNoCopy(SDL_AudioStream* stream, ui8* buf, i32 len, fn(ui8*, ui8*, i32) -> void uses io callback, ui8* userdata) uses io;
-    bool SDL_PutAudioStreamPlanarData(SDL_AudioStream* stream, ui8** channel_buffers, i32 num_channels, i32 num_samples) uses io;
+    bool SDL_PutAudioStreamDataNoCopy(
+        SDL_AudioStream* stream,
+        ui8* buf,
+        i32 len,
+        fn(ui8*, ui8*, i32) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
+    bool SDL_PutAudioStreamPlanarData(
+        SDL_AudioStream* stream,
+        ui8** channel_buffers,
+        i32 num_channels,
+        i32 num_samples
+    ) uses io;
     i32 SDL_GetAudioStreamData(SDL_AudioStream* stream, ui8* buf, i32 len) uses io;
     i32 SDL_GetAudioStreamAvailable(SDL_AudioStream* stream) uses io;
     i32 SDL_GetAudioStreamQueued(SDL_AudioStream* stream) uses io;
@@ -3597,20 +3656,51 @@ pub extern "C" {
     bool SDL_AudioStreamDevicePaused(SDL_AudioStream* stream) uses io;
     bool SDL_LockAudioStream(SDL_AudioStream* stream) uses io;
     bool SDL_UnlockAudioStream(SDL_AudioStream* stream) uses io;
-    bool SDL_SetAudioStreamGetCallback(SDL_AudioStream* stream, fn(ui8*, SDL_AudioStream*, i32, i32) -> void uses io callback, ui8* userdata) uses io;
-    bool SDL_SetAudioStreamPutCallback(SDL_AudioStream* stream, fn(ui8*, SDL_AudioStream*, i32, i32) -> void uses io callback, ui8* userdata) uses io;
+    bool SDL_SetAudioStreamGetCallback(
+        SDL_AudioStream* stream,
+        fn(ui8*, SDL_AudioStream*, i32, i32) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
+    bool SDL_SetAudioStreamPutCallback(
+        SDL_AudioStream* stream,
+        fn(ui8*, SDL_AudioStream*, i32, i32) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
     void SDL_DestroyAudioStream(SDL_AudioStream* stream) uses io;
-    SDL_AudioStream* SDL_OpenAudioDeviceStream(ui32 devid, SDL_AudioSpec* spec, fn(ui8*, SDL_AudioStream*, i32, i32) -> void uses io callback, ui8* userdata) uses io;
-    bool SDL_SetAudioPostmixCallback(ui32 devid, fn(ui8*, SDL_AudioSpec*, f32*, i32) -> void uses io callback, ui8* userdata) uses io;
+    SDL_AudioStream* SDL_OpenAudioDeviceStream(
+        ui32 devid,
+        SDL_AudioSpec* spec,
+        fn(ui8*, SDL_AudioStream*, i32, i32) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
+    bool SDL_SetAudioPostmixCallback(
+        ui32 devid,
+        fn(ui8*, SDL_AudioSpec*, f32*, i32) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
     bool SDL_LoadWAV_IO(SDL_IOStream* src, bool closeio, SDL_AudioSpec* spec, ui8** audio_buf, ui32* audio_len) uses io;
     bool SDL_LoadWAV(ui8* path, SDL_AudioSpec* spec, ui8** audio_buf, ui32* audio_len) uses io;
     bool SDL_MixAudio(ui8* dst, ui8* src, i32 format, ui32 len, f32 volume) uses io;
-    bool SDL_ConvertAudioSamples(SDL_AudioSpec* src_spec, ui8* src_data, i32 src_len, SDL_AudioSpec* dst_spec, ui8** dst_data, i32* dst_len) uses io;
+    bool SDL_ConvertAudioSamples(
+        SDL_AudioSpec* src_spec,
+        ui8* src_data,
+        i32 src_len,
+        SDL_AudioSpec* dst_spec,
+        ui8** dst_data,
+        i32* dst_len
+    ) uses io;
     ui8* SDL_GetAudioFormatName(i32 format) uses io;
     i32 SDL_GetSilenceValueForFormat(i32 format) uses io;
     i32 SDL_MostSignificantBitIndex32(ui32 x) uses io;
     bool SDL_HasExactlyOneBitSet32(ui32 x) uses io;
-    ui32 SDL_ComposeCustomBlendMode(i32 srcColorFactor, i32 dstColorFactor, i32 colorOperation, i32 srcAlphaFactor, i32 dstAlphaFactor, i32 alphaOperation) uses io;
+    ui32 SDL_ComposeCustomBlendMode(
+        i32 srcColorFactor,
+        i32 dstColorFactor,
+        i32 colorOperation,
+        i32 srcAlphaFactor,
+        i32 dstAlphaFactor,
+        i32 alphaOperation
+    ) uses io;
     ui8* SDL_GetPixelFormatName(i32 format) uses io;
     bool SDL_GetMasksForPixelFormat(i32 format, i32* bpp, ui32* Rmask, ui32* Gmask, ui32* Bmask, ui32* Amask) uses io;
     i32 SDL_GetPixelFormatForMasks(i32 bpp, ui32 Rmask, ui32 Gmask, ui32 Bmask, ui32 Amask) uses io;
@@ -3620,8 +3710,23 @@ pub extern "C" {
     void SDL_DestroyPalette(SDL_Palette* palette) uses io;
     ui32 SDL_MapRGB(SDL_PixelFormatDetails* format, SDL_Palette* palette, ui8 r, ui8 g, ui8 b) uses io;
     ui32 SDL_MapRGBA(SDL_PixelFormatDetails* format, SDL_Palette* palette, ui8 r, ui8 g, ui8 b, ui8 a) uses io;
-    void SDL_GetRGB(ui32 pixelvalue, SDL_PixelFormatDetails* format, SDL_Palette* palette, ui8* r, ui8* g, ui8* b) uses io;
-    void SDL_GetRGBA(ui32 pixelvalue, SDL_PixelFormatDetails* format, SDL_Palette* palette, ui8* r, ui8* g, ui8* b, ui8* a) uses io;
+    void SDL_GetRGB(
+        ui32 pixelvalue,
+        SDL_PixelFormatDetails* format,
+        SDL_Palette* palette,
+        ui8* r,
+        ui8* g,
+        ui8* b
+    ) uses io;
+    void SDL_GetRGBA(
+        ui32 pixelvalue,
+        SDL_PixelFormatDetails* format,
+        SDL_Palette* palette,
+        ui8* r,
+        ui8* g,
+        ui8* b,
+        ui8* a
+    ) uses io;
     void SDL_RectToFRect(SDL_Rect* rect, SDL_FRect* frect) uses io;
     bool SDL_PointInRect(SDL_Point* p, SDL_Rect* r) uses io;
     bool SDL_RectEmpty(SDL_Rect* r) uses io;
@@ -3683,22 +3788,96 @@ pub extern "C" {
     SDL_Surface* SDL_DuplicateSurface(SDL_Surface* surface) uses io;
     SDL_Surface* SDL_ScaleSurface(SDL_Surface* surface, i32 width, i32 height, i32 scaleMode) uses io;
     SDL_Surface* SDL_ConvertSurface(SDL_Surface* surface, i32 format) uses io;
-    SDL_Surface* SDL_ConvertSurfaceAndColorspace(SDL_Surface* surface, i32 format, SDL_Palette* palette, i32 colorspace, ui32 props) uses io;
-    bool SDL_ConvertPixels(i32 width, i32 height, i32 src_format, ui8* src, i32 src_pitch, i32 dst_format, ui8* dst, i32 dst_pitch) uses io;
-    bool SDL_ConvertPixelsAndColorspace(i32 width, i32 height, i32 src_format, i32 src_colorspace, ui32 src_properties, ui8* src, i32 src_pitch, i32 dst_format, i32 dst_colorspace, ui32 dst_properties, ui8* dst, i32 dst_pitch) uses io;
-    bool SDL_PremultiplyAlpha(i32 width, i32 height, i32 src_format, ui8* src, i32 src_pitch, i32 dst_format, ui8* dst, i32 dst_pitch, bool linear) uses io;
+    SDL_Surface* SDL_ConvertSurfaceAndColorspace(
+        SDL_Surface* surface,
+        i32 format,
+        SDL_Palette* palette,
+        i32 colorspace,
+        ui32 props
+    ) uses io;
+    bool SDL_ConvertPixels(
+        i32 width,
+        i32 height,
+        i32 src_format,
+        ui8* src,
+        i32 src_pitch,
+        i32 dst_format,
+        ui8* dst,
+        i32 dst_pitch
+    ) uses io;
+    bool SDL_ConvertPixelsAndColorspace(
+        i32 width,
+        i32 height,
+        i32 src_format,
+        i32 src_colorspace,
+        ui32 src_properties,
+        ui8* src,
+        i32 src_pitch,
+        i32 dst_format,
+        i32 dst_colorspace,
+        ui32 dst_properties,
+        ui8* dst,
+        i32 dst_pitch
+    ) uses io;
+    bool SDL_PremultiplyAlpha(
+        i32 width,
+        i32 height,
+        i32 src_format,
+        ui8* src,
+        i32 src_pitch,
+        i32 dst_format,
+        ui8* dst,
+        i32 dst_pitch,
+        bool linear
+    ) uses io;
     bool SDL_PremultiplySurfaceAlpha(SDL_Surface* surface, bool linear) uses io;
     bool SDL_ClearSurface(SDL_Surface* surface, f32 r, f32 g, f32 b, f32 a) uses io;
     bool SDL_FillSurfaceRect(SDL_Surface* dst, SDL_Rect* rect, ui32 color) uses io;
     bool SDL_FillSurfaceRects(SDL_Surface* dst, SDL_Rect* rects, i32 count, ui32 color) uses io;
     bool SDL_BlitSurface(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect) uses io;
     bool SDL_BlitSurfaceUnchecked(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect) uses io;
-    bool SDL_BlitSurfaceScaled(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect, i32 scaleMode) uses io;
-    bool SDL_BlitSurfaceUncheckedScaled(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect, i32 scaleMode) uses io;
-    bool SDL_StretchSurface(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect, i32 scaleMode) uses io;
+    bool SDL_BlitSurfaceScaled(
+        SDL_Surface* src,
+        SDL_Rect* srcrect,
+        SDL_Surface* dst,
+        SDL_Rect* dstrect,
+        i32 scaleMode
+    ) uses io;
+    bool SDL_BlitSurfaceUncheckedScaled(
+        SDL_Surface* src,
+        SDL_Rect* srcrect,
+        SDL_Surface* dst,
+        SDL_Rect* dstrect,
+        i32 scaleMode
+    ) uses io;
+    bool SDL_StretchSurface(
+        SDL_Surface* src,
+        SDL_Rect* srcrect,
+        SDL_Surface* dst,
+        SDL_Rect* dstrect,
+        i32 scaleMode
+    ) uses io;
     bool SDL_BlitSurfaceTiled(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect) uses io;
-    bool SDL_BlitSurfaceTiledWithScale(SDL_Surface* src, SDL_Rect* srcrect, f32 scale, i32 scaleMode, SDL_Surface* dst, SDL_Rect* dstrect) uses io;
-    bool SDL_BlitSurface9Grid(SDL_Surface* src, SDL_Rect* srcrect, i32 left_width, i32 right_width, i32 top_height, i32 bottom_height, f32 scale, i32 scaleMode, SDL_Surface* dst, SDL_Rect* dstrect) uses io;
+    bool SDL_BlitSurfaceTiledWithScale(
+        SDL_Surface* src,
+        SDL_Rect* srcrect,
+        f32 scale,
+        i32 scaleMode,
+        SDL_Surface* dst,
+        SDL_Rect* dstrect
+    ) uses io;
+    bool SDL_BlitSurface9Grid(
+        SDL_Surface* src,
+        SDL_Rect* srcrect,
+        i32 left_width,
+        i32 right_width,
+        i32 top_height,
+        i32 bottom_height,
+        f32 scale,
+        i32 scaleMode,
+        SDL_Surface* dst,
+        SDL_Rect* dstrect
+    ) uses io;
     ui32 SDL_MapSurfaceRGB(SDL_Surface* surface, ui8 r, ui8 g, ui8 b) uses io;
     ui32 SDL_MapSurfaceRGBA(SDL_Surface* surface, ui8 r, ui8 g, ui8 b, ui8 a) uses io;
     bool SDL_ReadSurfacePixel(SDL_Surface* surface, i32 x, i32 y, ui8* r, ui8* g, ui8* b, ui8* a) uses io;
@@ -3726,7 +3905,13 @@ pub extern "C" {
     bool SDL_SetPrimarySelectionText(ui8* text) uses io;
     ui8* SDL_GetPrimarySelectionText() uses io;
     bool SDL_HasPrimarySelectionText() uses io;
-    bool SDL_SetClipboardData(fn(ui8*, ui8*, usize*) -> ui8* uses io callback, fn(ui8*) -> void uses io cleanup, ui8* userdata, ui8** mime_types, usize num_mime_types) uses io;
+    bool SDL_SetClipboardData(
+        fn(ui8*, ui8*, usize*) -> ui8* uses io callback,
+        fn(ui8*) -> void uses io cleanup,
+        ui8* userdata,
+        ui8** mime_types,
+        usize num_mime_types
+    ) uses io;
     bool SDL_ClearClipboardData() uses io;
     ui8* SDL_GetClipboardData(ui8* mime_type, usize* size) uses io;
     bool SDL_HasClipboardData(ui8* mime_type) uses io;
@@ -3764,7 +3949,14 @@ pub extern "C" {
     i32 SDL_GetCurrentDisplayOrientation(ui32 displayID) uses io;
     f32 SDL_GetDisplayContentScale(ui32 displayID) uses io;
     SDL_DisplayMode** SDL_GetFullscreenDisplayModes(ui32 displayID, i32* count) uses io;
-    bool SDL_GetClosestFullscreenDisplayMode(ui32 displayID, i32 w, i32 h, f32 refresh_rate, bool include_high_density_modes, SDL_DisplayMode* closest) uses io;
+    bool SDL_GetClosestFullscreenDisplayMode(
+        ui32 displayID,
+        i32 w,
+        i32 h,
+        f32 refresh_rate,
+        bool include_high_density_modes,
+        SDL_DisplayMode* closest
+    ) uses io;
     SDL_DisplayMode* SDL_GetDesktopDisplayMode(ui32 displayID) uses io;
     SDL_DisplayMode* SDL_GetCurrentDisplayMode(ui32 displayID) uses io;
     ui32 SDL_GetDisplayForPoint(SDL_Point* point) uses io;
@@ -3833,7 +4025,11 @@ pub extern "C" {
     bool SDL_SetWindowModal(SDL_Window* window, bool modal) uses io;
     bool SDL_SetWindowFocusable(SDL_Window* window, bool focusable) uses io;
     bool SDL_ShowWindowSystemMenu(SDL_Window* window, i32 x, i32 y) uses io;
-    bool SDL_SetWindowHitTest(SDL_Window* window, fn(SDL_Window*, SDL_Point*, ui8*) -> i32 uses io callback, ui8* callback_data) uses io;
+    bool SDL_SetWindowHitTest(
+        SDL_Window* window,
+        fn(SDL_Window*, SDL_Point*, ui8*) -> i32 uses io callback,
+        ui8* callback_data
+    ) uses io;
     bool SDL_SetWindowShape(SDL_Window* window, SDL_Surface* shape) uses io;
     bool SDL_FlashWindow(SDL_Window* window, i32 operation) uses io;
     bool SDL_SetWindowProgressState(SDL_Window* window, i32 state) uses io;
@@ -3859,15 +4055,46 @@ pub extern "C" {
     ui8* SDL_EGL_GetCurrentDisplay() uses io;
     ui8* SDL_EGL_GetCurrentConfig() uses io;
     ui8* SDL_EGL_GetWindowSurface(SDL_Window* window) uses io;
-    void SDL_EGL_SetAttributeCallbacks(fn(ui8*) -> isize* uses io platformAttribCallback, fn(ui8*, ui8*, ui8*) -> i32* uses io surfaceAttribCallback, fn(ui8*, ui8*, ui8*) -> i32* uses io contextAttribCallback, ui8* userdata) uses io;
+    void SDL_EGL_SetAttributeCallbacks(
+        fn(ui8*) -> isize* uses io platformAttribCallback,
+        fn(ui8*, ui8*, ui8*) -> i32* uses io surfaceAttribCallback,
+        fn(ui8*, ui8*, ui8*) -> i32* uses io contextAttribCallback,
+        ui8* userdata
+    ) uses io;
     bool SDL_GL_SetSwapInterval(i32 interval) uses io;
     bool SDL_GL_GetSwapInterval(i32* interval) uses io;
     bool SDL_GL_SwapWindow(SDL_Window* window) uses io;
     bool SDL_GL_DestroyContext(SDL_GLContextState* context) uses io;
-    void SDL_ShowOpenFileDialog(fn(ui8*, ui8**, i32) -> void uses io callback, ui8* userdata, SDL_Window* window, SDL_DialogFileFilter* filters, i32 nfilters, ui8* default_location, bool allow_many) uses io;
-    void SDL_ShowSaveFileDialog(fn(ui8*, ui8**, i32) -> void uses io callback, ui8* userdata, SDL_Window* window, SDL_DialogFileFilter* filters, i32 nfilters, ui8* default_location) uses io;
-    void SDL_ShowOpenFolderDialog(fn(ui8*, ui8**, i32) -> void uses io callback, ui8* userdata, SDL_Window* window, ui8* default_location, bool allow_many) uses io;
-    void SDL_ShowFileDialogWithProperties(i32 type, fn(ui8*, ui8**, i32) -> void uses io callback, ui8* userdata, ui32 props) uses io;
+    void SDL_ShowOpenFileDialog(
+        fn(ui8*, ui8**, i32) -> void uses io callback,
+        ui8* userdata,
+        SDL_Window* window,
+        SDL_DialogFileFilter* filters,
+        i32 nfilters,
+        ui8* default_location,
+        bool allow_many
+    ) uses io;
+    void SDL_ShowSaveFileDialog(
+        fn(ui8*, ui8**, i32) -> void uses io callback,
+        ui8* userdata,
+        SDL_Window* window,
+        SDL_DialogFileFilter* filters,
+        i32 nfilters,
+        ui8* default_location
+    ) uses io;
+    void SDL_ShowOpenFolderDialog(
+        fn(ui8*, ui8**, i32) -> void uses io callback,
+        ui8* userdata,
+        SDL_Window* window,
+        ui8* default_location,
+        bool allow_many
+    ) uses io;
+    void SDL_ShowFileDialogWithProperties(
+        i32 type,
+        fn(ui8*, ui8**, i32) -> void uses io callback,
+        ui8* userdata,
+        ui32 props
+    ) uses io;
     void SDL_GUIDToString(SDL_GUID guid, ui8* pszGUID, i32 cbGUID) uses io;
     SDL_GUID SDL_StringToGUID(ui8* pchGUID) uses io;
     i32 SDL_GetPowerInfo(i32* seconds, i32* percent) uses io;
@@ -3907,8 +4134,22 @@ pub extern "C" {
     bool SDL_SetJoystickVirtualBall(SDL_Joystick* joystick, i32 ball, i16 xrel, i16 yrel) uses io;
     bool SDL_SetJoystickVirtualButton(SDL_Joystick* joystick, i32 button, bool down) uses io;
     bool SDL_SetJoystickVirtualHat(SDL_Joystick* joystick, i32 hat, ui8 value) uses io;
-    bool SDL_SetJoystickVirtualTouchpad(SDL_Joystick* joystick, i32 touchpad, i32 finger, bool down, f32 x, f32 y, f32 pressure) uses io;
-    bool SDL_SendJoystickVirtualSensorData(SDL_Joystick* joystick, i32 type, ui64 sensor_timestamp, f32* data, i32 num_values) uses io;
+    bool SDL_SetJoystickVirtualTouchpad(
+        SDL_Joystick* joystick,
+        i32 touchpad,
+        i32 finger,
+        bool down,
+        f32 x,
+        f32 y,
+        f32 pressure
+    ) uses io;
+    bool SDL_SendJoystickVirtualSensorData(
+        SDL_Joystick* joystick,
+        i32 type,
+        ui64 sensor_timestamp,
+        f32* data,
+        i32 num_values
+    ) uses io;
     ui32 SDL_GetJoystickProperties(SDL_Joystick* joystick) uses io;
     ui8* SDL_GetJoystickName(SDL_Joystick* joystick) uses io;
     ui8* SDL_GetJoystickPath(SDL_Joystick* joystick) uses io;
@@ -3936,8 +4177,18 @@ pub extern "C" {
     bool SDL_GetJoystickBall(SDL_Joystick* joystick, i32 ball, i32* dx, i32* dy) uses io;
     ui8 SDL_GetJoystickHat(SDL_Joystick* joystick, i32 hat) uses io;
     bool SDL_GetJoystickButton(SDL_Joystick* joystick, i32 button) uses io;
-    bool SDL_RumbleJoystick(SDL_Joystick* joystick, ui16 low_frequency_rumble, ui16 high_frequency_rumble, ui32 duration_ms) uses io;
-    bool SDL_RumbleJoystickTriggers(SDL_Joystick* joystick, ui16 left_rumble, ui16 right_rumble, ui32 duration_ms) uses io;
+    bool SDL_RumbleJoystick(
+        SDL_Joystick* joystick,
+        ui16 low_frequency_rumble,
+        ui16 high_frequency_rumble,
+        ui32 duration_ms
+    ) uses io;
+    bool SDL_RumbleJoystickTriggers(
+        SDL_Joystick* joystick,
+        ui16 left_rumble,
+        ui16 right_rumble,
+        ui32 duration_ms
+    ) uses io;
     bool SDL_SetJoystickLED(SDL_Joystick* joystick, ui8 red, ui8 green, ui8 blue) uses io;
     bool SDL_SendJoystickEffect(SDL_Joystick* joystick, ui8* data, i32 size) uses io;
     void SDL_CloseJoystick(SDL_Joystick* joystick) uses io;
@@ -4003,13 +4254,26 @@ pub extern "C" {
     i32 SDL_GetGamepadButtonLabel(SDL_Gamepad* gamepad, i32 button) uses io;
     i32 SDL_GetNumGamepadTouchpads(SDL_Gamepad* gamepad) uses io;
     i32 SDL_GetNumGamepadTouchpadFingers(SDL_Gamepad* gamepad, i32 touchpad) uses io;
-    bool SDL_GetGamepadTouchpadFinger(SDL_Gamepad* gamepad, i32 touchpad, i32 finger, bool* down, f32* x, f32* y, f32* pressure) uses io;
+    bool SDL_GetGamepadTouchpadFinger(
+        SDL_Gamepad* gamepad,
+        i32 touchpad,
+        i32 finger,
+        bool* down,
+        f32* x,
+        f32* y,
+        f32* pressure
+    ) uses io;
     bool SDL_GamepadHasSensor(SDL_Gamepad* gamepad, i32 type) uses io;
     bool SDL_SetGamepadSensorEnabled(SDL_Gamepad* gamepad, i32 type, bool enabled) uses io;
     bool SDL_GamepadSensorEnabled(SDL_Gamepad* gamepad, i32 type) uses io;
     f32 SDL_GetGamepadSensorDataRate(SDL_Gamepad* gamepad, i32 type) uses io;
     bool SDL_GetGamepadSensorData(SDL_Gamepad* gamepad, i32 type, f32* data, i32 num_values) uses io;
-    bool SDL_RumbleGamepad(SDL_Gamepad* gamepad, ui16 low_frequency_rumble, ui16 high_frequency_rumble, ui32 duration_ms) uses io;
+    bool SDL_RumbleGamepad(
+        SDL_Gamepad* gamepad,
+        ui16 low_frequency_rumble,
+        ui16 high_frequency_rumble,
+        ui32 duration_ms
+    ) uses io;
     bool SDL_RumbleGamepadTriggers(SDL_Gamepad* gamepad, ui16 left_rumble, ui16 right_rumble, ui32 duration_ms) uses io;
     bool SDL_SetGamepadLED(SDL_Gamepad* gamepad, ui8 red, ui8 green, ui8 blue) uses io;
     bool SDL_SendGamepadEffect(SDL_Gamepad* gamepad, ui8* data, i32 size) uses io;
@@ -4049,7 +4313,10 @@ pub extern "C" {
     ui32 SDL_GetRelativeMouseState(f32* x, f32* y) uses io;
     void SDL_WarpMouseInWindow(SDL_Window* window, f32 x, f32 y) uses io;
     bool SDL_WarpMouseGlobal(f32 x, f32 y) uses io;
-    bool SDL_SetRelativeMouseTransform(fn(ui8*, ui64, SDL_Window*, ui32, f32*, f32*) -> void uses io callback, ui8* userdata) uses io;
+    bool SDL_SetRelativeMouseTransform(
+        fn(ui8*, ui64, SDL_Window*, ui32, f32*, f32*) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
     bool SDL_SetWindowRelativeMouseMode(SDL_Window* window, bool enabled) uses io;
     bool SDL_GetWindowRelativeMouseMode(SDL_Window* window) uses io;
     bool SDL_CaptureMouse(bool enabled) uses io;
@@ -4110,13 +4377,22 @@ pub extern "C" {
     ui8* SDL_GetGPUDeviceDriver(SDL_GPUDevice* device) uses io;
     ui32 SDL_GetGPUShaderFormats(SDL_GPUDevice* device) uses io;
     ui32 SDL_GetGPUDeviceProperties(SDL_GPUDevice* device) uses io;
-    SDL_GPUComputePipeline* SDL_CreateGPUComputePipeline(SDL_GPUDevice* device, SDL_GPUComputePipelineCreateInfo* createinfo) uses io;
-    SDL_GPUGraphicsPipeline* SDL_CreateGPUGraphicsPipeline(SDL_GPUDevice* device, SDL_GPUGraphicsPipelineCreateInfo* createinfo) uses io;
+    SDL_GPUComputePipeline* SDL_CreateGPUComputePipeline(
+        SDL_GPUDevice* device,
+        SDL_GPUComputePipelineCreateInfo* createinfo
+    ) uses io;
+    SDL_GPUGraphicsPipeline* SDL_CreateGPUGraphicsPipeline(
+        SDL_GPUDevice* device,
+        SDL_GPUGraphicsPipelineCreateInfo* createinfo
+    ) uses io;
     SDL_GPUSampler* SDL_CreateGPUSampler(SDL_GPUDevice* device, SDL_GPUSamplerCreateInfo* createinfo) uses io;
     SDL_GPUShader* SDL_CreateGPUShader(SDL_GPUDevice* device, SDL_GPUShaderCreateInfo* createinfo) uses io;
     SDL_GPUTexture* SDL_CreateGPUTexture(SDL_GPUDevice* device, SDL_GPUTextureCreateInfo* createinfo) uses io;
     SDL_GPUBuffer* SDL_CreateGPUBuffer(SDL_GPUDevice* device, SDL_GPUBufferCreateInfo* createinfo) uses io;
-    SDL_GPUTransferBuffer* SDL_CreateGPUTransferBuffer(SDL_GPUDevice* device, SDL_GPUTransferBufferCreateInfo* createinfo) uses io;
+    SDL_GPUTransferBuffer* SDL_CreateGPUTransferBuffer(
+        SDL_GPUDevice* device,
+        SDL_GPUTransferBufferCreateInfo* createinfo
+    ) uses io;
     void SDL_SetGPUBufferName(SDL_GPUDevice* device, SDL_GPUBuffer* buffer, ui8* text) uses io;
     void SDL_SetGPUTextureName(SDL_GPUDevice* device, SDL_GPUTexture* texture, ui8* text) uses io;
     void SDL_InsertGPUDebugLabel(SDL_GPUCommandBuffer* command_buffer, ui8* text) uses io;
@@ -4130,58 +4406,222 @@ pub extern "C" {
     void SDL_ReleaseGPUShader(SDL_GPUDevice* device, SDL_GPUShader* shader) uses io;
     void SDL_ReleaseGPUGraphicsPipeline(SDL_GPUDevice* device, SDL_GPUGraphicsPipeline* graphics_pipeline) uses io;
     SDL_GPUCommandBuffer* SDL_AcquireGPUCommandBuffer(SDL_GPUDevice* device) uses io;
-    void SDL_PushGPUVertexUniformData(SDL_GPUCommandBuffer* command_buffer, ui32 slot_index, ui8* data, ui32 length) uses io;
-    void SDL_PushGPUFragmentUniformData(SDL_GPUCommandBuffer* command_buffer, ui32 slot_index, ui8* data, ui32 length) uses io;
-    void SDL_PushGPUComputeUniformData(SDL_GPUCommandBuffer* command_buffer, ui32 slot_index, ui8* data, ui32 length) uses io;
-    SDL_GPURenderPass* SDL_BeginGPURenderPass(SDL_GPUCommandBuffer* command_buffer, SDL_GPUColorTargetInfo* color_target_infos, ui32 num_color_targets, SDL_GPUDepthStencilTargetInfo* depth_stencil_target_info) uses io;
-    void SDL_BindGPUGraphicsPipeline(SDL_GPURenderPass* render_pass, SDL_GPUGraphicsPipeline* graphics_pipeline) uses io;
+    void SDL_PushGPUVertexUniformData(
+        SDL_GPUCommandBuffer* command_buffer,
+        ui32 slot_index,
+        ui8* data,
+        ui32 length
+    ) uses io;
+    void SDL_PushGPUFragmentUniformData(
+        SDL_GPUCommandBuffer* command_buffer,
+        ui32 slot_index,
+        ui8* data,
+        ui32 length
+    ) uses io;
+    void SDL_PushGPUComputeUniformData(
+        SDL_GPUCommandBuffer* command_buffer,
+        ui32 slot_index,
+        ui8* data,
+        ui32 length
+    ) uses io;
+    SDL_GPURenderPass* SDL_BeginGPURenderPass(
+        SDL_GPUCommandBuffer* command_buffer,
+        SDL_GPUColorTargetInfo* color_target_infos,
+        ui32 num_color_targets,
+        SDL_GPUDepthStencilTargetInfo* depth_stencil_target_info
+    ) uses io;
+    void SDL_BindGPUGraphicsPipeline(
+        SDL_GPURenderPass* render_pass,
+        SDL_GPUGraphicsPipeline* graphics_pipeline
+    ) uses io;
     void SDL_SetGPUViewport(SDL_GPURenderPass* render_pass, SDL_GPUViewport* viewport) uses io;
     void SDL_SetGPUScissor(SDL_GPURenderPass* render_pass, SDL_Rect* scissor) uses io;
     void SDL_SetGPUBlendConstants(SDL_GPURenderPass* render_pass, SDL_FColor blend_constants) uses io;
     void SDL_SetGPUStencilReference(SDL_GPURenderPass* render_pass, ui8 reference) uses io;
-    void SDL_BindGPUVertexBuffers(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUBufferBinding* bindings, ui32 num_bindings) uses io;
-    void SDL_BindGPUIndexBuffer(SDL_GPURenderPass* render_pass, SDL_GPUBufferBinding* binding, i32 index_element_size) uses io;
-    void SDL_BindGPUVertexSamplers(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUTextureSamplerBinding* texture_sampler_bindings, ui32 num_bindings) uses io;
-    void SDL_BindGPUVertexStorageTextures(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUTexture** storage_textures, ui32 num_bindings) uses io;
-    void SDL_BindGPUVertexStorageBuffers(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUBuffer** storage_buffers, ui32 num_bindings) uses io;
-    void SDL_BindGPUFragmentSamplers(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUTextureSamplerBinding* texture_sampler_bindings, ui32 num_bindings) uses io;
-    void SDL_BindGPUFragmentStorageTextures(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUTexture** storage_textures, ui32 num_bindings) uses io;
-    void SDL_BindGPUFragmentStorageBuffers(SDL_GPURenderPass* render_pass, ui32 first_slot, SDL_GPUBuffer** storage_buffers, ui32 num_bindings) uses io;
-    void SDL_DrawGPUIndexedPrimitives(SDL_GPURenderPass* render_pass, ui32 num_indices, ui32 num_instances, ui32 first_index, i32 vertex_offset, ui32 first_instance) uses io;
-    void SDL_DrawGPUPrimitives(SDL_GPURenderPass* render_pass, ui32 num_vertices, ui32 num_instances, ui32 first_vertex, ui32 first_instance) uses io;
-    void SDL_DrawGPUPrimitivesIndirect(SDL_GPURenderPass* render_pass, SDL_GPUBuffer* buffer, ui32 offset, ui32 draw_count) uses io;
-    void SDL_DrawGPUIndexedPrimitivesIndirect(SDL_GPURenderPass* render_pass, SDL_GPUBuffer* buffer, ui32 offset, ui32 draw_count) uses io;
+    void SDL_BindGPUVertexBuffers(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUBufferBinding* bindings,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUIndexBuffer(
+        SDL_GPURenderPass* render_pass,
+        SDL_GPUBufferBinding* binding,
+        i32 index_element_size
+    ) uses io;
+    void SDL_BindGPUVertexSamplers(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUTextureSamplerBinding* texture_sampler_bindings,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUVertexStorageTextures(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUTexture** storage_textures,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUVertexStorageBuffers(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUBuffer** storage_buffers,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUFragmentSamplers(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUTextureSamplerBinding* texture_sampler_bindings,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUFragmentStorageTextures(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUTexture** storage_textures,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUFragmentStorageBuffers(
+        SDL_GPURenderPass* render_pass,
+        ui32 first_slot,
+        SDL_GPUBuffer** storage_buffers,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_DrawGPUIndexedPrimitives(
+        SDL_GPURenderPass* render_pass,
+        ui32 num_indices,
+        ui32 num_instances,
+        ui32 first_index,
+        i32 vertex_offset,
+        ui32 first_instance
+    ) uses io;
+    void SDL_DrawGPUPrimitives(
+        SDL_GPURenderPass* render_pass,
+        ui32 num_vertices,
+        ui32 num_instances,
+        ui32 first_vertex,
+        ui32 first_instance
+    ) uses io;
+    void SDL_DrawGPUPrimitivesIndirect(
+        SDL_GPURenderPass* render_pass,
+        SDL_GPUBuffer* buffer,
+        ui32 offset,
+        ui32 draw_count
+    ) uses io;
+    void SDL_DrawGPUIndexedPrimitivesIndirect(
+        SDL_GPURenderPass* render_pass,
+        SDL_GPUBuffer* buffer,
+        ui32 offset,
+        ui32 draw_count
+    ) uses io;
     void SDL_EndGPURenderPass(SDL_GPURenderPass* render_pass) uses io;
-    SDL_GPUComputePass* SDL_BeginGPUComputePass(SDL_GPUCommandBuffer* command_buffer, SDL_GPUStorageTextureReadWriteBinding* storage_texture_bindings, ui32 num_storage_texture_bindings, SDL_GPUStorageBufferReadWriteBinding* storage_buffer_bindings, ui32 num_storage_buffer_bindings) uses io;
+    SDL_GPUComputePass* SDL_BeginGPUComputePass(
+        SDL_GPUCommandBuffer* command_buffer,
+        SDL_GPUStorageTextureReadWriteBinding* storage_texture_bindings,
+        ui32 num_storage_texture_bindings,
+        SDL_GPUStorageBufferReadWriteBinding* storage_buffer_bindings,
+        ui32 num_storage_buffer_bindings
+    ) uses io;
     void SDL_BindGPUComputePipeline(SDL_GPUComputePass* compute_pass, SDL_GPUComputePipeline* compute_pipeline) uses io;
-    void SDL_BindGPUComputeSamplers(SDL_GPUComputePass* compute_pass, ui32 first_slot, SDL_GPUTextureSamplerBinding* texture_sampler_bindings, ui32 num_bindings) uses io;
-    void SDL_BindGPUComputeStorageTextures(SDL_GPUComputePass* compute_pass, ui32 first_slot, SDL_GPUTexture** storage_textures, ui32 num_bindings) uses io;
-    void SDL_BindGPUComputeStorageBuffers(SDL_GPUComputePass* compute_pass, ui32 first_slot, SDL_GPUBuffer** storage_buffers, ui32 num_bindings) uses io;
-    void SDL_DispatchGPUCompute(SDL_GPUComputePass* compute_pass, ui32 groupcount_x, ui32 groupcount_y, ui32 groupcount_z) uses io;
+    void SDL_BindGPUComputeSamplers(
+        SDL_GPUComputePass* compute_pass,
+        ui32 first_slot,
+        SDL_GPUTextureSamplerBinding* texture_sampler_bindings,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUComputeStorageTextures(
+        SDL_GPUComputePass* compute_pass,
+        ui32 first_slot,
+        SDL_GPUTexture** storage_textures,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_BindGPUComputeStorageBuffers(
+        SDL_GPUComputePass* compute_pass,
+        ui32 first_slot,
+        SDL_GPUBuffer** storage_buffers,
+        ui32 num_bindings
+    ) uses io;
+    void SDL_DispatchGPUCompute(
+        SDL_GPUComputePass* compute_pass,
+        ui32 groupcount_x,
+        ui32 groupcount_y,
+        ui32 groupcount_z
+    ) uses io;
     void SDL_DispatchGPUComputeIndirect(SDL_GPUComputePass* compute_pass, SDL_GPUBuffer* buffer, ui32 offset) uses io;
     void SDL_EndGPUComputePass(SDL_GPUComputePass* compute_pass) uses io;
     ui8* SDL_MapGPUTransferBuffer(SDL_GPUDevice* device, SDL_GPUTransferBuffer* transfer_buffer, bool cycle) uses io;
     void SDL_UnmapGPUTransferBuffer(SDL_GPUDevice* device, SDL_GPUTransferBuffer* transfer_buffer) uses io;
     SDL_GPUCopyPass* SDL_BeginGPUCopyPass(SDL_GPUCommandBuffer* command_buffer) uses io;
-    void SDL_UploadToGPUTexture(SDL_GPUCopyPass* copy_pass, SDL_GPUTextureTransferInfo* source, SDL_GPUTextureRegion* destination, bool cycle) uses io;
-    void SDL_UploadToGPUBuffer(SDL_GPUCopyPass* copy_pass, SDL_GPUTransferBufferLocation* source, SDL_GPUBufferRegion* destination, bool cycle) uses io;
-    void SDL_CopyGPUTextureToTexture(SDL_GPUCopyPass* copy_pass, SDL_GPUTextureLocation* source, SDL_GPUTextureLocation* destination, ui32 w, ui32 h, ui32 d, bool cycle) uses io;
-    void SDL_CopyGPUBufferToBuffer(SDL_GPUCopyPass* copy_pass, SDL_GPUBufferLocation* source, SDL_GPUBufferLocation* destination, ui32 size, bool cycle) uses io;
-    void SDL_DownloadFromGPUTexture(SDL_GPUCopyPass* copy_pass, SDL_GPUTextureRegion* source, SDL_GPUTextureTransferInfo* destination) uses io;
-    void SDL_DownloadFromGPUBuffer(SDL_GPUCopyPass* copy_pass, SDL_GPUBufferRegion* source, SDL_GPUTransferBufferLocation* destination) uses io;
+    void SDL_UploadToGPUTexture(
+        SDL_GPUCopyPass* copy_pass,
+        SDL_GPUTextureTransferInfo* source,
+        SDL_GPUTextureRegion* destination,
+        bool cycle
+    ) uses io;
+    void SDL_UploadToGPUBuffer(
+        SDL_GPUCopyPass* copy_pass,
+        SDL_GPUTransferBufferLocation* source,
+        SDL_GPUBufferRegion* destination,
+        bool cycle
+    ) uses io;
+    void SDL_CopyGPUTextureToTexture(
+        SDL_GPUCopyPass* copy_pass,
+        SDL_GPUTextureLocation* source,
+        SDL_GPUTextureLocation* destination,
+        ui32 w,
+        ui32 h,
+        ui32 d,
+        bool cycle
+    ) uses io;
+    void SDL_CopyGPUBufferToBuffer(
+        SDL_GPUCopyPass* copy_pass,
+        SDL_GPUBufferLocation* source,
+        SDL_GPUBufferLocation* destination,
+        ui32 size,
+        bool cycle
+    ) uses io;
+    void SDL_DownloadFromGPUTexture(
+        SDL_GPUCopyPass* copy_pass,
+        SDL_GPUTextureRegion* source,
+        SDL_GPUTextureTransferInfo* destination
+    ) uses io;
+    void SDL_DownloadFromGPUBuffer(
+        SDL_GPUCopyPass* copy_pass,
+        SDL_GPUBufferRegion* source,
+        SDL_GPUTransferBufferLocation* destination
+    ) uses io;
     void SDL_EndGPUCopyPass(SDL_GPUCopyPass* copy_pass) uses io;
     void SDL_GenerateMipmapsForGPUTexture(SDL_GPUCommandBuffer* command_buffer, SDL_GPUTexture* texture) uses io;
     void SDL_BlitGPUTexture(SDL_GPUCommandBuffer* command_buffer, SDL_GPUBlitInfo* info) uses io;
-    bool SDL_WindowSupportsGPUSwapchainComposition(SDL_GPUDevice* device, SDL_Window* window, i32 swapchain_composition) uses io;
+    bool SDL_WindowSupportsGPUSwapchainComposition(
+        SDL_GPUDevice* device,
+        SDL_Window* window,
+        i32 swapchain_composition
+    ) uses io;
     bool SDL_WindowSupportsGPUPresentMode(SDL_GPUDevice* device, SDL_Window* window, i32 present_mode) uses io;
     bool SDL_ClaimWindowForGPUDevice(SDL_GPUDevice* device, SDL_Window* window) uses io;
     void SDL_ReleaseWindowFromGPUDevice(SDL_GPUDevice* device, SDL_Window* window) uses io;
-    bool SDL_SetGPUSwapchainParameters(SDL_GPUDevice* device, SDL_Window* window, i32 swapchain_composition, i32 present_mode) uses io;
+    bool SDL_SetGPUSwapchainParameters(
+        SDL_GPUDevice* device,
+        SDL_Window* window,
+        i32 swapchain_composition,
+        i32 present_mode
+    ) uses io;
     bool SDL_SetGPUAllowedFramesInFlight(SDL_GPUDevice* device, ui32 allowed_frames_in_flight) uses io;
     i32 SDL_GetGPUSwapchainTextureFormat(SDL_GPUDevice* device, SDL_Window* window) uses io;
-    bool SDL_AcquireGPUSwapchainTexture(SDL_GPUCommandBuffer* command_buffer, SDL_Window* window, SDL_GPUTexture** swapchain_texture, ui32* swapchain_texture_width, ui32* swapchain_texture_height) uses io;
+    bool SDL_AcquireGPUSwapchainTexture(
+        SDL_GPUCommandBuffer* command_buffer,
+        SDL_Window* window,
+        SDL_GPUTexture** swapchain_texture,
+        ui32* swapchain_texture_width,
+        ui32* swapchain_texture_height
+    ) uses io;
     bool SDL_WaitForGPUSwapchain(SDL_GPUDevice* device, SDL_Window* window) uses io;
-    bool SDL_WaitAndAcquireGPUSwapchainTexture(SDL_GPUCommandBuffer* command_buffer, SDL_Window* window, SDL_GPUTexture** swapchain_texture, ui32* swapchain_texture_width, ui32* swapchain_texture_height) uses io;
+    bool SDL_WaitAndAcquireGPUSwapchainTexture(
+        SDL_GPUCommandBuffer* command_buffer,
+        SDL_Window* window,
+        SDL_GPUTexture** swapchain_texture,
+        ui32* swapchain_texture_width,
+        ui32* swapchain_texture_height
+    ) uses io;
     bool SDL_SubmitGPUCommandBuffer(SDL_GPUCommandBuffer* command_buffer) uses io;
     SDL_GPUFence* SDL_SubmitGPUCommandBufferAndAcquireFence(SDL_GPUCommandBuffer* command_buffer) uses io;
     bool SDL_CancelGPUCommandBuffer(SDL_GPUCommandBuffer* command_buffer) uses io;
@@ -4298,7 +4738,14 @@ pub extern "C" {
     void SDL_DestroyProcess(SDL_Process* process) uses io;
     i32 SDL_GetNumRenderDrivers() uses io;
     ui8* SDL_GetRenderDriver(i32 index) uses io;
-    bool SDL_CreateWindowAndRenderer(ui8* title, i32 width, i32 height, ui64 window_flags, SDL_Window** window, SDL_Renderer** renderer) uses io;
+    bool SDL_CreateWindowAndRenderer(
+        ui8* title,
+        i32 width,
+        i32 height,
+        ui64 window_flags,
+        SDL_Window** window,
+        SDL_Renderer** renderer
+    ) uses io;
     SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, ui8* name) uses io;
     SDL_Renderer* SDL_CreateRendererWithProperties(ui32 props) uses io;
     SDL_Renderer* SDL_CreateGPURenderer(SDL_GPUDevice* device, SDL_Window* window) uses io;
@@ -4331,8 +4778,24 @@ pub extern "C" {
     bool SDL_SetTextureScaleMode(SDL_Texture* texture, i32 scaleMode) uses io;
     bool SDL_GetTextureScaleMode(SDL_Texture* texture, i32* scaleMode) uses io;
     bool SDL_UpdateTexture(SDL_Texture* texture, SDL_Rect* rect, ui8* pixels, i32 pitch) uses io;
-    bool SDL_UpdateYUVTexture(SDL_Texture* texture, SDL_Rect* rect, ui8* Yplane, i32 Ypitch, ui8* Uplane, i32 Upitch, ui8* Vplane, i32 Vpitch) uses io;
-    bool SDL_UpdateNVTexture(SDL_Texture* texture, SDL_Rect* rect, ui8* Yplane, i32 Ypitch, ui8* UVplane, i32 UVpitch) uses io;
+    bool SDL_UpdateYUVTexture(
+        SDL_Texture* texture,
+        SDL_Rect* rect,
+        ui8* Yplane,
+        i32 Ypitch,
+        ui8* Uplane,
+        i32 Upitch,
+        ui8* Vplane,
+        i32 Vpitch
+    ) uses io;
+    bool SDL_UpdateNVTexture(
+        SDL_Texture* texture,
+        SDL_Rect* rect,
+        ui8* Yplane,
+        i32 Ypitch,
+        ui8* UVplane,
+        i32 UVpitch
+    ) uses io;
     bool SDL_LockTexture(SDL_Texture* texture, SDL_Rect* rect, ui8** pixels, i32* pitch) uses io;
     bool SDL_LockTextureToSurface(SDL_Texture* texture, SDL_Rect* rect, SDL_Surface** surface) uses io;
     void SDL_UnlockTexture(SDL_Texture* texture) uses io;
@@ -4370,14 +4833,81 @@ pub extern "C" {
     bool SDL_RenderRects(SDL_Renderer* renderer, SDL_FRect* rects, i32 count) uses io;
     bool SDL_RenderFillRect(SDL_Renderer* renderer, SDL_FRect* rect) uses io;
     bool SDL_RenderFillRects(SDL_Renderer* renderer, SDL_FRect* rects, i32 count) uses io;
-    bool SDL_RenderTexture(SDL_Renderer* renderer, SDL_Texture* texture, SDL_FRect* srcrect, SDL_FRect* dstrect) uses io;
-    bool SDL_RenderTextureRotated(SDL_Renderer* renderer, SDL_Texture* texture, SDL_FRect* srcrect, SDL_FRect* dstrect, f64 angle, SDL_FPoint* center, i32 flip) uses io;
-    bool SDL_RenderTextureAffine(SDL_Renderer* renderer, SDL_Texture* texture, SDL_FRect* srcrect, SDL_FPoint* origin, SDL_FPoint* right, SDL_FPoint* down) uses io;
-    bool SDL_RenderTextureTiled(SDL_Renderer* renderer, SDL_Texture* texture, SDL_FRect* srcrect, f32 scale, SDL_FRect* dstrect) uses io;
-    bool SDL_RenderTexture9Grid(SDL_Renderer* renderer, SDL_Texture* texture, SDL_FRect* srcrect, f32 left_width, f32 right_width, f32 top_height, f32 bottom_height, f32 scale, SDL_FRect* dstrect) uses io;
-    bool SDL_RenderTexture9GridTiled(SDL_Renderer* renderer, SDL_Texture* texture, SDL_FRect* srcrect, f32 left_width, f32 right_width, f32 top_height, f32 bottom_height, f32 scale, SDL_FRect* dstrect, f32 tileScale) uses io;
-    bool SDL_RenderGeometry(SDL_Renderer* renderer, SDL_Texture* texture, SDL_Vertex* vertices, i32 num_vertices, i32* indices, i32 num_indices) uses io;
-    bool SDL_RenderGeometryRaw(SDL_Renderer* renderer, SDL_Texture* texture, f32* xy, i32 xy_stride, SDL_FColor* color, i32 color_stride, f32* uv, i32 uv_stride, i32 num_vertices, ui8* indices, i32 num_indices, i32 size_indices) uses io;
+    bool SDL_RenderTexture(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_FRect* srcrect,
+        SDL_FRect* dstrect
+    ) uses io;
+    bool SDL_RenderTextureRotated(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_FRect* srcrect,
+        SDL_FRect* dstrect,
+        f64 angle,
+        SDL_FPoint* center,
+        i32 flip
+    ) uses io;
+    bool SDL_RenderTextureAffine(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_FRect* srcrect,
+        SDL_FPoint* origin,
+        SDL_FPoint* right,
+        SDL_FPoint* down
+    ) uses io;
+    bool SDL_RenderTextureTiled(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_FRect* srcrect,
+        f32 scale,
+        SDL_FRect* dstrect
+    ) uses io;
+    bool SDL_RenderTexture9Grid(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_FRect* srcrect,
+        f32 left_width,
+        f32 right_width,
+        f32 top_height,
+        f32 bottom_height,
+        f32 scale,
+        SDL_FRect* dstrect
+    ) uses io;
+    bool SDL_RenderTexture9GridTiled(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_FRect* srcrect,
+        f32 left_width,
+        f32 right_width,
+        f32 top_height,
+        f32 bottom_height,
+        f32 scale,
+        SDL_FRect* dstrect,
+        f32 tileScale
+    ) uses io;
+    bool SDL_RenderGeometry(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        SDL_Vertex* vertices,
+        i32 num_vertices,
+        i32* indices,
+        i32 num_indices
+    ) uses io;
+    bool SDL_RenderGeometryRaw(
+        SDL_Renderer* renderer,
+        SDL_Texture* texture,
+        f32* xy,
+        i32 xy_stride,
+        SDL_FColor* color,
+        i32 color_stride,
+        f32* uv,
+        i32 uv_stride,
+        i32 num_vertices,
+        ui8* indices,
+        i32 num_indices,
+        i32 size_indices
+    ) uses io;
     bool SDL_SetRenderTextureAddressMode(SDL_Renderer* renderer, i32 u_mode, i32 v_mode) uses io;
     bool SDL_GetRenderTextureAddressMode(SDL_Renderer* renderer, i32* u_mode, i32* v_mode) uses io;
     SDL_Surface* SDL_RenderReadPixels(SDL_Renderer* renderer, SDL_Rect* rect) uses io;
@@ -4387,14 +4917,27 @@ pub extern "C" {
     bool SDL_FlushRenderer(SDL_Renderer* renderer) uses io;
     ui8* SDL_GetRenderMetalLayer(SDL_Renderer* renderer) uses io;
     ui8* SDL_GetRenderMetalCommandEncoder(SDL_Renderer* renderer) uses io;
-    bool SDL_AddVulkanRenderSemaphores(SDL_Renderer* renderer, ui32 wait_stage_mask, i64 wait_semaphore, i64 signal_semaphore) uses io;
+    bool SDL_AddVulkanRenderSemaphores(
+        SDL_Renderer* renderer,
+        ui32 wait_stage_mask,
+        i64 wait_semaphore,
+        i64 signal_semaphore
+    ) uses io;
     bool SDL_SetRenderVSync(SDL_Renderer* renderer, i32 vsync) uses io;
     bool SDL_GetRenderVSync(SDL_Renderer* renderer, i32* vsync) uses io;
     bool SDL_RenderDebugText(SDL_Renderer* renderer, f32 x, f32 y, ui8* str_) uses io;
     bool SDL_SetDefaultTextureScaleMode(SDL_Renderer* renderer, i32 scale_mode) uses io;
     bool SDL_GetDefaultTextureScaleMode(SDL_Renderer* renderer, i32* scale_mode) uses io;
-    SDL_GPURenderState* SDL_CreateGPURenderState(SDL_Renderer* renderer, SDL_GPURenderStateCreateInfo* createinfo) uses io;
-    bool SDL_SetGPURenderStateFragmentUniforms(SDL_GPURenderState* state, ui32 slot_index, ui8* data, ui32 length) uses io;
+    SDL_GPURenderState* SDL_CreateGPURenderState(
+        SDL_Renderer* renderer,
+        SDL_GPURenderStateCreateInfo* createinfo
+    ) uses io;
+    bool SDL_SetGPURenderStateFragmentUniforms(
+        SDL_GPURenderState* state,
+        ui32 slot_index,
+        ui8* data,
+        ui32 length
+    ) uses io;
     bool SDL_SetGPURenderState(SDL_Renderer* renderer, SDL_GPURenderState* state) uses io;
     void SDL_DestroyGPURenderState(SDL_GPURenderState* state) uses io;
     SDL_Storage* SDL_OpenTitleStorage(ui8* override_, ui32 props) uses io;
@@ -4407,7 +4950,12 @@ pub extern "C" {
     bool SDL_ReadStorageFile(SDL_Storage* storage, ui8* path, ui8* destination, ui64 length) uses io;
     bool SDL_WriteStorageFile(SDL_Storage* storage, ui8* path, ui8* source, ui64 length) uses io;
     bool SDL_CreateStorageDirectory(SDL_Storage* storage, ui8* path) uses io;
-    bool SDL_EnumerateStorageDirectory(SDL_Storage* storage, ui8* path, fn(ui8*, ui8*, ui8*) -> i32 uses io callback, ui8* userdata) uses io;
+    bool SDL_EnumerateStorageDirectory(
+        SDL_Storage* storage,
+        ui8* path,
+        fn(ui8*, ui8*, ui8*) -> i32 uses io callback,
+        ui8* userdata
+    ) uses io;
     bool SDL_RemoveStoragePath(SDL_Storage* storage, ui8* path) uses io;
     bool SDL_RenameStoragePath(SDL_Storage* storage, ui8* oldpath, ui8* newpath) uses io;
     bool SDL_CopyStorageFile(SDL_Storage* storage, ui8* oldpath, ui8* newpath) uses io;
@@ -4462,7 +5010,11 @@ pub extern "C" {
     bool SDL_GetTrayEntryChecked(SDL_TrayEntry* entry) uses io;
     void SDL_SetTrayEntryEnabled(SDL_TrayEntry* entry, bool enabled) uses io;
     bool SDL_GetTrayEntryEnabled(SDL_TrayEntry* entry) uses io;
-    void SDL_SetTrayEntryCallback(SDL_TrayEntry* entry, fn(ui8*, SDL_TrayEntry*) -> void uses io callback, ui8* userdata) uses io;
+    void SDL_SetTrayEntryCallback(
+        SDL_TrayEntry* entry,
+        fn(ui8*, SDL_TrayEntry*) -> void uses io callback,
+        ui8* userdata
+    ) uses io;
     void SDL_ClickTrayEntry(SDL_TrayEntry* entry) uses io;
     void SDL_DestroyTray(SDL_Tray* tray) uses io;
     SDL_TrayMenu* SDL_GetTrayEntryParent(SDL_TrayEntry* entry) uses io;

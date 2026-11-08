@@ -63,12 +63,15 @@ typedef struct {
                               Windows); "console"; NULL when not given */
 } LinkSection;
 
-/* [app]: what a phone shows of the program, for Android and iOS (spec §11.5). NULL when not given. */
+/* [app]: what a phone shows of the program, for Android and iOS, and what the desktop shows of it
+   (spec §11.5). NULL when not given. */
 typedef struct {
     char *id;      /* `org.sosu.window`: by default `org.sosu.<package>` */
     char *name;    /* shown under the icon: by default the name of the package */
     char *version; /* by default the version of the package */
     char *icon;    /* a PNG of the package */
+    char *description; /* Windows: the "File description" of the program, by default its name */
+    char *copyright;   /* Windows: its "Copyright"; macOS: NSHumanReadableCopyright */
     StringList assets; /* files and folders of the package given with the application */
 } AppSection;
 

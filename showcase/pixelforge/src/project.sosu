@@ -59,7 +59,10 @@ pub ui8[] encode(Arena* arena, vec.Vec<sheet.Frame>* frames, i32 columns, i32 ga
             for (usize n in 0..l.name.len) {
                 out.push(l.name.bytes[n]);
             }
-            ui8[] picture = png.encode(arena, image.Image{ width: first.width, height: first.height, pixels: l.pixels });
+            ui8[] picture = png.encode(
+                arena,
+                image.Image{ width: first.width, height: first.height, pixels: l.pixels }
+            );
             put_u32(out, picture.len as ui32);
             put_bytes(out, picture);
         }

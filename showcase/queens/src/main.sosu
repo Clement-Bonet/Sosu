@@ -335,7 +335,10 @@ class App : app.Handler {
                 f32 py = BOARD_Y + y as f32 * cell;
                 surface.fill(canvas.Rect{ x: px, y: py, w: cell, h: cell }, pastel(game.region_of(x, y)));
                 if (game.conflict(x, y)) {
-                    surface.fill(canvas.Rect{ x: px, y: py, w: cell, h: cell }, canvas.Color{ r: 220, g: 40, b: 40, a: 110 });
+                    surface.fill(
+                        canvas.Rect{ x: px, y: py, w: cell, h: cell },
+                        canvas.Color{ r: 220, g: 40, b: 40, a: 110 }
+                    );
                 }
             }
         }
@@ -366,10 +369,19 @@ class App : app.Handler {
                 }
                 i32 what = game.at(x, y);
                 if (what == board.QUEEN) {
-                    canvas.Color c = game.conflict(x, y) ? canvas.Color{ r: 170, g: 20, b: 20 } : canvas.Color{ r: 30, g: 34, b: 52 };
+                    canvas.Color c = game.conflict(x, y) ? canvas.Color{ r: 170, g: 20, b: 20 }
+                            : canvas.Color{ r: 30, g: 34, b: 52 };
                     icon(surface, scratch, ICON_CROWN, px + cell / 2.0, py + cell / 2.0, cell * 0.5, c);
                 } else if (what == board.CROSS) {
-                    icon(surface, scratch, ICON_CROSS, px + cell / 2.0, py + cell / 2.0, cell * 0.3, canvas.Color{ r: 30, g: 34, b: 52, a: 150 });
+                    icon(
+                        surface,
+                        scratch,
+                        ICON_CROSS,
+                        px + cell / 2.0,
+                        py + cell / 2.0,
+                        cell * 0.3,
+                        canvas.Color{ r: 30, g: 34, b: 52, a: 150 }
+                    );
                 }
             }
         }

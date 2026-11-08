@@ -61,7 +61,8 @@ static void test_canonical(void) {
     expect_format("void f() { auto t = [1,\n 2, // two\n\n 3]; }",
                   "void f() {\n    auto t = [\n        1,\n        2,  // two\n\n        3,\n    ];\n}\n");
     expect_format("void f() { auto t = [\n1, 2]; auto u = [[1, 2], [3, 4]]; }",
-                  "void f() {\n    auto t = [\n        1,\n        2,\n    ];\n    auto u = [[1, 2], [3, 4]];\n}\n");
+                  "void f() {\n    auto t = [\n        1, 2,\n    ];\n    auto u = [[1, 2], [3, 4]];\n}\n");
+    expect_format("void f() { auto t = [1,\n2, 3,\n4]; }", "void f() {\n    auto t = [\n        1,\n        2, 3,\n        4,\n    ];\n}\n");
     expect_format("class B : A, I { override void f() uses io { } }",
                   "class B : A, I {\n    override void f() uses io { }\n}\n");
     /* lambdas (spec §5.5) */
@@ -184,6 +185,88 @@ static void test_repository_files(void) {
     }
 }
 
+/* Long lines (spec §7.6): broken at their outermost list, chain of operators or conditional,
+   and formatted again unchanged. */
+static void test_long_lines(void) {
+    const char *input =
+        "void calls() {\n"
+        "    draw_rectangle(target_surface_now, first_corner_x, first_corner_y, second_corner_x, second_corner_y_of_it, line_color);\n"
+        "    handler.on_event(Resized(window_width_in_pixels, window_height_in_pixels, screen_density_scale, more_arguments_here));\n"
+        "    Rect r = Rect{ x: left_margin + padding, y: top_margin + padding, w: width - 2 * padding, h: line_height_in_pixels_now };\n"
+        "    i32 value = kind == 0 ? x : kind == 1 ? x + left : kind == 2 ? x + above : kind == 3 ? x + above_left : kind == 4 ? x + paeth : -1;\n"
+        "    if (first_condition_holds && second_condition_holds && third_condition_holds || fourth_condition_holds_too_now_and) {\n"
+        "        return;\n"
+        "    } else if (first_condition_holds && second_condition_holds && third_condition_holds || fourth_condition_holds_too) {\n"
+        "        return;\n"
+        "    }\n"
+        "    auto table = [16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29];\n"
+        "}\n"
+        "\n"
+        "i32 clamp(i32 x) requires x > 0 && x < 1000000 && x != 42 && x != 4242 && x != 424242 && x != 4242424242 + offset_value { return x; }\n"
+        "\n"
+        "void connect(Arena* arena, str host_name, ui16 port_number, Duration timeout, bool keep_alive, i32 retries_count) uses io { }\n";
+    const char *expected =
+        "void calls() {\n"
+        "    draw_rectangle(\n"
+        "        target_surface_now,\n"
+        "        first_corner_x,\n"
+        "        first_corner_y,\n"
+        "        second_corner_x,\n"
+        "        second_corner_y_of_it,\n"
+        "        line_color\n"
+        "    );\n"
+        "    handler.on_event(Resized(\n"
+        "        window_width_in_pixels,\n"
+        "        window_height_in_pixels,\n"
+        "        screen_density_scale,\n"
+        "        more_arguments_here\n"
+        "    ));\n"
+        "    Rect r = Rect{\n"
+        "        x: left_margin + padding,\n"
+        "        y: top_margin + padding,\n"
+        "        w: width - 2 * padding,\n"
+        "        h: line_height_in_pixels_now\n"
+        "    };\n"
+        "    i32 value = kind == 0 ? x\n"
+        "            : kind == 1 ? x + left\n"
+        "            : kind == 2 ? x + above\n"
+        "            : kind == 3 ? x + above_left\n"
+        "            : kind == 4 ? x + paeth\n"
+        "            : -1;\n"
+        "    if (first_condition_holds && second_condition_holds && third_condition_holds\n"
+        "            || fourth_condition_holds_too_now_and) {\n"
+        "        return;\n"
+        "    } else if (first_condition_holds && second_condition_holds && third_condition_holds || fourth_condition_holds_too) {\n"
+        "        return;\n"
+        "    }\n"
+        "    auto table = [\n"
+        "        16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29,\n"
+        "    ];\n"
+        "}\n"
+        "\n"
+        "i32 clamp(i32 x)\n"
+        "    requires x > 0 && x < 1000000 && x != 42 && x != 4242 && x != 424242 && x != 4242424242 + offset_value\n"
+        "{\n"
+        "    return x;\n"
+        "}\n"
+        "\n"
+        "void connect(\n"
+        "    Arena* arena,\n"
+        "    str host_name,\n"
+        "    ui16 port_number,\n"
+        "    Duration timeout,\n"
+        "    bool keep_alive,\n"
+        "    i32 retries_count\n"
+        ") uses io { }\n";
+    expect_format(input, expected);
+    char *again = format_text(expected);
+    CHECK(again && strcmp(again, expected) == 0, "long lines: formatting twice changes them:\n%s", again ? again : "(error)\n");
+    free(again);
+    /* a line that cannot be broken stays as it is */
+    expect_format("void f() { g(\"a string literal much longer than the width of a line, which the formatter never breaks, so it stays\"); }",
+                  "void f() {\n    g(\"a string literal much longer than the width of a line, which the formatter never breaks, so it stays\");\n}\n");
+}
+
 /* `.ui.sosu` files (spec §10.10): from their tokens, the lines kept, indented by their brackets. */
 static char *format_ui_text(const char *text) {
     SourceFile file;
@@ -223,6 +306,7 @@ static void test_interface_files(void) {
 int main(void) {
     test_canonical();
     test_comments_and_blank_lines();
+    test_long_lines();
     test_interface_files();
     test_repository_files();
     return test_summary("fmt tests");

@@ -112,8 +112,18 @@ i32 main() uses io {
     float(text.parse_f64("inf"));
 
     // numbers written, and a builder
-    io.print("{} {} {}", text.format_i64(&arena, -9223372036854775807 - 1), text.format_i64(&arena, 0), text.format_u64(&arena, 18446744073709551615));
-    io.print("{} {} {}", text.format_f64(&arena, 3.14159, 2), text.format_f64(&arena, -2.5, 0), text.format_f64(&arena, 0.125, 5));
+    io.print(
+        "{} {} {}",
+        text.format_i64(&arena, -9223372036854775807 - 1),
+        text.format_i64(&arena, 0),
+        text.format_u64(&arena, 18446744073709551615)
+    );
+    io.print(
+        "{} {} {}",
+        text.format_f64(&arena, 3.14159, 2),
+        text.format_f64(&arena, -2.5, 0),
+        text.format_f64(&arena, 0.125, 5)
+    );
     io.print("{} {}", text.format_f64(&arena, 1.0e30, 1).len, text.format_f64(&arena, -1.0e300 * 1.0e10, 2));
     text.TextBuilder* b = text.builder(&arena);
     for (i32 i in 0..100) {

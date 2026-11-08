@@ -221,7 +221,10 @@ i32 main() uses io {
     load_font(&arena, handler);
     widgets.Window window = screen.BeatboxConfig();
     app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
-    i32 code = app.run(app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar, landscape: true }, handler as app.Handler*);
+    i32 code = app.run(
+        app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar, landscape: true },
+        handler as app.Handler*
+    );
     sound.close();
     return code;
 }

@@ -170,7 +170,8 @@ test "crop, rotate, flip and resize a photo" {
     defer arena.free();
     image.Image photo = read_png(&arena, "tests/data/source.png");
     image.Image part = ops.crop(&arena, photo, 50, 10, 30, 40);
-    assert(part.width == 30 && part.height == 40 && part.at(0, 0) == photo.at(50, 10) && part.at(29, 39) == photo.at(79, 49));
+    assert(part.width == 30 && part.height == 40 && part.at(0, 0) == photo.at(50, 10)
+            && part.at(29, 39) == photo.at(79, 49));
     image.Image round = ops.rotate_270(&arena, ops.rotate_90(&arena, photo));
     assert(largest_difference(round, photo) == 0);
     image.Image mirrored = ops.flip_vertical(&arena, ops.flip_horizontal(&arena, photo));

@@ -340,7 +340,14 @@ class Cursor : db.Rows {
     mut bool done;
     mut bool row;  // on a row
 
-    void init(keeps Arena* arena, keeps Database* database, keeps ui8* stmt, bool owned, keeps Prepared*? statement, ui64 run) {
+    void init(
+        keeps Arena* arena,
+        keeps Database* database,
+        keeps ui8* stmt,
+        bool owned,
+        keeps Prepared*? statement,
+        ui64 run
+    ) {
         self.arena = arena;
         self.database = database;
         self.stmt = stmt;

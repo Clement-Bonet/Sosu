@@ -225,7 +225,14 @@ class App : app.Handler, app.TitleBar {
 
     void draw_unlock(canvas.Canvas* surface) {
         say(surface, 320.0, 150.0, 30.0, "Vault", ink());
-        say(surface, 320.0, 192.0, 14.0, state.creating ? "Choose a master password. Nothing can recover it." : "Enter the master password.", dim());
+        say(
+            surface,
+            320.0,
+            192.0,
+            14.0,
+            state.creating ? "Choose a master password. Nothing can recover it." : "Enter the master password.",
+            dim()
+        );
         field(surface, 250.0, "Master password", state.master.count(), !second);
         if (state.creating) {
             field(surface, 322.0, "Again", state.confirm.count(), second);

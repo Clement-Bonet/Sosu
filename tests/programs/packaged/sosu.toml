@@ -6,6 +6,8 @@ version = "0.1.0"
 
 [app]
 name = "Packaged"
+description = "A packaged test program"
+copyright = "Copyright 2026 The Sosu authors"
 icon = "../../../examples/workspace/assets/sosu.png"
 assets = ["data"]
 

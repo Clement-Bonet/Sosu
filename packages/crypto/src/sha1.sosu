@@ -15,7 +15,8 @@ pub struct Sha1 {
     void compress() {
         mut ui32[80] w = [0; 80];
         for (usize i in 0..16) {
-            w[i] = block[4 * i] as ui32 << 24 | block[4 * i + 1] as ui32 << 16 | block[4 * i + 2] as ui32 << 8 | block[4 * i + 3] as ui32;
+            w[i] = block[4 * i] as ui32 << 24 | block[4 * i + 1] as ui32 << 16 | block[4 * i + 2] as ui32 << 8
+                    | block[4 * i + 3] as ui32;
         }
         for (usize i in 16..80) {
             w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);

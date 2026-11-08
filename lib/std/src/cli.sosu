@@ -71,7 +71,13 @@ pub class Command {
 
     // An option with a value, `default_value` unless given; the help shows it as `value_name`.
     pub void option(keeps str name, char short, keeps str value_name, keeps str help, keeps str default_value) {
-        options.push(Spec{ name: name, short: some(short), value_name: value_name, help: help, default_value: default_value });
+        options.push(Spec{
+            name: name,
+            short: some(short),
+            value_name: value_name,
+            help: help,
+            default_value: default_value
+        });
     }
 
     pub void long_option(keeps str name, keeps str value_name, keeps str help, keeps str default_value) {

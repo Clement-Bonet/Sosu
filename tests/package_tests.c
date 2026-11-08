@@ -151,7 +151,17 @@ static void test_manifest(void) {
           strcmp(parsed.manifest.app.name, "A") == 0 && !parsed.manifest.app.version && parsed.manifest.app.assets.count == 2,
           "app section");
     CHECK(parsed.manifest.link[LINK_ANDROID].paths.count == 1, "android section");
+    CHECK(!parsed.manifest.app.description && !parsed.manifest.app.copyright, "app section: no description, no copyright");
     parsed_manifest_free(&parsed);
+    /* the description and the copyright of the properties of the file (spec §11.5): free texts */
+    parse_manifest(&parsed, "[package]\nname = \"a\"\nversion = \"1\"\n"
+                            "[app]\ndescription = \"A \\\"drum\\\" machine, 100%\"\ncopyright = \"© 2026 Ada & co\"\n");
+    check_codes("app description and copyright", &parsed.diags, "");
+    CHECK(parsed.manifest.app.description && strcmp(parsed.manifest.app.description, "A \"drum\" machine, 100%") == 0 &&
+              parsed.manifest.app.copyright && strcmp(parsed.manifest.app.copyright, "© 2026 Ada & co") == 0,
+          "app description and copyright");
+    parsed_manifest_free(&parsed);
+    expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\ncopyright = \"x\"\ncopyright = \"y\"\n", "E0408");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nlabel = \"A\"\n", "E0402");
     expect_manifest_errors("[package]\nname = \"a\"\nversion = \"1\"\n[app]\nid = \"x\"\nid = \"y\"\n", "E0408");
 

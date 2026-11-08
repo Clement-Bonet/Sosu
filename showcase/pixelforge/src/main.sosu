@@ -51,7 +51,12 @@ f32 ROW_X = 112.0;
 f32 ROW_W = 232.0;
 
 canvas.Color rgb(ui32 c) {
-    return canvas.Color{ r: (c >> 16 & 0xFF) as ui8, g: (c >> 8 & 0xFF) as ui8, b: (c & 0xFF) as ui8, a: (c >> 24) as ui8 };
+    return canvas.Color{
+        r: (c >> 16 & 0xFF) as ui8,
+        g: (c >> 8 & 0xFF) as ui8,
+        b: (c & 0xFF) as ui8,
+        a: (c >> 24) as ui8
+    };
 }
 
 canvas.Color shade(i32 r, i32 g, i32 b) {
@@ -292,7 +297,8 @@ class App : app.Handler, app.TitleBar {
         f32 top = strip_top();
         i32 first = strip_first();
         for (i32 j in 0..strip_capacity()) {
-            if (first + j < state.frame_count() && inside(x, y, editor.LEFT + 8.0 + j as f32 * THUMB_STEP, top + 8.0, THUMB, THUMB)) {
+            if (first + j < state.frame_count()
+                    && inside(x, y, editor.LEFT + 8.0 + j as f32 * THUMB_STEP, top + 8.0, THUMB, THUMB)) {
                 state.select_frame(first + j);
             }
         }
@@ -557,7 +563,8 @@ class App : app.Handler, app.TitleBar {
                             f32 a = wc < 0.0 ? 0.0 : wc;
                             f32 b = ww < 0.0 ? 0.0 : ww;
                             f32 v = a + b;
-                            c = (edge * 255.0 + 0.5) as i32 as ui32 << 24 | editor.hsv_rgb(state.hue, v > 0.0 ? a / v : 0.0, v > 1.0 ? 1.0 : v) & 0xFFFFFF;
+                            c = (edge * 255.0 + 0.5) as i32 as ui32 << 24
+                                    | editor.hsv_rgb(state.hue, v > 0.0 ? a / v : 0.0, v > 1.0 ? 1.0 : v) & 0xFFFFFF;
                         }
                     }
                     tri.pixels[(j * 300 + i) as usize] = c;
@@ -620,8 +627,10 @@ class App : app.Handler, app.TitleBar {
         f32 wc = state.sat * state.val;
         f32 ww = state.val - wc;
         f32 wb = 1.0 - state.val;
-        f32 tx = mid + TRI_R * (wc * math.cos(t) as f32 + ww * math.cos(t + 2.0 * math.TAU / 3.0) as f32 + wb * math.cos(t + math.TAU / 3.0) as f32);
-        f32 ty = center + TRI_R * (wc * math.sin(t) as f32 + ww * math.sin(t + 2.0 * math.TAU / 3.0) as f32 + wb * math.sin(t + math.TAU / 3.0) as f32);
+        f32 tx = mid + TRI_R * (wc * math.cos(t) as f32 + ww * math.cos(t + 2.0 * math.TAU / 3.0) as f32
+                + wb * math.cos(t + math.TAU / 3.0) as f32);
+        f32 ty = center + TRI_R * (wc * math.sin(t) as f32 + ww * math.sin(t + 2.0 * math.TAU / 3.0) as f32
+                + wb * math.sin(t + math.TAU / 3.0) as f32);
         surface.stroke(canvas.Rect{ x: tx - 5.0, y: ty - 5.0, w: 10.0, h: 10.0 }, shade(0, 0, 0), 3.0);
         surface.stroke(canvas.Rect{ x: tx - 5.0, y: ty - 5.0, w: 10.0, h: 10.0 }, shade(255, 255, 255), 1.0);
         // the color now (above) and the one when the picker opened (below)
@@ -643,7 +652,9 @@ class App : app.Handler, app.TitleBar {
             f32 rx = px + ROW_X;
             mut str label = "A";
             if (k < rows - 1) {
-                str[4] letters = state.model == 0 ? ["R", "G", "B", ""] : state.model == 1 ? ["C", "M", "Y", "K"] : ["H", "S", "L", ""];
+                str[4] letters = state.model == 0 ? ["R", "G", "B", ""]
+                        : state.model == 1 ? ["C", "M", "Y", "K"]
+                        : ["H", "S", "L", ""];
                 label = letters[k as usize];
             }
             i32 top = state.field_max(k);
@@ -651,7 +662,10 @@ class App : app.Handler, app.TitleBar {
             surface.fill_rounded(canvas.Rect{ x: rx, y: ry, w: ROW_W, h: 22.0 }, 3.0, shade(24, 26, 36));
             say(surface, rx + 5.0, ry + 3.0, 12.0, label, shade(160, 166, 190));
             surface.fill(canvas.Rect{ x: rx + 20.0, y: ry + 10.0, w: ROW_W - 76.0, h: 2.0 }, shade(60, 64, 86));
-            surface.fill(canvas.Rect{ x: rx + 20.0, y: ry + 10.0, w: (ROW_W - 76.0) * amount, h: 2.0 }, shade(110, 140, 220));
+            surface.fill(
+                canvas.Rect{ x: rx + 20.0, y: ry + 10.0, w: (ROW_W - 76.0) * amount, h: 2.0 },
+                shade(110, 140, 220)
+            );
             f32 knob = rx + 20.0 + (ROW_W - 76.0) * amount;
             surface.fill_rounded(canvas.Rect{ x: knob - 3.0, y: ry + 4.0, w: 6.0, h: 14.0 }, 2.0, shade(200, 206, 230));
             canvas.Rect cell = canvas.Rect{ x: rx + ROW_W - 52.0, y: ry, w: 52.0, h: 22.0 };
@@ -719,13 +733,32 @@ class App : app.Handler, app.TitleBar {
     }
 
     void draw_tools(canvas.Canvas* surface) {
-        surface.fill(canvas.Rect{ x: 0.0, y: editor.TOP, w: editor.LEFT, h: surface.height as f32 - editor.TOP - editor.BOTTOM }, shade(30, 32, 44));
+        surface.fill(
+            canvas.Rect{ x: 0.0, y: editor.TOP, w: editor.LEFT, h: surface.height as f32 - editor.TOP - editor.BOTTOM },
+            shade(30, 32, 44)
+        );
         for (i32 i in 0..editor.TOOLS) {
-            button(surface, 8.0, editor.TOP + 12.0 + i as f32 * TOOL_STEP, 68.0, TOOL_H, editor.tool_name(i), state.tool == i);
+            button(
+                surface,
+                8.0,
+                editor.TOP + 12.0 + i as f32 * TOOL_STEP,
+                68.0,
+                TOOL_H,
+                editor.tool_name(i),
+                state.tool == i
+            );
         }
         say(surface, 10.0, editor.TOP + 336.0, 12.0, "Brush", shade(160, 166, 190));
         for (i32 b in 0..4) {
-            button(surface, 8.0 + (b % 2) as f32 * 36.0, editor.TOP + 358.0 + (b / 2) as f32 * 34.0, 32.0, 30.0, size_label(b), state.brush == b + 1);
+            button(
+                surface,
+                8.0 + (b % 2) as f32 * 36.0,
+                editor.TOP + 358.0 + (b / 2) as f32 * 34.0,
+                32.0,
+                30.0,
+                size_label(b),
+                state.brush == b + 1
+            );
         }
         say(surface, 10.0, editor.TOP + 436.0, 12.0, "Selection", shade(160, 166, 190));
         for (i32 k in 0..4) {
@@ -779,7 +812,16 @@ class App : app.Handler, app.TitleBar {
         if (state.in_view(state.mouse_x, state.mouse_y)) {
             i32 size = state.tool == editor.PEN || state.tool == editor.ERASER ? state.brush : 1;
             f32 first = ((size - 1) / 2) as f32;
-            surface.stroke(canvas.Rect{ x: px + (state.hover_x as f32 - first) * z, y: py + (state.hover_y as f32 - first) * z, w: size as f32 * z, h: size as f32 * z }, shade(255, 255, 255), 1.0);
+            surface.stroke(
+                canvas.Rect{
+                    x: px + (state.hover_x as f32 - first) * z,
+                    y: py + (state.hover_y as f32 - first) * z,
+                    w: size as f32 * z,
+                    h: size as f32 * z
+                },
+                shade(255, 255, 255),
+                1.0
+            );
         }
         surface.pop_clip();
     }
@@ -803,7 +845,15 @@ class App : app.Handler, app.TitleBar {
             for (i32 cx in first_x..stop_x) {
                 f32 w = pw - cx as f32 * 8.0;
                 f32 h = ph - cy as f32 * 8.0;
-                surface.fill(canvas.Rect{ x: px + cx as f32 * 8.0, y: py + cy as f32 * 8.0, w: w < 8.0 ? w : 8.0, h: h < 8.0 ? h : 8.0 }, (cx + cy) % 2 == 0 ? shade(96, 98, 110) : shade(74, 76, 90));
+                surface.fill(
+                    canvas.Rect{
+                        x: px + cx as f32 * 8.0,
+                        y: py + cy as f32 * 8.0,
+                        w: w < 8.0 ? w : 8.0,
+                        h: h < 8.0 ? h : 8.0
+                    },
+                    (cx + cy) % 2 == 0 ? shade(96, 98, 110) : shade(74, 76, 90)
+                );
             }
         }
     }
@@ -825,12 +875,20 @@ class App : app.Handler, app.TitleBar {
                 text.TextBuilder* number = text.builder(&labels);
                 number.push_i64((k + 1) as i64);
                 say(surface, x + 3.0, top + 8.0 + THUMB - 16.0, 13.0, number.text(), ink());
-                surface.stroke(canvas.Rect{ x: x - 1.0, y: top + 7.0, w: THUMB + 2.0, h: THUMB + 2.0 }, k == state.current ? shade(255, 255, 255) : shade(80, 86, 110), k == state.current ? 2.0 : 1.0);
+                surface.stroke(
+                    canvas.Rect{ x: x - 1.0, y: top + 7.0, w: THUMB + 2.0, h: THUMB + 2.0 },
+                    k == state.current ? shade(255, 255, 255) : shade(80, 86, 110),
+                    k == state.current ? 2.0 : 1.0
+                );
             }
         }
         f32 px = editor.LEFT + width - PREVIEW - 10.0;
         draw_thumb(surface, state.art, px, top + 8.0, PREVIEW);
-        surface.stroke(canvas.Rect{ x: px - 1.0, y: top + 7.0, w: PREVIEW + 2.0, h: PREVIEW + 2.0 }, shade(80, 86, 110), 1.0);
+        surface.stroke(
+            canvas.Rect{ x: px - 1.0, y: top + 7.0, w: PREVIEW + 2.0, h: PREVIEW + 2.0 },
+            shade(80, 86, 110),
+            1.0
+        );
         str[8] a = ["Add", "Copy", "Del", "<", ">", play_label(), "Slow", "Fast"];
         for (i32 k in 0..8) {
             button(surface, row_a_x(k), top + 76.0, 56.0, 24.0, a[k as usize], k == 5 && state.playing);
@@ -869,7 +927,15 @@ class App : app.Handler, app.TitleBar {
     // The color, the palette, the sliders and the layers.
     void draw_panel(canvas.Canvas* surface) {
         f32 left = surface.width as f32 - editor.RIGHT;
-        surface.fill(canvas.Rect{ x: left, y: editor.TOP, w: editor.RIGHT, h: surface.height as f32 - editor.TOP - editor.BOTTOM }, shade(30, 32, 44));
+        surface.fill(
+            canvas.Rect{
+                x: left,
+                y: editor.TOP,
+                w: editor.RIGHT,
+                h: surface.height as f32 - editor.TOP - editor.BOTTOM
+            },
+            shade(30, 32, 44)
+        );
         f32 x0 = left + 12.0;
         surface.fill(canvas.Rect{ x: x0, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, shade(96, 98, 110));
         surface.fill(canvas.Rect{ x: x0 + 24.0, y: editor.TOP + 12.0, w: 24.0, h: 24.0 }, shade(74, 76, 90));
@@ -878,7 +944,14 @@ class App : app.Handler, app.TitleBar {
         surface.stroke(canvas.Rect{ x: x0, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, shade(110, 116, 140), 1.0);
         mut Arena frame = Arena.new(1 * KB);
         defer frame.free();
-        say(surface, x0 + 56.0, editor.TOP + 22.0, 14.0, state.color >> 24 == 0 ? "Transparent" : hex(&frame, state.color), ink());
+        say(
+            surface,
+            x0 + 56.0,
+            editor.TOP + 22.0,
+            14.0,
+            state.color >> 24 == 0 ? "Transparent" : hex(&frame, state.color),
+            ink()
+        );
         say(surface, x0 + 56.0, editor.TOP + 42.0, 11.0, "click to edit", shade(130, 136, 160));
         // the transparent color: a checkerboard
         f32 tx = x0 + 160.0;
@@ -891,7 +964,11 @@ class App : app.Handler, app.TitleBar {
         surface.fill(canvas.Rect{ x: tx + 36.0, y: editor.TOP + 36.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
         surface.fill(canvas.Rect{ x: tx, y: editor.TOP + 48.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
         surface.fill(canvas.Rect{ x: tx + 24.0, y: editor.TOP + 48.0, w: 12.0, h: 12.0 }, shade(74, 76, 90));
-        surface.stroke(canvas.Rect{ x: tx, y: editor.TOP + 12.0, w: 48.0, h: 48.0 }, state.color >> 24 == 0 ? shade(255, 255, 255) : shade(110, 116, 140), state.color >> 24 == 0 ? 2.0 : 1.0);
+        surface.stroke(
+            canvas.Rect{ x: tx, y: editor.TOP + 12.0, w: 48.0, h: 48.0 },
+            state.color >> 24 == 0 ? shade(255, 255, 255) : shade(110, 116, 140),
+            state.color >> 24 == 0 ? 2.0 : 1.0
+        );
         for (i32 i in 0..32) {
             f32 cx = x0 + (i % 8) as f32 * SWATCH;
             f32 cy = editor.TOP + PALETTE_Y + (i / 8) as f32 * SWATCH;
@@ -911,8 +988,21 @@ class App : app.Handler, app.TitleBar {
             f32 row = editor.TOP + LAYER_LIST_Y + (count - 1 - i) as f32 * LAYER_ROW;
             canvas.Rect r = canvas.Rect{ x: x0, y: row, w: 208.0, h: LAYER_ROW - 2.0 };
             surface.fill_rounded(r, 4.0, i == state.art.active ? shade(64, 96, 176) : shade(44, 48, 66));
-            surface.fill_rounded(canvas.Rect{ x: x0 + 6.0, y: row + (LAYER_ROW - 2.0) / 2.0 - 6.0, w: 12.0, h: 12.0 }, 2.0, l.visible ? ink() : shade(70, 74, 96));
-            draw_layer_thumb(surface, l, state.art.width, state.art.height, x0 + 26.0, row + 2.0, LAYER_ROW - 6.0, l.visible);
+            surface.fill_rounded(
+                canvas.Rect{ x: x0 + 6.0, y: row + (LAYER_ROW - 2.0) / 2.0 - 6.0, w: 12.0, h: 12.0 },
+                2.0,
+                l.visible ? ink() : shade(70, 74, 96)
+            );
+            draw_layer_thumb(
+                surface,
+                l,
+                state.art.width,
+                state.art.height,
+                x0 + 26.0,
+                row + 2.0,
+                LAYER_ROW - 6.0,
+                l.visible
+            );
             surface.push_clip(r);
             say(surface, x0 + 30.0 + LAYER_ROW, row + (LAYER_ROW - 2.0) / 2.0 - 8.0, 13.0, l.name, ink());
             surface.pop_clip();
@@ -920,7 +1010,16 @@ class App : app.Handler, app.TitleBar {
     }
 
     // One layer alone, in a square of `box` pixels, on a checkerboard; faint when the layer is hidden.
-    void draw_layer_thumb(canvas.Canvas* surface, sheet.Layer* l, i32 width, i32 height, f32 x, f32 y, f32 box, bool visible) {
+    void draw_layer_thumb(
+        canvas.Canvas* surface,
+        sheet.Layer* l,
+        i32 width,
+        i32 height,
+        f32 x,
+        f32 y,
+        f32 box,
+        bool visible
+    ) {
         f32 across = box / width as f32;
         f32 down = box / height as f32;
         f32 scale = across < down ? across : down;
@@ -930,7 +1029,10 @@ class App : app.Handler, app.TitleBar {
         f32 up = y + (box - h) / 2.0;
         surface.fill(canvas.Rect{ x: x, y: y, w: box, h: box }, shade(24, 26, 36));
         draw_checker(surface, canvas.Rect{ x: left, y: up, w: w, h: h }, left, up, w, h);
-        surface.draw_image(image.Image{ width: width, height: height, pixels: l.pixels }, canvas.Rect{ x: left, y: up, w: w, h: h });
+        surface.draw_image(
+            image.Image{ width: width, height: height, pixels: l.pixels },
+            canvas.Rect{ x: left, y: up, w: w, h: h }
+        );
         if (!visible) {
             surface.fill(canvas.Rect{ x: x, y: y, w: box, h: box }, rgb(0xC01E2030));
         }
@@ -947,7 +1049,8 @@ class App : app.Handler, app.TitleBar {
         } else {
             b.push(editor.tool_name(state.tool));
             b.push("    ");
-            if (state.hover_x >= 0 && state.hover_y >= 0 && state.hover_x < state.art.width && state.hover_y < state.art.height) {
+            if (state.hover_x >= 0 && state.hover_y >= 0 && state.hover_x < state.art.width
+                    && state.hover_y < state.art.height) {
                 b.push_i64(state.hover_x as i64);
                 b.push(", ");
                 b.push_i64(state.hover_y as i64);
@@ -1015,7 +1118,14 @@ i32 main() uses io {
     }
     str[] args = os.args(&arena);
     if (args.len >= 2 && args[0] == "--snapshot") {
-        return snapshot(&arena, handler, m, args[1], args.len >= 3 && args[2] == "--dialog", args.len >= 3 && args[2] == "--picker");
+        return snapshot(
+            &arena,
+            handler,
+            m,
+            args[1],
+            args.len >= 3 && args[2] == "--dialog",
+            args.len >= 3 && args[2] == "--picker"
+        );
     }
     if (args.len >= 1) {
         m.open_file(args[0]);

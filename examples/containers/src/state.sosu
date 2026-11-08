@@ -241,7 +241,11 @@ pub class Demo {
 
     // The total, written as money.
     pub str total_text() {
-        shown = widgets.format_number(total(), widgets.Number{ decimals: 2, decimal: ",", group: " ", symbol: "€" }, true);
+        shown = widgets.format_number(
+            total(),
+            widgets.Number{ decimals: 2, decimal: ",", group: " ", symbol: "€" },
+            true
+        );
         return shown.text();
     }
 

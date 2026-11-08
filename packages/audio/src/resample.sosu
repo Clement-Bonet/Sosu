@@ -25,7 +25,8 @@ pub audio.Sound to_rate(Arena* arena, audio.Sound s, i32 rate) {
 }
 
 pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality quality)
-    requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && audio.fits(rate as i64, s.channels as i64, frames_at(s.frames(), s.rate, rate) as i64)
+    requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE
+            && audio.fits(rate as i64, s.channels as i64, frames_at(s.frames(), s.rate, rate) as i64)
 {
     usize frames = frames_at(s.frames(), s.rate, rate);
     audio.Sound out = audio.create(arena, rate, s.channels, frames);

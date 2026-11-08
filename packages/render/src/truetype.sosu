@@ -155,7 +155,14 @@ struct Transform {
 
     // This transform after `inner`.
     Transform after(Transform inner) {
-        return Transform{ a: a * inner.a + c * inner.b, b: b * inner.a + d * inner.b, c: a * inner.c + c * inner.d, d: b * inner.c + d * inner.d, e: a * inner.e + c * inner.f + e, f: b * inner.e + d * inner.f + f };
+        return Transform{
+            a: a * inner.a + c * inner.b,
+            b: b * inner.a + d * inner.b,
+            c: a * inner.c + c * inner.d,
+            d: b * inner.c + d * inner.d,
+            e: a * inner.e + c * inner.f + e,
+            f: b * inner.e + d * inner.f + f
+        };
     }
 }
 
@@ -247,7 +254,10 @@ struct Raster {
         for (mut i32 i = 1; i <= pieces; i += 1) {
             f32 t = i as f32 / pieces as f32;
             f32 u = 1.0 - t;
-            Point to = Point{ x: u * u * p0.x + 2.0 * u * t * control.x + t * t * p1.x, y: u * u * p0.y + 2.0 * u * t * control.y + t * t * p1.y };
+            Point to = Point{
+                x: u * u * p0.x + 2.0 * u * t * control.x + t * t * p1.x,
+                y: u * u * p0.y + 2.0 * u * t * control.y + t * t * p1.y
+            };
             line(from, to);
             from = to;
         }
@@ -614,7 +624,12 @@ pub class Font {
         i32 top = ceil_of(i16_at(data, start + 8) as f32 * s);
         i32 width = min(max(right - left + 1, 1), 2048);
         i32 height = min(max(top - bottom + 1, 1), 2048);
-        mut Raster r = Raster{ width: width, height: height, stride: width + 2, area: scratch.alloc_slice(f32, ((width + 2) * height) as usize) };
+        mut Raster r = Raster{
+            width: width,
+            height: height,
+            stride: width + 2,
+            area: scratch.alloc_slice(f32, ((width + 2) * height) as usize)
+        };
         // from the units of the font, y upwards, to the pixels of the image, y downwards
         Transform place = Transform{ a: s, b: 0.0, c: 0.0, d: -s, e: -(left as f32), f: top as f32 };
         outline(&r, glyph, place, 0);
@@ -728,7 +743,10 @@ pub class Font {
                 on = k;
             }
         }
-        Point begin = on < count ? m.apply(xs[(first + on) as usize], ys[(first + on) as usize]) : middle_of(m.apply(xs[first as usize], ys[first as usize]), m.apply(xs[last as usize], ys[last as usize]));
+        Point begin = on < count ? m.apply(xs[(first + on) as usize], ys[(first + on) as usize]) : middle_of(
+            m.apply(xs[first as usize], ys[first as usize]),
+            m.apply(xs[last as usize], ys[last as usize])
+        );
         mut Pen pen = Pen{ current: begin, control: begin };
         ui32 skip = on < count ? on + 1 : 0;
         for (ui32 k in 0..count) {
@@ -807,7 +825,21 @@ pub Font*!FontError parse(Arena* arena, keeps ui8[] data) {
     if (units < 16 || units > 16384 || metrics == 0 || charmap.format == 0) {
         return err(NotTrueType);
     }
-    Tables tables = Tables{ charmap: charmap.offset, charmap_format: charmap.format, glyf: glyf, loca: loca, hmtx: hmtx, long_loca: i16_at(data, head + 50) == 1, metrics: metrics, glyphs: u16_at(data, maxp + 4), units: units as f32, ascent: i16_at(data, hhea + 4) as f32, descent: i16_at(data, hhea + 6) as f32, gap: i16_at(data, hhea + 8) as f32, gpos: find_table(data, "GPOS") };
+    Tables tables = Tables{
+        charmap: charmap.offset,
+        charmap_format: charmap.format,
+        glyf: glyf,
+        loca: loca,
+        hmtx: hmtx,
+        long_loca: i16_at(data, head + 50) == 1,
+        metrics: metrics,
+        glyphs: u16_at(data, maxp + 4),
+        units: units as f32,
+        ascent: i16_at(data, hhea + 4) as f32,
+        descent: i16_at(data, hhea + 6) as f32,
+        gap: i16_at(data, hhea + 8) as f32,
+        gpos: find_table(data, "GPOS")
+    };
     return ok(arena.new(Font, data, tables));
 }
 

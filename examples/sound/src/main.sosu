@@ -72,7 +72,8 @@ void play_chord(keeps Arena* arena, device.Player* player) uses io, time {
 }
 
 void play_file(Arena* arena, device.Player* player, str path) uses io, time {
-    audio.Sound!audio.AudioError read = text.ends_with(text.to_lower(arena, path), ".ogg") ? ogg.load(arena, path) : wav.load(arena, path);
+    audio.Sound!audio.AudioError read = text.ends_with(text.to_lower(arena, path), ".ogg") ? ogg.load(arena, path)
+            : wav.load(arena, path);
     match (read) {
         ok(s) => {
             io.print("{}: {} Hz, {} channels, {} s", path, s.rate, s.channels, s.seconds());
