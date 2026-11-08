@@ -2015,16 +2015,100 @@ fast = { git = "https://git.example/fast", rev = "3f2a91c" }
 
 > **Warning:** building a package runs code of its author: `sosuc` compiles the C files and applies the `[link]` settings of every dependency. Add a dependency only from a source you trust. Its URLs and values are checked so that none becomes a command (E0404, E0416).
 
-### 19.4 The manifest
+### 19.4 The manifest: `sosu.toml`
 
-`sosu.toml` is a subset of TOML: comments, strings, one-line lists and one-line inline tables.
+`sosu.toml` is a subset of TOML, the same on every system:
 
-| Section | Keys |
+- comments start with `#`;
+- values are strings (`"..."`), one-line lists of strings (`["a", "b"]`), or, for a dependency, a one-line inline table (`{ path = "../x" }`);
+- a key or a section the compiler does not know is an error (E0402), with the list of the ones it knows;
+- paths are relative to the package, never absolute, so that the manifest works on every machine;
+- values cannot contain a quote, `` ` ``, `$`, `%` or a control character (E0416), since they reach the commands of the C compiler and of `git`; URLs, tags and revs may use letters, digits and `-._~:/@+=,` only (E0404).
+
+A manifest with every section:
+
+```toml
+# A program with a window, a git dependency and a C library given as sources.
+[package]
+name = "notes"
+version = "1.2.0"
+
+[dependencies]
+platform = { path = "../sosu/packages/platform" }
+markdown = { git = "https://git.example/markdown", tag = "v0.3.0" }
+
+[link]
+c = ["vendor/miniz.c"]
+include = ["vendor"]
+defines = ["MINIZ_NO_ARCHIVE_APIS"]
+
+[link.windows]
+libs = ["shell32"]
+
+[link.macos]
+frameworks = ["Cocoa"]
+
+[app]
+id = "org.example.notes"
+name = "Notes"
+description = "Notes in Markdown"
+copyright = "Copyright 2026 Ada Lovelace"
+icon = "assets/icon.png"
+assets = ["assets", "fonts/NotoSans-Regular.ttf"]
+```
+
+#### `[package]` (required)
+
+| Key | Value |
 |---|---|
-| `[package]` | `name`, `version` (required) |
-| `[dependencies]` | one key per dependency, as above |
-| `[link]`, `[link.windows]`, ... | C libraries and C sources (chapter 25) |
-| `[app]` | `id`, `name`, `version`, `icon`, `assets`: for packaging (chapter 26) |
+| `name` | the name of the package: letters, digits and `_`, not starting with a digit (E0409); it starts the imports of its modules (`import notes.editor;`) and names the program (`build/notes`) |
+| `version` | its version, as `1.2.0`; it is also the version of the program on Windows, Android and iOS, unless `[app] version` gives another |
+
+#### `[dependencies]`
+
+One key per dependency: the name used in its imports, then an inline table.
+
+| Key of the table | Value |
+|---|---|
+| `path` | a folder, relative to this package |
+| `git` | a git URL, cloned into `build/deps/` of the root package; it needs a `tag` or a `rev` |
+| `tag` | a tag of the repository |
+| `rev` | a commit, full or abbreviated; a branch is not accepted, since it moves |
+
+`sosu.lock`, next to `sosu.toml`, pins the commit of each git dependency; keep it in version control.
+
+#### `[link]` and `[link.<target>]`
+
+`[link]` applies to every target; `[link.windows]`, `[link.linux]`, `[link.macos]`, `[link.android]` and `[link.ios]` add to it for one system, and `[link.windows-x64]`, `[link.windows-arm64]`, `[link.linux-x64]`, `[link.linux-arm64]`, `[link.macos-x64]` and `[link.macos-arm64]` for one architecture. Every key but `subsystem` is a list of strings.
+
+| Key | Value |
+|---|---|
+| `libs` | C libraries to link: `"SDL3"` is `SDL3.lib` with MSVC and `-lSDL3` with gcc and clang |
+| `paths` | folders where the linker looks for them |
+| `frameworks` | frameworks of macOS and iOS: `"Cocoa"` |
+| `copy` | files placed next to the program, as a DLL beside the `.exe` |
+| `c` | C files compiled with the program, so that its users install nothing |
+| `include` | folders of the headers of those C files |
+| `defines` | macros given to those C files: `"NAME"` or `"NAME=value"` |
+| `subsystem` | `"window"` for a package whose programs open windows (no console behind them, in release builds on Windows), or `"console"` |
+
+In a path, `{arch}` is the architecture of the target (`vendor/lib/{arch}`), and `{abi}` the folder of an Android architecture. A folder of `paths`, or a file of `copy` or `c`, that does not exist is reported before the C compiler runs. Linking is transitive: a program links what its dependencies declare, without naming it.
+
+#### `[app]`
+
+What a release of the program says about itself: its icon, its version and its files. Every key is optional.
+
+| Key | Value | Default |
+|---|---|---|
+| `id` | the identifier of the application on Android and iOS: `org.example.notes` | `org.sosu.<package>` |
+| `name` | its name: under its icon on a phone, the product name of a Windows program | the name of the package |
+| `version` | its version: the file and product version on Windows, the version on Android and iOS | the version of `[package]` |
+| `description` | the file description of a Windows program | the name |
+| `copyright` | the copyright of a Windows program, and of a macOS application | none |
+| `icon` | a PNG file of the package: the icon of the `.exe` on Windows, of the application on phones, and of its `.desktop` file on Linux | none |
+| `assets` | files and folders given with the program: copied into the release folder, the APK or the bundle, and read with `app.read_asset` | none |
+
+On Windows, every program and DLL carries a version resource made from these keys, which the "Details" tab of the properties of the file shows. Its four numbers are the leading digits of the version: `1.2.3-beta` gives `1.2.3.0`. Without `rc` (MSVC) or `windres` (MinGW), the program is built without it, with a warning.
 
 ## 20. Testing
 
@@ -2591,7 +2675,160 @@ The main nodes:
 
 `theme` blocks give colors and sizes for each widget and state (hover, focus), and `style` blocks name a look for `style:`. The [specification, chapter 10](SPEC.md), describes every node, theme and translation; `examples/form`, `examples/themes`, `examples/containers` and `examples/workspace` show them working.
 
-### 24.5 Phones
+### 24.5 Reference: the properties of a window
+
+A `window` starts with properties, before its nodes; a `component` has none.
+
+| Property | Value |
+|---|---|
+| `title` | the title of the window, a `str` |
+| `width`, `height` | its size at the start, in pixels |
+| `icon` | the path of a PNG file in the package, the icon of the window |
+
+They become `NameConfig()`, a `widgets.Window` given to `app.Config`. A `TitleBar` node makes the window draw its own title bar.
+
+### 24.6 Reference: the nodes
+
+Values come first, in order; then properties, by name, in any order. `{ }` says whether a node holds other nodes.
+
+| Node | For | Value | Properties | `{ }` |
+|---|---|---|---|---|
+| `Grid` | rows and columns of sized cells | - | `columns`, `rows`, `gap`, `padding`, `style` | yes |
+| `Column` | nodes one under the other | - | `gap`, `padding`, `style` | yes |
+| `Row` | nodes side by side | - | `gap`, `padding`, `style` | yes |
+| `List` | a scrolling list of items, chosen with the mouse or the keyboard | - | `width`, `height`, `selected`, `selection`, `count`, `item`, `on_drop`, `focus`, `style` | yes |
+| `Table` | rows and sortable columns, only the rows in view described | - | `count`, `item`, `width`, `height`, `selected`, `selection`, `sort`, `on_activate`, `focus`, `style` | yes |
+| `Scroll` | any content, scrolled | - | `width`, `height`, `style` | yes |
+| `Text` | a line of text | the text | `plural`, `count`, `context`, `style` | - |
+| `Title` | a title | the text | `plural`, `count`, `context`, `style` | - |
+| `Space` | empty room, in pixels | pixels | - | - |
+| `Button` | a button | the label | `on_click`, `enabled`, `focus`, `plural`, `count`, `context`, `style` | - |
+| `TextField` | a line of text to edit | - | `bind`, `width`, `on_enter`, `accept`, `max`, `mask`, `placeholder`, `focus`, `style` | - |
+| `TextArea` | several lines of text to edit | - | `bind`, `width`, `rows`, `wrap`, `tabs`, `placeholder`, `on_enter`, `focus`, `style` | - |
+| `Slider` | a number chosen by dragging | - | `bind`, `min`, `max`, `step`, `width`, `on_change`, `focus`, `style` | - |
+| `Progress` | a progress bar | - | `value`, `max`, `width`, `style` | - |
+| `DateField` | a date, typed or chosen in a calendar | - | `bind`, `width`, `format`, `monday_first`, `on_change`, `focus`, `style` | - |
+| `Dialog` | a modal box over the window | the title | `open`, `width`, `plural`, `count`, `context` | yes |
+| `NumberField` | a number, typed or stepped | - | `bind`, `width`, `min`, `max`, `step`, `decimals`, `decimal`, `group`, `on_change`, `focus`, `style` | - |
+| `MoneyField` | an amount, with its symbol | - | `bind`, `width`, `min`, `max`, `step`, `decimals`, `decimal`, `group`, `symbol`, `symbol_first`, `on_change`, `focus`, `style` | - |
+| `Checkbox` | a box to tick, with an optional label | the label (optional) | `bind`, `on_change`, `plural`, `count`, `context`, `style` | - |
+| `Radio` | one choice among the values of an enum | the label | `bind`, `value`, `on_change`, `plural`, `count`, `context`, `style` | - |
+| `TitleBar` | a title bar drawn by the program | - | `height`, `gap`, `padding`, `style` | yes |
+| `Dropdown` | a box that opens a list of options | - | `bind`, `width`, `on_change`, `placeholder`, `focus`, `style` | yes |
+| `Option` | an option of a dropdown | the label | `value`, `plural`, `count`, `context` | - |
+| `Image` | an image | an `image.Image` | `size`, `style` | - |
+| `Group` | nodes under a title, foldable | the title (optional) | `gap`, `padding`, `collapsible`, `open`, `style` | yes |
+| `Tabs` | a row of tabs and the content of the one chosen | - | `bind`, `placement`, `focus`, `style` | yes |
+| `Tab` | a tab of `Tabs` | the title | `closable`, `on_close`, `enabled`, `plural`, `count`, `context` | yes |
+| `Tree` | branches and leaves, or a long tree as a flat list | - | `selected`, `width`, `height`, `count`, `item`, `depth`, `branch`, `open`, `on_toggle`, `focus`, `style` | yes |
+| `Branch` | a branch of a tree | the label (optional) | `open`, `icon`, `template`, `plural`, `count`, `context` | yes |
+| `Leaf` | a leaf of a tree | the label (optional) | `on_click`, `icon`, `template`, `plural`, `count`, `context` | - |
+| `Item` | one item of a list, a tree or a table, made of several widgets | - | `gap`, `padding`, `vertical`, `enabled`, `style` | yes |
+| `MenuBar` | the menus of the window | - | `style` | yes |
+| `Menu` | a menu | the title | `plural`, `count`, `context`, `style` | yes |
+| `MenuItem` | an entry of a menu | the label | `on_click`, `shortcut`, `enabled`, `plural`, `count`, `context` | - |
+| `Separator` | a line between entries of a menu | - | - | - |
+| `ContextMenu` | the menu of a right click | - | - | yes |
+
+Inside a `Grid`, every node also takes `row`, `col`, `span` and `row_span`, its cell; `align` places a node in its cell, or across a `Column` or a `Row`.
+
+### 24.7 Reference: what the properties mean
+
+| Property | Nodes | Meaning |
+|---|---|---|
+| `gap`, `padding` | layouts, `Group`, `Item`, `TitleBar` | the room between nodes, and around them, in pixels (`gap` is 8 and `padding` 0 by default) |
+| `width`, `height` | fields, lists, `Scroll`, `Progress` | a size: a number of pixels, or `Fill` (what is left) and `Auto` (what it needs) where a list or a grid takes them |
+| `columns`, `rows` | `Grid` | the sizes of its columns and rows: `[120, Auto, Fill, Fill(2)]` |
+| `style` | most nodes | a `style` block of the file, applied to this node |
+| `bind` | inputs, `Dropdown`, `Tabs` | the variable the widget edits, read and written at each frame; its window parameter is `keeps` |
+| `on_click`, `on_enter`, `on_change` | buttons and inputs | what runs: a method (`s.save`), or a call (`s.save(1)`) |
+| `enabled` | `Button`, `Tab`, `MenuItem`, `Item` | a `bool`; `false` dims the widget and ignores it |
+| `focus` | inputs, `Button`, lists | a `bool`: when true, the widget takes the keyboard |
+| `placeholder` | `TextField`, `TextArea`, `Dropdown` | a hint shown, dimmed, while it is empty |
+| `accept`, `max`, `mask` | `TextField` | what can be typed (a variant of `widgets.Accept`: `Digits`...), how many characters, and a mask (`"99/99/9999"`) |
+| `rows`, `wrap`, `tabs` | `TextArea` | its height in lines, line wrapping, and whether Tab types spaces |
+| `min`, `max`, `step` | `Slider`, `NumberField`, `MoneyField` | the range, and what Up and Down add |
+| `decimals`, `decimal`, `group` | `NumberField`, `MoneyField` | the digits after the separator, the separator (`"."`), and the separator of thousands (`" "`) |
+| `symbol`, `symbol_first` | `MoneyField` | the currency (`"€"`), and whether it comes first |
+| `value` | `Radio`, `Option`, `Progress` | the variant this radio or option stands for; the progress shown |
+| `format`, `monday_first` | `DateField` | the order of the parts (`"dd/mm/yyyy"`), and the first day of the week of the calendar |
+| `selected` | `List`, `Table`, `Tree` | the index of the item chosen, an `i32` (-1: none) |
+| `selection` | `List`, `Table` | several items chosen, a `widgets.Selection` |
+| `count`, `item` | `List`, `Table`, `Tree` | a long collection: its number of items, and the name of the index of the item being described; only the items in view are described |
+| `count` | texts | with `plural`: the number that chooses the form of the text, and fills `{count}` |
+| `plural`, `context` | texts | the plural form of a text, and a context that tells two identical texts apart for translators |
+| `sort`, `on_activate` | `Table` | the sort of its columns, and what runs on Enter or a double click |
+| `on_drop` | `List` | what runs when an item is dragged to another place |
+| `depth`, `branch`, `open`, `on_toggle` | `Tree`, `Branch`, `Group` | a long tree as a flat list: the depth of a row, whether it has children, whether it is open, and what runs when it is toggled; `open` on a `Group` or a `Branch` is its state |
+| `icon`, `template` | `Branch`, `Leaf` | an icon before the label, and a component that describes the row |
+| `vertical` | `Item` | its widgets in a column instead of a row |
+| `collapsible` | `Group` | a triangle before the title, that folds the group |
+| `placement` | `Tabs` | where the row of tabs goes: `Top` (default) or `Bottom` |
+| `closable`, `on_close` | `Tab` | a cross on the tab, and what runs when it is clicked |
+| `shortcut` | `MenuItem` | the keys shown next to the entry |
+| `open` | `Dialog` | a `bool`: whether the dialog is shown |
+| `size` | `Image` | its height in pixels; its width follows its proportions |
+
+Writing a property that a node does not take is a compile error, with the list of those it takes.
+
+### 24.8 Reference: themes and styles
+
+A `theme` gives every kind of widget its colors and sizes; a `style` changes those of the nodes that name it, as a class of CSS does.
+
+```csharp
+theme Dark {
+    accent: #89B4FA          // a name of the theme, used below
+    color: #CDD6F4           // color, font_size and accent apply to every widget
+
+    Window { background: #1E1E2E }
+    Button {
+        background: #313244
+        radius: 6
+        hover { background: #45475A }
+        disabled { color: #6C7086 }
+    }
+    Dropdown {
+        background: #181825
+        open { border: accent }
+    }
+}
+
+theme Light : Dark {          // the selectors of Dark, with these changes
+    accent: #1E66F5
+    color: #4C4F69
+    Window { background: #EFF1F5 }
+}
+
+style Danger {
+    background: #D20F39
+    hover { background: #E64553 }
+}
+```
+
+The properties of a selector, a style or a state:
+
+| Property | Value |
+|---|---|
+| `color` | the color of the text |
+| `background` | the color behind the widget |
+| `border` | the color of its border |
+| `border_width` | the width of its border, in pixels |
+| `radius` | rounded corners, in pixels |
+| `padding` | the room inside it, in pixels |
+| `gap` | the room between the nodes of a layout |
+| `height` | the height of a line, in pixels |
+| `font_size` | the size of its text, in pixels per em |
+| `accent` | the color of what is chosen or has the keyboard |
+
+A color is `#RRGGBB`, or `#RRGGBBAA` with its opacity, or a name given at the top of the theme.
+
+The states, written inside a selector or a style: `hover`, `pressed`, `focus` (it has the keyboard), `disabled`, `checked` (a box ticked, a radio or an item chosen), `open` (a dropdown, a menu). The parts: `placeholder` (the hint of a field), `selection` (the text or the item selected), `bar` (the scroll bars), and `title` (the title of a `Group`). Several states can apply together.
+
+The selectors of a theme: `Window`, `Text`, `Title`, `Button`, `TextField`, `Checkbox`, `Radio`, `Dropdown`, `List`, `Scroll`, `Column`, `Row`, `TitleBar`, `MenuBar`, `Menu`, `Image`, `Grid`, `Group`, `Tabs`, `Tree`, `Slider`, `Progress`, `Tooltip`, `Dialog`, `DateField`, `Table`, `Item`.
+
+`theme Dark` becomes a function, `Dark()`, that gives a `widgets.Theme`; `style Danger` becomes `Danger()`, a `widgets.Style`. The program chooses its theme at any time with `ui.theme = some(screen.Dark())`; without one, `widgets.default_theme()` applies, and `widgets.light_theme()` is a light theme given by `ui`. `app.system_theme()` and the event `SystemThemeChanged` tell what the user chose, for a program that follows the system. The cascade goes from the default theme, to the selector of the widget, its states, then the styles of the node in their order; `color` and `font_size` are inherited by the nodes inside. [Section 10.7 of the specification](SPEC.md) gives the details, and `examples/themes` shows it working.
+
+### 24.9 Phones
 
 The same program runs on Android and iOS: `sosuc package --target android` makes an APK, and `--target ios-sim` an application for the iOS simulator (on a Mac). Files go through the platform (`app.data_folder`, `app.read_asset`), never through fixed paths. `[app]` of `sosu.toml` gives the identifier, the name, the version, the icon and the asset files of the application.
 
