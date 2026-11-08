@@ -157,7 +157,11 @@ bool!db.DbError values_of_each_type(Arena* arena, keeps db.Connection* c) uses i
     assert(check.same_text(listed(arena, c, "SELECT * FROM people ORDER BY id"), expected));
     // read by name, as their types
     mut db.Value[1] two = [db.Value.Integer(2)];
-    db.Rows* rows = try c.query(arena, "SELECT name AS who, born, height, photo, born IS NULL FROM people WHERE id = ?", two[0..1]);
+    db.Rows* rows = try c.query(
+        arena,
+        "SELECT name AS who, born, height, photo, born IS NULL FROM people WHERE id = ?",
+        two[0..1]
+    );
     defer rows.close();
     assert(rows.columns() == 5 && rows.name(0) == "who" && rows.name(3) == "photo" && rows.name(9) == "");
     assert(try rows.next());
@@ -327,7 +331,11 @@ test "the errors of SQLite" {
     c.close();  // twice: nothing
     // a file that is not a database, a folder that is not there
     str text_file = fs.join(&arena, dir, "notes.txt");
-    match (io.write_file(&arena, text_file, "these are not the pages of a database, but they are long enough to be read as a header of one")) {
+    match (io.write_file(
+        &arena,
+        text_file,
+        "these are not the pages of a database, but they are long enough to be read as a header of one"
+    )) {
         ok => { },
         err(e) => assert(false),
     }
@@ -438,7 +446,10 @@ test "a pool of connections, shared out between threads" {
     match (conns.take()) {
         ok(conn) => {
             assert(count(&arena, conn, "work") == 120);
-            assert(check.same_text(listed(&arena, conn, "SELECT worker, count(*), sum(step) FROM work GROUP BY worker"), "1 | 40 | 780\n2 | 40 | 780\n3 | 40 | 780\n"));
+            assert(check.same_text(
+                listed(&arena, conn, "SELECT worker, count(*), sum(step) FROM work GROUP BY worker"),
+                "1 | 40 | 780\n2 | 40 | 780\n3 | 40 | 780\n"
+            ));
             conns.give(conn);
         },
         err(e) => assert(false),

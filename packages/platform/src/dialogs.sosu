@@ -123,7 +123,8 @@ ui8*? prepare(Arena* arena, ui32 tag, Filter[] filters, str location) uses io {
         Request* r = block as Request*;
         r.tag = tag;
         r.count = filters.len as i32;
-        r.filters = filters.len == 0 ? 0 as sdl_c.SDL_DialogFileFilter* : (block + size_of(Request)) as sdl_c.SDL_DialogFileFilter*;
+        r.filters = filters.len == 0 ? 0 as sdl_c.SDL_DialogFileFilter*
+                : (block + size_of(Request)) as sdl_c.SDL_DialogFileFilter*;
         mut ui8* at = block + head;
         for (usize i in 0..filters.len) {
             sdl_c.SDL_DialogFileFilter* f = r.filters + i;
@@ -360,7 +361,15 @@ pub usize? ask(Question q) uses io {
     mut i32 chosen = -1;
     mut bool shown = false;
     unsafe {
-        mut sdl_c.SDL_MessageBoxData data = sdl_c.SDL_MessageBoxData{ flags: flags_of(q.level) | sdl_c.SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, window: parent(), title: c_title, message: c_text, numbuttons: buttons.len as i32, buttons: &buttons[0], colorScheme: 0 as sdl_c.SDL_MessageBoxColorScheme* };
+        mut sdl_c.SDL_MessageBoxData data = sdl_c.SDL_MessageBoxData{
+            flags: flags_of(q.level) | sdl_c.SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT,
+            window: parent(),
+            title: c_title,
+            message: c_text,
+            numbuttons: buttons.len as i32,
+            buttons: &buttons[0],
+            colorScheme: 0 as sdl_c.SDL_MessageBoxColorScheme*
+        };
         shown = sdl_c.SDL_ShowMessageBox(&data, &chosen);
     }
     if (!shown || chosen < 0 || chosen as usize >= q.buttons.len) {
@@ -396,13 +405,22 @@ sdl_c.SDL_MessageBoxButtonData[] buttons_of(Arena* arena, Question q) {
 test "filters, in the form SDL takes" {
     mut Arena arena = Arena.new(16 * KB);
     defer arena.free();
-    assert(pattern(&arena, Filter{ name: "Images", extensions: text.split(&arena, "png,*.JPG, .jpeg ", ",") }) == "png;JPG;jpeg");
-    assert(pattern(&arena, Filter{ name: "Archives", extensions: text.split(&arena, "tar.gz,bad/ext,été,my-ext_2", ",") }) == "tar.gz;my-ext_2");
+    assert(pattern(
+        &arena,
+        Filter{ name: "Images", extensions: text.split(&arena, "png,*.JPG, .jpeg ", ",") }
+    ) == "png;JPG;jpeg");
+    assert(pattern(
+        &arena,
+        Filter{ name: "Archives", extensions: text.split(&arena, "tar.gz,bad/ext,été,my-ext_2", ",") }
+    ) == "tar.gz;my-ext_2");
     assert(pattern(&arena, Filter{ name: "All", extensions: text.split(&arena, "txt,*", ",") }) == "*");
     assert(pattern(&arena, Filter{ name: "All", extensions: text.split(&arena, "", ",") }) == "*");
     assert(pattern(&arena, Filter{ name: "None valid", extensions: text.split(&arena, "a b", ",") }) == "*");
 
-    mut Filter[2] filters = [Filter{ name: "Images", extensions: text.split(&arena, "png,jpg", ",") }, Filter{ name: "Texte écrit", extensions: text.split(&arena, "*.txt", ",") }];
+    mut Filter[2] filters = [
+        Filter{ name: "Images", extensions: text.split(&arena, "png,jpg", ",") },
+        Filter{ name: "Texte écrit", extensions: text.split(&arena, "*.txt", ",") },
+    ];
     match (prepare(&arena, 5, filters[0..2], "C:\\Users\\été")) {
         some(block) => {
             unsafe {
@@ -447,7 +465,9 @@ bool answer_from_thread(Arena* arena, Answering job) uses io {
     match (prepare(arena, job.tag, arena.alloc_slice(Filter, 0), "")) {
         some(block) => {
             unsafe {
-                mut ui8*[3] list = ["C:\\Users\\été\\a.png".to_cstr(arena), "/home/b c/ü.jpg".to_cstr(arena), 0 as ui8*];
+                mut ui8*[3] list = [
+                    "C:\\Users\\été\\a.png".to_cstr(arena), "/home/b c/ü.jpg".to_cstr(arena), 0 as ui8*,
+                ];
                 if (job.paths < 0) {
                     answered(block, 0 as ui8**, -1);
                 } else {
@@ -504,16 +524,25 @@ test "answers, from the thread of a dialog to the loop of events" {
 test "message boxes: buttons, Enter and Escape" {
     mut Arena arena = Arena.new(4 * KB);
     defer arena.free();
-    Question q = Question{ title: "Quit", text: "Save the changes?", buttons: text.split(&arena, "Save,Don't save,Cancel", ","), escape: some(2) };
+    Question q = Question{
+        title: "Quit",
+        text: "Save the changes?",
+        buttons: text.split(&arena, "Save,Don't save,Cancel", ","),
+        escape: some(2)
+    };
     sdl_c.SDL_MessageBoxButtonData[] b = buttons_of(&arena, q);
     assert(b.len == 3);
-    assert(b[0].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT && b[1].flags == 0 && b[2].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT);
+    assert(b[0].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT && b[1].flags == 0
+            && b[2].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT);
     assert(b[0].buttonID == 0 && b[1].buttonID == 1 && b[2].buttonID == 2);
     unsafe {
         assert(sdl.copy_cstring(&arena, b[1].text, 100) == "Don't save");
     }
     // without Escape, and Enter on the last button
-    sdl_c.SDL_MessageBoxButtonData[] two = buttons_of(&arena, Question{ title: "", text: "", buttons: text.split(&arena, "No,Yes", ","), enter: 1 });
+    sdl_c.SDL_MessageBoxButtonData[] two = buttons_of(
+        &arena,
+        Question{ title: "", text: "", buttons: text.split(&arena, "No,Yes", ","), enter: 1 }
+    );
     assert(two[0].flags == 0 && two[1].flags == sdl_c.SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT);
     assert(flags_of(Warning) == 0x20 && flags_of(Error) == 0x10 && flags_of(Information) == 0x40);
 }

@@ -45,7 +45,8 @@ usize take(ui8[] data, usize at, widgets.TextBuffer* into) {
 
 // The bytes of `e`, in `arena`.
 pub ui8[] encode(Arena* arena, Entry* e) {
-    usize size = 1 + 6 * 2 + e.title.text().len + e.user.text().len + e.url.text().len + e.password.text().len + e.totp.text().len + e.notes.text().len + 8;
+    usize size = 1 + 6 * 2 + e.title.text().len + e.user.text().len + e.url.text().len + e.password.text().len
+            + e.totp.text().len + e.notes.text().len + 8;
     mut ui8[] out = arena.alloc_slice(ui8, size);
     out[0] = 1;
     mut usize at = 1;

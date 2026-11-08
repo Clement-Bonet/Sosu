@@ -483,7 +483,8 @@ pub class Notes {
             }
             str row = text.slice(all, at, end);
             str source = md.src_of(row);
-            if (!md.same(source, current.text()) && !md.same(source, last.text()) && md.link_matches(md.dst_of(row), current.text())) {
+            if (!md.same(source, current.text()) && !md.same(source, last.text())
+                    && md.link_matches(md.dst_of(row), current.text())) {
                 backlist.insert(backlist.text().len, source);
                 backlist.insert(backlist.text().len, "\n");
                 last.set(source);
@@ -1034,7 +1035,8 @@ pub class Notes {
                     str full = fs.join(scratch, folder, file);
                     if (depth < 4 && fs.is_dir(scratch, full)) {
                         add_fonts(scratch, full, depth + 1);
-                    } else if ((text.ends_with(file, ".ttf") || text.ends_with(file, ".TTF")) && !md.has(file, "symbol") && !md.has(file, "wingding") && !md.has(file, "webding")) {
+                    } else if ((text.ends_with(file, ".ttf") || text.ends_with(file, ".TTF")) && !md.has(file, "symbol")
+                            && !md.has(file, "wingding") && !md.has(file, "webding")) {
                         add_entry(font_entries, &font_pool, full, false);
                     }
                 }

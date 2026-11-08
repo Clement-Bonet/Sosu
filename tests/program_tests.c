@@ -180,6 +180,22 @@ static const char *after_lines(const char *text, int lines) {
     return text ? text : "";
 }
 
+/* `sosuc doc`: the reference of tests/packages/doc, a module in a subfolder, its private
+   function left out. */
+static void test_doc(const char *sosuc) {
+    char command[512];
+    snprintf(command, sizeof command, "%s doc tests/packages/doc -o build/doc.md > build/doc.out 2> build/doc.err", sosuc);
+    CHECK(run(command) == 0, "sosuc doc failed (see build/doc.err)");
+    char *actual = read_text("build/doc.md");
+    char *expected = read_text("tests/packages/doc/expected.md");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "sosuc doc: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+    snprintf(command, sizeof command, "%s doc tests/packages/doc --html > build/doc.out 2> build/doc.err", sosuc);
+    CHECK(run(command) == 2, "sosuc doc: an unknown option is refused");
+}
+
 /* `sosuc bindgen` (spec §11.6): the module of tests/programs/bindgen, written again from its header
    and checked against it by the C compiler, is the one committed (but its first lines, which name
    the system and the command); `long` is warned about. */
@@ -428,6 +444,7 @@ int main(int argc, char **argv) {
 
     test_library(argv[1]);
     test_bindgen(argv[1]);
+    test_doc(argv[1]);
     test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);
     test_guide(argv[1], "guide", "docs/GUIDE.md", 55);
     test_freed_arena(argv[1]);

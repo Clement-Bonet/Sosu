@@ -60,7 +60,10 @@ pub Instrument instrument(usize at) {
 }
 
 pub str instrument_name(usize instrument) {
-    str[16] names = ["Kick", "Snare", "Clap", "Hat", "Open hat", "Tom", "Rim", "Cowbell", "Conga", "Crash", "Shaker", "Bass", "Pluck", "Lead", "Bell", "Zap"];
+    str[16] names = [
+        "Kick", "Snare", "Clap", "Hat", "Open hat", "Tom", "Rim", "Cowbell", "Conga", "Crash", "Shaker", "Bass",
+        "Pluck", "Lead", "Bell", "Zap",
+    ];
     return names[instrument];
 }
 
@@ -68,7 +71,10 @@ pub str instrument_name(usize instrument) {
 pub str note_name(i64 note)
     requires note >= -12 && note <= 12
 {
-    str[25] names = ["C2", "C#2", "D2", "D#2", "E2", "F2", "F#2", "G2", "G#2", "A2", "A#2", "B2", "C3", "C#3", "D3", "D#3", "E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3", "C4"];
+    str[25] names = [
+        "C2", "C#2", "D2", "D#2", "E2", "F2", "F#2", "G2", "G#2", "A2", "A#2", "B2", "C3", "C#3", "D3", "D#3", "E3",
+        "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3", "C4",
+    ];
     return names[(note + 12) as usize];
 }
 
@@ -96,15 +102,27 @@ pub i32 white_key(i32 at) {
 // The tracks are the kick, snare, clap, hat, open hat, tom and a bass.
 str[7] preset_rows(i32 which) {
     if (which == 0) {  // rock
-        return ["x.......x.x.....", "....x.......x...", "................", "x.x.x.x.x.x.x.x.", "...............x", "..............x.", "x.......x.x....."];
+        return [
+            "x.......x.x.....", "....x.......x...", "................", "x.x.x.x.x.x.x.x.", "...............x",
+            "..............x.", "x.......x.x.....",
+        ];
     }
     if (which == 1) {  // house
-        return ["x...x...x...x...", "................", "....x.......x...", "x.xxx.xxx.xxx.xx", "..x...x...x...x.", "................", ".x..x..x.x..x..x"];
+        return [
+            "x...x...x...x...", "................", "....x.......x...", "x.xxx.xxx.xxx.xx", "..x...x...x...x.",
+            "................", ".x..x..x.x..x..x",
+        ];
     }
     if (which == 2) {  // hip hop
-        return ["x..x..x...x..x..", "....x.......x..x", "................", "x.x.x.x.x.x.x.xx", "..............x.", ".........x......", "x..x......x..x.."];
+        return [
+            "x..x..x...x..x..", "....x.......x..x", "................", "x.x.x.x.x.x.x.xx", "..............x.",
+            ".........x......", "x..x......x..x..",
+        ];
     }
-    return ["x.....x...x.....", "....x..x.x..x...", "................", "xxxxxxxxxxxxxxxx", "......x.........", "..............xx", "x.....x.x......."];  // break
+    return [
+        "x.....x...x.....", "....x..x.x..x...", "................", "xxxxxxxxxxxxxxxx", "......x.........",
+        "..............xx", "x.....x.x.......",
+    ];  // break
 }
 
 // How likely a step is to be played at random, by instrument.

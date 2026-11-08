@@ -70,7 +70,9 @@ pub class Out {
         mut usize i = 0;
         while (i < s.len) {
             i32 c = cm.ch(s, i);
-            bool safe = cm.is_alnum(c) || c == 59 || c == 44 || c == 47 || c == 63 || c == 58 || c == 64 || c == 38 || c == 61 || c == 43 || c == 36 || c == 45 || c == 95 || c == 46 || c == 33 || c == 126 || c == 42 || c == 39 || c == 40 || c == 41 || c == 35;
+            bool safe = cm.is_alnum(c) || c == 59 || c == 44 || c == 47 || c == 63 || c == 58 || c == 64 || c == 38
+                    || c == 61 || c == 43 || c == 36 || c == 45 || c == 95 || c == 46 || c == 33 || c == 126 || c == 42
+                    || c == 39 || c == 40 || c == 41 || c == 35;
             if (c == 37 && cm.hexval(cm.ch(s, i + 1)) >= 0 && cm.hexval(cm.ch(s, i + 2)) >= 0) {
                 o.push("%");
             } else if (safe) {

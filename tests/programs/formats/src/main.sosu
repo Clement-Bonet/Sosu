@@ -21,7 +21,16 @@ void try_args(Arena* arena, str line) uses io {
     cli.Command* c = counter(arena);
     match (c.parse(args)) {
         ok(m) => {
-            io.print("[{}] verbose {} quiet {} min {} file {} rest {} include {}", line, m.flag("verbose"), m.flag("quiet"), m.value("min"), m.argument("file"), text.join(arena, m.rest(), "+"), text.join(arena, m.values("include"), "+"));
+            io.print(
+                "[{}] verbose {} quiet {} min {} file {} rest {} include {}",
+                line,
+                m.flag("verbose"),
+                m.flag("quiet"),
+                m.value("min"),
+                m.argument("file"),
+                text.join(arena, m.rest(), "+"),
+                text.join(arena, m.values("include"), "+")
+            );
         },
         err(e) => {
             match (e) {
@@ -117,7 +126,10 @@ i32 main() uses io, time {
         err(e) => io.print("600 deep: {}", json.message(&arena, e)),
     }
 
-    match (json.parse(&arena, "{\"name\": \"Ada\", \"age\": 36, \"size\": 1.75, \"langs\": [\"en\", \"fr\"], \"x\": null}")) {
+    match (json.parse(
+        &arena,
+        "{\"name\": \"Ada\", \"age\": 36, \"size\": 1.75, \"langs\": [\"en\", \"fr\"], \"x\": null}"
+    )) {
         ok(v) => {
             str name = match (json.get(v, "name")) {
                 some(n) => match (json.as_str(n)) {
@@ -159,7 +171,17 @@ i32 main() uses io, time {
                 some(m) => false,
                 none => true,
             };
-            io.print("{} {} {} {} {} {} {} {}", name, age, size_integer, json.len(v), json.len(langs), second, x_null, missing);
+            io.print(
+                "{} {} {} {} {} {} {} {}",
+                name,
+                age,
+                size_integer,
+                json.len(v),
+                json.len(langs),
+                second,
+                x_null,
+                missing
+            );
             io.print("{}", json.write_pretty(&arena, v));
         },
         err(e) => io.print("{}", json.message(&arena, e)),

@@ -1107,6 +1107,162 @@ static void definition(LspServer *s, const Json *id, const Json *params) {
     send_response(s, &o);
 }
 
+/* ---- References and renaming ---- */
+
+/* A place where a name designates the declaration being looked for. */
+typedef struct {
+    const Unit *unit;
+    size_t offset;
+    size_t length;
+} Reference;
+
+typedef struct {
+    Reference *items;
+    size_t count;
+    size_t cap;
+} References;
+
+static bool same_target(const Target *a, const Target *b) {
+    return a->file && b->file && a->offset == b->offset && same_path(a->file->path, b->file->path);
+}
+
+/* The unit that holds `file`, or NULL. */
+static const Unit *unit_of_file(const Analysis *a, const SourceFile *file) {
+    for (size_t i = 0; i < a->program.units.count; i++) {
+        if (same_path(a->program.units.items[i]->file.path, file->path)) return a->program.units.items[i];
+    }
+    return NULL;
+}
+
+/* Every name of the packages of the program, outside `core` and `std`, that designates `target`:
+   each identifier spelled as it is, whose declaration is the same. */
+static void find_references(const Analysis *a, const Target *target, References *out) {
+    const char *name = target->file->text + target->offset;
+    for (size_t u = 0; u < a->program.units.count; u++) {
+        const Unit *unit = a->program.units.items[u];
+        if (unit->package && unit->package->builtin) continue;
+        for (size_t i = 0; i < unit->tokens.count; i++) {
+            const Token *token = &unit->tokens.items[i];
+            if (token->kind != TOK_IDENT || token->length != target->length ||
+                memcmp(unit->file.text + token->offset, name, token->length) != 0) {
+                continue;
+            }
+            Target t = describe(a, unit, token->offset);
+            if (same_target(&t, target)) {
+                Reference r = { unit, token->offset, token->length };
+                SOSU_VEC_PUSH(out, r);
+            }
+            target_free(&t);
+        }
+    }
+}
+
+/* The declaration designated at the position of `params`, in `*a`; false if there is none. */
+static bool target_at(LspServer *s, const Json *params, Analysis **a, Target *t) {
+    Position p;
+    memset(t, 0, sizeof *t);
+    *a = read_position(s, params, &p) ? analysis_for(s, p.doc) : NULL;
+    const Unit *unit = *a && (*a)->checked ? find_unit(*a, p.doc->path) : NULL;
+    if (unit) *t = describe(*a, unit, offset_in(unit->file.text, unit->file.length, p.line, p.character));
+    return t->file != NULL;
+}
+
+static void references(LspServer *s, const Json *id, const Json *params) {
+    JsonOut o = {0};
+    begin_response(&o, id);
+    Analysis *a;
+    Target t;
+    References found = {0};
+    if (target_at(s, params, &a, &t)) find_references(a, &t, &found);
+    bool declaration = json_bool(json_get(json_get(params, "context"), "includeDeclaration"), true);
+    json_raw(&o, "[");
+    bool first = true;
+    for (size_t i = 0; i < found.count; i++) {
+        const Reference *r = &found.items[i];
+        if (!declaration && r->offset == t.offset && same_path(r->unit->file.path, t.file->path)) continue;
+        char *uri = uri_for(s, r->unit->file.path);
+        json_raw(&o, first ? "{\"uri\":" : ",{\"uri\":");
+        json_str(&o, uri);
+        json_raw(&o, ",\"range\":");
+        write_range(&o, &r->unit->file, r->offset, r->length);
+        json_raw(&o, "}");
+        free(uri);
+        first = false;
+    }
+    json_raw(&o, "]");
+    free(found.items);
+    target_free(&t);
+    send_response(s, &o);
+}
+
+/* True if `text` is a name that a declaration can take: an identifier, not a keyword. */
+static bool is_plain_name(const char *text) {
+    SourceFile file;
+    source_from_string(&file, "rename", text);
+    TokenList tokens = {0};
+    DiagList diags = {0};
+    lex_file(&file, &tokens, &diags);
+    bool plain = diags.error_count == 0 && tokens.count == 2 && tokens.items[0].kind == TOK_IDENT &&
+                 tokens.items[0].offset == 0 && tokens.items[0].length == strlen(text);
+    token_list_free(&tokens);
+    diag_free(&diags);
+    source_free(&file);
+    return plain;
+}
+
+/* Renames a declaration and every name that designates it, in the files of the program: a
+   `WorkspaceEdit` the editor applies, open files and the others alike. */
+static void rename_symbol(LspServer *s, const Json *id, const Json *params) {
+    const char *new_name = json_string(json_get(params, "newName"), "");
+    Analysis *a;
+    Target t;
+    if (!target_at(s, params, &a, &t)) {
+        target_free(&t);
+        send_error(s, id, -32602, "there is no name to rename here");
+        return;
+    }
+    const Unit *home = unit_of_file(a, t.file);
+    if (!home || (home->package && home->package->builtin)) {
+        target_free(&t);
+        send_error(s, id, -32602, "a name of `core` or `std` cannot be renamed");
+        return;
+    }
+    if (!is_plain_name(new_name)) {
+        target_free(&t);
+        char *message = sosu_format("`%s` is not a name: letters, digits and `_`, not a keyword", new_name);
+        send_error(s, id, -32602, message);
+        free(message);
+        return;
+    }
+    References found = {0};
+    find_references(a, &t, &found);
+    JsonOut o = {0};
+    begin_response(&o, id);
+    json_raw(&o, "{\"changes\":{");
+    for (size_t i = 0; i < found.count; i++) {
+        const Reference *r = &found.items[i];
+        bool new_file = i == 0 || found.items[i - 1].unit != r->unit;
+        if (new_file) {
+            char *uri = uri_for(s, r->unit->file.path);
+            if (i > 0) json_raw(&o, "],");
+            json_str(&o, uri);
+            json_raw(&o, ":[");
+            free(uri);
+        } else {
+            json_raw(&o, ",");
+        }
+        json_raw(&o, "{\"range\":");
+        write_range(&o, &r->unit->file, r->offset, r->length);
+        json_raw(&o, ",\"newText\":");
+        json_str(&o, new_name);
+        json_raw(&o, "}");
+    }
+    json_raw(&o, found.count ? "]}}" : "}}");
+    free(found.items);
+    target_free(&t);
+    send_response(s, &o);
+}
+
 /* ---- Completion ---- */
 
 enum {
@@ -1459,7 +1615,7 @@ static void initialize(LspServer *s, const Json *id) {
     JsonOut o = {0};
     begin_response(&o, id);
     json_raw(&o, "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},"
-                 "\"hoverProvider\":true,\"definitionProvider\":true,"
+                 "\"hoverProvider\":true,\"definitionProvider\":true,\"referencesProvider\":true,\"renameProvider\":true,"
                  "\"completionProvider\":{\"triggerCharacters\":[\".\"]}},"
                  "\"serverInfo\":{\"name\":\"sosuc\",\"version\":\"%s\"}}", SOSU_VERSION);
     send_response(s, &o);
@@ -1499,6 +1655,10 @@ bool lsp_handle(LspServer *s, const char *text, size_t length, LspMessages *out)
         definition(s, id, params);
     } else if (strcmp(method, "textDocument/completion") == 0) {
         completion(s, id, params);
+    } else if (strcmp(method, "textDocument/references") == 0) {
+        references(s, id, params);
+    } else if (strcmp(method, "textDocument/rename") == 0) {
+        rename_symbol(s, id, params);
     } else if (id) {
         char *error = sosu_format("`%s` is not supported", method);
         send_error(s, id, -32601, error);

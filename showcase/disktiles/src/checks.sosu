@@ -77,7 +77,8 @@ test "the tiles follow the sizes and stay in their rectangle" {
         for (usize j in i + 1..map.tiles.len()) {
             layout.Tile* b = map.tiles.at(j);
             if (a.leaf && b.leaf) {
-                bool apart = a.x + a.w <= b.x + 0.01 || b.x + b.w <= a.x + 0.01 || a.y + a.h <= b.y + 0.01 || b.y + b.h <= a.y + 0.01;
+                bool apart = a.x + a.w <= b.x + 0.01 || b.x + b.w <= a.x + 0.01 || a.y + a.h <= b.y + 0.01
+                        || b.y + b.h <= a.y + 0.01;
                 assert(apart);
             }
         }

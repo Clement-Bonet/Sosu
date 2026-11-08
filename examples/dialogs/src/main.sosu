@@ -51,7 +51,10 @@ class Demo : app.Handler {
         text.TextBuilder* t = text.builder(&scratch);
         match (answer) {
             Chosen(tag, paths, filter) => {
-                t.push(tag == OPEN ? "Opened" : tag == OPEN_MANY ? "Opened together" : tag == SAVE ? "To save" : "Folder");
+                t.push(tag == OPEN ? "Opened"
+                        : tag == OPEN_MANY ? "Opened together"
+                        : tag == SAVE ? "To save"
+                        : "Folder");
                 t.push(" (filter ");
                 t.push_i64(filter as i64);
                 t.push("):");
@@ -97,10 +100,20 @@ class Demo : app.Handler {
                 } else if (code == 102) {  // f
                     dialogs.choose_folder(FOLDER, "");
                 } else if (code == 105) {  // i
-                    bool shown = dialogs.message(dialogs.Level.Information, "Sosu", "A message of the system.\nThe window waits for OK.");
+                    bool shown = dialogs.message(
+                        dialogs.Level.Information,
+                        "Sosu",
+                        "A message of the system.\nThe window waits for OK."
+                    );
                     show(shown ? "The message was read." : "No message box on this system.");
                 } else if (code == 113) {  // q
-                    dialogs.Question question = dialogs.Question{ title: "Quit", text: "Save the changes?", buttons: text.split(&scratch, "Save,Don't save,Cancel", ","), level: dialogs.Level.Warning, escape: some(2) };
+                    dialogs.Question question = dialogs.Question{
+                        title: "Quit",
+                        text: "Save the changes?",
+                        buttons: text.split(&scratch, "Save,Don't save,Cancel", ","),
+                        level: dialogs.Level.Warning,
+                        escape: some(2)
+                    };
                     usize? chosen = dialogs.ask(question);
                     show(match (chosen) {
                         some(i) => i == 0 ? "Answer: Save" : i == 1 ? "Answer: Don't save" : "Answer: Cancel",
@@ -117,7 +130,13 @@ class Demo : app.Handler {
         angle += 0.05;
         surface.clear(canvas.Color{ r: 30, g: 30, b: 46 });
         canvas.Color light = canvas.Color{ r: 205, g: 214, b: 244 };
-        surface.text(16.0, 16.0, "O: open a file   M: several   S: save   F: a folder\nI: a message   Q: a question   Escape: quit", light, 2);
+        surface.text(
+            16.0,
+            16.0,
+            "O: open a file   M: several   S: save   F: a folder\nI: a message   Q: a question   Escape: quit",
+            light,
+            2
+        );
         surface.text(16.0, 80.0, report, canvas.Color{ r: 249, g: 226, b: 175 }, 2);
         // turns while a file dialog is open: the window is not stopped
         f32 cx = surface.width as f32 - 60.0;

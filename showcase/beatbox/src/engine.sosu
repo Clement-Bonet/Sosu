@@ -45,7 +45,12 @@ pub class Engine {
 
     void init(keeps Arena* arena, keeps device.Player* player) {
         self.player = player;
-        kit = [sounds.kick(arena), sounds.snare(arena), sounds.clap(arena), sounds.hat(arena), sounds.open_hat(arena), sounds.tom(arena), sounds.rim(arena), sounds.cowbell(arena), sounds.conga(arena), sounds.crash(arena), sounds.shaker(arena), sounds.bass(arena), sounds.pluck(arena), sounds.lead(arena), sounds.bell(arena), sounds.zap(arena)];
+        kit = [
+            sounds.kick(arena), sounds.snare(arena), sounds.clap(arena), sounds.hat(arena), sounds.open_hat(arena),
+            sounds.tom(arena), sounds.rim(arena), sounds.cowbell(arena), sounds.conga(arena), sounds.crash(arena),
+            sounds.shaker(arena), sounds.bass(arena), sounds.pluck(arena), sounds.lead(arena), sounds.bell(arena),
+            sounds.zap(arena),
+        ];
         room = audio.create(arena, sounds.RATE, 2, 16 * step_frames(machine.MIN_BPM));
         cycle = audio.part(room, 0, 0);
         voice = 0;
@@ -118,7 +123,10 @@ pub class Engine {
         usize t = m.selected;
         f64 gain = m.level[t] as f64 / 100.0 * 0.6;
         f64 ratio = math.exp(m.note[t] as f64 * 0.05776226504666211);
-        player.sounds.play_with(kit[machine.index(m.inst[t])], mixer.Play{ volume: gain as f32, pan: pan_of(machine.index(m.inst[t])) as f32, speed: ratio as f32 });
+        player.sounds.play_with(
+            kit[machine.index(m.inst[t])],
+            mixer.Play{ volume: gain as f32, pan: pan_of(machine.index(m.inst[t])) as f32, speed: ratio as f32 }
+        );
     }
 
     // Keeps the device fed and the sound in line with the machine; to call at every frame.

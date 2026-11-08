@@ -172,8 +172,8 @@ DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu) package
 doc: build/docgen
 	./build/docgen docs/REFERENCE.md $(DOC_SOURCES)
 
-build/docgen: src/docgen/docgen.c | build
-	$(CC) $(CFLAGS) -o $@ src/docgen/docgen.c
+build/docgen: src/docgen/docgen.c src/lib/docgen.c src/lib/docgen.h src/lib/common.c src/lib/common.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ src/docgen/docgen.c src/lib/docgen.c src/lib/common.c
 
 clean:
 	rm -rf build

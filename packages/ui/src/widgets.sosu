@@ -1159,7 +1159,8 @@ i32 days_in(i32 year, i32 month) {
 }
 
 pub bool valid_date(Date d) {
-    return d.year >= 1 && d.year <= 9999 && d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= days_in(d.year, d.month);
+    return d.year >= 1 && d.year <= 9999 && d.month >= 1 && d.month <= 12 && d.day >= 1
+            && d.day <= days_in(d.year, d.month);
 }
 
 // The day of the week of a date: 0 for Sunday (the method of Sakamoto).
@@ -1631,17 +1632,68 @@ f32? or_f32(f32? strong, f32? weak) {
 
 // `strong` over `weak`: what `strong` says, else what `weak` says.
 Props merge_props(Props weak, Props strong) {
-    return Props{ color: or_color(strong.color, weak.color), background: or_color(strong.background, weak.background), border: or_color(strong.border, weak.border), border_width: or_f32(strong.border_width, weak.border_width), radius: or_f32(strong.radius, weak.radius), padding: or_f32(strong.padding, weak.padding), gap: or_f32(strong.gap, weak.gap), height: or_f32(strong.height, weak.height), font_size: or_f32(strong.font_size, weak.font_size), accent: or_color(strong.accent, weak.accent) };
+    return Props{
+        color: or_color(strong.color, weak.color),
+        background: or_color(strong.background, weak.background),
+        border: or_color(strong.border, weak.border),
+        border_width: or_f32(strong.border_width, weak.border_width),
+        radius: or_f32(strong.radius, weak.radius),
+        padding: or_f32(strong.padding, weak.padding),
+        gap: or_f32(strong.gap, weak.gap),
+        height: or_f32(strong.height, weak.height),
+        font_size: or_f32(strong.font_size, weak.font_size),
+        accent: or_color(strong.accent, weak.accent)
+    };
 }
 
 // `strong` over `weak`, state by state and part by part: a theme that starts from another one.
 pub Style merge(Style weak, Style strong) {
-    return Style{ normal: merge_props(weak.normal, strong.normal), hover: merge_props(weak.hover, strong.hover), pressed: merge_props(weak.pressed, strong.pressed), focus: merge_props(weak.focus, strong.focus), disabled: merge_props(weak.disabled, strong.disabled), checked: merge_props(weak.checked, strong.checked), open: merge_props(weak.open, strong.open), placeholder: merge_props(weak.placeholder, strong.placeholder), selection: merge_props(weak.selection, strong.selection), bar: merge_props(weak.bar, strong.bar) };
+    return Style{
+        normal: merge_props(weak.normal, strong.normal),
+        hover: merge_props(weak.hover, strong.hover),
+        pressed: merge_props(weak.pressed, strong.pressed),
+        focus: merge_props(weak.focus, strong.focus),
+        disabled: merge_props(weak.disabled, strong.disabled),
+        checked: merge_props(weak.checked, strong.checked),
+        open: merge_props(weak.open, strong.open),
+        placeholder: merge_props(weak.placeholder, strong.placeholder),
+        selection: merge_props(weak.selection, strong.selection),
+        bar: merge_props(weak.bar, strong.bar)
+    };
 }
 
 // The theme `strong` over the theme `weak`, selector by selector: `theme Light : Dark`.
 pub Theme over(Theme weak, Theme strong) {
-    return Theme{ all: merge_props(weak.all, strong.all), window: merge(weak.window, strong.window), text: merge(weak.text, strong.text), title: merge(weak.title, strong.title), button: merge(weak.button, strong.button), text_field: merge(weak.text_field, strong.text_field), checkbox: merge(weak.checkbox, strong.checkbox), radio: merge(weak.radio, strong.radio), dropdown: merge(weak.dropdown, strong.dropdown), list: merge(weak.list, strong.list), scroll: merge(weak.scroll, strong.scroll), column: merge(weak.column, strong.column), row: merge(weak.row, strong.row), title_bar: merge(weak.title_bar, strong.title_bar), menu_bar: merge(weak.menu_bar, strong.menu_bar), menu: merge(weak.menu, strong.menu), image: merge(weak.image, strong.image), grid: merge(weak.grid, strong.grid), group: merge(weak.group, strong.group), tabs: merge(weak.tabs, strong.tabs), tree: merge(weak.tree, strong.tree), slider: merge(weak.slider, strong.slider), progress: merge(weak.progress, strong.progress), tooltip: merge(weak.tooltip, strong.tooltip), dialog: merge(weak.dialog, strong.dialog), date: merge(weak.date, strong.date), table: merge(weak.table, strong.table), item: merge(weak.item, strong.item) };
+    return Theme{
+        all: merge_props(weak.all, strong.all),
+        window: merge(weak.window, strong.window),
+        text: merge(weak.text, strong.text),
+        title: merge(weak.title, strong.title),
+        button: merge(weak.button, strong.button),
+        text_field: merge(weak.text_field, strong.text_field),
+        checkbox: merge(weak.checkbox, strong.checkbox),
+        radio: merge(weak.radio, strong.radio),
+        dropdown: merge(weak.dropdown, strong.dropdown),
+        list: merge(weak.list, strong.list),
+        scroll: merge(weak.scroll, strong.scroll),
+        column: merge(weak.column, strong.column),
+        row: merge(weak.row, strong.row),
+        title_bar: merge(weak.title_bar, strong.title_bar),
+        menu_bar: merge(weak.menu_bar, strong.menu_bar),
+        menu: merge(weak.menu, strong.menu),
+        image: merge(weak.image, strong.image),
+        grid: merge(weak.grid, strong.grid),
+        group: merge(weak.group, strong.group),
+        tabs: merge(weak.tabs, strong.tabs),
+        tree: merge(weak.tree, strong.tree),
+        slider: merge(weak.slider, strong.slider),
+        progress: merge(weak.progress, strong.progress),
+        tooltip: merge(weak.tooltip, strong.tooltip),
+        dialog: merge(weak.dialog, strong.dialog),
+        date: merge(weak.date, strong.date),
+        table: merge(weak.table, strong.table),
+        item: merge(weak.item, strong.item)
+    };
 }
 
 // What `s` says about a widget in `states`, the states in the order of the spec.
@@ -1861,7 +1913,21 @@ Look default_look(Kind kind, ui32 states) {
         },
         _ => { },
     }
-    return Look{ color: color, background: background, border: border, border_width: border_width, radius: 0.0, padding: padding, gap: 8.0, height: 32.0, font_size: font_size, accent: accent(), hint: hint(), selection: rgb(137, 180, 250, 90), bar: face(true, false) };
+    return Look{
+        color: color,
+        background: background,
+        border: border,
+        border_width: border_width,
+        radius: 0.0,
+        padding: padding,
+        gap: 8.0,
+        height: 32.0,
+        font_size: font_size,
+        accent: accent(),
+        hint: hint(),
+        selection: rgb(137, 180, 250, 90),
+        bar: face(true, false)
+    };
 }
 
 // A light theme, given by `ui`.
@@ -1873,7 +1939,39 @@ pub Theme light_theme() {
     canvas.Color mantle = rgb(230, 233, 239, 255);
     Props field = Props{ background: some(rgb(255, 255, 255, 255)), border: some(surface) };
     Props focus = Props{ border: some(accent) };
-    return Theme{ all: Props{ color: some(text), accent: some(accent) }, window: Style{ normal: Props{ background: some(page) } }, button: Style{ normal: Props{ background: some(surface) }, hover: Props{ background: some(rgb(188, 192, 204, 255)) }, pressed: Props{ background: some(rgb(172, 176, 190, 255)) }, disabled: Props{ background: some(mantle), color: some(rgb(156, 160, 176, 255)) } }, text_field: Style{ normal: field, focus: focus, placeholder: Props{ color: some(rgb(140, 143, 161, 255)) } }, checkbox: Style{ normal: Props{ background: some(surface) }, hover: Props{ background: some(rgb(188, 192, 204, 255)) } }, radio: Style{ normal: Props{ background: some(surface) }, hover: Props{ background: some(rgb(188, 192, 204, 255)) } }, dropdown: Style{ normal: field, focus: focus, open: focus, placeholder: Props{ color: some(rgb(140, 143, 161, 255)) } }, list: Style{ normal: field, focus: focus }, scroll: Style{ normal: field, focus: focus, bar: Props{ background: some(rgb(172, 176, 190, 255)) } }, title_bar: Style{ normal: Props{ background: some(rgb(220, 224, 232, 255)) } }, menu_bar: Style{ hover: Props{ background: some(surface) }, open: Props{ background: some(rgb(188, 192, 204, 255)) } }, menu: Style{ normal: Props{ background: some(rgb(255, 255, 255, 255)), border: some(surface) } } };
+    return Theme{
+        all: Props{ color: some(text), accent: some(accent) },
+        window: Style{ normal: Props{ background: some(page) } },
+        button: Style{
+            normal: Props{ background: some(surface) },
+            hover: Props{ background: some(rgb(188, 192, 204, 255)) },
+            pressed: Props{ background: some(rgb(172, 176, 190, 255)) },
+            disabled: Props{ background: some(mantle), color: some(rgb(156, 160, 176, 255)) }
+        },
+        text_field: Style{ normal: field, focus: focus, placeholder: Props{ color: some(rgb(140, 143, 161, 255)) } },
+        checkbox: Style{
+            normal: Props{ background: some(surface) },
+            hover: Props{ background: some(rgb(188, 192, 204, 255)) }
+        },
+        radio: Style{
+            normal: Props{ background: some(surface) },
+            hover: Props{ background: some(rgb(188, 192, 204, 255)) }
+        },
+        dropdown: Style{
+            normal: field,
+            focus: focus,
+            open: focus,
+            placeholder: Props{ color: some(rgb(140, 143, 161, 255)) }
+        },
+        list: Style{ normal: field, focus: focus },
+        scroll: Style{ normal: field, focus: focus, bar: Props{ background: some(rgb(172, 176, 190, 255)) } },
+        title_bar: Style{ normal: Props{ background: some(rgb(220, 224, 232, 255)) } },
+        menu_bar: Style{
+            hover: Props{ background: some(surface) },
+            open: Props{ background: some(rgb(188, 192, 204, 255)) }
+        },
+        menu: Style{ normal: Props{ background: some(rgb(255, 255, 255, 255)), border: some(surface) } }
+    };
 }
 
 // What a window of a `.ui.sosu` file says about itself (spec §10.2).
@@ -2307,7 +2405,11 @@ pub struct Frame {
             painted = container_id();
             WidgetState s = ui.states[ui.state_slot(painted)];
             if (s.content_w > 0.0 && l.background.a > 0) {
-                surface.fill_rounded(canvas.Rect{ x: parent.x, y: parent.y, w: s.content_w, h: s.content_h }, l.radius, l.background);
+                surface.fill_rounded(
+                    canvas.Rect{ x: parent.x, y: parent.y, w: s.content_w, h: s.content_h },
+                    l.radius,
+                    l.background
+                );
             }
         }
         usize before = depth;
@@ -2393,7 +2495,8 @@ pub struct Frame {
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, true) || alt_letter(text);
         bool hot = over(r);
-        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0);
+        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0)
+                | (ui.focus == id ? state_focus() : 0);
         Look l = look(Button, states);
         paint(r, l);
         write_label(r.x + l.padding, r.y, r.h, text, l.color, l.font_size);
@@ -2418,12 +2521,17 @@ pub struct Frame {
             *value = !(*value);
         }
         bool hot = over(r);
-        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (*value ? state_checked() : 0);
+        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0)
+                | (ui.focus == id ? state_focus() : 0) | (*value ? state_checked() : 0);
         Look l = look(Checkbox, states);
         canvas.Rect box = canvas.Rect{ x: r.x + 2.0, y: r.y + (r.h - 20.0) / 2.0, w: 20.0, h: 20.0 };
         paint(box, l);
         if (*value) {
-            surface.fill_rounded(canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 }, max(l.radius - 3.0, 0.0), l.accent);
+            surface.fill_rounded(
+                canvas.Rect{ x: box.x + 5.0, y: box.y + 5.0, w: 10.0, h: 10.0 },
+                max(l.radius - 3.0, 0.0),
+                l.accent
+            );
         }
         write_label(r.x + 32.0, r.y, r.h, text, l.color, l.font_size);
         if (ui.focus == id) {
@@ -2449,7 +2557,8 @@ pub struct Frame {
         focusable(id, r);
         bool clicked = click(id, r) || activated(id, false) || alt_letter(text);
         bool hot = over(r);
-        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0) | (chosen ? state_checked() : 0);
+        ui32 states = (hot ? state_hover() : 0) | (ui.active == id && hot ? state_pressed() : 0)
+                | (ui.focus == id ? state_focus() : 0) | (chosen ? state_checked() : 0);
         Look l = look(Radio, states);
         if (ui.focus == id) {
             ring(r, l.accent);
@@ -2490,7 +2599,12 @@ pub struct Frame {
         f32 size = first.font_size;
         canvas.Rect r = place(width, first.height);
         interactive(r);
-        canvas.Rect inner = canvas.Rect{ x: r.x + first.padding, y: r.y, w: max(width - 2.0 * first.padding, 0.0), h: r.h };
+        canvas.Rect inner = canvas.Rect{
+            x: r.x + first.padding,
+            y: r.y,
+            w: max(width - 2.0 * first.padding, 0.0),
+            h: r.h
+        };
         if (ui.pressed && over(r)) {
             if (ui.focus != id) {
                 ui.focus = id;
@@ -2638,7 +2752,9 @@ pub struct Frame {
             } else if (e.key == key_backspace() || e.key == key_delete()) {
                 if (start == end) {
                     bool back = e.key == key_backspace();
-                    ui.anchor = e.ctrl ? back ? word_left(text, ui.cursor) : word_right(text, ui.cursor) : back ? text.previous(ui.cursor) : text.next(ui.cursor);
+                    ui.anchor = e.ctrl ? back ? word_left(text, ui.cursor) : word_right(text, ui.cursor)
+                            : back ? text.previous(ui.cursor)
+                            : text.next(ui.cursor);
                 }
                 erase_selection(text);
             } else if (e.key == key_left() || e.key == key_right()) {
@@ -2695,15 +2811,23 @@ pub struct Frame {
             usize last = ui.change_at - 1;
             Change c = ui.changes[last];
             // a word joins the spaces after it; the letter after a space starts the next change
-            bool word_starts = c.inserted_len > 0 && ui.history[ui.history_used - 1] == 32 && with.len > 0 && with.bytes[0] != 32;
-            if (c.typing && !word_starts && c.at + c.inserted_len == from && c.text_at + c.removed_len + c.inserted_len == ui.history_used) {
+            bool word_starts = c.inserted_len > 0 && ui.history[ui.history_used - 1] == 32 && with.len > 0
+                    && with.bytes[0] != 32;
+            if (c.typing && !word_starts && c.at + c.inserted_len == from
+                    && c.text_at + c.removed_len + c.inserted_len == ui.history_used) {
                 ui.changes[last].inserted_len += with.len;  // the next letter of a word typed
                 joined = true;
             }
         }
         if (fits && !joined) {
             usize slot = ui.change_at;
-            ui.changes[slot] = Change{ at: from, text_at: ui.history_used, removed_len: removed.len, inserted_len: with.len, typing: typing };
+            ui.changes[slot] = Change{
+                at: from,
+                text_at: ui.history_used,
+                removed_len: removed.len,
+                inserted_len: with.len,
+                typing: typing
+            };
             for (usize i in 0..removed.len) {
                 ui.history[ui.history_used + i] = removed.bytes[i];
             }
@@ -2918,7 +3042,10 @@ pub struct Frame {
             f32 left = measure_px(text_of(shown.bytes[0..at]), size).w;
             f32 right = measure_px(text_of(shown.bytes[0..next_char(shown, at)]), size).w;
             f32 h = measure_px(shown, size).h;
-            surface.fill(canvas.Rect{ x: x + left, y: y + (box + h) / 2.0 - 2.0, w: max(right - left, 1.0), h: 1.0 }, color);
+            surface.fill(
+                canvas.Rect{ x: x + left, y: y + (box + h) / 2.0 - 2.0, w: max(right - left, 1.0), h: 1.0 },
+                color
+            );
         }
     }
 
@@ -2960,7 +3087,12 @@ pub struct Frame {
         usize slot = ui.state_slot(id);
         WidgetState kept = ui.states[slot];
         // where it is: its row in a list, else its size at the last frame
-        canvas.Rect r = canvas.Rect{ x: in_list ? parent.frame.x : parent.x, y: parent.y, w: in_list ? parent.frame.w - parent.bar_w : kept.content_w, h: kept.content_h };
+        canvas.Rect r = canvas.Rect{
+            x: in_list ? parent.frame.x : parent.x,
+            y: parent.y,
+            w: in_list ? parent.frame.w - parent.bar_w : kept.content_w,
+            h: kept.content_h
+        };
         bool chosen = in_list && (match (parent.selected) {
             some(index) => *index == parent.item,
             none => false,
@@ -2968,7 +3100,8 @@ pub struct Frame {
             some(set) => set.contains(parent.item),
             none => false,
         });
-        ui32 states = (kept.content_h > 0.0 && over(r) && enabled ? state_hover() : 0) | (chosen ? state_checked() : 0) | (chosen && ui.focus == parent.area_id ? state_focus() : 0) | (enabled ? 0 : state_disabled());
+        ui32 states = (kept.content_h > 0.0 && over(r) && enabled ? state_hover() : 0) | (chosen ? state_checked() : 0)
+                | (chosen && ui.focus == parent.area_id ? state_focus() : 0) | (enabled ? 0 : state_disabled());
         Look l = look(Item, states);
         Props p = explicit_props(Item, states);
         if (kept.content_h > 0.0) {
@@ -2977,7 +3110,13 @@ pub struct Frame {
         if (item_count == 4 || depth == 15) {
             return;
         }
-        item_builds[item_count] = ItemBuild{ id: id, slot: slot, active_before: ui.active, enabled: enabled, in_list: in_list };
+        item_builds[item_count] = ItemBuild{
+            id: id,
+            slot: slot,
+            active_before: ui.active,
+            enabled: enabled,
+            in_list: in_list
+        };
         item_count += 1;
         open(horizontal, gap >= 0.0 ? gap : l.gap, padding >= 0.0 ? padding : l.padding);
         layouts[depth].color = or_color(p.color, parent.color);
@@ -3049,7 +3188,11 @@ pub struct Frame {
         next = next < low ? low : next > high ? high : next;
         bool changed = next != *value;
         *value = next;
-        Look l = look(Slider, (over(r) ? state_hover() : 0) | (ui.active == id ? state_pressed() : 0) | (ui.focus == id ? state_focus() : 0));
+        Look l = look(
+            Slider,
+            (over(r) ? state_hover() : 0) | (ui.active == id ? state_pressed() : 0)
+                    | (ui.focus == id ? state_focus() : 0)
+        );
         f32 x = left + track * (next - low) as f32 / range as f32;
         f32 cy = r.y + r.h / 2.0;
         surface.fill_rounded(canvas.Rect{ x: left, y: cy - 2.0, w: track, h: 4.0 }, 2.0, l.background);
@@ -3170,7 +3313,12 @@ pub struct Frame {
         mut TextBuffer shown = format_date(*date, format);
         TextBuffer mask = mask_of(format);
         bool focused_before = ui.focus == id;
-        field_id(id, focused_before && ui.date_of == id ? short_target(&ui.date_text) : short_target(&shown), width, Format{ mask: mask.text() });
+        field_id(
+            id,
+            focused_before && ui.date_of == id ? short_target(&ui.date_text) : short_target(&shown),
+            width,
+            Format{ mask: mask.text() }
+        );
         no_edit = false;
         canvas.Rect r = last;
         bool focused = ui.focus == id;
@@ -3210,7 +3358,12 @@ pub struct Frame {
         surface.stroke(canvas.Rect{ x: button.x + 4.0, y: button.y + 4.0, w: 14.0, h: button.h - 8.0 }, mark, 1.0);
         surface.fill(canvas.Rect{ x: button.x + 4.0, y: button.y + 4.0, w: 14.0, h: 3.0 }, mark);
         if (ui.open == id) {
-            canvas.Rect popup = canvas.Rect{ x: r.x, y: r.y + r.h + 2.0, w: 7.0 * 32.0 + 16.0, h: 32.0 + 24.0 + 6.0 * 28.0 + 8.0 };
+            canvas.Rect popup = canvas.Rect{
+                x: r.x,
+                y: r.y + r.h + 2.0,
+                w: 7.0 * 32.0 + 16.0,
+                h: 32.0 + 24.0 + 6.0 * 28.0 + 8.0
+            };
             layer = popup;
             layer_owner = id;
             cal_owner = id;
@@ -3273,7 +3426,10 @@ pub struct Frame {
         canvas.Rect r = layer;
         Look l = look(Calendar, 0);
         paint(r, l);
-        mut str[12] months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        mut str[12] months = [
+            "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+            "November", "December",
+        ];
         mut str[7] days = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
         str title = tr(months[(ui.cal_month - 1) as usize]);
         str year = decimal(ui.cal_year as i64);
@@ -3289,7 +3445,14 @@ pub struct Frame {
         }
         for (i32 c in 0..7) {
             i32 index = cal_monday ? (c + 1) % 7 : c;
-            write_px(r.x + 8.0 + c as f32 * 32.0 + 6.0, r.y + 32.0, 24.0, tr(days[index as usize]), l.hint, l.font_size * 0.8);
+            write_px(
+                r.x + 8.0 + c as f32 * 32.0 + 6.0,
+                r.y + 32.0,
+                24.0,
+                tr(days[index as usize]),
+                l.hint,
+                l.font_size * 0.8
+            );
         }
         Date chosen = match (cal_date) {
             some(d) => *d,
@@ -3298,7 +3461,12 @@ pub struct Frame {
         i32 offset = first_column(cal_monday);
         for (i32 day in 1..days_in(ui.cal_year, ui.cal_month) + 1) {
             i32 cell = day - 1 + offset;
-            canvas.Rect box = canvas.Rect{ x: r.x + 8.0 + (cell % 7) as f32 * 32.0, y: r.y + 56.0 + (cell / 7) as f32 * 28.0, w: 30.0, h: 26.0 };
+            canvas.Rect box = canvas.Rect{
+                x: r.x + 8.0 + (cell % 7) as f32 * 32.0,
+                y: r.y + 56.0 + (cell / 7) as f32 * 28.0,
+                w: 30.0,
+                h: 26.0
+            };
             bool is_chosen = chosen.year == ui.cal_year && chosen.month == ui.cal_month && chosen.day == day;
             if (is_chosen) {
                 surface.fill_rounded(box, 4.0, l.accent);
@@ -3310,7 +3478,14 @@ pub struct Frame {
             }
             str number = decimal(day as i64);
             canvas.Rect n = measure_px(number, l.font_size * 0.9);
-            write_px(box.x + (box.w - n.w) / 2.0, box.y, box.h, number, is_chosen ? well() : l.color, l.font_size * 0.9);
+            write_px(
+                box.x + (box.w - n.w) / 2.0,
+                box.y,
+                box.h,
+                number,
+                is_chosen ? well() : l.color,
+                l.font_size * 0.9
+            );
         }
     }
 
@@ -3363,7 +3538,16 @@ pub struct Frame {
         f32 left = x + l.padding;
         f32 top = y + title_h;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: l.gap, room_w: max(w - 2.0 * l.padding, 0.0) };
+        layouts[depth] = Layout{
+            x: left,
+            y: top,
+            left: left,
+            top: top,
+            right: left,
+            bottom: top,
+            gap: l.gap,
+            room_w: max(w - 2.0 * l.padding, 0.0)
+        };
         return true;
     }
 
@@ -3637,7 +3821,19 @@ pub struct Frame {
         f32 x = bar.x + padding;
         f32 y = bar.y + max((bar_height - height) / 2.0, 0.0);
         depth += 1;
-        layouts[depth] = Layout{ horizontal: true, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, color: or_color(p.color, l.color), font_size: or_f32(p.font_size, l.font_size), accent: or_color(p.accent, l.accent) };
+        layouts[depth] = Layout{
+            horizontal: true,
+            x: x,
+            y: y,
+            left: x,
+            top: y,
+            right: x,
+            bottom: y,
+            gap: gap,
+            color: or_color(p.color, l.color),
+            font_size: or_f32(p.font_size, l.font_size),
+            accent: or_color(p.accent, l.accent)
+        };
         bar_depth = depth;
     }
 
@@ -3672,7 +3868,11 @@ pub struct Frame {
             bool hot = over(r);
             if (hot) {
                 bool held = ui.active == id;
-                surface.fill(r, i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 } : look(Button, state_hover() | (held ? state_pressed() : 0)).background);
+                surface.fill(
+                    r,
+                    i == 2 ? canvas.Color{ r: 196, g: 43, b: 28 }
+                            : look(Button, state_hover() | (held ? state_pressed() : 0)).background
+                );
             }
             canvas.Color ink_of = i == 2 && hot ? white : mark;
             i32 cx = (r.x + w / 2.0) as i32;
@@ -3786,7 +3986,8 @@ pub struct Frame {
         } else if (ui.open == 0) {
             ui.drop_scroll = 0.0;  // the scroll belongs to the open list: another dropdown must not reset it
         }
-        ui32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0) | (ui.open == id ? state_open() : 0);
+        ui32 states = (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0)
+                | (ui.open == id ? state_open() : 0);
         drop_look = look(Dropdown, states);
         paint(r, drop_look);
         i32 cx = (r.x + r.w - 16.0) as i32;  // a chevron, pointing down
@@ -4035,7 +4236,8 @@ pub struct Frame {
             ui.context_x = ui.mouse_x;
             ui.context_y = ui.mouse_y;
             right_taken = true;
-        } else if (!right_taken && ui.focus != 0 && ui.focus == target && (ui.pressed_key(key_f10(), true, false) || ui.pressed_key(key_menu(), false, false))) {
+        } else if (!right_taken && ui.focus != 0 && ui.focus == target
+                && (ui.pressed_key(key_f10(), true, false) || ui.pressed_key(key_menu(), false, false))) {
             ui.close_menus(0);  // Shift+F10 or the Menu key: under the widget that has the keyboard
             ui.menus[0] = id;
             ui.menu_in_bar = false;
@@ -4161,7 +4363,8 @@ pub struct Frame {
                 continue;
             }
             canvas.Rect r = canvas.Rect{ x: p.x + 4.0, y: y, w: p.w - 8.0, h: 28.0 };
-            bool open_beside = p.kinds[i] == 2 && p.level + 1 < 4 && ui.menus[p.level + 1] == p.submenus[i] && p.submenus[i] != 0;
+            bool open_beside = p.kinds[i] == 2 && p.level + 1 < 4 && ui.menus[p.level + 1] == p.submenus[i]
+                    && p.submenus[i] != 0;
             bool keyed = ui.menu_cursor[p.level] == i as i32;
             if (p.enabled[i] && (contains(r, ui.mouse_x, ui.mouse_y) || open_beside || keyed)) {
                 surface.fill(r, m.selection);
@@ -4271,7 +4474,8 @@ pub struct Frame {
                 }
             } else if (e.key == key_up() || e.key == key_down()) {
                 ui.menu_cursor[level] = next_entry(p, cursor, e.key == key_up() ? -1 : 1);
-            } else if (e.key == key_right() && on_submenu || (e.key == key_enter() || e.key == key_space()) && on_submenu) {
+            } else if (e.key == key_right() && on_submenu
+                    || (e.key == key_enter() || e.key == key_space()) && on_submenu) {
                 if (level + 1 < 4) {
                     ui.close_menus(level + 1);
                     ui.menus[level + 1] = p.submenus[cursor as usize];
@@ -4343,7 +4547,10 @@ pub struct Frame {
         canvas.Color under_mouse = canvas.Color{ r: m.color.r, g: m.color.g, b: m.color.b, a: 28 };
         f32 row = option_height();
         if (ui.touch_screen) {  // a dialog: the window dimmed under it
-            surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: surface.width as f32, h: surface.height as f32 }, canvas.Color{ r: 0, g: 0, b: 0, a: 128 });
+            surface.fill(
+                canvas.Rect{ x: 0.0, y: 0.0, w: surface.width as f32, h: surface.height as f32 },
+                canvas.Color{ r: 0, g: 0, b: 0, a: 128 }
+            );
         }
         surface.fill_rounded(layer, m.radius, background);
         surface.push_clip(layer);
@@ -4362,11 +4569,20 @@ pub struct Frame {
             }
             if (ui.touch_screen) {  // a radio button, filled for the option chosen
                 f32 s = ui.scale;
-                canvas.Rect ring = canvas.Rect{ x: r.x + 16.0 * s, y: r.y + (row - 20.0 * s) / 2.0, w: 20.0 * s, h: 20.0 * s };
+                canvas.Rect ring = canvas.Rect{
+                    x: r.x + 16.0 * s,
+                    y: r.y + (row - 20.0 * s) / 2.0,
+                    w: 20.0 * s,
+                    h: 20.0 * s
+                };
                 bool on = i as i32 == layer_chosen;
                 surface.stroke_rounded(ring, 10.0 * s, on ? m.accent : m.color, 2.0 * s);
                 if (on) {
-                    surface.fill_rounded(canvas.Rect{ x: ring.x + 5.0 * s, y: ring.y + 5.0 * s, w: 10.0 * s, h: 10.0 * s }, 5.0 * s, m.accent);
+                    surface.fill_rounded(
+                        canvas.Rect{ x: ring.x + 5.0 * s, y: ring.y + 5.0 * s, w: 10.0 * s, h: 10.0 * s },
+                        5.0 * s,
+                        m.accent
+                    );
                 }
                 write_px(r.x + 52.0 * s, r.y, row, layer_options[i], m.color, m.font_size);
             } else {
@@ -4442,7 +4658,12 @@ pub struct Frame {
     // The size of `text` at `scale`, in the font of `ui`, or else the built-in one.
     canvas.Rect measure(str text, i32 scale) {
         return match (ui.font) {
-            some(f) => canvas.Rect{ x: 0.0, y: 0.0, w: f.measure(text, 9.0 * scale as f32), h: f.line_height(9.0 * scale as f32) },
+            some(f) => canvas.Rect{
+                x: 0.0,
+                y: 0.0,
+                w: f.measure(text, 9.0 * scale as f32),
+                h: f.line_height(9.0 * scale as f32)
+            },
             none => canvas.text_size(text, scale),
         };
     }
@@ -4514,13 +4735,41 @@ pub struct Frame {
         bool own_color = states & state_disabled() != 0;
         canvas.Color inherited = color_or(l.color, color_or(all.color, d.color));
         f32 size = kind == Title ? d.font_size : f32_or(l.font_size, f32_or(all.font_size, d.font_size));
-        Look unscaled = Look{ color: color_or(p.color, own_color ? d.color : inherited), background: color_or(p.background, d.background), border: color_or(p.border, d.border), border_width: f32_or(p.border_width, d.border_width), radius: f32_or(p.radius, d.radius), padding: f32_or(p.padding, d.padding), gap: f32_or(p.gap, d.gap), height: f32_or(p.height, d.height), font_size: f32_or(p.font_size, size), accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))), hint: color_or(part(kind, 0).color, d.hint), selection: color_or(part(kind, 1).background, d.selection), bar: color_or(part(kind, 2).background, d.bar) };
+        Look unscaled = Look{
+            color: color_or(p.color, own_color ? d.color : inherited),
+            background: color_or(p.background, d.background),
+            border: color_or(p.border, d.border),
+            border_width: f32_or(p.border_width, d.border_width),
+            radius: f32_or(p.radius, d.radius),
+            padding: f32_or(p.padding, d.padding),
+            gap: f32_or(p.gap, d.gap),
+            height: f32_or(p.height, d.height),
+            font_size: f32_or(p.font_size, size),
+            accent: color_or(p.accent, color_or(l.accent, color_or(all.accent, d.accent))),
+            hint: color_or(part(kind, 0).color, d.hint),
+            selection: color_or(part(kind, 1).background, d.selection),
+            bar: color_or(part(kind, 2).background, d.bar)
+        };
         if (ui.scale == 1.0) {
             return unscaled;
         }
         Look u = unscaled;
         f32 k = ui.scale;  // a dense screen (spec §10.10): every size of the theme, larger
-        return Look{ color: u.color, background: u.background, border: u.border, border_width: u.border_width * k, radius: u.radius * k, padding: u.padding * k, gap: u.gap * k, height: u.height * k, font_size: u.font_size * k, accent: u.accent, hint: u.hint, selection: u.selection, bar: u.bar };
+        return Look{
+            color: u.color,
+            background: u.background,
+            border: u.border,
+            border_width: u.border_width * k,
+            radius: u.radius * k,
+            padding: u.padding * k,
+            gap: u.gap * k,
+            height: u.height * k,
+            font_size: u.font_size * k,
+            accent: u.accent,
+            hint: u.hint,
+            selection: u.selection,
+            bar: u.bar
+        };
     }
 
     // The background and the border of `r`, as `l` says.
@@ -4608,7 +4857,17 @@ pub struct Frame {
         return fill(text, [name1, name2, name3, ""], [value1, value2, value3, ""], 3);
     }
 
-    pub str with4(str text, str name1, str value1, str name2, str value2, str name3, str value3, str name4, str value4) {
+    pub str with4(
+        str text,
+        str name1,
+        str value1,
+        str name2,
+        str value2,
+        str name3,
+        str value3,
+        str name4,
+        str value4
+    ) {
         return fill(text, [name1, name2, name3, name4], [value1, value2, value3, value4], 4);
     }
 
@@ -4645,7 +4904,8 @@ pub struct Frame {
             if (text.bytes[i] == 123) {  // {
                 for (usize k in 0..count) {
                     str name = names[k];
-                    if (i + name.len + 1 < text.len && text.bytes[i + name.len + 1] == 125 && same_bytes(text, i + 1, name)) {
+                    if (i + name.len + 1 < text.len && text.bytes[i + name.len + 1] == 125
+                            && same_bytes(text, i + 1, name)) {
                         if (pool_used + values[k].len > 8192) {
                             pool_used = start;
                             return text;
@@ -4851,7 +5111,19 @@ pub struct Frame {
         f32 x = layouts[depth].x + padding;
         f32 y = layouts[depth].y + padding;
         depth += 1;
-        layouts[depth] = Layout{ horizontal: horizontal, x: x, y: y, left: x, top: y, right: x, bottom: y, gap: gap, padding: padding, room_w: room_w, room_h: room_h };
+        layouts[depth] = Layout{
+            horizontal: horizontal,
+            x: x,
+            y: y,
+            left: x,
+            top: y,
+            right: x,
+            bottom: y,
+            gap: gap,
+            padding: padding,
+            room_w: room_w,
+            room_h: room_h
+        };
     }
 
     // The width the next widget can fill (spec §10.8): its cell in a grid, else what is left of
@@ -4901,7 +5173,8 @@ pub struct Frame {
         take_styles();
         Look l = look(Group, 0);
         Layout parent = layouts[depth];
-        canvas.Rect size = title.len > 0 ? measure_px(title, l.font_size) : canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        canvas.Rect size = title.len > 0 ? measure_px(title, l.font_size)
+                : canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         f32 mark = folding ? 18.0 : 0.0;  // the triangle before the title
         f32 title_w = size.w + mark;
         canvas.Rect head = canvas.Rect{ x: parent.x + 10.0, y: parent.y, w: title_w + 8.0, h: size.h };
@@ -4932,7 +5205,16 @@ pub struct Frame {
         // its background, at the size it had at the last frame
         WidgetState kept = ui.states[slot];
         if (l.background.a > 0 && kept.content_w > 0.0) {
-            surface.fill_rounded(canvas.Rect{ x: parent.x, y: parent.y + size.h / 2.0, w: kept.content_w, h: kept.content_h - size.h / 2.0 }, l.radius, l.background);
+            surface.fill_rounded(
+                canvas.Rect{
+                    x: parent.x,
+                    y: parent.y + size.h / 2.0,
+                    w: kept.content_w,
+                    h: kept.content_h - size.h / 2.0
+                },
+                l.radius,
+                l.background
+            );
         }
         Props p = explicit_props(Group, 0);
         canvas.Color ink_of = color_or(part(Group, 0).color, l.color);
@@ -4990,7 +5272,15 @@ pub struct Frame {
         Look l = done.look;
         if (done.folded) {  // folded: its title, on a line
             f32 top = r.y + done.title_h / 2.0;
-            surface.fill(canvas.Rect{ x: r.x + 10.0 + done.title_w, y: top, w: max(r.w - 10.0 - done.title_w, 0.0), h: max(l.border_width, 1.0) }, l.border);
+            surface.fill(
+                canvas.Rect{
+                    x: r.x + 10.0 + done.title_w,
+                    y: top,
+                    w: max(r.w - 10.0 - done.title_w, 0.0),
+                    h: max(l.border_width, 1.0)
+                },
+                l.border
+            );
         } else if (l.border.a > 0 && l.border_width > 0.0) {  // four sides, the top one cut by the title
             f32 bw = l.border_width;
             f32 top = r.y + done.title_h / 2.0;
@@ -5051,7 +5341,9 @@ pub struct Frame {
         f32 row_h = l.height + 4.0;
         f32 width = fill_width() > 0.0 ? fill_width() : max(s.extent, s.content_w);
         f32 room_h = fill_height();
-        f32 row_y = !bottom ? parent.y : room_h > 0.0 ? parent.y + max(room_h - row_h, 0.0) : parent.y + s.content_h + 8.0;
+        f32 row_y = !bottom ? parent.y
+                : room_h > 0.0 ? parent.y + max(room_h - row_h, 0.0)
+                : parent.y + s.content_h + 8.0;
         // tabs wider than the row: two arrows at its end scroll it
         bool arrows = s.extent > width;
         f32 view_w = arrows ? max(width - 48.0, 0.0) : width;
@@ -5106,7 +5398,20 @@ pub struct Frame {
             layouts[depth].top += row_h + 8.0;
             layouts[depth].bottom = layouts[depth].top;
         }
-        tab_builds[t] = TabsBuild{ id: id, slot: slot, bound: chosen, chosen: current, row: row, width: width, top: parent.y, bottom: bottom, reveal: picked, offset: s.scroll_x, marks: focus_marks, depth: depth };
+        tab_builds[t] = TabsBuild{
+            id: id,
+            slot: slot,
+            bound: chosen,
+            chosen: current,
+            row: row,
+            width: width,
+            top: parent.y,
+            bottom: bottom,
+            reveal: picked,
+            offset: s.scroll_x,
+            marks: focus_marks,
+            depth: depth
+        };
     }
 
     // A tab of the `Tabs` being described: true when it is the one chosen, whose widgets follow.
@@ -5128,7 +5433,12 @@ pub struct Frame {
         canvas.Rect r = canvas.Rect{ x: b.row.x + b.x - b.offset, y: b.row.y, w: w, h: b.row.h };
         tab_builds[t].x += w + 2.0;
         bool chosen = index == b.chosen;
-        canvas.Rect close_box = canvas.Rect{ x: r.x + r.w - cross - 4.0, y: r.y + (r.h - 18.0) / 2.0, w: 18.0, h: 18.0 };
+        canvas.Rect close_box = canvas.Rect{
+            x: r.x + r.w - cross - 4.0,
+            y: r.y + (r.h - 18.0) / 2.0,
+            w: 18.0,
+            h: 18.0
+        };
         surface.push_clip(b.row);
         bool hot = over(r) && over(b.row);
         mut bool closed = false;
@@ -5203,7 +5513,10 @@ pub struct Frame {
         s.content_w = content.right - content.left;
         s.content_h = content.bottom - content.top;
         Look l = look(Tabs, 0);
-        surface.fill(canvas.Rect{ x: b.row.x, y: b.bottom ? b.row.y : b.row.y + b.row.h - 1.0, w: b.width, h: 1.0 }, l.bar);
+        surface.fill(
+            canvas.Rect{ x: b.row.x, y: b.bottom ? b.row.y : b.row.y + b.row.h - 1.0, w: b.width, h: 1.0 },
+            l.bar
+        );
         // Ctrl+Tab and Ctrl+Shift+Tab, Ctrl+W: from the row, or from a widget of the content
         if (ui.focus == b.id || focus_marks > b.marks) {
             for (usize i in 0..ui.edit_count) {
@@ -5418,7 +5731,12 @@ pub struct Frame {
         usize bottom = (r + tall) as usize;
         f32 x = b.col_x[first];
         f32 y = b.row_y[top];
-        b.cell = canvas.Rect{ x: x, y: y, w: b.col_x[last_col] + b.col_w[last_col] - x, h: b.row_y[bottom] - layouts[depth].gap - y };
+        b.cell = canvas.Rect{
+            x: x,
+            y: y,
+            w: b.col_x[last_col] + b.col_w[last_col] - x,
+            h: b.row_y[bottom] - layouts[depth].gap - y
+        };
         b.cell_row = r;
         b.cell_col = c;
         b.single_w = wide == 1;
@@ -5534,7 +5852,9 @@ pub struct Frame {
     canvas.Rect aligned(Layout l, canvas.Rect r) {
         Align how = next_align;
         next_align = Start;
-        f32 room = l.horizontal ? l.room_h > 0.0 ? max(l.top + l.room_h - l.y, r.h) : max(height, r.h) : l.room_w > 0.0 ? max(l.left + l.room_w - l.x, r.w) : r.w;
+        f32 room = l.horizontal ? l.room_h > 0.0 ? max(l.top + l.room_h - l.y, r.h) : max(height, r.h)
+                : l.room_w > 0.0 ? max(l.left + l.room_w - l.x, r.w)
+                : r.w;
         f32 size = l.horizontal ? r.h : r.w;
         f32 shift = match (how) {
             Start => 0.0,
@@ -5754,7 +6074,14 @@ pub struct Frame {
         take_styles();
         canvas.Rect r = place(width, height_of);
         interactive(r);
-        table_build = TableBuild{ id: id, rect: r, count: max(count, 0), selected: selected, sort: sort, memory: grid_memory(id) };
+        table_build = TableBuild{
+            id: id,
+            rect: r,
+            count: max(count, 0),
+            selected: selected,
+            sort: sort,
+            memory: grid_memory(id)
+        };
     }
 
     // A column of the table being described, 16 at most: its title, its width (pixels, `Auto`,
@@ -5833,7 +6160,10 @@ pub struct Frame {
         for (usize i in 0..b.columns) {
             canvas.Rect title = canvas.Rect{ x: table_build.col_x[i], y: r.y, w: widths[i], h: header_h };
             ui64 grip_id = mix(id, 0x600 | i as ui64);
-            if (!gripped && b.sortable[i] && click(mix(id, 0x500 | i as ui64), canvas.Rect{ x: title.x, y: title.y, w: title.w - 3.0, h: title.h })) {
+            if (!gripped && b.sortable[i] && click(
+                mix(id, 0x500 | i as ui64),
+                canvas.Rect{ x: title.x, y: title.y, w: title.w - 3.0, h: title.h }
+            )) {
                 match (b.sort) {
                     some(order) => {
                         order.descending = order.column == i as i32 ? !order.descending : false;
@@ -5860,12 +6190,22 @@ pub struct Frame {
                 none => { },
             }
             surface.pop_clip();
-            surface.fill(canvas.Rect{ x: title.x + title.w - 1.0, y: title.y + 6.0, w: 1.0, h: title.h - 12.0 }, l.border);
+            surface.fill(
+                canvas.Rect{ x: title.x + title.w - 1.0, y: title.y + 6.0, w: 1.0, h: title.h - 12.0 },
+                l.border
+            );
         }
         // the rows: a long list under the header
         ui64 area = mix(id, 0xA11);
         table_build.area_id = area;
-        open_area(area, Table, canvas.Rect{ x: r.x, y: r.y + header_h, w: r.w, h: max(r.h - header_h, 0.0) }, true, b.selected, b.count);
+        open_area(
+            area,
+            Table,
+            canvas.Rect{ x: r.x, y: r.y + header_h, w: r.w, h: max(r.h - header_h, 0.0) },
+            true,
+            b.selected,
+            b.count
+        );
     }
 
     // The next cell: in the next column of the row, or of a new row after the last column.
@@ -5893,7 +6233,16 @@ pub struct Frame {
         f32 w = max(table_build.col_w[k] - 12.0, 0.0);
         surface.push_clip(canvas.Rect{ x: x - 4.0, y: table_build.row_y, w: w + 8.0, h: height });
         depth += 1;
-        layouts[depth] = Layout{ x: x, y: table_build.row_y, left: x, top: table_build.row_y, right: x, bottom: table_build.row_y, gap: 0.0, room_w: w };
+        layouts[depth] = Layout{
+            x: x,
+            y: table_build.row_y,
+            left: x,
+            top: table_build.row_y,
+            right: x,
+            bottom: table_build.row_y,
+            gap: 0.0,
+            room_w: w
+        };
         next_align = table_build.aligns[k];
         table_build.cell_open = true;
         table_build.cell = (k + 1) % table_build.columns;
@@ -6066,7 +6415,8 @@ pub struct Frame {
         if (tree_keys(index)) {
             for (usize i in 0..ui.edit_count) {
                 ui32 key = ui.edits[i].key;
-                if (is_branch && (key == key_right() && !is_open || key == key_left() && is_open || key == key_enter())) {
+                if (is_branch
+                        && (key == key_right() && !is_open || key == key_left() && is_open || key == key_enter())) {
                     change = true;
                 } else if (key == key_right() && is_open) {
                     tree_choose(index + 1);  // its first child
@@ -6189,7 +6539,19 @@ pub struct Frame {
         }
         f32 x = list.x + indent + 22.0;
         depth += 1;
-        layouts[depth] = Layout{ horizontal: true, x: x, y: list.y, left: x, top: list.y, right: x, bottom: list.y, gap: 8.0, color: list.color, font_size: list.font_size, accent: list.accent };
+        layouts[depth] = Layout{
+            horizontal: true,
+            x: x,
+            y: list.y,
+            left: x,
+            top: list.y,
+            right: x,
+            bottom: list.y,
+            gap: 8.0,
+            color: list.color,
+            font_size: list.font_size,
+            accent: list.accent
+        };
     }
 
     // Places the line in the tree, as one item; returns whether its branch is open.
@@ -6233,7 +6595,10 @@ pub struct Frame {
         match (icon) {
             some(img) => {
                 if (icon_w > 0.0) {
-                    surface.draw_image(img, canvas.Rect{ x: row.x + 22.0, y: row.y + (row.h - 16.0) / 2.0, w: icon_w - 6.0, h: 16.0 });
+                    surface.draw_image(
+                        img,
+                        canvas.Rect{ x: row.x + 22.0, y: row.y + (row.h - 16.0) / 2.0, w: icon_w - 6.0, h: 16.0 }
+                    );
                 }
             },
             none => { },
@@ -6345,16 +6710,35 @@ pub struct Frame {
             }
         }
         if (tall) {
-            s.scroll_y = drag_bar(mix(id, 1), canvas.Rect{ x: r.x + r.w - bar_w, y: r.y, w: bar_w, h: view_h }, s.scroll_y, s.content_h, view_h, true);
+            s.scroll_y = drag_bar(
+                mix(id, 1),
+                canvas.Rect{ x: r.x + r.w - bar_w, y: r.y, w: bar_w, h: view_h },
+                s.scroll_y,
+                s.content_h,
+                view_h,
+                true
+            );
         }
         if (wide) {
-            s.scroll_x = drag_bar(mix(id, 2), canvas.Rect{ x: r.x, y: r.y + r.h - bar_h, w: view_w, h: bar_h }, s.scroll_x, s.content_w, view_w, false);
+            s.scroll_x = drag_bar(
+                mix(id, 2),
+                canvas.Rect{ x: r.x, y: r.y + r.h - bar_h, w: view_w, h: bar_h },
+                s.scroll_x,
+                s.content_w,
+                view_w,
+                false
+            );
         }
         s.scroll_y = max(min(s.scroll_y, s.content_h - view_h), 0.0);
         s.scroll_x = max(min(s.scroll_x, s.content_w - view_w), 0.0);
         Look area_look = look(kind, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
         paint(r, area_look);
-        surface.push_clip(canvas.Rect{ x: r.x + 2.0, y: r.y + 2.0, w: view_w - (tall ? 2.0 : 4.0), h: view_h - (wide ? 2.0 : 4.0) });
+        surface.push_clip(canvas.Rect{
+            x: r.x + 2.0,
+            y: r.y + 2.0,
+            w: view_w - (tall ? 2.0 : 4.0),
+            h: view_h - (wide ? 2.0 : 4.0)
+        });
         if (depth == 15) {
             return;  // too deep: the widgets stay in the current layout
         }
@@ -6362,7 +6746,26 @@ pub struct Frame {
         f32 left = r.x + 8.0 - s.scroll_x;
         f32 top = r.y + pad - s.scroll_y;
         depth += 1;
-        layouts[depth] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, gap: is_list ? 0.0 : 8.0, area: slot as i32, area_id: id, is_list: is_list, frame: r, bar_w: bar_w, bar_h: bar_h, selected: selected, multi: multi, reorder: reorder, look: area_look, room_w: max(view_w - 16.0, 0.0) };
+        layouts[depth] = Layout{
+            x: left,
+            y: top,
+            left: left,
+            top: top,
+            right: left,
+            bottom: top,
+            gap: is_list ? 0.0 : 8.0,
+            area: slot as i32,
+            area_id: id,
+            is_list: is_list,
+            frame: r,
+            bar_w: bar_w,
+            bar_h: bar_h,
+            selected: selected,
+            multi: multi,
+            reorder: reorder,
+            look: area_look,
+            room_w: max(view_w - 16.0, 0.0)
+        };
         shown_first = 0;
         shown_last = 0;
         if (long_list) {  // the items in view: the first ones are skipped, where they would be
@@ -6409,7 +6812,15 @@ pub struct Frame {
                 ui.item_dragged = true;
             }
             if (ui.item_dragged && drag_target >= 0) {
-                surface.fill(canvas.Rect{ x: done.frame.x + 4.0, y: drag_line_y - 1.0, w: done.frame.w - done.bar_w - 8.0, h: 2.0 }, done.look.accent);
+                surface.fill(
+                    canvas.Rect{
+                        x: done.frame.x + 4.0,
+                        y: drag_line_y - 1.0,
+                        w: done.frame.w - done.bar_w - 8.0,
+                        h: 2.0
+                    },
+                    done.look.accent
+                );
             }
             if (ui.released) {
                 if (ui.item_dragged && drag_target >= 0) {
@@ -6464,12 +6875,18 @@ pub struct Frame {
         if (s.content_h > view_h) {  // the bars show where the content is
             f32 thumb = max(view_h * view_h / s.content_h, 16.0);
             f32 y = r.y + (view_h - thumb) * s.scroll_y / (s.content_h - view_h);
-            surface.fill(canvas.Rect{ x: r.x + r.w - 7.0, y: y + 2.0, w: 4.0, h: thumb - 4.0 }, ui.active == mix(done.area_id, 1) ? done.look.accent : done.look.bar);
+            surface.fill(
+                canvas.Rect{ x: r.x + r.w - 7.0, y: y + 2.0, w: 4.0, h: thumb - 4.0 },
+                ui.active == mix(done.area_id, 1) ? done.look.accent : done.look.bar
+            );
         }
         if (!is_list && s.content_w > view_w) {
             f32 thumb = max(view_w * view_w / s.content_w, 16.0);
             f32 x = r.x + (view_w - thumb) * s.scroll_x / (s.content_w - view_w);
-            surface.fill(canvas.Rect{ x: x + 2.0, y: r.y + r.h - 7.0, w: thumb - 4.0, h: 4.0 }, ui.active == mix(done.area_id, 2) ? done.look.accent : done.look.bar);
+            surface.fill(
+                canvas.Rect{ x: x + 2.0, y: r.y + r.h - 7.0, w: thumb - 4.0, h: 4.0 },
+                ui.active == mix(done.area_id, 2) ? done.look.accent : done.look.bar
+            );
         }
         last = r;
         last_id = done.area_id;
@@ -6502,7 +6919,8 @@ pub struct Frame {
 
     // The mouse is over `r`, and not over the open list of a dropdown, which is above it.
     bool over(canvas.Rect r) {
-        return contains(r, ui.mouse_x, ui.mouse_y) && !ui.on_layer(ui.mouse_x, ui.mouse_y) && (!ui.modal || in_dialog || finishing);
+        return contains(r, ui.mouse_x, ui.mouse_y) && !ui.on_layer(ui.mouse_x, ui.mouse_y)
+                && (!ui.modal || in_dialog || finishing);
     }
 
     // Pressed then released over `r`, the press and the release maybe in the same frame.
@@ -6520,7 +6938,16 @@ pub Frame begin(Ui* ui, canvas.Canvas* surface, f32 x, f32 y) {
     // inside the safe area (spec §10.9): notches and system bars leave margins
     f32 left = x + ui.safe_left;
     f32 top = y + ui.safe_top;
-    f.layouts[0] = Layout{ x: left, y: top, left: left, top: top, right: left, bottom: top, room_w: max(surface.width as f32 - left - ui.safe_right, 0.0), room_h: max(surface.height as f32 - top - ui.safe_bottom, 0.0) };
+    f.layouts[0] = Layout{
+        x: left,
+        y: top,
+        left: left,
+        top: top,
+        right: left,
+        bottom: top,
+        room_w: max(surface.width as f32 - left - ui.safe_right, 0.0),
+        room_h: max(surface.height as f32 - top - ui.safe_bottom, 0.0)
+    };
     // the background of the window, when the theme gives one (spec §10.7)
     match (ui.theme) {
         some(t) => {
@@ -7642,7 +8069,13 @@ test "themes and styles: the cascade" {
     canvas.Color pink = rgb(255, 0, 255, 255);
     canvas.Color blue = rgb(0, 0, 200, 255);
     canvas.Color page = rgb(1, 2, 3, 255);
-    ui.theme = some(Theme{ window: Style{ normal: Props{ background: some(page) } }, button: Style{ normal: Props{ background: some(dark), radius: some(6.0) }, hover: Props{ background: some(hot) } } });
+    ui.theme = some(Theme{
+        window: Style{ normal: Props{ background: some(page) } },
+        button: Style{
+            normal: Props{ background: some(dark), radius: some(6.0) },
+            hover: Props{ background: some(hot) }
+        }
+    });
     Style danger = Style{ normal: Props{ background: some(red) } };
     Style safe = Style{ normal: Props{ background: some(green) } };
     Style card = Style{ normal: Props{ background: some(blue), color: some(pink), padding: some(8.0) } };
@@ -7677,7 +8110,8 @@ test "themes and styles: the cascade" {
     f = begin(&ui, &surface, 0.0, 0.0);
     f.button("A");
     f.finish();
-    assert(surface.at(250, 290) == canvas.pack(rgb(239, 241, 245, 255)) && surface.at(3, 16) == canvas.pack(rgb(204, 208, 218, 255)));
+    assert(surface.at(250, 290) == canvas.pack(rgb(239, 241, 245, 255))
+            && surface.at(3, 16) == canvas.pack(rgb(204, 208, 218, 255)));
 }
 
 // A grid of three columns (100 pixels, `Auto`, `Fill`), for the test below: the rectangles of
@@ -8143,7 +8577,11 @@ test "a text area: lines, Up and Down, Home and End, wrapping, scrolling to the 
 // A money field in euros, for the test below.
 bool money_frame(Ui* ui, canvas.Canvas* surface, i64* cents) {
     mut Frame f = begin(ui, surface, 0.0, 0.0);
-    bool changed = f.money_field(cents, 200.0, Number{ min: some(0), max: some(100000000), step: 100, decimals: 2, decimal: ",", group: " ", symbol: "€" });
+    bool changed = f.money_field(
+        cents,
+        200.0,
+        Number{ min: some(0), max: some(100000000), step: 100, decimals: 2, decimal: ",", group: " ", symbol: "€" }
+    );
     f.finish();
     return changed;
 }

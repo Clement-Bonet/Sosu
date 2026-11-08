@@ -111,7 +111,10 @@ struct Huffman {
 
 // The lengths and distances of the codes 257 to 285 and 0 to 29: base and extra bits.
 ui32[29] length_base() {
-    return [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+    return [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227,
+        258,
+    ];
 }
 
 ui32[29] length_extra() {
@@ -119,7 +122,10 @@ ui32[29] length_extra() {
 }
 
 ui32[30] distance_base() {
-    return [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+    return [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097,
+        6145, 8193, 12289, 16385, 24577,
+    ];
 }
 
 ui32[30] distance_extra() {
@@ -327,7 +333,11 @@ pub Inflated!CompressError inflate_stream(Arena* arena, ui8[] data) {
 
 // As `inflate_stream`, with at most `limit` bytes (`TooLarge` beyond).
 pub Inflated!CompressError inflate_stream_limit(Arena* arena, ui8[] data, usize limit) {
-    mut Output output = Output{ arena: some(arena), out: arena.alloc_slice(ui8, min(max(data.len * 3, 1024), limit)), limit: limit };
+    mut Output output = Output{
+        arena: some(arena),
+        out: arena.alloc_slice(ui8, min(max(data.len * 3, 1024), limit)),
+        limit: limit
+    };
     usize read = try inflate_to(data, &output);
     return ok(Inflated{ bytes: output.out[0..output.len], read: read });
 }
@@ -417,7 +427,12 @@ struct Tables {
 }
 
 Tables tables() {
-    mut Tables t = Tables{ lbase: length_base(), lextra: length_extra(), dbase: distance_base(), dextra: distance_extra() };
+    mut Tables t = Tables{
+        lbase: length_base(),
+        lextra: length_extra(),
+        dbase: distance_base(),
+        dextra: distance_extra()
+    };
     mut usize code = 0;
     for (ui32 length in 3..259) {
         while (code < 28 && t.lbase[code + 1] <= length) {

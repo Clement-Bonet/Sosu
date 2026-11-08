@@ -76,7 +76,18 @@ pub class Mixer {
         ui32 id = next_id;
         next_id = next_id == 0xFFFFFFFF ? 1 : next_id + 1;
         f64 step = how.speed as f64 * sound.rate as f64 / rate as f64;
-        voices.push(Voice{ id: id, sound: sound, position: 0.0, step: step, volume: how.volume, pan: how.pan, looping: how.looping, left: 0.0, right: 0.0, started: false });
+        voices.push(Voice{
+            id: id,
+            sound: sound,
+            position: 0.0,
+            step: step,
+            volume: how.volume,
+            pan: how.pan,
+            looping: how.looping,
+            left: 0.0,
+            right: 0.0,
+            started: false
+        });
         return id;
     }
 

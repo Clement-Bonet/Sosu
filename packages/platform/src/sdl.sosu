@@ -340,7 +340,16 @@ pub void push_area(i32 x, i32 y, i32 w, i32 h) uses io {
     size[1] = (w >> 8 & 0xFF) as ui8;
     size[2] = (h & 0xFF) as ui8;
     size[3] = (h >> 8 & 0xFF) as ui8;
-    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: 3, word6: x as ui32, word7: y as ui32, rest: size };
+    mut Event event = Event{
+        kind: 0x8000,
+        reserved: 0,
+        timestamp: 0,
+        window: 0,
+        word5: 3,
+        word6: x as ui32,
+        word7: y as ui32,
+        rest: size
+    };
     unsafe {
         sdl_c.SDL_PushEvent(&event as sdl_c.SDL_Event*);
     }
@@ -380,7 +389,13 @@ pub MouseWheel* as_wheel(Event* event) {
 // A texture of `width * height` pixels 0xAARRGGBB that the program updates, or none.
 pub sdl_c.SDL_Texture*? create_texture(sdl_c.SDL_Renderer* renderer, i32 width, i32 height) uses io {
     unsafe {
-        sdl_c.SDL_Texture* texture = sdl_c.SDL_CreateTexture(renderer, sdl_c.SDL_PIXELFORMAT_ARGB8888, sdl_c.SDL_TEXTUREACCESS_STREAMING, width, height);
+        sdl_c.SDL_Texture* texture = sdl_c.SDL_CreateTexture(
+            renderer,
+            sdl_c.SDL_PIXELFORMAT_ARGB8888,
+            sdl_c.SDL_TEXTUREACCESS_STREAMING,
+            width,
+            height
+        );
         if (texture as ui64 == 0) {
             return none;
         }
@@ -448,7 +463,11 @@ pub sdl_c.SDL_Window*? create_window(Arena* arena, str title, i32 width, i32 hei
 
 // Asks the system to call `callback` with `data` for each point of the window where the mouse
 // acts (to drag it, to resize it). False when the system cannot.
-pub bool set_hit_test(sdl_c.SDL_Window* window, fn(sdl_c.SDL_Window*, sdl_c.SDL_Point*, ui8*) -> i32 uses io callback, ui8* data) uses io {
+pub bool set_hit_test(
+    sdl_c.SDL_Window* window,
+    fn(sdl_c.SDL_Window*, sdl_c.SDL_Point*, ui8*) -> i32 uses io callback,
+    ui8* data
+) uses io {
     mut bool ok = false;
     unsafe {
         ok = sdl_c.SDL_SetWindowHitTest(window, callback, data);
@@ -477,7 +496,13 @@ pub void set_icon(sdl_c.SDL_Window* window, ui32[] pixels, i32 width, i32 height
         return;
     }
     unsafe {
-        sdl_c.SDL_Surface* surface = sdl_c.SDL_CreateSurfaceFrom(width, height, sdl_c.SDL_PIXELFORMAT_ARGB8888, &pixels[0] as ui8*, width * 4);
+        sdl_c.SDL_Surface* surface = sdl_c.SDL_CreateSurfaceFrom(
+            width,
+            height,
+            sdl_c.SDL_PIXELFORMAT_ARGB8888,
+            &pixels[0] as ui8*,
+            width * 4
+        );
         if (surface as ui64 != 0) {
             sdl_c.SDL_SetWindowIcon(window, surface);
             sdl_c.SDL_DestroySurface(surface);
@@ -606,7 +631,16 @@ pub bool poll(Event* event) uses io {
 
 // Queues an SDL_EVENT_QUIT, as if the user had closed the window.
 pub void push_quit() uses io {
-    mut Event event = Event{ kind: 0x100, reserved: 0, timestamp: 0, window: 0, word5: 0, word6: 0, word7: 0, rest: [0; 96] };
+    mut Event event = Event{
+        kind: 0x100,
+        reserved: 0,
+        timestamp: 0,
+        window: 0,
+        word5: 0,
+        word6: 0,
+        word7: 0,
+        rest: [0; 96]
+    };
     unsafe {
         sdl_c.SDL_PushEvent(&event as sdl_c.SDL_Event*);
     }
@@ -615,7 +649,16 @@ pub void push_quit() uses io {
 // Queues an SDL_EVENT_USER with `code`: a request of the program that `run` carries out on
 // its window (SDL_UserEvent keeps its code where `word5` is).
 pub void push_request(ui32 code) uses io {
-    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: code, word6: 0, word7: 0, rest: [0; 96] };
+    mut Event event = Event{
+        kind: 0x8000,
+        reserved: 0,
+        timestamp: 0,
+        window: 0,
+        word5: code,
+        word6: 0,
+        word7: 0,
+        rest: [0; 96]
+    };
     unsafe {
         sdl_c.SDL_PushEvent(&event as sdl_c.SDL_Event*);
     }
@@ -635,7 +678,16 @@ struct User {
 // Queues an SDL_EVENT_USER with `code` and `data`, from any thread (SDL_PushEvent is safe there);
 // false if SDL did not queue it.
 pub bool push_user(ui32 code, ui8* data) uses io {
-    mut Event event = Event{ kind: 0x8000, reserved: 0, timestamp: 0, window: 0, word5: code, word6: 0, word7: 0, rest: [0; 96] };
+    mut Event event = Event{
+        kind: 0x8000,
+        reserved: 0,
+        timestamp: 0,
+        window: 0,
+        word5: code,
+        word6: 0,
+        word7: 0,
+        rest: [0; 96]
+    };
     mut bool pushed = false;
     unsafe {
         User* user = &event as User*;

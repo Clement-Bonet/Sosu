@@ -380,7 +380,9 @@ void push_cell(Arena* arena, text.TextBuilder* b, calc.Cell* c, i32 style) {
             b.push(" office:value-type=\"date\"");
             push_attr(b, "office:date-value", values.date_text(arena, v.num));
         } else {
-            b.push(c.fmt == 2 ? " office:value-type=\"percentage\"" : c.fmt == 3 ? " office:value-type=\"currency\"" : " office:value-type=\"float\"");
+            b.push(c.fmt == 2 ? " office:value-type=\"percentage\""
+                    : c.fmt == 3 ? " office:value-type=\"currency\""
+                    : " office:value-type=\"float\"");
             b.push(" office:value=\"");
             b.push_f64_shortest(v.num);
             b.push("\"");
@@ -440,7 +442,10 @@ pub ui8[] encode(Arena* arena, keeps calc.Book* book) {
         calc.Cell*? have = book.cells.get(cells[i]);
         match (have) {
             some(c) => {
-                i32 s = style_of(styles, Key{ flags: c.flags, align: c.align, fmt: c.fmt, dec: c.dec, fg: c.fg, bg: c.bg });
+                i32 s = style_of(
+                    styles,
+                    Key{ flags: c.flags, align: c.align, fmt: c.fmt, dec: c.dec, fg: c.fg, bg: c.bg }
+                );
                 if (c.raw.len > 0 || s > 0) {
                     used.push(cells[i]);
                     used_style.push(s);
@@ -774,7 +779,16 @@ class Reader {
         if (name.len == 0) {
             return;
         }
-        mut Look look = Look{ bold: -1, italic: -1, underline: -1, align: -1, fg: -1, bg: -1, parent: n.attr("style:parent-style-name"), data: n.attr("style:data-style-name") };
+        mut Look look = Look{
+            bold: -1,
+            italic: -1,
+            underline: -1,
+            align: -1,
+            fg: -1,
+            bg: -1,
+            parent: n.attr("style:parent-style-name"),
+            data: n.attr("style:data-style-name")
+        };
         xml.Node*[] kids = n.kids.items();
         for (usize i in 0..kids.len) {
             xml.Node* k = kids[i];
@@ -888,7 +902,9 @@ class Reader {
                 self.add_columns(k);
             } else if (k.name == "table:table-row") {
                 self.add_row(k);
-            } else if (k.name == "table:table-header-columns" || k.name == "table:table-columns" || k.name == "table:table-column-group" || k.name == "table:table-header-rows" || k.name == "table:table-rows" || k.name == "table:table-row-group") {
+            } else if (k.name == "table:table-header-columns" || k.name == "table:table-columns"
+                    || k.name == "table:table-column-group" || k.name == "table:table-header-rows"
+                    || k.name == "table:table-rows" || k.name == "table:table-row-group") {
                 self.walk(k);
             }
         }
@@ -923,7 +939,18 @@ class Reader {
             some(x) => x,
             none => Fmt{ fmt: 0, dec: -1 },
         };
-        mut Item it = Item{ col: col, raw: "", flags: (look.bold == 1 ? calc.FLAG_BOLD : 0) | (look.italic == 1 ? calc.FLAG_ITALIC : 0) | (look.underline == 1 ? calc.FLAG_UNDERLINE : 0), align: look.align > 0 ? look.align : 0, fmt: f.fmt, dec: f.dec, fg: look.fg > 0 ? look.fg as ui32 : 0, bg: look.bg > 0 ? look.bg as ui32 : 0, keep: false };
+        mut Item it = Item{
+            col: col,
+            raw: "",
+            flags: (look.bold == 1 ? calc.FLAG_BOLD : 0) | (look.italic == 1 ? calc.FLAG_ITALIC : 0)
+                    | (look.underline == 1 ? calc.FLAG_UNDERLINE : 0),
+            align: look.align > 0 ? look.align : 0,
+            fmt: f.fmt,
+            dec: f.dec,
+            fg: look.fg > 0 ? look.fg as ui32 : 0,
+            bg: look.bg > 0 ? look.bg as ui32 : 0,
+            keep: false
+        };
         str kind = n.attr("office:value-type");
         str formula = n.attr("table:formula");
         if (kind == "percentage" && it.fmt == 0) {
@@ -960,7 +987,8 @@ class Reader {
         } else if (kind == "string") {
             str s = n.has("office:string-value") ? n.attr("office:string-value") : cell_text(self.arena, n);
             raw = s;
-            if (it.fmt != 6 && s.len > 0 && (s.bytes[0] == 39 || s.bytes[0] == 61 || calc.literal(self.arena, s, 0).kind != values.TEXT)) {
+            if (it.fmt != 6 && s.len > 0
+                    && (s.bytes[0] == 39 || s.bytes[0] == 61 || calc.literal(self.arena, s, 0).kind != values.TEXT)) {
                 text.TextBuilder* q = text.builder(self.arena);
                 q.push("'");
                 q.push(s);
@@ -974,7 +1002,8 @@ class Reader {
             }
         }
         it.raw = raw;
-        it.keep = raw.len > 0 || it.flags != 0 || it.align != 0 || it.fmt != 0 || it.dec >= 0 || it.fg != 0 || it.bg != 0;
+        it.keep = raw.len > 0 || it.flags != 0 || it.align != 0 || it.fmt != 0 || it.dec >= 0 || it.fg != 0
+                || it.bg != 0;
         return it;
     }
 
@@ -1046,7 +1075,11 @@ pub bool decode(keeps Arena* arena, keeps calc.Book* book, keeps ui8[] bytes) {
         err(e) => "",
     };
     xml.Node* top = xml.first(arena, xml.parse(arena, content), "office:document-content");
-    xml.Node* table = xml.first(arena, xml.first(arena, xml.first(arena, top, "office:body"), "office:spreadsheet"), "table:table");
+    xml.Node* table = xml.first(
+        arena,
+        xml.first(arena, xml.first(arena, top, "office:body"), "office:spreadsheet"),
+        "table:table"
+    );
     if (table.name.len == 0) {
         return false;
     }

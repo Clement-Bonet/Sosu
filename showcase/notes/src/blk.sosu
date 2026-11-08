@@ -941,7 +941,8 @@ pub class Parser {
                 at(at(container).last).blank_end = true;
             }
             cm.Kind t = kind_of(container);
-            bool last_blank = blank && !(t == BlockQuote || t == CodeBlock && at(container).fenced || t == Item && at(container).first < 0 && at(container).line == line_no);
+            bool last_blank = blank && !(t == BlockQuote || t == CodeBlock && at(container).fenced
+                    || t == Item && at(container).first < 0 && at(container).line == line_no);
             mut i32 c = container;
             while (c >= 0) {
                 at(c).blank_end = last_blank;
@@ -956,7 +957,9 @@ pub class Parser {
                 if (t == HtmlBlock) {
                     i32 hk = at(container).html_type;
                     str r = rest();
-                    if (hk == 1 && closes_1(r) || hk == 2 && text.contains(r, "-->") || hk == 3 && text.contains(r, "?>") || hk == 4 && text.contains(r, ">") || hk == 5 && text.contains(r, "]]>")) {
+                    if (hk == 1 && closes_1(r) || hk == 2 && text.contains(r, "-->")
+                            || hk == 3 && text.contains(r, "?>") || hk == 4 && text.contains(r, ">")
+                            || hk == 5 && text.contains(r, "]]>")) {
                         finalize(container);
                     }
                 }
@@ -970,7 +973,8 @@ pub class Parser {
 
     bool closes_1(str r) {
         str low = text.to_lower(arena, r);
-        return text.contains(low, "</script>") || text.contains(low, "</pre>") || text.contains(low, "</style>") || text.contains(low, "</textarea>");
+        return text.contains(low, "</script>") || text.contains(low, "</pre>") || text.contains(low, "</style>")
+                || text.contains(low, "</textarea>");
     }
 
     pub void finish() {

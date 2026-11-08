@@ -52,7 +52,16 @@ pub class Layout {
     void place(Arena* scratch, i32 index, f32 x, f32 y, f32 w, f32 h, i32 depth) {
         scan.Node* n = tree.nodes.at(index as usize);
         usize slot = tiles.len();
-        tiles.push(Tile{ node: index, x: x, y: y, w: w, h: h, depth: depth, leaf: true, kind: n.dir ? 0 : category(scratch, n.name) });
+        tiles.push(Tile{
+            node: index,
+            x: x,
+            y: y,
+            w: w,
+            h: h,
+            depth: depth,
+            leaf: true,
+            kind: n.dir ? 0 : category(scratch, n.name)
+        });
         if (!n.dir || n.count == 0 || n.size == 0) {
             return;
         }

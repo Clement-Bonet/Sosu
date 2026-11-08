@@ -44,7 +44,13 @@ pub class Inl {
     mut i32 dtop;
     mut i32 btop;
 
-    void init(keeps Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Vec<cm.Ref>* refs, keeps vec.Vec<str>* notes, bool ext) {
+    void init(
+        keeps Arena* arena,
+        keeps vec.Vec<cm.Node>* nodes,
+        keeps vec.Vec<cm.Ref>* refs,
+        keeps vec.Vec<str>* notes,
+        bool ext
+    ) {
         self.arena = arena;
         self.nodes = nodes;
         self.refs = refs;
@@ -87,7 +93,8 @@ pub class Inl {
 
     bool is_special(usize i) {
         i32 c = cm.ch(s, i);
-        if (c == 10 || c == 92 || c == 96 || c == 42 || c == 95 || c == 91 || c == 93 || c == 33 || c == 60 || c == 38) {
+        if (c == 10 || c == 92 || c == 96 || c == 42 || c == 95 || c == 91 || c == 93 || c == 33 || c == 60
+                || c == 38) {
             return true;
         }
         if (!ext) {
@@ -204,14 +211,17 @@ pub class Inl {
     // ---- automatic links and HTML ----
 
     bool is_email_char(i32 c) {
-        return cm.is_alnum(c) || c == 46 || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 47 || c == 61 || c == 63 || c == 94 || c == 95 || c == 96 || c == 123 || c == 124 || c == 125 || c == 126 || c == 45;
+        return cm.is_alnum(c) || c == 46 || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42
+                || c == 43 || c == 47 || c == 61 || c == 63 || c == 94 || c == 95 || c == 96 || c == 123 || c == 124
+                || c == 125 || c == 126 || c == 45;
     }
 
     bool angle(i32 parent) {
         mut usize i = pos + 1;
         if (cm.is_alpha(cm.ch(s, i))) {
             i += 1;
-            while (i - pos <= 32 && (cm.is_alnum(cm.ch(s, i)) || cm.ch(s, i) == 43 || cm.ch(s, i) == 46 || cm.ch(s, i) == 45)) {
+            while (i - pos <= 32
+                    && (cm.is_alnum(cm.ch(s, i)) || cm.ch(s, i) == 43 || cm.ch(s, i) == 46 || cm.ch(s, i) == 45)) {
                 i += 1;
             }
             if (i - pos >= 3 && cm.ch(s, i) == 58) {
@@ -298,7 +308,8 @@ pub class Inl {
         }
         while (end > pos + plen) {
             i32 c = cm.ch(s, end - 1);
-            if (c == 63 || c == 33 || c == 46 || c == 44 || c == 58 || c == 42 || c == 95 || c == 126 || c == 39 || c == 34) {
+            if (c == 63 || c == 33 || c == 46 || c == 44 || c == 58 || c == 42 || c == 95 || c == 126 || c == 39
+                    || c == 34) {
                 end -= 1;
             } else if (c == 41) {
                 mut i32 open = 0;
@@ -489,7 +500,11 @@ pub class Inl {
         bool left = !after_ws && (!after_p || before_ws || before_p);
         bool right = !before_ws && (!before_p || after_ws || after_p);
         if (cc == 95) {
-            return Flank{ num: n as i32, can_open: left && (!right || before_p), can_close: right && (!left || after_p) };
+            return Flank{
+                num: n as i32,
+                can_open: left && (!right || before_p),
+                can_close: right && (!left || after_p)
+            };
         }
         return Flank{ num: n as i32, can_open: left, can_close: right };
     }
@@ -501,7 +516,15 @@ pub class Inl {
         i32 node = add_text(parent, text.slice(s, start, pos));
         bool usable = cc == 126 ? f.num <= 2 : cc == 61 ? f.num == 2 : true;
         if (usable && (f.can_open || f.can_close)) {
-            ds.push(Delim{ cc: cc, num: f.num, orig: f.num, node: node, prev: dtop, can_open: f.can_open, can_close: f.can_close });
+            ds.push(Delim{
+                cc: cc,
+                num: f.num,
+                orig: f.num,
+                node: node,
+                prev: dtop,
+                can_open: f.can_open,
+                can_close: f.can_close
+            });
             i32 id = (ds.len() - 1) as i32;
             if (dtop >= 0) {
                 ds.at(dtop as usize).next = id;
@@ -824,7 +847,8 @@ pub class Inl {
 void read_callout(keeps Arena* arena, vec.Vec<cm.Node>* nodes, i32 par) {
     i32 q = nodes.at(par as usize).parent;
     str lit = nodes.at(par as usize).lit;
-    if (q < 0 || nodes.at(q as usize).kind != BlockQuote || nodes.at(q as usize).first != par || !text.starts_with(lit, "[!")) {
+    if (q < 0 || nodes.at(q as usize).kind != BlockQuote || nodes.at(q as usize).first != par
+            || !text.starts_with(lit, "[!")) {
         return;
     }
     mut usize i = 2;
@@ -874,7 +898,8 @@ pub void process(keeps Arena* arena, keeps vec.Vec<cm.Node>* nodes, keeps vec.Ve
                     if (text.starts_with(lit, "[ ]") && (lit.len == 3 || cm.ch(lit, 3) == 32)) {
                         nodes.at(par as usize).task = 1;
                         nodes.at(i).lit = lit.len > 4 ? text.slice(lit, 4, lit.len) : "";
-                    } else if ((text.starts_with(lit, "[x]") || text.starts_with(lit, "[X]")) && (lit.len == 3 || cm.ch(lit, 3) == 32)) {
+                    } else if ((text.starts_with(lit, "[x]") || text.starts_with(lit, "[X]"))
+                            && (lit.len == 3 || cm.ch(lit, 3) == 32)) {
                         nodes.at(par as usize).task = 2;
                         nodes.at(i).lit = lit.len > 4 ? text.slice(lit, 4, lit.len) : "";
                     }

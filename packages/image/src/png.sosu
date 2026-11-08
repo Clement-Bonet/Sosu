@@ -104,7 +104,12 @@ bool unfilter(ui8[] data, usize rows, usize stride, usize step) {
             i32 b = y > 0 ? data[row - stride + i] as i32 : 0;
             i32 c = y > 0 && i > step ? data[row - stride + i - step] as i32 : 0;
             i32 x = data[row + i] as i32;
-            i32 value = kind == 0 ? x : kind == 1 ? x + a : kind == 2 ? x + b : kind == 3 ? x + (a + b) / 2 : kind == 4 ? x + paeth(a, b, c) : -1;
+            i32 value = kind == 0 ? x
+                    : kind == 1 ? x + a
+                    : kind == 2 ? x + b
+                    : kind == 3 ? x + (a + b) / 2
+                    : kind == 4 ? x + paeth(a, b, c)
+                    : -1;
             if (value < 0) {
                 return false;
             }
@@ -156,7 +161,9 @@ ui32 pixel(Header h, Extras* e, ui8[] data, usize row, ui32 x) {
     ui32 r = sample(data, row, x * n, d);
     ui32 g = sample(data, row, x * n + 1, d);
     ui32 b = sample(data, row, x * n + 2, d);
-    ui32 a = h.color == 6 ? to8(sample(data, row, x * n + 3, d), d) : e.keyed && r == e.key[0] && g == e.key[1] && b == e.key[2] ? 0 : 255;
+    ui32 a = h.color == 6 ? to8(sample(data, row, x * n + 3, d), d)
+            : e.keyed && r == e.key[0] && g == e.key[1] && b == e.key[2] ? 0
+            : 255;
     return a << 24 | to8(r, d) << 16 | to8(g, d) << 8 | to8(b, d);
 }
 
@@ -182,7 +189,13 @@ pub image.Image!image.ImageError decode(Arena* arena, ui8[] data) {
     if (data.len < 33 || !is_tag(data, 12, "IHDR") || u32_at(data, 8) != 13) {
         return err(image.ImageError.Damaged);
     }
-    Header h = Header{ width: u32_at(data, 16), height: u32_at(data, 20), depth: data[24] as ui32, color: data[25] as ui32, interlaced: data[28] == 1 };
+    Header h = Header{
+        width: u32_at(data, 16),
+        height: u32_at(data, 20),
+        depth: data[24] as ui32,
+        color: data[25] as ui32,
+        interlaced: data[28] == 1
+    };
     if (!h.valid() || h.width == 0 || h.height == 0 || data[26] != 0 || data[27] != 0 || data[28] > 1) {
         return err(image.ImageError.Damaged);
     }
@@ -410,7 +423,8 @@ ui8[] write(Arena* arena, ui8[] samples, ui32 width, ui32 height, ui32 channels,
 // The bytes of the PNG file holding `img`, deflated at `level` (0 to 9): RGB when every pixel
 // is opaque, RGBA otherwise.
 pub ui8[] encode_level(Arena* arena, image.Image img, i32 level)
-    requires level >= 0 && level <= 9 && img.width >= 0 && img.height >= 0 && img.pixels.len == img.width as usize * img.height as usize
+    requires level >= 0 && level <= 9 && img.width >= 0 && img.height >= 0
+            && img.pixels.len == img.width as usize * img.height as usize
 {
     bool opaque = img.opaque();
     ui32 channels = opaque ? 3 : 4;

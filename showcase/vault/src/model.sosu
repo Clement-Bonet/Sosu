@@ -237,7 +237,8 @@ pub class Model {
         for (usize i in 1..view.len()) {  // insertion sort
             i32 held = *view.at(i);
             mut usize j = i;
-            while (j > 0 && before(entries.at(held as usize).title.text(), entries.at(*view.at(j - 1) as usize).title.text())) {
+            while (j > 0
+                    && before(entries.at(held as usize).title.text(), entries.at(*view.at(j - 1) as usize).title.text())) {
                 view.set(j, *view.at(j - 1));
                 j -= 1;
             }

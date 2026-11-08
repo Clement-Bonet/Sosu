@@ -215,7 +215,10 @@ pub Ent char_at(str s, usize i) {
         return Ent{ len: 1, code: c };
     }
     if (c >= 0xF0) {
-        return Ent{ len: 4, code: (c & 7) << 18 | (ch(s, i + 1) & 63) << 12 | (ch(s, i + 2) & 63) << 6 | ch(s, i + 3) & 63 };
+        return Ent{
+            len: 4,
+            code: (c & 7) << 18 | (ch(s, i + 1) & 63) << 12 | (ch(s, i + 2) & 63) << 6 | ch(s, i + 3) & 63
+        };
     }
     if (c >= 0xE0) {
         return Ent{ len: 3, code: (c & 15) << 12 | (ch(s, i + 1) & 63) << 6 | ch(s, i + 2) & 63 };
@@ -237,7 +240,8 @@ pub i32 char_before(str s, usize i) {
 
 // A white space of Unicode (the flanking rules of emphasis look at it).
 pub bool is_uni_space(i32 c) {
-    return c < 0 || is_ws(c) || c == 0xA0 || c == 0x1680 || c >= 0x2000 && c <= 0x200A || c == 0x202F || c == 0x205F || c == 0x3000;
+    return c < 0 || is_ws(c) || c == 0xA0 || c == 0x1680 || c >= 0x2000 && c <= 0x200A || c == 0x202F || c == 0x205F
+            || c == 0x3000;
 }
 
 // A punctuation or a symbol of Unicode.
@@ -245,7 +249,11 @@ pub bool is_uni_punct(i32 c) {
     if (c < 0x80) {
         return is_punct_ascii(c);
     }
-    return c >= 0xA1 && c <= 0xA9 || c == 0xAB || c == 0xAC || c >= 0xAE && c <= 0xB1 || c == 0xB4 || c >= 0xB6 && c <= 0xB8 || c == 0xBB || c == 0xBF || c == 0xD7 || c == 0xF7 || c >= 0x2010 && c <= 0x2027 || c >= 0x2030 && c <= 0x205E || c >= 0x20A0 && c <= 0x20CF || c >= 0x2190 && c <= 0x23FF || c >= 0x2500 && c <= 0x27FF || c >= 0x3001 && c <= 0x3003 || c >= 0x3008 && c <= 0x3020 || c >= 0xFF01 && c <= 0xFF0F;
+    return c >= 0xA1 && c <= 0xA9 || c == 0xAB || c == 0xAC || c >= 0xAE && c <= 0xB1 || c == 0xB4
+            || c >= 0xB6 && c <= 0xB8 || c == 0xBB || c == 0xBF || c == 0xD7 || c == 0xF7 || c >= 0x2010 && c <= 0x2027
+            || c >= 0x2030 && c <= 0x205E || c >= 0x20A0 && c <= 0x20CF || c >= 0x2190 && c <= 0x23FF
+            || c >= 0x2500 && c <= 0x27FF || c >= 0x3001 && c <= 0x3003 || c >= 0x3008 && c <= 0x3020
+            || c >= 0xFF01 && c <= 0xFF0F;
 }
 
 // ---- entities and escapes ----
@@ -682,7 +690,8 @@ pub usize scan_tag(str s, usize pos) {
                     i = w + 1;
                 } else {
                     usize from = v;
-                    while (v < s.len && !is_ws(ch(s, v)) && ch(s, v) != 34 && ch(s, v) != 39 && ch(s, v) != 61 && ch(s, v) != 60 && ch(s, v) != 62 && ch(s, v) != 96) {
+                    while (v < s.len && !is_ws(ch(s, v)) && ch(s, v) != 34 && ch(s, v) != 39 && ch(s, v) != 61
+                            && ch(s, v) != 60 && ch(s, v) != 62 && ch(s, v) != 96) {
                         v += 1;
                     }
                     if (v == from) {
