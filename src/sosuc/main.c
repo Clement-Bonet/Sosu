@@ -354,7 +354,7 @@ typedef struct {
     StringList includes;
     StringList defines;
     bool window; /* a package is for programs with windows: no console in release (Windows) */
-    char *resource; /* Windows: the icon of the program, compiled (sosuc package), or NULL */
+    char *resource; /* Windows: the version and the icon of the program or DLL, compiled, or NULL */
 } Links;
 
 static void add_unique(StringList *list, char *item) {
@@ -1074,6 +1074,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
             add_sources(&cl, links, true);
             command_add(&cl, c);
             command_add(&cl, rt_c);
+            if (links->resource) command_add(&cl, links->resource);
             add_link_arguments(&cl, links, true);
             command_addf(&cl, "/IMPLIB:%s", import);
             ok = ok && run_logged(&cl, log);
@@ -1129,6 +1130,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
             command_add(&command, c_file);
             command_add(&command, runtime_c);
             add_sources(&command, links, false);
+            if (links->resource) command_add(&command, links->resource);
             command_add(&command, "-o");
             command_add(&command, files->library);
             add_link_arguments(&command, links, false);
@@ -1213,6 +1215,8 @@ static bool write_link_list(const char *build_dir, const char *name, const Links
 
 /* `sosuc build --lib[=static|shared]`: the package (entry `src/lib.sosu`) as a C library and its
    header, in build/. */
+static char *windows_resource(const Package *root, const char *relative_dir, const char *file_name, bool library);
+
 static int command_build_library(const char *dir, const char *argv0, DiagFormat format, const BuildOptions *options) {
     char *lib = library_dir(argv0);
     Program program;
@@ -1257,6 +1261,9 @@ static int command_build_library(const char *dir, const char *argv0, DiagFormat 
         LibraryFiles files = library_files(build_dir, root->name, shared, msvc);
         Links links;
         collect_links(&program, &links, options->target);
+#ifdef _WIN32
+        if (shared) links.resource = windows_resource(root, build_dir, files.library, true);
+#endif
         if (!write_file(c_file, source) || !write_file(h_file, header)) {
             fprintf(stderr, "sosuc: cannot write in `%s`\n", build_dir);
             status = 2;
@@ -1921,6 +1928,9 @@ static int command_build(const char *dir, const char *argv0, DiagFormat format, 
         char *exe = path_join(build_dir, exe_name);
         Links links;
         collect_links(&program, &links, options->target);
+        /* the version in the properties of the program; not for the program of the tests */
+        if (mode != MODE_TEST && options->target->os == TARGET_HOST && strcmp(target_system(options->target), "windows") == 0)
+            links.resource = windows_resource(root, build_dir, exe_name, false);
         if (!write_file(c_file, source)) {
             fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
             status = 2;
@@ -2020,21 +2030,100 @@ static bool write_ico(const char *png, const char *ico) {
 }
 #endif
 
-/* The icon of [app] as a resource of the program, on Windows: a .res (MSVC) or a .o (MinGW),
-   or NULL if there is none or the tools are missing (reported). */
-static char *windows_icon(const Package *root, const char *relative_dir) {
 #ifdef _WIN32
-    const char *icon = root->manifest.app.icon;
-    if (!icon) return NULL;
+/* `text` as a string of a resource script: quoted, its quotes doubled, its backslashes escaped,
+   the line breaks and tabs of sosu.toml made spaces. */
+static char *rc_string(const char *text) {
+    size_t length = 0;
+    for (const char *c = text; *c; c++) length += *c == '"' || *c == '\\' ? 2 : 1;
+    char *out = malloc(length + 3);
+    if (!out) abort();
+    char *o = out;
+    *o++ = '"';
+    for (const char *c = text; *c; c++) {
+        if (*c == '"') *o++ = '"';
+        if (*c == '\\') *o++ = '\\';
+        *o++ = (unsigned char)*c < 32 ? ' ' : *c;
+    }
+    *o++ = '"';
+    *o = '\0';
+    return out;
+}
+
+/* `1.2.3-beta` as the four numbers of a VERSIONINFO: `1,2,3,0`, the leading digits of each part. */
+static char *rc_version_numbers(const char *version) {
+    unsigned long parts[4] = {0};
+    const char *c = version;
+    for (int i = 0; i < 4 && *c; i++) {
+        while (*c >= '0' && *c <= '9') {
+            parts[i] = parts[i] * 10 + (unsigned long)(*c - '0');
+            if (parts[i] > 65535) parts[i] = 65535;
+            c++;
+        }
+        while (*c && *c != '.') c++;
+        if (*c == '.') c++;
+    }
+    return sosu_format("%lu,%lu,%lu,%lu", parts[0], parts[1], parts[2], parts[3]);
+}
+#endif
+
+/* The resources of a program (or of a DLL, `library`) on Windows: the icon of [app] when there is one,
+   and the version shown in the "Details" of its properties, from [package] and [app]. A .res (MSVC) or
+   a .o (MinGW), or NULL if the tools are missing (reported: the program is still built). */
+static char *windows_resource(const Package *root, const char *relative_dir, const char *file_name, bool library) {
+#ifdef _WIN32
+    const AppSection *app = &root->manifest.app;
+    const char *icon = app->icon;
     char *build_dir = absolute_path(relative_dir); /* rc runs from it */
-    char *png = package_path(root, icon);
     char *ico = path_join(build_dir, "icon.ico");
-    char *rc = path_join(build_dir, "icon.rc");
+    char *rc = path_join(build_dir, "resource.rc");
     const char *cc = getenv("SOSU_CC");
     bool msvc = !cc || !cc[0];
-    char *res = path_join(build_dir, msvc ? "icon.res" : "icon_res.o");
-    char *text = sosu_strdup("1 ICON \"icon.ico\"\n");
-    bool ok = write_ico(png, ico) && write_file(rc, text);
+    char *res = path_join(build_dir, msvc ? "resource.res" : "resource_res.o");
+    bool ok = true;
+    char *text = sosu_strdup("#pragma code_page(65001)\n"); /* sosu.toml is UTF-8 */
+    if (icon) {
+        char *png = package_path(root, icon);
+        ok = write_ico(png, ico);
+        if (ok) append(&text, "%s", "1 ICON \"icon.ico\"\n");
+        else fprintf(stderr, "sosuc: the icon `%s` was not added to the program (a PNG is needed)\n", icon);
+        free(png);
+    }
+    const char *version = app->version ? app->version : root->manifest.version ? root->manifest.version : "0.0.0";
+    const char *product = app->name ? app->name : root->name;
+    const char *base = file_name;
+    for (const char *c = file_name; *c; c++)
+        if (*c == '/' || *c == '\\') base = c + 1;
+    char *internal = sosu_strdup(base);
+    char *dot = strrchr(internal, '.');
+    if (dot) *dot = '\0';
+    char *numbers = rc_version_numbers(version);
+    append(&text, "1 VERSIONINFO\nFILEVERSION %s\n", numbers);
+    append(&text, "PRODUCTVERSION %s\n", numbers);
+    append(&text, "FILEFLAGSMASK 0x3f\nFILEFLAGS 0\nFILEOS 0x40004\nFILETYPE %s\nFILESUBTYPE 0\n", library ? "2" : "1");
+    append(&text, "%s", "BEGIN\n  BLOCK \"StringFileInfo\"\n  BEGIN\n    BLOCK \"040904B0\"\n    BEGIN\n");
+    const char *values[][2] = {
+        { "FileDescription", app->description ? app->description : product },
+        { "FileVersion", version },
+        { "InternalName", internal },
+        { "LegalCopyright", app->copyright },
+        { "OriginalFilename", base },
+        { "ProductName", product },
+        { "ProductVersion", version },
+    };
+    for (size_t i = 0; i < sizeof values / sizeof *values; i++) {
+        if (!values[i][1]) continue;
+        char *line = sosu_format("      VALUE \"%s\", ", values[i][0]);
+        append(&text, "%s", line);
+        char *value = rc_string(values[i][1]);
+        append(&text, "%s\n", value);
+        free(value);
+        free(line);
+    }
+    append(&text, "%s", "    END\n  END\n  BLOCK \"VarFileInfo\"\n  BEGIN\n    VALUE \"Translation\", 0x409, 1200\n  END\nEND\n");
+    free(numbers);
+    free(internal);
+    ok = write_file(rc, text);
     if (ok) {
         char *native_rc = shell_path(rc);
         char *native_res = shell_path(res);
@@ -2052,11 +2141,12 @@ static char *windows_icon(const Package *root, const char *relative_dir) {
         free(native_res);
         free(native_rc);
     }
-    if (!ok) fprintf(stderr, "sosuc: the icon `%s` was not added to the program (a PNG, and rc or windres, are needed)\n", icon);
+    if (!ok)
+        fprintf(stderr, "sosuc: the version%s was not added to `%s` (rc or windres is needed)\n",
+                icon ? " and the icon" : "", base);
     free(text);
     free(rc);
     free(ico);
-    free(png);
     free(build_dir);
     if (ok) return res;
     free(res);
@@ -2064,6 +2154,8 @@ static char *windows_icon(const Package *root, const char *relative_dir) {
 #else
     (void)root;
     (void)relative_dir;
+    (void)file_name;
+    (void)library;
     return NULL;
 #endif
 }
@@ -2123,7 +2215,7 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
         char *exe = path_join(bin_dir, exe_name);
         Links links;
         collect_links(&program, &links, options.target);
-        if (windows && options.target->os == TARGET_HOST) links.resource = windows_icon(root, build_dir);
+        if (windows && options.target->os == TARGET_HOST) links.resource = windows_resource(root, build_dir, exe_name, false);
         bool built = write_file(c_file, source);
         if (!built) fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
         if (built && !compile_c(build_dir, c_file, exe, lib, true, &links, options.target)) {
@@ -2166,6 +2258,15 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
         if (built && macos) {
             char *id = app->id ? sosu_strdup(app->id) : sosu_format("org.sosu.%s", root->name);
             const char *version = app->version ? app->version : root->manifest.version ? root->manifest.version : "1.0";
+            char *copyright = sosu_strdup("");
+            if (app->copyright) { /* its `&` and `<` escaped for the XML */
+                append(&copyright, "%s", "    <key>NSHumanReadableCopyright</key><string>");
+                for (const char *c = app->copyright; *c; c++) {
+                    char one[2] = { *c, '\0' };
+                    append(&copyright, "%s", *c == '&' ? "&amp;" : *c == '<' ? "&lt;" : one);
+                }
+                append(&copyright, "%s", "</string>\n");
+            }
             char *plist = sosu_format(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                 "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -2177,8 +2278,10 @@ static int command_package_desktop(const char *dir, const char *argv0, DiagForma
                 "    <key>CFBundleShortVersionString</key><string>%s</string>\n"
                 "    <key>CFBundlePackageType</key><string>APPL</string>\n"
                 "    <key>NSHighResolutionCapable</key><true/>\n"
+                "%s"
                 "</dict>\n</plist>\n",
-                id, title, root->name, version, version);
+                id, title, root->name, version, version, copyright);
+            free(copyright);
             char *plist_file = path_join(folder, "Contents/Info.plist");
             built = write_file(plist_file, plist);
 #ifdef __APPLE__

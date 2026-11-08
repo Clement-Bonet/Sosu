@@ -89,6 +89,38 @@ static int run(const char *command) {
     return status;
 }
 
+#ifdef _WIN32
+/* The FILETYPE of the version resource of `path` (1: a program, 2: a DLL), found by the signature
+   of its VS_FIXEDFILEINFO; 0 when there is none. */
+static unsigned file_type(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    unsigned char window[40] = {0};
+    unsigned type = 0;
+    int c;
+    while (!type && (c = fgetc(file)) != EOF) {
+        memmove(window, window + 1, sizeof window - 1);
+        window[sizeof window - 1] = (unsigned char)c;
+        /* dwSignature 0xFEEF04BD, then eight fields, then dwFileType */
+        if (memcmp(window, "\xBD\x04\xEF\xFE", 4) == 0) type = window[36] | (unsigned)window[37] << 8;
+    }
+    fclose(file);
+    return type;
+}
+
+/* The fields of the "Details" of the properties of `path`, as Windows reads them, one per line. */
+static char *version_info(const char *path) {
+    char command[1024];
+    snprintf(command, sizeof command,
+             "powershell -NoProfile -Command \"$v = (Get-Item '%s').VersionInfo; $v.FileDescription; $v.FileVersion; "
+             "$v.ProductName; $v.ProductVersion; $v.LegalCopyright; $v.OriginalFilename; "
+             "($v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.FilePrivatePart) -join ','\" > build\\version.out",
+             path);
+    if (run(command) != 0) return NULL;
+    return read_text("build/version.out");
+}
+#endif
+
 /* A library for other languages (spec §9.2): built static, then shared, each used by a C host
    compiled with the compiler of these tests (cl, or cc). */
 static void test_library(const char *sosuc) {
@@ -128,6 +160,15 @@ static void test_library(const char *sosuc) {
         free(actual);
         free(expected);
     }
+#ifdef _WIN32
+    /* the version of the DLL, in the properties of the file: from [package], without [app] */
+    CHECK(file_type("tests/programs/library/build/geom.dll") == 2, "geom.dll: no version resource of a DLL");
+    char *details = version_info("tests\\programs\\library\\build\\geom.dll");
+    const char *expected = "geom\n0.1.0\ngeom\n0.1.0\n\ngeom.dll\n0,1,0,0\n";
+    CHECK(details && strcmp(details, expected) == 0, "geom.dll: version\n--- got:\n%s--- expected:\n%s",
+          details ? details : "(none)\n", expected);
+    free(details);
+#endif
 }
 
 /* The text of a file after its first `lines` lines. */
@@ -321,6 +362,17 @@ static void test_package(const char *sosuc) {
     CHECK(actual && strstr(actual, "Read next to the program."), "the packaged program did not find its asset: %s",
           actual ? actual : "(nothing)");
     free(actual);
+#ifdef _WIN32
+    /* the version of the program and the texts of [app], in the properties of the file */
+    const char *exe = "tests\\programs\\packaged\\build\\package\\packaged\\packaged.exe";
+    CHECK(file_type(exe) == 1, "packaged.exe: no version resource of a program");
+    char *details = version_info(exe);
+    const char *expected = "A packaged test program\n0.1.0\nPackaged\n0.1.0\nCopyright 2026 The Sosu authors\n"
+                           "packaged.exe\n0,1,0,0\n";
+    CHECK(details && strcmp(details, expected) == 0, "packaged.exe: version\n--- got:\n%s--- expected:\n%s",
+          details ? details : "(none)\n", expected);
+    free(details);
+#endif
 }
 
 /* A program for Android (spec §11.5): `libmain.so` for the emulator, an ELF library for x86_64.
