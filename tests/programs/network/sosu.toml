@@ -1,0 +1,10 @@
+# The package net (spec §8.2), run by `sosuc test`, on this machine only: names, addresses, a TCP
+# server and its client on two threads, UDP datagrams, HTTP and HTTPS against servers of the test,
+# and the errors of the network.
+[package]
+name = "network"
+version = "0.1.0"
+
+[dependencies]
+net = { path = "../../../packages/net" }
+testing = { path = "../../../packages/testing" }

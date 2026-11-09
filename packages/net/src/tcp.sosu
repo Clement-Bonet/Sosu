@@ -1,0 +1,278 @@
+// net.tcp: TCP connections, a stream of bytes both ways. A client connects to a host and a port;
+// a server listens on a port and accepts the connections that come. Reads and writes wait (on
+// a thread of its own, a program does something else meanwhile, spec §5.6), at most the time set
+// by `set_timeout`. A stream belongs to the thread that opened it.
+//
+//     tcp.Stream* s = try tcp.connect(&arena, "example.org", 80, 5000);
+//     defer s.close();
+//     try s.write_all("GET / HTTP/1.0\r\n\r\n".bytes);
+import net.ip;
+
+extern "C" {
+    i64 sosu_net_tcp_connect(ui8* address, ui16 port, i32 timeout_ms, i32* error) uses io;
+    i64 sosu_net_tcp_listen(ui8* address, ui16 port, i32 backlog, i32* error) uses io;
+    i64 sosu_net_tcp_accept(i64 listener, ui8* address, ui16* port, i32* error) uses io;
+    i32 sosu_net_local(i64 handle, ui8* address, ui16* port);
+    i32 sosu_net_set_timeout(i64 handle, i32 timeout_ms);
+    i64 sosu_net_recv(i64 handle, ui8* buffer, i64 size, i32* error) uses io;
+    i64 sosu_net_send(i64 handle, ui8* buffer, i64 size, i32* error) uses io;
+    void sosu_net_shutdown(i64 handle) uses io;
+    void sosu_net_close(i64 handle) uses io;
+}
+
+// What a protocol reads and writes (`net.http`): a TCP stream, or a TLS one over it.
+pub interface Connection {
+    // Reads what has come, at most `into.len` bytes: how many; 0 at the end of the stream.
+    usize!ip.NetError read(ui8[] into) uses io;
+    // Writes all of `data`.
+    void!ip.NetError write_all(ui8[] data) uses io;
+    // Closes the connection.
+    void close() uses io;
+}
+
+// A connection: what one side writes, the other reads, in order.
+pub class Stream : Connection {
+    mut i64 handle;
+    ip.Address peer_address;
+    ui16 peer_port;
+
+    void init(i64 handle, ip.Address peer_address, ui16 peer_port) {
+        self.handle = handle;
+        self.peer_address = peer_address;
+        self.peer_port = peer_port;
+    }
+
+    // The address of the other side.
+    pub ip.Address peer() {
+        return peer_address;
+    }
+
+    // The port of the other side.
+    pub ui16 port() {
+        return peer_port;
+    }
+
+    // The socket of the system, for `net.tls`; -1 once closed.
+    pub i64 socket() {
+        return handle;
+    }
+
+    // The longest a read or a write waits, in milliseconds, before `TimedOut` (0: no limit, the
+    // default).
+    pub void!ip.NetError set_timeout(i32 timeout_ms) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        mut i32 code = 0;
+        unsafe {
+            code = sosu_net_set_timeout(handle, timeout_ms);
+        }
+        if (code != 0) {
+            return err(ip.error_of(code));
+        }
+        return ok();
+    }
+
+    // Reads what has come, at most `into.len` bytes, waiting for some: how many; 0 when the other
+    // side has closed its end and everything was read.
+    pub override usize!ip.NetError read(ui8[] into) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        if (into.len == 0) {
+            return ok(0);
+        }
+        mut i32 error = 0;
+        mut i64 n = 0;
+        unsafe {
+            n = sosu_net_recv(handle, &into[0], into.len as i64, &error);
+        }
+        if (n < 0) {
+            return err(ip.error_of(error));
+        }
+        return ok(n as usize);
+    }
+
+    // Reads exactly `into.len` bytes; `Closed` if the stream ends before.
+    pub void!ip.NetError read_exact(ui8[] into) uses io {
+        mut usize done = 0;
+        while (done < into.len) {
+            usize n = try read(into[done..into.len]);
+            if (n == 0) {
+                return err(ip.NetError.Closed);
+            }
+            done += n;
+        }
+        return ok();
+    }
+
+    // Writes all of `data`, waiting while the system sends it.
+    pub override void!ip.NetError write_all(ui8[] data) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        mut usize done = 0;
+        while (done < data.len) {
+            mut i32 error = 0;
+            mut i64 n = 0;
+            unsafe {
+                n = sosu_net_send(handle, &data[done], (data.len - done) as i64, &error);
+            }
+            if (n < 0) {
+                return err(ip.error_of(error));
+            }
+            done += n as usize;
+        }
+        return ok();
+    }
+
+    // Writes a text, as its bytes of UTF-8.
+    pub void!ip.NetError write_text(str text) uses io {
+        return write_all(text.bytes);
+    }
+
+    // Reads until the other side closes: everything that came, in `arena`, at most `max` bytes
+    // (`Invalid` beyond).
+    pub ui8[]!ip.NetError read_all(Arena* arena, usize max) uses io {
+        mut usize cap = 4096;
+        mut ui8[] buffer = arena.alloc_slice(ui8, cap);
+        mut usize size = 0;
+        while (true) {
+            if (size == cap) {
+                if (cap >= max) {
+                    return err(ip.NetError.Invalid);
+                }
+                usize bigger = cap * 2 > max ? max : cap * 2;
+                mut ui8[] grown = arena.alloc_slice(ui8, bigger);
+                for (usize i in 0..size) {
+                    grown[i] = buffer[i];
+                }
+                buffer = grown;
+                cap = bigger;
+            }
+            usize n = try read(buffer[size..cap]);
+            if (n == 0) {
+                return ok(buffer[0..size]);
+            }
+            size += n;
+        }
+        return ok(buffer[0..size]);
+    }
+
+    // No more writes from this side: the other side reads the end of the stream, and may still
+    // answer.
+    pub void finish() uses io {
+        if (handle >= 0) {
+            unsafe {
+                sosu_net_shutdown(handle);
+            }
+        }
+    }
+
+    // Closes the connection; then every read and write gives `Closed`. Closing twice does nothing.
+    pub override void close() uses io {
+        if (handle >= 0) {
+            unsafe {
+                sosu_net_close(handle);
+            }
+            handle = -1;
+        }
+    }
+}
+
+// Connects to `host` (a name or an address written out) on `port`, trying its addresses in
+// turn, each for `timeout_ms` at most (0: as long as the system waits). The stream is made in
+// `arena`; close it before freeing the arena.
+pub Stream*!ip.NetError connect(Arena* arena, str host, ui16 port, i32 timeout_ms) uses io {
+    ip.Address[] all = try ip.resolve(arena, host);
+    mut ip.NetError last = ip.NetError.NotFound;
+    for (ip.Address a in all) {
+        match (connect_to(arena, a, port, timeout_ms)) {
+            ok(s) => {
+                return ok(s);
+            },
+            err(e) => {
+                last = e;
+            },
+        }
+    }
+    return err(last);
+}
+
+// Connects to one address on `port`.
+pub Stream*!ip.NetError connect_to(Arena* arena, ip.Address address, ui16 port, i32 timeout_ms) uses io {
+    mut ui8[18] raw = address.raw;
+    mut i32 error = 0;
+    mut i64 handle = -1;
+    unsafe {
+        handle = sosu_net_tcp_connect(&raw[0], port, timeout_ms, &error);
+    }
+    if (handle < 0) {
+        return err(ip.error_of(error));
+    }
+    return ok(arena.new(Stream, handle, address, port));
+}
+
+// A socket that listens for connections.
+pub class Listener {
+    mut i64 handle;
+
+    void init(i64 handle) {
+        self.handle = handle;
+    }
+
+    // The port it listens on: the one chosen by the system when `listen` was given 0.
+    pub ui16 port() {
+        mut ui8[18] raw = [0; 18];
+        mut ui16 port = 0;
+        if (handle >= 0) {
+            unsafe {
+                sosu_net_local(handle, &raw[0], &port);
+            }
+        }
+        return port;
+    }
+
+    // Waits for the next connection; its stream is made in `arena`.
+    pub Stream*!ip.NetError accept(Arena* arena) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        mut ui8[18] raw = [0; 18];
+        mut ui16 port = 0;
+        mut i32 error = 0;
+        mut i64 s = -1;
+        unsafe {
+            s = sosu_net_tcp_accept(handle, &raw[0], &port, &error);
+        }
+        if (s < 0) {
+            return err(ip.error_of(error));
+        }
+        return ok(arena.new(Stream, s, ip.Address{ raw: raw }, port));
+    }
+
+    // Stops listening. Closing twice does nothing.
+    pub void close() uses io {
+        if (handle >= 0) {
+            unsafe {
+                sosu_net_close(handle);
+            }
+            handle = -1;
+        }
+    }
+}
+
+// Listens on `address` and `port` (0: a port the system chooses, given by `port()`):
+// `ip.localhost()` for this machine only, `ip.any()` for the network.
+pub Listener*!ip.NetError listen(Arena* arena, ip.Address address, ui16 port) uses io {
+    mut ui8[18] raw = address.raw;
+    mut i32 error = 0;
+    mut i64 handle = -1;
+    unsafe {
+        handle = sosu_net_tcp_listen(&raw[0], port, 0, &error);
+    }
+    if (handle < 0) {
+        return err(ip.error_of(error));
+    }
+    return ok(arena.new(Listener, handle));
+}

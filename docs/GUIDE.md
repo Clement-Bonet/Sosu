@@ -2088,7 +2088,7 @@ One key per dependency: the name used in its imports, then an inline table.
 | `paths` | folders where the linker looks for them |
 | `frameworks` | frameworks of macOS and iOS: `"Cocoa"` |
 | `copy` | files placed next to the program, as a DLL beside the `.exe` |
-| `c` | C files compiled with the program, so that its users install nothing |
+| `c` | C files compiled with the program, so that its users install nothing; a folder ending in `/` is its C files (not those of its subfolders) |
 | `include` | folders of the headers of those C files |
 | `defines` | macros given to those C files: `"NAME"` or `"NAME=value"` |
 | `subsystem` | `"window"` for a package whose programs open windows (no console behind them, in release builds on Windows), or `"console"` |
@@ -2494,6 +2494,47 @@ i32 main() uses io {
 ```
 
 `c.help(arena)` gives the usage text.
+
+### 22.8 The network
+
+The package `net` (in `packages/net`, named in `[dependencies]` as any other) has addresses and names (`net.ip`), TCP connections (`net.tcp`), UDP datagrams (`net.udp`), TLS (`net.tls`) and an HTTP client (`net.http`), for http and https alike:
+
+```csharp
+import std.io;
+import net.http;
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    match (http.get(&arena, "https://example.org/")) {
+        ok(r) => io.print("{} {} bytes", r.status, r.body.len),
+        err(e) => io.print("{}", http.message(e)),
+    }
+    return 0;
+}
+```
+
+The answer is read whole into the arena; every wait is limited (30 s), and so is its size (16 MB). For https, the certificate of the server is checked against the roots of the system. A request made by `http.request` is changed field by field before `http.send`:
+
+```csharp
+mut http.Request r = http.request(&arena, "POST", "https://api.example.org/notes");
+r.body = "{\"title\": \"Sosu\"}".bytes;
+r.timeout_ms = 5000;
+r.roots = company_roots;  // trust these certificates (PEM), not those of the system
+http.Response answer = try http.send(&arena, r);
+```
+
+TCP itself, for a protocol of your own:
+
+```csharp
+tcp.Stream* s = try tcp.connect(&arena, "example.org", 7, 5000);
+defer s.close();
+try s.write_text("ping");
+mut ui8[64] buffer = [0; 64];
+usize n = try s.read(buffer[0..64]);
+```
+
+Reads and writes wait; a server serves its clients from threads (chapter 23). TLS comes from Mbed TLS, given as C sources with the package: nothing to install.
 
 ## 23. Threads and Channels
 

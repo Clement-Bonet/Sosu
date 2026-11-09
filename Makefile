@@ -165,7 +165,7 @@ build/playground/sosuc.js: $(LIB_SRC) $(LIB_HDR) src/playground/playground.c pla
 # The reference of the public API of `core`, `std` and the packages of spec §8.3, from their
 # comments (src/docgen); the lib.sosu of a package only imports its modules. Committed; the CI
 # checks that it is up to date.
-DOC_PACKAGES := audio compress crypto db image math sqlite testing
+DOC_PACKAGES := audio compress crypto db image math net sqlite testing
 DOC_SOURCES := $(sort $(wildcard lib/core/src/*.sosu lib/std/src/*.sosu) packages/platform/src/dialogs.sosu \
 	$(filter-out %/lib.sosu,$(foreach p,$(DOC_PACKAGES),$(wildcard packages/$(p)/src/*.sosu))))
 

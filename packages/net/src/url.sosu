@@ -1,0 +1,174 @@
+// net.url: the URLs of `net.http`, `http://host:port/path?query`. Only what a request needs is
+// kept: the scheme, the host, the port and the target (the path and the query); a fragment
+// (`#part`) is dropped. A URL with spaces, control characters or a user (`user@host`) is refused.
+import std.text;
+
+// A URL taken apart.
+pub struct Url {
+    pub str scheme;  // "http" or "https"
+    pub str host;  // a name, or an address (an IPv6 one without its brackets)
+    pub ui16 port;  // the one written, or 80 for http and 443 for https
+    pub str target;  // the path and the query: "/", "/search?q=sosu"
+
+    // True when the port is the one of the scheme.
+    pub bool default_port() {
+        return scheme == "http" && port == 80 || scheme == "https" && port == 443;
+    }
+
+    // The value of the `Host` header: "example.org", "example.org:8080", "[::1]:8080".
+    pub str authority(Arena* arena) {
+        text.TextBuilder* b = text.builder(arena);
+        bool v6 = text.contains(host, ":");
+        if (v6) {
+            b.push("[");
+        }
+        b.push(host);
+        if (v6) {
+            b.push("]");
+        }
+        if (!default_port()) {
+            b.push(":");
+            b.push_u64(port as ui64);
+        }
+        return b.text();
+    }
+
+    // Written out again, without the default port: "http://example.org/a?b".
+    pub str written(Arena* arena) {
+        text.TextBuilder* b = text.builder(arena);
+        b.push(scheme);
+        b.push("://");
+        b.push(authority(arena));
+        b.push(target);
+        return b.text();
+    }
+}
+
+// The URL of `s`, or none if it is not an http or https URL that a request can use.
+pub Url? parse(Arena* arena, str s) {
+    for (ui8 c in s.bytes) {
+        if (c <= 32 || c == 127) {
+            return none;  // spaces, control characters: they could end a line of the request
+        }
+    }
+    usize? sep = text.find(s, "://");
+    usize after = match (sep) {
+        some(i) => i + 3,
+        none => 0,
+    };
+    if (after == 0) {
+        return none;
+    }
+    str scheme = text.to_lower(arena, text.slice(s, 0, after - 3));
+    if (scheme != "http" && scheme != "https") {
+        return none;
+    }
+    // the authority, up to the first `/`, `?` or `#`
+    mut usize end = after;
+    while (end < s.len && s.bytes[end] != 47 && s.bytes[end] != 63 && s.bytes[end] != 35) {
+        end += 1;
+    }
+    str authority = text.slice(s, after, end);
+    if (authority.len == 0 || text.contains(authority, "@")) {
+        return none;
+    }
+    mut str host = authority;
+    mut str port_text = "";
+    if (authority.bytes[0] == 91) {  // `[` an IPv6 address
+        usize close = match (text.find(authority, "]")) {
+            some(i) => i,
+            none => 0,
+        };
+        if (close < 2) {
+            return none;
+        }
+        host = text.slice(authority, 1, close);
+        str rest = text.slice(authority, close + 1, authority.len);
+        if (rest.len > 0) {
+            if (rest.bytes[0] != 58) {
+                return none;
+            }
+            port_text = text.slice(rest, 1, rest.len);
+        }
+    } else {
+        match (text.find(authority, ":")) {
+            some(i) => {
+                host = text.slice(authority, 0, i);
+                port_text = text.slice(authority, i + 1, authority.len);
+            },
+            none => { },
+        }
+    }
+    if (host.len == 0) {
+        return none;
+    }
+    mut ui16 port = scheme == "https" ? 443 : 80;
+    if (port_text.len > 0) {
+        if (port_text.len > 5) {
+            return none;
+        }
+        mut ui32 n = 0;
+        for (ui8 c in port_text.bytes) {
+            if (c < 48 || c > 57) {
+                return none;
+            }
+            n = n * 10 + (c - 48) as ui32;
+        }
+        if (n == 0 || n > 65535) {
+            return none;
+        }
+        port = n as ui16;
+    }
+    // the target, without the fragment
+    mut usize stop = end;
+    while (stop < s.len && s.bytes[stop] != 35) {
+        stop += 1;
+    }
+    mut str target = text.slice(s, end, stop);
+    if (target.len == 0) {
+        target = "/";
+    } else if (target.bytes[0] == 63) {  // `?` right after the host
+        text.TextBuilder* b = text.builder(arena);
+        b.push("/");
+        b.push(target);
+        target = b.text();
+    }
+    return some(Url{ scheme: scheme, host: text.to_lower(arena, host), port: port, target: target });
+}
+
+// `location`, the value of a `Location` header, against `from`: an absolute URL, a path from
+// the root (`/next`), a URL without its scheme (`//host/path`), or a path next to the target
+// of `from` (`next`, `../up`, kept as it is: the server reads the dots).
+pub Url? resolve(Arena* arena, Url from, str location) {
+    if (text.contains(location, "://")) {
+        return parse(arena, location);
+    }
+    text.TextBuilder* b = text.builder(arena);
+    if (text.starts_with(location, "//")) {
+        b.push(from.scheme);
+        b.push(":");
+        b.push(location);
+        return parse(arena, b.text());
+    }
+    b.push(from.scheme);
+    b.push("://");
+    b.push(from.authority(arena));
+    if (text.starts_with(location, "/")) {
+        b.push(location);
+    } else {
+        mut usize cut = 0;  // after the last `/` of the path of `from`, before its query
+        mut usize i = 0;
+        while (i < from.target.len && from.target.bytes[i] != 63) {
+            if (from.target.bytes[i] == 47) {
+                cut = i + 1;
+            }
+            i += 1;
+        }
+        b.push(text.slice(from.target, 0, cut > 0 ? cut : 1));
+        if (cut == 0) {
+            b.push("/");
+        }
+        b.push(location);
+    }
+    return parse(arena, b.text());
+}
