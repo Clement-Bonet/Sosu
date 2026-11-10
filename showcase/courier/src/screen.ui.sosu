@@ -1,6 +1,8 @@
 // courier.screen: the title bar with the buttons for every download and the limit of bandwidth,
 // the field of the URL, and one line per download: its name, its progress, its state, and its
-// buttons. The buttons are icons of Font Awesome, their tooltips say what they do.
+// buttons. The buttons are icons of Font Awesome, their tooltips say what they do. The layout
+// follows the width of the window (spec §10.2): on a phone, a download is its name and its
+// buttons; its progress comes from `Md`, its state from `Lg`, and the limit of bandwidth from `Md`.
 import courier.model;
 
 window Courier(keeps model.Model* m) uses io, time, threads {
@@ -13,14 +15,14 @@ window Courier(keeps model.Model* m) uses io, time, threads {
         Button(model.ICON_PAUSE_ALL, on_click: m.pause_all, tooltip: "Pause all")
         Button(model.ICON_RESUME_ALL, on_click: m.resume_all, tooltip: "Resume all")
         Button(model.ICON_CLEAR, on_click: m.clear_done, enabled: m.has_done(), tooltip: "Clear the finished downloads from the list")
-        Text("Limit")
-        NumberField(bind: m.limit, min: 0, max: 1000000, step: 10, width: 110)
-        Dropdown(bind: m.unit, width: 90) {
+        Text("Limit", from: Md)
+        NumberField(bind: m.limit, min: 0, max: 1000000, step: 10, width: 110, from: Md)
+        Dropdown(bind: m.unit, width: 90, from: Md) {
             Option("KB/s", value: Kilo)
             Option("MB/s", value: Mega)
             Option("GB/s", value: Giga)
         }
-        Text("(0: none)")
+        Text("(0: none)", from: Lg)
     }
     Column(gap: 12, padding: 16) {
         Grid(columns: [Fill, 48], gap: 8) {
@@ -32,11 +34,11 @@ window Courier(keeps model.Model* m) uses io, time, threads {
             Button(model.ICON_DESTINATION, on_click: m.choose_folder, tooltip: "Choose the folder of the downloads")
         }
         Scroll(width: Fill, height: Fill) {
-            Grid(columns: [Fill, 200, 300, 44, 44, 44], gap: 10, padding: 8) {
+            Grid(columns: [Fill, 44, 44, 44], md: [Fill, 200, 44, 44, 44], lg: [Fill, 200, 300, 44, 44, 44], gap: 10, padding: 8) {
                 for (i32 i in 0..m.count()) {
                     Text(m.name_at(i))
-                    Progress(value: m.progress_at(i), max: 1000, width: 200)
-                    Text(m.status_at(i))
+                    Progress(value: m.progress_at(i), max: 1000, width: 200, from: Md)
+                    Text(m.status_at(i), from: Lg)
                     Button(m.action_at(i), on_click: m.toggle(i), enabled: m.can_act(i), tooltip: m.action_tip_at(i))
                     Button(model.ICON_FOLDER, on_click: m.show(i), enabled: m.can_show(i), tooltip: "Show in the folder")
                     Button(model.ICON_REMOVE, on_click: m.remove(i), enabled: m.can_remove(i), tooltip: "Remove from the list (a file not whole is deleted)")
