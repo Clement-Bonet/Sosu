@@ -1,0 +1,1103 @@
+// platform.actions: what a player does, rather than which key or button (spec §8.2), as in
+// Unity's Input System. A program declares its actions in maps (`jump`, `move`...), each bound to
+// gamepad buttons, sticks and triggers, keys and the mouse; each frame, `input.update()` reads them,
+// and the program asks `triggered(jump)` or `vector(move)`. Keys are bound by their place on the
+// keyboard: `Scan.W` is Z on a French keyboard, so WASD plays as ZQSD there.
+import std.vec;
+import std.json;
+import std.text;
+import platform.app;
+import platform.gamepad;
+import platform.sdl_c;
+import math.linear;
+
+// Keys by their place (the scancodes of SDL, those of a US keyboard); `Code(n)` for the others.
+pub enum Scan {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    Digit0,
+    Enter,
+    Escape,
+    Backspace,
+    Tab,
+    Space,
+    Right,
+    Left,
+    Down,
+    Up,
+    LeftCtrl,
+    LeftShift,
+    LeftAlt,
+    RightCtrl,
+    RightShift,
+    RightAlt,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Code(ui32 scancode),
+}
+
+// The scancode of SDL of a key.
+pub ui32 scancode(Scan s) {
+    return match (s) {
+        A => 4,
+        B => 5,
+        C => 6,
+        D => 7,
+        E => 8,
+        F => 9,
+        G => 10,
+        H => 11,
+        I => 12,
+        J => 13,
+        K => 14,
+        L => 15,
+        M => 16,
+        N => 17,
+        O => 18,
+        P => 19,
+        Q => 20,
+        R => 21,
+        S => 22,
+        T => 23,
+        U => 24,
+        V => 25,
+        W => 26,
+        X => 27,
+        Y => 28,
+        Z => 29,
+        Digit1 => 30,
+        Digit2 => 31,
+        Digit3 => 32,
+        Digit4 => 33,
+        Digit5 => 34,
+        Digit6 => 35,
+        Digit7 => 36,
+        Digit8 => 37,
+        Digit9 => 38,
+        Digit0 => 39,
+        Enter => 40,
+        Escape => 41,
+        Backspace => 42,
+        Tab => 43,
+        Space => 44,
+        Right => 79,
+        Left => 80,
+        Down => 81,
+        Up => 82,
+        LeftCtrl => 224,
+        LeftShift => 225,
+        LeftAlt => 226,
+        RightCtrl => 228,
+        RightShift => 229,
+        RightAlt => 230,
+        F1 => 58,
+        F2 => 59,
+        F3 => 60,
+        F4 => 61,
+        F5 => 62,
+        F6 => 63,
+        F7 => 64,
+        F8 => 65,
+        F9 => 66,
+        F10 => 67,
+        F11 => 68,
+        F12 => 69,
+        Code(n) => n,
+    };
+}
+
+ui32 SCANCODES = 512;
+
+// What the keyboard of the user prints on the key at `scan`: "Z" for `Scan.W` on a French
+// keyboard. For prompts.
+pub str key_label(Arena* arena, ui32 scan) uses io {
+    unsafe {
+        ui32 key = sdl_c.SDL_GetKeyFromScancode(scan as i32, 0, false);
+        return copy_cstring(arena, sdl_c.SDL_GetKeyName(key), 64);
+    }
+}
+
+// What the actions read: the keyboard, the mouse and the clock. `system()` reads those of SDL; a
+// test gives its own, whose keys it presses.
+pub interface Devices {
+    bool key(ui32 scan) uses io;
+    bool mouse(app.Button b) uses io;
+    // How far the mouse moved since the last call, in pixels.
+    linear.Vec2 mouse_motion() uses io;
+    ui64 now_ms() uses io;
+}
+
+// The keyboard, the mouse and the clock of SDL, as the loop of `platform` keeps them.
+pub class SystemDevices : Devices {
+    void init() { }
+
+    override bool key(ui32 scan) uses io {
+        unsafe {
+            mut i32 count = 0;
+            bool* keys = sdl_c.SDL_GetKeyboardState(&count);
+            if (keys as ui64 == 0 || scan >= count as ui32) {
+                return false;
+            }
+            return *(keys + scan as usize);
+        }
+    }
+
+    override bool mouse(app.Button b) uses io {
+        mut f32 x = 0.0;
+        mut f32 y = 0.0;
+        mut ui32 buttons = 0;
+        unsafe {
+            buttons = sdl_c.SDL_GetMouseState(&x, &y);
+        }
+        ui32 bit = match (b) {
+            Left => 1,
+            Middle => 2,
+            Right => 4,
+            Other => 8,
+        };
+        return buttons & bit != 0;
+    }
+
+    override linear.Vec2 mouse_motion() uses io {
+        mut f32 x = 0.0;
+        mut f32 y = 0.0;
+        unsafe {
+            sdl_c.SDL_GetRelativeMouseState(&x, &y);
+        }
+        return linear.vec2(x, y);
+    }
+
+    override ui64 now_ms() uses io {
+        unsafe {
+            return sdl_c.SDL_GetTicks();
+        }
+    }
+}
+
+// The devices of the system.
+pub Devices* system(Arena* arena) {
+    return arena.new(SystemDevices) as Devices*;
+}
+
+// What an action gives.
+pub enum Kind {
+    Press,  // a button: pressed, triggered, released
+    Axis,  // a number from -1 to 1 (or 0 to 1)
+    Vector,  // a Vec2, each from -1 to 1
+}
+
+// Where a binding reads.
+pub enum Source {
+    PadButton(gamepad.Button button),
+    PadStick(gamepad.Stick stick),
+    PadTrigger(gamepad.Trigger trigger),
+    Key(ui32 scan),
+    Keys(ui32 up, ui32 down, ui32 left, ui32 right),  // four keys: a Vec2
+    AxisKeys(ui32 minus, ui32 plus),  // two keys: an axis
+    Mouse(app.Button button),
+    MouseMotion,  // pixels, scaled by `scale`
+}
+
+// Which hands moved last, for the prompts.
+pub enum Device {
+    KeyboardMouse,
+    Pad,
+}
+
+struct Binding {
+    mut Source source;
+    mut f32 scale = 1.0;
+    mut bool invert_y = false;
+}
+
+class Declared {
+    str name;
+    Kind kind;
+    vec.Vec<Binding>* bindings;
+    mut ui32 hold_ms;
+    mut ui32 tap_ms;
+    mut f32 press_point;
+    mut f32 dead_zone;
+    mut bool changed;  // rebound: written by `save`
+
+    void init(keeps Arena* arena, keeps str name, Kind kind) {
+        self.name = name;
+        self.kind = kind;
+        bindings = vec.new(arena);
+        hold_ms = 0;
+        tap_ms = 0;
+        press_point = 0.5;
+        dead_zone = 0.0;
+        changed = false;
+    }
+}
+
+// A set of actions turned on and off together: `play`, `menu`.
+pub class Map {
+    Arena* arena;
+    str name;
+    vec.Vec<Declared*>* declared;
+
+    void init(keeps Arena* arena, keeps str name) {
+        self.arena = arena;
+        self.name = name;
+        declared = vec.new(arena);
+    }
+
+    Action add(keeps str name, Kind kind) {
+        declared.push(arena.new(Declared, arena, name, kind));
+        return Action{ map: self, index: declared.len() - 1 };
+    }
+
+    pub Action button(keeps str name) {
+        return add(name, Press);
+    }
+
+    pub Action axis(keeps str name) {
+        return add(name, Axis);
+    }
+
+    pub Action vector(keeps str name) {
+        return add(name, Vector);
+    }
+}
+
+pub Map* map(keeps Arena* arena, keeps str name) {
+    return arena.new(Map, arena, name);
+}
+
+// An action of a map, and what binds it: each method adds to it, and gives it back.
+pub struct Action {
+    Map* map;
+    usize index;
+
+    Declared* declared() {
+        return map.declared.items()[index];
+    }
+
+    Action bind(Source source) {
+        declared().bindings.push(Binding{ source: source });
+        return Action{ map: map, index: index };
+    }
+
+    pub Action pad(gamepad.Button b) {
+        return bind(PadButton(b));
+    }
+
+    pub Action stick(gamepad.Stick s) {
+        return bind(PadStick(s));
+    }
+
+    pub Action trigger(gamepad.Trigger t) {
+        return bind(PadTrigger(t));
+    }
+
+    pub Action key(Scan s) {
+        return bind(Key(scancode(s)));
+    }
+
+    // Four keys as a vector, normalized on the diagonals.
+    pub Action keys(Scan up, Scan down, Scan left, Scan right) {
+        return bind(Keys(scancode(up), scancode(down), scancode(left), scancode(right)));
+    }
+
+    // Two keys as an axis: `minus` gives -1, `plus` 1.
+    pub Action axis_keys(Scan minus, Scan plus) {
+        return bind(AxisKeys(scancode(minus), scancode(plus)));
+    }
+
+    pub Action mouse(app.Button b) {
+        return bind(Mouse(b));
+    }
+
+    // The motion of the mouse, times `scale` (pixels to the units of the action), y up.
+    pub Action mouse_motion(f32 scale) {
+        bind(MouseMotion);
+        return last_scaled(scale);
+    }
+
+    Action last_scaled(f32 scale) {
+        vec.Vec<Binding>* bindings = declared().bindings;
+        Binding* b = bindings.at(bindings.len() - 1);
+        b.scale = scale;
+        return Action{ map: map, index: index };
+    }
+
+    // The last binding added, times `factor`.
+    pub Action scale(f32 factor) {
+        if (declared().bindings.len() > 0) {
+            return last_scaled(factor);
+        }
+        return Action{ map: map, index: index };
+    }
+
+    // The y of the last binding added, the other way.
+    pub Action invert_y() {
+        vec.Vec<Binding>* bindings = declared().bindings;
+        if (bindings.len() > 0) {
+            Binding* b = bindings.at(bindings.len() - 1);
+            b.invert_y = !b.invert_y;
+        }
+        return Action{ map: map, index: index };
+    }
+
+    // Values below `zone` read as 0, the others scaled again from 0 (on the strongest binding).
+    pub Action dead_zone(f32 zone) {
+        declared().dead_zone = max(0.0, min(0.9, zone));
+        return Action{ map: map, index: index };
+    }
+
+    // A button triggered once held `ms` milliseconds; `progress` goes from 0 to 1 meanwhile.
+    pub Action hold(ui32 ms) {
+        declared().hold_ms = ms;
+        return Action{ map: map, index: index };
+    }
+
+    // A button triggered when released less than `ms` milliseconds after it was pressed.
+    pub Action tap(ui32 ms) {
+        declared().tap_ms = ms;
+        return Action{ map: map, index: index };
+    }
+
+    // How far a trigger or a stick goes before a button counts as pressed (0.5 by default).
+    pub Action press_point(f32 point) {
+        declared().press_point = max(0.05, min(1.0, point));
+        return Action{ map: map, index: index };
+    }
+
+    pub str name() {
+        return declared().name;
+    }
+
+    // How many bindings it has, for `Input.listen`.
+    pub usize bindings() {
+        return declared().bindings.len();
+    }
+}
+
+// The state of an action for one input.
+class State {
+    Declared* declared;
+    mut linear.Vec2 value;
+    mut bool pressed;
+    mut bool was_pressed;
+    mut bool fired;  // triggered at this update
+    mut bool done;  // a hold already fired since the press
+    mut ui64 since;  // when it was pressed
+
+    void init(keeps Declared* declared) {
+        self.declared = declared;
+        value = linear.vec2(0.0, 0.0);
+        pressed = false;
+        was_pressed = false;
+        fired = false;
+        done = false;
+        since = 0;
+    }
+}
+
+// What a player does: the maps it reads, its devices, the state of its actions.
+pub class Input {
+    Arena* arena;
+    Devices* devices;
+    gamepad.Pads* pads;
+    mut gamepad.Pad*? own_pad;  // a player with a pad of its own reads only that one
+    mut bool any_pad;  // reads every pad (one player)
+    mut bool keyboard;  // reads the keyboard and the mouse
+    vec.Vec<Map*>* maps;
+    vec.Vec<State*>* states;
+    vec.Vec<gamepad.Pad*>* chosen;  // the pads read at this update, its memory kept
+    mut Device last;
+    // rebinding
+    mut Action? listening;
+    mut usize listening_index;
+    mut bool[512] keys_before;
+
+    void init(keeps Arena* arena, keeps Devices* devices, keeps gamepad.Pads* pads) {
+        self.arena = arena;
+        self.devices = devices;
+        self.pads = pads;
+        own_pad = none;
+        any_pad = true;
+        keyboard = true;
+        maps = vec.new(arena);
+        states = vec.new(arena);
+        chosen = vec.new(arena);
+        last = KeyboardMouse;
+        listening = none;
+        listening_index = 0;
+        keys_before = [false; 512];
+    }
+
+    // The actions of `m` read from now on.
+    pub void enable(keeps Map* m) {
+        for (Map* other in maps.items()) {
+            if (other == m) {
+                return;
+            }
+        }
+        maps.push(m);
+        for (Declared* d in m.declared.items()) {
+            states.push(arena.new(State, d));
+        }
+    }
+
+    // The actions of `m` no longer read: they read as released.
+    pub void disable(Map* m) {
+        mut usize i = 0;
+        while (i < maps.len()) {
+            if (maps.items()[i] == m) {
+                maps.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        mut usize j = 0;
+        while (j < states.len()) {
+            State* s = states.items()[j];
+            mut bool kept = false;
+            for (Declared* d in m.declared.items()) {
+                if (d == s.declared) {
+                    kept = true;
+                }
+            }
+            if (kept) {
+                states.remove(j);
+            } else {
+                j += 1;
+            }
+        }
+    }
+
+    State*? state_of(Action a) {
+        Declared* d = a.declared();
+        for (State* s in states.items()) {
+            if (s.declared == d) {
+                return some(s);
+            }
+        }
+        return none;
+    }
+
+    // The pads this input reads.
+    gamepad.Pad*[] read_pads() {
+        if (any_pad) {
+            return pads.connected();
+        }
+        chosen.clear();
+        match (own_pad) {
+            some(p) => {
+                chosen.push(p);
+            },
+            none => { },
+        }
+        return chosen.items();
+    }
+
+    // The value of a binding, and whether a pad gave it.
+    linear.Vec2 read(Binding b, gamepad.Pad*[] read_from, linear.Vec2 motion) uses io {
+        mut linear.Vec2 v = linear.vec2(0.0, 0.0);
+        match (b.source) {
+            PadButton(button) => {
+                for (gamepad.Pad* p in read_from) {
+                    if (p.pressed(button)) {
+                        v = linear.vec2(1.0, 0.0);
+                    }
+                }
+            },
+            PadStick(s) => {
+                for (gamepad.Pad* p in read_from) {
+                    linear.Vec2 pushed = p.stick(s);
+                    if (pushed.length() > v.length()) {
+                        v = pushed;
+                    }
+                }
+            },
+            PadTrigger(t) => {
+                for (gamepad.Pad* p in read_from) {
+                    v = linear.vec2(max(v.x, p.trigger(t)), 0.0);
+                }
+            },
+            Key(scan) => {
+                if (keyboard && devices.key(scan)) {
+                    v = linear.vec2(1.0, 0.0);
+                }
+            },
+            Keys(up, down, left, right) => {
+                if (keyboard) {
+                    f32 x = (devices.key(right) ? 1.0 : 0.0) - (devices.key(left) ? 1.0 : 0.0);
+                    f32 y = (devices.key(up) ? 1.0 : 0.0) - (devices.key(down) ? 1.0 : 0.0);
+                    v = linear.vec2(x, y).normalized();
+                }
+            },
+            AxisKeys(minus, plus) => {
+                if (keyboard) {
+                    v = linear.vec2((devices.key(plus) ? 1.0 : 0.0) - (devices.key(minus) ? 1.0 : 0.0), 0.0);
+                }
+            },
+            Mouse(button) => {
+                if (keyboard && devices.mouse(button)) {
+                    v = linear.vec2(1.0, 0.0);
+                }
+            },
+            MouseMotion => {
+                if (keyboard) {
+                    v = linear.vec2(motion.x, -motion.y);  // y up
+                }
+            },
+        }
+        v = v.scale(b.scale);
+        if (b.invert_y) {
+            v = linear.vec2(v.x, -v.y);
+        }
+        return v;
+    }
+
+    bool from_pad(Source s) {
+        return match (s) {
+            PadButton(b) => true,
+            PadStick(st) => true,
+            PadTrigger(t) => true,
+            _ => false,
+        };
+    }
+
+    // Reads every action of the maps enabled: at the start of each frame, after `pads.update()`.
+    pub void update() uses io {
+        ui64 now = devices.now_ms();
+        linear.Vec2 motion = keyboard ? devices.mouse_motion() : linear.vec2(0.0, 0.0);
+        gamepad.Pad*[] read_from = read_pads();
+        if (listen_step(read_from)) {
+            return;
+        }
+        for (State* s in states.items()) {
+            Declared* d = s.declared;
+            // the strongest binding wins
+            mut linear.Vec2 best = linear.vec2(0.0, 0.0);
+            mut bool best_from_pad = false;
+            for (Binding b in d.bindings.items()) {
+                linear.Vec2 v = read(b, read_from, motion);
+                if (v.length() > best.length()) {
+                    best = v;
+                    best_from_pad = from_pad(b.source);
+                }
+            }
+            f32 length = best.length();
+            if (d.dead_zone > 0.0 && length > 0.0) {
+                best = length <= d.dead_zone ? linear.vec2(0.0, 0.0)
+                        : best.scale(min(1.0, (length - d.dead_zone) / (1.0 - d.dead_zone)) / length);
+            }
+            if (best.length() >= 0.5) {
+                last = best_from_pad ? Pad : KeyboardMouse;
+            }
+            s.value = best;
+            s.was_pressed = s.pressed;
+            s.pressed = best.length() >= d.press_point;
+            s.fired = false;
+            if (s.pressed && !s.was_pressed) {
+                s.since = now;
+                s.done = false;
+            }
+            if (d.hold_ms > 0) {
+                if (s.pressed && !s.done && now - s.since >= d.hold_ms as ui64) {
+                    s.fired = true;
+                    s.done = true;
+                }
+            } else if (d.tap_ms > 0) {
+                s.fired = !s.pressed && s.was_pressed && now - s.since < d.tap_ms as ui64;
+            } else {
+                s.fired = s.pressed && !s.was_pressed;
+            }
+        }
+    }
+
+    // Pressed now (a button past its press point).
+    pub bool pressed(Action a) {
+        return match (state_of(a)) {
+            some(s) => s.pressed,
+            none => false,
+        };
+    }
+
+    // Triggered at this update: pressed (or held long enough, or tapped, as it was declared).
+    pub bool triggered(Action a) {
+        return match (state_of(a)) {
+            some(s) => s.fired,
+            none => false,
+        };
+    }
+
+    // Released at this update.
+    pub bool released(Action a) {
+        return match (state_of(a)) {
+            some(s) => !s.pressed && s.was_pressed,
+            none => false,
+        };
+    }
+
+    // An axis: x of the value.
+    pub f32 axis(Action a) {
+        return match (state_of(a)) {
+            some(s) => s.value.x,
+            none => 0.0,
+        };
+    }
+
+    pub linear.Vec2 vector(Action a) {
+        return match (state_of(a)) {
+            some(s) => s.value,
+            none => linear.vec2(0.0, 0.0),
+        };
+    }
+
+    // How far a hold is, from 0 to 1, for a gauge.
+    pub f32 progress(Action a) uses io {
+        return match (state_of(a)) {
+            some(s) => {
+                if (!s.pressed || s.declared.hold_ms == 0) {
+                    return s.done ? 1.0 : 0.0;
+                }
+                f32 held = (devices.now_ms() - s.since) as f32 / s.declared.hold_ms as f32;
+                return min(1.0, held);
+            },
+            none => 0.0,
+        };
+    }
+
+    // Whether the keyboard and the mouse, or a pad, moved last: the prompts follow the hands.
+    pub Device last_device() {
+        return last;
+    }
+
+    // ---- Rebinding ----
+
+    // Waits for the next button, key or mouse button pressed, and binds it in place of the
+    // binding `index` of `a`. Escape or Start cancels. Meanwhile, no action is read.
+    pub void listen(keeps Action a, usize index) uses io {
+        listening = some(a);
+        listening_index = index;
+        for (ui32 scan in 0..SCANCODES) {
+            keys_before[scan as usize] = devices.key(scan);
+        }
+    }
+
+    pub bool is_listening() {
+        return match (listening) {
+            some(a) => true,
+            none => false,
+        };
+    }
+
+    // One update while listening: true if it was listening.
+    bool listen_step(gamepad.Pad*[] read_from) uses io {
+        Action a = match (listening) {
+            some(l) => l,
+            none => {
+                return false;
+            },
+        };
+        mut Source? found = none;
+        mut bool cancel = false;
+        for (gamepad.Pad* p in read_from) {
+            for (i32 code in 0..15) {
+                gamepad.Button b = gamepad.button_of(code);
+                if (p.went_down(b)) {
+                    match (b) {
+                        Start => {
+                            cancel = true;
+                        },
+                        _ => {
+                            found = some(PadButton(b));
+                        },
+                    }
+                }
+            }
+        }
+        if (keyboard) {
+            for (ui32 scan in 0..SCANCODES) {
+                bool now = devices.key(scan);
+                if (now && !keys_before[scan as usize]) {
+                    if (scan == 41) {  // Escape
+                        cancel = true;
+                    } else {
+                        found = some(Key(scan));
+                    }
+                }
+                keys_before[scan as usize] = now;
+            }
+            if (devices.mouse(app.Button.Left)) {
+                found = some(Mouse(app.Button.Left));
+            } else if (devices.mouse(app.Button.Right)) {
+                found = some(Mouse(app.Button.Right));
+            }
+        }
+        if (cancel) {
+            listening = none;
+            return true;
+        }
+        match (found) {
+            some(source) => {
+                Declared* d = a.declared();
+                if (listening_index < d.bindings.len()) {
+                    Binding* b = d.bindings.at(listening_index);
+                    b.source = source;
+                } else {
+                    d.bindings.push(Binding{ source: source });
+                }
+                d.changed = true;
+                listening = none;
+            },
+            none => { },
+        }
+        return true;
+    }
+
+    // The bindings changed by `listen`, as JSON, for a file of `app.data_folder`. The
+    // declarations stay the defaults: a binding never changed follows a new version.
+    pub str save(Arena* out) {
+        text.TextBuilder* t = text.builder(out);
+        t.push("{");
+        mut bool first = true;
+        for (Map* m in maps.items()) {
+            for (Declared* d in m.declared.items()) {
+                if (d.changed) {
+                    t.push(first ? "\"" : ", \"");
+                    first = false;
+                    t.push(m.name);
+                    t.push("/");
+                    t.push(d.name);
+                    t.push("\": [");
+                    for (usize i in 0..d.bindings.len()) {
+                        t.push(i == 0 ? "\"" : ", \"");
+                        t.push(source_text(out, d.bindings.items()[i].source));
+                        t.push("\"");
+                    }
+                    t.push("]");
+                }
+            }
+        }
+        t.push("}");
+        return t.text();
+    }
+
+    // The bindings of `save` read back; false when `saved` is not what it wrote (then nothing
+    // changes).
+    pub bool load(str saved) {
+        json.Value v = match (json.parse(arena, saved)) {
+            ok(parsed) => parsed,
+            err(e) => {
+                return false;
+            },
+        };
+        // read everything first, so that a damaged file changes nothing
+        vec.Vec<Declared*>* targets = vec.new(arena);
+        vec.Vec<vec.Vec<Binding>*>* lists = vec.new(arena);
+        for (Map* m in maps.items()) {
+            for (Declared* d in m.declared.items()) {
+                text.TextBuilder* key = text.builder(arena);
+                key.push(m.name);
+                key.push("/");
+                key.push(d.name);
+                match (json.get(v, key.text())) {
+                    some(list) => {
+                        vec.Vec<Binding>* read_back = vec.new(arena);
+                        for (usize i in 0..json.len(list)) {
+                            str s = match (json.at(list, i)) {
+                                some(item) => match (json.as_str(item)) {
+                                    some(t) => t,
+                                    none => "",
+                                },
+                                none => "",
+                            };
+                            match (source_of(arena, s)) {
+                                some(source) => {
+                                    read_back.push(Binding{ source: source });
+                                },
+                                none => {
+                                    return false;
+                                },
+                            }
+                        }
+                        targets.push(d);
+                        lists.push(read_back);
+                    },
+                    none => { },
+                }
+            }
+        }
+        for (usize i in 0..targets.len()) {
+            Declared* d = targets.items()[i];
+            d.bindings.clear();
+            for (Binding b in lists.items()[i].items()) {
+                d.bindings.push(b);
+            }
+            d.changed = true;
+        }
+        return true;
+    }
+}
+
+// An input reading every pad, the keyboard and the mouse: a game of one player.
+pub Input* input(keeps Arena* arena, keeps Devices* devices, keeps gamepad.Pads* pads) {
+    return arena.new(Input, arena, devices, pads);
+}
+
+// `n` players: the first reads the keyboard and the mouse; each pad goes to the first player
+// that has none, as it connects (`pair`, each frame after `pads.update()`).
+pub Input*[] players(keeps Arena* arena, keeps Devices* devices, keeps gamepad.Pads* pads, usize n) {
+    vec.Vec<Input*>* all = vec.new(arena);
+    for (usize i in 0..n) {
+        Input* one = arena.new(Input, arena, devices, pads);
+        one.any_pad = false;
+        one.keyboard = i == 0;
+        all.push(one);
+    }
+    return all.items();
+}
+
+// The pads that came given to the players without one, those that left taken back.
+pub void pair(Input*[] all, gamepad.Pads* pads) {
+    for (Input* one in all) {
+        match (one.own_pad) {
+            some(p) => {
+                if (!p.is_connected()) {
+                    one.own_pad = none;
+                }
+            },
+            none => { },
+        }
+    }
+    for (gamepad.Pad* p in pads.connected()) {
+        mut bool taken = false;
+        for (Input* one in all) {
+            match (one.own_pad) {
+                some(own) => {
+                    if (own == p) {
+                        taken = true;
+                    }
+                },
+                none => { },
+            }
+        }
+        if (!taken) {
+            for (Input* one in all) {
+                bool free = match (one.own_pad) {
+                    some(own) => false,
+                    none => true,
+                };
+                if (free && !taken) {
+                    one.own_pad = some(p);
+                    taken = true;
+                }
+            }
+        }
+    }
+}
+
+// The pad of a player, if it has one.
+pub gamepad.Pad*? pad_of(Input* one) {
+    return one.own_pad;
+}
+
+str source_text(Arena* arena, Source s) {
+    text.TextBuilder* t = text.builder(arena);
+    match (s) {
+        PadButton(b) => {
+            t.push("pad:");
+            t.push_i64(gamepad.button_code_of(b) as i64);
+        },
+        PadStick(st) => {
+            t.push(match (st) {
+                LeftStick => "stick:left",
+                RightStick => "stick:right",
+            });
+        },
+        PadTrigger(tr) => {
+            t.push(match (tr) {
+                LeftTrigger => "trigger:left",
+                RightTrigger => "trigger:right",
+            });
+        },
+        Key(scan) => {
+            t.push("key:");
+            t.push_u64(scan as ui64);
+        },
+        Keys(up, down, left, right) => {
+            t.push("keys:");
+            t.push_u64(up as ui64);
+            t.push(",");
+            t.push_u64(down as ui64);
+            t.push(",");
+            t.push_u64(left as ui64);
+            t.push(",");
+            t.push_u64(right as ui64);
+        },
+        AxisKeys(minus, plus) => {
+            t.push("axiskeys:");
+            t.push_u64(minus as ui64);
+            t.push(",");
+            t.push_u64(plus as ui64);
+        },
+        Mouse(b) => {
+            t.push(match (b) {
+                Left => "mouse:left",
+                Middle => "mouse:middle",
+                Right => "mouse:right",
+                Other => "mouse:other",
+            });
+        },
+        MouseMotion => {
+            t.push("mousemotion");
+        },
+    }
+    return t.text();
+}
+
+// The numbers after `prefix`, separated by commas; none if `s` is not that.
+ui32[]? numbers_after(Arena* arena, str s, str prefix, usize count) {
+    str rest = match (text.strip_prefix(s, prefix)) {
+        some(r) => r,
+        none => {
+            return none;
+        },
+    };
+    str[] parts = text.split(arena, rest, ",");
+    if (parts.len != count) {
+        return none;
+    }
+    mut ui32[] out = arena.alloc_slice(ui32, count);
+    for (usize i in 0..count) {
+        match (text.parse_u64(parts[i])) {
+            ok(n) => {
+                if (n >= SCANCODES as ui64) {
+                    return none;
+                }
+                out[i] = n as ui32;
+            },
+            err(e) => {
+                return none;
+            },
+        }
+    }
+    return some(out);
+}
+
+Source? source_of(Arena* arena, str s) {
+    if (s == "stick:left") {
+        return some(PadStick(gamepad.Stick.LeftStick));
+    }
+    if (s == "stick:right") {
+        return some(PadStick(gamepad.Stick.RightStick));
+    }
+    if (s == "trigger:left") {
+        return some(PadTrigger(gamepad.Trigger.LeftTrigger));
+    }
+    if (s == "trigger:right") {
+        return some(PadTrigger(gamepad.Trigger.RightTrigger));
+    }
+    if (s == "mouse:left") {
+        return some(Mouse(app.Button.Left));
+    }
+    if (s == "mouse:middle") {
+        return some(Mouse(app.Button.Middle));
+    }
+    if (s == "mouse:right") {
+        return some(Mouse(app.Button.Right));
+    }
+    if (s == "mouse:other") {
+        return some(Mouse(app.Button.Other));
+    }
+    if (s == "mousemotion") {
+        return some(MouseMotion);
+    }
+    match (numbers_after(arena, s, "pad:", 1)) {
+        some(n) => {
+            return n[0] < 15 ? some(PadButton(gamepad.button_of(n[0] as i32))) : none;
+        },
+        none => { },
+    }
+    match (numbers_after(arena, s, "key:", 1)) {
+        some(n) => {
+            return some(Key(n[0]));
+        },
+        none => { },
+    }
+    match (numbers_after(arena, s, "keys:", 4)) {
+        some(n) => {
+            return some(Keys(n[0], n[1], n[2], n[3]));
+        },
+        none => { },
+    }
+    match (numbers_after(arena, s, "axiskeys:", 2)) {
+        some(n) => {
+            return some(AxisKeys(n[0], n[1]));
+        },
+        none => { },
+    }
+    return none;
+}
+
+// A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
+str copy_cstring(Arena* arena, ui8* bytes_of, usize limit) {
+    mut usize length = 0;
+    mut ui8[] bytes = arena.alloc_slice(ui8, 0);
+    unsafe {
+        if (bytes_of as ui64 == 0) {
+            return "";
+        }
+        while (length < limit && *(bytes_of + length) != 0) {
+            length += 1;
+        }
+        bytes = arena.alloc_slice(ui8, length);
+        for (usize i in 0..length) {
+            bytes[i] = *(bytes_of + i);
+        }
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
+}

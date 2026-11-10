@@ -989,7 +989,7 @@ try hud.draw(frame, &surface);                              // after the 3D pass
 
 #### Gamepads and input actions
 
-Status: design, after 1.0. It is useful with or without 3D: `app.run` and `app.run_window` both take it.
+Status: available (0.7.0): `platform.gamepad`, `platform.actions`, the pads as the keys of `ui` (`pads.navigation`), `examples/pads`, `tests/programs/controls` and `tests/programs/inputs`. Not yet: `with(modifier, key)`, `double_tap`, and the motion of the mouse in a test. It is useful with or without 3D: `app.run` and `app.run_window` both take it.
 
 The model is that of Unity's Input System, not that of Unreal's Enhanced Input.
 
@@ -1010,17 +1010,18 @@ Reading, rather than callbacks, has two reasons:
 ##### `platform.gamepad`
 
 ```sosu
-mut gamepad.Pads pads = gamepad.open(arena);   // in the state of the program
+gamepad.Pads* pads = gamepad.open(arena);       // in the state of the program
 ...
 pads.update();                                   // at the start of each frame
 for (gamepad.Pad* p in pads.connected()) {
-    linear.Vec2 move = p.stick(gamepad.Stick.Left);     // -1..1, a radial dead zone applied
+    linear.Vec2 move = p.stick(gamepad.Stick.LeftStick);   // -1..1, a radial dead zone applied
     if (p.went_down(gamepad.Button.South)) { jump(); }
-    f32 brake = p.trigger(gamepad.Trigger.Left); // 0..1
+    f32 brake = p.trigger(gamepad.Trigger.LeftTrigger);    // 0..1
 }
 ```
 
-- `gamepad.open(arena)` starts the gamepad subsystem of SDL (`SDL_INIT_GAMEPAD`), which `platform` does not start for programs that have no gamepad. It gives a `Pads`, which the program keeps in its state, as a `Mixer` of `audio`.
+- `gamepad.open(arena)` starts the gamepad subsystem of SDL (`SDL_INIT_GAMEPAD`), which `platform` does not start for programs that have no gamepad. It gives a `Pads*`, which the program keeps in its state, as a `Mixer` of `audio`; `pads.close()` closes the pads and quits the subsystem.
+- The variants of `Stick` are `LeftStick` and `RightStick`, and those of `Trigger` `LeftTrigger` and `RightTrigger`: `Button` already has `Left` and `Right` (the D-pad) and `LeftStick` and `RightStick` (the sticks pressed). `platform` depends on `math` for `linear.Vec2`.
 - `Pads` has no global state: Sosu has none (§5).
   - `update()` keeps the previous state and reads the current one from SDL. SDL keeps the current state up to date from the events that the loop of `platform` already pumps.
   - Called once per frame, `update()` is what gives `went_down` and `went_up` their meaning: a change between two frames.
@@ -1034,29 +1035,33 @@ for (gamepad.Pad* p in pads.connected()) {
   - `rumble(low, high, ms)`;
   - `battery()`.
   - The dead zone of a stick is radial, 0.15 by default (`set_dead_zone`), and the values are scaled again beyond it, so that a small push is not lost.
-- `pads.went_connected()` and `pads.went_disconnected()` give the pads that came or left since the last `update()`. A pad that leaves reads as released, never as frozen.
+- `pads.connected()` gives the pads in the order they came, and `pads.first()` the first, for a game of one player. `pads.went_connected()` and `pads.went_disconnected()` give the pads that came or left at the last `update()`. A pad that leaves reads as released, never as frozen: its held buttons went up at that update, and `p.is_connected()` is false.
+- `gamepad.plug_virtual(arena, name)` plugs in a pad that is not there (SDL's virtual joysticks), for tests: `press(button, down)`, `push(stick, x, y)`, `pull(trigger, amount)`, `detach()`. `Pads` reads it as a real pad, so a program can test its controls without hardware.
 - Phones and televisions: SDL reads the gamepads of Android (and Android TV) and those of iOS (Game Controller). Gyroscopes and touchpads (`SDL_GAMEPAD_SENSOR`) come later.
 - Effects: reading SDL is `uses io`, as the rest of `platform`. A `Pads` belongs to the thread of the window.
+- `tests/programs/controls` plugs in a virtual pad and checks, without hardware: its connection, a button across three updates (`went_down` once, then held, then `went_up`), a push within the dead zone read as nothing, a stick to the right and one up (y up), halfway beyond the dead zone read as 0.5, a trigger pulled and let go, and the pad unplugged with a button held, which went up. It counts the pads relative to those already connected, so a pad plugged into the machine changes nothing.
 
 ##### `platform.actions`
 
 ```sosu
-mut actions.Map play = actions.map(arena, "play");
+actions.Map* play = actions.map(arena, "play");
 actions.Action move = play.vector("move")
-    .stick(gamepad.Stick.Left)
-    .keys(actions.Keys{ up: actions.Scan.W, down: actions.Scan.S, left: actions.Scan.A, right: actions.Scan.D });  // a composite
+    .stick(gamepad.Stick.LeftStick)
+    .keys(actions.Scan.W, actions.Scan.S, actions.Scan.A, actions.Scan.D);   // up, down, left, right
 actions.Action jump = play.button("jump").pad(gamepad.Button.South).key(actions.Scan.Space);
-actions.Action fire = play.button("fire").trigger(gamepad.Trigger.Right).mouse(app.Button.Left);
+actions.Action fire = play.button("fire").trigger(gamepad.Trigger.RightTrigger).mouse(app.Button.Left);
 actions.Action charge = play.button("charge").pad(gamepad.Button.West).hold(400);  // held 400 ms
 
-mut actions.Input input = actions.input(arena, pads);
+actions.Input* input = actions.input(arena, actions.system(arena), pads);
 input.enable(play);
 ...
-input.update();                                  // instead of pads.update()
+pads.update();                                   // at the start of each frame, then
+input.update();
 linear.Vec2 m = input.vector(move);
 if (input.triggered(jump)) { ... }
 ```
 
+- What is written differs a little from the first design. `keys(up, down, left, right)` takes four keys, not a struct. An `Input` reads its keyboard, mouse and clock through `actions.Devices`, an interface: `actions.system(arena)` reads those of SDL, and a test gives its own, whose keys it presses and whose clock it sets (`tests/programs/inputs`). `pads.update()` stays the program's, before `input.update()`, since several inputs share the pads.
 - Three kinds of actions: `button` (`pressed`, `triggered`, `released`), `axis` (an `f32`) and `vector` (a `Vec2`).
   - A binding of another kind is converted. A trigger counts as a button beyond 0.5 (`press_point`). A key in an axis gives 1.
   - When several bindings are active, the strongest wins, as in Unity: the stick or the keys, whichever is pushed further.
@@ -1084,7 +1089,9 @@ if (input.triggered(jump)) { ... }
   - the composites, `hold`, `tap`, maps turned on and off, and the strongest binding;
   - the pairing of two players;
   - a rebinding saved and read back.
-- `examples/pads`: the pads connected, their buttons and sticks drawn with `render`, the right labels for each family, rumble on a button. It is tried by hand, with an Xbox, a PlayStation and a Switch controller if they are at hand.
+- `tests/programs/inputs`, with a keyboard, a mouse and a clock of the test and virtual pads: a button across three updates; W and D as a diagonal; a stick that wins over the keys, and `last_device`; an axis of two keys and a mouse button; a hold of 400 ms at 300 and 450 ms, firing once; a tap released in time and too late; a map turned off and another on; two players, each with a virtual pad (after those of the machine, if any), and South on the second only; South as Enter for `ui`; a key bound by `listen`, saved, read back by another input, and a damaged file refused without changing anything.
+- `pads.navigation(arena)` gives, after `pads.update()`, the pads as the keys that move through the widgets of `ui` (§10.6): the D-pad and the left stick as the arrows, repeated while held (after 400 ms, every 80 ms), South as Enter, East as Escape. The program gives these events to its interface with those of the keyboard: `ui` itself does not change.
+- `examples/pads` shows what is pressed, live: for each pad, its buttons by their place with the labels it prints, its sticks, its triggers, its battery, and a rumble on South; the buttons of the mouse; the keys of the keyboard held, by the letter the keyboard of the user prints; and two actions, `move` (a dot) and `jump` (a counter), with the hands that moved last. Every key is shown, Escape too: only the button of the window closes it. It is built by `make test`, and tried by hand, with an Xbox, a PlayStation and a Switch controller if they are at hand.
 
 ##### Open questions (with the answer proposed)
 

@@ -46,6 +46,10 @@ test: all
 	./build/sosuc check packages/audio
 	./build/sosuc check examples/sound
 	./build/sosuc check examples/dialogs
+	@# 3D (spec 8.2): built to the end, through the C compiler, without opening its window
+	./build/sosuc check packages/gpu
+	./build/sosuc build examples/cube
+	./build/sosuc build examples/pads
 	@# its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)
 	SDL_AUDIO_DRIVER=dummy ./build/sosuc test showcase/beatbox
 	./build/sosuc test showcase/disktiles

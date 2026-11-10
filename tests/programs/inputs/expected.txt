@@ -1,0 +1,22 @@
+jump pressed: true, triggered: true
+jump held: true, triggered again: false
+jump released: true
+W and D: true
+last device: keyboard
+the stick to the left: true
+last device: pad
+turn: -1.0, fire: true
+held 300 ms: false, progress 0.75
+held 450 ms: true
+held 500 ms, again: false
+tapped in 100 ms: true
+released after 300 ms: false
+menu: jump false, back true
+two players paired: true
+player 1 jumps: false, player 2 jumps: true
+South as Enter: true
+listening after J: false
+J jumps: true
+saved: {"play/jump": ["key:13", "key:44"]}
+read back: true
+a damaged file: false

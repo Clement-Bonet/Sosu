@@ -57,6 +57,8 @@ static const Case cases[] = {
     { "run", "hashes", "expected.txt", 0, NULL },
     { "run", "compression", "expected.txt", 0, NULL },
     { "run", "geometry", "expected.txt", 0, NULL },
+    { "run", "controls", "expected.txt", 0, NULL }, /* platform.gamepad, with a virtual pad (spec §8.2) */
+    { "run", "inputs", "expected.txt", 0, NULL },   /* platform.actions, with devices of the test */
     { "run --release", "overflow", "expected_release.txt", 0, NULL },
     { "run --release", "unsigned_floats", "expected_release.txt", 0, NULL },
     { "test", "testing", "expected.txt", 1, NULL },

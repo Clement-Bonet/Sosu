@@ -1,0 +1,237 @@
+// platform.actions (spec §8.2) with devices of the test: actions pressed, triggered and released,
+// the strongest binding, four keys as a vector, a hold and a tap on a clock of the test, maps
+// turned off, two players with a pad each, a binding changed by `listen`, saved and read back,
+// and the pads as the keys of `ui`.
+import std.io;
+import platform.app;
+import platform.gamepad;
+import platform.actions;
+import math.linear;
+
+// A keyboard, a mouse and a clock that the test sets.
+class Fake : actions.Devices {
+    mut bool[512] keys;
+    mut bool left;
+    mut ui64 now;
+
+    void init() {
+        keys = [false; 512];
+        left = false;
+        now = 0;
+    }
+
+    void set(actions.Scan s, bool down) {
+        keys[actions.scancode(s) as usize] = down;
+    }
+
+    override bool key(ui32 scan) uses io {
+        return scan < 512 && keys[scan as usize];
+    }
+
+    override bool mouse(app.Button b) uses io {
+        return match (b) {
+            Left => left,
+            _ => false,
+        };
+    }
+
+    override linear.Vec2 mouse_motion() uses io {
+        return linear.vec2(0.0, 0.0);
+    }
+
+    override ui64 now_ms() uses io {
+        return now;
+    }
+}
+
+bool near(f32 a, f32 b) {
+    return abs(a - b) < 0.02;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Fake* fake = arena.new(Fake);
+    actions.Devices* devices = fake as actions.Devices*;
+    gamepad.Pads* pads = gamepad.open(&arena);
+    defer pads.close();
+    pads.update();
+    usize real = pads.connected().len;  // the pads of the machine, if any: they come first
+
+    actions.Map* play = actions.map(&arena, "play");
+    actions.Action jump = play.button("jump").pad(gamepad.Button.South).key(actions.Scan.Space);
+    actions.Action move = play.vector("move").stick(gamepad.Stick.LeftStick).keys(
+        actions.Scan.W,
+        actions.Scan.S,
+        actions.Scan.A,
+        actions.Scan.D
+    );
+    actions.Action charge = play.button("charge").key(actions.Scan.E).hold(400);
+    actions.Action dash = play.button("dash").key(actions.Scan.Q).tap(200);
+    actions.Action turn = play.axis("turn").axis_keys(actions.Scan.Left, actions.Scan.Right);
+    actions.Action fire = play.button("fire").mouse(app.Button.Left);
+    actions.Map* menu = actions.map(&arena, "menu");
+    actions.Action back = menu.button("back").key(actions.Scan.Escape);
+
+    actions.Input* input = actions.input(&arena, devices, pads);
+    input.enable(play);
+
+    // a button across three updates
+    fake.set(actions.Scan.Space, true);
+    pads.update();
+    input.update();
+    io.print("jump pressed: {}, triggered: {}", input.pressed(jump), input.triggered(jump));
+    input.update();
+    io.print("jump held: {}, triggered again: {}", input.pressed(jump), input.triggered(jump));
+    fake.set(actions.Scan.Space, false);
+    input.update();
+    io.print("jump released: {}", input.released(jump));
+
+    // four keys as a vector, normalized on the diagonal
+    fake.set(actions.Scan.W, true);
+    fake.set(actions.Scan.D, true);
+    input.update();
+    linear.Vec2 diagonal = input.vector(move);
+    io.print("W and D: {}", near(diagonal.x, 0.707) && near(diagonal.y, 0.707));
+    io.print("last device: {}", input.last_device() == actions.Device.KeyboardMouse ? "keyboard" : "pad");
+
+    // the strongest binding wins: a pad pushed further than the keys
+    gamepad.Virtual* first = match (gamepad.plug_virtual(&arena, "Sosu pad 1")) {
+        some(v) => v,
+        none => {
+            io.print("no virtual pad");
+            return 1;
+        },
+    };
+    fake.set(actions.Scan.W, false);
+    fake.set(actions.Scan.D, false);
+    first.push(gamepad.Stick.LeftStick, -1.0, 0.0);
+    pads.update();
+    input.update();
+    linear.Vec2 pushed = input.vector(move);
+    io.print("the stick to the left: {}", near(pushed.x, -1.0) && near(pushed.y, 0.0));
+    io.print("last device: {}", input.last_device() == actions.Device.Pad ? "pad" : "keyboard");
+    first.push(gamepad.Stick.LeftStick, 0.0, 0.0);
+    pads.update();
+
+    // an axis of two keys, a mouse button
+    fake.set(actions.Scan.Left, true);
+    fake.left = true;
+    input.update();
+    io.print("turn: {}, fire: {}", input.axis(turn), input.triggered(fire));
+    fake.set(actions.Scan.Left, false);
+    fake.left = false;
+
+    // a hold of 400 ms, on the clock of the test
+    fake.now = 1000;
+    fake.set(actions.Scan.E, true);
+    input.update();
+    fake.now = 1300;
+    input.update();
+    io.print("held 300 ms: {}, progress {}", input.triggered(charge), input.progress(charge));
+    fake.now = 1450;
+    input.update();
+    io.print("held 450 ms: {}", input.triggered(charge));
+    fake.now = 1500;
+    input.update();
+    io.print("held 500 ms, again: {}", input.triggered(charge));
+    fake.set(actions.Scan.E, false);
+    input.update();
+
+    // a tap of 200 ms: released in time, then too late
+    fake.set(actions.Scan.Q, true);
+    input.update();
+    fake.now = 1600;
+    fake.set(actions.Scan.Q, false);
+    input.update();
+    io.print("tapped in 100 ms: {}", input.triggered(dash));
+    fake.set(actions.Scan.Q, true);
+    input.update();
+    fake.now = 1900;
+    fake.set(actions.Scan.Q, false);
+    input.update();
+    io.print("released after 300 ms: {}", input.triggered(dash));
+
+    // maps: play off, menu on
+    input.disable(play);
+    input.enable(menu);
+    fake.set(actions.Scan.Space, true);
+    fake.set(actions.Scan.Escape, true);
+    input.update();
+    io.print("menu: jump {}, back {}", input.pressed(jump), input.triggered(back));
+    fake.set(actions.Scan.Space, false);
+    fake.set(actions.Scan.Escape, false);
+    input.disable(menu);
+    input.enable(play);
+    input.update();
+
+    // two players: a pad each, the first player with the keyboard
+    gamepad.Virtual* second = match (gamepad.plug_virtual(&arena, "Sosu pad 2")) {
+        some(v) => v,
+        none => {
+            io.print("no second virtual pad");
+            return 1;
+        },
+    };
+    pads.update();
+    // a player per pad: those of the machine first, then the two virtual ones
+    actions.Input*[] all = actions.players(&arena, devices, pads, real + 2);
+    actions.pair(all, pads);
+    actions.Input* one = all[real];
+    actions.Input* two = all[real + 1];
+    one.enable(play);
+    two.enable(play);
+    bool paired = match (actions.pad_of(one)) {
+        some(p) => match (actions.pad_of(two)) {
+            some(q) => p.id() == first.id() && q.id() == second.id(),
+            none => false,
+        },
+        none => false,
+    };
+    io.print("two players paired: {}", paired);
+    // South on the pad of the second one only
+    second.press(gamepad.Button.South, true);
+    pads.update();
+    one.update();
+    two.update();
+    io.print("player 1 jumps: {}, player 2 jumps: {}", one.triggered(jump), two.triggered(jump));
+    second.press(gamepad.Button.South, false);
+    pads.update();
+
+    // the pads as the keys of ui: South is Enter
+    first.press(gamepad.Button.South, true);
+    pads.update();
+    app.Event[] keys = pads.navigation(&arena);
+    mut bool enter = false;
+    for (app.Event e in keys) {
+        match (e) {
+            Key(code, down, mods) => {
+                enter = enter || code == 13 && down;
+            },
+            _ => { },
+        }
+    }
+    io.print("South as Enter: {}", enter);
+    first.press(gamepad.Button.South, false);
+    pads.update();
+    pads.navigation(&arena);
+
+    // rebinding: jump on J instead of the pad, saved and read back by another input
+    input.listen(jump, 0);
+    input.update();
+    fake.set(actions.Scan.J, true);
+    input.update();
+    io.print("listening after J: {}", input.is_listening());
+    input.update();
+    io.print("J jumps: {}", input.pressed(jump));
+    fake.set(actions.Scan.J, false);
+    str saved = input.save(&arena);
+    io.print("saved: {}", saved);
+    actions.Input* other = actions.input(&arena, devices, pads);
+    other.enable(play);
+    io.print("read back: {}", other.load(saved));
+    io.print("a damaged file: {}", other.load("{\"play/jump\": [\"key:9999\"]}"));
+    first.detach();
+    second.detach();
+    return 0;
+}
