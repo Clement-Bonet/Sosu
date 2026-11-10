@@ -419,7 +419,8 @@ pub model.Model!model.ModelError load(Arena* arena, str path) uses io {
             }
         }
     }
-    return parse(arena, source, materials.items());
+    model.Model m = try parse(arena, source, materials.items());
+    return ok(model.with_textures(arena, m, folder));
 }
 
 test "a quad of two materials" {

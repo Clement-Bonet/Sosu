@@ -283,6 +283,20 @@ static void test_gpu(const char *sosuc) {
     char *printed = read_text("build/gpu_released.out");
     CHECK(printed && !strstr(printed, "not reached"), "run gpu_released: the program went on after the dead handle");
     free(printed);
+
+    /* render3d: a lit scene with its shadow, read back; its shaders carried in C */
+    snprintf(command, sizeof command,
+             "%s shaders packages/render3d --c native/render3d_shaders.c --check > build/gpu_shaders.out 2>&1", sosuc);
+    CHECK(run(command) == 0, "packages/render3d/native/render3d_shaders.c is out of date (see build/gpu_shaders.out)");
+    snprintf(command, sizeof command, "%s run tests/programs/render3d > build/render3d.out 2> build/render3d.err", sosuc);
+    status = run(command);
+    CHECK(status == 0, "run render3d: exit code %d (see build/render3d.out and build/render3d.err)", status);
+    actual = read_text("build/render3d.out");
+    expected = read_text("tests/programs/render3d/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run render3d: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
 }
 
 static void test_bindgen(const char *sosuc) {

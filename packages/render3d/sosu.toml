@@ -1,0 +1,16 @@
+# A renderer of 3D scenes on `gpu` (spec §8.2): models of `model` sent to the GPU, a camera,
+# light of metal and roughness from a sun that casts shadows and point lights, and what the camera
+# cannot see left out. Its shaders are in the package: `sosuc shaders packages/render3d --c
+# native/render3d_shaders.c` (a name of its own: the objects of every package go to one folder).
+[package]
+name = "render3d"
+version = "0.1.0"
+
+[link]
+c = ["native/render3d_shaders.c"]
+
+[dependencies]
+gpu = { path = "../gpu" }
+model = { path = "../model" }
+math = { path = "../math" }
+image = { path = "../image" }

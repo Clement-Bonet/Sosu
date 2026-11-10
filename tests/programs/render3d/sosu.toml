@@ -1,0 +1,12 @@
+# The package render3d (spec §8.2), without a window: a lit scene drawn into a target and read
+# back. Exits with 77 where no GPU driver is found (skipped).
+[package]
+name = "render3dtest"
+version = "0.1.0"
+
+[dependencies]
+gpu = { path = "../../../packages/gpu" }
+render3d = { path = "../../../packages/render3d" }
+model = { path = "../../../packages/model" }
+math = { path = "../../../packages/math" }
+image = { path = "../../../packages/image" }

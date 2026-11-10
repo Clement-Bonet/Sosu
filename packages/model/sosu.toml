@@ -1,9 +1,14 @@
 # 3D models read from files (spec §8.2): meshes, materials, a tree of nodes, from Wavefront OBJ
-# and glTF 2.0 (.gltf and .glb), in Sosu. Every read is checked: a damaged or hostile file gives
-# an error, never a read outside of its bytes nor a size it cannot hold.
+# and glTF 2.0 (.gltf and .glb) in Sosu, and FBX through ufbx (C). Every read is checked: a
+# damaged or hostile file gives an error, never a read outside of its bytes nor a size it cannot
+# hold.
 [package]
 name = "model"
 version = "0.1.0"
+
+[link]
+# FBX: ufbx 0.23.1 (MIT or public domain, THIRD_PARTY_NOTICES.md), and the interface of model.fbx
+c = ["native/vendor/ufbx.c", "native/fbx.c"]
 
 [dependencies]
 math = { path = "../math" }      # vectors, matrices, bounds

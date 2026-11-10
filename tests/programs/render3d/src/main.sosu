@@ -1,0 +1,92 @@
+// render3d without a window (spec §8.2): a cube on a ground, lit by a sun from the upper left,
+// drawn into a target of 128 by 128 pixels and read back. The ground away from the cube is lit,
+// the ground where the cube casts its shadow is darker, the top of the cube is brighter than its
+// front (which the sun does not light), and a cube behind the camera is left out.
+import std.io;
+import math.linear;
+import image.image;
+import gpu.gpu;
+import render3d.render3d;
+
+ui32 SIZE = 128;
+
+// The pixel where the point `p` of the world falls, for `camera`.
+i32[2] screen(render3d.Camera camera, linear.Vec3 p) {
+    linear.Vec4 clip = camera.view_projection(1.0).mul_vec(linear.vec4(p.x, p.y, p.z, 1.0));
+    f32 x = (clip.x / clip.w + 1.0) / 2.0 * SIZE as f32;
+    f32 y = (1.0 - clip.y / clip.w) / 2.0 * SIZE as f32;
+    return [x as i32, y as i32];
+}
+
+// How bright the pixel where `p` falls is, from 0 to 255.
+i32 brightness(image.Image img, render3d.Camera camera, linear.Vec3 p) {
+    i32[2] at = screen(camera, p);
+    return image.luma(img.at(at[0], at[1])) as i32;
+}
+
+void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    render3d.Renderer* r = try render3d.create(arena, device, render3d.Options{ shadow_size: 1024 });
+    r.sun = render3d.Sun{ direction: linear.vec3(1.0, -1.0, 0.0), shadow_extent: 8.0 };
+    render3d.Uploaded* box = try r.upload(arena, render3d.cube(arena, [0.8, 0.3, 0.2, 1.0]));
+    render3d.Uploaded* floor = try r.upload(arena, render3d.ground(arena, 20.0, [0.7, 0.7, 0.7, 1.0]));
+    render3d.Camera camera = render3d.Camera{
+        position: linear.vec3(0.0, 6.0, 8.0),
+        target: linear.vec3(0.0, 0.0, 0.0)
+    };
+    mut render3d.Item[3] items = [
+        render3d.item(floor, linear.identity4()),
+        render3d.item(box, linear.translation(linear.vec3(0.0, 1.0, 0.0))),
+        render3d.item(box, linear.translation(linear.vec3(0.0, 1.0, 40.0))),  // behind the camera
+    ];
+    gpu.Texture target = try device.target(SIZE, SIZE);
+    gpu.Frame frame = try device.commands();
+    r.draw_into(frame, target, camera, items[0..3]);
+    try frame.submit_and_wait();
+    image.Image img = try device.read_texture(arena, target);
+
+    // the ground away from the cube, and where the cube casts its shadow (toward +x)
+    i32 lit = brightness(img, camera, linear.vec3(-4.0, 0.0, 3.0));
+    i32 shaded = brightness(img, camera, linear.vec3(2.0, 0.0, 0.0));
+    io.print("lit ground: {}", lit > 60 ? "ok" : "too dark");
+    io.print("shadow: {}", shaded * 10 < lit * 6 ? "ok" : "missing");
+    if (shaded * 10 >= lit * 6) {
+        io.print("shadow: the shaded ground is {}, the lit one {}", shaded, lit);
+    }
+    // the top of the cube, lit; its front, that the sun does not reach
+    i32 top = brightness(img, camera, linear.vec3(0.0, 2.0, 0.0));
+    i32 front = brightness(img, camera, linear.vec3(0.0, 1.0, 1.0));
+    io.print("top brighter than the front: {}", top > front + 30 ? "ok" : "no");
+    if (top <= front + 30) {
+        io.print("top {}, front {}", top, front);
+    }
+    render3d.Stats s = r.stats();
+    io.print("drawn: {}, left out: {}", s.drawn, s.culled);
+
+    device.release_texture(target);
+    r.release(box);
+    r.release(floor);
+    r.close();
+    return ok();
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ debug: true })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("gpu: no device ({}: {})", gpu.message(e), gpu.last_error(&arena));
+            return 77;
+        },
+    };
+    mut i32 status = 0;
+    match (run(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("render3d: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    device.close();
+    return status;
+}

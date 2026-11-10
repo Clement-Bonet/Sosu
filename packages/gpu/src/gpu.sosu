@@ -215,6 +215,9 @@ pub struct PipelineDesc {
     pub bool depth = true;  // tested against, and written to, the depth of the frame
     pub Cull cull = Back;
     pub Blend blend = Opaque;
+    // Writes a color: false for a pipeline that draws the depth alone (`frame.depth_pass`: the
+    // map of the shadows of a light).
+    pub bool color = true;
 }
 
 pub struct SamplerDesc {
@@ -222,6 +225,9 @@ pub struct SamplerDesc {
     pub Wrap wrap = Repeat;
     pub bool mipmaps = true;
     pub f32 anisotropy = 1.0;  // more than 1: sharper textures seen at a grazing angle
+    // Compares the depth it reads with the one the shader gives (`SampleCmp` in HLSL), for a map
+    // of shadows of `device.depth_target`: 1 when it is nearer or as near, 0 else.
+    pub bool compare = false;
 }
 
 // How a frame starts: the color it is cleared to, and whether it has a depth (for pipelines with
@@ -283,7 +289,8 @@ pub class Device {
         unsafe {
             color_format = windowed ? sdl_c.SDL_GetGPUSwapchainTextureFormat(device, window)
                     : sdl_c.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
-            ui32 usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+            // the depth of frames and of the maps of shadows: one format, that can be sampled too
+            ui32 usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
             i32 kind = sdl_c.SDL_GPU_TEXTURETYPE_2D;
             if (sdl_c.SDL_GPUTextureSupportsFormat(device, sdl_c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT, kind, usage)) {
                 depth_format = sdl_c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
@@ -587,6 +594,8 @@ pub class Device {
             info.address_mode_w = wrap;
             info.max_lod = desc.mipmaps ? 1000.0 : 0.0;
             info.enable_anisotropy = desc.anisotropy > 1.0;
+            info.enable_compare = desc.compare;
+            info.compare_op = sdl_c.SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
             info.max_anisotropy = max(desc.anisotropy, 1.0);
             sdl_c.SDL_GPUSampler* created = sdl_c.SDL_CreateGPUSampler(device, info);
             if (created as ui64 == 0) {
@@ -712,7 +721,7 @@ pub class Device {
                 },
             }
             info.target_info.color_target_descriptions = target;
-            info.target_info.num_color_targets = 1;
+            info.target_info.num_color_targets = desc.color ? 1 : 0;
             info.target_info.has_depth_stencil_target = desc.depth;
             info.target_info.depth_stencil_format = depth_format;
 
@@ -792,6 +801,34 @@ pub class Device {
             info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
             info.format = color_format;
             info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = width;
+            info.height = height;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            info.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
+            sdl_c.SDL_GPUTexture* texture = sdl_c.SDL_CreateGPUTexture(device, info);
+            if (texture as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(texture as ui8*, KIND_TEXTURE);
+            return ok(Texture{ index: h.index, generation: h.generation, width: width, height: height });
+        }
+    }
+
+    // A texture of depth to draw into (`frame.depth_pass`) and to sample afterwards with a
+    // sampler of `compare`: the map of the shadows of a light.
+    pub Texture!GpuError depth_target(ui32 width, ui32 height) uses io {
+        assert(!closed);
+        if (width == 0 || height == 0) {
+            return err(Unsupported);
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTextureCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTextureCreateInfo);
+            info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
+            info.format = depth_format;
+            info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
             info.width = width;
             info.height = height;
             info.layer_count_or_depth = 1;
@@ -1208,6 +1245,29 @@ pub struct Frame {
     // A pass that draws into `t`, a texture of `device.target`, cleared first.
     pub Pass pass_into(Texture t, Clear clear) uses io {
         return open_pass(device.texture_of_handle(t), t.width, t.height, clear);
+    }
+
+    // A pass that draws the depth alone into `t`, a texture of `device.depth_target`, cleared to
+    // the farthest: the map of the shadows of a light, for pipelines without `color`.
+    pub Pass depth_pass(Texture t) uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUDepthStencilTargetInfo* depth = scratch.alloc(sdl_c.SDL_GPUDepthStencilTargetInfo);
+            depth.texture = device.texture_of_handle(t);
+            depth.clear_depth = 1.0;
+            depth.load_op = sdl_c.SDL_GPU_LOADOP_CLEAR;
+            depth.store_op = sdl_c.SDL_GPU_STOREOP_STORE;
+            depth.stencil_load_op = sdl_c.SDL_GPU_LOADOP_DONT_CARE;
+            depth.stencil_store_op = sdl_c.SDL_GPU_STOREOP_DONT_CARE;
+            sdl_c.SDL_GPURenderPass* pass = sdl_c.SDL_BeginGPURenderPass(
+                commands,
+                0 as sdl_c.SDL_GPUColorTargetInfo*,
+                0,
+                depth
+            );
+            return Pass{ device: device, commands: commands, pass: pass };
+        }
     }
 
     Pass open_pass(sdl_c.SDL_GPUTexture* into, ui32 w, ui32 h, Clear clear) uses io {

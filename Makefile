@@ -52,6 +52,8 @@ test: all
 	./build/sosuc check packages/gpu
 	./build/sosuc build examples/cube
 	./build/sosuc build examples/pads
+	./build/sosuc check packages/render3d
+	./build/sosuc build examples/viewer
 	@# its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)
 	SDL_AUDIO_DRIVER=dummy ./build/sosuc test showcase/beatbox
 	./build/sosuc test showcase/disktiles

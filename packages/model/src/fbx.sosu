@@ -1,0 +1,319 @@
+// model.fbx: FBX files (spec §8.2), binary and ASCII, read by ufbx (native/vendor/ufbx.c, MIT
+// or public domain) through native/fbx.c. The scene is turned to the axes of math.linear
+// (right-handed, y up) and to meters, whatever the file used; its meshes are cut into triangles,
+// one `model.Mesh` per material, with their normals (computed when the file gives none) and
+// texture coordinates; materials have their base color, metal and roughness (from the older
+// models of shading too), and their texture when the file holds it, else its path
+// (`texture_path`, relative to the file). The memory a file may ask for is limited (1 GB).
+// Animations and skins come with `anim`.
+import std.io;
+import std.vec;
+import std.fs;
+import math.linear;
+import image.image;
+import image.png;
+import image.jpeg;
+import model.model;
+
+extern "C" {
+    ui8* sosu_fbx_load(ui8* data, usize size, ui8* error, usize error_size) uses io;
+    void sosu_fbx_free(ui8* handle) uses io;
+    usize sosu_fbx_parts(ui8* handle) uses io;
+    usize sosu_fbx_part_mesh(ui8* handle, usize part) uses io;
+    usize sosu_fbx_part_triangles(ui8* handle, usize part) uses io;
+    i64 sosu_fbx_part_material(ui8* handle, usize part) uses io;
+    usize sosu_fbx_part_corners(ui8* handle, usize part, f32* out, usize capacity) uses io;
+    usize sosu_fbx_materials(ui8* handle) uses io;
+    usize sosu_fbx_material_name(ui8* handle, usize m, ui8* out, usize size) uses io;
+    void sosu_fbx_material_factors(ui8* handle, usize m, f32* color, f32* metallic, f32* roughness) uses io;
+    i32 sosu_fbx_material_texture(ui8* handle, usize m, ui8** bytes, usize* size, ui8* name, usize name_size) uses io;
+    usize sosu_fbx_nodes(ui8* handle) uses io;
+    usize sosu_fbx_root(ui8* handle) uses io;
+    usize sosu_fbx_node_name(ui8* handle, usize n, ui8* out, usize size) uses io;
+    void sosu_fbx_node_matrix(ui8* handle, usize n, f32* out) uses io;
+    i64 sosu_fbx_node_mesh(ui8* handle, usize n) uses io;
+    usize sosu_fbx_node_children(ui8* handle, usize n) uses io;
+    usize sosu_fbx_node_child(ui8* handle, usize n, usize k) uses io;
+}
+
+usize NAME_SIZE = 256;
+
+// The text of `length` bytes written into `buffer` by native/fbx.c, copied into `arena`.
+str text_of(Arena* arena, ui8[] buffer, usize length) {
+    mut ui8[] bytes = arena.alloc_slice(ui8, min(length, buffer.len));
+    for (usize i in 0..bytes.len) {
+        bytes[i] = buffer[i];
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(s) => s,
+        err(e) => "",
+    };
+}
+
+// Reads an FBX file from its bytes. The textures it only names are left to the program
+// (`Material.texture_path`); those it holds are decoded (PNG, JPEG).
+pub model.Model!model.ModelError decode(Arena* arena, ui8[] data) uses io {
+    if (data.len == 0) {
+        return err(model.ModelError.Damaged("FBX: an empty file"));
+    }
+    mut ui8[] buffer = arena.alloc_slice(ui8, NAME_SIZE);
+    mut ui8* handle = "".to_cstr(arena);
+    unsafe {
+        handle = sosu_fbx_load(&data[0], data.len, &buffer[0], buffer.len);
+        if (handle as ui64 == 0) {
+            mut usize length = 0;
+            while (length < buffer.len && buffer[length] != 0) {
+                length += 1;
+            }
+            str why = text_of(arena, buffer, length);
+            return err(model.ModelError.Damaged(why.len == 0 ? "FBX: a file that ufbx cannot read" : why));
+        }
+    }
+    defer free_scene(handle);
+
+    // materials
+    vec.Vec<model.Material>* materials = vec.new(arena);
+    vec.Vec<image.Image>* images = vec.new(arena);
+    mut usize material_count = 0;
+    unsafe {
+        material_count = sosu_fbx_materials(handle);
+    }
+    for (usize m in 0..material_count) {
+        mut usize length = 0;
+        mut f32[4] color = [1.0, 1.0, 1.0, 1.0];
+        mut f32 metallic = 0.0;
+        mut f32 roughness = 1.0;
+        mut ui8* bytes = "".to_cstr(arena);
+        mut usize size = 0;
+        mut i32 texture = 0;
+        mut ui8[] path = arena.alloc_slice(ui8, NAME_SIZE);
+        unsafe {
+            length = sosu_fbx_material_name(handle, m, &buffer[0], buffer.len);
+            sosu_fbx_material_factors(handle, m, &color[0], &metallic, &roughness);
+            texture = sosu_fbx_material_texture(handle, m, &bytes, &size, &path[0], path.len);
+        }
+        mut model.Material made = model.default_material(text_of(arena, buffer, length));
+        made.base_color = color;
+        made.metallic = max(0.0, min(1.0, metallic));
+        made.roughness = max(0.0, min(1.0, roughness));
+        mut usize path_length = 0;
+        while (path_length < path.len && path[path_length] != 0) {
+            path_length += 1;
+        }
+        made.texture_path = text_of(arena, path, path_length);
+        if (texture == 1 && size > 0) {
+            mut ui8[] content = arena.alloc_slice(ui8, size);
+            unsafe {
+                for (usize i in 0..size) {
+                    content[i] = *(bytes + i);
+                }
+            }
+            image.Image? decoded = png.is_png(content) ? match (png.decode(arena, content)) {
+                ok(img) => some(img),
+                err(e) => none,
+            } : jpeg.is_jpeg(content) ? match (jpeg.decode(arena, content)) {
+                ok(img) => some(img),
+                err(e) => none,
+            } : none;
+            match (decoded) {
+                some(img) => {
+                    images.push(img);
+                    made.texture = some(images.len() - 1);
+                },
+                none => { },  // a format other than PNG and JPEG: its path stays
+            }
+        }
+        materials.push(made);
+    }
+
+    // meshes: one per part, and the parts of each mesh of ufbx, for the nodes
+    mut usize parts = 0;
+    unsafe {
+        parts = sosu_fbx_parts(handle);
+    }
+    vec.Vec<model.Mesh>* meshes = vec.new(arena);
+    vec.Vec<usize>* part_of_mesh = vec.new(arena);  // the ufbx mesh of each of ours
+    mut usize total = 0;
+    for (usize p in 0..parts) {
+        mut usize triangles = 0;
+        mut i64 material = -1;
+        mut usize source = 0;
+        unsafe {
+            triangles = sosu_fbx_part_triangles(handle, p);
+            material = sosu_fbx_part_material(handle, p);
+            source = sosu_fbx_part_mesh(handle, p);
+        }
+        if (triangles == 0) {
+            continue;
+        }
+        if (triangles > model.MAX_INDICES / 3 || total + triangles * 3 > model.MAX_INDICES) {
+            return err(model.ModelError.TooLarge);
+        }
+        total += triangles * 3;
+        usize corners = triangles * 3;
+        mut f32[] floats = arena.alloc_slice(f32, corners * 8);
+        mut usize written = 0;
+        unsafe {
+            written = sosu_fbx_part_corners(handle, p, &floats[0], floats.len);
+        }
+        mut model.Vertex[] vertices = arena.alloc_slice(model.Vertex, written);
+        mut ui32[] indices = arena.alloc_slice(ui32, written);
+        for (usize i in 0..written) {
+            usize at = i * 8;
+            vertices[i] = model.Vertex{
+                position: [floats[at], floats[at + 1], floats[at + 2]],
+                normal: [floats[at + 3], floats[at + 4], floats[at + 5]],
+                uv: [floats[at + 6], floats[at + 7]]
+            };
+            indices[i] = i as ui32;
+        }
+        part_of_mesh.push(source);
+        meshes.push(model.Mesh{
+            name: "",
+            vertices: vertices,
+            indices: indices,
+            material: material >= 0 && material as usize < materials.len() ? some(material as usize) : none,
+            bounds: model.bounds_of(vertices)
+        });
+    }
+
+    // nodes, their meshes and children
+    mut usize node_count = 0;
+    mut usize root = 0;
+    unsafe {
+        node_count = sosu_fbx_nodes(handle);
+        root = sosu_fbx_root(handle);
+    }
+    if (node_count > model.MAX_NODES) {
+        return err(model.ModelError.TooLarge);
+    }
+    vec.Vec<model.Node>* nodes = vec.new(arena);
+    for (usize n in 0..node_count) {
+        mut linear.Mat4 local = linear.identity4();
+        mut i64 mesh = -1;
+        mut usize length = 0;
+        mut usize child_count = 0;
+        unsafe {
+            sosu_fbx_node_matrix(handle, n, &local.m[0]);
+            mesh = sosu_fbx_node_mesh(handle, n);
+            length = sosu_fbx_node_name(handle, n, &buffer[0], buffer.len);
+            child_count = sosu_fbx_node_children(handle, n);
+        }
+        vec.Vec<usize>* own = vec.new(arena);
+        if (mesh >= 0) {
+            for (usize k in 0..part_of_mesh.len()) {
+                if (part_of_mesh.items()[k] == mesh as usize) {
+                    own.push(k);
+                }
+            }
+        }
+        vec.Vec<usize>* children = vec.new(arena);
+        for (usize k in 0..child_count) {
+            mut usize child = 0;
+            unsafe {
+                child = sosu_fbx_node_child(handle, n, k);
+            }
+            if (child < node_count && child != n) {
+                children.push(child);
+            }
+        }
+        nodes.push(model.Node{
+            name: text_of(arena, buffer, length),
+            local: local,
+            meshes: own.items(),
+            children: children.items()
+        });
+    }
+    vec.Vec<usize>* roots = vec.new(arena);
+    if (root < node_count) {
+        roots.push(root);
+    }
+    return ok(model.Model{
+        meshes: meshes.items(),
+        materials: materials.items(),
+        images: images.items(),
+        nodes: nodes.items(),
+        roots: roots.items()
+    });
+}
+
+void free_scene(ui8* handle) uses io {
+    unsafe {
+        sosu_fbx_free(handle);
+    }
+}
+
+// Reads the FBX file at `path`, and the textures it names beside it (`model.with_textures`).
+pub model.Model!model.ModelError load(Arena* arena, str path) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(b) => b,
+        err(e) => {
+            return err(model.ModelError.Unreadable);
+        },
+    };
+    model.Model m = try decode(arena, data);
+    return ok(model.with_textures(arena, m, model.folder_of(path)));
+}
+
+// A quad in an ASCII FBX file of centimeters, with a red material, its node moved 3 m away.
+str quad_file() {
+    return "; FBX 7.4.0 project file\nFBXHeaderExtension:  {\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}\nGlobalSettings:  {\n\tVersion: 1000\n\tProperties70:  {\n\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",1\n\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",2\n\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1\n\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n\t}\n}\nObjects:  {\n\tGeometry: 1000, \"Geometry::quad\", \"Mesh\" {\n\t\tVertices: *12 {\n\t\t\ta: 0,0,0,100,0,0,100,100,0,0,100,0\n\t\t}\n\t\tPolygonVertexIndex: *4 {\n\t\t\ta: 0,1,2,-4\n\t\t}\n\t\tLayerElementMaterial: 0 {\n\t\t\tVersion: 101\n\t\t\tName: \"\"\n\t\t\tMappingInformationType: \"AllSame\"\n\t\t\tReferenceInformationType: \"IndexToDirect\"\n\t\t\tMaterials: *1 {\n\t\t\t\ta: 0\n\t\t\t}\n\t\t}\n\t\tLayer: 0 {\n\t\t\tVersion: 100\n\t\t\tLayerElement:  {\n\t\t\t\tType: \"LayerElementMaterial\"\n\t\t\t\tTypedIndex: 0\n\t\t\t}\n\t\t}\n\t}\n\tModel: 2000, \"Model::quad\", \"Mesh\" {\n\t\tVersion: 232\n\t\tProperties70:  {\n\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,300\n\t\t}\n\t}\n\tMaterial: 3000, \"Material::red\", \"\" {\n\t\tVersion: 102\n\t\tShadingModel: \"phong\"\n\t\tProperties70:  {\n\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",1,0,0\n\t\t}\n\t}\n}\nConnections:  {\n\tC: \"OO\",2000,0\n\tC: \"OO\",1000,2000\n\tC: \"OO\",3000,2000\n}\n";
+}
+
+test "a quad of an ASCII FBX, in centimeters" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    model.Model m = match (decode(&arena, quad_file().bytes)) {
+        ok(read) => read,
+        err(e) => {
+            io.print("{}", model.message(e));
+            assert(false);
+            return;
+        },
+    };
+    // two triangles, their corners in meters
+    assert(m.meshes.len == 1 && m.meshes[0].indices.len == 6);
+    assert(abs(m.meshes[0].bounds.max.x - 1.0) < 0.001 && abs(m.meshes[0].bounds.max.y - 1.0) < 0.001);
+    assert(m.meshes[0].vertices[0].normal[2] > 0.99);  // computed: the file gives none
+    // the red material
+    assert(m.materials.len == 1 && m.materials[0].name == "red");
+    assert(m.materials[0].base_color[0] > 0.99 && m.materials[0].base_color[1] < 0.01);
+    assert(match (m.meshes[0].material) {
+        some(i) => i == 0,
+        none => false,
+    });
+    // its node, 3 m away, under the root
+    assert(m.roots.len == 1);
+    linear.Mat4[] world = model.world_matrices(&arena, m, linear.identity4());
+    mut bool placed = false;
+    for (usize n in 0..m.nodes.len) {
+        if (m.nodes[n].meshes.len == 1) {
+            placed = world[n].transform_point(linear.vec3(0.0, 0.0, 0.0)).near(linear.vec3(0.0, 0.0, 3.0), 0.001);
+        }
+    }
+    assert(placed);
+}
+
+test "damaged FBX files" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    assert(match (decode(&arena, "not a 3D file".bytes)) {
+        ok(m) => false,
+        err(e) => true,
+    });
+    // the header of a binary FBX, then nothing that follows it
+    assert(match (decode(&arena, "Kaydara FBX Binary  \u{0}\u{1a}\u{0}\u{e8}\u{1c}\u{0}\u{0}".bytes)) {
+        ok(m) => false,
+        err(e) => true,
+    });
+    // the quad cut in its middle
+    str whole = quad_file();
+    assert(match (decode(&arena, whole.bytes[0..whole.len / 2])) {
+        ok(m) => false,
+        err(e) => true,
+    });
+    assert(match (decode(&arena, "".bytes)) {
+        ok(m) => false,
+        err(e) => true,
+    });
+}

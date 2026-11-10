@@ -1,0 +1,4 @@
+lit ground: ok
+shadow: ok
+top brighter than the front: ok
+drawn: 2, left out: 1

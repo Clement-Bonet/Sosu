@@ -54,6 +54,8 @@ build\sosuc.exe check examples\window || exit /b 1
 build\sosuc.exe check packages\gpu || exit /b 1
 build\sosuc.exe build examples\cube || exit /b 1
 build\sosuc.exe build examples\pads || exit /b 1
+build\sosuc.exe check packages\render3d || exit /b 1
+build\sosuc.exe build examples\viewer || exit /b 1
 build\sosuc.exe check tests\window || exit /b 1
 build\sosuc.exe test packages\math || exit /b 1
 build\sosuc.exe test packages\model || exit /b 1

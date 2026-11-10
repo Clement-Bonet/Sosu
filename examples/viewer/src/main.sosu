@@ -1,0 +1,388 @@
+// A viewer of 3D models (spec §8.2): `sosuc run examples/viewer -- model.glb` shows a glTF (.gltf,
+// .glb), FBX or OBJ file with render3d, lit by a sun that casts shadows on a ground; without a file, a
+// few cubes. Dragging with the mouse turns the camera around the model, the wheel brings it nearer,
+// S turns the shadows on and off. What it draws, and what it leaves out, is written over the scene
+// by gpu.overlay.
+// A second argument, `-- model.fbx wood.png`, gives a texture (PNG or JPEG) to the materials that
+// have none; the textures an OBJ or an FBX names are read beside it.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/viewer`.
+import std.io;
+import std.os;
+import std.text;
+import std.math;
+import std.vec;
+import platform.app;
+import math.linear;
+import math.geometry;
+import image.image;
+import image.png;
+import image.jpeg;
+import model.model;
+import model.gltf;
+import model.obj;
+import model.fbx;
+import gpu.gpu;
+import gpu.overlay;
+import render.canvas;
+import render3d.render3d;
+
+// The model of the command line, or none.
+model.Model? load(Arena* arena) uses io {
+    str[] args = os.args(arena);
+    if (args.len == 0) {
+        return none;
+    }
+    str path = args[0];
+    str lower = text.to_lower(arena, path);
+    model.Model!model.ModelError read = text.ends_with(lower, ".obj") ? obj.load(arena, path)
+            : text.ends_with(lower, ".fbx") ? fbx.load(arena, path)
+            : gltf.load(arena, path);
+    model.Model m = match (read) {
+        ok(loaded) => loaded,
+        err(e) => {
+            io.print("viewer: {}: {}", path, model.message(e));
+            return none;
+        },
+    };
+    // the textures the file names, read beside it (by `load`)
+    mut usize textured = 0;
+    for (model.Material mat in m.materials) {
+        match (mat.texture) {
+            some(t) => {
+                textured += 1;
+            },
+            none => {
+                if (mat.texture_path.len > 0) {
+                    io.print("viewer: the texture {} of {} is not beside the model", mat.texture_path, mat.name);
+                }
+            },
+        }
+    }
+    io.print("viewer: {} meshes, {} materials, {} with a texture", m.meshes.len, m.materials.len, textured);
+    if (args.len < 2) {
+        return some(m);
+    }
+    // a texture given on the command line, for the materials that have none
+    image.Image picture = match (read_picture(arena, args[1])) {
+        some(img) => img,
+        none => {
+            io.print("viewer: {} is not an image of PNG or JPEG", args[1]);
+            return some(m);
+        },
+    };
+    vec.Vec<image.Image>* images = vec.new(arena);
+    for (image.Image img in m.images) {
+        images.push(img);
+    }
+    images.push(picture);
+    vec.Vec<model.Material>* materials = vec.new(arena);
+    for (model.Material mat in m.materials) {
+        mut model.Material made = mat;
+        if (match (mat.texture) {
+            some(t) => false,
+            none => true,
+        }) {
+            made.texture = some(images.len() - 1);
+        }
+        materials.push(made);
+    }
+    if (m.materials.len == 0) {
+        // a model without materials: one, textured, for every mesh
+        mut model.Material made = model.default_material("texture");
+        made.texture = some(images.len() - 1);
+        materials.push(made);
+    }
+    vec.Vec<model.Mesh>* meshes = vec.new(arena);
+    for (model.Mesh mesh in m.meshes) {
+        mut model.Mesh given = mesh;
+        if (match (mesh.material) {
+            some(i) => false,
+            none => true,
+        }) {
+            given.material = some(0);
+        }
+        meshes.push(given);
+    }
+    io.print("viewer: {} applied to the materials without a texture", args[1]);
+    return some(model.Model{
+        meshes: meshes.items(),
+        materials: materials.items(),
+        images: images.items(),
+        nodes: m.nodes,
+        roots: m.roots
+    });
+}
+
+// The image of the file at `path`, PNG or JPEG.
+image.Image? read_picture(Arena* arena, str path) uses io {
+    ui8[] bytes = match (io.read_bytes(arena, path)) {
+        ok(b) => b,
+        err(e) => {
+            return none;
+        },
+    };
+    if (png.is_png(bytes)) {
+        return match (png.decode(arena, bytes)) {
+            ok(img) => some(img),
+            err(e) => none,
+        };
+    }
+    if (jpeg.is_jpeg(bytes)) {
+        return match (jpeg.decode(arena, bytes)) {
+            ok(img) => some(img),
+            err(e) => none,
+        };
+    }
+    return none;
+}
+
+class Viewer : app.WindowHandler {
+    mut Arena arena;
+    mut gpu.Device*? device;
+    mut render3d.Renderer*? renderer;
+    mut overlay.Overlay*? hud;
+    mut canvas.Canvas surface;
+    mut Arena pixels;  // of the canvas of the overlay
+    mut render3d.Item[8] items;
+    mut usize item_count;
+    mut geometry.Aabb bounds;  // of the model, to place the camera
+    mut f32 yaw;
+    mut f32 pitch;
+    mut f32 distance;
+    mut bool dragging;
+    mut f32 last_x;
+    mut f32 last_y;
+    mut str error;
+
+    void init() {
+        arena = Arena.new(256 * KB);
+        pixels = Arena.new(1 * KB);
+        surface = canvas.create(&pixels, 0, 0);
+        device = none;
+        renderer = none;
+        hud = none;
+        item_count = 0;
+        bounds = geometry.aabb(linear.vec3(-1.0, 0.0, -1.0), linear.vec3(1.0, 2.0, 1.0));
+        yaw = 0.6;
+        pitch = 0.45;
+        distance = 8.0;
+        dragging = false;
+        last_x = 0.0;
+        last_y = 0.0;
+        error = "";
+    }
+
+    override void on_start(app.Window window) uses io {
+        gpu.Device* d = match (gpu.open(&arena, window, gpu.Options{ })) {
+            ok(opened) => opened,
+            err(e) => {
+                io.print("viewer: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                app.request_quit();
+                return;
+            },
+        };
+        device = some(d);
+        match (build(d)) {
+            ok() => { },
+            err(e) => {
+                io.print("viewer: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                app.request_quit();
+            },
+        }
+    }
+
+    void!gpu.GpuError build(keeps gpu.Device* d) keeps self uses io {
+        render3d.Renderer* r = try render3d.create(&arena, d, render3d.Options{ });
+        renderer = some(r);
+        hud = some(try overlay.create(&arena, d));
+        mut render3d.PointLight[1] lights = [
+            render3d.PointLight{ position: linear.vec3(-3.0, 3.0, 3.0), color: linear.vec3(0.4, 0.6, 1.0), intensity: 25.0, range: 12.0 },
+        ];
+        r.set_lights(lights[0..1]);
+        render3d.Uploaded* floor = try r.upload(&arena, render3d.ground(&arena, 40.0, [0.55, 0.57, 0.6, 1.0]));
+        items[0] = render3d.item(floor, linear.identity4());
+        item_count = 1;
+        match (load(&arena)) {
+            some(m) => {
+                // the model on the ground, about 4 units high
+                linear.Mat4[] worlds = model.world_matrices(&arena, m, linear.identity4());
+                mut bool first = true;
+                for (usize n in 0..m.nodes.len) {
+                    for (usize k in m.nodes[n].meshes) {
+                        geometry.Aabb b = m.meshes[k].bounds.transformed(worlds[n]);
+                        bounds = first ? b : bounds.union(b);
+                        first = false;
+                    }
+                }
+                linear.Vec3 size = bounds.size();
+                f32 largest = max(size.x, max(size.y, size.z));
+                f32 scale = largest > 0.0 ? 4.0 / largest : 1.0;
+                linear.Vec3 c = bounds.center();
+                linear.Mat4 place = linear.scaling(linear.vec3(scale, scale, scale)).mul(linear.translation(linear.vec3(
+                    -c.x,
+                    -bounds.min.y,
+                    -c.z
+                )));
+                bounds = bounds.transformed(place);
+                items[1] = render3d.item(try r.upload(&arena, m), place);
+                item_count = 2;
+            },
+            none => {
+                render3d.Uploaded* cube = try r.upload(&arena, render3d.cube(&arena, [0.85, 0.35, 0.2, 1.0]));
+                render3d.Uploaded* blue = try r.upload(&arena, render3d.cube(&arena, [0.2, 0.4, 0.85, 1.0]));
+                items[1] = render3d.item(cube, linear.translation(linear.vec3(0.0, 1.0, 0.0)));
+                items[2] = render3d.item(
+                    blue,
+                    linear.translation(linear.vec3(3.0, 0.5, -1.0)).mul(linear.scaling(linear.vec3(0.5, 0.5, 0.5)))
+                );
+                items[3] = render3d.item(
+                    blue,
+                    linear.translation(linear.vec3(
+                        -2.5,
+                        0.75,
+                        1.5
+                    )).mul(linear.rotation_y(0.7)).mul(linear.scaling(linear.vec3(0.75, 0.75, 0.75)))
+                );
+                item_count = 4;
+            },
+        }
+        return ok();
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Click(x, y, b) => {
+                dragging = true;
+                last_x = x;
+                last_y = y;
+            },
+            Release(x, y, b) => {
+                dragging = false;
+            },
+            MouseMove(x, y) => {
+                if (dragging) {
+                    yaw -= (x - last_x) * 0.008;
+                    pitch = max(0.05, min(1.5, pitch + (y - last_y) * 0.008));
+                    last_x = x;
+                    last_y = y;
+                }
+            },
+            Wheel(x, y) => {
+                distance = max(2.0, min(60.0, distance * (y > 0.0 ? 0.9 : 1.1)));
+            },
+            Key(code, down, mods) => {
+                if (down && code == 115) {  // s
+                    match (renderer) {
+                        some(r) => {
+                            r.sun.shadows = !r.sun.shadows;
+                        },
+                        none => { },
+                    }
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(app.Window window) uses io {
+        gpu.Device* d = match (device) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        render3d.Renderer* r = match (renderer) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        gpu.Frame frame = match (d.begin()) {
+            some(f) => f,
+            none => {
+                return;
+            },
+        };
+        linear.Vec3 target = bounds.center();
+        linear.Vec3 eye = target.add(linear.vec3(
+            math.cos(pitch as f64) as f32 * math.sin(yaw as f64) as f32,
+            math.sin(pitch as f64) as f32,
+            math.cos(pitch as f64) as f32 * math.cos(yaw as f64) as f32
+        ).scale(distance));
+        render3d.Camera camera = render3d.Camera{ position: eye, target: target };
+        r.draw(frame, camera, items[0..item_count]);
+        match (hud) {
+            some(h) => {
+                draw_text(frame, r.stats(), r.sun.shadows);
+                match (h.draw(frame, &surface)) {
+                    ok() => { },
+                    err(e) => { },
+                }
+            },
+            none => { },
+        }
+        frame.submit();
+    }
+
+    // The help and the counts, on a canvas the size of the frame.
+    void draw_text(gpu.Frame frame, render3d.Stats s, bool shadows) {
+        if (surface.width != frame.width as i32 || surface.height != frame.height as i32) {
+            pixels.free();
+            pixels = Arena.new(1 * MB);
+            surface = canvas.create(&pixels, frame.width as i32, frame.height as i32);
+        }
+        surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });
+        surface.fill_rounded(
+            canvas.Rect{ x: 12.0, y: 12.0, w: 560.0, h: 64.0 },
+            8.0,
+            canvas.Color{ r: 20, g: 22, b: 30, a: 190 }
+        );
+        surface.text(24.0, 22.0, "drag: turn   wheel: nearer   S: shadows", canvas.Color{ r: 230, g: 232, b: 240 }, 2);
+        mut Arena line = Arena.new(1 * KB);
+        defer line.free();
+        text.TextBuilder* t = text.builder(&line);
+        t.push("drawn: ");
+        t.push_u64(s.drawn as ui64);
+        t.push("   left out: ");
+        t.push_u64(s.culled as ui64);
+        t.push(shadows ? "   shadows on" : "   shadows off");
+        surface.text(24.0, 48.0, t.text(), canvas.Color{ r: 255, g: 170, b: 40 }, 2);
+    }
+
+    override void on_stop(app.Window window) uses io {
+        match (hud) {
+            some(h) => {
+                h.release();
+            },
+            none => { },
+        }
+        match (renderer) {
+            some(r) => {
+                for (usize i in 0..item_count) {
+                    r.release(items[i].model);
+                }
+                r.close();
+            },
+            none => { },
+        }
+        match (device) {
+            some(d) => {
+                d.close();
+            },
+            none => { },
+        }
+        pixels.free();
+        arena.free();
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Viewer* viewer = arena.new(Viewer);
+    return app.run_window(app.Config{ title: "Sosu viewer", width: 1100, height: 760 }, viewer as app.WindowHandler*);
+}

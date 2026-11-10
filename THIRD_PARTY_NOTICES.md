@@ -97,6 +97,22 @@ under their own licenses.
   the CI fuzzes it. A fault found later in it is fixed by taking the new commit of that branch, or
   here when that branch has none (`SECURITY.md`).
 
+## ufbx
+
+- Files: `packages/model/native/vendor/ufbx.c` and `ufbx.h` (version 0.23.1), and its license
+  `packages/model/native/vendor/LICENSE`, compiled into the programs that use the `model`
+  package (through `packages/model/native/fbx.c`), for the FBX files of `model.fbx`
+- Source: <https://github.com/ufbx/ufbx>, tag `v0.23.1` (commit
+  `26a482ae66871d7de36eb722aa060bce95bce274`, September 25, 2026): `ufbx.c` (1 181 511 bytes,
+  SHA-256 `4a956c26a708e40d82ecb0aeaee54da709d5ba7c144c9642174970059bda7e1d`), `ufbx.h`
+  (223 898 bytes, SHA-256 `f787be529af577efc04f3e3e735844a08556718dbb613d1211c2b313d72895dc`)
+- Written by Samuli Raivio (2020) and its contributors
+- License: the MIT license (Copyright (c) 2020 Samuli Raivio), or public domain (the Unlicense), at
+  your option; both are in `LICENSE`
+- Not changed by Sosu. `fbx.c` limits the memory a file may ask for (1 GB) and turns the scene to
+  the axes and the unit of Sosu. ufbx is written to read files from anywhere and fuzzed by its
+  authors; a fault found in it is fixed by taking its new version (`SECURITY.md`).
+
 ## SQLite
 
 - Files: `packages/sqlite/native/vendor/sqlite3.c` and `sqlite3.h` (version 3.54.1), compiled

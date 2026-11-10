@@ -2,9 +2,16 @@
 // one material: a primitive of glTF, a group of OBJ), materials, images, and a tree of nodes that
 // place the meshes. Its vertices are laid out as `gpu` reads them: `size_of(model.Vertex)` and
 // `offset_of(model.Vertex, normal)` give the layout of a pipeline.
+import std.io;
+import std.fs;
+import std.os;
+import std.text;
+import std.vec;
 import math.linear;
 import math.geometry;
 import image.image;
+import image.png;
+import image.jpeg;
 
 // A corner of a triangle.
 pub struct Vertex {
@@ -18,7 +25,7 @@ pub struct Mesh {
     pub str name;
     pub Vertex[] vertices;
     pub ui32[] indices;
-    pub usize? material;  // in `Model.materials`
+    pub mut usize? material;  // in `Model.materials`
     pub geometry.Aabb bounds;  // in the space of the mesh
 }
 
@@ -27,7 +34,7 @@ pub struct Material {
     pub str name;
     pub mut f32[4] base_color;  // linear RGBA, times the texture
     pub mut usize? texture;  // in `Model.images`
-    pub mut str texture_path;  // OBJ: the file named by `map_Kd`, for the program to load; "" else
+    pub mut str texture_path;  // the file named by an OBJ (`map_Kd`) or an FBX; "" else
     pub mut f32 metallic;
     pub mut f32 roughness;
 }
@@ -155,4 +162,187 @@ pub Material default_material(str name) {
         metallic: 0.0,
         roughness: 1.0
     };
+}
+
+// The image of the file at `path`, PNG or JPEG, or none when it is not there or does not decode.
+image.Image? read_image(Arena* arena, str path) uses io {
+    ui8[] bytes = match (io.read_bytes(arena, path)) {
+        ok(b) => b,
+        err(e) => {
+            return none;
+        },
+    };
+    if (png.is_png(bytes)) {
+        return match (png.decode(arena, bytes)) {
+            ok(img) => some(img),
+            err(e) => none,
+        };
+    }
+    if (jpeg.is_jpeg(bytes)) {
+        return match (jpeg.decode(arena, bytes)) {
+            ok(img) => some(img),
+            err(e) => none,
+        };
+    }
+    return none;
+}
+
+// The name of the file at the end of `path`, after its last `/` or `\\`.
+str file_name_of(str path) {
+    mut usize start = 0;
+    for (usize i in 0..path.len) {
+        if (path.bytes[i] == 47 || path.bytes[i] == 92) {  // '/' or '\\'
+            start = i + 1;
+        }
+    }
+    return text.slice(path, start, path.len);
+}
+
+// `m` with the textures its materials name by a file (`texture_path`), read from `folder`: the
+// path relative to it, else the name of the file alone in it (an FBX often keeps the absolute
+// path of the machine where it was made). Only files under `folder` are read: a path that goes
+// above it (`..`) or is absolute gives its name alone. PNG and JPEG; a file that is missing or
+// does not decode leaves its material without a texture. A file named twice is read once.
+pub Model with_textures(Arena* arena, Model m, str folder) uses io {
+    vec.Vec<Material>* materials = vec.new(arena);
+    vec.Vec<image.Image>* images = vec.new(arena);
+    for (image.Image img in m.images) {
+        images.push(img);
+    }
+    vec.Vec<str>* read_paths = vec.new(arena);
+    vec.Vec<usize>* read_images = vec.new(arena);
+    for (Material material in m.materials) {
+        mut Material made = material;
+        bool wanted = match (material.texture) {
+            some(t) => false,
+            none => material.texture_path.len > 0,
+        };
+        if (wanted) {
+            str path = text.replace(arena, material.texture_path, "\\", "/");
+            mut str[2] candidates = ["", fs.join(arena, folder, file_name_of(path))];
+            if (!fs.is_absolute(path) && !text.contains(path, "..")) {
+                candidates[0] = folder.len == 0 ? path : fs.join(arena, folder, path);
+            }
+            for (str candidate in candidates) {
+                if (candidate.len == 0 || match (made.texture) {
+                    some(t) => true,
+                    none => false,
+                }) {
+                    continue;
+                }
+                for (usize k in 0..read_paths.len()) {
+                    if (read_paths.items()[k] == candidate) {
+                        made.texture = some(read_images.items()[k]);
+                    }
+                }
+                if (match (made.texture) {
+                    some(t) => true,
+                    none => false,
+                }) {
+                    continue;
+                }
+                match (read_image(arena, candidate)) {
+                    some(img) => {
+                        images.push(img);
+                        read_paths.push(candidate);
+                        read_images.push(images.len() - 1);
+                        made.texture = some(images.len() - 1);
+                    },
+                    none => { },
+                }
+            }
+        }
+        materials.push(made);
+    }
+    return Model{
+        meshes: m.meshes,
+        materials: materials.items(),
+        images: images.items(),
+        nodes: m.nodes,
+        roots: m.roots
+    };
+}
+
+// The folder of `path`, "" when it has none.
+pub str folder_of(str path) {
+    return match (fs.parent(path)) {
+        some(p) => p,
+        none => "",
+    };
+}
+
+test "textures read beside the model" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str temp = match (os.env(&arena, "TEMP")) {
+        some(t) => t,
+        none => match (os.env(&arena, "TMPDIR")) {
+            some(t) => t,
+            none => "/tmp",
+        },
+    };
+    str folder = fs.join(&arena, temp, "sosu-model-textures");
+    assert(match (fs.create_dirs(&arena, fs.join(&arena, folder, "maps"))) {
+        ok => true,
+        err(e) => false,
+    });
+    mut image.Image red = image.create(&arena, 2, 2);
+    red.set(0, 0, image.rgba(255, 0, 0, 255));
+    assert(match (png.save(&arena, fs.join(&arena, folder, "maps/red.png"), red)) {
+        ok => true,
+        err(e) => false,
+    });
+    assert(match (png.save(&arena, fs.join(&arena, folder, "wood.png"), image.create(&arena, 4, 4))) {
+        ok => true,
+        err(e) => false,
+    });
+    vec.Vec<Material>* given = vec.new(&arena);
+    mut Material a = default_material("relative");
+    a.texture_path = "maps/red.png";
+    given.push(a);
+    mut Material b = default_material("absolute elsewhere");
+    b.texture_path = "C:\\Users\\artist\\textures\\wood.png";  // its name alone, beside the model
+    given.push(b);
+    mut Material c = default_material("again");
+    c.texture_path = "maps/red.png";
+    given.push(c);
+    mut Material d = default_material("missing");
+    d.texture_path = "nowhere.png";
+    given.push(d);
+    mut Material up = default_material("above");
+    up.texture_path = "../secret/red.png";  // not above the folder: its name alone, which is not there
+    given.push(up);
+    Model none_yet = Model{
+        meshes: vec.new<Mesh>(&arena).items(),
+        materials: given.items(),
+        images: vec.new<image.Image>(&arena).items(),
+        nodes: vec.new<Node>(&arena).items(),
+        roots: vec.new<usize>(&arena).items()
+    };
+    Model m = with_textures(&arena, none_yet, folder);
+    assert(m.images.len == 2);
+    assert(match (m.materials[0].texture) {
+        some(i) => m.images[i].at(0, 0) == image.rgba(255, 0, 0, 255),
+        none => false,
+    });
+    assert(match (m.materials[1].texture) {
+        some(i) => m.images[i].width == 4,
+        none => false,
+    });
+    assert(match (m.materials[2].texture) {
+        some(i) => i == 0,
+        none => false,
+    });  // read once
+    assert(match (m.materials[3].texture) {
+        some(i) => false,
+        none => true,
+    });
+    assert(match (m.materials[4].texture) {
+        some(i) => false,
+        none => true,
+    });
+    match (fs.remove_all(&arena, folder)) {
+        ok => { },
+        err(e) => { },
+    }
 }
