@@ -2,3 +2,4 @@
 // resources, frames and passes) and `gpu.shaders` (the shaders written by `sosuc shaders`).
 import gpu.gpu;
 import gpu.shaders;
+import gpu.overlay;

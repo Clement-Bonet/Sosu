@@ -4,6 +4,8 @@
 import std.io;
 import gpu.gpu;
 import gpu.shaders;
+import gpu.overlay;
+import render.canvas;
 import image.image;
 
 struct Vertex {
@@ -64,13 +66,19 @@ struct Kit {
 }
 
 // `vertices` drawn into the target, cleared to blue, with `texture`; the pixels read back.
-image.Image!gpu.GpuError draw(Arena* arena, Kit kit, Vertex[] vertices, gpu.Texture texture) uses io {
+image.Image!gpu.GpuError draw(
+    Arena* arena,
+    Kit kit,
+    Vertex[] vertices,
+    gpu.Texture texture,
+    gpu.Sampler sampler
+) uses io {
     gpu.Buffer buffer = try kit.device.buffer_of(gpu.Usage.Vertex, vertices);
     gpu.Frame frame = try kit.device.commands();
     gpu.Pass pass = frame.pass_into(kit.target, gpu.Clear{ color: gpu.rgba(0.0, 0.0, 1.0, 1.0) });
     pass.bind(kit.pipeline);
     pass.vertices(buffer);
-    pass.texture(0, texture, kit.nearest);
+    pass.texture(0, texture, sampler);
     pass.draw(vertices.len as ui32, 1);
     pass.end();
     try frame.submit_and_wait();
@@ -78,7 +86,7 @@ image.Image!gpu.GpuError draw(Arena* arena, Kit kit, Vertex[] vertices, gpu.Text
     return kit.device.read_texture(arena, kit.target);
 }
 
-void!gpu.GpuError scenes(Arena* arena, gpu.Device* device) uses io {
+void!gpu.GpuError scenes(Arena* arena, keeps gpu.Device* device) uses io {
     gpu.Shader vs = try shaders.load(arena, device, "tests/programs/gpu/shaders/scene.vert");
     gpu.Shader fs = try shaders.load(arena, device, "tests/programs/gpu/shaders/scene.frag");
     mut gpu.Attribute[3] attributes = [
@@ -115,7 +123,7 @@ void!gpu.GpuError scenes(Arena* arena, gpu.Device* device) uses io {
     triangle[0] = at(-1.0, -1.0, 0.5, 0.0, 0.0, color(255, 0, 0));
     triangle[1] = at(1.0, -1.0, 0.5, 0.0, 0.0, color(255, 0, 0));
     triangle[2] = at(-1.0, 1.0, 0.5, 0.0, 0.0, color(255, 0, 0));
-    mut image.Image drawn = try draw(arena, kit, triangle, kit.white);
+    mut image.Image drawn = try draw(arena, kit, triangle, kit.white, kit.nearest);
     bool corners = pixel("triangle", drawn, 4, 59, RED) && pixel("triangle", drawn, 59, 4, BLUE);
     io.print("triangle: {}", corners ? "ok" : "wrong");
 
@@ -127,14 +135,56 @@ void!gpu.GpuError scenes(Arena* arena, gpu.Device* device) uses io {
         both[i] = near[i];
         both[i + 6] = far[i];
     }
-    drawn = try draw(arena, kit, both, kit.white);
+    drawn = try draw(arena, kit, both, kit.white, kit.nearest);
     io.print("depth: {}", pixel("depth", drawn, 32, 32, GREEN) ? "ok" : "wrong");
 
     // a texture of 2 by 2 pixels on the whole target, sampled without filtering
-    drawn = try draw(arena, kit, square(arena, 0.5, WHITE), picture);
+    drawn = try draw(arena, kit, square(arena, 0.5, WHITE), picture, kit.nearest);
     bool quarters = pixel("texture", drawn, 16, 16, RED) && pixel("texture", drawn, 48, 16, GREEN)
             && pixel("texture", drawn, 16, 48, BLUE) && pixel("texture", drawn, 48, 48, WHITE);
     io.print("texture: {}", quarters ? "ok" : "wrong");
+
+    // mipmaps: a checkerboard of single pixels, 256 a side, drawn on 64 pixels, reads from a level
+    // made by the GPU, where black and white average to gray (without them, it would alias)
+    mut image.Image fine = image.create(arena, 256, 256);
+    for (i32 y in 0..256) {
+        for (i32 x in 0..256) {
+            fine.set(x, y, (x + y) % 2 == 0 ? WHITE : 0xFF000000);
+        }
+    }
+    gpu.Texture checkers = try device.texture_of(fine, true);
+    gpu.Sampler smooth = try device.sampler(gpu.SamplerDesc{ filter: gpu.Filter.Nearest, wrap: gpu.Wrap.Clamp });  // a texel of a level: gray only if the level averaged it
+    drawn = try draw(arena, kit, square(arena, 0.5, WHITE), checkers, smooth);
+    mut bool gray = true;
+    for (i32 at in [8, 32, 56]) {
+        ui32 p = drawn.at(at, at);
+        i32 level = (p >> 8 & 0xFF) as i32;
+        if (level < 100 || level > 155) {
+            io.print("mipmaps: the pixel ({}, {}) is {}, not gray", at, at, p);
+            gray = false;
+        }
+    }
+    io.print("mipmaps: {}", gray ? "ok" : "wrong");
+    device.release_texture(checkers);
+    device.release_sampler(smooth);
+
+    // the overlay: a canvas cleared transparent, an opaque red square at the top left and a half
+    // transparent green one at the bottom right, drawn over the blue of the target
+    overlay.Overlay* hud = try overlay.create(arena, device);
+    mut canvas.Canvas surface = canvas.create(arena, 64, 64);
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });
+    surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: 32.0, h: 32.0 }, canvas.Color{ r: 255, g: 0, b: 0 });
+    surface.fill(canvas.Rect{ x: 32.0, y: 32.0, w: 32.0, h: 32.0 }, canvas.Color{ r: 0, g: 255, b: 0, a: 128 });
+    gpu.Frame frame = try device.commands();
+    gpu.Pass blue = frame.pass_into(kit.target, gpu.Clear{ color: gpu.rgba(0.0, 0.0, 1.0, 1.0) });
+    blue.end();
+    try hud.draw_into(frame, kit.target, &surface);
+    try frame.submit_and_wait();
+    drawn = try device.read_texture(arena, kit.target);
+    bool layered = pixel("overlay", drawn, 16, 16, RED) && pixel("overlay", drawn, 48, 16, BLUE)
+            && pixel("overlay", drawn, 48, 48, 0xFF00807F);
+    io.print("overlay: {}", layered ? "ok" : "wrong");
+    hud.release();
 
     device.release_texture(picture);
     device.release_texture(kit.target);

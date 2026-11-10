@@ -45,8 +45,9 @@ static void usage(FILE *out) {
           "  fmt     format files or packages in place (--check: only report)\n"
           "  bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu] [--check]\n"
           "          write the Sosu declarations of a C header (spec 11.6)\n"
-          "  shaders [package] [--check]\n"
-          "          compile shaders/*.hlsl to SPIR-V, DXIL and MSL with shadercross (spec 8.2)\n"
+          "  shaders [package] [--check] [--c file.c]\n"
+          "          compile shaders/*.hlsl to SPIR-V, DXIL and MSL with shadercross (spec 8.2);\n"
+          "          --c: also as a C file of the package, so that it carries them\n"
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
           "  i18n extract [package] [-o messages.locale.default.sosu]\n"
           "          write the template of the catalogs of translations (spec 10.7)\n"
@@ -2650,6 +2651,71 @@ static bool shader_name_ok(const char *name) {
     return true;
 }
 
+/* The compiled shaders of `out` (those of the sources `names`) as a C file: for each file, a
+   function `sosu_shader_<name>_<format>(size_t *size)` that gives its bytes, so that a package
+   carries its shaders inside the program (gpu.overlay). NULL after saying which is missing. */
+typedef struct {
+    char *text;
+    size_t length, cap;
+} TextOut;
+
+static void text_out(TextOut *t, const char *s) {
+    size_t n = strlen(s);
+    if (t->length + n + 1 > t->cap) {
+        while (t->length + n + 1 > t->cap) t->cap = t->cap ? t->cap * 2 : 4096;
+        t->text = sosu_realloc(t->text, t->cap);
+    }
+    memcpy(t->text + t->length, s, n + 1);
+    t->length += n;
+}
+
+static char *shaders_c_file(const char *out, char **names, size_t count) {
+    TextOut t = { NULL, 0, 0 };
+    text_out(&t, "/* Written by `sosuc shaders --c` from shaders/compiled (spec 8.2): do not edit. */\n"
+                 "#include <stddef.h>\n");
+    for (size_t i = 0; i < count; i++) {
+        size_t base_length = strlen(names[i]) - 5; /* without .hlsl */
+        for (size_t f = 0; f < sizeof SHADER_FORMATS / sizeof *SHADER_FORMATS; f++) {
+            char *file = sosu_format("%.*s.%s", (int)base_length, names[i], SHADER_FORMATS[f][1]);
+            char *path = path_join(out, file);
+            FILE *in = fopen(path, "rb");
+            if (!in) {
+                fprintf(stderr, "sosuc: `%s` is missing: run `sosuc shaders`\n", path);
+                free(file);
+                free(path);
+                free(t.text);
+                return NULL;
+            }
+            char *symbol = sosu_strdup(file);
+            for (char *c = symbol; *c; c++) {
+                if (*c == '.' || *c == '-') *c = '_';
+            }
+            char *line = sosu_format("\nstatic const unsigned char %s[] = {", symbol);
+            text_out(&t, line);
+            free(line);
+            size_t n = 0;
+            int byte;
+            char hex[32];
+            while ((byte = fgetc(in)) != EOF) {
+                snprintf(hex, sizeof hex, "%s0x%02x,", n % 16 == 0 ? "\n    " : " ", (unsigned)byte);
+                text_out(&t, hex);
+                n++;
+            }
+            fclose(in);
+            if (n == 0) text_out(&t, "0");
+            text_out(&t, "\n};\n");
+            line = sosu_format("const unsigned char *sosu_shader_%s(size_t *size) {\n    *size = %zu;\n    return %s;\n}\n",
+                               symbol, n, symbol);
+            text_out(&t, line);
+            free(line);
+            free(symbol);
+            free(file);
+            free(path);
+        }
+    }
+    return t.text;
+}
+
 /* `sosuc shaders [package] [--check]` (spec 8.2): each `shaders/<name>.<vert|frag|comp>.hlsl`
    compiled by `shadercross` to SPIR-V, DXIL and MSL, with its resources (JSON), in
    `shaders/compiled/`, when it is newer than them. With --check, compiles nothing: exit 1 if one
@@ -2657,9 +2723,12 @@ static bool shader_name_ok(const char *name) {
 static int command_shaders(int argc, char **argv) {
     const char *dir = ".";
     bool check = false;
+    const char *c_file = NULL; /* --c: the compiled shaders in a C file of the package too */
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0) {
             check = true;
+        } else if (strcmp(argv[i], "--c") == 0 && i + 1 < argc) {
+            c_file = argv[++i];
         } else if (argv[i][0] != '-') {
             dir = argv[i];
         } else {
@@ -2769,6 +2838,31 @@ static int command_shaders(int argc, char **argv) {
     }
     if (check && stale > 0 && status == 0) status = 1;
     if (!check && status == 0) printf("%zu shader file%s written to %s\n", compiled, compiled == 1 ? "" : "s", out);
+    if (c_file && status == 0) {
+        char *text = shaders_c_file(out, names, count);
+        char *path = path_join(dir, c_file);
+        if (!text) {
+            status = 1;
+        } else if (check) {
+            SourceFile now;
+            bool same = false;
+            if (source_load(&now, path)) {
+                same = now.length == strlen(text) && memcmp(now.text, text, now.length) == 0;
+                source_free(&now);
+            }
+            if (!same) {
+                fprintf(stderr, "sosuc: `%s` does not hold the compiled shaders: run `sosuc shaders --c %s`\n", path, c_file);
+                status = 1;
+            }
+        } else if (!write_file(path, text)) {
+            fprintf(stderr, "sosuc: cannot write `%s`\n", path);
+            status = 1;
+        } else {
+            printf("the shaders written in C to %s\n", path);
+        }
+        free(text);
+        free(path);
+    }
     for (size_t i = 0; i < count; i++) free(names[i]);
     free(names);
     free(sources);

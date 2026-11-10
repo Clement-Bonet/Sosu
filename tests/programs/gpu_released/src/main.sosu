@@ -1,0 +1,39 @@
+// A buffer of gpu used after its release (spec §8.2): the handle is dead, and the program stops
+// (exit 101) instead of giving SDL a freed buffer. A new buffer that takes its line in the table
+// of the device does not make the old handle alive again.
+import std.io;
+import gpu.gpu;
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("gpu: no device ({})", gpu.message(e));
+            return 77;
+        },
+    };
+    mut ui32[4] numbers = [1, 2, 3, 4];
+    gpu.Buffer first = match (device.buffer_of(gpu.Usage.Vertex, numbers[0..4])) {
+        ok(b) => b,
+        err(e) => {
+            io.print("gpu: {}", gpu.message(e));
+            return 1;
+        },
+    };
+    device.release_buffer(first);
+    gpu.Buffer second = match (device.buffer_of(gpu.Usage.Vertex, numbers[0..4])) {  // the same line
+        ok(b) => b,
+        err(e) => {
+            io.print("gpu: {}", gpu.message(e));
+            return 1;
+        },
+    };
+    io.print("released, and a new buffer made");
+    device.upload(first, numbers[0..4]);  // stops here
+    io.print("not reached");
+    device.release_buffer(second);
+    device.close();
+    return 0;
+}

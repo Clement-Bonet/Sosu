@@ -249,6 +249,10 @@ static void test_gpu(const char *sosuc) {
     char command[1024];
     snprintf(command, sizeof command, "%s shaders tests/programs/gpu --check > build/gpu_shaders.out 2>&1", sosuc);
     CHECK(run(command) == 0, "the shaders of tests/programs/gpu are out of date (see build/gpu_shaders.out)");
+    /* the shaders of gpu.overlay, carried by the package in C */
+    snprintf(command, sizeof command, "%s shaders packages/gpu --c native/shaders.c --check > build/gpu_shaders.out 2>&1",
+             sosuc);
+    CHECK(run(command) == 0, "packages/gpu/native/shaders.c is out of date (see build/gpu_shaders.out)");
     snprintf(command, sizeof command, "%s run tests/programs/gpu > build/gpu.out 2> build/gpu.err", sosuc);
     int status = run(command);
     if (status == 77) {
@@ -264,6 +268,19 @@ static void test_gpu(const char *sosuc) {
           actual ? actual : "(none)\n", expected ? expected : "(none)\n");
     free(actual);
     free(expected);
+
+    /* a handle used after its release stops the program, even when its line was taken again */
+    snprintf(command, sizeof command, "%s run tests/programs/gpu_released > build/gpu_released.out 2> build/gpu_released.err",
+             sosuc);
+    status = run(command);
+    CHECK(status == 101, "run gpu_released: exit code %d, expected 101 (see build/gpu_released.err)", status);
+    char *said = read_text("build/gpu_released.err");
+    CHECK(said && strstr(said, "assertion failed: s.alive && s.generation == generation"),
+          "run gpu_released: the stop does not say why (see build/gpu_released.err)");
+    free(said);
+    char *printed = read_text("build/gpu_released.out");
+    CHECK(printed && !strstr(printed, "not reached"), "run gpu_released: the program went on after the dead handle");
+    free(printed);
 }
 
 static void test_bindgen(const char *sosuc) {

@@ -229,6 +229,8 @@ pub struct SamplerDesc {
 pub struct Clear {
     pub Color color;
     pub bool depth = true;
+    // Keep what the target holds instead of clearing it: to draw over a pass before (gpu.overlay).
+    pub bool keep = false;
 }
 
 ui8 KIND_BUFFER = 1;
@@ -666,7 +668,7 @@ pub class Device {
                 attributes[i].offset = a.offset;
             }
             info.vertex_input_state.vertex_buffer_descriptions = buffer;
-            info.vertex_input_state.num_vertex_buffers = 1;
+            info.vertex_input_state.num_vertex_buffers = count == 0 ? 0 : 1;  // none: the shader makes its vertices
             info.vertex_input_state.vertex_attributes = &attributes[0];
             info.vertex_input_state.num_vertex_attributes = count as ui32;
 
@@ -1161,6 +1163,38 @@ pub struct Frame {
         }
     }
 
+    // `pixels` (0xAARRGGBB, as many as `t` has) copied into the first level of `t` before the
+    // passes that follow: a picture that changes each frame (gpu.overlay). A pass must not be open.
+    pub void upload_texture(Texture t, ui32[] pixels) uses io {
+        assert(pixels.len as ui64 == t.width as ui64 * t.height as ui64);
+        sdl_c.SDL_GPUTexture* texture = device.texture_of_handle(t);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTransferBuffer* transfer = device.upload_buffer(
+                &scratch,
+                &pixels[0] as ui8*,
+                t.width * t.height * 4
+            );
+            if (transfer as ui64 == 0) {
+                return;
+            }
+            sdl_c.SDL_GPUCopyPass* pass = sdl_c.SDL_BeginGPUCopyPass(commands);
+            sdl_c.SDL_GPUTextureTransferInfo* source = scratch.alloc(sdl_c.SDL_GPUTextureTransferInfo);
+            source.transfer_buffer = transfer;
+            source.pixels_per_row = t.width;
+            source.rows_per_layer = t.height;
+            sdl_c.SDL_GPUTextureRegion* region = scratch.alloc(sdl_c.SDL_GPUTextureRegion);
+            region.texture = texture;
+            region.w = t.width;
+            region.h = t.height;
+            region.d = 1;
+            sdl_c.SDL_UploadToGPUTexture(pass, source, region, true);
+            sdl_c.SDL_EndGPUCopyPass(pass);
+            sdl_c.SDL_ReleaseGPUTransferBuffer(device.device, transfer);
+        }
+    }
+
     // A pass that draws into the window, cleared first.
     pub Pass pass(Clear clear) uses io {
         unsafe {
@@ -1186,7 +1220,7 @@ pub struct Frame {
                 b: clear.color.b,
                 a: clear.color.a
             };
-            color.load_op = sdl_c.SDL_GPU_LOADOP_CLEAR;
+            color.load_op = clear.keep ? sdl_c.SDL_GPU_LOADOP_LOAD : sdl_c.SDL_GPU_LOADOP_CLEAR;
             color.store_op = sdl_c.SDL_GPU_STOREOP_STORE;
             mut sdl_c.SDL_GPUDepthStencilTargetInfo* depth = 0 as sdl_c.SDL_GPUDepthStencilTargetInfo*;
             if (clear.depth) {

@@ -850,7 +850,7 @@ Status: design, after 1.0. Nothing below changes the language, except `offset_of
 
 ##### A window drawn by the program
 
-Status: available (0.7.0): `app.run_window`, `gpu` (render and compute passes, targets, devices without a window, pixels and buffers read back), `sosuc shaders`, `offset_of`, `examples/cube` and `tests/programs/gpu`. Not yet: `gpu.overlay`, and a test that a handle used after its release stops the program.
+Status: available (0.7.0): `app.run_window`, `gpu` (render and compute passes, targets, devices without a window, pixels and buffers read back), `sosuc shaders`, `offset_of`, `gpu.overlay`, `examples/cube`, `tests/programs/gpu` and `tests/programs/gpu_released`.
 
 `app.run` owns the main loop and gives the program a canvas of pixels each frame (§10.1). A 3D program needs the window itself. `app.run_window(config, handler)` runs the same loop, with the same events, and calls a `WindowHandler`:
 
@@ -867,7 +867,7 @@ pub interface WindowHandler<uses E> {
 - `platform` does not import `gpu`, since `gpu` imports `platform` and packages have no cycles (§8.1). So the program opens its device itself, in `on_start`, and closes it in `on_stop`, which `run_window` calls before the window is destroyed.
 - While Windows holds the loop during a live resize, `run_window` still calls `on_frame`, as `run` draws its canvas.
 - A frame drawn in less than 2 ms did not wait for the screen: the loop then sleeps 14 ms rather than spin.
-- A window has either the canvas or the GPU, never both: SDL refuses an `SDL_Renderer` and a GPU device on the same window. `gpu.overlay` is how a 3D program will still draw text and widgets.
+- A window has either the canvas or the GPU, never both: SDL refuses an `SDL_Renderer` and a GPU device on the same window. `gpu.overlay` is how a 3D program still draws text and widgets.
 
 ##### `gpu`
 
@@ -914,7 +914,8 @@ match (device.begin()) {                          // none while the window is mi
 - Pipelines: `PipelineDesc{ vertex, fragment, layout, depth, cull, blend }`. Triangles counter-clockwise are the front, as the axes of `math.linear` are right-handed. `cull` is `Back` by default (`Off`, `Front`), `blend` is `Opaque` (`Alpha`, `Additive`), and `depth` is true.
 - Frames:
   - `device.begin()` acquires the image of the swapchain of its window and gives a `Frame`, with its `width` and `height` in pixels of the screen. It gives none while the window is minimized or hidden, as on Android in the background.
-  - `frame.pass(Clear{ color, depth })` opens a render pass cleared to that color. With `depth`, the device keeps a depth texture the size of the window: D32, else D24, else D16, whichever the GPU takes.
+  - `frame.pass(Clear{ color, depth, keep })` opens a render pass cleared to that color. With `depth`, the device keeps a depth texture the size of the window: D32, else D24, else D16, whichever the GPU takes. With `keep`, the pass draws over what the target holds instead of clearing it.
+  - `frame.upload_texture(texture, pixels)` copies 0xAARRGGBB pixels into a texture before the passes that follow, for a picture that changes each frame.
   - `submit()` sends the passes and shows the frame.
   - `device.commands()` gives a frame that does not draw into the window: its passes draw into targets with `frame.pass_into(texture, clear)`, and compute. A device without a window has only these frames.
   - `frame.submit_and_wait()` sends the passes and waits until the GPU ran them.
@@ -942,6 +943,7 @@ SDL_GPU takes SPIR-V on Vulkan, DXIL on Direct3D 12 and MSL on Metal. One source
   - Exit 1 when a shader does not compile, 2 when `shadercross` cannot be run.
 - `sosuc shaders --check` compiles nothing, and exits with 1 when an output is missing or its source changed since it was compiled. `sosuc test` runs it first on a package that has `.hlsl` files, so that compiled shaders that no longer follow their sources fail the tests, on a machine without `shadercross` too.
 - `shadercross` is run without a shell, as the C compiler is. The names of the files of shaders are letters, digits, `-`, `_` and `.`, so none is read as an option.
+- `sosuc shaders [package] --c file.c` also writes the compiled shaders as a C file of the package (`file.c`, relative to it). Each file of `shaders/compiled` gets a function `sosu_shader_<name>_<format>(size_t *size)` that gives its bytes, so a package carries its shaders inside the programs that use it, as `gpu.overlay` does. With `--check`, the C file must hold what it would write.
 - `gpu.shaders.load(arena, device, path)`:
   - `path` is the source without `.hlsl` (`shaders/cube.vert`);
   - it reads `shaders/compiled/cube.vert` in the format the device takes, and its `.json`, with `app.read_asset`, so `shaders/compiled` is listed in the `assets` of [app] (§11.5) and travels in the APK and in the bundles;
@@ -954,10 +956,28 @@ SDL_GPU takes SPIR-V on Vulkan, DXIL on Direct3D 12 and MSL on Metal. One source
   - a triangle drawn into a target of 64 by 64 pixels, read back: its corner, and the clear color beside it, which also checks that the top of an image is y = 1 in clip space;
   - depth: a near square drawn first hides a far one drawn after it;
   - a texture of 2 by 2 pixels sampled without filtering, each quarter of its color;
+  - mipmaps: a checkerboard of single pixels, 256 a side, drawn on 64 pixels with a `Nearest` sampler, reads a texel of the level that the GPU made, gray (without mipmaps, the test sees white);
+  - the overlay: an opaque red square and a half transparent green one, drawn by `gpu.overlay` over the blue of a target;
   - a compute shader that doubles 256 numbers and adds a uniform, read back.
   - Pixels are compared within 2 for each channel, since two drivers do not round alike. It runs under Direct3D 12 and Vulkan on Windows (`SDL_GPU_DRIVER=vulkan`).
   - Where no driver is found (the runners of Windows and macOS have no GPU), it exits with 77, and `tests/program_tests.c` counts it as skipped, and says so. The test also checks that its compiled shaders are up to date (`sosuc shaders --check`).
-  - Later: the overlay, mipmaps, and a handle used after its release, which stops the program.
+  - `tests/programs/gpu_released` releases a buffer, makes another one that takes its line in the table of the device, then uploads to the first: the program stops with 101 and the `assert` of `gpu`, and goes no further.
+  - The test also checks that `packages/gpu/native/shaders.c` holds the compiled shaders of the overlay.
+
+##### `gpu.overlay`
+
+```sosu
+overlay.Overlay* hud = try overlay.create(arena, device);   // once, in on_start
+...
+surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });      // transparent where the 3D shows
+surface.text(...);                                          // render, or the widgets of ui
+try hud.draw(frame, &surface);                              // after the 3D passes, before submit
+```
+
+- A canvas of `render` drawn over the 3D, so that `render` and `ui` work on top of a scene. Each frame, its pixels go to a texture of its size (`frame.upload_texture`, the texture made again when the size changes), drawn over the frame by one triangle that covers it, in a pass with `keep`, blended by their alpha (`Blend.Alpha`, not premultiplied).
+- `draw(frame, surface)` draws over the window, and `draw_into(frame, target, surface)` over a texture of `device.target`. `release()` frees its pipeline, its sampler and its texture.
+- Its two shaders are in the package: `packages/gpu/shaders/overlay.*.hlsl`, compiled and written in `native/shaders.c` by `sosuc shaders packages/gpu --c native/shaders.c`, a C file of the package (§9.1). A program needs no file of its own.
+- The canvas blends a color over a pixel that is not opaque as the operator "over" of Porter and Duff (the colors weighed by their alphas): drawn on a canvas cleared transparent, a half transparent shape stays half transparent, and the edges of text keep their color instead of turning dark. Over an opaque pixel, nothing changed.
 - `examples/cube`: a textured cube turning, with `math.linear.perspective` and `look_at`, the mouse turning the camera. It is built by the CI on each desktop and for Android, and tried by hand in a window.
 - A binding check: `sosuc bindgen --check` on `SDL_gpu.h`, since its structs hold structs, arrays and pointers to arrays (§11.6).
 

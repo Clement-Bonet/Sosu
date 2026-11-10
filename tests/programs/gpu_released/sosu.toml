@@ -1,0 +1,8 @@
+# A handle of gpu used after its release stops the program (spec §8.2): exit 101, never a
+# freed resource reached. Exits with 77 where no GPU driver is found (skipped).
+[package]
+name = "gpu_released"
+version = "0.1.0"
+
+[dependencies]
+gpu = { path = "../../../packages/gpu" }
