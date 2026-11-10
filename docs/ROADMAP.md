@@ -36,7 +36,7 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 
 ## What remains (November 10, 2026)
 
-Estimated again from the pace above. Works 1 to 5, 7, 8 and 10 are done, and `0.5.3` is the last version; works 6 and 9 remain before 1.0, then the 0.x versions tried by others (§13.1).
+Estimated again from the pace above. Works 1 to 5 and 7 to 10 are done, and `0.5.4` is the last version; work 6 remains before 1.0, then the 0.x versions tried by others (§13.1).
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
