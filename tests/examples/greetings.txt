@@ -1,0 +1,15 @@
+Amélie wants fr-CA, en: fr
+  Bienvenue, Amélie !
+  0 nouveau message / 1 nouveau message / 2 nouveaux messages / 5 nouveaux messages / 21 nouveaux messages
+  [Ouvrir] the file is Ouvert
+  [Sign out]
+Ivan wants ru_RU: ru
+  Добро пожаловать, Ivan!
+  0 новых сообщений / 1 новое сообщение / 2 новых сообщения / 5 новых сообщений / 21 новое сообщение
+  [Открыть] the file is Открыто
+  [Выйти]
+Heidi wants de-AT, it: en
+  Welcome, Heidi!
+  0 new messages / 1 new message / 2 new messages / 5 new messages / 21 new messages
+  [Open] the file is Open
+  [Sign out]

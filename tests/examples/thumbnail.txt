@@ -1,0 +1,11 @@
+drawn: 320 x 240
+PNG: 1447 bytes, a PNG file: true
+PNG read back, the same pixels: true
+JPEG at quality 85, a JPEG file: true
+JPEG read back, close (a mean difference under 3): true
+cropped: 240 x 180
+resized: 80 x 60
+turned: 60 x 80
+gray: 60 x 80, the ground stays dark: true
+saved examples/thumbnail/build/thumbnail.png
+a text read as PNG: not a file of this format

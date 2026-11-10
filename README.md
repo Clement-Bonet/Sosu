@@ -188,11 +188,11 @@ src/playground/  the entry points of the compiler in WebAssembly, for playground
 src/docgen/   the generator of docs/REFERENCE.md (`make doc`), on src/lib/docgen
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 packages/     platform (window and events, on SDL3), render (pixels, shapes, text, PNG images), ui (widgets),
-              i18n (catalogs of translations)
+              i18n (catalogs of translations), crypto, compress, math, image, audio, db, sqlite, net, testing
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
               trees, inputs), poster (the poster of the project and the image of its shared links,
-              drawn with `render` into PNGs)
+              drawn with `render` into PNGs); one small example for each other package (below)
 showcase/     whole applications: beatbox (a drum machine), disktiles (the sizes of a disk as tiles),
               notes (Markdown notes), pixelforge (a pixel art editor), queens (a puzzle),
               sheets (a spreadsheet), vault (a password manager), courier (a download manager)
@@ -262,6 +262,19 @@ The examples:
   own becomes a tool bar;
 - `examples/themes`: themes and styles of a `.ui.sosu` file, following the system;
 - `examples/containers`: a grid, groups, a tree of folders, and every input widget.
+
+One small example for each package without a window, run from the root of the repository
+(`sosuc run examples/checksums`) and checked by the tests:
+
+- `examples/checksums` (`crypto`): a checksum, a link signed with HMAC and checked, a session token;
+- `examples/archive` (`compress`): a log compressed with gzip and zlib, read back, a damaged copy refused;
+- `examples/orbit` (`math`): a moon around a planet around a sun, projected to the pixels of a screen;
+- `examples/thumbnail` (`image`): a picture drawn, saved as PNG and JPEG, read back, made into a thumbnail;
+- `examples/bookshelf` (`db` and `sqlite`): books and loans in SQLite, a transaction, a join;
+- `examples/fetch` (`net`): an HTTP client and a small server of its own, without a network;
+- `examples/wordcount` (`testing`): a library and its tests (`sosuc test examples/wordcount`);
+- `examples/greetings` (`i18n`): texts in English, French and Russian, with their plurals;
+- `examples/sound` (`audio`): sounds played and recorded (it needs a sound card).
 
 Whole applications, each with its README, a screenshot and its tests (`sosuc test`), run from their
 folder (`../../build/sosuc run .`):

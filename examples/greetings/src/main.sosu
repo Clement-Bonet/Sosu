@@ -1,0 +1,80 @@
+// The package i18n (spec §10.7): the texts of a program in English, French and Russian, from
+// the catalogs of locales/ (the format of gettext). The language that suits each user best,
+// plurals by the rule of each language, a text in two contexts, and a translation not checked
+// yet, which shows the English text. A program asks the system for the languages of its user
+// (`app.locales` of `platform`); here, three users are written out, so that the output is the
+// same everywhere.
+import std.io;
+import std.text;
+import i18n.catalog;
+
+// The catalog of `language`, or none for English, the language of the source texts.
+catalog.Catalog*? load(Arena* arena, str language) uses io {
+    if (language == "en") {
+        return none;
+    }
+    text.TextBuilder* path = text.builder(arena);
+    path.push("examples/greetings/locales/messages.locale.");
+    path.push(language);
+    path.push(".sosu");
+    return match (catalog.load(arena, path.text())) {
+        ok(c) => some(c),
+        err(e) => none,
+    };
+}
+
+str tr(catalog.Catalog*? c, str source) {
+    return match (c) {
+        some(found) => found.text(source),
+        none => source,
+    };
+}
+
+str tr_in(catalog.Catalog*? c, str context, str source) {
+    return match (c) {
+        some(found) => found.in_context(context, source),
+        none => source,
+    };
+}
+
+// The plural form of `n` in the language of `c` (English: one for 1 only), its `{count}` filled.
+str tr_plural(Arena* arena, catalog.Catalog*? c, str one, str other, i64 n) {
+    str form = match (c) {
+        some(found) => found.plural(one, other, n),
+        none => n == 1 ? one : other,
+    };
+    return text.replace(arena, form, "{count}", text.format_i64(arena, n));
+}
+
+void greet(Arena* arena, str user, str[] wanted) uses io {
+    mut str[3] available = ["en", "fr", "ru"];
+    usize chosen = match (catalog.best(available[0..3], wanted)) {
+        some(i) => i,
+        none => 0,  // none of their languages: English
+    };
+    catalog.Catalog*? c = load(arena, available[chosen]);
+    io.print("{} wants {}: {}", user, text.join(arena, wanted, ", "), available[chosen]);
+    io.print("  {}", text.replace(arena, tr(c, "Welcome, {name}!"), "{name}", user));
+    mut text.TextBuilder* counts = text.builder(arena);
+    for (i32 n in [0, 1, 2, 5, 21]) {
+        if (n > 0) {
+            counts.push(" / ");
+        }
+        counts.push(tr_plural(arena, c, "{count} new message", "{count} new messages", n as i64));
+    }
+    io.print("  {}", counts.text());
+    io.print("  [{}] the file is {}", tr_in(c, "button", "Open"), tr_in(c, "state", "Open"));
+    io.print("  [{}]", tr(c, "Sign out"));
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    mut str[2] amelie = ["fr-CA", "en"];  // French of Canada: the French catalog
+    mut str[1] ivan = ["ru_RU"];
+    mut str[2] heidi = ["de-AT", "it"];  // no catalog for them: English
+    greet(&arena, "Amélie", amelie[0..2]);
+    greet(&arena, "Ivan", ivan[0..1]);
+    greet(&arena, "Heidi", heidi[0..2]);
+    return 0;
+}

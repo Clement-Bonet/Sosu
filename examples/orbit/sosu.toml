@@ -1,0 +1,8 @@
+# The package math (spec §8.3): transforms one inside the other, a camera and its projection.
+# No window. Run it from the root of the repository: sosuc run examples/orbit
+[package]
+name = "orbit"
+version = "0.1.0"
+
+[dependencies]
+math = { path = "../../packages/math" }

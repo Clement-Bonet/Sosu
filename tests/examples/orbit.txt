@@ -1,0 +1,7 @@
+sun at (320, 240)
+day 0: planet at (463, 240), moon at (491, 240), 2.000 apart
+day 91: planet at (320, 183), moon at (304, 189), 2.000 apart
+day 182: planet at (178, 239), moon at (187, 226), 2.000 apart
+day 273: planet at (317, 344), moon at (345, 368), 2.000 apart
+day 91 with matrices: moon at (304, 189)
+the camera is at 0.0 15.0 25.0

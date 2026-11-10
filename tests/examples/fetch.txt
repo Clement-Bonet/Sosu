@@ -1,0 +1,4 @@
+GET /hello: 200 OK from /hello (text/plain): hello from the server
+GET /old: 200 OK from /new (application/json): {"moved": true}
+GET /missing: 404 Not Found from /missing (text/plain): nothing here
+POST /echo: 201 Created from /echo (text/plain): a form, posted

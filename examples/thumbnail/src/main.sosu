@@ -1,0 +1,112 @@
+// The package image (spec §8.3): a picture drawn pixel by pixel, saved as PNG and JPEG, read
+// back, then made into a thumbnail: resized, cropped, turned and made gray.
+import std.io;
+import image.image;
+import image.jpeg;
+import image.ops;
+import image.png;
+
+// A sky from blue to orange, a sun with a soft edge, a dark ground: integers only.
+image.Image sunset(Arena* arena, i32 width, i32 height) {
+    mut image.Image img = image.create(arena, width, height);
+    i32 horizon = height * 2 / 3;
+    for (i32 y in 0..height) {
+        for (i32 x in 0..width) {
+            mut ui32 pixel = 0;
+            if (y < horizon) {
+                ui32 t = (y * 255 / horizon) as ui32;
+                pixel = image.rgba(40 + t * 215 / 255, 60 + t * 90 / 255, 160 - t * 120 / 255, 255);
+                i32 dx = x - width / 2;
+                i32 dy = y - horizon;
+                i32 d2 = dx * dx + dy * dy;
+                if (d2 < 30 * 30) {
+                    pixel = image.rgba(255, 220, 90, 255);
+                } else if (d2 < 34 * 34) {
+                    pixel = image.rgba(255, 190, 80, 255);
+                }
+            } else {
+                pixel = image.rgba(30, 25, 40, 255);
+            }
+            img.set(x, y, pixel);
+        }
+    }
+    return img;
+}
+
+// Whether two images of the same size have the same pixels.
+bool same_pixels(image.Image a, image.Image b) {
+    if (a.width != b.width || a.height != b.height) {
+        return false;
+    }
+    for (usize i in 0..a.pixels.len) {
+        if (a.pixels[i] != b.pixels[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The mean difference of the color channels of two images of the same size.
+f64 mean_difference(image.Image a, image.Image b) {
+    mut ui64 total = 0;
+    for (usize i in 0..a.pixels.len) {
+        for (i32 bits in [16, 8, 0]) {
+            i64 x = (a.pixels[i] >> bits as ui32 & 0xFF) as i64;
+            i64 y = (b.pixels[i] >> bits as ui32 & 0xFF) as i64;
+            total += abs(x - y) as ui64;
+        }
+    }
+    return total as f64 / (a.pixels.len * 3) as f64;
+}
+
+void described(str name, image.Image img) uses io {
+    io.print("{}: {} x {}", name, img.width, img.height);
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(8 * MB);
+    defer arena.free();
+    image.Image picture = sunset(&arena, 320, 240);
+    described("drawn", picture);
+
+    // PNG keeps every pixel
+    ui8[] file = png.encode(&arena, picture);
+    io.print("PNG: {} bytes, a PNG file: {}", file.len, png.is_png(file));
+    match (png.decode(&arena, file)) {
+        ok(back) => io.print("PNG read back, the same pixels: {}", same_pixels(back, picture)),
+        err(e) => io.print("PNG: {}", image.message(e)),
+    }
+    // JPEG keeps what the eye sees: fewer bytes for a photo, more than PNG for a flat drawing
+    ui8[] photo = jpeg.encode(&arena, picture, 85);
+    io.print("JPEG at quality 85, a JPEG file: {}", jpeg.is_jpeg(photo));
+    match (jpeg.decode(&arena, photo)) {
+        ok(back) => io.print(
+            "JPEG read back, close (a mean difference under 3): {}",
+            mean_difference(back, picture) < 3.0
+        ),
+        err(e) => io.print("JPEG: {}", image.message(e)),
+    }
+
+    // the thumbnail: the middle of the picture, shrunk with Lanczos, turned for a phone held
+    // upright, in gray
+    image.Image middle = ops.crop(&arena, picture, 40, 30, 240, 180);
+    described("cropped", middle);
+    image.Image small = ops.resize(&arena, middle, 80, 60, ops.Filter.Lanczos);
+    described("resized", small);
+    image.Image upright = ops.rotate_90(&arena, small);
+    described("turned", upright);
+    image.Gray gray = image.to_gray(&arena, upright);
+    io.print("gray: {} x {}, the ground stays dark: {}", gray.width, gray.height, gray.at(5, 30) < 50);
+    // a file a viewer opens: build/ of the example, beside the program
+    match (png.save(&arena, "examples/thumbnail/build/thumbnail.png", image.from_gray(&arena, gray))) {
+        ok => io.print("saved examples/thumbnail/build/thumbnail.png"),
+        err(e) => io.print("not saved: build/ is made by sosuc build"),
+    }
+
+    // a file that is not an image is refused, with why
+    match (png.decode(&arena, "not a picture".bytes)) {
+        ok(img) => described("text", img),
+        err(e) => io.print("a text read as PNG: {}", image.message(e)),
+    }
+    return 0;
+}

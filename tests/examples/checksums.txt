@@ -1,0 +1,8 @@
+sha256  ab64b5579e7ffd90c9da512a2bdb53c3766fad249f7391c9fd143a571bff2ded  notes.txt
+by parts, the same: true
+link: /files/report.pdf?expires=1800000000&sig=VUlHE3aEMpXpQwV7vKPyto5mrlrwkQCYvcywyL3dlOk
+valid now: true
+valid after it expires: false
+valid for another file: false
+valid with another date: false
+session token: 32 hexadecimal digits
