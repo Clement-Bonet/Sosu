@@ -188,7 +188,15 @@ Options of `build`, `run` and `test`:
 
 ### 1.5 Editors
 
-`sosuc lsp` speaks the Language Server Protocol: errors as you type, hover, go to definition, find references, rename and completion. It reads what is on the disk and fetches nothing: after cloning a project with git dependencies, run `sosuc check` once in a terminal, or the editor reports them as not fetched (E0405).
+`sosuc lsp` speaks the Language Server Protocol: errors as you type, hover, go to definition, find references, rename, completion, signature help and the outline of a file. A rename that would change what the program means, such as a new name already declared there, is refused with the reason. It reads what is on the disk and fetches nothing: after cloning a project with git dependencies, run `sosuc check` once in a terminal, or the editor reports them as not fetched (E0405).
+
+For Visual Studio Code, the extension [Sosu](https://github.com/Clement-Bonet/VSCode-Sosu-Plugins) runs `sosuc lsp`, and adds the highlighting of `.sosu`, `.ui.sosu` and catalog files, the commands Run, Build, Run the tests, Check and Generate the documentation, formatting with `sosuc fmt`, and debugging through the C debugger. Until 1.0 it is installed from the `.vsix` of its releases:
+
+```bash
+code --install-extension sosu-0.3.0.vsix
+```
+
+It runs the `sosuc` of the `PATH`, or else the one that an installer of §1.1 put in place, even in a VS Code opened before the installation; the setting `sosu.path` names any other. Other editors start `sosuc lsp` as the server of `.sosu` files.
 
 ## 2. Lexical Structure
 
