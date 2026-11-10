@@ -206,6 +206,9 @@ jobs:
             build/fuzz_ui_corpus
             build/fuzz_bindgen_corpus
             build/fuzz_lsp_corpus
+            build/fuzz_gltf_corpus
+            build/fuzz_obj_corpus
+            build/fuzz_fbx_corpus
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - name: Fuzz
@@ -229,6 +232,10 @@ jobs:
       - name: Fuzz the language server
         timeout-minutes: 3
         run: make fuzz-lsp FUZZ_TIME=60
+      # the readers of models (glTF, OBJ, FBX): code of Sosu, built by `sosuc fuzz` (spec 13.1)
+      - name: Fuzz the readers of models
+        timeout-minutes: 6
+        run: make build/sosuc && make fuzz-models FUZZ_TIME=60
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

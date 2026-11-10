@@ -216,7 +216,14 @@ Layout!model.ModelError layout_of(Document d, usize a, usize most) {
         none => "",
     };
     usize components = components_of(kind);
-    i64 type = number(acc, "componentType", 0.0) as i64;
+    // a whole number: a float of the file would not fit an integer (found by `sosuc fuzz`)
+    i64 type = match (json.get(acc, "componentType")) {
+        some(t) => match (json.as_i64(t)) {
+            some(i) => i,
+            none => 0,
+        },
+        none => 0,
+    };
     usize size = size_of_component(type);
     if (components == 0 || size == 0) {
         return err(damaged("glTF: an accessor of an unknown type"));
@@ -282,6 +289,12 @@ f32 component(Layout l, usize i, usize c) {
             : l.type == 5120 ? max(v / 127.0, -1.0)
             : l.type == 5122 ? max(v / 32767.0, -1.0)
             : v;
+}
+
+// The element `i` of an accessor of indices (8, 16 or 32 bits), as a whole number.
+ui32 index_at(Layout l, usize i) {
+    usize at = l.offset + i * l.stride;
+    return l.type == 5121 ? l.bytes[at] as ui32 : l.type == 5123 ? le16(l.bytes, at) : le32(l.bytes, at);
 }
 
 // The meshes of the mesh `m` of the document: one per primitive.
@@ -350,12 +363,13 @@ void!model.ModelError read_mesh(keeps Arena* arena, Document d, usize m, vec.Vec
         match (index(prim, "indices")) {
             some(a) => {
                 Layout read = try layout_of(d, a, model.MAX_INDICES);
-                if (read.components != 1 || read.type == 5126 || read.normalized) {
+                if (read.components != 1 || read.type != 5121 && read.type != 5123 && read.type != 5125
+                        || read.normalized) {
                     return err(damaged("glTF: indices that are not whole numbers"));
                 }
                 indices = arena.alloc_slice(ui32, read.count);
                 for (usize i in 0..read.count) {
-                    ui32 at = component(read, i, 0) as ui32;
+                    ui32 at = index_at(read, i);  // not through a float: 0xFFFFFFFF does not fit one back
                     if (at as usize >= vertices.len) {
                         return err(damaged("glTF: an index beyond the vertices"));
                     }

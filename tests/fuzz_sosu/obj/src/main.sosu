@@ -1,0 +1,65 @@
+// The fuzzing of model.obj (spec §13.1, work 5): whatever bytes libFuzzer gives, the reader
+// returns a model or an error, and never stops on a check of Sosu (an index out of its bounds, an
+// overflow) nor on an `assert`; what it returns is used, so that its meshes, nodes and materials
+// hold what their counts say.
+import math.linear;
+import math.geometry;
+import model.model;
+import model.obj;
+
+// Reads every part of the model: the vertices and indices of each mesh, its bounds moved by the
+// nodes, the materials and the images they name.
+void use(Arena* arena, model.Model m) {
+    linear.Mat4[] world = model.world_matrices(arena, m, linear.identity4());
+    for (usize n in 0..m.nodes.len) {
+        for (usize k in m.nodes[n].meshes) {
+            if (k < m.meshes.len) {
+                geometry.Aabb b = m.meshes[k].bounds.transformed(world[n]);
+                assert(b.min.x <= b.max.x || b.min.x != b.min.x);  // NaN passes: a file may hold one
+            }
+        }
+    }
+    for (model.Mesh mesh in m.meshes) {
+        for (ui32 i in mesh.indices) {
+            assert((i as usize) < mesh.vertices.len);
+        }
+        match (mesh.material) {
+            some(x) => {
+                assert(x < m.materials.len);
+            },
+            none => { },
+        }
+    }
+    for (model.Material mat in m.materials) {
+        match (mat.texture) {
+            some(t) => {
+                assert(t < m.images.len);
+            },
+            none => { },
+        }
+    }
+}
+
+void fuzz(ui8[] data) uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str source = match (str.from_bytes(data)) {
+        ok(s) => s,
+        err(e) => {
+            return;
+        },
+    };
+    // the same text read as MTL, then as OBJ with those materials
+    model.Material[] materials = match (obj.parse_mtl(&arena, source)) {
+        ok(found) => found,
+        err(e) => arena.alloc_slice(model.Material, 0),
+    };
+    match (obj.parse(&arena, source, materials)) {
+        ok(m) => {
+            use(&arena, m);
+        },
+        err(e) => {
+            model.message(e);
+        },
+    }
+}

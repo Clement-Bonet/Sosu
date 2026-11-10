@@ -45,6 +45,9 @@ static void usage(FILE *out) {
           "  fmt     format files or packages in place (--check: only report)\n"
           "  bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu] [--check]\n"
           "          write the Sosu declarations of a C header (spec 11.6)\n"
+          "  fuzz [--replay] [package] [-- arguments]\n"
+          "          build `void fuzz(ui8[] data)` for libFuzzer (clang) and run it; --replay: run it\n"
+          "          once on each file of the arguments (spec 13.1)\n"
           "  shaders [package] [--check] [--c file.c]\n"
           "          compile shaders/*.hlsl to SPIR-V, DXIL and MSL with shadercross (spec 8.2);\n"
           "          --c: also as a C file of the package, so that it carries them\n"
@@ -808,6 +811,10 @@ static char *objects_dir(const char *build_dir, const Target *target, bool optim
 }
 
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
+/* Flags given to every C compilation of the next `compile_c` (`sosuc fuzz`), NULL-ended; NULL
+   for none. */
+static const char *const *extra_c_flags = NULL;
+
 static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize,
                       const Links *links, const Target *target) {
     char *runtime = path_join(lib, "runtime");
@@ -823,6 +830,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         Command cl = {0};
         const char *options[] = { "cl", "/nologo", "/std:c11", "/utf-8", "/W0", "/Zi", optimize ? "/O2" : "/Od", NULL };
         add_all(&cl, options);
+        if (extra_c_flags) add_all(&cl, extra_c_flags);
         if (!optimize) command_add(&cl, "-DSOSU_DEBUG"); /* freed arenas made unreadable (sosu_rt.c) */
         char *rt = shell_path(runtime);
         char *rt_c = shell_path(runtime_c);
@@ -835,6 +843,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         add_source_flags(&cl, links, true);
         Command base = {0};
         add_all(&base, options);
+        if (extra_c_flags) add_all(&base, extra_c_flags);
         char *obj_dir = objects_dir(build_dir, target, optimize);
         if (ok) ok = package_objects(links, obj_dir, &base, true, log, &cl);
         free(obj_dir);
@@ -866,6 +875,10 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         for (size_t i = 0; i < command.count; i++) command_add(&base, command.items[i]); /* the compiler */
         add_all(&base, options);
         add_all(&command, options);
+        if (extra_c_flags) {
+            add_all(&base, extra_c_flags);
+            add_all(&command, extra_c_flags);
+        }
         if (!optimize) command_add(&command, "-DSOSU_DEBUG");
         command_addf(&command, "-I%s", runtime);
         command_add(&command, c_file);
@@ -2870,6 +2883,118 @@ static int command_shaders(int argc, char **argv) {
     return status;
 }
 
+/* `sosuc fuzz [--replay] [package] [-- arguments]` (spec 13.1, work 5): the package's
+   `void fuzz(ui8[] data)` built as the target of libFuzzer, with the sanitizers of addresses and
+   undefined behaviour, in build/fuzz/, and run with the arguments (its corpus folders, options of
+   libFuzzer); it needs clang (SOSU_CC=clang), or MSVC with its libFuzzer on Windows. With
+   --replay: built by any C compiler, in build/fuzz-replay/, and run once on each file of the
+   arguments (a folder gives its files): the inputs kept by the runs before, in `make test`. */
+static int command_fuzz(int argc, char **argv, const char *argv0, DiagFormat format) {
+    bool replay = false;
+    const char *dir = ".";
+    int rest = argc;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) {
+            rest = i + 1;
+            break;
+        }
+        if (strcmp(argv[i], "--replay") == 0) {
+            replay = true;
+        } else if (argv[i][0] != '-') {
+            dir = argv[i];
+        } else {
+            fprintf(stderr, "sosuc: unknown option `%s` of `sosuc fuzz`\n", argv[i]);
+            return 2;
+        }
+    }
+    char *lib = library_dir(argv0);
+    Program program;
+    Sema sema = {0};
+    char *source = NULL;
+    CodegenOptions checks = { true, true, true };
+    bool ok = program_load(&program, dir, lib);
+    if (ok) ok = sema_check(&sema, &program);
+    if (ok) {
+        source = codegen_program(&sema, &program, CODEGEN_FUZZ, checks);
+        ok = source != NULL;
+    }
+    if (program.fatal) fprintf(stderr, "sosuc: %s\n", program.fatal);
+    print_diagnostics(&program.diags, format);
+    int status = program.fatal ? 2 : 1;
+    if (ok) {
+        const Package *root = program.packages.items[0];
+        char *base_dir = path_join(root->root, "build");
+        char *build_dir = path_join(base_dir, replay ? "fuzz-replay" : "fuzz");
+        free(base_dir);
+        shell_make_dir(build_dir);
+        char *file = sosu_format("%s_fuzz.c", root->name);
+        char *c_file = path_join(build_dir, file);
+#ifdef _WIN32
+        char *exe_name = sosu_format("%s_fuzz.exe", root->name);
+#else
+        char *exe_name = sosu_format("%s_fuzz", root->name);
+#endif
+        char *exe = path_join(build_dir, exe_name);
+        Links links;
+        collect_links(&program, &links, &host_target);
+        bool msvc = false;
+#ifdef _WIN32
+        const char *cc = getenv("SOSU_CC");
+        msvc = !cc || !cc[0];
+#endif
+        static const char *const replay_gnu[] = { "-DSOSU_FUZZ_REPLAY", NULL };
+        static const char *const replay_msvc[] = { "/DSOSU_FUZZ_REPLAY", NULL };
+        static const char *const fuzz_gnu[] = { "-fsanitize=fuzzer,address,undefined", "-fno-sanitize-recover=undefined", NULL };
+        /* the sanitizer makes every frame larger: 16 MB of stack, as Linux nearly gives (8 MB) */
+        static const char *const fuzz_msvc[] = { "/fsanitize=fuzzer", "/fsanitize=address", "/F16777216", NULL };
+        extra_c_flags = replay ? (msvc ? replay_msvc : replay_gnu) : (msvc ? fuzz_msvc : fuzz_gnu);
+        if (!write_file(c_file, source)) {
+            fprintf(stderr, "sosuc: cannot write `%s`\n", c_file);
+            status = 2;
+        } else if (!compile_c(build_dir, c_file, exe, lib, false, &links, &host_target)) {
+            fprintf(stderr, "sosuc: the C compiler failed on `%s`%s\n", c_file,
+                    replay ? "" : " (fuzzing needs clang, SOSU_CC=clang, or MSVC with its libFuzzer)");
+            status = 2;
+        } else if (!copy_files(&links, build_dir)) {
+            status = 2;
+        } else {
+            char *native_exe = shell_path(exe);
+            Command command = {0};
+            command_add(&command, native_exe);
+            for (int i = rest; i < argc; i++) {
+                if (replay && shell_dir_exists(argv[i])) {
+                    size_t count = 0;
+                    char **names = shell_files_ending(argv[i], "", &count);
+                    for (size_t k = 0; k < count; k++) {
+                        char *path = path_join(argv[i], names[k]);
+                        command_add(&command, path);
+                        free(path);
+                        free(names[k]);
+                    }
+                    free(names);
+                } else {
+                    command_add(&command, argv[i]);
+                }
+            }
+            status = command_run(&command);
+            command_free(&command);
+            free(native_exe);
+        }
+        extra_c_flags = NULL;
+        free_links(&links);
+        free(exe);
+        free(exe_name);
+        free(c_file);
+        free(file);
+        free(build_dir);
+    }
+    free(source);
+    free(lib);
+    sema_free(&sema);
+    program_free(&program);
+    return status;
+}
+
 /* `sosuc doc`: the reference of what a package makes `pub`, with the comments written above it
    (spec 7.6), in Markdown: one section per module of the package, interface and catalog files
    aside. */
@@ -3011,6 +3136,7 @@ int main(int argc, char **argv) {
     if (strcmp(command, "doc") == 0) return command_doc(argc - 2, argv + 2, argv[0]);
     if (strcmp(command, "bindgen") == 0) return command_bindgen(argc - 2, argv + 2);
     if (strcmp(command, "shaders") == 0) return command_shaders(argc - 2, argv + 2);
+    if (strcmp(command, "fuzz") == 0) return command_fuzz(argc - 2, argv + 2, argv[0], FORMAT_TEXT);
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;

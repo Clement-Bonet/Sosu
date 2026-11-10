@@ -1,0 +1,9 @@
+# A target of `sosuc fuzz` (spec §13.1, work 5): model.fbx, FBX, binary and ASCII (ufbx, through native/fbx.c), given what libFuzzer
+# makes; `corpus/` holds its seeds and the inputs that once failed, replayed by `make test`.
+[package]
+name = "fuzz_fbx"
+version = "0.1.0"
+
+[dependencies]
+model = { path = "../../../packages/model" }
+math = { path = "../../../packages/math" }

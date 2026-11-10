@@ -26,6 +26,9 @@ jobs:
             build/fuzz_ui_corpus
             build/fuzz_bindgen_corpus
             build/fuzz_lsp_corpus
+            build/fuzz_gltf_corpus
+            build/fuzz_obj_corpus
+            build/fuzz_fbx_corpus
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - name: Fuzz the compiler
@@ -51,6 +54,10 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: make fuzz-lsp FUZZ_TIME=1800
+      - name: Fuzz the readers of models
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make build/sosuc && make fuzz-models FUZZ_TIME=600
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
