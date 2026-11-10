@@ -1116,6 +1116,7 @@ Translation in v0:
 | `TitleBar(...) { ... }`, `Dropdown(...) { Option(...) }` | see §10.5 |
 
 - `if`, `else` and `for (T x in ...)` hold nodes, as in the examples. Identities (§10.6): each node of a widget that has one is preceded by `f.at(site)`, its offset in the file; a component used as a node is called between `f.push_id(site)` and `f.pop_id()`; a `for` is between `f.push_id(site)` and `f.pop_id()`, each iteration between `f.push_item()` (or `f.push_id(key as ui64)` with `for (T x in ..., key: k)`) and `f.pop_id()`. `focus: c` on a `TextField`, a `Button`, a `Dropdown` or a `List` becomes `if (c) { f.focus_here(); }` before it. A node without arguments may leave out its parentheses: `List { ... }`.
+- `from:` and `until:` on a node, `md:` (and `sm:`, `lg:`, `xl:`, `xxl:`) on a `Grid`, `stack:` on a `Row`: the layout follows the width of the window, see §10.12.
 - `theme` and `style` blocks, and `style:` on a node: see §10.7. `Grid` and the places of its nodes (`row:`, `col:`, `span:`, `align:`), `Group`, `Tabs` and `Tree`: see §10.8. `bind:` goes on `TextField`, `TextArea`, `NumberField`, `MoneyField`, `Checkbox`, `Radio`, `Dropdown`, `Slider` and `DateField` (elsewhere: error E0215). `.ui.sosu` files have no formatter yet; `sosuc parse file.ui.sosu` shows the functions they become.
 
 Grammar of a `.ui.sosu` file (the expressions, types and parameters are those of §12):
@@ -1139,7 +1140,7 @@ state        = IDENT "{" property { [ "," ] property } "}" ;        (* hover, fo
 
 - Touch screens: `Touch` events, gestures in `ui`.
 - Safe areas (notches, system bars): `SafeAreaChanged`.
-- Orientation, virtual keyboard and varying screen sizes: adaptive layout in `ui`.
+- Orientation, virtual keyboard and varying screen sizes: adaptive layout in `ui`, with breakpoints (§10.12).
 - Lifecycle: `Suspend` / `Resume` / `LowMemory`; on iOS, rendering must stop in the background.
 - The dialogs of the system (§10.11): on Android, files opened and saved through its Storage Access Framework, as `content://` URIs, and no folder dialog; on iOS, no file dialog; message boxes on both.
 
@@ -1767,6 +1768,65 @@ SDL calls the answer of a file dialog back "possibly on another thread": on Wind
 - The program names its dialogs by a tag, not by a value returned: the answers need no state kept by `platform`.
 - Not yet: the title and the texts of the buttons of a file dialog (`SDL_ShowFileDialogWithProperties`), several folders at once, the colors of a message box.
 
+### 10.12 Responsive windows (step 15)
+
+Status: available. A layout follows the width of the window, with breakpoints as in the grid of Bootstrap: the columns of a grid stack on a phone and sit side by side on a desktop, and a widget is shown or hidden by width.
+
+```sosu
+window Files(state.Files* s) {
+    Row(stack: Md, gap: 16) {
+        Tree(selected: s.folder, width: 240, height: Fill, from: Md)
+        Grid(columns: [Fill, 44], md: [Fill, 120, 44], lg: [Fill, 120, 200, 44]) {
+            for (state.File* f in s.files, key: f.id) {
+                Text(f.name)
+                Text(f.size, from: Md)
+                Text(f.changed, from: Lg)
+                Button("Open", on_click: s.open(f))
+            }
+        }
+    }
+}
+```
+
+#### Breakpoints
+
+| Name | From (pixels of `ui`) | Typically |
+|---|---|---|
+| `Xs` | 0 | a phone held upright |
+| `Sm` | 576 | a phone held sideways |
+| `Md` | 768 | a tablet |
+| `Lg` | 992 | a small laptop |
+| `Xl` | 1200 | a desktop |
+| `Xxl` | 1400 | a wide screen |
+
+- The width compared is that of the window, inside its safe area, in pixels of `ui`: those of the screen divided by `ui.scale` (§11.5). A phone 1080 pixels wide at a scale of 3 is 360 pixels wide: `Xs`. It is the width of the window, not that of the container (the media queries of CSS, not its container queries): the same breakpoint holds for the whole frame.
+- The values are those of Bootstrap 5, fixed in v0.
+
+#### In a `.ui.sosu` file
+
+- `from: Md` on any node (a widget, a `Column`, a `Grid`, a component): the node is described only when the window is at least that wide; `until: Md`, only when it is narrower; both: between the two. The node, its cell and its tooltip are then in `if (f.at_least(widgets.Breakpoint.Md)) { ... }` (`f.below(...)` for `until:`). A node that is not described does not exist in that frame (§10.6): in a grid, it takes no cell, and the next node takes its place.
+- `Grid(columns: [...], sm: [...], md: [...], lg: [...], xl: [...], xxl: [...])`: `columns` holds for the narrowest windows, and each breakpoint given replaces it from its width. The translator chooses, the widest first: `if (f.at_least(Lg)) { f.grid_column(...) ... } else if (f.at_least(Md)) { ... } else { ... }`. The nodes that take the next free cell (§10.8) follow the columns: with one column, they stack; with several, they sit side by side. A literal `col:` past the last column goes to the last one, as before. When the number of columns of a grid changes, the sizes its cells measured are forgotten, and measured again at the next frame.
+- `Row(stack: Md)`: a row from `Md`, a column below (`f.row_stacked(widgets.Breakpoint.Md, gap, padding)`, closed by `f.end()`): a side bar beside its content on a desktop, above it on a phone.
+- A breakpoint is written without qualifier (`Md`); another expression is a `widgets.Breakpoint` already: `from: s.wide_from`.
+- What does not change: the widths of the widgets (`width: Fill` in a cell follows the cell), the rows of a grid (`rows:` has no breakpoints), and the properties of a node other than its columns (a `gap` by width: later, if programs need it).
+
+#### In `ui`
+
+- `widgets.Breakpoint` (`Xs`, `Sm`, `Md`, `Lg`, `Xl`, `Xxl`) and `widgets.breakpoint_width(b)`, its width.
+- `f.at_least(b)`: whether the window is at least as wide as `b`; `f.below(b)`: narrower; `f.breakpoint()`: the widest it reaches. A program that describes its interface in Sosu uses them as the translator does.
+- `f.row_stacked(from, gap, padding)`: a row from `from`, a column below.
+
+#### Tests
+
+- `ui`: the breakpoint of a window from its width, its scale and its safe area; a grid with other columns from `Md`, a widget shown from `Md`, a row stacked below `Md`, at 1000 and 400 pixels, and back.
+- The translator: `from:`, `until:` and both, on a widget and on a component; `md:` and `lg:` on a `Grid`; `Row(stack: Md)`; `md:` or `stack:` on a `Column`, `from:` given twice, `md:` that is not a list (E0215). The type checker: a breakpoint that is not one (E0331, E0337).
+- `tests/programs/screens`: a translated component, its buttons clicked at 1000 and 400 pixels. `showcase/courier`: the state of a download hidden below `Lg`, its progress and the limit of bandwidth below `Md`.
+
+#### Decisions, and what differs from the design
+
+- Breakpoints as values of the window, not of a container: a container's width is known only once its content is placed, one frame late; the window's is known before the first widget.
+- The columns change with the width, rather than the span of each node as in Bootstrap (`col-12 col-md-6`): a grid of `ui` already has columns of sizes (§10.8), and its nodes already flow into the next free cell; changing the columns reflows them without a property per node.
+
 ## 11. Targets and compilation
 
 ### 11.1 Targets
@@ -1871,7 +1931,7 @@ sosuc package --target ios-sim examples/window       # build/ios/window.app, for
 - iOS: `sosuc package --target ios-sim` builds the `.app` itself (clang, `SDL3.framework` in `Frameworks/`, `Info.plist`, signed for the simulator), without an Xcode project: there is nothing to keep up to date. For a device, `sosuc build --target ios-arm64` gives `libmain.a`, linked in an Xcode project with the signing team of the developer.
 - `app.data_folder(arena, name)` takes the name of the application (`SDL_GetPrefPath`).
 - An asset is kept in the APK or the bundle under the path the program reads on the desktop: its path relative to the folder where `sosuc` runs (`assets = ["../../packages/render/fonts/NotoSans-Regular.ttf"]` in `examples/themes` is read as `packages/render/fonts/NotoSans-Regular.ttf`, from the repository).
-- On a phone, the window takes the whole screen: `run` starts the program with `Resized`, `SafeAreaChanged` and `ScaleChanged` when the screen differs from what it asked for, and the program gives them to `ui` (`ui.safe_area`, `ui.scale`). The widths that the program gives its widgets stay its own: a layout made for the desktop is not adapted to a phone (responsive layouts: step 15 of the roadmap, §13).
+- On a phone, the window takes the whole screen: `run` starts the program with `Resized`, `SafeAreaChanged` and `ScaleChanged` when the screen differs from what it asked for, and the program gives them to `ui` (`ui.safe_area`, `ui.scale`). The widths that the program gives its widgets stay its own; a layout adapts to a phone through breakpoints (`from: Md`, the columns of a grid by width, `Row(stack: Md)`, §10.12), which compare the width of the window divided by `ui.scale`.
 - `io.print` and the run-time errors go to the log of Android (`adb logcat -s sosu`) through a thread that reads standard output.
 - The CI builds an APK in an `Android (NDK)` job and the simulator application in the `macOS` job; `tests/programs` builds `examples/window` for `android-x64` when an NDK is found, and says it skipped otherwise.
 
@@ -2052,8 +2112,8 @@ Inside a node, `if`, `for` and `match` follow the syntax of §5 and §7.1, with 
 12. Custom native backend (x86-64 / ARM64; ELF, Mach-O, PE)
 13. Research: `comptime`, effect polymorphism, regions, concurrency
 14. Self-hosting
-15. Responsive windows (not urgent): layouts that adapt to the width of the window, with breakpoints, as the grid of Bootstrap (`xs`, `md`, `lg`...): columns that stack on a phone and sit side by side on a desktop, widgets shown or hidden by width, in `.ui.sosu` (§10.2) and `ui`
-Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15, the libraries of §8.2 marked 1.0, and what the language lacked: lambdas (§5.5) and concurrency (§5.6), now done.
+15. Responsive windows: layouts that adapt to the width of the window, with breakpoints, as the grid of Bootstrap (`Xs`, `Md`, `Lg`...): columns that stack on a phone and sit side by side on a desktop, widgets shown or hidden by width, in `.ui.sosu` (§10.2) and `ui`: done (§10.12)
+Version 1.0 (§13.1) comes before steps 12 to 14: it holds step 15 (done), the libraries of §8.2 marked 1.0, and what the language lacked: lambdas (§5.5) and concurrency (§5.6), now done.
 
 ### 13.1 Version 1.0
 
@@ -2070,7 +2130,7 @@ What 1.0 holds, in the proposed order; how long each work may take is estimated 
 | 5 | Quality | Done: the grammar and the error codes frozen, and a compatibility policy (§12, §13.2, `docs/errors.md`, the codes checked by `make test`); the parser, the semantic analysis, code generation and the formatter fuzzed by libFuzzer in the CI (`tests/fuzz.c`, `make fuzz`, the inputs that crashed replayed by `make test` from `tests/fuzz/`); the time of `sosuc` on programs of 5 000 to 80 000 lines measured in the CI (`tests/bench.c`, `make bench`), which found four lookups that grew with the program (the C types, the instances of generic functions, the structural types, the names of a module): about 285 000 lines a second, linearly; `void!E` a value as any other, and a type such as `ui8*` given to `alloc_slice` and `size_of` (§5.3, §6); `git` and the C compiler run without a shell (§8.1); the depth of the tree bounded (E0219, §12), the values of `sosu.toml` checked before they reach a command (E0416, §8.1), the pointers returned into a function refused (E0371, §7.7) |
 | 6 | Tooling | Rename and references in `sosuc lsp`; `sosuc doc` (the documentation of a package, from its comments); long lines broken by the formatter; the VS Code extension finished |
 | 7 | Documentation | A guide from the first program to a window, the reference of `std`, examples for each package of §8.2 marked 1.0 |
-| 8 | Interface | Responsive windows (step 15), the menus with the keyboard (§14.2) |
+| 8 | Interface | Done: responsive windows (step 15, §10.12), and the menus with the keyboard (§10.6: F10 or Alt alone, the arrows, Enter, Escape, Shift+F10) |
 | 9 | Distribution | Installers of `sosuc` for each desktop, version numbers and release notes, signed binaries |
 | 10 | Dangling pointers | Sosu does not promise memory safety: without lifetimes in the types, some dangling pointers cannot be proved absent, by choice (decision of November 6, 2026). What 1.0 promises: the compiler refuses the cases of the rules of §6.1, what it does not follow is listed in §7.7, and a debug build stops on a pointer used after the `free()` of its arena. Done (November 6, 2026). |
 
@@ -2156,5 +2216,5 @@ Widgets of `ui` (§10.4):
 - Title bars: Windows 11 shows its snap layouts when the mouse rests on the maximize button, which needs `HTMAXBUTTON`, an answer that SDL's hit test does not have. (proposed: accept it in v0; a Win32 backend could add it)
 - Title bars: the double-click that maximizes, on macOS and Linux, where SDL moves the window itself. Detect it in `ui` and send `ToggleMaximize`? (proposed: later; SDL takes the clicks of the drag area before the program sees them)
 - Menus are drawn by `ui`, the same on every system. On macOS, the menus of an application belong in the bar at the top of the screen: give them to the system there (`NSMenu`, through a backend outside of SDL), or keep them in the window? (proposed: in the window in v0; the bar of macOS later, from the same `MenuBar`)
-- Menus and the keyboard: Alt (or F10) to reach the bar, the arrows between menus and items, Enter to choose, the letter of an item. (proposed: later, with the keyboard navigation of §10.4, foundation 5)
+- Menus and the keyboard: Alt (or F10) to reach the bar, the arrows between menus and items, Enter to choose, the letter of an item. (decided: done, see §10.6; Shift+F10 and the Menu key open the context menu of the widget that has the keyboard)
 - Accessibility (screen readers) needs the tree of widgets, which immediate mode does not keep. (proposed: later; the frame could record its widgets as it draws them)

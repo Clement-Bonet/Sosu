@@ -12,6 +12,13 @@ void frame(widgets.Ui* ui, canvas.Canvas* surface, state.Form* form) {
     f.finish();
 }
 
+// The responsive component, on `surface`.
+void responsive(widgets.Ui* ui, canvas.Canvas* surface, state.Form* form) {
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    screen.Responsive(&f, form);
+    f.finish();
+}
+
 void click(widgets.Ui* ui, f32 x, f32 y) {
     ui.mouse_move(x, y);
     ui.mouse_button(true);
@@ -61,5 +68,26 @@ i32 main() uses io {
     click(&ui, 30.0, 310.0);  // S
     frame(&ui, &surface, form);
     io.print("size small: {}, changes: {}", form.size == state.Size.Small, form.changes);
+
+    // A window 1000 pixels wide (Lg), then 400 (Xs). On the desktop, the grid has two columns of
+    // 500 and one row (0-32), the row of buttons is a row (40-72); on the phone, the grid has one
+    // column and two rows (0-64), the row is a column: Left 72-104, Right 112-144.
+    mut canvas.Canvas desktop = canvas.create(&arena, 1000, 200);
+    mut canvas.Canvas phone = canvas.create(&arena, 400, 200);
+    mut widgets.Ui wide_ui = widgets.Ui{ };
+    responsive(&wide_ui, &desktop, form);
+    responsive(&wide_ui, &desktop, form);
+    click(&wide_ui, 510.0, 10.0);  // Wide, in the second column
+    responsive(&wide_ui, &desktop, form);
+    click(&wide_ui, 10.0, 125.0);  // nothing there
+    responsive(&wide_ui, &desktop, form);
+    io.print("desktop: changes {}, greeted {}", form.changes, form.greeted);
+    responsive(&wide_ui, &phone, form);
+    responsive(&wide_ui, &phone, form);
+    click(&wide_ui, 10.0, 45.0);  // Narrow, under A
+    responsive(&wide_ui, &phone, form);
+    click(&wide_ui, 10.0, 125.0);  // Right, under Left
+    responsive(&wide_ui, &phone, form);
+    io.print("phone: changes {}, greeted {}", form.changes, form.greeted);
     return 0;
 }

@@ -5,6 +5,20 @@ component Greeting(str text) {
     Text(text)
 }
 
+// A layout that follows the width of the window: two columns from `Md`, one below; a button for
+// each width; a row that stacks below `Md`.
+component Responsive(state.Form* form) {
+    Grid(columns: [Fill], md: [Fill, Fill], gap: 0) {
+        Button("A", on_click: form.changed)
+        Button("Narrow", on_click: form.changed, until: Md)
+        Button("Wide", on_click: form.changed, from: Md)
+    }
+    Row(stack: Md) {
+        Button("Left")
+        Button("Right", on_click: form.greet)
+    }
+}
+
 window Greeter(state.Form* form) {
     title: "Greeter"
     width: 400

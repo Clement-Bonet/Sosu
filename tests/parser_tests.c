@@ -886,6 +886,67 @@ static void test_ui_grids(void) {
                     "        }\n    }\n}\n", "E0215", 4, 23);
 }
 
+/* Responsive windows (spec §10.2): the columns of a grid by breakpoint, `from:` and `until:` on
+   any node, `Row(stack: ...)`. */
+static void test_ui_responsive(void) {
+    expect_ui("window W(S* s) {\n    Grid(columns: [Fill], md: [Fill, 60], lg: [Fill, 200, 60]) {\n"
+              "        Text(\"a\")\n        Text(\"b\", from: Md, until: Xl)\n"
+              "        Button(\"x\", until: Lg, tooltip: \"t\")\n    }\n"
+              "    Row(stack: Md, gap: 4) {\n        Text(\"c\", from: s.wide)\n    }\n}\n",
+              "(fn pub void W ((widgets.Frame* ui_frame) (S* s))\n"
+              "  (block\n"
+              "    (call (. ui_frame grid) (- 1.0) (- 1.0))\n"
+              "    (if (call (. ui_frame at_least) (. (. widgets Breakpoint) Lg))\n"
+              "      (block\n"
+              "        (call (. ui_frame grid_column) (call (. (. widgets Size) Fill) 1.0))\n"
+              "        (call (. ui_frame grid_column) (call (. (. widgets Size) Pixels) 200))\n"
+              "        (call (. ui_frame grid_column) (call (. (. widgets Size) Pixels) 60)))\n"
+              "      (if (call (. ui_frame at_least) (. (. widgets Breakpoint) Md))\n"
+              "        (block\n"
+              "          (call (. ui_frame grid_column) (call (. (. widgets Size) Fill) 1.0))\n"
+              "          (call (. ui_frame grid_column) (call (. (. widgets Size) Pixels) 60)))\n"
+              "        (block\n"
+              "          (call (. ui_frame grid_column) (call (. (. widgets Size) Fill) 1.0)))))\n"
+              "    (call (. ui_frame label) (call (. ui_frame tr) \"a\"))\n"
+              "    (if (&& (call (. ui_frame at_least) (. (. widgets Breakpoint) Md)) (call (. ui_frame below) (. (. widgets Breakpoint) Xl)))\n"
+              "      (block\n"
+              "        (call (. ui_frame label) (call (. ui_frame tr) \"b\"))))\n"
+              "    (if (call (. ui_frame below) (. (. widgets Breakpoint) Lg))\n"
+              "      (block\n"
+              "        (call (. ui_frame at) 147)\n"
+              "        (call (. ui_frame button) (call (. ui_frame tr) \"x\"))\n"
+              "        (call (. ui_frame tooltip) (call (. ui_frame tr) \"t\"))))\n"
+              "    (call (. ui_frame end_grid))\n"
+              "    (call (. ui_frame row_stacked) (. (. widgets Breakpoint) Md) 4 (- 1.0))\n"
+              "    (if (call (. ui_frame at_least) (. s wide))\n"
+              "      (block\n"
+              "        (call (. ui_frame label) (call (. ui_frame tr) \"c\"))))\n"
+              "    (call (. ui_frame end))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    /* a component hidden by width: its call, in its scope, in the `if` */
+    expect_ui("component C() { }\nwindow W() {\n    C(until: Sm)\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame))\n"
+              "  (block))\n"
+              "(fn pub void W ((widgets.Frame* ui_frame))\n"
+              "  (block\n"
+              "    (if (call (. ui_frame below) (. (. widgets Breakpoint) Sm))\n"
+              "      (block\n"
+              "        (call (. ui_frame push_id) 35)\n"
+              "        (call C ui_frame)\n"
+              "        (call (. ui_frame pop_id))))))\n"
+              "(fn pub widgets.Window WConfig ()\n"
+              "  (block\n"
+              "    (return (lit widgets.Window))))\n"
+              "(import ui.widgets)\n");
+    expect_ui_error("window W() {\n    Column(md: [Fill]) { }\n}\n", "E0215", 2, 12);
+    expect_ui_error("window W() {\n    Column(stack: Md) { }\n}\n", "E0215", 2, 12);
+    expect_ui_error("window W() {\n    Text(\"a\", from: Md, from: Lg)\n}\n", "E0215", 2, 25);
+    expect_ui_error("window W() {\n    Grid(columns: [Fill], md: Fill) { }\n}\n", "E0215", 2, 31);
+}
+
 static void test_ui_themes(void) {
     expect_ui("style Danger {\n    background: #F38BA8\n    radius: 6\n    hover { background: #EBA0AC, border_width: 2 }\n}\n",
               "(fn pub widgets.Style Danger ()\n"
@@ -980,6 +1041,7 @@ int main(void) {
     test_ui_files();
     test_ui_themes();
     test_ui_grids();
+    test_ui_responsive();
     test_precedence();
     test_casts();
     test_generics();
