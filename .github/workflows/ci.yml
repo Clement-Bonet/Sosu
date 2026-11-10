@@ -28,13 +28,14 @@ jobs:
       # Sosu declares the SDL functions itself and needs no header: the library is enough
       # (libsdl3-dev pulls in some 170 packages, slow when the mirror is). The link libSDL3.so,
       # which -lSDL3 looks for, comes with libsdl3-dev: it is made by hand. The tests package a
-      # program of `platform` (spec 11.6): SDL comes first.
-      - name: Install SDL3
+      # program of `platform` (spec 11.6): SDL comes first. lavapipe (the Vulkan of Mesa, on the
+      # processor) gives tests/programs/gpu a GPU without one (spec 8.2).
+      - name: Install SDL3 and lavapipe
         timeout-minutes: 8  # a stalled apt mirror fails the job instead of hanging it
         run: |
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           sudo apt-get $APT update
-          sudo apt-get $APT install -y --no-install-recommends libsdl3-0
+          sudo apt-get $APT install -y --no-install-recommends libsdl3-0 libvulkan1 mesa-vulkan-drivers
           sudo ln -sf "$(ls /usr/lib/x86_64-linux-gnu/libSDL3.so.0)" /usr/local/lib/libSDL3.so
           sudo ldconfig
       - name: Build and test

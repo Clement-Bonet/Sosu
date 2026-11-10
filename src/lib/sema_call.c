@@ -127,6 +127,30 @@ static Type *call_builtin(Body *b, Expr *e, const char *name, Type *expected) {
         }
         return sema_builtin(b, "usize");
     }
+    if (strcmp(name, "offset_of") == 0) {
+        /* offset_of(T, field): where a field of a struct starts, in bytes, as C lays it out (spec §8.2) */
+        Type *type = count == 2 ? sema_type_argument(b, args[0]) : NULL;
+        FieldInfo *field = NULL;
+        if (type && type->tag == T_STRUCT && args[1]->kind == EXPR_NAME) {
+            field = sema_find_field(type->as.info, args[1]->as.name);
+        }
+        if (!field) {
+            if (!type || !sema_is_error(type)) {
+                Diagnostic *d = sema_error_expr(b, "E0336", callee, "`offset_of` takes a struct and the name of one of its fields");
+                diag_help(d, "e.g. `offset_of(Vertex, normal)`");
+            }
+            return sema_builtin(b, "usize");
+        }
+        Name field_name = args[1]->as.name;
+        if (type->as.info->unit != b->unit && !field->decl->is_pub) {
+            Diagnostic *d = sema_error_at(b, "E0305", field_name.offset, field_name.length,
+                                          "the field `%.*s` of `%.*s` is private", NAME_ARGS(field_name), NAME_ARGS(type->name));
+            diag_help(d, "declare it `pub` in `%.*s`", NAME_ARGS(type->name));
+        }
+        args[0]->type = type;
+        args[1]->type = field->type;
+        return sema_builtin(b, "usize");
+    }
     bool is_ok = strcmp(name, "ok") == 0;
     bool void_ok = is_ok && expected && expected->tag == T_RESULT && expected->as.result.value->tag == T_VOID;
     bool two = strcmp(name, "min") == 0 || strcmp(name, "max") == 0 || strncmp(name, "wrapping_", 9) == 0;

@@ -242,6 +242,30 @@ static void test_stack_overflow(const char *sosuc) {
     }
 }
 
+/* The package gpu (spec §8.2): scenes drawn without a window and read back, and a computation.
+   A machine without a GPU driver (Vulkan, Direct3D 12, Metal) makes the program exit with 77:
+   the test is skipped, and says so. The shaders it loads must be up to date. */
+static void test_gpu(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command, "%s shaders tests/programs/gpu --check > build/gpu_shaders.out 2>&1", sosuc);
+    CHECK(run(command) == 0, "the shaders of tests/programs/gpu are out of date (see build/gpu_shaders.out)");
+    snprintf(command, sizeof command, "%s run tests/programs/gpu > build/gpu.out 2> build/gpu.err", sosuc);
+    int status = run(command);
+    if (status == 77) {
+        char *said = read_text("build/gpu.out");
+        printf("gpu: skipped, %s", said ? said : "no device\n");
+        free(said);
+        return;
+    }
+    CHECK(status == 0, "run gpu: exit code %d (see build/gpu.out and build/gpu.err)", status);
+    char *actual = read_text("build/gpu.out");
+    char *expected = read_text("tests/programs/gpu/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run gpu: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+}
+
 static void test_bindgen(const char *sosuc) {
     char command[1024];
     snprintf(command, sizeof command,
@@ -466,6 +490,7 @@ int main(int argc, char **argv) {
 
     test_library(argv[1]);
     test_bindgen(argv[1]);
+    test_gpu(argv[1]);
     test_doc(argv[1]);
     test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);
     test_guide(argv[1], "guide", "docs/GUIDE.md", 55);

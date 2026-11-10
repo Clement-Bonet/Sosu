@@ -1629,6 +1629,21 @@ static void parse_probe(P *p) {
         free(m.name);
         return;
     }
+    /* a value that depends on where it is used: the place of the probe (bindgen.h) */
+    for (size_t i = first; i < end; i++) {
+        const Tok *t = &p->toks.items[i];
+        bool line = t->kind == TK_NUMBER && t->length == strlen(BINDGEN_PROBE_LINE) &&
+                    strncmp(t->text, BINDGEN_PROBE_LINE, t->length) == 0;
+        bool file = false;
+        size_t n = strlen(BINDGEN_PROBE_FILE);
+        for (size_t j = 0; t->kind == TK_STRING && j + n <= t->length && !file; j++) {
+            file = strncmp(t->text + j, BINDGEN_PROBE_FILE, n) == 0;
+        }
+        if (line || file) {
+            free(m.name);
+            return;
+        }
+    }
     SOSU_VEC_PUSH(&p->macros, m);
 }
 

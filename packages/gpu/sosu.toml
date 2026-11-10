@@ -1,0 +1,9 @@
+# 3D drawing on the GPU (spec §8.2): SDL_GPU (Vulkan, Metal, Direct3D 12), through the
+# declarations of platform.sdl_c, on a window of `app.run_window`.
+[package]
+name = "gpu"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../platform" }  # SDL3, its declarations, and the window of run_window
+image = { path = "../image" }        # textures from images

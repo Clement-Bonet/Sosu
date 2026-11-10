@@ -1,0 +1,4 @@
+triangle: ok
+depth: ok
+texture: ok
+compute: ok

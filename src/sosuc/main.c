@@ -2,6 +2,7 @@
 #define _XOPEN_SOURCE 700 /* realpath */
 #endif
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +45,8 @@ static void usage(FILE *out) {
           "  fmt     format files or packages in place (--check: only report)\n"
           "  bindgen <header.h> [-I dir]... [-D NAME[=value]]... [--prefix P]... [-o file.sosu] [--check]\n"
           "          write the Sosu declarations of a C header (spec 11.6)\n"
+          "  shaders [package] [--check]\n"
+          "          compile shaders/*.hlsl to SPIR-V, DXIL and MSL with shadercross (spec 8.2)\n"
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
           "  i18n extract [package] [-o messages.locale.default.sosu]\n"
           "          write the template of the catalogs of translations (spec 10.7)\n"
@@ -1080,6 +1083,7 @@ static int command_bindgen(int argc, char **argv) {
     if (ok) {
         char *probe = sosu_strdup(include);
         for (size_t i = 0; i < macros.count; i++) {
+            append(&probe, "#line %s \"" BINDGEN_PROBE_FILE "\"\n", BINDGEN_PROBE_LINE);
             append(&probe, BINDGEN_PROBE " \"%s\" ", macros.items[i]);
             append(&probe, "%s ;\n", macros.items[i]);
         }
@@ -2634,6 +2638,144 @@ static int command_i18n(int argc, char **argv, const char *argv0) {
     return status;
 }
 
+/* The formats `sosuc shaders` writes: the destination of `shadercross`, and the extension. */
+static const char *const SHADER_FORMATS[][2] = { { "SPIRV", "spv" }, { "DXIL", "dxil" }, { "MSL", "msl" }, { "JSON", "json" } };
+
+/* A name of a file of shaders that `shadercross` can be given: letters, digits, `-`, `_`, `.`. */
+static bool shader_name_ok(const char *name) {
+    if (!name[0] || name[0] == '-' || name[0] == '.') return false;
+    for (const char *c = name; *c; c++) {
+        if (!(isalnum((unsigned char)*c) || *c == '-' || *c == '_' || *c == '.')) return false;
+    }
+    return true;
+}
+
+/* `sosuc shaders [package] [--check]` (spec 8.2): each `shaders/<name>.<vert|frag|comp>.hlsl`
+   compiled by `shadercross` to SPIR-V, DXIL and MSL, with its resources (JSON), in
+   `shaders/compiled/`, when it is newer than them. With --check, compiles nothing: exit 1 if one
+   is out of date. Exit 2 when `shadercross` cannot be run. */
+static int command_shaders(int argc, char **argv) {
+    const char *dir = ".";
+    bool check = false;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--check") == 0) {
+            check = true;
+        } else if (argv[i][0] != '-') {
+            dir = argv[i];
+        } else {
+            fprintf(stderr, "sosuc: unknown option `%s` of `sosuc shaders`\n", argv[i]);
+            return 2;
+        }
+    }
+    char *sources = path_join(dir, "shaders");
+    char *out = path_join(sources, "compiled");
+    size_t count = 0;
+    char **names = shell_files_ending(sources, ".hlsl", &count);
+    if (count == 0) {
+        fprintf(stderr, "sosuc: no .hlsl file in `%s`\n", sources);
+        free(sources);
+        free(out);
+        return 2;
+    }
+    if (!check) shell_make_dir(out);
+    int status = 0;
+    size_t compiled = 0, stale = 0;
+    for (size_t i = 0; i < count && status != 2; i++) {
+        const char *name = names[i];
+        size_t length = strlen(name);
+        size_t base_length = length - 5; /* without .hlsl */
+        const char *stage = NULL;
+        if (base_length > 5 && strncmp(name + base_length - 5, ".vert", 5) == 0) stage = "vertex";
+        else if (base_length > 5 && strncmp(name + base_length - 5, ".frag", 5) == 0) stage = "fragment";
+        else if (base_length > 5 && strncmp(name + base_length - 5, ".comp", 5) == 0) stage = "compute";
+        if (!stage || !shader_name_ok(name)) {
+            fprintf(stderr, "sosuc: `%s`: a shader is named <name>.vert.hlsl, .frag.hlsl or .comp.hlsl, with letters, "
+                            "digits, `-`, `_` and `.`\n", name);
+            status = 1;
+            continue;
+        }
+        char *source = path_join(sources, name);
+        /* what the outputs were compiled from: a hash of the source, without its \r (a checkout
+           of Git on Windows may add them), kept in <name>.source; dates would not do, since a
+           clone gives every file the time it was written */
+        SourceFile text;
+        uint64_t hash = 14695981039346656037ULL;
+        if (source_load(&text, source)) {
+            for (size_t k = 0; k < text.length; k++) {
+                if (text.text[k] == '\r') continue;
+                hash = (hash ^ (uint8_t)text.text[k]) * 1099511628211ULL;
+            }
+            source_free(&text);
+        }
+        char *stamp_name = sosu_format("%.*s.source", (int)base_length, name);
+        char *stamp = path_join(out, stamp_name);
+        char *expected_stamp = sosu_format("fnv1a64 %016llx\n", (unsigned long long)hash);
+        bool same_source = false;
+        if (source_load(&text, stamp)) {
+            same_source = text.length == strlen(expected_stamp) && memcmp(text.text, expected_stamp, text.length) == 0;
+            source_free(&text);
+        }
+        size_t written = 0;
+        for (size_t f = 0; f < sizeof SHADER_FORMATS / sizeof *SHADER_FORMATS && status != 2; f++) {
+            char *target_name = sosu_format("%.*s.%s", (int)base_length, name, SHADER_FORMATS[f][1]);
+            char *target = path_join(out, target_name);
+            bool exists = shell_file_exists(target);
+            bool fresh = exists && same_source;
+            if (!fresh && check) {
+                if (exists) fprintf(stderr, "sosuc: `%s` changed since `%s` was compiled: run `sosuc shaders`\n", source, target);
+                else fprintf(stderr, "sosuc: `%s` is missing: run `sosuc shaders`\n", target);
+                stale++;
+            } else if (fresh) {
+                written++;
+            } else {
+                Command c = { 0 };
+                command_add(&c, "shadercross");
+                command_add(&c, source);
+                command_add(&c, "-s");
+                command_add(&c, "HLSL");
+                command_add(&c, "-d");
+                command_add(&c, SHADER_FORMATS[f][0]);
+                command_add(&c, "-t");
+                command_add(&c, stage);
+                command_add(&c, "-e");
+                command_add(&c, "main");
+                command_add(&c, "-o");
+                command_add(&c, target);
+                int code = command_run(&c);
+                command_free(&c);
+                if (code == 127) {
+                    fputs("sosuc: `sosuc shaders` needs `shadercross` (SDL_shadercross) in the PATH\n", stderr);
+                    status = 2;
+                } else if (code != 0) {
+                    fprintf(stderr, "sosuc: shadercross could not compile `%s` to %s\n", source, SHADER_FORMATS[f][0]);
+                    status = 1;
+                } else {
+                    compiled++;
+                    written++;
+                }
+            }
+            free(target_name);
+            free(target);
+        }
+        if (!check && !same_source && written == sizeof SHADER_FORMATS / sizeof *SHADER_FORMATS &&
+            !write_file(stamp, expected_stamp)) {
+            fprintf(stderr, "sosuc: cannot write `%s`\n", stamp);
+            status = 1;
+        }
+        free(stamp_name);
+        free(stamp);
+        free(expected_stamp);
+        free(source);
+    }
+    if (check && stale > 0 && status == 0) status = 1;
+    if (!check && status == 0) printf("%zu shader file%s written to %s\n", compiled, compiled == 1 ? "" : "s", out);
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
+    free(sources);
+    free(out);
+    return status;
+}
+
 /* `sosuc doc`: the reference of what a package makes `pub`, with the comments written above it
    (spec 7.6), in Markdown: one section per module of the package, interface and catalog files
    aside. */
@@ -2774,6 +2916,7 @@ int main(int argc, char **argv) {
     if (strcmp(command, "i18n") == 0) return command_i18n(argc - 2, argv + 2, argv[0]);
     if (strcmp(command, "doc") == 0) return command_doc(argc - 2, argv + 2, argv[0]);
     if (strcmp(command, "bindgen") == 0) return command_bindgen(argc - 2, argv + 2);
+    if (strcmp(command, "shaders") == 0) return command_shaders(argc - 2, argv + 2);
 
     DiagFormat format = FORMAT_TEXT;
     const char *path = NULL;
@@ -2887,7 +3030,21 @@ int main(int argc, char **argv) {
     if (strcmp(command, "build") == 0 && options.lib) return command_build_library(path ? path : ".", argv[0], format, &options);
     if (strcmp(command, "build") == 0) return command_build(path ? path : ".", argv[0], format, MODE_BUILD, &options);
     if (strcmp(command, "run") == 0) return command_build(path ? path : ".", argv[0], format, MODE_RUN, &options);
-    if (strcmp(command, "test") == 0) return command_build(path ? path : ".", argv[0], format, MODE_TEST, &options);
+    if (strcmp(command, "test") == 0) {
+        /* the compiled shaders must follow their sources (spec 8.2): checked without shadercross */
+        const char *dir = path ? path : ".";
+        char *shaders = path_join(dir, "shaders");
+        size_t count = 0;
+        char **sources = shell_files_ending(shaders, ".hlsl", &count);
+        for (size_t i = 0; i < count; i++) free(sources[i]);
+        free(sources);
+        free(shaders);
+        if (count > 0) {
+            char *check_args[] = { (char *)dir, "--check" };
+            if (command_shaders(2, check_args) != 0) return 1;
+        }
+        return command_build(dir, argv[0], format, MODE_TEST, &options);
+    }
     if (is_fmt) {
         if (path_count == 0) paths[path_count++] = ".";
         int status = command_fmt(paths, path_count, fmt_check, argv[0]);

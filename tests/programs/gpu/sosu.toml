@@ -1,0 +1,11 @@
+# The package gpu (spec §8.2), without a window: scenes drawn into a target and read back, and a
+# computation. Where no GPU driver is found (a machine without Vulkan nor Direct3D 12), it says
+# so and exits with 77, which tests/program_tests.c counts as skipped.
+[package]
+name = "gputest"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../../packages/platform" }
+gpu = { path = "../../../packages/gpu" }
+image = { path = "../../../packages/image" }

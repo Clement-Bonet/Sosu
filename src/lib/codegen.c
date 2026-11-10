@@ -1437,6 +1437,10 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
     if (strcmp(name, "size_of") == 0) return sosu_format("((uint64_t)sizeof(%s))", value_type(f->g, args[0]->type));
+    if (strcmp(name, "offset_of") == 0) {
+        Name field = args[1]->as.name;
+        return sosu_format("((uint64_t)offsetof(%s, f_%.*s))", value_type(f->g, args[0]->type), NAME_ARGS(field));
+    }
     if (strcmp(name, "assert") == 0 && gen_assert_comparison(f, e)) return NULL;
     char **values = gen_operands(f, args, count);
     const char *type = e->type->tag == T_VOID ? "void" : value_type(f->g, e->type);
