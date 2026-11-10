@@ -785,6 +785,7 @@ static bool package_objects(const Links *links, const char *obj_dir, const Comma
 #endif
     {
         (void)log;
+        (void)stale; /* counted for the MSVC batch only */
         command_free(&batch);
     }
     for (size_t i = 0; i < links->sources.count; i++) free(keys[i]);
