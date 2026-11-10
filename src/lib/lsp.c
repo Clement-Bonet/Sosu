@@ -51,9 +51,18 @@ typedef struct {
     Sema sema;
 } Analysis;
 
+/* A text a file takes in a trial analysis only: a rename tried before it is sent, a call
+   closed to show its signature. */
+typedef struct {
+    char *path;
+    char *text;
+    size_t length;
+} TrialFile;
+
 struct LspServer {
     char *lib_dir;
     struct { Document *items; size_t count; size_t cap; } docs;
+    struct { TrialFile *items; size_t count; size_t cap; } trial;
     PublishedList published;
     Analysis analysis;
     bool shutdown;
@@ -180,7 +189,14 @@ static Document *find_document(LspServer *s, const char *path) {
 }
 
 static const char *overlay(const char *path, size_t *length, void *data) {
-    Document *doc = find_document(data, path);
+    LspServer *s = data;
+    for (size_t i = 0; i < s->trial.count; i++) {
+        if (same_path(s->trial.items[i].path, path)) {
+            *length = s->trial.items[i].length;
+            return s->trial.items[i].text;
+        }
+    }
+    Document *doc = find_document(s, path);
     if (!doc) return NULL;
     *length = doc->length;
     return doc->text;
@@ -450,6 +466,37 @@ static Analysis *analysis_for(LspServer *s, Document *doc) {
     return &s->analysis;
 }
 
+/* ---- Trial analyses ---- */
+
+/* `path` reads `text` (taken, `length` bytes) in the next trial analysis. */
+static void trial_set(LspServer *s, const char *path, char *text, size_t length) {
+    TrialFile file = { sosu_strdup(path), text, length };
+    SOSU_VEC_PUSH(&s->trial, file);
+}
+
+/* Loads and checks the package in `root` with the texts given by trial_set, into `out`, beside
+   the analysis that is kept; the texts are then forgotten. */
+static void trial_run(LspServer *s, const char *root, Analysis *out) {
+    analysis_run(s, out, root);
+    for (size_t i = 0; i < s->trial.count; i++) {
+        free(s->trial.items[i].path);
+        free(s->trial.items[i].text);
+    }
+    s->trial.count = 0;
+}
+
+/* The text of `doc` with `insert` at `offset`. */
+static char *text_with(const Document *doc, size_t offset, const char *insert, size_t *length) {
+    size_t n = strlen(insert);
+    char *text = sosu_alloc(doc->length + n + 1);
+    memcpy(text, doc->text, offset);
+    memcpy(text + offset, insert, n);
+    memcpy(text + offset + n, doc->text + offset, doc->length - offset);
+    *length = doc->length + n;
+    text[*length] = '\0';
+    return text;
+}
+
 /* ---- Finding what is at a position ---- */
 
 typedef enum {
@@ -480,6 +527,7 @@ typedef struct {
     const Decl *declared_decl;
     const Decl *decl; /* the declaration around the position */
     const FnDecl *fn; /* the function or method around it */
+    const Expr *call; /* the innermost call whose parentheses hold the position */
 } Find;
 
 static bool covers(size_t start, size_t length, size_t offset) {
@@ -553,10 +601,16 @@ static void find_expr(Find *f, const Expr *e) {
         find_expr(f, e->as.range.start);
         find_expr(f, e->as.range.end);
         break;
-    case EXPR_CALL:
+    case EXPR_CALL: {
+        const Expr *callee = e->as.call.callee;
+        if (f->offset > callee->offset + callee->length && f->offset < e->offset + e->length &&
+            (!f->call || e->length <= f->call->length)) {
+            f->call = e;
+        }
         find_expr(f, e->as.call.callee);
         for (size_t i = 0; i < e->as.call.arg_count; i++) find_expr(f, e->as.call.args[i]);
         break;
+    }
     case EXPR_INDEX:
         find_expr(f, e->as.index.object);
         find_expr(f, e->as.index.index);
@@ -1157,23 +1211,45 @@ static void find_references(const Analysis *a, const Target *target, References 
     }
 }
 
-/* The declaration designated at the position of `params`, in `*a`; false if there is none. */
-static bool target_at(LspServer *s, const Json *params, Analysis **a, Target *t) {
+/* Why there is nothing to find or rename at the position of `params`, or NULL. Otherwise `*a` is
+   the analysis, `*t` the declaration designated and `*at` the name under the position. */
+static const char *name_at(LspServer *s, const Json *params, Analysis **a, Target *t, Reference *at) {
     Position p;
     memset(t, 0, sizeof *t);
+    memset(at, 0, sizeof *at);
     *a = read_position(s, params, &p) ? analysis_for(s, p.doc) : NULL;
-    const Unit *unit = *a && (*a)->checked ? find_unit(*a, p.doc->path) : NULL;
-    if (unit) *t = describe(*a, unit, offset_in(unit->file.text, unit->file.length, p.line, p.character));
-    return t->file != NULL;
+    if (!*a) return "the file is not in a package (a folder with a sosu.toml)";
+    if (!(*a)->checked) return "the program does not load (see its errors): fix them first";
+    const Unit *unit = find_unit(*a, p.doc->path);
+    if (!unit) return "there is no name here";
+    size_t offset = offset_in(unit->file.text, unit->file.length, p.line, p.character);
+    for (size_t i = 0; i < unit->tokens.count; i++) {
+        const Token *token = &unit->tokens.items[i];
+        if (token->kind == TOK_IDENT && covers(token->offset, token->length, offset)) {
+            *at = (Reference){ unit, token->offset, token->length };
+            break;
+        }
+    }
+    if (!at->unit) return "there is no name here";
+    *t = describe(*a, unit, at->offset);
+    if (!t->file) return "this name designates nothing that can be found";
+    return NULL;
 }
 
 static void references(LspServer *s, const Json *id, const Json *params) {
-    JsonOut o = {0};
-    begin_response(&o, id);
     Analysis *a;
     Target t;
+    Reference at;
+    const char *why = name_at(s, params, &a, &t, &at);
+    if (why && a && !a->checked) {
+        target_free(&t);
+        send_error(s, id, -32803, why); /* RequestFailed: the client shows the message */
+        return;
+    }
     References found = {0};
-    if (target_at(s, params, &a, &t)) find_references(a, &t, &found);
+    if (!why) find_references(a, &t, &found);
+    JsonOut o = {0};
+    begin_response(&o, id);
     bool declaration = json_bool(json_get(json_get(params, "context"), "includeDeclaration"), true);
     json_raw(&o, "[");
     bool first = true;
@@ -1210,21 +1286,173 @@ static bool is_plain_name(const char *text) {
     return plain;
 }
 
+/* Why the name at the position of `params` cannot be renamed, or NULL (see name_at). */
+static const char *renamable(LspServer *s, const Json *params, Analysis **a, Target *t, Reference *at) {
+    const char *why = name_at(s, params, a, t, at);
+    if (why) return why;
+    if (t->length == 0) return "a module is renamed with its file";
+    const Unit *home = unit_of_file(*a, t->file);
+    if (!home || (home->package && home->package->builtin)) return "a name of `core` or `std` cannot be renamed";
+    return NULL;
+}
+
+/* Where `offset` of the file `path` is once each reference of `refs` before it grew by `delta`. */
+static size_t shifted(const References *refs, const char *path, size_t offset, long delta) {
+    long moved = 0;
+    for (size_t i = 0; i < refs->count; i++) {
+        if (refs->items[i].offset < offset && same_path(refs->items[i].unit->file.path, path)) moved += delta;
+    }
+    return (size_t)((long)offset + moved);
+}
+
+/* True if `offset` of the file `path`, in the analysis `b`, designates the declaration at
+   `target_offset` of `target_path`. */
+static bool designates(const Analysis *b, const char *path, size_t offset, const char *target_path, size_t target_offset) {
+    const Unit *unit = find_unit(b, path);
+    if (!unit) return false;
+    Target t = describe(b, unit, offset);
+    bool same = t.file && t.offset == target_offset && same_path(t.file->path, target_path);
+    target_free(&t);
+    return same;
+}
+
+/* A name already spelled as the new one, and the declaration it designates before the renaming. */
+typedef struct {
+    const Unit *unit;
+    size_t offset;
+    const char *target_path;
+    size_t target_offset;
+} Other;
+
+/* The message of the first error of `b` that `a` does not have, or NULL. */
+static const char *new_error(const Analysis *a, const Analysis *b) {
+    for (size_t i = 0; i < b->program.diags.count; i++) {
+        const Diagnostic *d = &b->program.diags.items[i];
+        if (d->severity != SEVERITY_ERROR) continue;
+        bool known = false;
+        for (size_t j = 0; j < a->program.diags.count && !known; j++) {
+            known = strcmp(a->program.diags.items[j].message, d->message) == 0;
+        }
+        if (!known) return d->message;
+    }
+    return NULL;
+}
+
+/* Why renaming the references `refs` of `t` to `new_name` would change the program, or NULL.
+   The renaming is tried: the package is analysed again with the new texts. It must have no more
+   errors, and each name must still designate what it designated: the renamed ones their
+   declaration, and those already spelled as the new name theirs (neither hidden by the new
+   name, nor hiding it). The message is allocated. */
+static char *rename_conflict(LspServer *s, const Analysis *a, const Target *t, const References *refs, const char *new_name) {
+    size_t new_length = strlen(new_name);
+    long delta = (long)new_length - (long)t->length;
+    struct { Other *items; size_t count; size_t cap; } others = {0};
+    for (size_t u = 0; u < a->program.units.count; u++) {
+        const Unit *unit = a->program.units.items[u];
+        if (unit->package && unit->package->builtin) continue;
+        for (size_t i = 0; i < unit->tokens.count; i++) {
+            const Token *token = &unit->tokens.items[i];
+            if (token->kind != TOK_IDENT || token->length != new_length ||
+                memcmp(unit->file.text + token->offset, new_name, new_length) != 0) {
+                continue;
+            }
+            Target before = describe(a, unit, token->offset);
+            if (before.file) {
+                Other other = { unit, token->offset, before.file->path, before.offset };
+                SOSU_VEC_PUSH(&others, other);
+            }
+            target_free(&before);
+        }
+    }
+    for (size_t i = 0; i < refs->count;) {
+        const Unit *unit = refs->items[i].unit;
+        size_t end = i;
+        while (end < refs->count && refs->items[end].unit == unit) end++;
+        size_t length = (size_t)((long)unit->file.length + delta * (long)(end - i));
+        char *text = sosu_alloc(length + 1);
+        size_t from = 0;
+        size_t to = 0;
+        for (size_t k = i; k < end; k++) {
+            memcpy(text + to, unit->file.text + from, refs->items[k].offset - from);
+            to += refs->items[k].offset - from;
+            memcpy(text + to, new_name, new_length);
+            to += new_length;
+            from = refs->items[k].offset + refs->items[k].length;
+        }
+        memcpy(text + to, unit->file.text + from, unit->file.length - from);
+        text[length] = '\0';
+        trial_set(s, unit->file.path, text, length);
+        i = end;
+    }
+    Analysis b;
+    trial_run(s, a->root, &b);
+    char *why = NULL;
+    if (!b.checked) {
+        why = sosu_format("renaming to `%s` would stop the program from loading", new_name);
+    } else if (b.program.diags.error_count > a->program.diags.error_count) {
+        const char *message = new_error(a, &b);
+        why = message ? sosu_format("renaming to `%s` would make an error: %s", new_name, message)
+                      : sosu_format("renaming to `%s` would make an error", new_name);
+    }
+    size_t target_offset = shifted(refs, t->file->path, t->offset, delta);
+    for (size_t i = 0; i < refs->count && !why; i++) {
+        const Reference *r = &refs->items[i];
+        size_t offset = shifted(refs, r->unit->file.path, r->offset, delta);
+        if (!designates(&b, r->unit->file.path, offset, t->file->path, target_offset)) {
+            size_t line, character;
+            position_of(&r->unit->file, r->offset, &line, &character);
+            why = sosu_format("renamed `%s`, the name on line %zu of %s would designate another declaration", new_name,
+                              line + 1, r->unit->file.path);
+        }
+    }
+    for (size_t i = 0; i < others.count && !why; i++) {
+        const Other *o = &others.items[i];
+        size_t offset = shifted(refs, o->unit->file.path, o->offset, delta);
+        if (!designates(&b, o->unit->file.path, offset, o->target_path, shifted(refs, o->target_path, o->target_offset, delta))) {
+            size_t line, character;
+            position_of(&o->unit->file, o->offset, &line, &character);
+            why = sosu_format("`%s` is already a name here: the one on line %zu of %s would designate another declaration",
+                              new_name, line + 1, o->unit->file.path);
+        }
+    }
+    analysis_free(&b);
+    free(others.items);
+    return why;
+}
+
+/* Before a rename: the name under the position and its range, or why it cannot be renamed. */
+static void prepare_rename(LspServer *s, const Json *id, const Json *params) {
+    Analysis *a;
+    Target t;
+    Reference at;
+    const char *why = renamable(s, params, &a, &t, &at);
+    target_free(&t);
+    if (why) {
+        send_error(s, id, -32803, why);
+        return;
+    }
+    JsonOut o = {0};
+    begin_response(&o, id);
+    json_raw(&o, "{\"range\":");
+    write_range(&o, &at.unit->file, at.offset, at.length);
+    json_raw(&o, ",\"placeholder\":");
+    json_strn(&o, at.unit->file.text + at.offset, at.length);
+    json_raw(&o, "}");
+    send_response(s, &o);
+}
+
 /* Renames a declaration and every name that designates it, in the files of the program: a
-   `WorkspaceEdit` the editor applies, open files and the others alike. */
+   `WorkspaceEdit` the editor applies, open files and the others alike. A renaming that would
+   change what the program means is refused (rename_conflict). */
 static void rename_symbol(LspServer *s, const Json *id, const Json *params) {
     const char *new_name = json_string(json_get(params, "newName"), "");
     Analysis *a;
     Target t;
-    if (!target_at(s, params, &a, &t)) {
+    Reference at;
+    const char *why = renamable(s, params, &a, &t, &at);
+    if (why) {
         target_free(&t);
-        send_error(s, id, -32602, "there is no name to rename here");
-        return;
-    }
-    const Unit *home = unit_of_file(a, t.file);
-    if (!home || (home->package && home->package->builtin)) {
-        target_free(&t);
-        send_error(s, id, -32602, "a name of `core` or `std` cannot be renamed");
+        send_error(s, id, -32803, why);
         return;
     }
     if (!is_plain_name(new_name)) {
@@ -1236,6 +1464,16 @@ static void rename_symbol(LspServer *s, const Json *id, const Json *params) {
     }
     References found = {0};
     find_references(a, &t, &found);
+    bool same = strlen(new_name) == t.length && memcmp(new_name, t.file->text + t.offset, t.length) == 0;
+    char *conflict = same ? NULL : rename_conflict(s, a, &t, &found, new_name);
+    if (conflict) {
+        send_error(s, id, -32803, conflict);
+        free(conflict);
+        free(found.items);
+        target_free(&t);
+        return;
+    }
+    if (same) found.count = 0;
     JsonOut o = {0};
     begin_response(&o, id);
     json_raw(&o, "{\"changes\":{");
@@ -1260,6 +1498,264 @@ static void rename_symbol(LspServer *s, const Json *id, const Json *params) {
     json_raw(&o, found.count ? "]}}" : "}}");
     free(found.items);
     target_free(&t);
+    send_response(s, &o);
+}
+
+/* ---- Outline: the declarations of a file ---- */
+
+enum {
+    SYMBOL_CLASS = 5,
+    SYMBOL_METHOD = 6,
+    SYMBOL_FIELD = 8,
+    SYMBOL_ENUM = 10,
+    SYMBOL_INTERFACE = 11,
+    SYMBOL_FUNCTION = 12,
+    SYMBOL_CONSTANT = 14,
+    SYMBOL_ENUM_MEMBER = 22,
+    SYMBOL_STRUCT = 23,
+};
+
+/* Starts a `DocumentSymbol`: its children are written next, then end_symbol. The range runs
+   from `start` to `end`, and must hold the name. */
+static void begin_symbol(JsonOut *o, bool *first, const SourceFile *file, const char *name, size_t name_offset,
+                         size_t name_length, int kind, const char *detail, size_t start, size_t end) {
+    if (start > name_offset) start = name_offset;
+    if (end < name_offset + name_length) end = name_offset + name_length;
+    json_raw(o, *first ? "{\"name\":" : ",{\"name\":");
+    *first = false;
+    json_strn(o, name, name_length);
+    json_raw(o, ",\"kind\":%d", kind);
+    if (detail) {
+        json_raw(o, ",\"detail\":");
+        json_str(o, detail);
+    }
+    json_raw(o, ",\"range\":");
+    write_range(o, file, start, end - start);
+    json_raw(o, ",\"selectionRange\":");
+    write_range(o, file, name_offset, name_length);
+    json_raw(o, ",\"children\":[");
+}
+
+static void end_symbol(JsonOut *o) { json_raw(o, "]}"); }
+
+static void name_symbol(JsonOut *o, bool *first, const SourceFile *file, Name name, int kind, size_t start, size_t end) {
+    if (!name.length) return; /* a declaration the parser could not finish */
+    begin_symbol(o, first, file, name.text, name.offset, name.length, kind, NULL, start, end);
+    end_symbol(o);
+}
+
+static void fn_symbol(JsonOut *o, bool *first, const SourceFile *file, const FnDecl *fn, int kind) {
+    name_symbol(o, first, file, fn->name, kind, fn->offset, fn->offset + fn->length);
+}
+
+static void decl_symbol(JsonOut *o, bool *first, const SourceFile *file, const Decl *d) {
+    size_t end = d->offset + d->length;
+    switch (d->kind) {
+    case DECL_STRUCT: case DECL_CLASS: case DECL_INTERFACE: {
+        Name name = d->as.type.name;
+        if (!name.length) return;
+        int kind = d->kind == DECL_STRUCT ? SYMBOL_STRUCT : d->kind == DECL_CLASS ? SYMBOL_CLASS : SYMBOL_INTERFACE;
+        begin_symbol(o, first, file, name.text, name.offset, name.length, kind, NULL, d->offset, end);
+        bool inner = true;
+        for (size_t i = 0; i < d->as.type.field_count; i++) {
+            const Field *field = &d->as.type.fields[i];
+            size_t start = field->type ? field->type->offset : field->name.offset;
+            name_symbol(o, &inner, file, field->name, SYMBOL_FIELD, start, field->name.offset + field->name.length);
+        }
+        for (size_t i = 0; i < d->as.type.method_count; i++) fn_symbol(o, &inner, file, &d->as.type.methods[i], SYMBOL_METHOD);
+        end_symbol(o);
+        break;
+    }
+    case DECL_ENUM: {
+        Name name = d->as.enum_.name;
+        if (!name.length) return;
+        begin_symbol(o, first, file, name.text, name.offset, name.length, SYMBOL_ENUM, NULL, d->offset, end);
+        bool inner = true;
+        for (size_t i = 0; i < d->as.enum_.variant_count; i++) {
+            Name v = d->as.enum_.variants[i].name;
+            name_symbol(o, &inner, file, v, SYMBOL_ENUM_MEMBER, v.offset, v.offset + v.length);
+        }
+        end_symbol(o);
+        break;
+    }
+    case DECL_FN: fn_symbol(o, first, file, &d->as.fn, SYMBOL_FUNCTION); break;
+    case DECL_EXTERN:
+        for (size_t i = 0; i < d->as.extern_.fn_count; i++) fn_symbol(o, first, file, &d->as.extern_.fns[i], SYMBOL_FUNCTION);
+        break;
+    case DECL_CONST: name_symbol(o, first, file, d->as.const_.name, SYMBOL_CONSTANT, d->offset, end); break;
+    case DECL_TEST: {
+        Name name = d->as.test.name; /* a string literal: shown without its quotes */
+        if (name.length < 3) return;
+        begin_symbol(o, first, file, name.text + 1, name.offset + 1, name.length - 2, SYMBOL_FUNCTION, "test", d->offset, end);
+        end_symbol(o);
+        break;
+    }
+    default: break;
+    }
+}
+
+/* The declarations of a Sosu file, from its text alone: the outline, the breadcrumbs and
+   Go to Symbol of the editor. */
+static void document_symbols(LspServer *s, const Json *id, const Json *params) {
+    JsonOut o = {0};
+    begin_response(&o, id);
+    json_raw(&o, "[");
+    char *path = lsp_uri_to_path(json_string(json_get(json_get(params, "textDocument"), "uri"), ""));
+    Document *doc = path ? find_document(s, path) : NULL;
+    free(path);
+    if (doc && !program_is_ui_file(doc->path) && !program_is_locale_file(doc->path)) {
+        SourceFile file;
+        source_from_string(&file, doc->path, doc->text);
+        TokenList tokens = {0};
+        DiagList diags = {0};
+        Arena arena = {0};
+        lex_file(&file, &tokens, &diags);
+        Module *module = parse_module(&file, &tokens, &arena, &diags);
+        bool first = true;
+        for (size_t i = 0; module && i < module->count; i++) decl_symbol(&o, &first, &file, module->decls[i]);
+        arena_free(&arena);
+        diag_free(&diags);
+        token_list_free(&tokens);
+        source_free(&file);
+    }
+    json_raw(&o, "]");
+    send_response(s, &o);
+}
+
+/* ---- Signature help ---- */
+
+/* The source from `start` to `end` on one line: each run of spaces and line breaks becomes one
+   space, without the spaces and the `;` at its ends. Allocated. */
+static char *one_line(const SourceFile *file, size_t start, size_t end) {
+    if (end > file->length) end = file->length;
+    while (start < end && isspace((unsigned char)file->text[start])) start++;
+    while (end > start && (isspace((unsigned char)file->text[end - 1]) || file->text[end - 1] == ';')) end--;
+    char *text = sosu_alloc(end - start + 1);
+    size_t n = 0;
+    for (size_t i = start; i < end; i++) {
+        char c = file->text[i];
+        if (isspace((unsigned char)c)) {
+            if (n > 0 && text[n - 1] != ' ') text[n++] = ' ';
+        } else {
+            text[n++] = c;
+        }
+    }
+    text[n] = '\0';
+    return text;
+}
+
+/* The argument being written at `offset` in a call: the commas outside brackets and strings
+   from the `(` after `callee` up to it. */
+static size_t active_argument(const SourceFile *file, const Expr *callee, size_t offset) {
+    size_t i = callee->offset + callee->length;
+    while (i < offset && file->text[i] != '(') i++;
+    size_t commas = 0;
+    int depth = 0;
+    for (i++; i < offset && i < file->length; i++) {
+        char c = file->text[i];
+        if (c == '"' || c == '\'') {
+            for (i++; i < offset && file->text[i] != c; i++) {
+                if (file->text[i] == '\\') i++;
+            }
+        } else if (c == '/' && i + 1 < offset && file->text[i + 1] == '/') {
+            while (i < offset && file->text[i] != '\n') i++;
+        } else if (c == '(' || c == '[' || c == '{') {
+            depth++;
+        } else if (c == ')' || c == ']' || c == '}') {
+            depth--;
+        } else if (c == ',' && depth == 0) {
+            commas++;
+        }
+    }
+    return commas;
+}
+
+/* Writes the `SignatureHelp` of the call around `offset` in `unit`; false if there is none. */
+static bool write_signature_help(JsonOut *o, const Analysis *a, const Unit *unit, size_t offset) {
+    Find f = find_at(unit, offset);
+    if (!f.call) return false;
+    const Expr *callee = f.call->as.call.callee;
+    const FnDecl *fn = NULL;
+    const SourceFile *file = NULL;
+    char *owner = NULL;
+    if (callee->resolution == RESOLVED_FN) {
+        const FnInfo *info = callee->target;
+        if (info->unit) {
+            fn = info->decl;
+            file = &info->unit->file;
+        }
+    } else if (callee->resolution == RESOLVED_METHOD || callee->resolution == RESOLVED_SELF_METHOD) {
+        const MethodInfo *m = callee->target;
+        fn = m->decl;
+        file = &m->owner->unit->file;
+        owner = type_to_string(m->owner->type);
+    } else if (callee->resolution == RESOLVED_NONE) {
+        Symbol *sym = symbol_of(a, unit, callee);
+        if (sym && sym->kind == SYM_FN && sym->fn->unit) {
+            fn = sym->fn->decl;
+            file = &sym->fn->unit->file;
+        }
+    }
+    if (!fn) {
+        free(owner);
+        return false;
+    }
+    char *label = one_line(file, fn->offset, fn->body ? fn->body->offset : fn->offset + fn->length);
+    json_raw(o, "{\"signatures\":[{\"label\":");
+    json_str(o, label);
+    if (owner) {
+        char *text = sosu_format("method of `%s`", owner);
+        json_raw(o, ",\"documentation\":");
+        json_str(o, text);
+        free(text);
+    }
+    json_raw(o, ",\"parameters\":[");
+    for (size_t i = 0; i < fn->param_count; i++) {
+        const Param *param = &fn->params[i];
+        size_t start = param->type ? param->type->offset : param->name.offset;
+        char *text = one_line(file, start, param->name.offset + param->name.length);
+        json_raw(o, i ? ",{\"label\":" : "{\"label\":");
+        json_str(o, text);
+        json_raw(o, "}");
+        free(text);
+    }
+    json_raw(o, "]}],\"activeSignature\":0,\"activeParameter\":%zu}", active_argument(&unit->file, callee, offset));
+    free(label);
+    free(owner);
+    return true;
+}
+
+/* The signature of the function called around the position, and the argument being written.
+   While a call is being typed, the program rarely parses: its end is then tried closed in a
+   trial analysis (`)`, `);`, `0)`, `0);` at the position), until one loads. */
+static void signature_help(LspServer *s, const Json *id, const Json *params) {
+    static const char *const endings[] = { "", ")", ");", "0)", "0);" };
+    JsonOut o = {0};
+    begin_response(&o, id);
+    Position p;
+    bool answered = false;
+    if (read_position(s, params, &p) && p.doc->root && !program_is_ui_file(p.doc->path)) {
+        size_t offset = offset_in(p.doc->text, p.doc->length, p.line, p.character);
+        for (size_t i = 0; i < sizeof endings / sizeof endings[0] && !answered; i++) {
+            Analysis trial;
+            Analysis *a;
+            if (i == 0) {
+                a = analysis_for(s, p.doc);
+            } else {
+                size_t length;
+                char *text = text_with(p.doc, offset, endings[i], &length);
+                trial_set(s, p.doc->path, text, length);
+                trial_run(s, p.doc->root, &trial);
+                a = &trial;
+            }
+            bool loaded = a && a->checked;
+            const Unit *unit = loaded ? find_unit(a, p.doc->path) : NULL;
+            if (unit) answered = write_signature_help(&o, a, unit, offset);
+            if (i > 0) analysis_free(&trial);
+            if (loaded) break; /* it parses: what is at the position is what is there */
+        }
+    }
+    if (!answered) json_raw(&o, "null");
     send_response(s, &o);
 }
 
@@ -1593,6 +2089,7 @@ void lsp_free(LspServer *s) {
     analysis_free(&s->analysis);
     for (size_t i = 0; i < s->docs.count; i++) document_free(&s->docs.items[i]);
     free(s->docs.items);
+    free(s->trial.items);
     for (size_t i = 0; i < s->published.count; i++) {
         free(s->published.items[i].path);
         free(s->published.items[i].uri);
@@ -1615,7 +2112,9 @@ static void initialize(LspServer *s, const Json *id) {
     JsonOut o = {0};
     begin_response(&o, id);
     json_raw(&o, "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},"
-                 "\"hoverProvider\":true,\"definitionProvider\":true,\"referencesProvider\":true,\"renameProvider\":true,"
+                 "\"hoverProvider\":true,\"definitionProvider\":true,\"referencesProvider\":true,"
+                 "\"renameProvider\":{\"prepareProvider\":true},\"documentSymbolProvider\":true,"
+                 "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},"
                  "\"completionProvider\":{\"triggerCharacters\":[\".\"]}},"
                  "\"serverInfo\":{\"name\":\"sosuc\",\"version\":\"%s\"}}", SOSU_VERSION);
     send_response(s, &o);
@@ -1659,6 +2158,12 @@ bool lsp_handle(LspServer *s, const char *text, size_t length, LspMessages *out)
         references(s, id, params);
     } else if (strcmp(method, "textDocument/rename") == 0) {
         rename_symbol(s, id, params);
+    } else if (strcmp(method, "textDocument/prepareRename") == 0) {
+        prepare_rename(s, id, params);
+    } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
+        document_symbols(s, id, params);
+    } else if (strcmp(method, "textDocument/signatureHelp") == 0) {
+        signature_help(s, id, params);
     } else if (id) {
         char *error = sosu_format("`%s` is not supported", method);
         send_error(s, id, -32601, error);
