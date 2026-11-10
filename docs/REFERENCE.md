@@ -45,6 +45,7 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [image.jpeg](#imagejpeg) | JPEG files (ITU T.81), read and written in Sosu |
 | [image.ops](#imageops) | Images transformed: cropped, resized (bilinear or Lanczos), rotated by quarter turns or by any angle, flipped |
 | [image.png](#imagepng) | PNG files, read and written in Sosu |
+| [math.geometry](#mathgeometry) | The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling) |
 | [math.linear](#mathlinear) | Vectors, matrices, quaternions and transforms of f32, for `render` and 3D |
 | [net.http](#nethttp) | An HTTP/1.1 client |
 | [net.ip](#netip) | The addresses of the network, IPv4 and IPv6, the names resolved into them (DNS), and the errors of `net` |
@@ -3177,6 +3178,176 @@ Writes `img` as a PNG file at `path`.
 
 ```sosu
 pub void!io.IoError save(Arena* arena, str path, image.Image img) uses io
+```
+
+## math.geometry
+
+The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling). Right-handed axes, the matrices of math.linear (columns, a depth of 0 to 1 after projection).
+
+### struct `Aabb`
+
+A box aligned on the axes, from `min` to `max`.
+
+```sosu
+pub struct Aabb
+```
+
+- `pub linear.Vec3 min`
+- `pub linear.Vec3 max`
+- `pub linear.Vec3 center()`
+- `pub linear.Vec3 size()`
+- `pub bool contains(linear.Vec3 p)`
+- `pub bool overlaps(Aabb o)`  
+  Whether the two boxes share a point.
+- `pub Aabb union(Aabb o)`  
+  The smallest box that holds both.
+- `pub Aabb grown(linear.Vec3 p)`  
+  The smallest box that holds it and `p`.
+- `pub Aabb transformed(linear.Mat4 m)`  
+  The box that holds this one moved by `m` (its 8 corners transformed): the bounds of a mesh in the world, from its bounds in its own space.
+
+### `aabb`
+
+```sosu
+pub Aabb aabb(linear.Vec3 min, linear.Vec3 max)
+```
+
+### `around`
+
+The smallest box that holds `points`, none if there are none.
+
+```sosu
+pub Aabb? around(linear.Vec3[] points)
+```
+
+### struct `Sphere`
+
+```sosu
+pub struct Sphere
+```
+
+- `pub linear.Vec3 center`
+- `pub f32 radius`
+- `pub bool contains(linear.Vec3 p)`
+- `pub bool overlaps(Sphere o)`
+
+### `sphere`
+
+```sosu
+pub Sphere sphere(linear.Vec3 center, f32 radius)
+```
+
+### struct `Plane`
+
+A plane: the points p where normal.dot(p) + d == 0; the normal points to its front.
+
+```sosu
+pub struct Plane
+```
+
+- `pub linear.Vec3 normal`
+- `pub f32 d`
+- `pub f32 distance(linear.Vec3 p)`  
+  The distance of `p` to the plane, positive in front, negative behind (normal of length 1).
+
+### `plane`
+
+The plane through `point`, facing `normal` (normalized here).
+
+```sosu
+pub Plane plane(linear.Vec3 point, linear.Vec3 normal)
+```
+
+### struct `Ray`
+
+A ray: from `origin`, toward `direction`, normalized by `ray`, so that a distance along it is a distance in the world.
+
+```sosu
+pub struct Ray
+```
+
+- `pub linear.Vec3 origin`
+- `pub linear.Vec3 direction`
+- `pub linear.Vec3 at(f32 distance)`
+
+### `ray`
+
+```sosu
+pub Ray ray(linear.Vec3 origin, linear.Vec3 direction)
+```
+
+### `ray_from_screen`
+
+The ray under the point (x, y) of a window `width` by `height` pixels (from the top left), for a camera whose matrix is `view_projection` (projection times view): picking with the mouse. None when the matrix cannot be inverted.
+
+```sosu
+pub Ray? ray_from_screen(linear.Mat4 view_projection, f32 x, f32 y, f32 width, f32 height)
+```
+
+### `ray_box`
+
+Where the ray enters the box, as a distance along it (0 when it starts inside); none if it misses it, or the box is behind.
+
+```sosu
+pub f32? ray_box(Ray r, Aabb b)
+```
+
+### `ray_sphere`
+
+Where the ray first meets the sphere (0 when it starts inside); none if it misses it.
+
+```sosu
+pub f32? ray_sphere(Ray r, Sphere s)
+```
+
+### `ray_plane`
+
+Where the ray meets the plane, from its front or its back; none if it is parallel to it or meets it behind its origin.
+
+```sosu
+pub f32? ray_plane(Ray r, Plane p)
+```
+
+### struct `TriangleHit`
+
+Where a ray meets a triangle: the distance along the ray, and the coordinates (u, v) of the point in the triangle (the point is a * (1 - u - v) + b * u + c * v), to interpolate what the vertices hold.
+
+```sosu
+pub struct TriangleHit
+```
+
+- `pub f32 distance`
+- `pub f32 u`
+- `pub f32 v`
+
+### `ray_triangle`
+
+The ray against the triangle (a, b, c), seen from either side (Möller and Trumbore).
+
+```sosu
+pub TriangleHit? ray_triangle(Ray r, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c)
+```
+
+### struct `Frustum`
+
+What a camera sees: six planes facing inward (left, right, bottom, top, near, far).
+
+```sosu
+pub struct Frustum
+```
+
+- `pub Plane[6] planes`
+- `pub bool sees_box(Aabb b)`  
+  Whether some of the box may be seen: false only when it is wholly behind a plane (a box near a corner may be kept although unseen, which costs a draw, never a missing object).
+- `pub bool sees_sphere(Sphere s)`
+- `pub bool sees_point(linear.Vec3 point)`
+
+### `frustum`
+
+The frustum of a camera from its matrix, projection times view (a depth of 0 to 1 after projection, as `linear.perspective` gives it): the planes of Gribb and Hartmann.
+
+```sosu
+pub Frustum frustum(linear.Mat4 view_projection)
 ```
 
 ## math.linear
