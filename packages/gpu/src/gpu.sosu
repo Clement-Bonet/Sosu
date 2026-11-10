@@ -489,7 +489,9 @@ pub class Device {
     // `mipmaps`, its smaller levels made by the GPU.
     pub Texture!GpuError texture_of(image.Image img, bool mipmaps) uses io {
         assert(!closed);
-        if (img.width <= 0 || img.height <= 0) {
+        // an image made by hand may not hold as many pixels as its size says: the copy below,
+        // in `unsafe`, would read beyond them
+        if (img.width <= 0 || img.height <= 0 || img.pixels.len as ui64 != img.width as ui64 * img.height as ui64) {
             return err(Unsupported);
         }
         ui32 w = img.width as ui32;

@@ -110,6 +110,13 @@ void!gpu.GpuError scenes(Arena* arena, keeps gpu.Device* device) uses io {
     four.set(0, 1, BLUE);
     four.set(1, 1, WHITE);
     gpu.Texture picture = try device.texture_of(four, false);
+    // an image made by hand that holds fewer pixels than its size says: refused, never read beyond
+    image.Image short = image.Image{ width: 64, height: 64, pixels: four.pixels };
+    bool refused = match (device.texture_of(short, false)) {
+        ok(t) => false,
+        err(e) => true,
+    };
+    io.print("short image: {}", refused ? "refused" : "taken");
     Kit kit = Kit{
         device: device,
         pipeline: pipeline,
