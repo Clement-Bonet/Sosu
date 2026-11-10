@@ -266,8 +266,12 @@ tab:	| quote: " | e acute: é
 
 | Category | Types |
 |---|---|
-| integers | `i8 i16 i32 i64`, `ui8 ui16 ui32 ui64`, `isize usize` |
-| floats | `f32 f64`, and `uf32 uf64`, never negative |
+| integers | `i8 i16 i32 i64` |
+| unsigned integers | `ui8 ui16 ui32 ui64` |
+| floats | `f32 f64` |
+| unsigned floats | `uf32 uf64` |
+| sizes | `isize` |
+| unsigned sizes | `usize` |
 | others | `bool`, `char` (a Unicode code point, 32 bits), `void` |
 | text | `str`: valid UTF-8, a pointer and a length, not owned |
 | pointer | `T*`, never null; `T*?` if it may be absent |
