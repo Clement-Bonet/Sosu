@@ -344,6 +344,7 @@ merged only once it builds and passes the tests everywhere.
 - [docs/REFERENCE.md](docs/REFERENCE.md): the public API of `core` and `std`, generated from their
   comments (`make doc`).
 - [docs/ROADMAP.md](docs/ROADMAP.md): the works left before 1.0, and their estimates.
+- [docs/TESTERS.md](docs/TESTERS.md): for the people who try Sosu before 1.0: installing, what to try, how to report.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to propose a change.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability, and what to know before using Sosu.
 
