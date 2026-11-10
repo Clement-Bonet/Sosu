@@ -237,6 +237,7 @@ pub enum Source {
     Key(ui32 scan),
     Keys(ui32 up, ui32 down, ui32 left, ui32 right),  // four keys: a Vec2
     AxisKeys(ui32 minus, ui32 plus),  // two keys: an axis
+    Chord(ui32 modifier, ui32 scan),  // a key that counts only while a modifier is held: Ctrl+S
     Mouse(app.Button button),
     MouseMotion,  // pixels, scaled by `scale`
 }
@@ -259,6 +260,7 @@ class Declared {
     vec.Vec<Binding>* bindings;
     mut ui32 hold_ms;
     mut ui32 tap_ms;
+    mut ui32 double_ms;
     mut f32 press_point;
     mut f32 dead_zone;
     mut bool changed;  // rebound: written by `save`
@@ -269,6 +271,7 @@ class Declared {
         bindings = vec.new(arena);
         hold_ms = 0;
         tap_ms = 0;
+        double_ms = 0;
         press_point = 0.5;
         dead_zone = 0.0;
         changed = false;
@@ -396,6 +399,18 @@ pub struct Action {
         return Action{ map: map, index: index };
     }
 
+    // A button triggered on its second press, when it comes less than `ms` milliseconds after the
+    // first.
+    pub Action double_tap(ui32 ms) {
+        declared().double_ms = ms;
+        return Action{ map: map, index: index };
+    }
+
+    // A key that counts only while `modifier` is held: `with(Scan.LeftCtrl, Scan.S)`.
+    pub Action with(Scan modifier, Scan key) {
+        return bind(Chord(scancode(modifier), scancode(key)));
+    }
+
     // A button triggered when released less than `ms` milliseconds after it was pressed.
     pub Action tap(ui32 ms) {
         declared().tap_ms = ms;
@@ -427,6 +442,7 @@ class State {
     mut bool fired;  // triggered at this update
     mut bool done;  // a hold already fired since the press
     mut ui64 since;  // when it was pressed
+    mut ui64 first_tap;  // when the press that a double tap waits to follow came, or 0
 
     void init(keeps Declared* declared) {
         self.declared = declared;
@@ -436,6 +452,7 @@ class State {
         fired = false;
         done = false;
         since = 0;
+        first_tap = 0;
     }
 }
 
@@ -578,6 +595,11 @@ pub class Input {
                     v = linear.vec2((devices.key(plus) ? 1.0 : 0.0) - (devices.key(minus) ? 1.0 : 0.0), 0.0);
                 }
             },
+            Chord(modifier, scan) => {
+                if (keyboard && devices.key(modifier) && devices.key(scan)) {
+                    v = linear.vec2(1.0, 0.0);
+                }
+            },
             Mouse(button) => {
                 if (keyboard && devices.mouse(button)) {
                     v = linear.vec2(1.0, 0.0);
@@ -641,7 +663,16 @@ pub class Input {
                 s.since = now;
                 s.done = false;
             }
-            if (d.hold_ms > 0) {
+            if (d.double_ms > 0) {
+                if (s.pressed && !s.was_pressed) {
+                    if (s.first_tap != 0 && now - s.first_tap < d.double_ms as ui64) {
+                        s.fired = true;
+                        s.first_tap = 0;  // a third press starts again
+                    } else {
+                        s.first_tap = max(now, 1);
+                    }
+                }
+            } else if (d.hold_ms > 0) {
                 if (s.pressed && !s.done && now - s.since >= d.hold_ms as ui64) {
                     s.fired = true;
                     s.done = true;
@@ -981,6 +1012,12 @@ str source_text(Arena* arena, Source s) {
             t.push(",");
             t.push_u64(plus as ui64);
         },
+        Chord(modifier, scan) => {
+            t.push("with:");
+            t.push_u64(modifier as ui64);
+            t.push(",");
+            t.push_u64(scan as ui64);
+        },
         Mouse(b) => {
             t.push(match (b) {
                 Left => "mouse:left",
@@ -1074,6 +1111,12 @@ Source? source_of(Arena* arena, str s) {
     match (numbers_after(arena, s, "axiskeys:", 2)) {
         some(n) => {
             return some(AxisKeys(n[0], n[1]));
+        },
+        none => { },
+    }
+    match (numbers_after(arena, s, "with:", 2)) {
+        some(n) => {
+            return some(Chord(n[0], n[1]));
         },
         none => { },
     }

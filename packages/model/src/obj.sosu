@@ -1,0 +1,503 @@
+// model.obj: Wavefront OBJ files and their MTL materials (spec §8.2). Positions (`v`), texture
+// coordinates (`vt`), normals (`vn`), faces (`f`, polygons cut into triangles from their first
+// corner), with indices from 1 or from the end (-1); objects and groups (`o`, `g`) and materials
+// (`usemtl`) start meshes. A corner used twice is one vertex. Normals the file does not give are
+// computed. The v of OBJ goes up the texture: it is turned to the 0-at-the-top of glTF and `gpu`.
+import std.io;
+import std.text;
+import std.vec;
+import std.map;
+import std.fs;
+import math.linear;
+import image.image;
+import model.model;
+
+// Corners a polygon may have.
+usize MAX_CORNERS = 256;
+
+str at_line(Arena* arena, usize line, str what) {
+    text.TextBuilder* t = text.builder(arena);
+    t.push("OBJ line ");
+    t.push_u64(line as ui64);
+    t.push(": ");
+    t.push(what);
+    return t.text();
+}
+
+f32? number(str s) {
+    return match (text.parse_f64(s)) {
+        ok(v) => v == v && v < 1.0e30 && v > -1.0e30 ? some(v as f32) : none,
+        err(e) => none,
+    };
+}
+
+// An index of OBJ (from 1, or negative from the end) as an index from 0 into `count`.
+usize? index_of(str s, usize count) {
+    i64 n = match (text.parse_i64(s)) {
+        ok(v) => v,
+        err(e) => {
+            return none;
+        },
+    };
+    if (n > 0 && n as ui64 <= count as ui64) {
+        return some((n - 1) as usize);
+    }
+    if (n < 0 && n > -(1 as i64 << 40) && -n as ui64 <= count as ui64) {
+        return some((count as i64 + n) as usize);
+    }
+    return none;
+}
+
+// The mesh being read: its corners, and the vertex made for each (position, uv, normal) seen.
+class Building {
+    str name;
+    usize? material;
+    vec.Vec<model.Vertex>* vertices;
+    vec.Vec<ui32>* indices;
+    map.HashMap<ui64, ui32>* seen;
+    mut bool has_normals;
+
+    void init(keeps Arena* arena, keeps str name, usize? material) {
+        self.name = name;
+        self.material = material;
+        vertices = vec.new(arena);
+        indices = vec.new(arena);
+        seen = map.new(arena);
+        has_normals = true;
+    }
+}
+
+// Reads the materials of an MTL file: `newmtl`, its color `Kd`, its opacity `d`, its texture
+// `map_Kd`, and the metal and roughness `Pm` and `Pr` of the extension for PBR.
+pub model.Material[]!model.ModelError parse_mtl(Arena* arena, str source) {
+    vec.Vec<model.Material>* out = vec.new(arena);
+    mut usize line_number = 0;
+    for (str raw in text.lines(arena, source)) {
+        line_number += 1;
+        str line = text.trim(raw);
+        str[] words = text.words(arena, line);
+        if (words.len == 0 || text.starts_with(words[0], "#")) {
+            continue;
+        }
+        str key = words[0];
+        if (key == "newmtl") {
+            out.push(model.default_material(words.len > 1 ? words[1] : ""));
+            continue;
+        }
+        if (out.len() == 0) {
+            continue;  // before any material: ignored
+        }
+        model.Material* m = out.at(out.len() - 1);
+        if (key == "Kd" && words.len >= 4) {
+            f32 r = match (number(words[1])) {
+                some(v) => v,
+                none => {
+                    return err(model.ModelError.Damaged(at_line(
+                        arena,
+                        line_number,
+                        "a color that is not three numbers"
+                    )));
+                },
+            };
+            f32 g = match (number(words[2])) {
+                some(v) => v,
+                none => {
+                    return err(model.ModelError.Damaged(at_line(
+                        arena,
+                        line_number,
+                        "a color that is not three numbers"
+                    )));
+                },
+            };
+            f32 b = match (number(words[3])) {
+                some(v) => v,
+                none => {
+                    return err(model.ModelError.Damaged(at_line(
+                        arena,
+                        line_number,
+                        "a color that is not three numbers"
+                    )));
+                },
+            };
+            m.base_color = [r, g, b, m.base_color[3]];
+        } else if (key == "d" && words.len >= 2) {
+            match (number(words[1])) {
+                some(v) => {
+                    m.base_color = [m.base_color[0], m.base_color[1], m.base_color[2], max(0.0, min(1.0, v))];
+                },
+                none => { },
+            }
+        } else if (key == "map_Kd" && words.len >= 2) {
+            m.texture_path = words[words.len - 1];  // the options of map_Kd come before the file
+        } else if (key == "Pm" && words.len >= 2) {
+            match (number(words[1])) {
+                some(v) => {
+                    m.metallic = max(0.0, min(1.0, v));
+                },
+                none => { },
+            }
+        } else if (key == "Pr" && words.len >= 2) {
+            match (number(words[1])) {
+                some(v) => {
+                    m.roughness = max(0.0, min(1.0, v));
+                },
+                none => { },
+            }
+        }
+    }
+    return ok(out.items());
+}
+
+// Reads an OBJ file. `materials` are those of its MTL files (`parse_mtl`); a material named by
+// `usemtl` and not among them is plain white.
+pub model.Model!model.ModelError parse(Arena* arena, str source, model.Material[] materials) {
+    vec.Vec<linear.Vec3>* positions = vec.new(arena);
+    vec.Vec<linear.Vec2>* uvs = vec.new(arena);
+    vec.Vec<linear.Vec3>* normals = vec.new(arena);
+    vec.Vec<model.Material>* all_materials = vec.new(arena);
+    for (model.Material m in materials) {
+        all_materials.push(m);
+    }
+    vec.Vec<Building*>* done = vec.new(arena);
+    mut str group = "";
+    mut usize? material = none;
+    mut Building* current = arena.new(Building, arena, "", none);
+    mut usize total_indices = 0;
+    mut usize line_number = 0;
+    mut usize[256] corner_vertex = [0; 256];
+    for (str raw in text.lines(arena, source)) {
+        line_number += 1;
+        str line = text.trim(raw);
+        str[] words = text.words(arena, line);
+        if (words.len == 0 || text.starts_with(words[0], "#")) {
+            continue;
+        }
+        str key = words[0];
+        if (key == "v" || key == "vn") {
+            if (words.len < 4) {
+                return err(model.ModelError.Damaged(at_line(arena, line_number, "a vector that is not three numbers")));
+            }
+            mut f32[3] xyz = [0.0, 0.0, 0.0];
+            for (usize i in 0..3) {
+                xyz[i] = match (number(words[i + 1])) {
+                    some(v) => v,
+                    none => {
+                        return err(model.ModelError.Damaged(at_line(
+                            arena,
+                            line_number,
+                            "a vector that is not three numbers"
+                        )));
+                    },
+                };
+            }
+            if (positions.len() + normals.len() >= model.MAX_VERTICES) {
+                return err(model.ModelError.TooLarge);
+            }
+            if (key == "v") {
+                positions.push(linear.vec3(xyz[0], xyz[1], xyz[2]));
+            } else {
+                normals.push(linear.vec3(xyz[0], xyz[1], xyz[2]).normalized());
+            }
+        } else if (key == "vt") {
+            if (words.len < 2) {
+                return err(model.ModelError.Damaged(at_line(
+                    arena,
+                    line_number,
+                    "texture coordinates without numbers"
+                )));
+            }
+            f32 u = match (number(words[1])) {
+                some(v) => v,
+                none => {
+                    return err(model.ModelError.Damaged(at_line(
+                        arena,
+                        line_number,
+                        "texture coordinates that are not numbers"
+                    )));
+                },
+            };
+            f32 v = words.len > 2 ? match (number(words[2])) {
+                some(n) => n,
+                none => 0.0,
+            } : 0.0;
+            if (uvs.len() >= model.MAX_VERTICES) {
+                return err(model.ModelError.TooLarge);
+            }
+            uvs.push(linear.vec2(u, 1.0 - v));
+        } else if (key == "f") {
+            usize corners = words.len - 1;
+            if (corners < 3) {
+                return err(model.ModelError.Damaged(at_line(arena, line_number, "a face of fewer than three corners")));
+            }
+            if (corners > MAX_CORNERS) {
+                return err(model.ModelError.Damaged(at_line(arena, line_number, "a face of more than 256 corners")));
+            }
+            for (usize c in 0..corners) {
+                str[] parts = text.split(arena, words[c + 1], "/");
+                usize p = match (index_of(parts[0], positions.len())) {
+                    some(i) => i,
+                    none => {
+                        return err(model.ModelError.Damaged(at_line(
+                            arena,
+                            line_number,
+                            "a corner without a position given before it"
+                        )));
+                    },
+                };
+                mut usize? t = none;
+                if (parts.len > 1 && parts[1].len > 0) {
+                    t = index_of(parts[1], uvs.len());
+                    if (match (t) {
+                        some(x) => false,
+                        none => true,
+                    }) {
+                        return err(model.ModelError.Damaged(at_line(
+                            arena,
+                            line_number,
+                            "texture coordinates not given before"
+                        )));
+                    }
+                }
+                mut usize? n = none;
+                if (parts.len > 2 && parts[2].len > 0) {
+                    n = index_of(parts[2], normals.len());
+                    if (match (n) {
+                        some(x) => false,
+                        none => true,
+                    }) {
+                        return err(model.ModelError.Damaged(at_line(arena, line_number, "a normal not given before")));
+                    }
+                }
+                ui64 ti = match (t) {
+                    some(x) => x as ui64 + 1,
+                    none => 0,
+                };
+                ui64 ni = match (n) {
+                    some(x) => x as ui64 + 1,
+                    none => 0,
+                };
+                ui64 key_of = p as ui64 | ti << 24 | ni << 48;
+                match (current.seen.get(key_of)) {
+                    some(existing) => {
+                        corner_vertex[c] = existing as usize;
+                    },
+                    none => {
+                        if (current.vertices.len() >= model.MAX_VERTICES) {
+                            return err(model.ModelError.TooLarge);
+                        }
+                        linear.Vec3 position = positions.items()[p];
+                        linear.Vec2 uv = match (t) {
+                            some(x) => uvs.items()[x],
+                            none => linear.vec2(0.0, 0.0),
+                        };
+                        linear.Vec3 normal = match (n) {
+                            some(x) => normals.items()[x],
+                            none => linear.vec3(0.0, 0.0, 0.0),
+                        };
+                        if (match (n) {
+                            some(x) => false,
+                            none => true,
+                        }) {
+                            current.has_normals = false;
+                        }
+                        ui32 made = current.vertices.len() as ui32;
+                        current.vertices.push(model.Vertex{
+                            position: [position.x, position.y, position.z],
+                            normal: [normal.x, normal.y, normal.z],
+                            uv: [uv.x, uv.y]
+                        });
+                        current.seen.put(key_of, made);
+                        corner_vertex[c] = made as usize;
+                    },
+                }
+            }
+            // a fan from the first corner
+            for (usize c in 1..corners - 1) {
+                total_indices += 3;
+                if (total_indices > model.MAX_INDICES) {
+                    return err(model.ModelError.TooLarge);
+                }
+                current.indices.push(corner_vertex[0] as ui32);
+                current.indices.push(corner_vertex[c] as ui32);
+                current.indices.push(corner_vertex[c + 1] as ui32);
+            }
+        } else if (key == "o" || key == "g" || key == "usemtl") {
+            if (key == "usemtl") {
+                str name = words.len > 1 ? words[1] : "";
+                mut usize? found = none;
+                for (usize i in 0..all_materials.len()) {
+                    if (all_materials.items()[i].name == name) {
+                        found = some(i);
+                    }
+                }
+                match (found) {
+                    some(i) => {
+                        material = some(i);
+                    },
+                    none => {
+                        all_materials.push(model.default_material(name));
+                        material = some(all_materials.len() - 1);
+                    },
+                }
+            } else {
+                group = words.len > 1 ? words[1] : "";
+            }
+            if (current.indices.len() > 0) {
+                done.push(current);
+            }
+            current = arena.new(Building, arena, group, material);
+        }
+        // the other keys (s, mtllib, l, p...) are ignored
+    }
+    if (current.indices.len() > 0) {
+        done.push(current);
+    }
+    vec.Vec<model.Mesh>* meshes = vec.new(arena);
+    vec.Vec<usize>* all = vec.new(arena);
+    for (Building* b in done.items()) {
+        model.Vertex[] vertices = b.vertices.items();
+        ui32[] indices = b.indices.items();
+        if (!b.has_normals) {
+            model.smooth_normals(vertices, indices);
+        }
+        all.push(meshes.len());
+        meshes.push(model.Mesh{
+            name: b.name,
+            vertices: vertices,
+            indices: indices,
+            material: b.material,
+            bounds: model.bounds_of(vertices)
+        });
+    }
+    vec.Vec<model.Node>* nodes = vec.new(arena);
+    vec.Vec<image.Image>* images = vec.new(arena);
+    nodes.push(model.Node{
+        name: "",
+        local: linear.identity4(),
+        meshes: all.items(),
+        children: arena.alloc_slice(usize, 0)
+    });
+    mut usize[] roots = arena.alloc_slice(usize, 1);
+    roots[0] = 0;
+    return ok(model.Model{
+        meshes: meshes.items(),
+        materials: all_materials.items(),
+        images: images.items(),
+        nodes: nodes.items(),
+        roots: roots
+    });
+}
+
+// Reads the OBJ file at `path` and the MTL files it names (`mtllib`), next to it; an MTL file
+// that is missing leaves its materials plain white.
+pub model.Model!model.ModelError load(Arena* arena, str path) uses io {
+    str source = match (io.read_file(arena, path)) {
+        ok(s) => s,
+        err(e) => {
+            return err(model.ModelError.Unreadable);
+        },
+    };
+    vec.Vec<model.Material>* materials = vec.new(arena);
+    str folder = match (fs.parent(path)) {
+        some(p) => p,
+        none => "",
+    };
+    for (str raw in text.lines(arena, source)) {
+        str[] words = text.words(arena, text.trim(raw));
+        if (words.len >= 2 && words[0] == "mtllib") {
+            for (usize i in 1..words.len) {
+                str mtl = folder.len == 0 ? words[i] : fs.join(arena, folder, words[i]);
+                match (io.read_file(arena, mtl)) {
+                    ok(read) => {
+                        model.Material[] found = try parse_mtl(arena, read);
+                        for (model.Material m in found) {
+                            materials.push(m);
+                        }
+                    },
+                    err(e) => { },
+                }
+            }
+        }
+    }
+    return parse(arena, source, materials.items());
+}
+
+test "a quad of two materials" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    str source = "# a square and a triangle\nmtllib scene.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\no floor\nusemtl red\nf 1/1/1 2/2/1 3/3/1 4/4/1\nusemtl blue\nf -4/1/1 -3/2/1 -2/3/1\n";
+    model.Material[] mtl = match (parse_mtl(
+        &arena,
+        "newmtl red\nKd 1 0 0\nd 0.5\nmap_Kd -s 1 1 1 bricks.png\nnewmtl blue\nKd 0 0 1\nPr 0.25\n"
+    )) {
+        ok(m) => m,
+        err(e) => arena.alloc_slice(model.Material, 0),
+    };
+    assert(mtl.len == 2 && mtl[0].base_color[3] == 0.5 && mtl[0].texture_path == "bricks.png"
+            && mtl[1].roughness == 0.25);
+    model.Model m = match (parse(&arena, source, mtl)) {
+        ok(read) => read,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(m.meshes.len == 2);
+    // the square: four corners, two triangles from its first corner
+    assert(m.meshes[0].vertices.len == 4 && m.meshes[0].indices.len == 6 && m.meshes[0].name == "floor");
+    assert(m.meshes[0].indices[3] == 0 && m.meshes[0].indices[4] == 2 && m.meshes[0].indices[5] == 3);
+    // v turned: the bottom of the texture in OBJ is 1 here
+    assert(m.meshes[0].vertices[0].uv[1] == 1.0 && m.meshes[0].vertices[2].uv[1] == 0.0);
+    assert(match (m.meshes[0].material) {
+        some(i) => m.materials[i].name == "red",
+        none => false,
+    });
+    // the triangle: indices from the end, a mesh of its own for its material
+    assert(m.meshes[1].vertices.len == 3 && m.meshes[1].vertices[1].position[0] == 1.0);
+    assert(match (m.meshes[1].material) {
+        some(i) => m.materials[i].name == "blue",
+        none => false,
+    });
+    assert(m.meshes[0].bounds.max.x == 1.0 && m.meshes[0].bounds.max.y == 1.0);
+    assert(m.nodes.len == 1 && m.nodes[0].meshes.len == 2 && m.roots.len == 1);
+}
+
+test "normals computed, corners shared, an unknown material" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    str source = "v 0 0 0\r\nv 1 0 0\r\nv 0 1 0\r\nv 1 1 0\r\nusemtl stone\r\nf 1 2 3\r\nf 2 4 3\r\n";
+    model.Model m = match (parse(&arena, source, arena.alloc_slice(model.Material, 0))) {
+        ok(read) => read,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(m.meshes.len == 1 && m.meshes[0].vertices.len == 4 && m.meshes[0].indices.len == 6);
+    assert(m.meshes[0].vertices[0].normal[2] > 0.99);  // counter-clockwise seen from +z
+    assert(m.materials.len == 1 && m.materials[0].name == "stone" && m.materials[0].base_color[0] == 1.0);
+}
+
+test "damaged files" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    model.Material[] none_given = arena.alloc_slice(model.Material, 0);
+    str[6] damaged = [
+        "v 0 0 0\nv 1 0 0\nf 1 2 3\n",  // a corner without its position
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2\n",  // two corners
+        "v 0 0 x\n",  // not a number
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 0 1 2\n",  // indices start at 1
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1/5 2 3\n",  // a texture coordinate not given
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nf -9223372036854775807 2 3\n",
+    ];
+    for (str s in damaged) {
+        bool refused = match (parse(&arena, s, none_given)) {
+            ok(m) => false,
+            err(e) => match (e) {
+                Damaged(why) => text.starts_with(why, "OBJ line "),
+                _ => false,
+            },
+        };
+        assert(refused);
+    }
+}

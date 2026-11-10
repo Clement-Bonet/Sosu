@@ -1,0 +1,158 @@
+// model.model: what `model.obj` and `model.gltf` read (spec §8.2). A `Model` holds meshes (each
+// one material: a primitive of glTF, a group of OBJ), materials, images, and a tree of nodes that
+// place the meshes. Its vertices are laid out as `gpu` reads them: `size_of(model.Vertex)` and
+// `offset_of(model.Vertex, normal)` give the layout of a pipeline.
+import math.linear;
+import math.geometry;
+import image.image;
+
+// A corner of a triangle.
+pub struct Vertex {
+    pub mut f32[3] position;
+    pub mut f32[3] normal;
+    pub mut f32[2] uv;  // 0, 0 at the top left of the texture, as glTF and `gpu` have it
+}
+
+// Triangles of one material: three indices of `vertices` each.
+pub struct Mesh {
+    pub str name;
+    pub Vertex[] vertices;
+    pub ui32[] indices;
+    pub usize? material;  // in `Model.materials`
+    pub geometry.Aabb bounds;  // in the space of the mesh
+}
+
+// A material of metal and roughness, as glTF has it (OBJ gives its color and texture).
+pub struct Material {
+    pub str name;
+    pub mut f32[4] base_color;  // linear RGBA, times the texture
+    pub mut usize? texture;  // in `Model.images`
+    pub mut str texture_path;  // OBJ: the file named by `map_Kd`, for the program to load; "" else
+    pub mut f32 metallic;
+    pub mut f32 roughness;
+}
+
+// A node of the tree: where it is relative to its parent, its meshes and its children.
+pub struct Node {
+    pub str name;
+    pub linear.Mat4 local;
+    pub usize[] meshes;  // in `Model.meshes`
+    pub usize[] children;  // in `Model.nodes`
+}
+
+pub struct Model {
+    pub Mesh[] meshes;
+    pub Material[] materials;
+    pub image.Image[] images;
+    pub Node[] nodes;
+    pub usize[] roots;  // the nodes of the scene shown, without a parent
+}
+
+// What went wrong. `Damaged` says what, for a message.
+pub enum ModelError {
+    Unreadable,  // the file could not be read
+    Damaged(str why),  // not what the format says
+    TooLarge,  // beyond MAX_VERTICES, MAX_INDICES or MAX_NODES
+    Unsupported(str what),
+}
+
+pub str message(ModelError e) {
+    return match (e) {
+        Unreadable => "the model could not be read",
+        Damaged(why) => why,
+        TooLarge => "the model is too large",
+        Unsupported(what) => what,
+    };
+}
+
+// Limits: what a file may ask for, checked before anything is allocated.
+pub usize MAX_VERTICES = 16777216;  // 2^24
+pub usize MAX_INDICES = 67108864;  // 2^26
+pub usize MAX_NODES = 1048576;  // 2^20
+
+// The world matrix of each node, parents first: the roots at `origin`, their children after them.
+// A node reached twice (a file that makes a cycle) is placed once.
+pub linear.Mat4[] world_matrices(Arena* arena, Model m, linear.Mat4 origin) {
+    mut linear.Mat4[] world = arena.alloc_slice(linear.Mat4, m.nodes.len);
+    mut bool[] placed = arena.alloc_slice(bool, m.nodes.len);
+    mut usize[] stack = arena.alloc_slice(usize, m.nodes.len + 1);
+    mut usize top = 0;
+    for (usize root in m.roots) {
+        if (root < m.nodes.len && !placed[root]) {
+            world[root] = origin.mul(m.nodes[root].local);
+            placed[root] = true;
+            stack[top] = root;
+            top += 1;
+        }
+        while (top > 0) {
+            top -= 1;
+            usize n = stack[top];
+            for (usize child in m.nodes[n].children) {
+                if (child < m.nodes.len && !placed[child] && top < stack.len) {
+                    world[child] = world[n].mul(m.nodes[child].local);
+                    placed[child] = true;
+                    stack[top] = child;
+                    top += 1;
+                }
+            }
+        }
+    }
+    return world;
+}
+
+// The normals of the vertices, from the triangles around them (weighed by their area): for a
+// file that gives none.
+pub void smooth_normals(Vertex[] vertices, ui32[] indices) {
+    for (usize i in 0..vertices.len) {
+        vertices[i].normal = [0.0, 0.0, 0.0];
+    }
+    mut usize t = 0;
+    while (t + 2 < indices.len) {
+        usize a = indices[t] as usize;
+        usize b = indices[t + 1] as usize;
+        usize c = indices[t + 2] as usize;
+        t += 3;
+        if (a >= vertices.len || b >= vertices.len || c >= vertices.len) {
+            continue;
+        }
+        linear.Vec3 pa = position_of(vertices[a]);
+        linear.Vec3 face = position_of(vertices[b]).sub(pa).cross(position_of(vertices[c]).sub(pa));
+        for (usize v in [a, b, c]) {
+            vertices[v].normal = [
+                vertices[v].normal[0] + face.x, vertices[v].normal[1] + face.y, vertices[v].normal[2] + face.z,
+            ];
+        }
+    }
+    for (usize i in 0..vertices.len) {
+        linear.Vec3 n = linear.vec3(vertices[i].normal[0], vertices[i].normal[1], vertices[i].normal[2]).normalized();
+        vertices[i].normal = [n.x, n.y, n.z];
+    }
+}
+
+pub linear.Vec3 position_of(Vertex v) {
+    return linear.vec3(v.position[0], v.position[1], v.position[2]);
+}
+
+// The bounds of the vertices (a point at the origin when there are none).
+pub geometry.Aabb bounds_of(Vertex[] vertices) {
+    if (vertices.len == 0) {
+        return geometry.aabb(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
+    }
+    mut geometry.Aabb box = geometry.aabb(position_of(vertices[0]), position_of(vertices[0]));
+    for (Vertex v in vertices) {
+        box = box.grown(position_of(v));
+    }
+    return box;
+}
+
+// A material of plain white, for what has none.
+pub Material default_material(str name) {
+    return Material{
+        name: name,
+        base_color: [1.0, 1.0, 1.0, 1.0],
+        texture: none,
+        texture_path: "",
+        metallic: 0.0,
+        roughness: 1.0
+    };
+}

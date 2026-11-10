@@ -34,6 +34,8 @@ test: all
 	./build/sosuc test packages/platform
 	./build/sosuc check examples/window
 	./build/sosuc check tests/window
+	./build/sosuc test packages/math
+	./build/sosuc test packages/model
 	./build/sosuc test packages/image
 	./build/sosuc test packages/render
 	./build/sosuc test packages/ui

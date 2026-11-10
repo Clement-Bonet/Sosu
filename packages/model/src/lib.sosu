@@ -1,0 +1,5 @@
+// model: 3D models read from files (spec §8.2). Programs import `model.model` (meshes,
+// materials, nodes), `model.obj` (Wavefront OBJ and MTL) and `model.gltf` (glTF 2.0).
+import model.model;
+import model.obj;
+import model.gltf;

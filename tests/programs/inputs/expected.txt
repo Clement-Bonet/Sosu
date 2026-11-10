@@ -11,6 +11,11 @@ held 450 ms: true
 held 500 ms, again: false
 tapped in 100 ms: true
 released after 300 ms: false
+S alone saves: false
+Ctrl+S saves: true
+R once: false
+R twice in 200 ms: true
+R twice 500 ms apart: false
 menu: jump false, back true
 two players paired: true
 player 1 jumps: false, player 2 jumps: true

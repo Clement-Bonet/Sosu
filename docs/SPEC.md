@@ -834,8 +834,8 @@ Status: design, after 1.0. Nothing below changes the language, except `offset_of
 | `platform` | `app.run_window`: a window whose frames the program draws itself, without the canvas of pixels | SDL3 | after (first) |
 | `gpu` | the device, buffers, textures, samplers, shaders, pipelines, render, copy and compute passes | SDL_GPU (Vulkan, Metal, Direct3D 12), through `platform.sdl_c` | after (first) |
 | `sosuc shaders` | shaders written in HLSL, compiled to SPIR-V, DXIL and MSL, with what they use | the `shadercross` command of SDL, when it is installed | after (first) |
-| `math.geometry` | `Aabb`, `Sphere`, `Ray`, `Plane`, `Frustum`, and their tests: a ray against a box, a triangle or a sphere (picking), a box in a frustum (culling) | Sosu | after |
-| `model.gltf`, `model.obj` | meshes, materials, a tree of nodes, skins and animations, read from glTF 2.0 (`.gltf` and `.glb`) and OBJ | Sosu (`std.json`, `crypto.base64`, `image`) | after |
+| `math.geometry` | `Aabb`, `Sphere`, `Ray`, `Plane`, `Frustum`, and their tests: a ray against a box, a triangle or a sphere (picking), a box in a frustum (culling) | Sosu | available (0.7.0), below |
+| `model.gltf`, `model.obj` | meshes, materials, a tree of nodes, skins and animations, read from glTF 2.0 (`.gltf` and `.glb`) and OBJ | Sosu (`std.json`, `crypto.base64`, `image`) | available (0.7.0) without skins and animations, below |
 | `render3d` | a camera, materials (PBR, metal and roughness, as glTF), lights, shadow maps, meshes drawn in batches, objects outside the frustum skipped | Sosu, on `gpu` | after |
 | `gpu.overlay` | a `render.canvas.Canvas` drawn over the 3D, so that `render` and `ui` work on top of a scene | Sosu, on `gpu` | after |
 | `scene` | entities as handles, components in tables, a hierarchy of transforms, prefabs, scenes saved as JSON | Sosu | after |
@@ -987,9 +987,25 @@ try hud.draw(frame, &surface);                              // after the 3D pass
 - Should Direct3D 12 be left out, to need two formats only? No: Vulkan is missing on some Windows machines, and Direct3D 12 is not. DXIL costs nothing at run time, since it is compiled beforehand.
 - Should there be physics? Not in these packages. Simple collisions come from `math.geometry`. A full engine (Jolt, in C++) would need a C wrapper, as a package of its own.
 
+##### `math.geometry` and `model`
+
+Status: available (0.7.0), tested by the tests of their packages (`sosuc test packages/math`, `sosuc test packages/model`), run by `make test`.
+
+- `math.geometry`:
+  - `Aabb` (`min`, `max`: `center`, `size`, `contains`, `overlaps`, `union`, `grown`, `transformed(m)` by a matrix, its 8 corners), `around(points)`;
+  - `Sphere` (`contains`, `overlaps`), `Plane` (`plane(point, normal)`, `distance`), `Ray` (`ray(origin, direction)`, normalized; `at(distance)`);
+  - `ray_box`, `ray_sphere`, `ray_plane` (a distance, none when missed), `ray_triangle` (Möller and Trumbore: a distance and the coordinates `u`, `v` in the triangle, from either side);
+  - `ray_from_screen(view_projection, x, y, width, height)`: the ray under the mouse, for picking;
+  - `frustum(view_projection)`: the six planes of Gribb and Hartmann for a depth of 0 to 1; `sees_box` (conservative: a box near a corner may be kept, never one in view dropped), `sees_sphere`, `sees_point`.
+- `model.model`: a `Model` of `meshes` (one material each: a primitive of glTF, a group of OBJ), `materials` (metal and roughness: `base_color`, `texture`, `metallic`, `roughness`; `texture_path` for OBJ), `images`, `nodes` (a `local` matrix, meshes, children) and `roots`. `Vertex` is `position`, `normal`, `uv`, laid out for `gpu` (`size_of`, `offset_of`). `world_matrices(arena, model, origin)` places the nodes, parents first, once each even in a file that makes a cycle. `smooth_normals` and `bounds_of` serve both readers.
+- `model.obj`: `parse(arena, text, materials)`, `parse_mtl(arena, text)` (`newmtl`, `Kd`, `d`, `map_Kd`, `Pm`, `Pr`), `load(arena, path)` with the MTL files that `mtllib` names beside it. Faces of 3 to 256 corners, cut from their first corner; indices from 1 or from the end; a corner used twice is one vertex; normals computed when the file gives none; the v of OBJ turned so that 0 is the top, as in glTF and `gpu`.
+- `model.gltf`: `decode(arena, bytes)` for a .glb or a .gltf whose buffers and images are written in it as base64, `decode_with(arena, bytes, files)` with the files it names, read beforehand, and `load(arena, path)`, which reads them beside it (never above it nor at an absolute path). Triangles with positions, normals (computed when missing), `TEXCOORD_0` and indices of 8, 16 or 32 bits; normalized integers; strides; materials with their base color, its texture (PNG or JPEG, from a URI or a buffer view), metal and roughness; nodes by a matrix or a translation, a rotation and a scale; the scene shown, or every node without a parent.
+- Every read is checked against its bytes: an accessor or a view beyond its buffer, an index beyond the vertices, a chunk of .glb beyond the file, a node that is its own child, give `Damaged(why)`; counts beyond `MAX_VERTICES` (2^24), `MAX_INDICES` (2^26) or `MAX_NODES` (2^20) give `TooLarge` before anything is allocated. Sparse accessors, modes other than triangles, required extensions (Draco...) and files in other folders give `Unsupported`.
+- Not yet: skins, animations and morph targets (for `anim`), the other texture coordinates and colors of vertices, the other textures of a material (normals, occlusion, emission). A target of fuzzing for these readers comes with a way to fuzz code of Sosu (§13.1, work 5).
+
 #### Gamepads and input actions
 
-Status: available (0.7.0): `platform.gamepad`, `platform.actions`, the pads as the keys of `ui` (`pads.navigation`), `examples/pads`, `tests/programs/controls` and `tests/programs/inputs`. Not yet: `with(modifier, key)`, `double_tap`, and the motion of the mouse in a test. It is useful with or without 3D: `app.run` and `app.run_window` both take it.
+Status: available (0.7.0): `platform.gamepad`, `platform.actions`, the pads as the keys of `ui` (`pads.navigation`), `examples/pads`, `tests/programs/controls` and `tests/programs/inputs`. `with(modifier, key)` and `double_tap(ms)` are there too. Not yet: the motion of the mouse in a test. It is useful with or without 3D: `app.run` and `app.run_window` both take it.
 
 The model is that of Unity's Input System, not that of Unreal's Enhanced Input.
 

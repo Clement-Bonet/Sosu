@@ -70,6 +70,8 @@ i32 main() uses io {
     actions.Action dash = play.button("dash").key(actions.Scan.Q).tap(200);
     actions.Action turn = play.axis("turn").axis_keys(actions.Scan.Left, actions.Scan.Right);
     actions.Action fire = play.button("fire").mouse(app.Button.Left);
+    actions.Action quicksave = play.button("save").with(actions.Scan.LeftCtrl, actions.Scan.S);
+    actions.Action roll = play.button("roll").key(actions.Scan.R).double_tap(300);
     actions.Map* menu = actions.map(&arena, "menu");
     actions.Action back = menu.button("back").key(actions.Scan.Escape);
 
@@ -151,6 +153,43 @@ i32 main() uses io {
     fake.set(actions.Scan.Q, false);
     input.update();
     io.print("released after 300 ms: {}", input.triggered(dash));
+
+    // a chord: S alone does nothing, Ctrl+S saves
+    fake.set(actions.Scan.S, true);
+    input.update();
+    io.print("S alone saves: {}", input.triggered(quicksave));
+    fake.set(actions.Scan.LeftCtrl, true);
+    input.update();
+    io.print("Ctrl+S saves: {}", input.triggered(quicksave));
+    fake.set(actions.Scan.S, false);
+    fake.set(actions.Scan.LeftCtrl, false);
+    input.update();
+
+    // a double tap within 300 ms: the first press does nothing, the second fires
+    fake.now = 2000;
+    fake.set(actions.Scan.R, true);
+    input.update();
+    io.print("R once: {}", input.triggered(roll));
+    fake.set(actions.Scan.R, false);
+    fake.now = 2100;
+    input.update();
+    fake.now = 2200;
+    fake.set(actions.Scan.R, true);
+    input.update();
+    io.print("R twice in 200 ms: {}", input.triggered(roll));
+    fake.set(actions.Scan.R, false);
+    fake.now = 3000;
+    input.update();
+    fake.set(actions.Scan.R, true);
+    input.update();
+    fake.set(actions.Scan.R, false);
+    fake.now = 3500;
+    input.update();
+    fake.set(actions.Scan.R, true);
+    input.update();
+    io.print("R twice 500 ms apart: {}", input.triggered(roll));
+    fake.set(actions.Scan.R, false);
+    input.update();
 
     // maps: play off, menu on
     input.disable(play);

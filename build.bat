@@ -55,6 +55,8 @@ build\sosuc.exe check packages\gpu || exit /b 1
 build\sosuc.exe build examples\cube || exit /b 1
 build\sosuc.exe build examples\pads || exit /b 1
 build\sosuc.exe check tests\window || exit /b 1
+build\sosuc.exe test packages\math || exit /b 1
+build\sosuc.exe test packages\model || exit /b 1
 build\sosuc.exe test packages\image || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1
 build\sosuc.exe test packages\ui || exit /b 1
