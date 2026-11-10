@@ -33,22 +33,26 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 - November 1, in a fourth session of its own: the packages `db` (the interface, prepared statements, transactions, a pool of connections between threads) and `sqlite` (`db.sqlite` of §8.2, on the amalgamation of SQLite 3.54.1 given as C sources): about 850 lines of Sosu and 190 of C around the vendored sources, and the test program `databases` (about 450 lines).
 - November 1, in a fifth session of its own: `platform.dialogs` (about 400 lines of Sosu and 120 of tests in the package, and `examples/dialogs`): open one file or several, save, choose a folder, message boxes, on SDL3; the answer of a file dialog, given by SDL on a thread of its own, comes back to the loop of `app.run` as an event. Work 4 is done; the dialogs are still to be tried by hand.
 - November 1, in a sixth session of its own: work 5. `git` and the C compiler run with their arguments, never through a shell (`Command` in `src/lib/shell.c`: CreateProcess, or fork and execvp; the environment of MSVC read once from `vcvarsall.bat`; Gradle run by `java` from its wrapper, the clang of the NDK with `--target`); `void!E` a value, a type such as `ui8*` given to a call; the fuzzing (`tests/fuzz.c`: 40 000 runs of libFuzzer under ASan, with MSVC, found no crash); the time of `sosuc` measured (`tests/bench.c`), which found four lookups that grew with the program, made constant by hash tables: 318 000 lines took 6.0 s, now 1.1 s; the grammar and the error codes frozen, the compatibility policy (§13.2).
+- November 2 to 7, in several sessions: reviews and the hardening they asked for (versions `0.3.2` to `0.4.0`), the showcase Beatbox, closures given to `spawn`; work 10 was added on November 4 and done on November 6 (the regions of §6.1, E0371 to E0376, and the limits of §7.7); the complete guide (`docs/GUIDE.md`) on November 7.
+- November 8: version `0.5.0`. The fuzzing extended to the interfaces, `bindgen` and the language server; the quick guide (`docs/QUICK_GUIDE.md`); the details of a Windows program (the description and version that its properties show, from `[app]`); and work 6 begun: references and rename in `sosuc lsp`, `sosuc doc` for any package, long lines broken by `sosuc fmt`, the VS Code extension 0.2.0.
+- November 8 to 10: the package `net` and `showcase/courier`, with the interfaces that take an effect parameter (§5.4).
+- November 10, in a session for each work, started from one session: work 8 (responsive windows), work 7 (an example for each package of §8.3) and work 9 (the installers), with the versions `0.5.1` to `0.5.4`; then work 6 finished, for `0.6.0`: the checks of a rename, the outline and signature help in `sosuc lsp`, and the extension 0.3.0, tested with `sosuc lsp` in its CI. The tokens of these sessions were not measured: the tools show the share of the quota, not the tokens written, and that share was not noted.
 
 ## What remains (November 10, 2026)
 
-Estimated again from the pace above. Works 1 to 5 and 7 to 10 are done, and `0.5.4` is the last version; work 6 remains before 1.0, then the 0.x versions tried by others (§13.1).
+Estimated again from the pace above. Works 1 to 10 are done, and `0.6.0` is the last version; the 0.x versions tried by others remain before 1.0 (§13.1).
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
 | 4 | Standard library | Done (§8.0, §8.3, §10.11), the dialogs and the sound tried by hand on Windows 11. Added on November 8, 2026: the package `net` (DNS, TCP, UDP, an HTTP client, HTTPS with Mbed TLS 4.1 LTS given as C sources), tried against a real server on Windows and Linux; the server of `net.http` and WebSocket stay after 1.0. Added on November 9, 2026: `showcase/courier`, a download manager on `net`, and interfaces with an effect parameter (§5.4), so that a window starts threads (`app.Handler<uses threads>`) | 0 |
-| 5 | Quality | Done (§13.1, §13.2): the CI of 0.3.0 passes on Linux (gcc, clang), macOS (with the iOS simulator), Windows and Android, with the fuzzing (`make fuzz`, and `make fuzz-ogg` for stb_vorbis) and `make bench` | 0 |
-| 6 | Tooling | Begun: references and rename in `sosuc lsp`, `sosuc doc` for any package (the generator of `docs/REFERENCE.md` is now in `src/lib/docgen.c`), long lines broken by `sosuc fmt` at 120 characters, and the VS Code extension 0.2.0 (its own repository: references, rename, `sosuc doc`). Remains: releasing them | 200 to 350 k |
+| 5 | Quality | Done (§13.1, §13.2): the CI passes since 0.3.0, last on 0.5.4 (November 10, 2026), on Linux (gcc, clang), macOS (with the iOS simulator), Windows and Android, with the fuzzing (`make fuzz`, and `make fuzz-ogg` for stb_vorbis) and `make bench` | 0 |
+| 6 | Tooling | Done on November 10, 2026: references and rename in `sosuc lsp` (a rename is tried in a second analysis first, and refused when it would change what a name designates or make an error; the editor learns before the new name is typed when a name cannot be renamed), the outline of a file and signature help (a call being typed is tried closed); `sosuc doc` for any package (`src/lib/docgen.c`); long lines broken by `sosuc fmt` at 120 characters; and the VS Code extension 0.3.0, in its own repository: it finds the `sosuc` of the installers, a test holds a whole session with `sosuc lsp` in its CI, and its `.vsix` is published on the Marketplace and Open VSX at 1.0 by a workflow that refuses a version below 1.0.0 | 0 |
 | 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`), the guide from the first program to a window (`docs/QUICK_GUIDE.md`), and the complete guide (`docs/GUIDE.md`), both run by `tests/program_tests.c`. Done on November 10, 2026: an example for each package of §8.3 (`examples/checksums`, `archive`, `orbit`, `wordcount`, `thumbnail`, `bookshelf`, `fetch`, `greetings`), run by `tests/program_tests.c` and linked from the guide (§22.9) and the README | 0 |
 | 8 | Interface | Done on November 10, 2026: responsive windows (step 15, §10.12: breakpoints, `from:` and `until:`, the columns of a `Grid` by width, `Row(stack: ...)`, `showcase/courier` adapted); the menus with the keyboard were already done (§10.6), only the specification still called them open | 0 |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Done on November 10, 2026, with free means only: the installers (`installers/`), built and tried by `release.yml` from the tag, or by hand without publishing. They are `install.sh` (`curl | sh`, Linux and macOS) and `install.ps1` (`irm | iex`, Windows), which check the SHA-256 and install for the user without administrator rights; a `.deb` for x64 and ARM64; and, unsigned, a setup for Windows made by Inno Setup and a `.pkg` for macOS. The formula of Homebrew and the manifests of Scoop and winget are filled for each release, to be published at 1.0. `install.ps1` and the setup were tried on Windows 11, the `.deb` and `install.sh` on Ubuntu 24.04 and Debian 13. Remains, not needed for 1.0: signing. On Windows it would come from the free program of SignPath Foundation, whose steps are written and turn on once its secret exists; on macOS, a Developer ID would only be bought if users of macOS ask for it | 0 |
 | 10 | Dangling pointers | Added on November 4, 2026 (§13.1), and reduced on November 6, 2026: Sosu does not promise memory safety. Done on November 6, 2026 (§6.1, §7.7) | 0 |
 
-In all, about 0.2 to 0.35 million output tokens: 0.09 to 0.16 weeks of the Pro quota, a new session for each work.
+In all, nothing remains to be written for the works of 1.0: what is left is below, and does not depend on tokens.
 
 What tokens do not buy, and sets the pace as much:
 
@@ -64,12 +68,12 @@ Steps 12 and 14 of the specification (§13) come after 1.0 (§13.1). Their estim
 
 | Work | Today | Weeks |
 |---|---|---|
-| Intermediate representation | `src/lib/codegen.c` (2,733 lines) goes to C with no IR of its own, although §11.3 names one | 1 to 2 |
+| Intermediate representation | `src/lib/codegen.c` (2,764 lines) goes to C with no IR of its own, although §11.3 names one | 1 to 2 |
 | x86-64 backend, for one system | Nothing: instruction selection, registers, calling conventions, object file | 3 to 4 |
 | ARM64 and the two other systems | ELF, PE and Mach-O, with linking | 3 to 4 |
 | Debug information | `#line` and the C compiler give it; DWARF and PDB would have to be written | 1 to 2 |
-| Runtime and `std` | 1,778 lines of C in `lib/runtime`, 10 modules of `std` with `extern "C"` | 1 |
-| Self-hosting | About 25,700 lines of C rewritten in Sosu, then the bootstrap | 1 to 2 |
+| Runtime and `std` | 1,784 lines of C in `lib/runtime`, 10 modules of `std` with `extern "C"` | 1 |
+| Self-hosting | About 28,300 lines of C rewritten in Sosu, then the bootstrap | 1 to 2 |
 
 In all, 10 to 15 weeks, so 3 to 4 months, for a compiler without C on the desktop.
 

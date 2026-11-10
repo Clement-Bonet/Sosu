@@ -131,8 +131,8 @@ static const char *const good =
 
 static void test_session(void) {
     exchange("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}");
-    CHECK(answer("\"hoverProvider\":true") && answer("\"renameProvider\":true") && answer("\"referencesProvider\":true") &&
-              answer("\"id\":1"),
+    CHECK(answer("\"hoverProvider\":true") && answer("\"prepareProvider\":true") && answer("\"referencesProvider\":true") &&
+              answer("\"documentSymbolProvider\":true") && answer("\"signatureHelpProvider\"") && answer("\"id\":1"),
           "initialize: %s", out.count ? out.items[0] : "nothing");
     exchange("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
     CHECK(out.count == 0, "initialized needs no answer");
@@ -232,6 +232,96 @@ static void test_session(void) {
     CHECK(answer("-32602") && answer("not a name"), "a keyword is not a name: %s", out.count ? out.items[0] : "nothing");
     request_with("textDocument/rename", good, "origin();", 0, ",\"newName\":\"zero\"");
     CHECK(times("\"newText\":\"zero\"") == 2, "a function, declared and called: %s", out.count ? out.items[0] : "nothing");
+    request_with("textDocument/rename", good, "count + 1", 0, ",\"newName\":\"count\"");
+    CHECK(answer("\"changes\":{}"), "the same name changes nothing: %s", out.count ? out.items[0] : "nothing");
+
+    /* a rename that would change the program is refused: tried first, in a second analysis */
+    request_with("textDocument/rename", good, "count + 1", 0, ",\"newName\":\"n\"");
+    CHECK(answer("-32803") && answer("would make an error"), "a local named as another of its block: %s",
+          out.count ? out.items[0] : "nothing");
+    request_with("textDocument/rename", good, "origin();", 0, ",\"newName\":\"pick\"");
+    CHECK(answer("-32803") && answer("renaming to `pick`"), "a function named as another: %s",
+          out.count ? out.items[0] : "nothing");
+    const char *shadow =
+        "i32 main() {\n"
+        "    i32 total = 1;\n"
+        "    if (total > 0) {\n"
+        "        i32 inner = 2;\n"
+        "        return inner + total;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n";
+    change_main(shadow);
+    request_with("textDocument/rename", shadow, "inner = 2", 0, ",\"newName\":\"total\"");
+    CHECK(answer("-32803"), "a local that would hide another used next to it: %s", out.count ? out.items[0] : "nothing");
+    request_with("textDocument/rename", shadow, "inner = 2", 0, ",\"newName\":\"other\"");
+    CHECK(times("\"newText\":\"other\"") == 2, "without a conflict: %s", out.count ? out.items[0] : "nothing");
+    change_main(good);
+
+    /* before a rename: the name and its range, or why it cannot be renamed */
+    request("textDocument/prepareRename", good, "count + 1", 2);
+    CHECK(answer("\"placeholder\":\"count\"") && answer("\"start\":{\"line\":21,\"character\":11}"),
+          "the name under the position: %s", out.count ? out.items[0] : "nothing");
+    request("textDocument/prepareRename", good, "return count", 2);
+    CHECK(answer("-32803") && answer("no name here"), "a keyword: %s", out.count ? out.items[0] : "nothing");
+    request("textDocument/prepareRename", good, "io;", 0);
+    CHECK(answer("-32803") && answer("module"), "a module: %s", out.count ? out.items[0] : "nothing");
+
+    /* a program that does not load: references and rename say why they cannot answer */
+    const char *broken = "i32 main() {\n    i32 count = 2;\n    return count +;\n}\n";
+    change_main(broken);
+    request_with("textDocument/references", broken, "count +", 0, ",\"context\":{\"includeDeclaration\":true}");
+    CHECK(answer("-32803") && answer("does not load"), "references without a program: %s", out.count ? out.items[0] : "nothing");
+    request("textDocument/prepareRename", broken, "count +", 0);
+    CHECK(answer("-32803") && answer("does not load"), "rename without a program: %s", out.count ? out.items[0] : "nothing");
+    change_main(good);
+
+    /* the outline of the file */
+    char *symbols = sosu_format("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"textDocument/documentSymbol\",\"params\":"
+                                "{\"textDocument\":{\"uri\":\"%s\"}}}", main_uri);
+    exchange(symbols);
+    free(symbols);
+    CHECK(answer("\"name\":\"origin\",\"kind\":12") && answer("\"name\":\"pick\"") && answer("\"name\":\"main\"") &&
+              answer("\"selectionRange\":{\"start\":{\"line\":4,\"character\":12}"),
+          "the functions of the file: %s", out.count ? out.items[0] : "nothing");
+    const char *types =
+        "struct Point {\n    f32 x;\n    f32 y;\n    f32 sum() { return self.x + self.y; }\n}\n"
+        "enum Light { Red, Green }\n"
+        "test \"a point\" {\n}\n"
+        "i32 main() {\n    return 0;\n}\n";
+    change_main(types);
+    symbols = sosu_format("{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"textDocument/documentSymbol\",\"params\":"
+                          "{\"textDocument\":{\"uri\":\"%s\"}}}", main_uri);
+    exchange(symbols);
+    free(symbols);
+    CHECK(answer("\"name\":\"Point\",\"kind\":23") && answer("\"name\":\"x\",\"kind\":8") &&
+              answer("\"name\":\"sum\",\"kind\":6") && answer("\"name\":\"Light\",\"kind\":10") &&
+              answer("\"name\":\"Green\",\"kind\":22") && answer("\"name\":\"a point\""),
+          "types, their members, and tests: %s", out.count ? out.items[0] : "nothing");
+    change_main(good);
+
+    /* signature help: in a call written, and in one being typed */
+    request("textDocument/signatureHelp", good, "count, 3", 7);
+    CHECK(answer("\"label\":\"T pick<T>(T a, T b)\"") && answer("\"label\":\"T b\"") && answer("\"activeParameter\":1"),
+          "the second argument: %s", out.count ? out.items[0] : "nothing");
+    request("textDocument/signatureHelp", good, "origin();", 7);
+    CHECK(answer("\"label\":\"vector.Vec2 origin()\"") && answer("\"activeParameter\":0"), "no parameter: %s",
+          out.count ? out.items[0] : "nothing");
+    const char *typing =
+        "T pick<T>(T a, T b) {\n"
+        "    return a;\n"
+        "}\n"
+        "i32 main() {\n"
+        "    i32 count = 2;\n"
+        "    i32 n = pick(count, \n"
+        "}\n";
+    change_main(typing);
+    request("textDocument/signatureHelp", typing, "count, \n", 7);
+    CHECK(answer("\"label\":\"T pick<T>(T a, T b)\"") && answer("\"activeParameter\":1"), "a call being typed: %s",
+          out.count ? out.items[0] : "nothing");
+    request("textDocument/signatureHelp", typing, "count = 2", 0);
+    CHECK(answer("\"result\":null"), "outside a call: %s", out.count ? out.items[0] : "nothing");
+    change_main(good);
 
     exchange("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"textDocument/codeLens\",\"params\":{}}");
     CHECK(answer("-32601"), "an unknown request is an error");
