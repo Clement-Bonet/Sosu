@@ -1,0 +1,8 @@
+# Version manifest of winget for sosuc, filled by installers/fill-manifests.sh for each release.
+# Not published before 1.0: the three files go to microsoft/winget-pkgs, in
+# manifests/c/ClementBonet/Sosu/<version>/, then `winget install ClementBonet.Sosu`.
+PackageIdentifier: ClementBonet.Sosu
+PackageVersion: "@VERSION@"
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

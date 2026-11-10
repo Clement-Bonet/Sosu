@@ -36,7 +36,7 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 
 ## What remains (November 10, 2026)
 
-Estimated again from the pace above. Works 1 to 5, 7, 8 and 10 are done, and `0.5.2` is the last version; works 6 and 9 remain before 1.0, then the 0.x versions tried by others (§13.1).
+Estimated again from the pace above. Works 1 to 5 and 7 to 10 are done, and `0.5.4` is the last version; work 6 remains before 1.0, then the 0.x versions tried by others (§13.1).
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
@@ -45,15 +45,15 @@ Estimated again from the pace above. Works 1 to 5, 7, 8 and 10 are done, and `0.
 | 6 | Tooling | Begun: references and rename in `sosuc lsp`, `sosuc doc` for any package (the generator of `docs/REFERENCE.md` is now in `src/lib/docgen.c`), long lines broken by `sosuc fmt` at 120 characters, and the VS Code extension 0.2.0 (its own repository: references, rename, `sosuc doc`). Remains: releasing them | 200 to 350 k |
 | 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`), the guide from the first program to a window (`docs/QUICK_GUIDE.md`), and the complete guide (`docs/GUIDE.md`), both run by `tests/program_tests.c`. Done on November 10, 2026: an example for each package of §8.3 (`examples/checksums`, `archive`, `orbit`, `wordcount`, `thumbnail`, `bookshelf`, `fetch`, `greetings`), run by `tests/program_tests.c` and linked from the guide (§22.9) and the README | 0 |
 | 8 | Interface | Done on November 10, 2026: responsive windows (step 15, §10.12: breakpoints, `from:` and `until:`, the columns of a `Grid` by width, `Row(stack: ...)`, `showcase/courier` adapted); the menus with the keyboard were already done (§10.6), only the specification still called them open | 0 |
-| 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
+| 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Done on November 10, 2026, with free means only: the installers (`installers/`), built and tried by `release.yml` from the tag, or by hand without publishing. They are `install.sh` (`curl | sh`, Linux and macOS) and `install.ps1` (`irm | iex`, Windows), which check the SHA-256 and install for the user without administrator rights; a `.deb` for x64 and ARM64; and, unsigned, a setup for Windows made by Inno Setup and a `.pkg` for macOS. The formula of Homebrew and the manifests of Scoop and winget are filled for each release, to be published at 1.0. `install.ps1` and the setup were tried on Windows 11, the `.deb` and `install.sh` on Ubuntu 24.04 and Debian 13. Remains, not needed for 1.0: signing. On Windows it would come from the free program of SignPath Foundation, whose steps are written and turn on once its secret exists; on macOS, a Developer ID would only be bought if users of macOS ask for it | 0 |
 | 10 | Dangling pointers | Added on November 4, 2026 (§13.1), and reduced on November 6, 2026: Sosu does not promise memory safety. Done on November 6, 2026 (§6.1, §7.7) | 0 |
 
-In all, about 0.26 to 0.5 million output tokens: 0.12 to 0.23 weeks of the Pro quota, a new session for each work.
+In all, about 0.2 to 0.35 million output tokens: 0.09 to 0.16 weeks of the Pro quota, a new session for each work.
 
 What tokens do not buy, and sets the pace as much:
 
 - The tests by hand: Beatbox runs on an Android phone (built with `--release`: the sound, the dialog of its lists, landscape); iOS on an iPhone remains (a Mac is needed). The dialogs and the sound are tried on Windows 11, not yet on Linux nor macOS.
-- The accounts and certificates of signed binaries (Apple developer program, a code-signing certificate for Windows), which cost money.
+- Signed binaries, after 1.0 if they are asked for: SignPath Foundation (free, for open source projects) has to accept the project for Windows; the Apple developer program costs money.
 - The 0.x versions tried by others than their authors, for a few weeks, before 1.0 (§13.1).
 
 A new session for each package or work spends much less than one long session, whose context is read again at each call.

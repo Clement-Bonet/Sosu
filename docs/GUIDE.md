@@ -56,7 +56,50 @@ Seven choices explain most of what follows:
 
 ### 1.1 Installing
 
-The [releases](https://github.com/Clement-Bonet/Sosu/releases) have `sosuc` for Windows (x64), Linux (x64 and ARM64) and macOS (universal), with the standard library (`lib/`) and the packages (`packages/`). Unpack the archive and add its `bin/` folder to your `PATH`.
+The [releases](https://github.com/Clement-Bonet/Sosu/releases) have `sosuc` for Windows (x64), Linux (x64 and ARM64) and macOS (universal), with the standard library (`lib/`) and the packages (`packages/`). The simplest way is the install script. It downloads the archive of the latest release, checks it against the `SHA256SUMS.txt` of the release, and installs it for your user, without administrator rights.
+
+On Linux and macOS:
+
+```bash
+curl -fsSL https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.ps1 | iex
+```
+
+`install.sh` puts the release into `~/.local/lib/sosu` and `sosuc` into `~/.local/bin`, and says so when that folder is not in your `PATH`. `install.ps1` puts it into `%LOCALAPPDATA%\Programs\Sosu` and adds its `bin\` to your `PATH`; open a new terminal to use it. To pass options to the scripts:
+
+```bash
+curl -fsSL https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.sh | sh -s -- --version 0.6.0
+curl -fsSL https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.ps1))) -Version 0.6.0
+& ([scriptblock]::Create((irm https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.ps1))) -Uninstall
+```
+
+`install.sh --prefix /usr/local`, run with `sudo`, installs for every user. Running a script again installs the release over the one already there.
+
+The other files of a release:
+
+| System | File | Installed in | `sosuc` |
+|---|---|---|---|
+| Ubuntu, Debian | `sosu_X.Y.Z_amd64.deb`, `sosu_X.Y.Z_arm64.deb` | `/usr/lib/sosu` | `/usr/bin/sosuc` |
+| Windows | `sosu-X.Y.Z-windows-x64-setup.exe` (unsigned) | `%LOCALAPPDATA%\Programs\Sosu` | `bin\` added to the user's `PATH` |
+| macOS | `sosu-X.Y.Z-macos-universal.pkg` (unsigned) | `/usr/local/lib/sosu` | `/usr/local/bin/sosuc` |
+| Linux, macOS | `sosu-X.Y.Z-<system>.tar.gz`, then `./install.sh` in it | `~/.local/lib/sosu` | `~/.local/bin/sosuc` |
+| Windows | `sosu-X.Y.Z-windows-x64.zip` | where it is unpacked | add its `bin\` to the `PATH` |
+
+- The `.deb` installs with `sudo apt install ./sosu_X.Y.Z_amd64.deb`, which also installs gcc when no C compiler is there. `sudo apt remove sosu` uninstalls it.
+- The Windows setup installs for the current user only, without administrator rights. It is not signed, so SmartScreen may stop it: click *More info*, then *Run anyway*. Uninstall it from *Installed apps*, which also removes `bin\` from the `PATH`. The setup and `install.ps1` use the same folder: uninstall one before using the other.
+- The `.pkg` asks for an administrator password, like any package. It is not signed, so macOS refuses to open it the first time: click *Open Anyway* in System Settings, under Privacy & Security, then open it again. To uninstall it: `sudo rm -rf /usr/local/lib/sosu /usr/local/bin/sosuc`, then `sudo pkgutil --forget io.github.clement-bonet.sosu`.
+- A file downloaded by a browser is marked, and macOS refuses to run the unsigned `sosuc` of an archive. `install.sh` removes the mark. With the archive alone, `xattr -dr com.apple.quarantine sosu-X.Y.Z-macos-universal` removes it. What `curl` and `irm` download is not marked, which is why the scripts are the simplest way.
+
+The packages of the release are in the `packages/` folder of the installation, next to `lib/`. A `sosu.toml` names them by their path (`platform = { path = "/usr/lib/sosu/packages/platform" }`, section 19.4).
 
 `sosuc` needs a C compiler to produce programs:
 
