@@ -1,0 +1,15 @@
+# Installer manifest of winget: the setup made by Inno Setup, for the current user.
+PackageIdentifier: ClementBonet.Sosu
+PackageVersion: "@VERSION@"
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Clement-Bonet/Sosu/releases/download/v@VERSION@/sosu-@VERSION@-windows-x64-setup.exe
+    InstallerSha256: "@SHA256_WINDOWS_SETUP@"
+ManifestType: installer
+ManifestVersion: 1.6.0

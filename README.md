@@ -49,7 +49,7 @@ This program prints `12.0` and `total: 42`; it is tested as `tests/programs/read
 ## Try it
 
 - In the browser: the [playground](https://clement-bonet.github.io/Sosu/) checks a program and shows the C it generates (the compiler built to WebAssembly; it does not run the program).
-- Installed: the [releases](https://github.com/Clement-Bonet/Sosu/releases) have `sosuc` for Windows, Linux (x64, ARM64) and macOS, with the library. Unpack the archive, put its `bin/` in the `PATH`, and run `sosuc run` in a package folder. A C compiler is needed: MSVC on Windows, `cc` (gcc or clang) elsewhere.
+- Installed: the [releases](https://github.com/Clement-Bonet/Sosu/releases) have `sosuc` for Windows, Linux (x64, ARM64) and macOS, with the library. `curl -fsSL https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.sh | sh` installs it on Linux and macOS, and `irm https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.ps1 | iex` on Windows, for the user, without administrator rights. There is also a `.deb`, an unsigned setup for Windows, an unsigned `.pkg` for macOS, and the archives ([guide, section 1.1](docs/GUIDE.md)). Then run `sosuc run` in a package folder. A C compiler is needed: MSVC on Windows, `cc` (gcc or clang) elsewhere.
 - From the sources: see [Building](#building).
 
 ## Written in Sosu

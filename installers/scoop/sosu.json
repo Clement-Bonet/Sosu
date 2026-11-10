@@ -1,0 +1,30 @@
+{
+    "version": "@VERSION@",
+    "description": "Compiler of the Sosu programming language",
+    "homepage": "https://github.com/Clement-Bonet/Sosu",
+    "license": "MIT|Apache-2.0",
+    "notes": [
+        "sosuc needs MSVC to build programs: Visual Studio or its Build Tools, with \"Desktop development with C++\".",
+        "The packages of the release are in $dir\\packages."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/Clement-Bonet/Sosu/releases/download/v@VERSION@/sosu-@VERSION@-windows-x64.zip",
+            "hash": "@SHA256_WINDOWS_ZIP@",
+            "extract_dir": "sosu-@VERSION@-windows-x64"
+        }
+    },
+    "env_add_path": "bin",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/Clement-Bonet/Sosu/releases/download/v$version/sosu-$version-windows-x64.zip",
+                "extract_dir": "sosu-$version-windows-x64"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/Clement-Bonet/Sosu/releases/download/v$version/SHA256SUMS.txt"
+        }
+    }
+}
