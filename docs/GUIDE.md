@@ -2198,6 +2198,8 @@ test "arenas are fine in tests" {
 | `testing.bench` | `bench.run(name, f)`: benchmarks, run by `sosuc test --bench` |
 | `testing.fixture` | the data files of a test, golden files (`sosuc test --update` writes them again), temporary folders |
 
+`examples/wordcount` is a small library tested with all three: `sosuc test examples/wordcount`.
+
 ```csharp
 import testing.check;
 
@@ -2580,6 +2582,24 @@ usize n = try s.read(buffer[0..64]);
 
 Reads and writes wait; a server serves its clients from threads (chapter 23). TLS comes from Mbed TLS, given as C sources with the package: nothing to install.
 
+`examples/fetch` runs an HTTP client against a small server of its own on this machine, without a network: a text, a redirect, a page not found and a form posted.
+
+### 22.9 The other packages
+
+Beside `std`, the release has packages in `packages/`, each named in `[dependencies]` as `net` is. Each has a small example in `examples/`, run from the root of the repository (`sosuc run examples/orbit`); [section 8.3 of the specification](SPEC.md) describes every function.
+
+| Package | Gives | Example |
+|---|---|---|
+| `crypto` | SHA-256, SHA-1, HMAC, base64, hexadecimal, random numbers for security | `examples/checksums`: a checksum, a link signed and checked, a session token |
+| `compress` | deflate, zlib and gzip, compressed and read; Adler-32 and CRC-32 | `examples/archive`: a log compressed at three levels, read back, a damaged copy refused |
+| `math` | `math.linear`: vectors, matrices, quaternions, transforms, cameras | `examples/orbit`: a moon around a planet around a sun, projected to the pixels of a screen |
+| `image` | images read and written as PNG and JPEG; crop, resize, rotate, gray | `examples/thumbnail`: a picture drawn, saved, read back and made into a thumbnail |
+| `db`, `sqlite` | databases that take SQL, and the driver of SQLite (nothing to install) | `examples/bookshelf`: books and loans, prepared statements, a transaction, a join |
+| `net` | TCP, UDP, TLS, an HTTP client (section 22.8) | `examples/fetch` |
+| `testing` | comparisons, fixtures, benchmarks (section 20.2) | `examples/wordcount` |
+| `i18n` | catalogs of translations, in the format of gettext | `examples/greetings`: three languages, their plurals, the language that suits a user |
+| `audio` | sounds played, recorded and mixed; WAV and Ogg Vorbis | `examples/sound` (it needs a sound card) |
+
 ## 23. Threads and Channels
 
 ### 23.1 The model
@@ -2656,7 +2676,7 @@ i32 main() uses io, threads {
 | `platform` | a window, its events and its loop, on SDL3; dialogs, clipboard, the data folder of the application |
 | `render` | drawing in a canvas of pixels: rectangles, rounded corners, lines, text (a built-in font and TrueType fonts), PNG and JPEG images |
 | `ui` | widgets in immediate mode, and the `.ui.sosu` files that describe them |
-| `i18n` | translations of the texts of an interface |
+| `i18n` | translations of the texts of an interface (`examples/greetings` uses it without a window) |
 
 They are in `packages/` of the release, written in Sosu. SDL3 is the only native library: on Windows, run `packages/platform/fetch-sdl3.ps1` once; on Linux and macOS, install it with your package manager.
 

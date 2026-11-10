@@ -1,0 +1,9 @@
+# The packages db and sqlite (spec §8.3): the books of a library and their loans, in a database
+# in memory. No window. Run it from the root of the repository: sosuc run examples/bookshelf
+[package]
+name = "bookshelf"
+version = "0.1.0"
+
+[dependencies]
+db = { path = "../../packages/db" }
+sqlite = { path = "../../packages/sqlite" }

@@ -1,0 +1,27 @@
+# The French catalog of examples/greetings.
+msgid ""
+msgstr ""
+"Language: fr\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+msgid "Welcome, {name}!"
+msgstr "Bienvenue, {name} !"
+
+msgid "{count} new message"
+msgid_plural "{count} new messages"
+msgstr[0] "{count} nouveau message"
+msgstr[1] "{count} nouveaux messages"
+
+msgctxt "button"
+msgid "Open"
+msgstr "Ouvrir"
+
+msgctxt "state"
+msgid "Open"
+msgstr "Ouvert"
+
+# not checked by a translator yet: the English text is shown
+#, fuzzy
+msgid "Sign out"
+msgstr "Déconnexion"

@@ -1,0 +1,87 @@
+// The package compress (spec §8.3): the log of a day of a server, compressed with gzip at three
+// levels, read back and compared, its CRC-32, and a damaged copy refused.
+import std.io;
+import std.text;
+import compress.checksum;
+import compress.deflate;
+import compress.gzip;
+import compress.zlib;
+
+// The log of a day: a line a minute, as a web server writes it.
+str day_of_log(Arena* arena) {
+    mut str[4] paths = ["/", "/files/report.pdf", "/api/items?page=2", "/favicon.ico"];
+    mut i32[4] statuses = [200, 200, 304, 404];
+    text.TextBuilder* b = text.builder(arena);
+    for (i32 minute in 0..1440) {
+        usize k = (minute * 7 % 4) as usize;
+        b.push("2026-11-10 ");
+        if (minute / 60 < 10) {
+            b.push("0");
+        }
+        b.push_i64((minute / 60) as i64);
+        b.push(minute % 60 < 10 ? ":0" : ":");
+        b.push_i64((minute % 60) as i64);
+        b.push(" GET ");
+        b.push(paths[k]);
+        b.push(" ");
+        b.push_i64(statuses[k] as i64);
+        b.push(" ");
+        b.push_i64((minute * 37 % 9000 + 120) as i64);
+        b.push(" bytes\n");
+    }
+    return b.text();
+}
+
+bool same(ui8[] a, ui8[] b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (usize i in 0..a.len) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+
+    str log = day_of_log(&arena);
+    io.print("log: {} lines, {} bytes, CRC-32 {}", 1440, log.len, checksum.crc32(log.bytes));
+
+    // gzip, as the `gzip` command writes it: 1 the fastest, 6 the default, 9 the smallest
+    for (i32 level in [1, 6, 9]) {
+        ui8[] packed = gzip.compress_level(&arena, log.bytes, level);
+        bool back = match (gzip.decompress(&arena, packed)) {
+            ok(bytes) => same(bytes, log.bytes),
+            err(e) => false,
+        };
+        io.print(
+            "gzip -{}: {} bytes ({}%), read back the same: {}",
+            level,
+            packed.len,
+            packed.len * 100 / log.len,
+            back
+        );
+    }
+
+    // zlib, the stream that PNG images and HTTP use, with its Adler-32
+    ui8[] z = zlib.compress(&arena, log.bytes);
+    io.print("zlib: {} bytes, Adler-32 {}", z.len, checksum.adler32(log.bytes));
+
+    // one byte changed in the middle: the checksum finds it, nothing is read outside the bytes
+    mut ui8[] damaged = gzip.compress(&arena, log.bytes);
+    damaged[damaged.len / 2] ^= 0x10;
+    match (gzip.decompress(&arena, damaged)) {
+        ok(bytes) => io.print("damaged: read, {} bytes", bytes.len),
+        err(e) => io.print("damaged: {}", deflate.message(e)),
+    }
+    // a limit: a small file that would grow too large is refused before it does
+    match (gzip.decompress_limit(&arena, gzip.compress(&arena, log.bytes), 4096)) {
+        ok(bytes) => io.print("limited: read, {} bytes", bytes.len),
+        err(e) => io.print("limited to 4096 bytes: {}", deflate.message(e)),
+    }
+    return 0;
+}

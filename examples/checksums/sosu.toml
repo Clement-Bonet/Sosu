@@ -1,0 +1,8 @@
+# The package crypto (spec §8.3): a checksum, a signed link, a random token. No window.
+# Run it from the root of the repository: sosuc run examples/checksums
+[package]
+name = "checksums"
+version = "0.1.0"
+
+[dependencies]
+crypto = { path = "../../packages/crypto" }

@@ -1,0 +1,6 @@
+the 9
+roof 3
+to 3
+it 2
+on 2
+words: 32, different: 15, mean length: 3.41

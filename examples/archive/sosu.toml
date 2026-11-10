@@ -1,0 +1,8 @@
+# The package compress (spec §8.3): a log compressed with gzip and zlib, read back, checked.
+# No window. Run it from the root of the repository: sosuc run examples/archive
+[package]
+name = "archive"
+version = "0.1.0"
+
+[dependencies]
+compress = { path = "../../packages/compress" }

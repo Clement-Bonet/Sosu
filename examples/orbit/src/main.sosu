@@ -1,0 +1,91 @@
+// The package math (spec §8.3): a planet around its sun and a moon around the planet, placed
+// by transforms one inside the other, seen by a camera and projected to the pixels of a screen
+// of 640 by 480, as a 3D program does before it draws.
+import std.io;
+import std.math;
+import std.text;
+import math.linear;
+
+i32 WIDTH = 640;
+i32 HEIGHT = 480;
+
+// The pixel where `p`, in the world, falls on the screen: the camera and its projection map it
+// to -1..1 on each axis (y up), the screen has y down.
+str pixel(Arena* arena, linear.Mat4 camera, linear.Vec3 p) {
+    linear.Vec3 ndc = camera.transform_point(p);
+    i64 x = math.round((ndc.x as f64 + 1.0) / 2.0 * WIDTH as f64) as i64;
+    i64 y = math.round((1.0 - ndc.y as f64) / 2.0 * HEIGHT as f64) as i64;
+    text.TextBuilder* b = text.builder(arena);
+    b.push("(");
+    b.push_i64(x);
+    b.push(", ");
+    b.push_i64(y);
+    b.push(")");
+    return b.text();
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+
+    // the camera, above the plane of the orbits and looking at the sun; 60 degrees of field
+    linear.Vec3 up = linear.vec3(0.0, 1.0, 0.0);
+    linear.Mat4 view = linear.look_at(linear.vec3(0.0, 15.0, 25.0), linear.vec3(0.0, 0.0, 0.0), up);
+    linear.Mat4 projection = linear.perspective((math.PI / 3.0) as f32, WIDTH as f32 / HEIGHT as f32, 0.1, 100.0);
+    linear.Mat4 camera = projection.mul(view);  // `a.mul(b)` applies b first
+    io.print("sun at {}", pixel(&arena, camera, linear.vec3(0.0, 0.0, 0.0)));
+
+    for (i32 day in [0, 91, 182, 273]) {
+        f32 year = (2.0 * math.PI * day as f64 / 365.0) as f32;
+        f32 month = (2.0 * math.PI * day as f64 / 27.0) as f32;
+        // the orbit of the planet turns around the sun; the planet is 10 away on it
+        mut linear.Transform orbit = linear.transform();
+        orbit.rotation = linear.from_axis_angle(up, year);
+        mut linear.Transform planet = linear.transform();
+        planet.position = linear.vec3(10.0, 0.0, 0.0);
+        // the moon is 2 away from the planet, on an orbit of its own
+        mut linear.Transform moon_orbit = linear.transform();
+        moon_orbit.rotation = linear.from_axis_angle(up, month);
+        mut linear.Transform moon = linear.transform();
+        moon.position = linear.vec3(2.0, 0.0, 0.0);
+
+        linear.Transform planet_in_world = orbit.then(planet);
+        linear.Transform moon_in_world = planet_in_world.then(moon_orbit).then(moon);
+        linear.Vec3 p = planet_in_world.apply(linear.vec3(0.0, 0.0, 0.0));
+        linear.Vec3 m = moon_in_world.apply(linear.vec3(0.0, 0.0, 0.0));
+        io.print(
+            "day {}: planet at {}, moon at {}, {} apart",
+            day,
+            pixel(&arena, camera, p),
+            pixel(&arena, camera, m),
+            text.format_f64(&arena, p.distance(m) as f64, 3)
+        );
+    }
+
+    // the same moon on day 91, placed with matrices: the transforms are their shorthand
+    f32 year = (2.0 * math.PI * 91.0 / 365.0) as f32;
+    f32 month = (2.0 * math.PI * 91.0 / 27.0) as f32;
+    linear.Mat4 placed = linear.rotation_y(year).mul(linear.translation(linear.vec3(
+        10.0,
+        0.0,
+        0.0
+    ))).mul(linear.rotation_y(month)).mul(linear.translation(linear.vec3(2.0, 0.0, 0.0)));
+    io.print(
+        "day 91 with matrices: moon at {}",
+        pixel(&arena, camera, placed.transform_point(linear.vec3(0.0, 0.0, 0.0)))
+    );
+    // and back: the inverse of the camera takes the middle of the screen to the target
+    match (view.inverse()) {
+        some(inverse) => {
+            linear.Vec3 eye = inverse.transform_point(linear.vec3(0.0, 0.0, 0.0));
+            io.print(
+                "the camera is at {} {} {}",
+                text.format_f64(&arena, eye.x as f64, 1),
+                text.format_f64(&arena, eye.y as f64, 1),
+                text.format_f64(&arena, eye.z as f64, 1)
+            );
+        },
+        none => io.print("the view cannot be inverted"),
+    }
+    return 0;
+}

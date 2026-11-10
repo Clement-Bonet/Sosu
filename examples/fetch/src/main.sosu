@@ -1,0 +1,169 @@
+// The package net (spec §8.3): an HTTP client asks a small server of its own, on this machine,
+// so that it runs without a network. The server answers in main; the client runs on a thread
+// and prints what it gets: a text, a redirect followed, a page not found, a form posted.
+import std.io;
+import std.text;
+import std.thread;
+import net.http;
+import net.ip;
+import net.tcp;
+import net.url;
+
+i32 REQUESTS = 5;  // what the client sends, the redirect counted twice
+
+// ---- the client ----
+
+struct Client {
+    ui16 port;
+}
+
+str address(Arena* arena, ui16 port, str path) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("http://127.0.0.1:");
+    b.push_u64(port as ui64);
+    b.push(path);
+    return b.text();
+}
+
+// The path of the URL that answered (the port changes at each run).
+str path_of(Arena* arena, str address) {
+    return match (url.parse(arena, address)) {
+        some(u) => u.target,
+        none => "?",
+    };
+}
+
+void show(Arena* arena, str what, http.Response!http.HttpError answer) uses io {
+    match (answer) {
+        ok(r) => {
+            str kind = match (r.header("Content-Type")) {
+                some(t) => t,
+                none => "no type",
+            };
+            io.print("{}: {} {} from {} ({}): {}", what, r.status, r.reason, path_of(arena, r.url), kind, r.text());
+        },
+        err(e) => io.print("{}: {}", what, http.message(e)),
+    }
+}
+
+i64 client(Arena* arena, Client c) uses io {
+    show(arena, "GET /hello", http.get(arena, address(arena, c.port, "/hello")));
+    show(arena, "GET /old", http.get(arena, address(arena, c.port, "/old")));  // moved: followed
+    show(arena, "GET /missing", http.get(arena, address(arena, c.port, "/missing")));
+    // a request made field by field: a header of its own, a body, a shorter wait
+    mut http.Request r = http.request(arena, "POST", address(arena, c.port, "/echo"));
+    mut http.Header[1] headers = [http.Header{ name: "Content-Type", value: "text/plain" }];
+    r.headers = headers[0..1];
+    r.body = "a form, posted".bytes;
+    r.timeout_ms = 5000;
+    show(arena, "POST /echo", http.send(arena, r));
+    return 0;
+}
+
+// ---- the server ----
+
+// The number after `name: ` in the head of a request, or 0.
+usize header_number(str head, str name) {
+    usize at = match (text.find(head, name)) {
+        some(i) => i + name.len,
+        none => {
+            return 0;
+        },
+    };
+    usize end = match (text.find_from(head, "\r\n", at)) {
+        some(i) => i,
+        none => head.len,
+    };
+    return match (text.parse_u64(text.trim(text.slice(head, at, end)))) {
+        ok(n) => n as usize,
+        err(e) => 0,
+    };
+}
+
+str reply(Arena* arena, str status, str type, str body, str extra) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("HTTP/1.1 ");
+    b.push(status);
+    b.push("\r\nContent-Type: ");
+    b.push(type);
+    b.push("\r\nContent-Length: ");
+    b.push_u64(body.len as ui64);
+    b.push("\r\n");
+    b.push(extra);
+    b.push("\r\n");
+    b.push(body);
+    return b.text();
+}
+
+// Reads one request, up to its empty line and its body, and answers it.
+void serve(Arena* arena, tcp.Stream* s) uses io {
+    mut ui8[] got = arena.alloc_slice(ui8, 8192);
+    mut usize size = 0;
+    mut usize head = 0;
+    mut usize body = 0;
+    while (head == 0 || size < head + body) {
+        usize n = match (s.read(got[size..got.len])) {
+            ok(n) => n,
+            err(e) => 0,
+        };
+        if (n == 0) {
+            break;
+        }
+        size += n;
+        if (head == 0) {
+            str so_far = match (str.from_bytes(got[0..size])) {
+                ok(t) => t,
+                err(e) => "",
+            };
+            match (text.find(so_far, "\r\n\r\n")) {
+                some(i) => {
+                    head = i + 4;
+                    body = header_number(so_far, "Content-Length:");
+                },
+                none => { },
+            }
+        }
+    }
+    str request = match (str.from_bytes(got[0..size])) {
+        ok(t) => t,
+        err(e) => "",
+    };
+    str answer = text.starts_with(request, "GET /hello ")
+            ? reply(arena, "200 OK", "text/plain", "hello from the server", "")
+            : text.starts_with(request, "GET /old ")
+            ? reply(arena, "301 Moved Permanently", "text/plain", "", "Location: /new\r\n")
+            : text.starts_with(request, "GET /new ")
+            ? reply(arena, "200 OK", "application/json", "{\"moved\": true}", "")
+            : text.starts_with(request, "POST /echo ") && head > 0
+            ? reply(arena, "201 Created", "text/plain", text.slice(request, head, request.len), "")
+            : reply(arena, "404 Not Found", "text/plain", "nothing here", "");
+    match (s.write_text(answer)) {
+        ok => { },
+        err(e) => { },
+    }
+}
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    // port 0: one the system chooses, free
+    tcp.Listener* server = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            io.print("cannot listen: {}", ip.message(e));
+            return 1;
+        },
+    };
+    defer server.close();
+    auto asking = thread.spawn(&arena, client, Client{ port: server.port() });
+    for (i32 i in 0..REQUESTS) {
+        match (server.accept(&arena)) {
+            ok(s) => {
+                serve(&arena, s);
+                s.close();
+            },
+            err(e) => io.print("accept: {}", ip.message(e)),
+        }
+    }
+    return asking.join() as i32;
+}

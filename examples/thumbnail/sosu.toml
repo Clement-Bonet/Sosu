@@ -1,0 +1,8 @@
+# The package image (spec §8.3): a picture drawn, saved as PNG and JPEG, read back, made into a
+# thumbnail. No window. Run it from the root of the repository: sosuc run examples/thumbnail
+[package]
+name = "thumbnail"
+version = "0.1.0"
+
+[dependencies]
+image = { path = "../../packages/image" }
