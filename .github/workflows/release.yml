@@ -1,12 +1,27 @@
 name: Release
 
 # A tag `vX.Y.Z` pushed on main publishes the release X.Y.Z: sosuc for each system, with the
-# library, in an archive laid out as an installation (bin/sosuc finds ../lib, see library_dir).
+# library, in an archive laid out as an installation (bin/sosuc finds ../lib, see library_dir),
+# and what installs it (installers/): install.sh and install.ps1, a .deb for Linux, and unsigned,
+# a setup for Windows and a .pkg for macOS.
 #   git tag v0.1.0 && git push origin v0.1.0
 # The tag must match SOSU_VERSION (src/lib/common.h): `sosuc --version` says what was released.
+#
+# Run by hand (Actions > Release > Run workflow, on any branch), it builds and tries everything
+# with the version of SOSU_VERSION, keeps the files as artifacts of the run, and publishes nothing.
+#
+# The formula of Homebrew and the manifests of Scoop and winget are filled for each run (the
+# artifact `manifests`) but published nowhere before 1.0.
+#
+# Signing is off. On Windows it turns on by itself once the secret SIGNPATH_API_TOKEN and the
+# variable SIGNPATH_ORGANIZATION_ID exist (Settings > Secrets and variables > Actions), from the
+# free signing of SignPath Foundation for open source projects (signpath.org): sosuc.exe, then the
+# setup and install.ps1. On macOS nothing signs: a Developer ID would sign sosuc and the .pkg
+# (codesign, pkgbuild --sign) and notarize them (xcrun notarytool, stapler), in the job `unix`.
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,13 +36,12 @@ jobs:
       - uses: actions/checkout@v7
       - id: check
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           source=$(sed -n 's/^#define SOSU_VERSION "\(.*\)"$/\1/p' src/lib/common.h)
-          if [ "$tag" != "$source" ]; then
-            echo "::error::the tag is v$tag, SOSU_VERSION is $source (src/lib/common.h)"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$source" ]; then
+            echo "::error::the tag is $GITHUB_REF_NAME, SOSU_VERSION is $source (src/lib/common.h)"
             exit 1
           fi
-          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$source" >> "$GITHUB_OUTPUT"
 
   unix:
     name: ${{ matrix.target }}
@@ -37,12 +51,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: linux-x64, runner: ubuntu-24.04, cc: gcc, arch: '' }
-          - { target: linux-arm64, runner: ubuntu-24.04-arm, cc: gcc, arch: '' }
+          - { target: linux-x64, runner: ubuntu-24.04, cc: gcc, arch: '', deb: amd64 }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm, cc: gcc, arch: '', deb: arm64 }
           # Both architectures in one sosuc; each slice is compiled with its own host_system().
-          - { target: macos-universal, runner: macos-latest, cc: clang, arch: '-arch arm64 -arch x86_64' }
+          - { target: macos-universal, runner: macos-latest, cc: clang, arch: '-arch arm64 -arch x86_64', deb: '' }
     env:
+      VERSION: ${{ needs.version.outputs.version }}
       DIST: sosu-${{ needs.version.outputs.version }}-${{ matrix.target }}
+      SOSU_CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v7
       # No -Werror: the warnings are checked by ci.yml, a new one on ARM64 must not stop a release.
@@ -54,11 +70,11 @@ jobs:
           cp build/sosuc "$DIST/bin/"
           cp -R lib packages "$DIST/"
           cp README.md LICENSE-APACHE LICENSE-MIT THIRD_PARTY_NOTICES.md "$DIST/"
+          cp installers/install.sh "$DIST/"
+          chmod 755 "$DIST/install.sh"
       # The archive works on its own: the program of the README, built from a copy outside the
       # repository, prints what it is expected to.
       - name: Smoke test
-        env:
-          SOSU_CC: ${{ matrix.cc }}
         run: |
           cp -R tests/programs/readme "$RUNNER_TEMP/readme"
           rm -rf "$RUNNER_TEMP/readme/build"
@@ -69,32 +85,111 @@ jobs:
       # (examples/poster); once, on linux-x64.
       - name: Poster
         if: matrix.target == 'linux-x64'
-        env:
-          SOSU_CC: ${{ matrix.cc }}
-          VERSION: ${{ needs.version.outputs.version }}
         run: |
           "$DIST/bin/sosuc" run examples/poster -- "v$VERSION"
           cp examples/poster/build/poster.png "sosu-$VERSION-poster.png"
       - name: Archive
         run: tar -czf "$DIST.tar.gz" "$DIST"
+      # install.sh run as `curl | sh` would run it, on a release laid out in a folder of the run
+      # (SOSU_RELEASES), then from the unpacked archive; each time uninstalled.
+      - name: Try install.sh
+        run: |
+          releases="$RUNNER_TEMP/releases"
+          mkdir -p "$releases/download/v$VERSION"
+          cp "$DIST.tar.gz" "$releases/download/v$VERSION/"
+          (cd "$releases/download/v$VERSION" && shasum -a 256 "$DIST.tar.gz" > SHA256SUMS.txt)
+          prefix="$RUNNER_TEMP/prefix"
+          for way in download archive; do
+            if [ "$way" = download ]; then
+              SOSU_RELEASES="file://$releases" sh -s -- --version "$VERSION" --prefix "$prefix" < installers/install.sh
+            else
+              "$DIST/install.sh" --prefix "$prefix"
+            fi
+            rm -rf "$RUNNER_TEMP/readme/build"
+            PATH="$prefix/bin:$PATH" sosuc run "$RUNNER_TEMP/readme" > out.txt
+            diff -u "$RUNNER_TEMP/readme/expected.txt" out.txt
+            sh installers/install.sh --prefix "$prefix" --uninstall
+            test ! -e "$prefix/bin/sosuc" && test ! -e "$prefix/lib/sosu"
+          done
+      - name: Debian package
+        if: matrix.deb != ''
+        run: sh installers/linux/build-deb.sh "$DIST" "$VERSION" ${{ matrix.deb }}
+      - name: Try the Debian package
+        if: matrix.deb != ''
+        run: |
+          sudo apt-get install -y ./sosu_*.deb
+          rm -rf "$RUNNER_TEMP/readme/build"
+          /usr/bin/sosuc run "$RUNNER_TEMP/readme" > out.txt
+          diff -u "$RUNNER_TEMP/readme/expected.txt" out.txt
+          sudo apt-get remove -y sosu
+          test ! -e /usr/bin/sosuc && test ! -e /usr/lib/sosu
+      # Unsigned: macOS asks to allow it in System Settings (docs/GUIDE.md, section 1.1).
+      - name: macOS package
+        if: matrix.target == 'macos-universal'
+        run: sh installers/macos/build-pkg.sh "$DIST" "$VERSION"
+      - name: Try the macOS package
+        if: matrix.target == 'macos-universal'
+        run: |
+          sudo installer -pkg sosu-*.pkg -target /
+          rm -rf "$RUNNER_TEMP/readme/build"
+          /usr/local/bin/sosuc run "$RUNNER_TEMP/readme" > out.txt
+          diff -u "$RUNNER_TEMP/readme/expected.txt" out.txt
+      # install.sh is also a file of the release, for `curl ... | sh`; once.
+      - name: Install script of the release
+        if: matrix.target == 'linux-x64'
+        run: cp installers/install.sh .
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
+          name: release-${{ matrix.target }}
           path: |
             ${{ env.DIST }}.tar.gz
             sosu-*-poster.png
+            sosu_*.deb
+            sosu-*.pkg
+            install.sh
 
   windows:
     name: windows-x64
     needs: version
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read  # SignPath reads the artifacts it signs
     env:
+      VERSION: ${{ needs.version.outputs.version }}
       DIST: sosu-${{ needs.version.outputs.version }}-windows-x64
+      SIGN_WINDOWS: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
     steps:
       - uses: actions/checkout@v7
       - name: Build sosuc
         shell: cmd
         run: build.bat release
+      # SignPath signs what an artifact of the run holds and gives it back signed. Its project
+      # (SIGNPATH_PROJECT, `sosu` by default) has an artifact configuration for each of the two
+      # artifacts: `sosuc` (sosuc.exe) and `installers` (the setup and install.ps1).
+      - name: Artifact to sign (sosuc.exe)
+        if: env.SIGN_WINDOWS == 'true'
+        id: unsigned-sosuc
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-sosuc
+          path: build/sosuc.exe
+      - name: Sign sosuc.exe
+        if: env.SIGN_WINDOWS == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT || 'sosu' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY || 'release-signing' }}
+          artifact-configuration-slug: sosuc
+          github-artifact-id: ${{ steps.unsigned-sosuc.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: build/signed
+      - name: Use the signed sosuc.exe
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        run: Copy-Item -Force build/signed/sosuc.exe build/sosuc.exe
       - name: Lay out the installation
         shell: pwsh
         run: |
@@ -116,13 +211,87 @@ jobs:
       - name: Archive
         shell: pwsh
         run: Compress-Archive -Path "$env:DIST" -DestinationPath "$env:DIST.zip"
+      - name: Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          & $iscc "/DVersion=$env:VERSION" "/DSourceDir=$PWD\$env:DIST" "/DOutputDir=$PWD" installers\windows\sosu.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Copy-Item installers/install.ps1 .
+      - name: Artifact to sign (setup, install.ps1)
+        if: env.SIGN_WINDOWS == 'true'
+        id: unsigned-installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-installers
+          path: |
+            sosu-*-setup.exe
+            install.ps1
+      - name: Sign the setup and install.ps1
+        if: env.SIGN_WINDOWS == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT || 'sosu' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY || 'release-signing' }}
+          artifact-configuration-slug: installers
+          github-artifact-id: ${{ steps.unsigned-installers.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+      - name: Use the signed setup and install.ps1
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        run: Copy-Item -Force signed/* .
+      # install.ps1 run as `irm | iex` would run it, on the archive of the run, then uninstalled.
+      - name: Try install.ps1
+        shell: pwsh
+        run: |
+          & ([scriptblock]::Create((Get-Content -Raw install.ps1))) -Archive "$PWD\$env:DIST.zip"
+          $bin = Join-Path $env:LOCALAPPDATA 'Programs\Sosu\bin'
+          Remove-Item -Recurse -Force "$env:RUNNER_TEMP/readme/build" -ErrorAction SilentlyContinue
+          $got = (& "$bin\sosuc.exe" run "$env:RUNNER_TEMP/readme") -join "`n"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $expected = (Get-Content "$env:RUNNER_TEMP/readme/expected.txt") -join "`n"
+          if ($got -ne $expected) { Write-Error "got:`n$got`nexpected:`n$expected"; exit 1 }
+          & ./install.ps1 -Uninstall
+          if (Test-Path $bin) { Write-Error "install.ps1 -Uninstall left $bin"; exit 1 }
+      - name: Try the setup
+        shell: pwsh
+        run: installers\windows\test-setup.ps1 "sosu-$env:VERSION-windows-x64-setup.exe"
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-x64
-          path: ${{ env.DIST }}.zip
+          name: release-windows-x64
+          path: |
+            ${{ env.DIST }}.zip
+            sosu-*-setup.exe
+            install.ps1
+
+  manifests:
+    name: Homebrew, Scoop and winget
+    needs: [version, unix, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: files
+          merge-multiple: true
+      - name: Fill the manifests
+        run: sh installers/fill-manifests.sh "${{ needs.version.outputs.version }}" files manifests
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifests
+          path: manifests
 
   publish:
     name: Publish the release
+    if: github.ref_type == 'tag'
     needs: [version, unix, windows]
     runs-on: ubuntu-24.04
     permissions:
@@ -130,11 +299,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
+          pattern: release-*
           path: dist
           merge-multiple: true
       - name: Checksums
         working-directory: dist
-        run: sha256sum * > SHA256SUMS.txt
+        run: sha256sum -- * > SHA256SUMS.txt
       # The notes list the pull requests merged since the previous tag; they can be edited on
       # GitHub afterwards. A version with a suffix (0.2.0-rc.1) is marked as a pre-release.
       - name: Create the release

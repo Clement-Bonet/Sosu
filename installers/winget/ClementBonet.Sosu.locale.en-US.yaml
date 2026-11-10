@@ -1,0 +1,16 @@
+# Locale manifest of winget: what `winget show ClementBonet.Sosu` says.
+PackageIdentifier: ClementBonet.Sosu
+PackageVersion: "@VERSION@"
+PackageLocale: en-US
+Publisher: Clément Bonet
+PublisherUrl: https://github.com/Clement-Bonet
+PackageName: Sosu
+PackageUrl: https://github.com/Clement-Bonet/Sosu
+License: MIT OR Apache-2.0
+ShortDescription: Compiler of the Sosu programming language
+Description: sosuc checks Sosu packages, writes C from them and builds them with MSVC.
+Tags:
+  - compiler
+  - programming-language
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

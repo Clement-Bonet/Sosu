@@ -40,7 +40,21 @@ Contents:
 
 ### Installing
 
-The [releases](https://github.com/Clement-Bonet/Sosu/releases) hold `sosuc` for Windows, Linux and macOS, with its library. Unpack the archive and put its `bin/` folder in your `PATH`.
+The [releases](https://github.com/Clement-Bonet/Sosu/releases) hold `sosuc` for Windows, Linux and macOS, with its library. The install script installs the latest one for your user, without administrator rights.
+
+On Linux and macOS:
+
+```bash
+curl -fsSL https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/Clement-Bonet/Sosu/releases/latest/download/install.ps1 | iex
+```
+
+On Ubuntu and Debian, the `.deb` of the release also works: `sudo apt install ./sosu_X.Y.Z_amd64.deb` (`arm64` on ARM). [Section 1.1 of the guide](GUIDE.md) gives the other files: a setup for Windows, a `.pkg` for macOS, and the archives.
 
 `sosuc` writes C, so it needs a C compiler to finish the job: MSVC on Windows, `cc` (gcc or clang) elsewhere.
 
