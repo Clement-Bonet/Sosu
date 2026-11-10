@@ -1,0 +1,6 @@
+# An interface with an effect parameter (spec §5.4): implementations that give it effects, a
+# generic function that calls them with those effects, and the same object seen through the
+# instance without effects (one table at run time).
+[package]
+name = "effects"
+version = "0.1.0"

@@ -195,7 +195,7 @@ examples/     window (shapes, keyboard and mouse), form (widgets), editor and wo
               drawn with `render` into PNGs)
 showcase/     whole applications: beatbox (a drum machine), disktiles (the sizes of a disk as tiles),
               notes (Markdown notes), pixelforge (a pixel art editor), queens (a puzzle),
-              sheets (a spreadsheet), vault (a password manager)
+              sheets (a spreadsheet), vault (a password manager), courier (a download manager)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification, error codes, library reference, roadmap
@@ -273,7 +273,9 @@ folder (`../../build/sosuc run .`):
 - `showcase/pixelforge`: a pixel art editor, with layers, frames, onion skin and sprite sheets;
 - `showcase/queens`: the puzzle of the queens and the coloured regions, each grid with one solution;
 - `showcase/sheets`: a spreadsheet with about 120 functions, reading and writing `.ods` and `.csv`;
-- `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software).
+- `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software);
+- `showcase/courier`: a download manager, on the package `net`: downloads that pause, start again after an error from where
+  they stopped, and keep to a limit of bandwidth.
 
 On Windows:
 

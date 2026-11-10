@@ -112,11 +112,13 @@ Event? device_event(sdl_c.SDL_Window* window, sdl.Event* event, i32 w, i32 h) us
     return none;
 }
 
-// What a program implements: its state lives in the class that implements it.
-pub interface Handler {
+// What a program implements: its state lives in the class that implements it. `E` is what its
+// methods do besides `io`: a program that starts threads from them, or reads the clock,
+// implements `app.Handler<uses threads, time>`; `app.Handler` alone is `io` only.
+pub interface Handler<uses E> {
     // Returns false to close the window.
-    bool on_event(Event e) uses io;
-    void on_frame(canvas.Canvas* surface) uses io;
+    bool on_event(Event e) uses io, E;
+    void on_frame(canvas.Canvas* surface) uses io, E;
 }
 
 Button button_of(ui8 index) {
@@ -192,6 +194,12 @@ pub ui8[]? read_asset(Arena* arena, str path) uses io {
 // on the desktop (spec §11.5).
 pub str data_folder(Arena* arena, str name) uses io {
     return sdl.pref_path(arena, "sosu", name);
+}
+
+// The system the program runs on: "Windows", "macOS", "Linux", "iOS", "Android" (as SDL names
+// them), for what differs between them (the file manager, a shortcut key).
+pub str system(Arena* arena) uses io {
+    return sdl.platform_name(arena);
 }
 
 pub str clipboard(Arena* arena) uses io {
@@ -397,8 +405,16 @@ bool on_expose(ui8* data, sdl_c.SDL_Event* raw) uses io {
     return true;
 }
 
-// Opens the window and runs until `on_event` returns false. Returns the exit code.
-pub i32 run(Config config, Handler* handler) uses io {
+// The handler as an `app.Handler`, for the screen (see `run`).
+Handler* drawer_of<uses E>(keeps Handler<uses E>* handler) {
+    unsafe {
+        return handler as Handler*;
+    }
+}
+
+// Opens the window and runs until `on_event` returns false. Returns the exit code. It has the
+// effects of the handler: `app.run(config, h as app.Handler<uses threads>*)` uses io and threads.
+pub i32 run<uses E>(Config config, Handler<uses E>* handler) uses io, E {
     mut Arena arena = Arena.new(16 * KB);
     defer arena.free();
     bool wants_bar = match (config.title_bar) {
@@ -462,8 +478,12 @@ pub i32 run(Config config, Handler* handler) uses io {
     };
     defer sdl.destroy_renderer(renderer);
 
-    // The pixels of the window: rebuilt, with their arena, when its size changes.
-    Screen* screen = arena.new(Screen, handler, renderer);
+    // The pixels of the window: rebuilt, with their arena, when its size changes. The screen
+    // draws from `on_expose` too, a callback of SDL whose type says `io` only; SDL calls it only
+    // while this loop waits for events, which holds the effects `E` of the handler. So the
+    // screen keeps the handler as an `app.Handler` (the same object and table at run time: the
+    // effects exist for the compiler only).
+    Screen* screen = arena.new(Screen, drawer_of(handler), renderer);
     defer screen.pixels.free();
     defer screen.release();
     // the size the system gave: on a phone, the whole screen, whatever the program asked (spec §11.5)

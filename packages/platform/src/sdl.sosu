@@ -145,6 +145,13 @@ pub str clipboard_text(Arena* arena) uses io {
     }
 }
 
+// The system, as SDL names it: "Windows", "macOS", "Linux", "iOS", "Android"...
+pub str platform_name(Arena* arena) uses io {
+    unsafe {
+        return copy_cstring(arena, sdl_c.SDL_GetPlatform(), 64);
+    }
+}
+
 // The folder where an application keeps its data, ending with a separator (spec §11.5).
 pub str pref_path(Arena* arena, str organization, str application) uses io {
     ui8* org = organization.to_cstr(arena);

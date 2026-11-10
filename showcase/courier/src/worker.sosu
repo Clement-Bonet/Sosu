@@ -1,0 +1,283 @@
+// courier.worker: one download, on a thread of its own. It asks for the file from the bytes
+// already written (`Range: bytes=N-`), appends what comes to the `.part` file, keeps to its rate
+// (it sleeps when it is ahead), reads the commands of the window between two blocks, and says
+// what happens on the channel of events, at most ten times a second while it runs.
+import std.channel;
+import std.io;
+import std.text;
+import std.time;
+import net.http;
+import net.ip;
+import courier.files;
+import courier.job;
+
+// The bytes read at once.
+usize BLOCK = 16384;
+
+// The first byte and the total size of a `Content-Range` (`bytes 100-199/1000`; the total may
+// be `*`, -1). None if it cannot be read.
+pub struct Range {
+    pub i64 first;
+    pub i64 total;
+}
+
+pub Range? content_range(str value) {
+    str v = text.trim(value);
+    if (!text.starts_with(v, "bytes ")) {
+        return none;
+    }
+    usize dash = match (text.find(v, "-")) {
+        some(i) => i,
+        none => {
+            return none;
+        },
+    };
+    usize slash = match (text.find(v, "/")) {
+        some(i) => i,
+        none => {
+            return none;
+        },
+    };
+    if (dash < 7 || slash < dash) {
+        return none;
+    }
+    i64 first = match (text.parse_i64(text.slice(v, 6, dash))) {
+        ok(n) => n,
+        err(e) => {
+            return none;
+        },
+    };
+    str after = text.slice(v, slash + 1, v.len);
+    i64 total = after == "*" ? -1 : match (text.parse_i64(after)) {
+        ok(n) => n,
+        err(e) => {
+            return none;
+        },
+    };
+    return some(Range{ first: first, total: total });
+}
+
+// How long to wait before reading more, in milliseconds, after `sent` bytes in `elapsed_ms` at
+// `rate` bytes per second (0: no limit): what the bytes would have taken at that rate, beyond
+// the time spent.
+pub i64 wait_ms(i64 sent, i64 elapsed_ms, i64 rate) {
+    if (rate <= 0) {
+        return 0;
+    }
+    i64 due = sent * 1000 / rate;
+    return due > elapsed_ms ? due - elapsed_ms : 0;
+}
+
+// Whether a failure with this status of HTTP may pass if tried again.
+pub bool worth_again(i32 status) {
+    return status >= 500 || status == 408 || status == 429;
+}
+
+// The download of `job`: gives the bytes in the file when it stops.
+pub i64 run(Arena* arena, job.Job j) uses io, time, threads {
+    mut Download d = Download{
+        id: j.id,
+        events: j.events,
+        control: j.control,
+        done: j.offset,
+        total: -1,
+        rate: j.rate,
+        name: [0; 128],
+        name_len: 0
+    };
+    return d.go(arena, j);
+}
+
+struct Download {
+    i32 id;
+    channel.Channel<job.Event> events;
+    channel.Channel<job.Command> control;
+    mut i64 done;
+    mut i64 total;
+    mut i64 rate;
+    mut ui8[128] name;  // the name the server gives, sent with each event
+    mut usize name_len;
+
+    void say(i32 kind, i32 error, i32 status, bool again) uses threads {
+        bool sent = events.send(job.Event{
+            id: id,
+            kind: kind,
+            done: done,
+            total: total,
+            error: error,
+            status: status,
+            again: again,
+            name: name,
+            name_len: name_len
+        });
+    }
+
+    i64 failed(i32 error, i32 status, bool again) uses threads {
+        say(job.FAILED, error, status, again);
+        return done;
+    }
+
+    // The commands that came: false after a Pause.
+    bool listen() uses threads {
+        while (true) {
+            match (control.try_receive()) {
+                some(c) => {
+                    match (c) {
+                        Pause => {
+                            return false;
+                        },
+                        Limit(r) => {
+                            rate = r;
+                        },
+                    }
+                },
+                none => {
+                    return true;
+                },
+            }
+        }
+        return true;
+    }
+
+    i64 go(Arena* arena, job.Job j) uses io, time, threads {
+        mut ui8[2048] url_bytes = j.url;  // a view needs a variable of its own
+        mut ui8[1024] path_bytes = j.path;
+        str address = job.text_of(arena, url_bytes[0..job.MAX_URL], j.url_len);
+        str path = job.text_of(arena, path_bytes[0..job.MAX_PATH], j.path_len);
+        mut http.Request r = http.request(arena, "GET", address);
+        r.timeout_ms = j.timeout_ms;
+        r.max_size = 1 << 62;  // a file may be larger than memory: it is not kept in it
+        if (done > 0) {
+            text.TextBuilder* b = text.builder(arena);
+            b.push("bytes=");
+            b.push_i64(done);
+            b.push("-");
+            mut http.Header[] headers = arena.alloc_slice(http.Header, 1);
+            headers[0] = http.Header{ name: "Range", value: b.text() };
+            r.headers = headers;
+        }
+        if (!listen()) {
+            say(job.PAUSED, job.NO_ERROR, 0, false);
+            return done;
+        }
+        http.Body* body = match (http.open(arena, r)) {
+            ok(b) => b,
+            err(e) => {
+                return match (e) {
+                    Network(n) => failed(job.NETWORK, 0, true),
+                    TooLarge => failed(job.REFUSED, 0, false),
+                    BadResponse => failed(job.NETWORK, 0, true),
+                    _ => failed(job.REFUSED, 0, false),
+                };
+            },
+        };
+        defer body.close();
+        i32 status = body.head.status;
+        match (body.head.header("Content-Disposition")) {  // `attachment; filename=font.zip`
+            some(v) => {
+                match (files.disposition_name(arena, v)) {
+                    some(n) => {
+                        if (n.len < 128) {
+                            for (usize k in 0..n.len) {
+                                name[k] = n.bytes[k];
+                            }
+                            name_len = n.len;
+                        }
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+        mut bool append = false;
+        if (status == 206) {
+            Range range = match (body.head.header("Content-Range")) {
+                some(v) => match (content_range(v)) {
+                    some(x) => x,
+                    none => {
+                        return failed(job.REFUSED, status, false);
+                    },
+                },
+                none => {
+                    return failed(job.REFUSED, status, false);
+                },
+            };
+            if (range.first != done) {
+                return failed(job.REFUSED, status, false);
+            }
+            total = range.total;
+            append = true;
+        } else if (status == 200) {
+            done = 0;  // the server sends the whole file again: written from its start
+            total = body.length();
+        } else if (status == 416 && done > 0) {
+            total = done;  // nothing after the bytes written: the file is whole
+            say(job.DONE, job.NO_ERROR, 0, false);
+            return done;
+        } else {
+            return failed(job.SERVER, status, worth_again(status));
+        }
+        mut io.File file = match (io.open(arena, path, append ? io.Mode.Append : io.Mode.Write)) {
+            ok(f) => f,
+            err(e) => {
+                return failed(job.DISK, 0, false);
+            },
+        };
+        defer file.close();
+        say(job.PROGRESS, job.NO_ERROR, 0, false);
+        mut ui8[] buffer = arena.alloc_slice(ui8, BLOCK);
+        mut ui64 window_start = time.monotonic_ms();  // the time and the bytes the rate counts from
+        mut i64 window_bytes = 0;
+        mut i64 window_rate = rate;
+        mut ui64 last_said = window_start;
+        while (true) {
+            if (!listen()) {
+                file.flush();
+                say(job.PAUSED, job.NO_ERROR, 0, false);
+                return done;
+            }
+            if (rate != window_rate) {  // a new rate counts from now
+                window_start = time.monotonic_ms();
+                window_bytes = 0;
+                window_rate = rate;
+            }
+            i64 ahead = wait_ms(window_bytes, (time.monotonic_ms() - window_start) as i64, rate);
+            if (ahead > 0) {
+                time.sleep_ms((ahead > 50 ? 50 : ahead) as ui32);  // short sleeps: a Pause is heard at once
+                continue;
+            }
+            // at a low rate, small blocks: the bytes come evenly
+            usize want = rate > 0 && rate / 8 < BLOCK as i64 ? (rate / 8 > 512 ? rate / 8 : 512) as usize : BLOCK;
+            usize n = match (body.read(buffer[0..want])) {
+                ok(n) => n,
+                err(e) => {
+                    file.flush();
+                    return failed(job.NETWORK, 0, true);
+                },
+            };
+            if (n == 0) {
+                break;
+            }
+            match (file.write(buffer[0..n])) {
+                ok => { },
+                err(e) => {
+                    return failed(job.DISK, 0, false);
+                },
+            }
+            done += n as i64;
+            window_bytes += n as i64;
+            ui64 now = time.monotonic_ms();
+            if (now - last_said >= 100) {
+                last_said = now;
+                say(job.PROGRESS, job.NO_ERROR, 0, false);
+            }
+        }
+        file.flush();
+        if (total >= 0 && done < total) {
+            return failed(job.NETWORK, 0, true);  // cut short: the rest is asked again
+        }
+        total = done;
+        say(job.DONE, job.NO_ERROR, 0, false);
+        return done;
+    }
+}

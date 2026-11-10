@@ -1,3 +1,4 @@
 joined: 2664667000, received: 2664667000
 counted: 100
 lambda: 42
+polled: true 7

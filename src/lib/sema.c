@@ -434,6 +434,9 @@ static Type *resolve_type(Sema *s, Unit *unit, const TypeExpr *te, TypePosition 
         free(params.items);
         return type;
     }
+    case TYPE_EFFECTS:
+        error_at(s, unit, "E0361", te->offset, te->length, "effects are given after the type arguments of an interface");
+        return s->types.error;
     }
     return s->types.error;
 }
@@ -544,7 +547,7 @@ static Type *function_type(Sema *s, Unit *unit, const FnDecl *fn) {
 }
 
 static void resolve_type_params(Sema *s, Unit *unit, TypeParams params, Type ***out, size_t *count, Name **effects,
-                                size_t *effect_count);
+                                size_t *effect_count, bool interface);
 
 static void resolve_fields_and_methods(Sema *s, TypeInfo *info) {
     const Decl *decl = info->decl;
@@ -797,7 +800,15 @@ static void check_override(Sema *s, TypeInfo *cls, MethodInfo *method) {
         Diagnostic *d = error_at(s, cls->unit, "E0317", name.offset, name.length,
                                  "`%.*s` adds the effect `%s` to `%.*s.%.*s`", NAME_ARGS(name), effect_name(bit),
                                  NAME_ARGS(target->owner->name), NAME_ARGS(name));
-        diag_help(d, "an override has the effects of the method it overrides, or fewer (spec §7.4)");
+        const TypeInfo *generic = target->owner->generic ? target->owner->generic : target->owner;
+        bool takes_effects = false;
+        for (size_t i = 0; i < generic->param_count; i++) takes_effects |= generic->params[i]->as.param.effect;
+        if (takes_effects) {
+            diag_help(d, "give the effect to the interface: `%.*s<uses %s>` (spec §5.4)", NAME_ARGS(target->owner->name),
+                      effect_name(bit));
+        } else {
+            diag_help(d, "an override has the effects of the method it overrides, or fewer (spec §7.4)");
+        }
     }
 }
 
@@ -944,6 +955,7 @@ bool type_is_open(const Type *type) {
         return type_is_open(type->as.fn.ret);
     case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM:
         return type->as.info->open || (type->as.info->param_count > 0 && !type->as.info->generic);
+    case T_EFFECTS: return (type->as.effects & EFFECT_PARAMS) != 0; /* an effect parameter of a function */
     default: return false;
     }
 }
@@ -1000,6 +1012,14 @@ Type *sema_subst(Sema *s, Type *type, Type **from, Type **to, size_t count, cons
         free(params.items);
         return result;
     }
+    case T_EFFECTS: {
+        if (!effects) return type;
+        unsigned own = type->as.effects & ~EFFECT_PARAMS;
+        for (size_t i = 0; i < effect_count; i++) {
+            if (type->as.effects & (EFFECT_PARAM << i)) own |= effects[i];
+        }
+        return type_effects(&s->types, own);
+    }
     case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM: {
         TypeInfo *info = type->as.info;
         TypeInfo *generic = info->generic ? info->generic : info;
@@ -1023,6 +1043,14 @@ const TypeEnv *sema_info_env(Sema *s, TypeInfo *generic, Type **args) {
     env->names = arena_alloc(&s->arena, (env->count + 1) * sizeof *env->names);
     for (size_t i = 0; i < env->count; i++) env->names[i] = generic->params[i]->name;
     env->types = args;
+    for (size_t i = 0; i < generic->param_count; i++) { /* the effect parameter of an interface */
+        if (!generic->params[i]->as.param.effect) continue;
+        env->effect_count = 1;
+        env->effect_names = arena_alloc(&s->arena, sizeof *env->effect_names);
+        env->effect_names[0] = generic->params[i]->name;
+        env->effects = arena_alloc(&s->arena, sizeof *env->effects);
+        env->effects[0] = args[i]->tag == T_EFFECTS ? args[i]->as.effects : EFFECT_PARAM; /* the generic itself */
+    }
     return env;
 }
 
@@ -1171,15 +1199,31 @@ static Type *apply_type_args(Sema *s, Unit *unit, const TypeExpr *te, Type *type
         }
         return type;
     }
-    if (te->arg_count != info->param_count) {
+    /* the effects `uses io, E`, last, give the effect parameter of an interface; without them it
+       stands for no effect */
+    const TypeExpr *effects = te->arg_count && te->args[te->arg_count - 1]->kind == TYPE_EFFECTS ? te->args[te->arg_count - 1]
+                                                                                                 : NULL;
+    size_t given = te->arg_count - (effects ? 1 : 0);
+    size_t wanted = 0;
+    bool takes_effects = false;
+    for (size_t i = 0; i < info->param_count; i++) {
+        if (info->params[i]->as.param.effect) takes_effects = true;
+        else wanted++;
+    }
+    if (effects && !takes_effects) {
+        Diagnostic *d = error_at(s, unit, "E0361", effects->offset, effects->length, "`%.*s` takes no effects",
+                                 NAME_ARGS(info->name));
+        diag_help(d, "an interface declared with `uses E` takes them (spec §5.4)");
+        return s->types.error;
+    }
+    if (given != wanted) {
         Diagnostic *d;
-        if (te->arg_count == 0) {
+        if (given == 0) {
             d = error_at(s, unit, "E0361", te->offset, te->length, "`%.*s` is generic: give its type arguments",
                          NAME_ARGS(info->name));
         } else {
             d = error_at(s, unit, "E0361", te->offset, te->length, "`%.*s` takes %zu type argument%s, but %zu %s given",
-                         NAME_ARGS(info->name), info->param_count, info->param_count == 1 ? "" : "s", te->arg_count,
-                         te->arg_count == 1 ? "was" : "were");
+                         NAME_ARGS(info->name), wanted, wanted == 1 ? "" : "s", given, given == 1 ? "was" : "were");
         }
         char *text = type_to_string(info->type);
         diag_help(d, "write `%s`, with a type for each parameter", text);
@@ -1188,8 +1232,13 @@ static Type *apply_type_args(Sema *s, Unit *unit, const TypeExpr *te, Type *type
     }
     Type **args = arena_alloc(&s->arena, info->param_count * sizeof *args);
     bool ok = true;
+    size_t next = 0;
     for (size_t i = 0; i < info->param_count; i++) {
-        const TypeExpr *arg = te->args[i];
+        if (info->params[i]->as.param.effect) {
+            args[i] = type_effects(&s->types, effects ? resolve_effects(s, unit, effects->as.effects) : 0);
+            continue;
+        }
+        const TypeExpr *arg = te->args[next++];
         args[i] = resolve_type(s, unit, arg, POSITION_VALUE);
         ok &= sema_check_type_arg(s, unit, arg->offset, arg->length, args[i], info->params[i], info->name);
     }
@@ -1197,10 +1246,12 @@ static Type *apply_type_args(Sema *s, Unit *unit, const TypeExpr *te, Type *type
 }
 
 /* The type parameters of a declaration, as T_PARAM types; its effect parameters too, if
-   `effects` is given (functions only). */
+   `effects` is given (functions); for an `interface`, its effect parameter as a T_PARAM marked
+   `effect`, which its instances give as T_EFFECTS. */
 static void resolve_type_params(Sema *s, Unit *unit, TypeParams params, Type ***out, size_t *count, Name **effects,
-                                size_t *effect_count) {
+                                size_t *effect_count, bool interface) {
     VEC(Type *) types = {0};
+    int interface_effects = 0;
     VEC(Name) names = {0};
     VEC(Name) effect_names = {0};
     for (size_t i = 0; i < params.count; i++) {
@@ -1213,9 +1264,23 @@ static void resolve_type_params(Sema *s, Unit *unit, TypeParams params, Type ***
                      NAME_ARGS(name));
         }
         if (param->is_effect) {
-            if (!effects) {
+            if (!effects && interface && !effect_from_name(name.text, name.length)) {
+                /* an interface: a parameter of its instances, which their arguments `uses ...` give */
+                if (interface_effects++) {
+                    error_at(s, unit, "E0217", name.offset, name.length, "an interface takes one effect parameter at most");
+                    continue;
+                }
+                Type *type = arena_alloc(&s->arena, sizeof *type);
+                type->tag = T_PARAM;
+                type->name = name;
+                type->as.param.index = (uint32_t)types.count;
+                type->as.param.effect = true;
+                SOSU_VEC_PUSH(&types, type);
+                continue;
+            }
+            if (!effects && !interface) {
                 Diagnostic *d = error_at(s, unit, "E0217", name.offset, name.length,
-                                         "only a function takes an effect parameter");
+                                         "only a function or an interface takes an effect parameter");
                 diag_help(d, "give `uses %.*s` to the functions that need it (spec §5.4)", NAME_ARGS(name));
             } else if (effect_from_name(name.text, name.length)) {
                 error_at(s, unit, "E0217", name.offset, name.length,
@@ -1279,7 +1344,8 @@ static void resolve_generics(Sema *s) {
         TypeInfo *info = s->type_infos.items[i];
         const Decl *decl = info->decl;
         if (decl->type_params.count == 0) continue;
-        resolve_type_params(s, info->unit, decl->type_params, &info->params, &info->param_count, NULL, NULL);
+        resolve_type_params(s, info->unit, decl->type_params, &info->params, &info->param_count, NULL, NULL,
+                            decl->kind == DECL_INTERFACE);
         info->type->type_args = info->params;
         info->type->type_arg_count = info->param_count;
         if (decl->kind == DECL_CLASS && decl->as.type.base_count) {
@@ -1299,7 +1365,7 @@ static void resolve_generics(Sema *s) {
             params->decl = fn;
             params->unit = info->unit;
             resolve_type_params(s, info->unit, fn->type_params, &params->params, &params->param_count,
-                                &params->effect_params, &params->effect_param_count);
+                                &params->effect_params, &params->effect_param_count, false);
             SOSU_VEC_PUSH(&s->method_params, params);
         }
     }
@@ -1311,7 +1377,7 @@ static void resolve_generics(Sema *s) {
             continue;
         }
         resolve_type_params(s, fn->unit, fn->decl->type_params, &fn->params, &fn->param_count, &fn->effect_params,
-                            &fn->effect_param_count);
+                            &fn->effect_param_count, false);
     }
 }
 

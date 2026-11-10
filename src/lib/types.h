@@ -28,6 +28,9 @@ typedef enum {
     T_INTERFACE,
     T_ENUM,
     T_PARAM, /* a type parameter `T` of a generic declaration (spec §5.4) */
+    /* What an effect parameter of an interface stands for, in the arguments of one of its
+       instances (`Handler<uses io, threads>`): `as.effects`. Never the type of a value. */
+    T_EFFECTS,
 } TypeTag;
 
 /* Effects (spec §7.4), as bits of a mask. */
@@ -69,7 +72,9 @@ struct Type {
         struct { Type *value; Type *error; } result;
         struct { Type **params; size_t param_count; Type *ret; unsigned effects; uint64_t keeps; } fn; /* keeps: bit i, the parameter i is marked `keeps` */
         TypeInfo *info; /* STRUCT, CLASS, INTERFACE, ENUM */
-        struct { uint32_t index; uint32_t constraints; TypeInfo *bound; } param; /* PARAM; bound: an interface */
+        /* PARAM; bound: an interface; effect: an effect parameter of an interface (`uses E`) */
+        struct { uint32_t index; uint32_t constraints; TypeInfo *bound; bool effect; } param;
+        unsigned effects; /* EFFECTS */
     } as;
 };
 
@@ -93,6 +98,7 @@ Type *type_slice(TypeTable *table, Type *inner);
 Type *type_array(TypeTable *table, Type *element, uint64_t size);
 Type *type_result(TypeTable *table, Type *value, Type *error);
 Type *type_fn(TypeTable *table, Type **params, size_t param_count, Type *ret, unsigned effects, uint64_t keeps);
+Type *type_effects(TypeTable *table, unsigned effects);
 
 /* Source form of a type, e.g. "Vec2*" or "fn(i32) -> i32 uses io". New string. */
 char *type_to_string(const Type *type);

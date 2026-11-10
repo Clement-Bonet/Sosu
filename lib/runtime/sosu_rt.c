@@ -236,7 +236,8 @@ bool sosu_channel_send(uint64_t id, const uint8_t *value) {
 
 /* The address of a copy of the next value, waiting while the channel is empty and open; 0 when it
    is closed and empty. The copy stays until the next call of this thread. */
-uint64_t sosu_channel_receive(uint64_t id) {
+/* The next value of the channel, waiting for one while it is empty when `wait`. */
+static uint64_t receive_from(uint64_t id, bool wait) {
     sosu_channel *channel = (sosu_channel *)(uintptr_t)id;
     if (staging_size < channel->size || !staging) {
         free(staging);
@@ -245,7 +246,7 @@ uint64_t sosu_channel_receive(uint64_t id) {
         if (!staging) sosu_fail("std.channel", "out of memory");
     }
     LOCK(&channel->lock);
-    while (channel->count == 0 && !channel->closed) COND_WAIT(&channel->changed, &channel->lock);
+    while (wait && channel->count == 0 && !channel->closed) COND_WAIT(&channel->changed, &channel->lock);
     bool received = channel->count > 0;
     if (received) {
         memcpy(staging, channel->items + channel->head * channel->size, channel->size);
@@ -256,6 +257,11 @@ uint64_t sosu_channel_receive(uint64_t id) {
     UNLOCK(&channel->lock);
     return received ? (uint64_t)(uintptr_t)staging : 0;
 }
+
+uint64_t sosu_channel_receive(uint64_t id) { return receive_from(id, true); }
+
+/* The next value if there is one, without waiting; 0 if the channel is empty. */
+uint64_t sosu_channel_try_receive(uint64_t id) { return receive_from(id, false); }
 
 /* No more values: the receivers get those left, then none; senders get false. */
 void sosu_channel_close(uint64_t id) {

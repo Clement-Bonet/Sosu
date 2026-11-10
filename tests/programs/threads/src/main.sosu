@@ -67,5 +67,19 @@ i32 main() uses io, threads {
     numbers.free();
     auto doubled = thread.spawn(&arena, (Arena* own, i32 x) => x * 2, 21);
     io.print("lambda: {}", doubled.join());
+
+    // try_receive does not wait: none while the channel is empty
+    channel.Channel<i32> polled = channel.new<i32>(1);
+    bool empty = match (polled.try_receive()) {
+        some(x) => false,
+        none => true,
+    };
+    bool sent = polled.send(7);
+    i32 got = match (polled.try_receive()) {
+        some(x) => x,
+        none => -1,
+    };
+    io.print("polled: {} {}", empty, got);
+    polled.free();
     return 0;
 }

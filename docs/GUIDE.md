@@ -1881,6 +1881,50 @@ i32 main() uses io {
 6
 ```
 
+An interface can take an effect parameter as well: its methods add it to theirs, and each implementation says which effects it needs. Without `uses ...`, the interface stands for none, so the classes that need nothing write nothing:
+
+<!-- run -->
+```csharp
+import std.io;
+import std.time;
+
+interface Step<uses E> {
+    i32 step(i32 n) uses io, E;
+}
+
+class Doubler : Step {  // Step<uses >: io only
+    override i32 step(i32 n) uses io {
+        return n * 2;
+    }
+}
+
+class Timed : Step<uses time> {
+    override i32 step(i32 n) uses io, time {
+        return time.monotonic_ms() > 0 ? n + 1 : n;
+    }
+}
+
+// A generic function takes the effect of the instance it is given.
+i32 run<uses E>(Step<uses E>* s, i32 n) uses io, E {
+    return s.step(s.step(n));
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    io.print("{}", run(arena.new(Doubler) as Step*, 3));                  // io
+    io.print("{}", run(arena.new(Timed) as Step<uses time>*, 3));         // io and time
+    return 0;
+}
+```
+
+```text
+12
+5
+```
+
+This is how a window starts threads: its handler implements `app.Handler<uses threads>` (section 24.2).
+
 ## 18. Methods, Iteration and Small Abstractions
 
 ### 18.1 Methods on any struct, enum or class
@@ -2595,7 +2639,7 @@ i32 main() uses io, threads {
 
 - `thread.spawn(arena, work, value)` runs `work(its own arena, value)` on a new thread, and returns a handle made in `arena`. `work` is a function, or a lambda without captures.
 - `join()` waits for the thread and gives what `work` returned.
-- `channel.new<T>(capacity)` makes a channel of `capacity` values. `send(x)` copies `x` in, waiting while it is full, and gives `false` once the channel is closed; `receive()` waits for a value and gives `none` once the channel is closed and empty; `close()` closes it, and `free()` releases it.
+- `channel.new<T>(capacity)` makes a channel of `capacity` values. `send(x)` copies `x` in, waiting while it is full, and gives `false` once the channel is closed; `receive()` waits for a value and gives `none` once the channel is closed and empty; `try_receive()` does not wait: `none` while it is empty; `close()` closes it, and `free()` releases it.
 - A run-time error in a thread stops the whole program.
 - Windows stay on the main thread: a worker gives its results to the interface through a channel.
 
@@ -2661,6 +2705,8 @@ i32 main() uses io {
 ```
 
 The events: `Quit`, `Resized`, `Key`, `MouseMove`, `Click`, `Release`, `Wheel`, `TextInput`, and on phones `Touch` and the safe area of the screen.
+
+`app.Handler` is `io` only. A handler that starts threads or reads the clock says so, `class App : app.Handler<uses threads, time>`, with the same effects on `on_event` and `on_frame`; `app.run(config, app as app.Handler<uses threads, time>*)` then has them, and so must `main` (section 17.4). Its threads give their results back through channels, which `on_frame` reads with `try_receive` without waiting: `showcase/courier` downloads files this way.
 
 ### 24.3 Widgets in immediate mode
 

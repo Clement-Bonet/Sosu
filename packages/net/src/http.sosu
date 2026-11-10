@@ -1,8 +1,8 @@
 // net.http: an HTTP/1.1 client. A request is sent on a connection of its own (`Connection:
-// close`), over TLS for https (`net.tls`: the certificate of the server is checked), and its
-// answer is read whole into the arena: its status, its headers and its body, whether the server
-// gave its length, sent it in chunks or closed the connection at its end. Redirects are followed
-// (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the
+// close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads
+// its answer whole into the arena, `open` gives its body to read as it comes (a large file).
+// Either way, the server may give the length of the body, send it in chunks or close the
+// connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the
 // size of the answer (16 MB by default). Compressed bodies are not asked for.
 //
 //     http.Response r = try http.get(&arena, "http://example.org/");
@@ -119,6 +119,17 @@ pub Response!HttpError post(Arena* arena, str address, keeps str content_type, k
 
 // Sends a request and reads its answer, following the redirects.
 pub Response!HttpError send(Arena* arena, Request r) uses io {
+    Body* answer = try open(arena, r);
+    defer answer.close();
+    ui8[] body = try answer.read_all(arena);
+    Response head = answer.head;
+    return ok(Response{ status: head.status, reason: head.reason, headers: head.headers, body: body, url: head.url });
+}
+
+// Sends a request and reads the head of its answer, following the redirects: its body is read
+// as it comes, by `Body.read`, for a file larger than memory. Close the body when done. The
+// whole answer counts against `max_size`.
+pub Body*!HttpError open(Arena* arena, Request r) uses io {
     if (!is_token(r.method)) {
         return err(HttpError.InvalidHeader);
     }
@@ -137,10 +148,17 @@ pub Response!HttpError send(Arena* arena, Request r) uses io {
     mut ui8[] body = r.body;
     mut i32 left = r.redirects;
     while (true) {
-        Response answer = try exchange(arena, target, method, r.headers, body, r);
-        bool redirect = answer.status == 301 || answer.status == 302 || answer.status == 303 || answer.status == 307
-                || answer.status == 308;
-        str? location = answer.header("Location");
+        tcp.Connection* c = try connect_for(arena, target, r);
+        Body* answer = match (start(arena, c, target, method, r.headers, body, r.max_size)) {
+            ok(b) => b,
+            err(e) => {
+                c.close();
+                return err(e);
+            },
+        };
+        i32 status = answer.head.status;
+        bool redirect = status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+        str? location = answer.head.header("Location");
         if (!redirect || r.redirects == 0) {
             return ok(answer);
         }
@@ -150,6 +168,7 @@ pub Response!HttpError send(Arena* arena, Request r) uses io {
                 return ok(answer);
             },
         };
+        answer.close();
         if (left == 0) {
             return err(HttpError.TooManyRedirects);
         }
@@ -161,7 +180,7 @@ pub Response!HttpError send(Arena* arena, Request r) uses io {
             },
         };
         // 303, and 301 or 302 after a POST: the next request is a GET without a body
-        if (answer.status == 303 || (answer.status == 301 || answer.status == 302) && method == "POST") {
+        if (status == 303 || (status == 301 || status == 302) && method == "POST") {
             method = "GET";
             body = arena.alloc_slice(ui8, 0);
         }
@@ -169,36 +188,51 @@ pub Response!HttpError send(Arena* arena, Request r) uses io {
     return err(HttpError.TooManyRedirects);
 }
 
-// One request on a connection of its own, and its answer.
-Response!HttpError exchange(Arena* arena, url.Url target, str method, Header[] headers, ui8[] body, Request r) uses io {
+// A connection of its own to the host of `target`, under TLS for https.
+tcp.Connection*!HttpError connect_for(Arena* arena, url.Url target, Request r) uses io {
     tcp.Stream* stream = match (tcp.connect(arena, target.host, target.port, r.timeout_ms)) {
         ok(s) => s,
         err(e) => {
             return err(HttpError.Network(e));
         },
     };
-    defer stream.close();
     match (stream.set_timeout(r.timeout_ms)) {
         ok => { },
         err(e) => {
+            stream.close();
             return err(HttpError.Network(e));
         },
     }
     if (target.scheme != "https") {
-        return over(arena, stream as tcp.Connection*, target, method, headers, body, r.max_size);
+        return ok(stream as tcp.Connection*);
     }
-    tls.Stream* secure = match (tls.connect(arena, stream, target.host, r.roots)) {
-        ok(s) => s,
+    return match (tls.connect(arena, stream, target.host, r.roots)) {
+        ok(s) => ok(s as tcp.Connection*),
         err(e) => {
+            stream.close();
             return err(HttpError.Tls(e));
         },
     };
-    defer secure.close();
-    return over(arena, secure as tcp.Connection*, target, method, headers, body, r.max_size);
 }
 
-// The request written on `c`, then its answer read from it.
+// The request written on `c`, then its whole answer read from it.
 pub Response!HttpError over(
+    Arena* arena,
+    keeps tcp.Connection* c,
+    url.Url target,
+    str method,
+    Header[] headers,
+    ui8[] body,
+    usize max_size
+) uses io {
+    Body* answer = try start(arena, c, target, method, headers, body, max_size);
+    ui8[] bytes = try answer.read_all(arena);
+    Response head = answer.head;
+    return ok(Response{ status: head.status, reason: head.reason, headers: head.headers, body: bytes, url: head.url });
+}
+
+// The request written on `c`, then the head of its answer.
+Body*!HttpError start(
     Arena* arena,
     keeps tcp.Connection* c,
     url.Url target,
@@ -240,13 +274,21 @@ pub Response!HttpError over(
             },
         }
     }
-    mut Reader* reader = arena.new(Reader, arena, c, max_size);
-    return read_response(arena, reader, method, target.written(arena));
+    Reader* reader = arena.new(Reader, arena, c, max_size);
+    return body_of(arena, reader, method, target.written(arena));
 }
 
-// The answer read from `reader`: the status line and the headers (after any 1xx answer), then
-// the body as the headers say it comes.
-pub Response!HttpError read_response(Arena* arena, Reader* reader, str method, str from) uses io {
+// The whole answer read from `reader`: its head, then its body.
+pub Response!HttpError read_response(Arena* arena, keeps Reader* reader, str method, keeps str from) uses io {
+    Body* answer = try body_of(arena, reader, method, from);
+    ui8[] bytes = try answer.read_all(arena);
+    Response head = answer.head;
+    return ok(Response{ status: head.status, reason: head.reason, headers: head.headers, body: bytes, url: head.url });
+}
+
+// The head of the answer read from `reader` (the status line and the headers, after any 1xx
+// answer), and its body, to be read as the headers say it comes.
+pub Body*!HttpError body_of(Arena* arena, keeps Reader* reader, str method, keeps str from) uses io {
     mut i32 status = 100;
     mut str reason = "";
     mut Header[] headers = arena.alloc_slice(Header, 0);
@@ -281,9 +323,8 @@ pub Response!HttpError read_response(Arena* arena, Reader* reader, str method, s
         url: from
     };
     if (method == "HEAD" || status == 204 || status == 304) {
-        return ok(head);
+        return ok(arena.new(Body, head, reader, NO_BODY, 0));
     }
-    mut ui8[] body = arena.alloc_slice(ui8, 0);
     str? encoding = head.header("Transfer-Encoding");
     str? length = head.header("Content-Length");
     bool chunked = match (encoding) {
@@ -291,33 +332,21 @@ pub Response!HttpError read_response(Arena* arena, Reader* reader, str method, s
         none => false,
     };
     if (chunked) {
-        body = try read_chunks(arena, reader);
-    } else {
-        match (encoding) {
-            some(e) => {
-                return err(HttpError.BadResponse);  // gzip, deflate: not asked for
-            },
-            none => { },
-        }
-        match (length) {
-            some(l) => {
-                ui64 n = match (text.parse_u64(text.trim(l))) {
-                    ok(n) => n,
-                    err(e) => {
-                        return err(HttpError.BadResponse);
-                    },
-                };
-                if (n > reader.max as ui64) {
-                    return err(HttpError.TooLarge);
-                }
-                body = try reader.exact(n as usize);
-            },
-            none => {
-                body = try reader.rest();
-            },
-        }
+        return ok(arena.new(Body, head, reader, CHUNKED, -1));
     }
-    return ok(Response{ status: status, reason: reason, headers: headers, body: body, url: from });
+    match (encoding) {
+        some(e) => {
+            return err(HttpError.BadResponse);  // gzip, deflate: not asked for
+        },
+        none => { },
+    }
+    return match (length) {
+        some(l) => match (text.parse_u64(text.trim(l))) {
+            ok(n) => n > reader.max as ui64 ? err(HttpError.TooLarge) : ok(arena.new(Body, head, reader, LENGTH, n as i64)),
+            err(e) => err(HttpError.BadResponse),
+        },
+        none => ok(arena.new(Body, head, reader, UNTIL_CLOSED, -1)),
+    };
 }
 
 // The headers up to the empty line, at most 100.
@@ -348,11 +377,76 @@ Header[]!HttpError read_headers(Arena* arena, Reader* reader) uses io {
     return ok(all[0..count]);
 }
 
-// A body sent in chunks: each a size in hexadecimal on its line, then its bytes; a size 0 ends
-// it, followed by trailers (read and dropped) and an empty line.
-ui8[]!HttpError read_chunks(Arena* arena, Reader* reader) uses io {
-    mut ui8[] body = arena.alloc_slice(ui8, 0);
-    while (true) {
+// How a body comes.
+i32 NO_BODY = 0;  // HEAD, 204, 304
+i32 LENGTH = 1;  // the bytes of Content-Length
+i32 CHUNKED = 2;  // in chunks, each a size in hexadecimal on its line, then its bytes; a size 0 ends it
+i32 UNTIL_CLOSED = 3;  // up to the end of the stream
+
+// The body of an answer, read as it comes.
+pub class Body {
+    pub Response head;  // the status, the headers and the URL; its `body` is empty
+    Reader* reader;
+    i32 mode;
+    i64 size;  // LENGTH: the bytes of the body; else -1
+    mut i64 left;  // LENGTH: the bytes still to come; CHUNKED: those of the current chunk
+    mut bool ended;
+    mut bool closed;
+
+    void init(keeps Response head, keeps Reader* reader, i32 mode, i64 length) {
+        self.head = head;
+        self.reader = reader;
+        self.mode = mode;
+        size = mode == LENGTH ? length : mode == NO_BODY ? 0 : -1;
+        left = mode == LENGTH ? length : 0;
+        ended = mode == NO_BODY || mode == LENGTH && length == 0;
+        closed = false;
+    }
+
+    // The bytes the body has, from Content-Length; -1 if the server did not say.
+    pub i64 length() {
+        return size;
+    }
+
+    // Reads what has come, at most `into.len` bytes: how many; 0 at the end of the body. A body
+    // cut short by the server is the error `Network(Closed)`.
+    pub usize!HttpError read(ui8[] into) uses io {
+        if (ended || into.len == 0) {
+            return ok(0);
+        }
+        if (mode == UNTIL_CLOSED) {
+            usize n = try reader.some(into);
+            ended = n == 0;
+            return ok(n);
+        }
+        if (mode == CHUNKED && left == 0) {
+            left = try next_chunk();
+            if (left == 0) {
+                ended = true;
+                return ok(0);
+            }
+        }
+        usize want = into.len as i64 > left ? left as usize : into.len;
+        usize n = try reader.some(into[0..want]);
+        if (n == 0) {
+            return err(HttpError.Network(ip.NetError.Closed));
+        }
+        left -= n as i64;
+        if (left == 0) {
+            if (mode == LENGTH) {
+                ended = true;
+            } else {
+                str after = try reader.line();  // the line end after a chunk
+                if (after.len != 0) {
+                    return err(HttpError.BadResponse);
+                }
+            }
+        }
+        return ok(n);
+    }
+
+    // The size of the next chunk; 0 for the last, after its trailers (read and dropped).
+    i64!HttpError next_chunk() uses io {
         str line = try reader.line();
         mut usize end = 0;
         while (end < line.len && line.bytes[end] != 59 && line.bytes[end] != 32 && line.bytes[end] != 9) {
@@ -373,32 +467,48 @@ ui8[]!HttpError read_chunks(Arena* arena, Reader* reader) uses io {
             }
             size = size * 16 + digit;
         }
+        if (size > reader.max as ui64) {
+            return err(HttpError.TooLarge);
+        }
         if (size == 0) {
             while (true) {
                 str trailer = try reader.line();
                 if (trailer.len == 0) {
-                    return ok(body);
+                    return ok(0);
                 }
             }
         }
-        if (size > reader.max as ui64) {
-            return err(HttpError.TooLarge);
-        }
-        ui8[] chunk = try reader.exact(size as usize);
-        str after = try reader.line();
-        if (after.len != 0) {
-            return err(HttpError.BadResponse);
-        }
-        mut ui8[] joined = arena.alloc_slice(ui8, body.len + chunk.len);
-        for (usize i in 0..body.len) {
-            joined[i] = body[i];
-        }
-        for (usize i in 0..chunk.len) {
-            joined[body.len + i] = chunk[i];
-        }
-        body = joined;
+        return ok(size as i64);
     }
-    return ok(body);
+
+    // The whole body, in `arena`.
+    pub ui8[]!HttpError read_all(Arena* arena) uses io {
+        mut ui8[] buffer = arena.alloc_slice(ui8, mode == LENGTH && left < 65536 ? left as usize + 1 : 4096);
+        mut usize size = 0;
+        while (true) {
+            if (size == buffer.len) {
+                mut ui8[] bigger = arena.alloc_slice(ui8, buffer.len * 2);
+                for (usize i in 0..size) {
+                    bigger[i] = buffer[i];
+                }
+                buffer = bigger;
+            }
+            usize n = try read(buffer[size..buffer.len]);
+            if (n == 0) {
+                return ok(buffer[0..size]);
+            }
+            size += n;
+        }
+        return ok(buffer[0..size]);
+    }
+
+    // Closes the connection. Closing twice does nothing.
+    pub void close() uses io {
+        if (!closed) {
+            reader.c.close();
+            closed = true;
+        }
+    }
 }
 
 // The bytes of an answer as they come, with what is read ahead kept for the next call. Counts
@@ -443,7 +553,20 @@ pub class Reader {
             }
             buffer = bigger;
         }
-        usize n = match (c.read(buffer[end..buffer.len])) {
+        usize n = try counted(buffer[end..buffer.len]);
+        if (n == 0) {
+            return ok(false);
+        }
+        end += n;
+        return ok(true);
+    }
+
+    // Reads from the connection into `into`, counting against `max`: 0 at the end of the stream.
+    usize!HttpError counted(ui8[] into) uses io {
+        if (done) {
+            return ok(0);
+        }
+        usize n = match (c.read(into)) {
             ok(n) => n,
             err(e) => {
                 return err(HttpError.Network(e));
@@ -451,14 +574,27 @@ pub class Reader {
         };
         if (n == 0) {
             done = true;
-            return ok(false);
+            return ok(0);
         }
         total += n;
         if (total > max) {
             return err(HttpError.TooLarge);
         }
-        end += n;
-        return ok(true);
+        return ok(n);
+    }
+
+    // At most `into.len` bytes: those kept first, else what comes, straight into `into`; 0 at
+    // the end of the stream.
+    pub usize!HttpError some(ui8[] into) uses io {
+        if (end > start) {
+            usize n = end - start < into.len ? end - start : into.len;
+            for (usize i in 0..n) {
+                into[i] = buffer[start + i];
+            }
+            start += n;
+            return ok(n);
+        }
+        return counted(into);
     }
 
     // The next line, without its CRLF (a bare LF is taken too); at most 8 KB.
@@ -487,32 +623,6 @@ pub class Reader {
             scanned += start;
         }
         return err(HttpError.BadResponse);
-    }
-
-    // The next `n` bytes; `Closed` if the stream ends before.
-    pub ui8[]!HttpError exact(usize n) uses io {
-        while (end - start < n) {
-            bool more = try fill();
-            if (!more) {
-                return err(HttpError.Network(ip.NetError.Closed));
-            }
-        }
-        ui8[] bytes = copied(arena, buffer[start..start + n]);
-        start += n;
-        return ok(bytes);
-    }
-
-    // Everything up to the end of the stream.
-    pub ui8[]!HttpError rest() uses io {
-        while (true) {
-            bool more = try fill();
-            if (!more) {
-                ui8[] bytes = copied(arena, buffer[start..end]);
-                start = end;
-                return ok(bytes);
-            }
-        }
-        return ok(arena.alloc_slice(ui8, 0));
     }
 }
 

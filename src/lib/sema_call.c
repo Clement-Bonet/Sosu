@@ -302,6 +302,19 @@ static bool unify(FnInfo *fn, Type *pattern, Type *actual, Type **bound, unsigne
         }
         return true;
     }
+    case T_EFFECTS: { /* `Handler<uses E>` given a `Handler<uses io, threads>` */
+        unsigned own = pattern->as.effects & ~EFFECT_PARAMS;
+        unsigned params = pattern->as.effects & EFFECT_PARAMS;
+        if (!params || !fn->effect_param_count) return pattern->as.effects == actual->as.effects;
+        if (own & ~actual->as.effects) return false;
+        unsigned rest = actual->as.effects & ~own;
+        for (size_t k = 0; k < fn->effect_param_count; k++) {
+            if (!(params & (EFFECT_PARAM << k))) continue;
+            if (effects[k] == EFFECT_UNBOUND) effects[k] = rest;
+            return effects[k] == rest;
+        }
+        return true;
+    }
     case T_STRUCT: case T_CLASS: case T_INTERFACE: case T_ENUM: {
         TypeInfo *generic = sema_generic_of(pattern);
         if (generic != sema_generic_of(actual)) return false;
@@ -346,6 +359,11 @@ bool sema_all_bound(FnInfo *fn, const Type *type, Type **bound, const unsigned *
         }
         return true;
     }
+    case T_EFFECTS:
+        for (size_t k = 0; k < fn->effect_param_count; k++) {
+            if ((type->as.effects & (EFFECT_PARAM << k)) && effects[k] == EFFECT_UNBOUND) return false;
+        }
+        return true;
     default:
         return true;
     }

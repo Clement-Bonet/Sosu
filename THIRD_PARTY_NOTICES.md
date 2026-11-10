@@ -24,12 +24,13 @@ under their own licenses.
 
 ## Font Awesome Free
 
-- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox, and
-  `showcase/queens/assets/fa-solid-900.ttf`, the icons of Queens
+- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox,
+  `showcase/queens/assets/fa-solid-900.ttf`, the icons of Queens, and
+  `showcase/courier/assets/fa-solid-900.ttf`, the icons of Courier
 - Source: <https://fontawesome.com> (Font Awesome Free, desktop font files)
 - Copyright (c) 2024 Fonticons, Inc., with the Reserved Font Name "Font Awesome"
 - License: SIL Open Font License, Version 1.1, for the font files, in
-  `showcase/beatbox/assets/FA-LICENSE.txt` and `showcase/queens/assets/FontAwesome-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
+  `showcase/beatbox/assets/FA-LICENSE.txt`, `showcase/courier/assets/FA-LICENSE.txt` and `showcase/queens/assets/FontAwesome-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
   the code under MIT; neither is given here)
 
 ## Montserrat

@@ -444,6 +444,15 @@ static TypeExpr **parse_type_args(Parser *p, size_t *count) {
     advance(p); /* < */
     VEC(TypeExpr *) args = {0};
     do {
+        if (check(p, TOK_KW_USES)) { /* `uses io, E`: the effects, last (spec §5.4) */
+            size_t start = token_at(p, p->pos)->offset;
+            advance(p);
+            TypeExpr *effects = new_type(p, TYPE_EFFECTS, start);
+            effects->as.effects = parse_effects(p, false);
+            effects->length = span_from(p, start);
+            SOSU_VEC_PUSH(&args, effects);
+            break;
+        }
         TypeExpr *arg = parse_type(p, false);
         SOSU_VEC_PUSH(&args, arg);
     } while (!p->half_gt && parser_accept(p, TOK_COMMA));

@@ -62,6 +62,7 @@ static const Case cases[] = {
     { "test", "images", "expected.txt", 0, NULL }, /* the package image (spec §8.2) */
     { "test", "sounds", "expected.txt", 0, NULL }, /* the package audio (spec §8.2) */
     { "test", "databases", "expected.txt", 0, NULL }, /* the packages db and sqlite (spec §8.2) */
+    { "run", "effects", "expected.txt", 0, NULL }, /* an interface with an effect parameter (spec §5.4) */
     { "test", "network", "expected.txt", 0, NULL }, /* the package net (spec §8.2) */
 };
 

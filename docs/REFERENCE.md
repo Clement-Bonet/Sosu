@@ -90,6 +90,8 @@ pub struct Channel<T: Send>
   Copies `value` in, waiting while the channel is full; false if it is closed.
 - `pub T? receive() uses threads`  
   The next value, waiting while the channel is empty; none once it is closed and empty.
+- `pub T? try_receive() uses threads`  
+  The next value if one is there, without waiting: none while the channel is empty (a window reads what its threads sent at each frame, and goes on).
 - `pub void close() uses threads`  
   No more values: the receivers get those left, then none.
 - `pub void free() uses threads`  
@@ -3485,7 +3487,7 @@ pub Transform transform()
 
 ## net.http
 
-An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked), and its answer is read whole into the arena: its status, its headers and its body, whether the server gave its length, sent it in chunks or closed the connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
+An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
 
 ### enum `HttpError`
 
@@ -3600,9 +3602,17 @@ Sends a request and reads its answer, following the redirects.
 pub Response!HttpError send(Arena* arena, Request r) uses io
 ```
 
+### `open`
+
+Sends a request and reads the head of its answer, following the redirects: its body is read as it comes, by `Body.read`, for a file larger than memory. Close the body when done. The whole answer counts against `max_size`.
+
+```sosu
+pub Body*!HttpError open(Arena* arena, Request r) uses io
+```
+
 ### `over`
 
-The request written on `c`, then its answer read from it.
+The request written on `c`, then its whole answer read from it.
 
 ```sosu
 pub Response!HttpError over(Arena* arena, keeps tcp.Connection* c, url.Url target, str method, Header[] headers, ui8[] body, usize max_size) uses io
@@ -3610,11 +3620,38 @@ pub Response!HttpError over(Arena* arena, keeps tcp.Connection* c, url.Url targe
 
 ### `read_response`
 
-The answer read from `reader`: the status line and the headers (after any 1xx answer), then the body as the headers say it comes.
+The whole answer read from `reader`: its head, then its body.
 
 ```sosu
-pub Response!HttpError read_response(Arena* arena, Reader* reader, str method, str from) uses io
+pub Response!HttpError read_response(Arena* arena, keeps Reader* reader, str method, keeps str from) uses io
 ```
+
+### `body_of`
+
+The head of the answer read from `reader` (the status line and the headers, after any 1xx answer), and its body, to be read as the headers say it comes.
+
+```sosu
+pub Body*!HttpError body_of(Arena* arena, keeps Reader* reader, str method, keeps str from) uses io
+```
+
+### class `Body`
+
+The body of an answer, read as it comes.
+
+```sosu
+pub class Body
+```
+
+- `pub Response head`  
+  the status, the headers and the URL; its `body` is empty
+- `pub i64 length()`  
+  The bytes the body has, from Content-Length; -1 if the server did not say.
+- `pub usize!HttpError read(ui8[] into) uses io`  
+  Reads what has come, at most `into.len` bytes: how many; 0 at the end of the body. A body cut short by the server is the error `Network(Closed)`.
+- `pub ui8[]!HttpError read_all(Arena* arena) uses io`  
+  The whole body, in `arena`.
+- `pub void close() uses io`  
+  Closes the connection. Closing twice does nothing.
 
 ### class `Reader`
 
@@ -3625,12 +3662,10 @@ pub class Reader
 ```
 
 - `pub usize max`
+- `pub usize!HttpError some(ui8[] into) uses io`  
+  At most `into.len` bytes: those kept first, else what comes, straight into `into`; 0 at the end of the stream.
 - `pub str!HttpError line() uses io`  
   The next line, without its CRLF (a bare LF is taken too); at most 8 KB.
-- `pub ui8[]!HttpError exact(usize n) uses io`  
-  The next `n` bytes; `Closed` if the stream ends before.
-- `pub ui8[]!HttpError rest() uses io`  
-  Everything up to the end of the stream.
 
 ### `same_name`
 

@@ -1,0 +1,315 @@
+// courier.files: where the files go and what they are called. A download is written to
+// `<name>.part`, renamed to `<name>` once whole; a name taken by another file gets ` (2)`,
+// ` (3)`... before its extension.
+import std.fs;
+import std.io;
+import std.os;
+import std.text;
+import net.url;
+
+// The folder of the downloads: Downloads/Courier in the folder of the user, created if needed;
+// else `downloads` in the current folder.
+pub str folder(Arena* arena) uses io {
+    str? home = os.env(arena, "USERPROFILE");
+    str? other = os.env(arena, "HOME");
+    str root = match (home) {
+        some(h) => h,
+        none => match (other) {
+            some(h) => h,
+            none => "",
+        },
+    };
+    str dir = root.len > 0 ? fs.join(arena, fs.join(arena, root, "Downloads"), "Courier")
+            : fs.join(arena, fs.current_dir(arena), "downloads");
+    match (fs.create_dirs(arena, dir)) {
+        ok => { },
+        err(e) => { },
+    }
+    return dir;
+}
+
+// A byte that may stay in the name of a file on every system.
+bool plain(ui8 c) {
+    return c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c == 45 || c == 46 || c == 95 || c >= 128;
+}
+
+// The name of the file of `address`, until the server gives one (`disposition_name`): the last
+// part of its path that is not empty, without its query, made a name (`clean_name`); the name of
+// the host when the path has none (`https://example.org/`); `download` when it is not a URL.
+pub str name_for(Arena* arena, str address) {
+    url.Url u = match (url.parse(arena, address)) {
+        some(x) => x,
+        none => {
+            return "download";
+        },
+    };
+    mut usize end = 0;
+    while (end < u.target.len && u.target.bytes[end] != 63) {
+        end += 1;
+    }
+    while (end > 0 && u.target.bytes[end - 1] == 47) {
+        end -= 1;  // `/dl/?f=x`: the part before the last `/`
+    }
+    mut usize start = end;
+    while (start > 0 && u.target.bytes[start - 1] != 47) {
+        start -= 1;
+    }
+    if (start == end) {
+        return u.host;
+    }
+    return match (clean_name(arena, text.slice(u.target, start, end))) {
+        some(n) => n,
+        none => "download",
+    };
+}
+
+// `raw` made the name of a file on every system: what follows its last `/` or `\`, each byte that a
+// system refuses (`: * ? " < > |`, spaces, `%`, control characters) made `_`. None if nothing
+// is left but dots.
+pub str? clean_name(Arena* arena, str raw) {
+    mut usize start = raw.len;
+    while (start > 0 && raw.bytes[start - 1] != 47 && raw.bytes[start - 1] != 92) {
+        start -= 1;
+    }
+    if (start == raw.len) {
+        return none;
+    }
+    mut ui8[] bytes = arena.alloc_slice(ui8, raw.len - start);
+    mut bool only_dots = true;
+    for (usize i in start..raw.len) {
+        ui8 c = raw.bytes[i];
+        bytes[i - start] = plain(c) ? c : 95;
+        if (c != 46) {
+            only_dots = false;
+        }
+    }
+    if (only_dots) {
+        return none;
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(t) => some(t),
+        err(e) => none,
+    };
+}
+
+// The name of the file in a `Content-Disposition` header (`attachment; filename="a b.zip"`, or
+// `filename*=UTF-8''a%20b.zip`, which wins), made a name; none if it gives none.
+pub str? disposition_name(Arena* arena, str value) {
+    str lower = text.to_lower(arena, value);  // the same length: the names of parameters are ASCII
+    match (text.find(lower, "filename*=")) {
+        some(at) => {
+            str rest = param_value(value, at + 10);
+            match (text.find(rest, "''")) {
+                some(q) => {
+                    match (percent_decoded(arena, text.slice(rest, q + 2, rest.len))) {
+                        some(decoded) => {
+                            return clean_name(arena, decoded);
+                        },
+                        none => { },
+                    }
+                },
+                none => { },
+            }
+        },
+        none => { },
+    }
+    return match (text.find(lower, "filename=")) {
+        some(at) => {
+            str rest = text.trim(param_value(value, at + 9));
+            if (rest.len >= 2 && rest.bytes[0] == 34) {
+                usize close = match (text.find_from(rest, "\"", 1)) {
+                    some(c) => c,
+                    none => rest.len,
+                };
+                return clean_name(arena, text.slice(rest, 1, close));
+            }
+            return clean_name(arena, rest);
+        },
+        none => none,
+    };
+}
+
+// The value of a parameter that starts at `at`, up to the next `;` (outside quotes).
+str param_value(str value, usize at) {
+    mut usize end = at;
+    mut bool quoted = false;
+    while (end < value.len && (quoted || value.bytes[end] != 59)) {
+        if (value.bytes[end] == 34) {
+            quoted = !quoted;
+        }
+        end += 1;
+    }
+    return text.trim(text.slice(value, at, end));
+}
+
+// `%41` made `A`; none if an escape is broken or the bytes are not UTF-8.
+str? percent_decoded(Arena* arena, str s) {
+    mut ui8[] out = arena.alloc_slice(ui8, s.len);
+    mut usize n = 0;
+    mut usize i = 0;
+    while (i < s.len) {
+        ui8 c = s.bytes[i];
+        if (c == 37) {
+            if (i + 2 >= s.len) {
+                return none;
+            }
+            i32 high = hex_digit(s.bytes[i + 1]);
+            i32 low = hex_digit(s.bytes[i + 2]);
+            if (high < 0 || low < 0) {
+                return none;
+            }
+            out[n] = (high * 16 + low) as ui8;
+            i += 3;
+        } else {
+            out[n] = c;
+            i += 1;
+        }
+        n += 1;
+    }
+    return match (str.from_bytes(out[0..n])) {
+        ok(t) => some(t),
+        err(e) => none,
+    };
+}
+
+i32 hex_digit(ui8 c) {
+    return c >= 48 && c <= 57 ? (c - 48) as i32
+            : c >= 97 && c <= 102 ? (c - 87) as i32
+            : c >= 65 && c <= 70 ? (c - 55) as i32
+            : -1;
+}
+
+// `name`, or `name (2)`, `name (3)`... before its extension, whichever is free in `dir` (neither
+// the file nor its `.part`) and not in `taken`.
+pub str free_name(Arena* arena, str dir, str name, str[] taken) uses io {
+    usize dot = match (text.find_last(name, ".")) {
+        some(i) => i > 0 ? i : name.len,
+        none => name.len,
+    };
+    str stem = text.slice(name, 0, dot);
+    str extension = text.slice(name, dot, name.len);
+    mut i32 n = 1;
+    while (true) {
+        mut str candidate = name;
+        if (n > 1) {
+            text.TextBuilder* b = text.builder(arena);
+            b.push(stem);
+            b.push(" (");
+            b.push_i64(n as i64);
+            b.push(")");
+            b.push(extension);
+            candidate = b.text();
+        }
+        mut bool used = fs.exists(arena, fs.join(arena, dir, candidate))
+                || fs.exists(arena, part_of(arena, fs.join(arena, dir, candidate)));
+        for (str t in taken) {
+            if (t == candidate) {
+                used = true;
+            }
+        }
+        if (!used) {
+            return candidate;
+        }
+        n += 1;
+    }
+    return name;
+}
+
+// Creates the folder of the file at `path`, and its parents, if they are not there (the folder
+// of the downloads may have been deleted, or be on a drive plugged again): false if it is still
+// not there.
+pub bool ensure_folder_of(Arena* arena, str path) uses io {
+    str folder = match (fs.parent(path)) {
+        some(p) => p,
+        none => {
+            return true;
+        },
+    };
+    if (fs.is_dir(arena, folder)) {
+        return true;
+    }
+    match (fs.create_dirs(arena, folder)) {
+        ok => { },
+        err(e) => { },
+    }
+    return fs.is_dir(arena, folder);
+}
+
+// The file written while the download runs.
+pub str part_of(Arena* arena, str path) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(path);
+    b.push(".part");
+    return b.text();
+}
+
+extern "C" {
+    i32 courier_reveal(ui8* path) uses io;
+}
+
+// Shows the file at `path` chosen in Explorer, through the shell of Windows (native/reveal.c):
+// false if it could not. Windows only.
+pub bool reveal(Arena* arena, str path) uses io {
+    mut i32 shown = 0;
+    unsafe {
+        shown = courier_reveal(path.to_cstr(arena));
+    }
+    return shown == 1;
+}
+
+// The command that shows the file at `path` chosen in the file manager of `system` (as
+// `app.system` names it), elsewhere than on Windows (`reveal`): the Finder on macOS, and else
+// the file manager of the desktop through D-Bus (org.freedesktop.FileManager1), which GNOME, KDE
+// and the others answer.
+pub str[] show_command(Arena* arena, str system, keeps str path) {
+    if (system == "macOS") {
+        mut str[] command = arena.alloc_slice(str, 3);
+        command[0] = "open";
+        command[1] = "-R";
+        command[2] = path;
+        return command;
+    }
+    str digits = "0123456789ABCDEF";
+    text.TextBuilder* uri = text.builder(arena);
+    uri.push("array:string:file://");
+    for (ui8 c in path.bytes) {
+        if (plain(c) && c < 128 || c == 47) {
+            uri.push_char(c as char);
+        } else {
+            uri.push("%");
+            uri.push_char(digits.bytes[(c >> 4) as usize] as char);
+            uri.push_char(digits.bytes[(c & 15) as usize] as char);
+        }
+    }
+    mut str[] command = arena.alloc_slice(str, 8);
+    command[0] = "dbus-send";
+    command[1] = "--session";
+    command[2] = "--dest=org.freedesktop.FileManager1";
+    command[3] = "--type=method_call";
+    command[4] = "/org/freedesktop/FileManager1";
+    command[5] = "org.freedesktop.FileManager1.ShowItems";
+    command[6] = uri.text();
+    command[7] = "string:";
+    return command;
+}
+
+// A size for people: "512 B", "12.3 KB", "4.5 MB", "1.2 GB".
+pub str size_text(Arena* arena, i64 bytes) {
+    text.TextBuilder* b = text.builder(arena);
+    if (bytes < 1024) {
+        b.push_i64(bytes);
+        b.push(" B");
+        return b.text();
+    }
+    mut f64 x = bytes as f64;
+    str[3] units = [" KB", " MB", " GB"];
+    mut usize unit = 0;
+    x = x / 1024.0;
+    while (x >= 1024.0 && unit < 2) {
+        x = x / 1024.0;
+        unit += 1;
+    }
+    b.push_f64(x, 1);
+    b.push(units[unit]);
+    return b.text();
+}

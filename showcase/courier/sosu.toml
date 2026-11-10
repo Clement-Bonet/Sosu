@@ -1,0 +1,24 @@
+# Courier: a download manager, written in Sosu. Downloads that pause, resume after an error, and
+# keep to a limit of bandwidth; on the package net (HTTP and HTTPS).
+[package]
+name = "courier"
+version = "0.1.0"
+
+[link]
+c = ["native/reveal.c"]  # a file shown chosen in Explorer
+
+[link.windows]
+libs = ["shell32", "ole32"]
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+ui = { path = "../../packages/ui" }
+image = { path = "../../packages/image" }
+net = { path = "../../packages/net" }
+testing = { path = "../../packages/testing" }
+
+[app]
+name = "Courier"
+description = "A download manager written in Sosu"
+assets = ["assets/NotoSans-Regular.ttf", "assets/fa-solid-900.ttf"]

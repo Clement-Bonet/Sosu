@@ -144,10 +144,29 @@ static char *nominal_c_name(Gen *g, const TypeInfo *info) {
     buf_printf(&name, "T_%s__%.*s", module, NAME_ARGS(info->name));
     free(module);
     for (size_t i = 0; info->generic && i < info->type->type_arg_count; i++) {
+        if (info->type->type_args[i]->tag == T_EFFECTS) continue; /* effects: not in the C name */
         buf_puts(&name, "__");
         mangle(g, &name, info->type->type_args[i]);
     }
     return name.items;
+}
+
+/* The instance with no effect in its arguments, for an instance that gives some
+   (`Handler<uses io>`): effects exist for the compiler only, so both have one C type, one table
+   and one identity, and a pointer to one is a pointer to the other. */
+static const Type *effectless(Gen *g, const Type *type) {
+    bool nominal = type->tag == T_STRUCT || type->tag == T_CLASS || type->tag == T_INTERFACE || type->tag == T_ENUM;
+    if (!nominal || !type->as.info->generic) return type;
+    bool any = false;
+    for (size_t i = 0; i < type->type_arg_count; i++) {
+        any |= type->type_args[i]->tag == T_EFFECTS && type->type_args[i]->as.effects != 0;
+    }
+    if (!any) return type;
+    Type **args = arena_alloc(&g->s->arena, type->type_arg_count * sizeof *args);
+    for (size_t i = 0; i < type->type_arg_count; i++) {
+        args[i] = type->type_args[i]->tag == T_EFFECTS ? type_effects(&g->s->types, 0) : type->type_args[i];
+    }
+    return sema_instance(g->s, type->as.info->generic, args)->type;
 }
 
 static char *fn_c_name(const FnInfo *fn) {
@@ -228,6 +247,7 @@ static const char *int_c_type(const Type *type) {
 /* Self-delimiting code of a type, used to name the generated aggregates. */
 static void mangle(Gen *g, Buf *out, const Type *type) {
     switch (type->tag) {
+    case T_EFFECTS: buf_printf(out, "E%u", type->as.effects); break; /* `Handler<uses io>`: Handler__E1 */
     case T_POINTER: buf_puts(out, "P"); mangle(g, out, type->as.inner); break;
     case T_OPTION: buf_puts(out, "O"); mangle(g, out, type->as.inner); break;
     case T_SLICE: buf_puts(out, "S"); mangle(g, out, type->as.inner); break;
@@ -281,6 +301,12 @@ static TypeEntry *named_type(Gen *g, const Type *type) {
 static const char *struct_name(Gen *g, const Type *type) {
     TypeEntry *entry = find_type(g, type);
     if (entry) return entry->name;
+    const Type *plain = effectless(g, type);
+    if (plain != type) { /* the entry of the instance without effects, shared */
+        const char *shared = struct_name(g, plain);
+        ptrmap_put(&g->type_index, type, *(size_t *)ptrmap_get(&g->type_index, plain));
+        return shared;
+    }
     char *name;
     if (type->tag == T_STRUCT || type->tag == T_ENUM || type->tag == T_CLASS || type->tag == T_INTERFACE) {
         name = nominal_c_name(g, type->as.info);
@@ -2460,8 +2486,13 @@ static void gen_tables(Gen *g, Buf *out) {
     for (size_t i = 0; i < g->s->type_infos.count; i++) {
         if (g->s->type_infos.items[i]->param_count == 0) SOSU_VEC_PUSH(&infos, g->s->type_infos.items[i]);
     }
+    size_t before = g->s->instances.count;
+    for (size_t i = 0; i < before; i++) { /* the instances without effects, which stand for those with */
+        if (!g->s->instances.items[i]->open) effectless(g, g->s->instances.items[i]->type);
+    }
     for (size_t i = 0; i < g->s->instances.count; i++) {
-        if (!g->s->instances.items[i]->open) SOSU_VEC_PUSH(&infos, g->s->instances.items[i]);
+        const TypeInfo *info = g->s->instances.items[i];
+        if (!info->open && effectless(g, info->type) == info->type) SOSU_VEC_PUSH(&infos, info);
     }
     /* interfaces: an identity, and a dispatcher per method */
     for (size_t i = 0; i < infos.count; i++) {
