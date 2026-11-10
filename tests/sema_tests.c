@@ -508,6 +508,24 @@ static void test_generics(void) {
     snprintf(text, sizeof text, "%svoid g(i32[] xs) { each(xs, show); }", each);
     expect_codes(text, "E0340");
     expect_codes("void each<T, uses E>(T[] items, fn(T) -> void uses E f) { f(items[0]); }", "E0340");
+    /* an interface with an effect parameter: its implementations give the effects of their methods */
+    const char *handler = "interface H<uses E> {\n    void step() uses io, E;\n}\n"
+                          "class Quiet : H {\n    override void step() uses io { }\n}\n"
+                          "class Busy : H<uses threads, time> {\n    override void step() uses io, threads, time { }\n}\n"
+                          "void run<uses E>(H<uses E>* h) uses io, E {\n    h.step();\n}\n";
+    snprintf(text, sizeof text, "%svoid f(Quiet* q, Busy* b) uses io, threads, time {\n"
+                                "    run(q as H*);\n    run(b as H<uses time, threads>*);\n}\n"
+                                "void g(Quiet* q) uses io { run(q as H*); }", handler);
+    expect_codes(text, "");
+    snprintf(text, sizeof text, "%svoid g(Busy* b) uses io { run(b as H<uses threads, time>*); }", handler);
+    expect_codes(text, "E0340");  /* the caller lacks the effects of the handler */
+    snprintf(text, sizeof text, "%sclass Loud : H {\n    override void step() uses io, threads { }\n}", handler);
+    expect_help(text, "E0317", "give the effect to the interface: `H<uses threads>` (spec §5.4)");
+    snprintf(text, sizeof text, "%svoid g(Busy* b) uses io { H* h = b as H*; }", handler);
+    expect_codes(text, "E0341");  /* another instance: a cast of memory, in unsafe only */
+    expect_codes("interface Plain { void step(); }\nclass P : Plain<uses io> {\n    override void step() { }\n}", "E0361 E0313");
+    expect_codes("struct S<uses E> { i32 x; }", "E0217");
+    expect_codes("interface Two<uses A, uses B> { void step() uses A; }", "E0217");
     /* exports (spec §9.2) */
     expect_codes("struct V { f32 x; }\nenum M { A, B }\nclass C { }\n"
                  "export \"C\" f32 lib_dot(V a, V b, M m, str s, i64[] xs, C* c, fn(i32) -> i32 f) { return a.x; }", "");

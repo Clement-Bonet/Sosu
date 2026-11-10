@@ -1,0 +1,9 @@
+// net: the network (spec §8.2). Programs import `net.ip` (addresses, names, errors), `net.tcp`
+// (connections), `net.udp` (datagrams), `net.tls` (TLS), `net.url` and `net.http` (an HTTP
+// and HTTPS client).
+import net.ip;
+import net.tcp;
+import net.udp;
+import net.tls;
+import net.url;
+import net.http;

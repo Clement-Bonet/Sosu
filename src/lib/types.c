@@ -89,6 +89,8 @@ static bool same_structure(const Type *a, const Type *b) {
             if (a->as.fn.params[i] != b->as.fn.params[i]) return false;
         }
         return true;
+    case T_EFFECTS:
+        return a->as.effects == b->as.effects;
     default:
         return false;
     }
@@ -110,6 +112,7 @@ static uint64_t structure_hash(const Type *type) {
         h = mix(mix(mix(h, (uintptr_t)type->as.fn.ret), type->as.fn.effects), (uintptr_t)type->as.fn.keeps);
         for (size_t i = 0; i < type->as.fn.param_count; i++) h = mix(h, (uintptr_t)type->as.fn.params[i]);
         return h;
+    case T_EFFECTS: return mix(h, type->as.effects);
     default:
         return h;
     }
@@ -191,6 +194,13 @@ Type *type_fn(TypeTable *table, Type **params, size_t param_count, Type *ret, un
     return intern(table, &probe);
 }
 
+Type *type_effects(TypeTable *table, unsigned effects) {
+    Type probe = {0};
+    probe.tag = T_EFFECTS;
+    probe.as.effects = effects;
+    return intern(table, &probe);
+}
+
 /* ---- Printing ---- */
 
 typedef struct {
@@ -261,17 +271,31 @@ static void append_type(Buffer *buffer, const Type *type) {
             if (type->as.fn.effects & EFFECT_PARAMS) append_text(buffer, first ? "E" : ", E"); /* an effect parameter */
         }
         break;
-    default:
-        append(buffer, type->name.text, type->name.length);
-        if (type->type_arg_count) {
-            append_text(buffer, "<");
-            for (size_t i = 0; i < type->type_arg_count; i++) {
-                if (i) append_text(buffer, ", ");
-                append_type(buffer, type->type_args[i]);
-            }
-            append_text(buffer, ">");
+    case T_EFFECTS: {
+        append_text(buffer, "uses ");
+        bool first = true;
+        for (unsigned bit = 1; bit <= EFFECT_THREADS; bit <<= 1) {
+            if (!(type->as.effects & bit)) continue;
+            if (!first) append_text(buffer, ", ");
+            append_text(buffer, effect_name(bit));
+            first = false;
         }
+        if (type->as.effects & EFFECT_PARAMS) append_text(buffer, first ? "E" : ", E");
         break;
+    }
+    default: {
+        append(buffer, type->name.text, type->name.length);
+        size_t shown = 0; /* no effect given is not written: `Handler`, not `Handler<uses >` */
+        for (size_t i = 0; i < type->type_arg_count; i++) {
+            const Type *arg = type->type_args[i];
+            if (arg->tag == T_EFFECTS && arg->as.effects == 0) continue;
+            append_text(buffer, shown ? ", " : "<");
+            append_type(buffer, arg);
+            shown++;
+        }
+        if (shown) append_text(buffer, ">");
+        break;
+    }
     }
 }
 

@@ -46,6 +46,12 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [image.ops](#imageops) | Images transformed: cropped, resized (bilinear or Lanczos), rotated by quarter turns or by any angle, flipped |
 | [image.png](#imagepng) | PNG files, read and written in Sosu |
 | [math.linear](#mathlinear) | Vectors, matrices, quaternions and transforms of f32, for `render` and 3D |
+| [net.http](#nethttp) | An HTTP/1.1 client |
+| [net.ip](#netip) | The addresses of the network, IPv4 and IPv6, the names resolved into them (DNS), and the errors of `net` |
+| [net.tcp](#nettcp) | TCP connections, a stream of bytes both ways |
+| [net.tls](#nettls) | TLS 1.2 and 1.3 over a TCP stream, with Mbed TLS 4.1 (native/tls.c) |
+| [net.udp](#netudp) | Datagrams, each sent on its own to an address and a port, without connection: one may be lost, come twice or come out of order, and one is 65 507 bytes at most (IPv4) |
+| [net.url](#neturl) | The URLs of `net.http`, `http://host:port/path?query` |
 | [platform.dialogs](#platformdialogs) | The dialogs of the system (spec §10.11), on SDL3 |
 | [sqlite.sqlite](#sqlitesqlite) | SQLite databases through `db.Connection` (spec §8.2), on SQLite 3.54.1, a C file of the package (native/sqlite.c, spec §9.1) |
 | [testing.bench](#testingbench) | Benchmarks, written in `test` blocks (spec §8.3) |
@@ -84,6 +90,8 @@ pub struct Channel<T: Send>
   Copies `value` in, waiting while the channel is full; false if it is closed.
 - `pub T? receive() uses threads`  
   The next value, waiting while the channel is empty; none once it is closed and empty.
+- `pub T? try_receive() uses threads`  
+  The next value if one is there, without waiting: none while the channel is empty (a window reads what its threads sent at each frame, and goes on).
 - `pub void close() uses threads`  
   No more values: the receivers get those left, then none.
 - `pub void free() uses threads`  
@@ -3475,6 +3483,553 @@ A transform that changes nothing.
 
 ```sosu
 pub Transform transform()
+```
+
+## net.http
+
+An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
+
+### enum `HttpError`
+
+What went wrong with a request.
+
+```sosu
+pub enum HttpError {
+    InvalidUrl,  // not an http or https URL, or one with spaces or a user
+    InvalidHeader,  // a header with a line end, or a name that is not a token
+    Network(ip.NetError error),  // the connection failed, or the server closed it too soon
+    BadResponse,  // the server did not answer in HTTP/1.x
+    TooLarge,  // the answer is bigger than `max_size`
+    TooManyRedirects,  // more redirects than `redirects`
+    Tls(tls.TlsError error),  // https: the certificate of the server, or the secure connection
+}
+```
+
+### `message`
+
+A sentence for an error, for a message to the user.
+
+```sosu
+pub str message(HttpError e)
+```
+
+### struct `Header`
+
+A header: its name (any case) and its value.
+
+```sosu
+pub struct Header
+```
+
+- `pub str name`
+- `pub str value`
+
+### struct `Request`
+
+A request, made by `request` and changed field by field.
+
+```sosu
+pub struct Request
+```
+
+- `pub mut str method`  
+  "GET", "POST"...
+- `pub mut str url`
+- `pub mut Header[] headers`  
+  besides Host, User-Agent, Accept, Connection and Content-Length
+- `pub mut ui8[] body`
+- `pub mut i32 timeout_ms`  
+  the longest each connect, read and write waits (0: no limit)
+- `pub mut usize max_size`  
+  the largest answer, headers and body
+- `pub mut i32 redirects`  
+  the most redirects followed (0: none, the redirect is the answer)
+- `pub mut str roots`  
+  https: the certificates trusted, in PEM; "" for those of the system
+
+### `request`
+
+A request with the defaults: no headers, no body, 30 s, 16 MB, 5 redirects, the roots of the system.
+
+```sosu
+pub Request request(Arena* arena, str method, str address)
+```
+
+### struct `Response`
+
+The answer of the server.
+
+```sosu
+pub struct Response
+```
+
+- `pub i32 status`  
+  200, 404...
+- `pub str reason`  
+  "OK", "Not Found"...
+- `pub Header[] headers`
+- `pub ui8[] body`
+- `pub str url`  
+  the URL that answered, after the redirects
+- `pub bool ok()`  
+  True for a status of success, 200 to 299.
+- `pub str? header(str name)`  
+  The value of the first header named `name`, in any case.
+- `pub str text()`  
+  The body as text, or "" if it is not UTF-8.
+
+### `get`
+
+GET `address`.
+
+```sosu
+pub Response!HttpError get(Arena* arena, str address) uses io
+```
+
+### `post`
+
+POST `body` to `address`, as `content_type` ("application/json").
+
+```sosu
+pub Response!HttpError post(Arena* arena, str address, keeps str content_type, keeps ui8[] body) uses io
+```
+
+### `send`
+
+Sends a request and reads its answer, following the redirects.
+
+```sosu
+pub Response!HttpError send(Arena* arena, Request r) uses io
+```
+
+### `open`
+
+Sends a request and reads the head of its answer, following the redirects: its body is read as it comes, by `Body.read`, for a file larger than memory. Close the body when done. The whole answer counts against `max_size`.
+
+```sosu
+pub Body*!HttpError open(Arena* arena, Request r) uses io
+```
+
+### `over`
+
+The request written on `c`, then its whole answer read from it.
+
+```sosu
+pub Response!HttpError over(Arena* arena, keeps tcp.Connection* c, url.Url target, str method, Header[] headers, ui8[] body, usize max_size) uses io
+```
+
+### `read_response`
+
+The whole answer read from `reader`: its head, then its body.
+
+```sosu
+pub Response!HttpError read_response(Arena* arena, keeps Reader* reader, str method, keeps str from) uses io
+```
+
+### `body_of`
+
+The head of the answer read from `reader` (the status line and the headers, after any 1xx answer), and its body, to be read as the headers say it comes.
+
+```sosu
+pub Body*!HttpError body_of(Arena* arena, keeps Reader* reader, str method, keeps str from) uses io
+```
+
+### class `Body`
+
+The body of an answer, read as it comes.
+
+```sosu
+pub class Body
+```
+
+- `pub Response head`  
+  the status, the headers and the URL; its `body` is empty
+- `pub i64 length()`  
+  The bytes the body has, from Content-Length; -1 if the server did not say.
+- `pub usize!HttpError read(ui8[] into) uses io`  
+  Reads what has come, at most `into.len` bytes: how many; 0 at the end of the body. A body cut short by the server is the error `Network(Closed)`.
+- `pub ui8[]!HttpError read_all(Arena* arena) uses io`  
+  The whole body, in `arena`.
+- `pub void close() uses io`  
+  Closes the connection. Closing twice does nothing.
+
+### class `Reader`
+
+The bytes of an answer as they come, with what is read ahead kept for the next call. Counts everything read against `max`.
+
+```sosu
+pub class Reader
+```
+
+- `pub usize max`
+- `pub usize!HttpError some(ui8[] into) uses io`  
+  At most `into.len` bytes: those kept first, else what comes, straight into `into`; 0 at the end of the stream.
+- `pub str!HttpError line() uses io`  
+  The next line, without its CRLF (a bare LF is taken too); at most 8 KB.
+
+### `same_name`
+
+Two names of headers, the same but for the case of ASCII letters.
+
+```sosu
+pub bool same_name(str a, str b)
+```
+
+## net.ip
+
+The addresses of the network, IPv4 and IPv6, the names resolved into them (DNS), and the errors of `net`. A program connects with `net.tcp` and sends datagrams with `net.udp`.      ip.Address[] all = try ip.resolve(&arena, "example.org");
+
+### enum `NetError`
+
+What went wrong on the network.
+
+```sosu
+pub enum NetError {
+    NotFound,  // the name is not known (DNS)
+    Refused,  // nothing listens at that address and port
+    TimedOut,  // the other side did not answer in time
+    Unreachable,  // no route to the host, or no network
+    AddressInUse,  // another socket holds that address and port
+    Closed,  // the other side closed or reset the connection, or it was closed here
+    Invalid,  // an address, a port or a size the system refuses
+    Denied,  // a permission is missing: a port below 1024, a firewall
+    Other,  // another error of the system
+}
+```
+
+### `message`
+
+A sentence for an error, for a message to the user.
+
+```sosu
+pub str message(NetError e)
+```
+
+### `error_of`
+
+The error of a code of native/net.c.
+
+```sosu
+pub NetError error_of(i32 code)
+```
+
+### struct `Address`
+
+An IP address: IPv4 (its 4 bytes) or IPv6 (its 16 bytes).
+
+```sosu
+pub struct Address
+```
+
+- `pub ui8[18] raw`  
+  Its family (4 or 6), a byte 0, then 16 bytes of IP: how native/net.c reads it.
+- `pub bool is_v6()`  
+  True for IPv6.
+- `pub ui8[] bytes(Arena* arena)`  
+  Its bytes: 4 for IPv4, 16 for IPv6.
+- `pub bool is_loopback()`  
+  The loopback of its family (127.0.0.1 or ::1).
+- `pub str text(Arena* arena)`  
+  Written out: "192.168.0.1", "::1".
+
+### `v4`
+
+An IPv4 address from its 4 bytes: `v4(127, 0, 0, 1)`.
+
+```sosu
+pub Address v4(ui8 a, ui8 b, ui8 c, ui8 d)
+```
+
+### `v6`
+
+An IPv6 address from its 16 bytes, or none if there are not 16.
+
+```sosu
+pub Address? v6(ui8[] bytes)
+```
+
+### `localhost`
+
+127.0.0.1, this machine.
+
+```sosu
+pub Address localhost()
+```
+
+### `any`
+
+0.0.0.0: every interface of this machine, for a server that listens to the network.
+
+```sosu
+pub Address any()
+```
+
+### `resolve`
+
+The addresses of `host`, a name ("example.org") or an address written out ("10.0.0.2", "::1"), from the resolver of the system: IPv4 first. `NotFound` if it has none.
+
+```sosu
+pub Address[]!NetError resolve(Arena* arena, str host) uses io
+```
+
+### `lookup`
+
+The first address of `host`, as `resolve` gives them.
+
+```sosu
+pub Address!NetError lookup(Arena* arena, str host) uses io
+```
+
+## net.tcp
+
+TCP connections, a stream of bytes both ways. A client connects to a host and a port; a server listens on a port and accepts the connections that come. Reads and writes wait (on a thread of its own, a program does something else meanwhile, spec §5.6), at most the time set by `set_timeout`. A stream belongs to the thread that opened it.      tcp.Stream* s = try tcp.connect(&arena, "example.org", 80, 5000);     defer s.close();     try s.write_all("GET / HTTP/1.0\r\n\r\n".bytes);
+
+### interface `Connection`
+
+What a protocol reads and writes (`net.http`): a TCP stream, or a TLS one over it.
+
+```sosu
+pub interface Connection
+```
+
+- `usize!ip.NetError read(ui8[] into) uses io`  
+  Reads what has come, at most `into.len` bytes: how many; 0 at the end of the stream.
+- `void!ip.NetError write_all(ui8[] data) uses io`  
+  Writes all of `data`.
+- `void close() uses io`  
+  Closes the connection.
+
+### class `Stream`
+
+A connection: what one side writes, the other reads, in order.
+
+```sosu
+pub class Stream : Connection
+```
+
+- `pub ip.Address peer()`  
+  The address of the other side.
+- `pub ui16 port()`  
+  The port of the other side.
+- `pub i64 socket()`  
+  The socket of the system, for `net.tls`; -1 once closed.
+- `pub void!ip.NetError set_timeout(i32 timeout_ms) uses io`  
+  The longest a read or a write waits, in milliseconds, before `TimedOut` (0: no limit, the default).
+- `pub override usize!ip.NetError read(ui8[] into) uses io`  
+  Reads what has come, at most `into.len` bytes, waiting for some: how many; 0 when the other side has closed its end and everything was read.
+- `pub void!ip.NetError read_exact(ui8[] into) uses io`  
+  Reads exactly `into.len` bytes; `Closed` if the stream ends before.
+- `pub override void!ip.NetError write_all(ui8[] data) uses io`  
+  Writes all of `data`, waiting while the system sends it.
+- `pub void!ip.NetError write_text(str text) uses io`  
+  Writes a text, as its bytes of UTF-8.
+- `pub ui8[]!ip.NetError read_all(Arena* arena, usize max) uses io`  
+  Reads until the other side closes: everything that came, in `arena`, at most `max` bytes (`Invalid` beyond).
+- `pub void finish() uses io`  
+  No more writes from this side: the other side reads the end of the stream, and may still answer.
+- `pub override void close() uses io`  
+  Closes the connection; then every read and write gives `Closed`. Closing twice does nothing.
+
+### `connect`
+
+Connects to `host` (a name or an address written out) on `port`, trying its addresses in turn, each for `timeout_ms` at most (0: as long as the system waits). The stream is made in `arena`; close it before freeing the arena.
+
+```sosu
+pub Stream*!ip.NetError connect(Arena* arena, str host, ui16 port, i32 timeout_ms) uses io
+```
+
+### `connect_to`
+
+Connects to one address on `port`.
+
+```sosu
+pub Stream*!ip.NetError connect_to(Arena* arena, ip.Address address, ui16 port, i32 timeout_ms) uses io
+```
+
+### class `Listener`
+
+A socket that listens for connections.
+
+```sosu
+pub class Listener
+```
+
+- `pub ui16 port()`  
+  The port it listens on: the one chosen by the system when `listen` was given 0.
+- `pub Stream*!ip.NetError accept(Arena* arena) uses io`  
+  Waits for the next connection; its stream is made in `arena`.
+- `pub void close() uses io`  
+  Stops listening. Closing twice does nothing.
+
+### `listen`
+
+Listens on `address` and `port` (0: a port the system chooses, given by `port()`): `ip.localhost()` for this machine only, `ip.any()` for the network.
+
+```sosu
+pub Listener*!ip.NetError listen(Arena* arena, ip.Address address, ui16 port) uses io
+```
+
+## net.tls
+
+TLS 1.2 and 1.3 over a TCP stream, with Mbed TLS 4.1 (native/tls.c). A client checks the certificate of the server: signed by a root of the system (or by those the program gives), in its dates, and for the name asked for. A server answers with its certificate and its key. `net.http` uses it for https.      tcp.Stream* raw = try tcp.connect(&arena, "example.org", 443, 5000);     tls.Stream* s = try tls.connect(&arena, raw, "example.org", "");     defer s.close();
+
+### enum `TlsError`
+
+What went wrong with TLS.
+
+```sosu
+pub enum TlsError {
+    Network(ip.NetError error),  // the connection failed under TLS
+    Untrusted,  // the certificate is not signed by a trusted root
+    Expired,  // the certificate is out of its dates
+    WrongName,  // the certificate is for another name
+    Handshake,  // no common version or cipher, an alert, a message that cannot be read
+    Invalid,  // a certificate or a key in PEM that cannot be read
+    Closed,  // the stream was closed here
+    Other,  // another error of the library
+}
+```
+
+### `message`
+
+A sentence for an error, for a message to the user.
+
+```sosu
+pub str message(TlsError e)
+```
+
+### class `Stream`
+
+A connection under TLS: what is written is encrypted, what is read is checked and decrypted. Closing it closes the TCP stream under it.
+
+```sosu
+pub class Stream : tcp.Connection
+```
+
+- `pub str version(Arena* arena)`  
+  The version of TLS agreed on: "TLSv1.3" or "TLSv1.2".
+- `pub override usize!ip.NetError read(ui8[] into) uses io`  
+  Reads what has come, at most `into.len` bytes: how many; 0 when the other side has closed.
+- `pub usize!TlsError read_tls(ui8[] into) uses io`  
+  `read`, with the error of TLS.
+- `pub override void!ip.NetError write_all(ui8[] data) uses io`  
+  Writes all of `data`.
+- `pub override void close() uses io`  
+  Says goodbye to the other side, then closes the TCP stream. Closing twice does nothing.
+
+### `connect`
+
+The handshake of a client over `stream`, for `host`: the name checked in the certificate (and sent to the server, which may serve several names). `roots` are the certificates trusted, in PEM; "" for those of the system. On an error the stream is left open.
+
+```sosu
+pub Stream*!TlsError connect(Arena* arena, keeps tcp.Stream* stream, str host, str roots) uses io
+```
+
+### class `Server`
+
+The certificate and the key of a server.
+
+```sosu
+pub class Server
+```
+
+- `pub Stream*!TlsError accept(Arena* arena, keeps tcp.Stream* stream) uses io`  
+  The handshake of the server over `stream`, a connection it accepted.
+- `pub void close()`  
+  Frees the certificate and the key. Closing twice does nothing.
+
+### `server`
+
+A server that answers with `chain` (its certificate, then those that sign it, in PEM) and `key` (its private key, in PEM, not encrypted).
+
+```sosu
+pub Server*!TlsError server(Arena* arena, str chain, str key)
+```
+
+## net.udp
+
+Datagrams, each sent on its own to an address and a port, without connection: one may be lost, come twice or come out of order, and one is 65 507 bytes at most (IPv4).      udp.Socket* s = try udp.open(&arena, ip.any(), 0);     try s.send_to(ip.localhost(), 9000, "ping".bytes);
+
+### struct `Datagram`
+
+A datagram received: how many bytes came, and who sent it.
+
+```sosu
+pub struct Datagram
+```
+
+- `pub usize size`
+- `pub ip.Address from`
+- `pub ui16 port`
+
+### class `Socket`
+
+A UDP socket, bound to an address and a port.
+
+```sosu
+pub class Socket
+```
+
+- `pub ui16 port()`  
+  The port it is bound to: the one chosen by the system when `open` was given 0.
+- `pub void!ip.NetError set_timeout(i32 timeout_ms) uses io`  
+  The longest `receive` waits, in milliseconds, before `TimedOut` (0: no limit).
+- `pub void!ip.NetError send_to(ip.Address address, ui16 port, ui8[] data) uses io`  
+  Sends `data` as one datagram to `address` and `port`; `Invalid` if it is too big.
+- `pub Datagram!ip.NetError receive(ui8[] into) uses io`  
+  Waits for the next datagram, written into `into`; a longer one is cut to `into.len`.
+- `pub void close() uses io`  
+  Closes the socket. Closing twice does nothing.
+
+### `open`
+
+A socket bound to `address` and `port` (0: a port the system chooses).
+
+```sosu
+pub Socket*!ip.NetError open(Arena* arena, ip.Address address, ui16 port) uses io
+```
+
+## net.url
+
+The URLs of `net.http`, `http://host:port/path?query`. Only what a request needs is kept: the scheme, the host, the port and the target (the path and the query); a fragment (`#part`) is dropped. A URL with spaces, control characters or a user (`user@host`) is refused.
+
+### struct `Url`
+
+A URL taken apart.
+
+```sosu
+pub struct Url
+```
+
+- `pub str scheme`  
+  "http" or "https"
+- `pub str host`  
+  a name, or an address (an IPv6 one without its brackets)
+- `pub ui16 port`  
+  the one written, or 80 for http and 443 for https
+- `pub str target`  
+  the path and the query: "/", "/search?q=sosu"
+- `pub bool default_port()`  
+  True when the port is the one of the scheme.
+- `pub str authority(Arena* arena)`  
+  The value of the `Host` header: "example.org", "example.org:8080", "[::1]:8080".
+- `pub str written(Arena* arena)`  
+  Written out again, without the default port: "http://example.org/a?b".
+
+### `parse`
+
+The URL of `s`, or none if it is not an http or https URL that a request can use.
+
+```sosu
+pub Url? parse(Arena* arena, str s)
+```
+
+### `resolve`
+
+`location`, the value of a `Location` header, against `from`: an absolute URL, a path from the root (`/next`), a URL without its scheme (`//host/path`), or a path next to the target of `from` (`next`, `../up`, kept as it is: the server reads the dots).
+
+```sosu
+pub Url? resolve(Arena* arena, Url from, str location)
 ```
 
 ## platform.dialogs

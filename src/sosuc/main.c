@@ -447,6 +447,22 @@ static void collect_links(const Program *program, Links *links, const Target *ta
             }
             for (size_t j = 0; j < link->c.count; j++) {
                 char *file = link_path(package, link->c.items[j], target);
+                const char *written = link->c.items[j];
+                size_t length = strlen(written);
+                if (length > 0 && (written[length - 1] == '/' || written[length - 1] == '\\')) {
+                    /* a folder: its C files, not those of its subfolders */
+                    size_t end = strlen(file);
+                    if (end > 0 && (file[end - 1] == '/' || file[end - 1] == '\\')) file[end - 1] = '\0';
+                    size_t count = 0;
+                    char **names = checked(package, file, "c", true) ? shell_files_ending(file, ".c", &count) : NULL;
+                    for (size_t k = 0; k < count; k++) {
+                        add_unique(&links->sources, path_join(file, names[k]));
+                        free(names[k]);
+                    }
+                    free(names);
+                    free(file);
+                    continue;
+                }
                 add_unique(&links->sources, checked(package, file, "c", false));
             }
             for (size_t j = 0; j < link->include.count; j++) {
@@ -648,6 +664,145 @@ static bool use_msvc(const Target *target, const char *work_dir) {
 }
 #endif
 
+/* ---- The objects of the C files of the packages, kept between builds ----
+
+   A package may give a large C library as its sources (Mbed TLS, SQLite): each of its files is
+   compiled once into an object of build/obj/<target>-<debug|release>/, next to a `.key` file
+   that says what it was made from. A file is compiled again when its key changes: the command
+   that compiles it, its time and size, or the newest of the other files of the folders of the
+   headers and of the sources (a header, a file it includes: sqlite.c includes sqlite3.c). */
+
+/* What the object of `source` depends on. New string. */
+static char *object_key(const Command *compile, const char *source, long long newest) {
+    long long time = 0, size = 0;
+    shell_file_stamp(source, &time, &size);
+    size_t length = 96;
+    for (size_t i = 0; i < compile->count; i++) length += strlen(compile->items[i]) + 1;
+    char *key = sosu_alloc(length);
+    size_t used = 0;
+    for (size_t i = 0; i < compile->count; i++) {
+        size_t n = strlen(compile->items[i]);
+        memcpy(key + used, compile->items[i], n);
+        used += n;
+        key[used++] = '\n';
+    }
+    snprintf(key + used, length - used, "%lld %lld %lld\n", time, size, newest);
+    return key;
+}
+
+/* True if the file at `path` holds exactly `text`. */
+static bool file_holds(const char *path, const char *text) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = strlen(text);
+    char *buffer = sosu_alloc(n + 2);
+    size_t got = fread(buffer, 1, n + 1, f);
+    fclose(f);
+    bool same = got == n && memcmp(buffer, text, n) == 0;
+    free(buffer);
+    return same;
+}
+
+/* The C files of the packages, as objects of `obj_dir` added to `link` (the command that links
+   the program): those that changed are compiled again, with `base` (the compiler and its
+   options) and the folders and defines of [link]. False if the C compiler failed. */
+static bool package_objects(const Links *links, const char *obj_dir, const Command *base, bool msvc, const char *log,
+                            Command *link) {
+    if (links->sources.count == 0) return true;
+    shell_make_dir(obj_dir);
+    StringList dirs = {0}; /* the folders of headers and of sources */
+    for (size_t i = 0; i < links->includes.count; i++) add_unique(&dirs, sosu_strdup(links->includes.items[i]));
+    for (size_t i = 0; i < links->sources.count; i++) {
+        char *dir = sosu_strdup(links->sources.items[i]);
+        char *slash = strrchr(dir, '/');
+        char *back = strrchr(dir, '\\');
+        if (back && (!slash || back > slash)) slash = back;
+        if (slash) *slash = '\0';
+        add_unique(&dirs, dir);
+    }
+    long long newest = 0;
+    for (size_t i = 0; i < dirs.count; i++) {
+        /* a compiled file counts in its own key only, so that a change recompiles it alone */
+        long long t = shell_newest_time(dirs.items[i], links->sources.items, links->sources.count);
+        if (t > newest) newest = t;
+        free(dirs.items[i]);
+    }
+    free(dirs.items);
+
+    Command compile = {0}; /* what compiles one file: the key of its object */
+    for (size_t i = 0; i < base->count; i++) command_add(&compile, base->items[i]);
+    char *native_dir = shell_path(obj_dir);
+    if (msvc) {
+        command_add(&compile, "/c");
+        command_addf(&compile, "/Fo%s\\", native_dir);
+        command_addf(&compile, "/Fd%s\\", native_dir);
+    } else {
+        command_add(&compile, "-c");
+    }
+    add_source_flags(&compile, links, msvc);
+    bool ok = true;
+    Command batch = {0}; /* MSVC: the files that changed, compiled at once */
+    for (size_t i = 0; i < compile.count; i++) command_add(&batch, compile.items[i]);
+    size_t stale = 0;
+    char **keys = sosu_alloc(links->sources.count * sizeof *keys);
+    for (size_t i = 0; i < links->sources.count; i++) {
+        const char *source = links->sources.items[i];
+        char *object = source_object(source, obj_dir, msvc ? ".obj" : ".o");
+        char *key_file = sosu_format("%s.key", object);
+        keys[i] = object_key(&compile, source, newest);
+        bool kept = shell_file_exists(object) && file_holds(key_file, keys[i]);
+        if (!kept) {
+            remove(key_file); /* until it is compiled again */
+            char *native = shell_path(source);
+            if (msvc) {
+                command_add(&batch, native);
+            } else if (ok) {
+                Command one = {0};
+                for (size_t k = 0; k < compile.count; k++) command_add(&one, compile.items[k]);
+                command_add(&one, native);
+                command_add(&one, "-o");
+                command_add(&one, object);
+                ok = run(&one) && write_file(key_file, keys[i]);
+            }
+            free(native);
+            stale++;
+        }
+        command_add(link, object);
+        free(key_file);
+        free(object);
+    }
+#ifdef _WIN32
+    if (msvc && stale > 0) {
+        ok = run_logged(&batch, log);
+        for (size_t i = 0; ok && i < links->sources.count; i++) {
+            char *object = source_object(links->sources.items[i], obj_dir, ".obj");
+            char *key_file = sosu_format("%s.key", object);
+            if (!shell_file_exists(key_file) || !file_holds(key_file, keys[i])) ok = write_file(key_file, keys[i]);
+            free(key_file);
+            free(object);
+        }
+    } else
+#endif
+    {
+        (void)log;
+        (void)stale; /* counted for the MSVC batch only */
+        command_free(&batch);
+    }
+    for (size_t i = 0; i < links->sources.count; i++) free(keys[i]);
+    free(keys);
+    command_free(&compile);
+    free(native_dir);
+    return ok;
+}
+
+/* The folder of the objects of the C files of the packages, for `target`. New string. */
+static char *objects_dir(const char *build_dir, const Target *target, bool optimize) {
+    char *name = sosu_format("obj/%s-%s", target->name, optimize ? "release" : "debug");
+    char *dir = path_join(build_dir, name);
+    free(name);
+    return dir;
+}
+
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
 static bool compile_c(const char *build_dir, const char *c_file, const char *exe, const char *lib, bool optimize,
                       const Links *links, const Target *target) {
@@ -673,7 +828,13 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         command_addf(&cl, "/Fo%s\\", dir);
         command_addf(&cl, "/Fd%s\\", dir);
         command_addf(&cl, "/Fe%s", out);
-        add_sources(&cl, links, true);
+        add_source_flags(&cl, links, true);
+        Command base = {0};
+        add_all(&base, options);
+        char *obj_dir = objects_dir(build_dir, target, optimize);
+        if (ok) ok = package_objects(links, obj_dir, &base, true, log, &cl);
+        free(obj_dir);
+        command_free(&base);
         command_add(&cl, c);
         command_add(&cl, rt_c);
         if (links->resource) command_add(&cl, links->resource);
@@ -693,17 +854,22 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
     } else
 #endif
     {
-        (void)build_dir;
         (void)cc; /* SOSU_CC: read by desktop_compiler */
         Command command = {0};
         ok = desktop_compiler(target, &command);
         const char *options[] = { "-std=c99", "-g", optimize ? "-O2" : "-O0", "-w", "-fno-strict-aliasing", NULL };
+        Command base = {0};
+        for (size_t i = 0; i < command.count; i++) command_add(&base, command.items[i]); /* the compiler */
+        add_all(&base, options);
         add_all(&command, options);
         if (!optimize) command_add(&command, "-DSOSU_DEBUG");
         command_addf(&command, "-I%s", runtime);
         command_add(&command, c_file);
         command_add(&command, runtime_c);
-        add_sources(&command, links, false);
+        char *obj_dir = objects_dir(build_dir, target, optimize);
+        if (ok) ok = package_objects(links, obj_dir, &base, false, NULL, &command);
+        free(obj_dir);
+        command_free(&base);
         if (links->resource) command_add(&command, links->resource);
         command_add(&command, "-o");
         command_add(&command, exe);
@@ -1667,6 +1833,12 @@ static int command_package_android(const char *dir, const char *argv0, DiagForma
             built = false;
         }
         int api = newest_android_api(sdk);
+        /* a program that uses the package net asks for the network (a permission granted when the
+           application is installed) */
+        bool network = false;
+        for (size_t i = 0; i < program.packages.count; i++) {
+            if (strcmp(program.packages.items[i]->name, "net") == 0) network = true;
+        }
         Fill fills[] = {
             { "@ID@", app->id ? sosu_strdup(app->id) : sosu_format("org.sosu.%s", root->name) },
             { "@NAME@", sosu_strdup(app->name ? app->name : root->name) },
@@ -1674,6 +1846,7 @@ static int command_package_android(const char *dir, const char *argv0, DiagForma
             { "@COMPILE_SDK@", sosu_format("%d", api > ANDROID_API ? api : 35) },
             { "@MIN_SDK@", sosu_format("%d", ANDROID_API) },
             { "@SDL_AAR@", sosu_strdup(aar ? aar : "") },
+            { "@PERMISSIONS@", sosu_strdup(network ? "<uses-permission android:name=\"android.permission.INTERNET\" />" : "") },
         };
         size_t fill_count = sizeof fills / sizeof *fills;
         for (size_t i = 0; built && i < sizeof android_templates / sizeof *android_templates; i++) {

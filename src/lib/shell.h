@@ -58,4 +58,17 @@ void shell_wait_second(void);
    `27.1.12297006`), or NULL if it is empty or does not exist. New string. */
 char *shell_last_entry(const char *dir);
 
+/* The names of the files of `dir` that end in `suffix` (not its folders), sorted; `*count` of
+   them. Each name and the array are new; NULL with 0 if there are none. */
+char **shell_files_ending(const char *dir, const char *suffix, size_t *count);
+
+/* The time of the last change of the file at `path` (seconds, or finer, from some origin of the
+   system) and its size; false if it is not there. */
+bool shell_file_stamp(const char *path, long long *time, long long *size);
+
+/* The newest time of the last change of the files under `dir`, its subfolders included, but
+   those of `skip` (paths written as `dir` and its files are, with `/` or `\`); 0 if there are
+   none. */
+long long shell_newest_time(const char *dir, char *const *skip, size_t skip_count);
+
 #endif

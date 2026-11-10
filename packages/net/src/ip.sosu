@@ -1,0 +1,190 @@
+// net.ip: the addresses of the network, IPv4 and IPv6, the names resolved into them (DNS), and
+// the errors of `net`. A program connects with `net.tcp` and sends datagrams with `net.udp`.
+//
+//     ip.Address[] all = try ip.resolve(&arena, "example.org");
+
+extern "C" {
+    i32 sosu_net_resolve(ui8* host, ui8* out, i32 max, i32* error) uses io;
+    i32 sosu_net_address_text(ui8* address, ui8* out);
+}
+
+// What went wrong on the network.
+pub enum NetError {
+    NotFound,  // the name is not known (DNS)
+    Refused,  // nothing listens at that address and port
+    TimedOut,  // the other side did not answer in time
+    Unreachable,  // no route to the host, or no network
+    AddressInUse,  // another socket holds that address and port
+    Closed,  // the other side closed or reset the connection, or it was closed here
+    Invalid,  // an address, a port or a size the system refuses
+    Denied,  // a permission is missing: a port below 1024, a firewall
+    Other,  // another error of the system
+}
+
+// A sentence for an error, for a message to the user.
+pub str message(NetError e) {
+    return match (e) {
+        NotFound => "the name is not known",
+        Refused => "the connection was refused",
+        TimedOut => "the network did not answer in time",
+        Unreachable => "the host cannot be reached",
+        AddressInUse => "the address is already in use",
+        Closed => "the connection is closed",
+        Invalid => "the address or the request is not valid",
+        Denied => "the system denied it",
+        Other => "the network gave an error",
+    };
+}
+
+// The error of a code of native/net.c.
+pub NetError error_of(i32 code) {
+    if (code == 1) {
+        return NetError.NotFound;
+    }
+    if (code == 2) {
+        return NetError.Refused;
+    }
+    if (code == 3) {
+        return NetError.TimedOut;
+    }
+    if (code == 4) {
+        return NetError.Unreachable;
+    }
+    if (code == 5) {
+        return NetError.AddressInUse;
+    }
+    if (code == 6) {
+        return NetError.Closed;
+    }
+    if (code == 7) {
+        return NetError.Invalid;
+    }
+    if (code == 8) {
+        return NetError.Denied;
+    }
+    return NetError.Other;
+}
+
+// An IP address: IPv4 (its 4 bytes) or IPv6 (its 16 bytes).
+pub struct Address {
+    // Its family (4 or 6), a byte 0, then 16 bytes of IP: how native/net.c reads it.
+    pub ui8[18] raw;
+
+    // True for IPv6.
+    pub bool is_v6() {
+        return raw[0] == 6;
+    }
+
+    // Its bytes: 4 for IPv4, 16 for IPv6.
+    pub ui8[] bytes(Arena* arena) {
+        usize n = is_v6() ? 16 : 4;
+        mut ui8[] out = arena.alloc_slice(ui8, n);
+        for (usize i in 0..n) {
+            out[i] = raw[i + 2];
+        }
+        return out;
+    }
+
+    // The loopback of its family (127.0.0.1 or ::1).
+    pub bool is_loopback() {
+        if (!is_v6()) {
+            return raw[2] == 127;
+        }
+        for (usize i in 2..17) {
+            if (raw[i] != 0) {
+                return false;
+            }
+        }
+        return raw[17] == 1;
+    }
+
+    // Written out: "192.168.0.1", "::1".
+    pub str text(Arena* arena) {
+        mut ui8[64] out = [0; 64];
+        mut ui8[18] copy = raw;
+        mut i32 n = 0;
+        unsafe {
+            n = sosu_net_address_text(&copy[0], &out[0]);
+        }
+        mut ui8[] bytes = arena.alloc_slice(ui8, n as usize);
+        for (usize i in 0..n as usize) {
+            bytes[i] = out[i];
+        }
+        return match (str.from_bytes(bytes)) {
+            ok(t) => t,
+            err(e) => "",
+        };
+    }
+}
+
+// An IPv4 address from its 4 bytes: `v4(127, 0, 0, 1)`.
+pub Address v4(ui8 a, ui8 b, ui8 c, ui8 d) {
+    mut ui8[18] raw = [0; 18];
+    raw[0] = 4;
+    raw[2] = a;
+    raw[3] = b;
+    raw[4] = c;
+    raw[5] = d;
+    return Address{ raw: raw };
+}
+
+// An IPv6 address from its 16 bytes, or none if there are not 16.
+pub Address? v6(ui8[] bytes) {
+    if (bytes.len != 16) {
+        return none;
+    }
+    mut ui8[18] raw = [0; 18];
+    raw[0] = 6;
+    for (usize i in 0..16) {
+        raw[i + 2] = bytes[i];
+    }
+    return some(Address{ raw: raw });
+}
+
+// 127.0.0.1, this machine.
+pub Address localhost() {
+    return v4(127, 0, 0, 1);
+}
+
+// 0.0.0.0: every interface of this machine, for a server that listens to the network.
+pub Address any() {
+    return v4(0, 0, 0, 0);
+}
+
+// The addresses of `host`, a name ("example.org") or an address written out ("10.0.0.2",
+// "::1"), from the resolver of the system: IPv4 first. `NotFound` if it has none.
+pub Address[]!NetError resolve(Arena* arena, str host) uses io {
+    if (host.len == 0) {
+        return err(NetError.Invalid);
+    }
+    for (ui8 c in host.bytes) {
+        if (c == 0) {
+            return err(NetError.Invalid);  // the resolver would read a shorter name
+        }
+    }
+    usize max = 16;
+    mut ui8[] out = arena.alloc_slice(ui8, 18 * max);
+    mut i32 error = 0;
+    mut i32 count = 0;
+    unsafe {
+        count = sosu_net_resolve(host.to_cstr(arena), &out[0], max as i32, &error);
+    }
+    if (count < 0) {
+        return err(error_of(error));
+    }
+    mut Address[] all = arena.alloc_slice(Address, count as usize);
+    for (usize i in 0..count as usize) {
+        mut ui8[18] raw = [0; 18];
+        for (usize j in 0..18) {
+            raw[j] = out[18 * i + j];
+        }
+        all[i] = Address{ raw: raw };
+    }
+    return ok(all);
+}
+
+// The first address of `host`, as `resolve` gives them.
+pub Address!NetError lookup(Arena* arena, str host) uses io {
+    Address[] all = try resolve(arena, host);
+    return ok(all[0]);
+}

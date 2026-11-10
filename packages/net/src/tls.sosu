@@ -1,0 +1,256 @@
+// net.tls: TLS 1.2 and 1.3 over a TCP stream, with Mbed TLS 4.1 (native/tls.c). A client checks
+// the certificate of the server: signed by a root of the system (or by those the program gives),
+// in its dates, and for the name asked for. A server answers with its certificate and its key.
+// `net.http` uses it for https.
+//
+//     tcp.Stream* raw = try tcp.connect(&arena, "example.org", 443, 5000);
+//     tls.Stream* s = try tls.connect(&arena, raw, "example.org", "");
+//     defer s.close();
+import net.ip;
+import net.tcp;
+
+extern "C" {
+    ui8* sosu_tls_connect(i64 socket, ui8* host, ui8* roots, i64 roots_size, i32* error, i32* net_error) uses io;
+    ui8* sosu_tls_server(ui8* chain, i64 chain_size, ui8* key, i64 key_size, i32* error);
+    void sosu_tls_server_free(ui8* server);
+    ui8* sosu_tls_accept(ui8* server, i64 socket, i32* error, i32* net_error) uses io;
+    i64 sosu_tls_read(ui8* tls, ui8* buffer, i64 size, i32* error, i32* net_error) uses io;
+    i64 sosu_tls_write(ui8* tls, ui8* buffer, i64 size, i32* error, i32* net_error) uses io;
+    void sosu_tls_version(ui8* tls, ui8* out);
+    void sosu_tls_close(ui8* tls) uses io;
+}
+
+// What went wrong with TLS.
+pub enum TlsError {
+    Network(ip.NetError error),  // the connection failed under TLS
+    Untrusted,  // the certificate is not signed by a trusted root
+    Expired,  // the certificate is out of its dates
+    WrongName,  // the certificate is for another name
+    Handshake,  // no common version or cipher, an alert, a message that cannot be read
+    Invalid,  // a certificate or a key in PEM that cannot be read
+    Closed,  // the stream was closed here
+    Other,  // another error of the library
+}
+
+// A sentence for an error, for a message to the user.
+pub str message(TlsError e) {
+    return match (e) {
+        Network(n) => ip.message(n),
+        Untrusted => "the certificate of the server is not trusted",
+        Expired => "the certificate of the server has expired, or is not valid yet",
+        WrongName => "the certificate is for another name",
+        Handshake => "the secure connection could not be set up",
+        Invalid => "a certificate or a key cannot be read",
+        Closed => "the connection is closed",
+        Other => "the secure connection failed",
+    };
+}
+
+// The error of the codes of native/tls.c.
+TlsError error_of(i32 code, i32 net) {
+    if (code == 1) {
+        return TlsError.Network(ip.error_of(net));
+    }
+    if (code == 2) {
+        return TlsError.Untrusted;
+    }
+    if (code == 3) {
+        return TlsError.Expired;
+    }
+    if (code == 4) {
+        return TlsError.WrongName;
+    }
+    if (code == 5) {
+        return TlsError.Handshake;
+    }
+    if (code == 6) {
+        return TlsError.Invalid;
+    }
+    return TlsError.Other;
+}
+
+// A connection under TLS: what is written is encrypted, what is read is checked and decrypted.
+// Closing it closes the TCP stream under it.
+pub class Stream : tcp.Connection {
+    mut ui8* handle;
+    mut bool open;
+    tcp.Stream* under;
+
+    void init(keeps ui8* handle, keeps tcp.Stream* under) {
+        self.handle = handle;
+        self.under = under;
+        open = true;
+    }
+
+    // The version of TLS agreed on: "TLSv1.3" or "TLSv1.2".
+    pub str version(Arena* arena) {
+        if (!open) {
+            return "";
+        }
+        mut ui8[32] out = [0; 32];
+        unsafe {
+            sosu_tls_version(handle, &out[0]);
+        }
+        mut usize n = 0;
+        while (n < 32 && out[n] != 0) {
+            n += 1;
+        }
+        mut ui8[] bytes = arena.alloc_slice(ui8, n);
+        for (usize i in 0..n) {
+            bytes[i] = out[i];
+        }
+        return match (str.from_bytes(bytes)) {
+            ok(t) => t,
+            err(e) => "",
+        };
+    }
+
+    // Reads what has come, at most `into.len` bytes: how many; 0 when the other side has closed.
+    pub override usize!ip.NetError read(ui8[] into) uses io {
+        return match (read_tls(into)) {
+            ok(n) => ok(n),
+            err(e) => err(net_error(e)),
+        };
+    }
+
+    // `read`, with the error of TLS.
+    pub usize!TlsError read_tls(ui8[] into) uses io {
+        if (!open) {
+            return err(TlsError.Closed);
+        }
+        if (into.len == 0) {
+            return ok(0);
+        }
+        mut i32 error = 0;
+        mut i32 net = 0;
+        mut i64 n = 0;
+        unsafe {
+            n = sosu_tls_read(handle, &into[0], into.len as i64, &error, &net);
+        }
+        if (n < 0) {
+            return err(error_of(error, net));
+        }
+        return ok(n as usize);
+    }
+
+    // Writes all of `data`.
+    pub override void!ip.NetError write_all(ui8[] data) uses io {
+        if (!open) {
+            return err(ip.NetError.Closed);
+        }
+        mut usize done = 0;
+        while (done < data.len) {
+            mut i32 error = 0;
+            mut i32 net = 0;
+            mut i64 n = 0;
+            unsafe {
+                n = sosu_tls_write(handle, &data[done], (data.len - done) as i64, &error, &net);
+            }
+            if (n < 0) {
+                return err(net_error(error_of(error, net)));
+            }
+            done += n as usize;
+        }
+        return ok();
+    }
+
+    // Says goodbye to the other side, then closes the TCP stream. Closing twice does nothing.
+    pub override void close() uses io {
+        if (open) {
+            unsafe {
+                sosu_tls_close(handle);
+            }
+            open = false;
+        }
+        under.close();
+    }
+}
+
+// The error of the network that a failure of TLS amounts to, for `tcp.Connection`.
+ip.NetError net_error(TlsError e) {
+    return match (e) {
+        Network(n) => n,
+        Closed => ip.NetError.Closed,
+        Untrusted => ip.NetError.Denied,
+        Expired => ip.NetError.Denied,
+        WrongName => ip.NetError.Denied,
+        Handshake => ip.NetError.Other,
+        Invalid => ip.NetError.Invalid,
+        Other => ip.NetError.Other,
+    };
+}
+
+// The handshake of a client over `stream`, for `host`: the name checked in the certificate (and
+// sent to the server, which may serve several names). `roots` are the certificates trusted, in
+// PEM; "" for those of the system. On an error the stream is left open.
+pub Stream*!TlsError connect(Arena* arena, keeps tcp.Stream* stream, str host, str roots) uses io {
+    for (ui8 c in host.bytes) {
+        if (c == 0) {
+            return err(TlsError.Invalid);
+        }
+    }
+    mut i32 error = 0;
+    mut i32 net = 0;
+    mut ui8[1] none_bytes = [0];
+    unsafe {
+        ui8* pem = roots.len > 0 ? &roots.bytes[0] : &none_bytes[0];
+        ui8* handle = sosu_tls_connect(stream.socket(), host.to_cstr(arena), pem, roots.len as i64, &error, &net);
+        if (error != 0) {
+            return err(error_of(error, net));
+        }
+        return ok(arena.new(Stream, handle, stream));
+    }
+}
+
+// The certificate and the key of a server.
+pub class Server {
+    mut ui8* handle;
+    mut bool open;
+
+    void init(keeps ui8* handle) {
+        self.handle = handle;
+        open = true;
+    }
+
+    // The handshake of the server over `stream`, a connection it accepted.
+    pub Stream*!TlsError accept(Arena* arena, keeps tcp.Stream* stream) uses io {
+        if (!open) {
+            return err(TlsError.Closed);
+        }
+        mut i32 error = 0;
+        mut i32 net = 0;
+        unsafe {
+            ui8* tls = sosu_tls_accept(handle, stream.socket(), &error, &net);
+            if (error != 0) {
+                return err(error_of(error, net));
+            }
+            return ok(arena.new(Stream, tls, stream));
+        }
+    }
+
+    // Frees the certificate and the key. Closing twice does nothing.
+    pub void close() {
+        if (open) {
+            unsafe {
+                sosu_tls_server_free(handle);
+            }
+            open = false;
+        }
+    }
+}
+
+// A server that answers with `chain` (its certificate, then those that sign it, in PEM) and
+// `key` (its private key, in PEM, not encrypted).
+pub Server*!TlsError server(Arena* arena, str chain, str key) {
+    if (chain.len == 0 || key.len == 0) {
+        return err(TlsError.Invalid);
+    }
+    mut i32 error = 0;
+    unsafe {
+        ui8* handle = sosu_tls_server(&chain.bytes[0], chain.len as i64, &key.bytes[0], key.len as i64, &error);
+        if (error != 0) {
+            return err(error_of(error, 0));
+        }
+        return ok(arena.new(Server, handle));
+    }
+}

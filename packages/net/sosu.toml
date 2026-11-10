@@ -1,0 +1,20 @@
+# The network (spec §8.2): addresses and names (DNS), TCP connections, UDP datagrams, on the
+# sockets of the system (native/net.c: Winsock on Windows, BSD sockets elsewhere); TLS and
+# HTTPS with Mbed TLS 4.1 LTS (native/mbedtls, Apache 2.0, given with the package: nothing to
+# install; native/tls.c). A folder in `c` is its C files.
+[package]
+name = "net"
+version = "0.1.0"
+
+[link]
+c = ["native/net.c", "native/tls.c", "native/mbedtls/library/", "native/mbedtls/tf-psa-crypto/core/", "native/mbedtls/tf-psa-crypto/drivers/builtin/src/", "native/mbedtls/tf-psa-crypto/extras/", "native/mbedtls/tf-psa-crypto/platform/", "native/mbedtls/tf-psa-crypto/utilities/"]
+include = ["native", "native/mbedtls/include", "native/mbedtls/tf-psa-crypto/include", "native/mbedtls/tf-psa-crypto/drivers/builtin/include", "native/mbedtls/library", "native/mbedtls/tf-psa-crypto/core", "native/mbedtls/tf-psa-crypto/drivers/builtin/src", "native/mbedtls/tf-psa-crypto/dispatch", "native/mbedtls/tf-psa-crypto/extras", "native/mbedtls/tf-psa-crypto/platform", "native/mbedtls/tf-psa-crypto/utilities"]
+
+[link.windows]
+libs = ["ws2_32", "crypt32", "bcrypt", "advapi32"]
+
+[link.macos]
+frameworks = ["Security", "CoreFoundation"]
+
+[link.ios]
+frameworks = ["Security", "CoreFoundation"]

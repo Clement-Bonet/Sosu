@@ -2,6 +2,7 @@
 <!-- The activity is SDL's: it loads libSDL3.so and libmain.so, and calls SDL_main (spec §11.5). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:glEsVersion="0x00020000" />
+    @PERMISSIONS@
     <application
         android:label="@NAME@"
         android:hasCode="true"

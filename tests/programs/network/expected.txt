@@ -1,0 +1,10 @@
+test a name and an address resolved, written out ... ok
+test a TCP server answers its client ... ok
+test UDP datagrams both ways ... ok
+test a port where nothing listens, a read that waits too long, a stream closed ... ok
+test URLs taken apart, written out again, and resolved ... ok
+test an HTTP client: lengths, chunks, the end of the stream, redirects, limits ... ok
+test https: a certificate checked, its dates, its name, its authority ... ok
+test answers damaged at random are read or refused, never more ... ok
+
+8 tests, 8 passed, 0 failed

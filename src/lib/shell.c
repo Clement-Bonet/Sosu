@@ -411,6 +411,128 @@ char *shell_last_entry(const char *dir) {
     return last;
 }
 
+static int compare_names(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+char **shell_files_ending(const char *dir, const char *suffix, size_t *count) {
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    size_t length = strlen(suffix);
+#ifdef _WIN32
+    char *pattern = sosu_format("%s\\*", dir);
+    WIN32_FIND_DATAA found;
+    HANDLE handle = FindFirstFileA(pattern, &found);
+    free(pattern);
+    if (handle != INVALID_HANDLE_VALUE) {
+        do {
+            const char *name = found.cFileName;
+            size_t size = strlen(name);
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (size <= length || strcmp(name + size - length, suffix) != 0) continue;
+            if (n == cap) names = sosu_realloc(names, (cap = cap ? cap * 2 : 16) * sizeof *names);
+            names[n++] = sosu_strdup(name);
+        } while (FindNextFileA(handle, &found));
+        FindClose(handle);
+    }
+#else
+    DIR *folder = opendir(dir);
+    if (folder) {
+        struct dirent *entry;
+        while ((entry = readdir(folder))) {
+            const char *name = entry->d_name;
+            size_t size = strlen(name);
+            if (name[0] == '.' || size <= length || strcmp(name + size - length, suffix) != 0) continue;
+            char *full = sosu_format("%s/%s", dir, name);
+            bool file = shell_file_exists(full);
+            free(full);
+            if (!file) continue;
+            if (n == cap) names = sosu_realloc(names, (cap = cap ? cap * 2 : 16) * sizeof *names);
+            names[n++] = sosu_strdup(name);
+        }
+        closedir(folder);
+    }
+#endif
+    if (n > 1) qsort(names, n, sizeof *names, compare_names);
+    *count = n;
+    return names;
+}
+
+bool shell_file_stamp(const char *path, long long *time, long long *size) {
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &data)) return false;
+    *time = (long long)(((unsigned long long)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime);
+    *size = (long long)(((unsigned long long)data.nFileSizeHigh << 32) | data.nFileSizeLow);
+#else
+    struct stat info;
+    if (stat(path, &info) != 0) return false;
+    *time = (long long)info.st_mtime;
+    *size = (long long)info.st_size;
+#endif
+    return true;
+}
+
+/* True if `path` is one of `skip`, `/` and `\` being the same. */
+static bool skipped(const char *path, char *const *skip, size_t skip_count) {
+    for (size_t i = 0; i < skip_count; i++) {
+        const char *a = path, *b = skip[i];
+        while (*a && (*a == *b || ((*a == '/' || *a == '\\') && (*b == '/' || *b == '\\')))) {
+            a++;
+            b++;
+        }
+        if (!*a && !*b) return true;
+    }
+    return false;
+}
+
+long long shell_newest_time(const char *dir, char *const *skip, size_t skip_count) {
+    long long newest = 0;
+#ifdef _WIN32
+    char *pattern = sosu_format("%s/*", dir);
+    WIN32_FIND_DATAA found;
+    HANDLE handle = FindFirstFileA(pattern, &found);
+    free(pattern);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    do {
+        const char *name = found.cFileName;
+        if (name[0] == '.') continue;
+        char *child = sosu_format("%s/%s", dir, name);
+        long long time = 0;
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            time = shell_newest_time(child, skip, skip_count);
+        } else if (!skipped(child, skip, skip_count)) {
+            time = (long long)(((unsigned long long)found.ftLastWriteTime.dwHighDateTime << 32) |
+                               found.ftLastWriteTime.dwLowDateTime);
+        }
+        free(child);
+        if (time > newest) newest = time;
+    } while (FindNextFileA(handle, &found));
+    FindClose(handle);
+#else
+    DIR *folder = opendir(dir);
+    if (!folder) return 0;
+    struct dirent *entry;
+    while ((entry = readdir(folder))) {
+        if (entry->d_name[0] == '.') continue;
+        char *child = sosu_format("%s/%s", dir, entry->d_name);
+        struct stat info;
+        long long time = 0;
+        if (stat(child, &info) == 0) {
+            if (S_ISDIR(info.st_mode)) {
+                time = shell_newest_time(child, skip, skip_count);
+            } else if (!skipped(child, skip, skip_count)) {
+                time = (long long)info.st_mtime;
+            }
+        }
+        free(child);
+        if (time > newest) newest = time;
+    }
+    closedir(folder);
+#endif
+    return newest;
+}
+
 bool shell_dir_exists(const char *path) {
 #ifdef _WIN32
     DWORD attributes = GetFileAttributesA(path);

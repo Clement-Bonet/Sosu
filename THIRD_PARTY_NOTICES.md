@@ -24,12 +24,13 @@ under their own licenses.
 
 ## Font Awesome Free
 
-- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox, and
-  `showcase/queens/assets/fa-solid-900.ttf`, the icons of Queens
+- Files: `showcase/beatbox/assets/fa-solid-900.ttf` (version 6.5.2), the icons of Beatbox,
+  `showcase/queens/assets/fa-solid-900.ttf`, the icons of Queens, and
+  `showcase/courier/assets/fa-solid-900.ttf`, the icons of Courier
 - Source: <https://fontawesome.com> (Font Awesome Free, desktop font files)
 - Copyright (c) 2024 Fonticons, Inc., with the Reserved Font Name "Font Awesome"
 - License: SIL Open Font License, Version 1.1, for the font files, in
-  `showcase/beatbox/assets/FA-LICENSE.txt` and `showcase/queens/assets/FontAwesome-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
+  `showcase/beatbox/assets/FA-LICENSE.txt`, `showcase/courier/assets/FA-LICENSE.txt` and `showcase/queens/assets/FontAwesome-LICENSE.txt` (the icons as SVG and JS files are under CC BY 4.0, and
   the code under MIT; neither is given here)
 
 ## Montserrat
@@ -109,3 +110,22 @@ under their own licenses.
 - Not changed: its options are set by `native/sqlite.c` before it includes the file
   (`SQLITE_THREADSAFE=2`, `SQLITE_DQS=0`, `SQLITE_DEFAULT_FOREIGN_KEYS=1`,
   `SQLITE_OMIT_LOAD_EXTENSION`...)
+
+## Mbed TLS
+
+- Files: `packages/net/native/mbedtls/` (version 4.1.1, the long-term support branch 4.1,
+  maintained until March 2029), compiled into the programs that use the `net` package (through
+  `packages/net/native/tls.c`)
+- Source: <https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.1.1/mbedtls-4.1.1.tar.bz2>
+  (SHA-256 `3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c`, as the release
+  gives it); only the library is kept: `include/`, `library/` and, of `tf-psa-crypto/`,
+  `include/`, `core/`, `dispatch/`, `drivers/builtin/`, `extras/`, `platform/` and `utilities/`
+  (not the tests, the programs, the documentation, the build files, nor the drivers `everest`,
+  `p256-m` and `pqcp`)
+- Copyright The Mbed TLS Contributors
+- License: Apache License 2.0 (or GPL 2.0 or later, at your option), in
+  `packages/net/native/mbedtls/LICENSE`
+- Changed: one line at the end of `include/mbedtls/mbedtls_config.h` and of
+  `tf-psa-crypto/include/psa/crypto_config.h`, which includes the choices of Sosu
+  (`packages/net/native/sosu_tls_config.h`, `sosu_crypto_config.h`: no file written, no
+  session kept, threads). `packages/net/native/UPDATING.md` says how to take a new version.

@@ -1,0 +1,765 @@
+// The package net (spec §8.2), on this machine only: names resolved, addresses written out, a
+// TCP server and its client on two threads, UDP datagrams both ways, and the errors of a port
+// where nothing listens and of a read that waits too long.
+import std.io;
+import std.random;
+import std.text;
+import std.thread;
+import net.ip;
+import net.tcp;
+import net.udp;
+import net.tls;
+import net.url;
+import net.http;
+import testing.fixture;
+
+// Stops the test on an error, with what it means.
+void failed(ip.NetError e) uses io {
+    io.print("error: {}", ip.message(e));
+    assert(false);
+}
+
+// The client of the TCP test, on a thread of its own: sends a line, then reads the answer up to
+// the end of the stream. Gives the length of the answer, or -1.
+i64 client(Arena* arena, ui16 port) uses io {
+    tcp.Stream* s = match (tcp.connect(arena, "127.0.0.1", port, 5000)) {
+        ok(s) => s,
+        err(e) => {
+            return -1;
+        },
+    };
+    defer s.close();
+    match (s.write_text("hello, server")) {
+        ok => { },
+        err(e) => {
+            return -1;
+        },
+    }
+    s.finish();
+    return match (s.read_all(arena, 1024)) {
+        ok(answer) => answer.len as i64,
+        err(e) => -1,
+    };
+}
+
+test "a name and an address resolved, written out" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    match (ip.resolve(&arena, "127.0.0.1")) {
+        ok(all) => {
+            assert(all.len == 1);
+            assert(!all[0].is_v6() && all[0].is_loopback());
+            assert(all[0].text(&arena) == "127.0.0.1");
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (ip.resolve(&arena, "::1")) {
+        ok(all) => {
+            assert(all[0].is_v6() && all[0].is_loopback());
+            assert(all[0].text(&arena) == "::1");
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (ip.resolve(&arena, "localhost")) {
+        ok(all) => {
+            assert(all.len >= 1 && all[0].is_loopback());
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+    assert(ip.v4(192, 168, 0, 1).text(&arena) == "192.168.0.1");
+    assert(ip.v4(10, 0, 0, 2).bytes(&arena).len == 4);
+    match (ip.resolve(&arena, "")) {
+        ok(all) => {
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.Invalid);
+        },
+    }
+    match (ip.resolve(&arena, "name.that.does.not.exist.invalid")) {
+        ok(all) => {
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.NotFound || e == ip.NetError.Unreachable);
+        },
+    }
+}
+
+test "a TCP server answers its client" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    tcp.Listener* server = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer server.close();
+    ui16 port = server.port();
+    assert(port != 0);
+    auto other = thread.spawn(&arena, client, port);
+    tcp.Stream* s = match (server.accept(&arena)) {
+        ok(s) => s,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer s.close();
+    assert(s.peer().is_loopback());
+    match (s.read_all(&arena, 1024)) {
+        ok(request) => {
+            assert(request.len == 13);
+            assert(request[0] == 104 && request[12] == 114);  // "h" ... "r"
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (s.write_text("hello, client, and goodbye")) {
+        ok => { },
+        err(e) => {
+            failed(e);
+        },
+    }
+    s.close();
+    assert(other.join() == 26);
+}
+
+test "UDP datagrams both ways" {
+    mut Arena arena = Arena.new(8 * KB);
+    defer arena.free();
+    udp.Socket* a = match (udp.open(&arena, ip.localhost(), 0)) {
+        ok(s) => s,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer a.close();
+    udp.Socket* b = match (udp.open(&arena, ip.localhost(), 0)) {
+        ok(s) => s,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer b.close();
+    match (b.set_timeout(5000)) {
+        ok => { },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (a.send_to(ip.localhost(), b.port(), "ping".bytes)) {
+        ok => { },
+        err(e) => {
+            failed(e);
+        },
+    }
+    mut ui8[16] buffer = [0; 16];
+    match (b.receive(buffer[0..16])) {
+        ok(d) => {
+            assert(d.size == 4 && buffer[0] == 112);  // "p"
+            assert(d.port == a.port() && d.from.is_loopback());
+            match (b.send_to(d.from, d.port, "pong!".bytes)) {
+                ok => { },
+                err(e) => {
+                    failed(e);
+                },
+            }
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (a.set_timeout(5000)) {
+        ok => { },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (a.receive(buffer[0..2])) {  // cut to 2 bytes
+        ok(d) => {
+            assert(d.size == 2 && buffer[0] == 112 && buffer[1] == 111);
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (a.send_to(ip.localhost(), b.port(), buffer[0..0])) {  // an empty datagram is one too
+        ok => { },
+        err(e) => {
+            failed(e);
+        },
+    }
+    match (b.receive(buffer[0..16])) {
+        ok(d) => {
+            assert(d.size == 0);
+        },
+        err(e) => {
+            failed(e);
+        },
+    }
+}
+
+test "a port where nothing listens, a read that waits too long, a stream closed" {
+    mut Arena arena = Arena.new(8 * KB);
+    defer arena.free();
+    // a port taken, then freed: nothing listens there any more
+    tcp.Listener* taken = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    ui16 free_port = taken.port();
+    taken.close();
+    match (tcp.connect(&arena, "127.0.0.1", free_port, 5000)) {
+        ok(s) => {
+            s.close();
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.Refused || e == ip.NetError.TimedOut);
+        },
+    }
+    // a server that accepts but never writes
+    tcp.Listener* quiet = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer quiet.close();
+    tcp.Stream* s = match (tcp.connect_to(&arena, ip.localhost(), quiet.port(), 5000)) {
+        ok(s) => s,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    match (s.set_timeout(200)) {
+        ok => { },
+        err(e) => {
+            failed(e);
+        },
+    }
+    mut ui8[8] buffer = [0; 8];
+    match (s.read(buffer[0..8])) {
+        ok(n) => {
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.TimedOut);
+        },
+    }
+    s.close();
+    s.close();  // twice: nothing
+    match (s.read(buffer[0..8])) {
+        ok(n) => {
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.Closed);
+        },
+    }
+    match (s.write_all(buffer[0..8])) {
+        ok => {
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.Closed);
+        },
+    }
+    // two servers on the same port
+    tcp.Listener* first = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer first.close();
+    match (tcp.listen(&arena, ip.localhost(), first.port())) {
+        ok(l) => {
+            l.close();
+            assert(false);
+        },
+        err(e) => {
+            assert(e == ip.NetError.AddressInUse || e == ip.NetError.Denied);
+        },
+    }
+}
+
+// ---- net.url and net.http ----
+
+test "URLs taken apart, written out again, and resolved" {
+    mut Arena arena = Arena.new(8 * KB);
+    defer arena.free();
+    match (url.parse(&arena, "HTTP://Example.ORG:8080/a/b?q=1#part")) {
+        some(u) => {
+            assert(u.scheme == "http" && u.host == "example.org" && u.port == 8080);
+            assert(u.target == "/a/b?q=1");
+            assert(u.authority(&arena) == "example.org:8080");
+            assert(u.written(&arena) == "http://example.org:8080/a/b?q=1");
+            match (url.resolve(&arena, u, "c?d")) {
+                some(r) => {
+                    assert(r.written(&arena) == "http://example.org:8080/a/c?d");
+                },
+                none => {
+                    assert(false);
+                },
+            }
+            match (url.resolve(&arena, u, "/root")) {
+                some(r) => {
+                    assert(r.target == "/root" && r.port == 8080);
+                },
+                none => {
+                    assert(false);
+                },
+            }
+            match (url.resolve(&arena, u, "//other.net/x")) {
+                some(r) => {
+                    assert(r.host == "other.net" && r.port == 80 && r.target == "/x");
+                },
+                none => {
+                    assert(false);
+                },
+            }
+        },
+        none => {
+            assert(false);
+        },
+    }
+    match (url.parse(&arena, "https://[::1]?x")) {
+        some(u) => {
+            assert(u.host == "::1" && u.port == 443 && u.target == "/?x");
+            assert(u.authority(&arena) == "[::1]");
+        },
+        none => {
+            assert(false);
+        },
+    }
+    assert(refused(url.parse(&arena, "ftp://example.org/")));
+    assert(refused(url.parse(&arena, "http://user@example.org/")));
+    assert(refused(url.parse(&arena, "http://example.org/a b")));
+    assert(refused(url.parse(&arena, "http://example.org:99999/")));
+    assert(refused(url.parse(&arena, "http://example.org/\r\nX: y")));
+    assert(refused(url.parse(&arena, "example.org")));
+}
+
+bool refused(url.Url? u) {
+    return match (u) {
+        some(x) => false,
+        none => true,
+    };
+}
+
+// What the client thread of an HTTP test asks for.
+struct Ask {
+    ui16 port;
+    i32 kind;  // 0: GET /, 1: GET /small (64 bytes at most), 2: POST /form
+}
+
+// The client of an HTTP test: the status times 100 000 plus the length of the body, or a
+// negative code for an error.
+i64 ask(Arena* arena, Ask a) uses io {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("http://127.0.0.1:");
+    b.push_u64(a.port as ui64);
+    b.push(a.kind == 1 ? "/small" : a.kind == 2 ? "/form" : "/");
+    mut http.Request r = http.request(arena, a.kind == 2 ? "POST" : "GET", b.text());
+    r.timeout_ms = 5000;
+    if (a.kind == 1) {
+        r.max_size = 64;
+    }
+    if (a.kind == 2) {
+        r.body = "name=sosu".bytes;
+    }
+    return match (http.send(arena, r)) {
+        ok(answer) => answer.status as i64 * 100000 + answer.body.len as i64,
+        err(e) => match (e) {
+            InvalidUrl => -1,
+            InvalidHeader => -2,
+            Network(n) => -4,
+            BadResponse => -5,
+            TooLarge => -6,
+            TooManyRedirects => -7,
+            Tls(t) => -8,
+        },
+    };
+}
+
+// Accepts one connection, reads its request up to the empty line (and `body` more bytes),
+// answers `reply` and closes. Gives the request.
+str answer(Arena* arena, tcp.Listener* server, str reply, usize body) uses io {
+    tcp.Stream* s = match (server.accept(arena)) {
+        ok(s) => s,
+        err(e) => {
+            failed(e);
+            return "";
+        },
+    };
+    defer s.close();
+    mut ui8[] got = arena.alloc_slice(ui8, 4096);
+    mut usize size = 0;
+    mut usize head = 0;
+    while (head == 0 || size < head + body) {
+        usize n = match (s.read(got[size..got.len])) {
+            ok(n) => n,
+            err(e) => 0,
+        };
+        if (n == 0) {
+            break;
+        }
+        size += n;
+        for (usize i in 3..size) {
+            if (head == 0 && got[i - 3] == 13 && got[i - 2] == 10 && got[i - 1] == 13 && got[i] == 10) {
+                head = i + 1;
+            }
+        }
+    }
+    match (s.write_text(reply)) {
+        ok => { },
+        err(e) => { },
+    }
+    return match (str.from_bytes(got[0..size])) {
+        ok(t) => t,
+        err(e) => "",
+    };
+}
+
+// One exchange: the client on a thread, `reply` from the server. Gives what the client got.
+i64 exchange(Arena* arena, tcp.Listener* server, i32 kind, str reply, usize body) uses io, threads {
+    auto client = thread.spawn(arena, ask, Ask{ port: server.port(), kind: kind });
+    str request = answer(arena, server, reply, body);
+    str line = kind == 2 ? "POST /form HTTP/1.1\r\n" : kind == 1 ? "GET /small HTTP/1.1\r\n" : "GET / HTTP/1.1\r\n";
+    assert(text.starts_with(request, line));
+    assert(text.contains(request, "\r\nHost: 127.0.0.1:"));
+    assert(text.contains(request, "\r\nConnection: close\r\n"));
+    return client.join();
+}
+
+test "an HTTP client: lengths, chunks, the end of the stream, redirects, limits" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    tcp.Listener* server = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer server.close();
+    // a body of a given length
+    str plain = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello";
+    assert(exchange(&arena, server, 0, plain, 0) == 20000005);
+    // in chunks, with an extension and a trailer
+    str chunks = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;x=y\r\nWiki\r\nA\r\npedia in c\r\n0\r\nT: v\r\n\r\n";
+    assert(exchange(&arena, server, 0, chunks, 0) == 20000014);
+    // up to the end of the stream, after an interim answer
+    assert(exchange(
+        &arena,
+        server,
+        0,
+        "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.0 404 Not Found\r\n\r\ngone",
+        0
+    ) == 40400004);
+    // a POST and its body
+    assert(exchange(&arena, server, 2, "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n", 9) == 20100000);
+    // larger than allowed
+    assert(exchange(&arena, server, 1, "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n", 0) == -6);
+    // not HTTP
+    assert(exchange(&arena, server, 0, "SSH-2.0-OpenSSH\r\n\r\n", 0) == -5);
+    // a length that is not a number, a body cut short
+    assert(exchange(&arena, server, 0, "HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n", 0) == -5);
+    assert(exchange(&arena, server, 0, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort", 0) == -4);
+    // a redirect, followed on a second connection
+    auto client = thread.spawn(&arena, ask, Ask{ port: server.port(), kind: 0 });
+    str first = answer(&arena, server, "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n", 0);
+    str second = answer(&arena, server, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 0);
+    assert(text.starts_with(first, "GET / HTTP/1.1"));
+    assert(text.starts_with(second, "GET /next HTTP/1.1"));
+    assert(client.join() == 20000002);
+    // a URL refused before any connection
+    match (http.get(&arena, "http://bad url/")) {
+        ok(r) => {
+            assert(false);
+        },
+        err(e) => {
+            assert(http.message(e) == "the URL is not valid");
+        },
+    }
+}
+
+// ---- net.tls and https ----
+
+// What the client thread of a TLS test asks for.
+struct Secure {
+    ui16 port;
+    i32 kind;  // 0: https://localhost with the test authority, 1: the same with the roots of the system, 2: https://127.0.0.1
+}
+
+// The client of a TLS test: the status times 100 000 plus the length of the body, or a negative
+// code for an error (-10 untrusted, -11 expired, -12 wrong name, -13 handshake, -14 another).
+i64 ask_secure(Arena* arena, Secure a) uses io {
+    str roots = fixture.read(arena, "tests/data/ca.pem");
+    text.TextBuilder* b = text.builder(arena);
+    b.push(a.kind == 2 ? "https://127.0.0.1:" : "https://localhost:");
+    b.push_u64(a.port as ui64);
+    b.push("/secret");
+    mut http.Request r = http.request(arena, "GET", b.text());
+    r.timeout_ms = 5000;
+    if (a.kind != 1) {
+        r.roots = roots;
+    }
+    return match (http.send(arena, r)) {
+        ok(answer) => answer.status as i64 * 100000 + answer.body.len as i64,
+        err(e) => match (e) {
+            Tls(t) => match (t) {
+                Untrusted => -10,
+                Expired => -11,
+                WrongName => -12,
+                Handshake => -13,
+                Network(n) => -14,
+                Invalid => -14,
+                Closed => -14,
+                Other => -14,
+            },
+            InvalidUrl => -1,
+            InvalidHeader => -2,
+            Network(n) => -4,
+            BadResponse => -5,
+            TooLarge => -6,
+            TooManyRedirects => -7,
+        },
+    };
+}
+
+// Accepts one connection under TLS, reads its request up to the empty line, answers `reply`.
+// Gives the request, or "" if the handshake failed (the client refused the certificate).
+str answer_secure(Arena* arena, tcp.Listener* server, tls.Server* identity, str reply) uses io {
+    tcp.Stream* raw = match (server.accept(arena)) {
+        ok(s) => s,
+        err(e) => {
+            failed(e);
+            return "";
+        },
+    };
+    match (raw.set_timeout(5000)) {
+        ok => { },
+        err(e) => { },
+    }
+    tls.Stream* s = match (identity.accept(arena, raw)) {
+        ok(s) => s,
+        err(e) => {
+            raw.close();
+            return "";
+        },
+    };
+    defer s.close();
+    assert(s.version(arena) == "TLSv1.3");
+    mut ui8[] got = arena.alloc_slice(ui8, 4096);
+    mut usize size = 0;
+    mut bool head = false;
+    while (!head) {
+        usize n = match (s.read(got[size..got.len])) {
+            ok(n) => n,
+            err(e) => 0,
+        };
+        if (n == 0) {
+            break;
+        }
+        size += n;
+        head = size >= 4 && got[size - 4] == 13 && got[size - 3] == 10 && got[size - 2] == 13 && got[size - 1] == 10;
+    }
+    match (s.write_all(reply.bytes)) {
+        ok => { },
+        err(e) => { },
+    }
+    return match (str.from_bytes(got[0..size])) {
+        ok(t) => t,
+        err(e) => "",
+    };
+}
+
+// The certificate `name` of tests/data (`server`, `expired`, `other`) and the key of the server.
+tls.Server* identity(Arena* arena, str name) uses io {
+    text.TextBuilder* b = text.builder(arena);
+    b.push("tests/data/");
+    b.push(name);
+    b.push(".pem");
+    str chain = fixture.read(arena, b.text());
+    str key = fixture.read(arena, "tests/data/server.key");
+    return match (tls.server(arena, chain, key)) {
+        ok(s) => s,
+        err(e) => {
+            io.print("cannot read the certificate: {}", tls.message(e));
+            assert(false);
+            return identity(arena, name);
+        },
+    };
+}
+
+// One exchange under TLS: the client on a thread, the server here with `certificate`.
+i64 secure_exchange(Arena* arena, tcp.Listener* server, i32 kind, str certificate) uses io, threads {
+    tls.Server* id = identity(arena, certificate);
+    defer id.close();
+    auto client = thread.spawn(arena, ask_secure, Secure{ port: server.port(), kind: kind });
+    str request = answer_secure(arena, server, id, "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nsecret");
+    i64 got = client.join();
+    if (got > 0) {
+        assert(text.starts_with(request, "GET /secret HTTP/1.1\r\n"));
+    }
+    return got;
+}
+
+test "https: a certificate checked, its dates, its name, its authority" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    tcp.Listener* server = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer server.close();
+    // signed by the authority given, for localhost and for 127.0.0.1
+    assert(secure_exchange(&arena, server, 0, "server") == 20000006);
+    assert(secure_exchange(&arena, server, 2, "server") == 20000006);
+    // the test authority is not a root of the system
+    assert(secure_exchange(&arena, server, 1, "server") == -10);
+    // out of its dates, for another name
+    assert(secure_exchange(&arena, server, 0, "expired") == -11);
+    assert(secure_exchange(&arena, server, 0, "other") == -12);
+    // a certificate that is not PEM
+    match (tls.server(&arena, "not a certificate", "nor a key")) {
+        ok(s) => {
+            s.close();
+            assert(false);
+        },
+        err(e) => {
+            assert(tls.message(e) == "a certificate or a key cannot be read");
+        },
+    }
+}
+
+// ---- answers damaged at random ----
+
+// A connection that gives `data`, at most `step` bytes at a time, then the end of the stream.
+class Replay : tcp.Connection {
+    ui8[] data;
+    mut usize at;
+    usize step;
+
+    void init(keeps ui8[] data, usize step) {
+        self.data = data;
+        self.step = step;
+        at = 0;
+    }
+
+    pub override usize!ip.NetError read(ui8[] into) uses io {
+        mut usize n = data.len - at;
+        if (n > into.len) {
+            n = into.len;
+        }
+        if (n > step) {
+            n = step;
+        }
+        for (usize i in 0..n) {
+            into[i] = data[at + i];
+        }
+        at += n;
+        return ok(n);
+    }
+
+    pub override void!ip.NetError write_all(ui8[] bytes) uses io {
+        return ok();
+    }
+
+    pub override void close() uses io { }
+}
+
+test "answers damaged at random are read or refused, never more" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str[4] valid = [
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-A: b\r\n\r\nhello",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5;e=1\r\npedia\r\n0\r\nT: v\r\n\r\n",
+        "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.0 301 Moved\r\nLocation: /x\r\n\r\nend of the stream",
+        "HTTP/1.1 204 No Content\r\nA:\r\n\r\n",
+    ];
+    // the valid answers, given one byte at a time and all at once
+    for (usize v in 0..4) {
+        for (i32 step in [1, 7, 4096]) {
+            mut Arena round = Arena.new(16 * KB);
+            Replay* c = round.new(Replay, valid[v].bytes, step as usize);
+            http.Reader* reader = round.new(http.Reader, &round, c as tcp.Connection*, 4096);
+            match (http.read_response(&round, reader, "GET", "http://test/")) {
+                ok(r) => {
+                    assert(r.status >= 200);
+                },
+                err(e) => {
+                    io.print("answer {} refused: {}", v, http.message(e));
+                    assert(false);
+                },
+            }
+            round.free();
+        }
+    }
+    // damaged: bytes changed, cut short or doubled, at random
+    mut random.Rng rng = random.seeded(2026);
+    mut i32 read = 0;
+    mut i32 refused = 0;
+    for (i32 round_index in 0..3000) {
+        mut Arena round = Arena.new(16 * KB);
+        str sample = valid[rng.below(4) as usize];
+        mut ui8[] bytes = round.alloc_slice(ui8, sample.len * 2);
+        mut usize size = sample.len;
+        for (usize i in 0..sample.len) {
+            bytes[i] = sample.bytes[i];
+        }
+        ui64 changes = 1 + rng.below(6);
+        for (ui64 k in 0..changes) {
+            ui64 what = rng.below(4);
+            usize at = rng.below(size as ui64 + 1) as usize;
+            if (what == 0 && at < size) {
+                bytes[at] = rng.below(256) as ui8;  // a byte changed
+            } else if (what == 1) {
+                size = at;  // cut short
+            } else if (what == 2 && at < size) {
+                bytes[at] = [13, 10, 48, 58, 32, 70][rng.below(6) as usize] as ui8;  // a byte that matters
+            } else if (size * 2 <= bytes.len) {
+                for (usize i in 0..size) {
+                    bytes[size + i] = bytes[i];  // doubled
+                }
+                size *= 2;
+            }
+        }
+        Replay* c = round.new(Replay, bytes[0..size], 1 + rng.below(16) as usize);
+        http.Reader* reader = round.new(http.Reader, &round, c as tcp.Connection*, 1024);
+        match (http.read_response(&round, reader, "GET", "http://test/")) {
+            ok(r) => {
+                assert(r.status >= 100 && r.status <= 999 && r.body.len <= 1024);
+                read += 1;
+            },
+            err(e) => {
+                refused += 1;
+            },
+        }
+        round.free();
+    }
+    assert(read > 0 && refused > 0 && read + refused == 3000);
+}

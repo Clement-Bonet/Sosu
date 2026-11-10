@@ -1,0 +1,941 @@
+// courier.model: the list of the downloads and what the buttons do. Each download that runs has
+// a thread (courier.worker); the window reads what they say at each frame (`update`), without
+// waiting, starts again those that failed when their time comes, and shares the limit of
+// bandwidth between those that run.
+import std.channel;
+import std.fs;
+import std.io;
+import std.json;
+import std.os;
+import std.text;
+import std.thread;
+import std.vec;
+import net.url;
+import platform.dialogs;
+import ui.widgets;
+import courier.files;
+import courier.job;
+import courier.worker;
+
+// The states of a download.
+pub i32 RUNNING = 1;
+pub i32 PAUSING = 2;  // asked to pause: its thread has not stopped yet
+pub i32 PAUSED = 3;
+pub i32 WAITING = 4;  // failed: started again at `retry_at`
+pub i32 DONE = 5;
+pub i32 FAILED = 6;
+
+// The icons of the buttons, in Font Awesome (assets/fa-solid-900.ttf, behind Noto Sans), written
+// as escapes since Noto has none of them.
+pub str ICON_PAUSE = "\u{f04c}";
+pub str ICON_RESUME = "\u{f04b}";
+pub str ICON_RETRY = "\u{f2f9}";
+pub str ICON_DONE = "\u{f00c}";
+pub str ICON_WAIT = "\u{f252}";
+pub str ICON_REMOVE = "\u{f2ed}";
+pub str ICON_DOWNLOAD = "\u{f019}";
+pub str ICON_PAUSE_ALL = "\u{f28b}";
+pub str ICON_RESUME_ALL = "\u{f144}";
+pub str ICON_FOLDER = "\u{f07c}";
+pub str ICON_DESTINATION = "\u{f07b}";
+pub str ICON_CLEAR = "\u{f51a}";
+
+// The tag of the dialog that chooses the folder of the downloads.
+pub ui32 FOLDER_DIALOG = 1;
+
+// The most attempts in a row without a byte written, before a download is left failed.
+pub i32 MAX_ATTEMPTS = 8;
+
+// The wait before attempt `n` (from 1): 1, 2, 4, 8, 16 s, then 30 s.
+pub i64 retry_delay_ms(i32 n) {
+    i64 ms = 1000 << (n > 6 ? 5 : n - 1);
+    return ms > 30000 ? 30000 : ms;
+}
+
+// The unit of the limit of bandwidth, chosen beside its field.
+pub enum RateUnit {
+    Kilo,  // KB/s
+    Mega,  // MB/s
+    Giga,  // GB/s
+}
+
+// The KB of a unit.
+pub i64 kb_of(RateUnit unit) {
+    return match (unit) {
+        Kilo => 1,
+        Mega => 1024,
+        Giga => 1024 * 1024,
+    };
+}
+
+// The rate of each download that runs, in bytes per second, when `running` share `limit_kb`
+// (0: no limit); at least 1 KB/s each.
+pub i64 share(i64 limit_kb, i64 running) {
+    if (limit_kb <= 0) {
+        return 0;
+    }
+    i64 each = limit_kb * 1024 / (running > 0 ? running : 1);
+    return each > 1024 ? each : 1024;
+}
+
+pub struct Item {
+    pub i32 id;
+    pub str address;
+    pub mut str name;  // from the URL, then the one the server gives (Content-Disposition)
+    pub mut str path;  // where the file goes, once whole
+    pub str part;  // the file written while it runs, named after the first name
+    pub mut bool named;  // the name the server gives is taken
+    pub mut i32 state;
+    pub mut i64 done;
+    pub mut i64 total;  // -1 while the size is not known
+    pub mut i64 speed;  // bytes per second, measured
+    pub mut i32 attempts;  // attempts in a row without a byte written
+    pub mut i64 retry_at;  // WAITING: when it starts again
+    pub mut i64 done_at_start;  // the bytes in the file when the thread started
+    pub mut i64 measured_at;  // the time and the bytes of the last measure of the speed
+    pub mut i64 measured_done;
+    pub mut str problem;  // FAILED or WAITING: why
+    pub mut bool resume;  // it ran when Courier closed: it starts again at the next run
+    pub mut bool removing;  // asked to leave the list while it ran: it does once its thread stops
+    pub mut widgets.TextBuffer status;  // what the window shows of it
+    pub mut thread.Thread<job.Job, i64>*? worker;
+    pub mut channel.Channel<job.Command> control;
+}
+
+pub class Model {
+    Arena* arena;
+    pub mut widgets.TextBuffer address;  // the field of the URL
+    pub mut i64 limit;  // the field of the limit, in `unit` (0: none)
+    pub mut RateUnit unit;
+    mut i64 applied_kb;
+    pub mut str dir;  // where the new downloads go
+    pub mut str settings;  // the file that keeps `dir` between two runs ("": none)
+    pub mut str list_file;  // the file that keeps the list between two runs ("": none)
+    mut bool changed;  // the list changed since it was saved
+    pub mut widgets.TextBuffer info;  // the line under the field
+    vec.Vec<Item>* items;
+    channel.Channel<job.Event> events;
+    mut i32 next_id;
+    pub mut i64 now;
+    pub mut i32 timeout_ms;
+    pub mut str system;  // "Windows", "macOS", "Linux"...: the file manager to open (`show`)
+
+    void init(keeps Arena* arena, keeps str dir) uses threads {
+        self.arena = arena;
+        address = widgets.TextBuffer{ };
+        limit = 0;
+        unit = Kilo;
+        applied_kb = 0;
+        self.dir = dir;
+        settings = "";
+        list_file = "";
+        changed = false;
+        info = widgets.TextBuffer{ };
+        items = vec.new<Item>(arena);
+        events = channel.new<job.Event>(256);
+        next_id = 1;
+        now = 0;
+        timeout_ms = 15000;
+        system = "";
+        say_info();
+    }
+
+    void say_info() {
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        text.TextBuilder* b = text.builder(&scratch);
+        b.push("Files go to ");
+        b.push(dir);
+        info.set(b.text());
+    }
+
+    // ---- What the window shows ----
+
+    // The limit in KB/s, from its field and its unit (0: none).
+    pub i64 limit_kb() {
+        return limit * kb_of(unit);
+    }
+
+    pub i32 count() {
+        return items.len() as i32;
+    }
+
+    pub str name_at(i32 i) {
+        return items.at(i as usize).name;
+    }
+
+    pub str status_at(i32 i) {
+        return items.at(i as usize).status.text();
+    }
+
+    // The progress, in thousandths.
+    pub i64 progress_at(i32 i) {
+        Item* it = items.at(i as usize);
+        if (it.state == DONE) {
+            return 1000;
+        }
+        return it.total > 0 ? it.done * 1000 / it.total : 0;
+    }
+
+    // The icon of the button of a line (Font Awesome), and what it does, for its tooltip.
+    pub str action_at(i32 i) {
+        i32 s = items.at(i as usize).state;
+        return s == RUNNING || s == WAITING ? ICON_PAUSE
+                : s == FAILED ? ICON_RETRY
+                : s == DONE ? ICON_DONE
+                : s == PAUSING ? ICON_WAIT
+                : ICON_RESUME;
+    }
+
+    pub str action_tip_at(i32 i) {
+        i32 s = items.at(i as usize).state;
+        return s == RUNNING || s == WAITING ? "Pause"
+                : s == FAILED ? "Retry"
+                : s == DONE ? "Done"
+                : s == PAUSING ? "Pausing"
+                : "Resume";
+    }
+
+    pub bool can_act(i32 i) {
+        i32 s = items.at(i as usize).state;
+        return s != DONE && s != PAUSING;
+    }
+
+    pub bool can_remove(i32 i) {
+        return !items.at(i as usize).removing;
+    }
+
+    // Asks the system for another folder for the downloads; the answer comes as an event
+    // (`folder_answered`).
+    pub void choose_folder() uses io {
+        dialogs.choose_folder(FOLDER_DIALOG, dir);
+    }
+
+    // The answer of the dialog of `choose_folder`.
+    pub void folder_answered(dialogs.Answer answer) uses io {
+        match (answer) {
+            Chosen(tag, paths, filter) => {
+                if (tag == FOLDER_DIALOG && paths.len > 0) {
+                    set_dir(paths[0]);
+                }
+            },
+            Cancelled(tag) => { },
+            Failed(tag, message) => {
+                info.set("The dialog of the system cannot open.");
+            },
+        }
+    }
+
+    // The folder of the new downloads (those already in the list keep theirs), kept for the next
+    // runs in `settings`.
+    pub void set_dir(str folder) uses io {
+        if (folder.len == 0) {
+            return;
+        }
+        if (folder.len + 260 > job.MAX_PATH) {
+            info.set("This folder has too long a path.");
+            return;
+        }
+        mut Arena scratch = Arena.new(2 * KB);
+        defer scratch.free();
+        match (fs.create_dirs(&scratch, folder)) {
+            ok => { },
+            err(e) => { },
+        }
+        if (!fs.is_dir(&scratch, folder)) {
+            info.set("This folder cannot be used.");
+            return;
+        }
+        dir = copy_of(arena, folder);
+        if (settings.len > 0) {
+            match (io.write_file(&scratch, settings, dir)) {
+                ok => { },
+                err(e) => { },
+            }
+        }
+        say_info();
+    }
+
+    pub bool can_show(i32 i) {
+        return items.at(i as usize).state == DONE;
+    }
+
+    // Shows a downloaded file in the file manager of the system, chosen in it.
+    pub void show(i32 i) uses io {
+        Item* it = items.at(i as usize);
+        if (it.state != DONE) {
+            return;
+        }
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        if (system == "Windows") {  // the shell of Windows (native/reveal.c)
+            if (!files.reveal(&scratch, it.path)) {
+                info.set("The file manager cannot be opened.");
+            }
+            return;
+        }
+        str[] command = files.show_command(&scratch, system, it.path);
+        mut bool shown = match (os.run(&scratch, command)) {
+            ok(o) => o.code == 0,
+            err(e) => false,
+        };
+        if (!shown && system != "macOS") {
+            str folder = match (fs.parent(it.path)) {
+                some(p) => p,
+                none => dir,
+            };
+            mut str[2] open = ["xdg-open", folder];  // no file manager that chooses: its folder
+            match (os.run(&scratch, open[0..2])) {
+                ok(o) => {
+                    shown = o.code == 0;
+                },
+                err(e) => { },
+            }
+        }
+        if (!shown) {
+            info.set("The file manager cannot be opened.");
+        }
+    }
+
+    pub i32 running() {
+        mut i32 n = 0;
+        for (usize i in 0..items.len()) {
+            if (items.at(i).state == RUNNING) {
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    // ---- What the buttons do ----
+
+    // Downloads the URL of the field.
+    pub void add() uses io, time, threads {
+        str typed = text.trim(address.text());
+        mut Arena scratch = Arena.new(8 * KB);
+        defer scratch.free();
+        if (typed.len == 0) {
+            return;
+        }
+        match (url.parse(&scratch, typed)) {
+            some(u) => { },
+            none => {
+                info.set("Not an http or https URL.");
+                return;
+            },
+        }
+        if (typed.len > job.MAX_URL) {
+            info.set("This URL is too long.");
+            return;
+        }
+        mut str[] taken = arena.alloc_slice(str, items.len());
+        for (usize i in 0..items.len()) {
+            taken[i] = items.at(i).name;
+        }
+        str name = files.free_name(arena, dir, files.name_for(arena, typed), taken);
+        str path = fs.join(arena, dir, name);
+        if (path.len + 5 > job.MAX_PATH) {
+            info.set("The folder of the downloads has too long a path.");
+            return;
+        }
+        items.push(Item{
+            id: next_id,
+            address: copy_of(arena, typed),
+            name: name,
+            path: path,
+            part: files.part_of(arena, path),
+            named: false,
+            state: PAUSED,
+            done: 0,
+            total: -1,
+            speed: 0,
+            attempts: 0,
+            retry_at: 0,
+            done_at_start: 0,
+            measured_at: 0,
+            measured_done: 0,
+            problem: "",
+            status: widgets.TextBuffer{ },
+            resume: false,
+            removing: false,
+            worker: none,
+            control: channel.new<job.Command>(8)
+        });
+        next_id += 1;
+        changed = true;
+        address.set("");
+        say_info();
+        start(items.len() - 1);
+    }
+
+    // Pauses a download that runs or waits, resumes one that is paused or failed.
+    pub void toggle(i32 i) uses io, time, threads {
+        Item* it = items.at(i as usize);
+        if (it.state == RUNNING || it.state == WAITING) {
+            pause(i as usize);
+        } else if (it.state == PAUSED || it.state == FAILED) {
+            it.attempts = 0;
+            start(i as usize);
+        }
+    }
+
+    // Takes a download out of the list; a file not whole is deleted.
+    // A download that runs is paused first, and leaves the list once its thread has stopped.
+    pub void remove(i32 i) uses io, threads {
+        Item* it = items.at(i as usize);
+        if (it.state == RUNNING || it.state == PAUSING) {
+            it.removing = true;
+            pause(i as usize);
+            return;
+        }
+        forget(i as usize);
+    }
+
+    void forget(usize i) uses io, threads {
+        Item* it = items.at(i);
+        if (it.state != DONE) {
+            mut Arena scratch = Arena.new(2 * KB);
+            defer scratch.free();
+            match (fs.remove_file(&scratch, it.part)) {
+                ok => { },
+                err(e) => { },
+            }
+        }
+        it.control.free();
+        Item gone = items.remove(i);
+        changed = true;
+        rebalance();
+    }
+
+    pub void pause_all() uses threads {
+        for (usize i in 0..items.len()) {
+            i32 s = items.at(i).state;
+            if (s == RUNNING || s == WAITING) {
+                pause(i);
+            }
+        }
+    }
+
+    pub void resume_all() uses io, time, threads {
+        for (usize i in 0..items.len()) {
+            i32 s = items.at(i).state;
+            if (s == PAUSED || s == FAILED) {
+                items.at(i).attempts = 0;
+                start(i);
+            }
+        }
+    }
+
+    void pause(usize i) uses threads {
+        Item* it = items.at(i);
+        if (it.state == RUNNING) {
+            bool sent = it.control.send(job.Command.Pause);
+            it.state = PAUSING;
+        } else if (it.state == WAITING) {
+            it.state = PAUSED;
+        }
+    }
+
+    // Starts the thread of a download, from the bytes already in its `.part` file.
+    void start(usize i) uses io, time, threads {
+        Item* it = items.at(i);
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        str part = it.part;
+        if (!files.ensure_folder_of(&scratch, part)) {  // a folder deleted since: made again
+            it.state = FAILED;
+            it.problem = "the folder cannot be created";
+            return;
+        }
+        i64 offset = match (fs.info(&scratch, part)) {
+            ok(f) => f.size as i64,
+            err(e) => 0,
+        };
+        it.done = offset;
+        it.done_at_start = offset;
+        it.measured_at = now;
+        it.measured_done = offset;
+        it.speed = 0;
+        it.problem = "";
+        it.state = RUNNING;
+        mut ui8[2048] address_bytes = [0; 2048];
+        for (usize k in 0..it.address.len) {
+            address_bytes[k] = it.address.bytes[k];
+        }
+        mut ui8[1024] path_bytes = [0; 1024];
+        for (usize k in 0..part.len) {
+            path_bytes[k] = part.bytes[k];
+        }
+        job.Job j = job.Job{
+            id: it.id,
+            url: address_bytes,
+            url_len: it.address.len,
+            path: path_bytes,
+            path_len: part.len,
+            offset: offset,
+            rate: share(limit_kb(), running() as i64),
+            timeout_ms: timeout_ms,
+            control: it.control,
+            events: events
+        };
+        it.worker = some(thread.spawn(arena, worker.run, j));
+        rebalance();
+    }
+
+    // Tells each download that runs its share of the limit.
+    void rebalance() uses threads {
+        i64 each = share(limit_kb(), running() as i64);
+        for (usize i in 0..items.len()) {
+            Item* it = items.at(i);
+            if (it.state == RUNNING) {
+                bool sent = it.control.send(job.Command.Limit(each));
+            }
+        }
+        applied_kb = limit_kb();
+    }
+
+    // ---- At each frame ----
+
+    // Reads what the threads said, starts again the downloads whose time has come, applies a
+    // new limit, and writes the status of each line. `now` is in milliseconds.
+    pub void update(i64 time_ms) uses io, time, threads {
+        now = time_ms;
+        while (true) {
+            match (events.try_receive()) {
+                some(e) => {
+                    happened(e);
+                },
+                none => {
+                    break;
+                },
+            }
+        }
+        for (usize i in 0..items.len()) {
+            Item* it = items.at(i);
+            if (it.state == WAITING && now >= it.retry_at) {
+                start(i);
+            }
+        }
+        if (changed) {
+            save();
+        }
+        if (limit_kb() != applied_kb) {
+            rebalance();
+        }
+        mut Arena scratch = Arena.new(8 * KB);
+        defer scratch.free();
+        for (usize i in 0..items.len()) {
+            describe(&scratch, items.at(i));
+        }
+    }
+
+    // The index of the download `id`, or none.
+    usize? index_of(i32 id) {
+        for (usize i in 0..items.len()) {
+            if (items.at(i).id == id) {
+                return some(i);
+            }
+        }
+        return none;
+    }
+
+    void happened(job.Event e) uses io, threads {
+        usize i = match (index_of(e.id)) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        Item* it = items.at(i);
+        it.done = e.done;
+        if (e.total >= 0) {
+            it.total = e.total;
+        }
+        if (e.name_len > 0 && !it.named) {  // the server gives the name of the file
+            rename_to(i, e);
+            changed = true;
+        }
+        if (e.kind == job.PROGRESS) {
+            if (now - it.measured_at >= 500) {
+                it.speed = (it.done - it.measured_done) * 1000 / (now - it.measured_at);
+                it.measured_at = now;
+                it.measured_done = it.done;
+            }
+            return;
+        }
+        join(it);  // DONE, PAUSED or FAILED: its thread has ended
+        changed = true;
+        it.speed = 0;
+        if (it.removing) {
+            it.state = e.kind == job.DONE ? DONE : PAUSED;
+            if (e.kind == job.DONE) {
+                mut Arena scratch = Arena.new(2 * KB);
+                defer scratch.free();
+                bool there = files.ensure_folder_of(&scratch, it.path);
+                match (fs.rename(&scratch, it.part, it.path)) {
+                    ok => { },
+                    err(x) => { },
+                }
+            }
+            forget(i);
+            return;
+        }
+        if (e.kind == job.DONE) {
+            it.state = DONE;
+            it.total = it.done;
+            mut Arena scratch = Arena.new(2 * KB);
+            defer scratch.free();
+            bool there = files.ensure_folder_of(&scratch, it.path);
+            match (fs.rename(&scratch, it.part, it.path)) {
+                ok => { },
+                err(x) => {
+                    it.state = FAILED;
+                    it.problem = "the file cannot be renamed";
+                },
+            }
+        } else if (e.kind == job.PAUSED) {
+            it.state = PAUSED;
+        } else {
+            if (it.done > it.done_at_start) {
+                it.attempts = 0;  // bytes came: the count of attempts starts again
+            }
+            it.problem = problem_of(e);
+            if (e.again && it.state != PAUSING && it.attempts < MAX_ATTEMPTS) {
+                it.attempts += 1;
+                it.state = WAITING;
+                it.retry_at = now + retry_delay_ms(it.attempts);
+            } else {
+                it.state = it.state == PAUSING ? PAUSED : FAILED;
+            }
+        }
+        rebalance();
+    }
+
+    // The name the server gave, made free in the folder (the `.part` keeps its name).
+    void rename_to(usize i, job.Event e) uses io {
+        mut ui8[128] bytes = e.name;
+        str given = job.text_of(arena, bytes[0..128], e.name_len);
+        Item* it = items.at(i);
+        it.named = true;
+        str clean = match (files.clean_name(arena, given)) {
+            some(n) => n,
+            none => {
+                return;
+            },
+        };
+        if (clean == it.name) {
+            return;
+        }
+        mut str[] taken = arena.alloc_slice(str, items.len());
+        for (usize k in 0..items.len()) {
+            taken[k] = k == i ? "" : items.at(k).name;
+        }
+        it.name = files.free_name(arena, dir, clean, taken);
+        it.path = fs.join(arena, dir, it.name);
+    }
+
+    void join(Item* it) uses threads {
+        match (it.worker) {
+            some(t) => {
+                i64 done = t.join();
+            },
+            none => { },
+        }
+        it.worker = none;
+    }
+
+    // What the window shows of a download.
+    void describe(Arena* scratch, Item* it) {
+        text.TextBuilder* b = text.builder(scratch);
+        if (it.state == DONE) {
+            b.push("Done, ");
+            b.push(files.size_text(scratch, it.done));
+        } else {
+            b.push(files.size_text(scratch, it.done));
+            if (it.total > 0) {
+                b.push(" of ");
+                b.push(files.size_text(scratch, it.total));
+            }
+            if (it.state == RUNNING) {
+                b.push(", ");
+                b.push(files.size_text(scratch, it.speed));
+                b.push("/s");
+            } else if (it.state == PAUSING || it.state == PAUSED) {
+                b.push(", paused");
+            } else if (it.state == WAITING) {
+                b.push(", ");
+                b.push(it.problem);
+                b.push(": again in ");
+                i64 left = (it.retry_at - now + 999) / 1000;
+                b.push_i64(left > 0 ? left : 0);
+                b.push(" s");
+            } else if (it.state == FAILED) {
+                b.push(", failed: ");
+                b.push(it.problem);
+            }
+        }
+        it.status.set(b.text());
+    }
+
+    // Downloads in each state, for the picture of `--snapshot` (no thread runs).
+    pub void show_demo() uses threads {
+        now = 10000;
+        demo("https://releases.example.org/sosu-0.5.0-windows-x64.zip", RUNNING, 31457280, 52428800, 1048576, "");
+        demo("https://media.example.org/talks/sosu-intro.mp4", RUNNING, 125829120, 734003200, 1048576, "");
+        demo("https://mirror.example.net/iso/distribution-26.04.iso", PAUSED, 1288490188, 4294967296, 0, "");
+        demo("https://data.example.org/cities.csv", WAITING, 524288, -1, 0, "network error");
+        demo("https://example.org/missing.pdf", FAILED, 0, -1, 0, "not found (404)");
+        demo("https://fonts.example.org/NotoSans.zip", DONE, 8912896, 8912896, 0, "");
+        mut Arena scratch = Arena.new(8 * KB);
+        defer scratch.free();
+        for (usize i in 0..items.len()) {
+            describe(&scratch, items.at(i));
+        }
+    }
+
+    void demo(keeps str address, i32 state, i64 done, i64 total, i64 speed, keeps str problem) uses threads {
+        mut Arena scratch = Arena.new(2 * KB);
+        defer scratch.free();
+        items.push(Item{
+            id: next_id,
+            address: address,
+            name: files.name_for(arena, address),
+            path: "",
+            part: "",
+            named: true,
+            state: state,
+            done: done,
+            total: total,
+            speed: speed,
+            attempts: 2,
+            retry_at: now + 4000,
+            done_at_start: 0,
+            measured_at: 0,
+            measured_done: 0,
+            problem: problem,
+            status: widgets.TextBuffer{ },
+            resume: false,
+            removing: false,
+            worker: none,
+            control: channel.new<job.Command>(1)
+        });
+        next_id += 1;
+    }
+
+    // Lets the threads end: each running download is paused, and waited for.
+    pub void stop() uses io, threads {
+        for (usize i in 0..items.len()) {  // started again at the next run
+            Item* it = items.at(i);
+            it.resume = it.state == RUNNING || it.state == WAITING;
+        }
+        pause_all();
+        while (true) {
+            mut bool busy = false;
+            for (usize i in 0..items.len()) {
+                if (items.at(i).state == PAUSING) {
+                    busy = true;
+                }
+            }
+            if (!busy) {
+                break;
+            }
+            match (events.receive()) {
+                some(e) => {
+                    happened(e);
+                },
+                none => {
+                    break;
+                },
+            }
+        }
+        save();
+    }
+
+    // ---- The list kept between two runs ----
+
+    pub bool has_done() {
+        for (usize i in 0..items.len()) {
+            if (items.at(i).state == DONE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Takes the downloads that are whole out of the list; their files stay.
+    pub void clear_done() uses threads {
+        mut usize i = 0;
+        while (i < items.len()) {
+            if (items.at(i).state == DONE) {
+                items.at(i).control.free();
+                Item gone = items.remove(i);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Writes the list to `list_file`, as JSON: a download that runs is kept paused, and
+    // `resume` says whether it starts again.
+    pub void save() uses io {
+        changed = false;
+        if (list_file.len == 0) {
+            return;
+        }
+        mut Arena scratch = Arena.new(16 * KB);
+        defer scratch.free();
+        mut json.Value[] all = scratch.alloc_slice(json.Value, items.len());
+        for (usize i in 0..items.len()) {
+            Item* it = items.at(i);
+            bool runs = it.state == RUNNING || it.state == PAUSING || it.state == WAITING;
+            mut json.Member[] m = scratch.alloc_slice(json.Member, 11);
+            m[0] = json.Member{ key: "address", value: json.Value.Text(it.address) };
+            m[1] = json.Member{ key: "name", value: json.Value.Text(it.name) };
+            m[2] = json.Member{ key: "path", value: json.Value.Text(it.path) };
+            m[3] = json.Member{ key: "part", value: json.Value.Text(it.part) };
+            m[4] = json.Member{ key: "named", value: json.Value.Bool(it.named) };
+            m[5] = json.Member{ key: "state", value: json.Value.Number((runs ? PAUSED : it.state) as f64) };
+            m[6] = json.Member{ key: "done", value: json.Value.Number(it.done as f64) };
+            m[7] = json.Member{ key: "total", value: json.Value.Number(it.total as f64) };
+            m[8] = json.Member{ key: "attempts", value: json.Value.Number(it.attempts as f64) };
+            m[9] = json.Member{ key: "problem", value: json.Value.Text(it.problem) };
+            m[10] = json.Member{
+                key: "resume",
+                value: json.Value.Bool(it.resume || it.state == RUNNING || it.state == WAITING)
+            };
+            all[i] = json.Value.Object(m);
+        }
+        mut json.Member[] top = scratch.alloc_slice(json.Member, 2);
+        top[0] = json.Member{ key: "version", value: json.Value.Number(1.0) };
+        top[1] = json.Member{ key: "downloads", value: json.Value.Array(all) };
+        match (io.write_file(&scratch, list_file, json.write_pretty(&scratch, json.Value.Object(top)))) {
+            ok => { },
+            err(e) => { },
+        }
+    }
+
+    // Reads the list of `list_file`, and starts again the downloads that ran when Courier closed.
+    pub void load() uses io, time, threads {
+        if (list_file.len == 0) {
+            return;
+        }
+        str text_of = match (io.read_file(arena, list_file)) {
+            ok(t) => t,
+            err(e) => {
+                return;
+            },
+        };
+        json.Value root = match (json.parse(arena, text_of)) {
+            ok(v) => v,
+            err(e) => {
+                info.set("The list of downloads cannot be read: it starts empty.");
+                return;
+            },
+        };
+        json.Value list = match (json.get(root, "downloads")) {
+            some(v) => v,
+            none => {
+                return;
+            },
+        };
+        for (usize k in 0..json.len(list)) {
+            json.Value d = match (json.at(list, k)) {
+                some(v) => v,
+                none => json.Value.Null,
+            };
+            str address = text_at(d, "address");
+            if (address.len == 0) {
+                continue;
+            }
+            i32 state = number_at(d, "state", PAUSED as i64) as i32;
+            items.push(Item{
+                id: next_id,
+                address: address,
+                name: text_at(d, "name"),
+                path: text_at(d, "path"),
+                part: text_at(d, "part"),
+                named: bool_at(d, "named"),
+                state: state == DONE || state == FAILED ? state : PAUSED,
+                done: number_at(d, "done", 0),
+                total: number_at(d, "total", -1),
+                speed: 0,
+                attempts: number_at(d, "attempts", 0) as i32,
+                retry_at: 0,
+                done_at_start: 0,
+                measured_at: 0,
+                measured_done: 0,
+                problem: text_at(d, "problem"),
+                status: widgets.TextBuffer{ },
+                resume: false,
+                removing: false,
+                worker: none,
+                control: channel.new<job.Command>(8)
+            });
+            next_id += 1;
+            if (bool_at(d, "resume") && state != DONE) {
+                items.at(items.len() - 1).attempts = 0;
+                start(items.len() - 1);
+            }
+        }
+        changed = false;
+    }
+}
+
+pub str text_at(json.Value v, str key) {
+    return match (json.get(v, key)) {
+        some(x) => match (json.as_str(x)) {
+            some(t) => t,
+            none => "",
+        },
+        none => "",
+    };
+}
+
+pub i64 number_at(json.Value v, str key, i64 otherwise) {
+    return match (json.get(v, key)) {
+        some(x) => match (json.as_i64(x)) {
+            some(n) => n,
+            none => otherwise,
+        },
+        none => otherwise,
+    };
+}
+
+pub bool bool_at(json.Value v, str key) {
+    return match (json.get(v, key)) {
+        some(x) => match (json.as_bool(x)) {
+            some(b) => b,
+            none => false,
+        },
+        none => false,
+    };
+}
+
+// Why a download failed, in a few words.
+pub str problem_of(job.Event e) {
+    if (e.error == job.SERVER) {
+        return e.status == 404 ? "not found (404)"
+                : e.status >= 500 ? "server error"
+                : e.status == 403 ? "forbidden (403)"
+                : "refused by the server";
+    }
+    if (e.error == job.DISK) {
+        return "the file cannot be written";
+    }
+    if (e.error == job.REFUSED) {
+        return "refused (URL, certificate or answer)";
+    }
+    return "network error";
+}
+
+str copy_of(Arena* arena, str s) {
+    mut ui8[] bytes = arena.alloc_slice(ui8, s.len);
+    for (usize i in 0..s.len) {
+        bytes[i] = s.bytes[i];
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(t) => t,
+        err(e) => "",
+    };
+}

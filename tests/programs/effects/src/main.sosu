@@ -1,0 +1,60 @@
+import std.io;
+import std.thread;
+import std.time;
+
+// What runs at each step of a loop; `E` is what it does besides `io`.
+interface Step<uses E> {
+    i32 step(i32 n) uses io, E;
+}
+
+class Doubler : Step {
+    override i32 step(i32 n) uses io {
+        return n * 2;
+    }
+}
+
+// Reads the clock and starts a thread at each step.
+class Worker : Step<uses time, threads> {
+    mut i32 runs;
+
+    void init() {
+        runs = 0;
+    }
+
+    override i32 step(i32 n) uses io, time, threads {
+        ui64 now = time.monotonic_ms();
+        mut Arena arena = Arena.new(4 * KB);
+        defer arena.free();
+        auto t = thread.spawn(&arena, (Arena* own, i32 x) => x + 1, n);
+        runs += 1;
+        return now > 0 ? t.join() : -1;
+    }
+}
+
+// Runs `count` steps: it has the effects of the step.
+i32 run<uses E>(Step<uses E>* s, i32 start, i32 count) uses io, E {
+    mut i32 n = start;
+    for (i32 i in 0..count) {
+        n = s.step(n);
+    }
+    return n;
+}
+
+// The step seen through the instance without effects, as a C callback would see it.
+Step* plain<uses E>(keeps Step<uses E>* s) {
+    unsafe {
+        return s as Step*;
+    }
+}
+
+i32 main() uses io, time, threads {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Doubler* d = arena.new(Doubler);
+    Worker* w = arena.new(Worker);
+    io.print("doubled: {}", run(d as Step*, 1, 5));
+    io.print("worked: {}", run(w as Step<uses time, threads>*, 10, 3));
+    io.print("runs: {}", w.runs);
+    io.print("plain: {}", run(plain(w as Step<uses threads, time>*), 0, 2));
+    return 0;
+}

@@ -1,0 +1,125 @@
+// net.udp: datagrams, each sent on its own to an address and a port, without connection: one
+// may be lost, come twice or come out of order, and one is 65 507 bytes at most (IPv4).
+//
+//     udp.Socket* s = try udp.open(&arena, ip.any(), 0);
+//     try s.send_to(ip.localhost(), 9000, "ping".bytes);
+import net.ip;
+
+extern "C" {
+    i64 sosu_net_udp_open(ui8* address, ui16 port, i32* error) uses io;
+    i64 sosu_net_send_to(i64 handle, ui8* address, ui16 port, ui8* buffer, i64 size, i32* error) uses io;
+    i64 sosu_net_recv_from(i64 handle, ui8* buffer, i64 size, ui8* address, ui16* port, i32* error) uses io;
+    i32 sosu_net_local(i64 handle, ui8* address, ui16* port);
+    i32 sosu_net_set_timeout(i64 handle, i32 timeout_ms);
+    void sosu_net_close(i64 handle) uses io;
+}
+
+// A datagram received: how many bytes came, and who sent it.
+pub struct Datagram {
+    pub usize size;
+    pub ip.Address from;
+    pub ui16 port;
+}
+
+// A UDP socket, bound to an address and a port.
+pub class Socket {
+    mut i64 handle;
+
+    void init(i64 handle) {
+        self.handle = handle;
+    }
+
+    // The port it is bound to: the one chosen by the system when `open` was given 0.
+    pub ui16 port() {
+        mut ui8[18] raw = [0; 18];
+        mut ui16 port = 0;
+        if (handle >= 0) {
+            unsafe {
+                sosu_net_local(handle, &raw[0], &port);
+            }
+        }
+        return port;
+    }
+
+    // The longest `receive` waits, in milliseconds, before `TimedOut` (0: no limit).
+    pub void!ip.NetError set_timeout(i32 timeout_ms) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        mut i32 code = 0;
+        unsafe {
+            code = sosu_net_set_timeout(handle, timeout_ms);
+        }
+        if (code != 0) {
+            return err(ip.error_of(code));
+        }
+        return ok();
+    }
+
+    // Sends `data` as one datagram to `address` and `port`; `Invalid` if it is too big.
+    pub void!ip.NetError send_to(ip.Address address, ui16 port, ui8[] data) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        if (data.len > 65507) {
+            return err(ip.NetError.Invalid);
+        }
+        mut ui8[18] raw = address.raw;
+        mut ui8[1] empty = [0];
+        mut i32 error = 0;
+        mut i64 n = 0;
+        unsafe {
+            ui8* bytes = data.len > 0 ? &data[0] : &empty[0];
+            n = sosu_net_send_to(handle, &raw[0], port, bytes, data.len as i64, &error);
+        }
+        if (n < 0) {
+            return err(ip.error_of(error));
+        }
+        return ok();
+    }
+
+    // Waits for the next datagram, written into `into`; a longer one is cut to `into.len`.
+    pub Datagram!ip.NetError receive(ui8[] into) uses io {
+        if (handle < 0) {
+            return err(ip.NetError.Closed);
+        }
+        if (into.len == 0) {
+            return err(ip.NetError.Invalid);
+        }
+        mut ui8[18] raw = [0; 18];
+        mut ui16 port = 0;
+        mut i32 error = 0;
+        mut i64 n = 0;
+        unsafe {
+            n = sosu_net_recv_from(handle, &into[0], into.len as i64, &raw[0], &port, &error);
+        }
+        if (n < 0) {
+            return err(ip.error_of(error));
+        }
+        return ok(Datagram{ size: n as usize, from: ip.Address{ raw: raw }, port: port });
+    }
+
+    // Closes the socket. Closing twice does nothing.
+    pub void close() uses io {
+        if (handle >= 0) {
+            unsafe {
+                sosu_net_close(handle);
+            }
+            handle = -1;
+        }
+    }
+}
+
+// A socket bound to `address` and `port` (0: a port the system chooses).
+pub Socket*!ip.NetError open(Arena* arena, ip.Address address, ui16 port) uses io {
+    mut ui8[18] raw = address.raw;
+    mut i32 error = 0;
+    mut i64 handle = -1;
+    unsafe {
+        handle = sosu_net_udp_open(&raw[0], port, &error);
+    }
+    if (handle < 0) {
+        return err(ip.error_of(error));
+    }
+    return ok(arena.new(Socket, handle));
+}
