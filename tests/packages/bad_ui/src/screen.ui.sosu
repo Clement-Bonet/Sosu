@@ -2,4 +2,6 @@
 window Broken(i32 count) {
     Text(count)
     Button("OK", on_click: count)
+    Text("wide", from: count)
+    Text("narrow", until: Medium)
 }

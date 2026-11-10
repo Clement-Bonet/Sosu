@@ -45,9 +45,9 @@ typedef struct {
 } UiNodeKind;
 
 static const UiNodeKind ui_nodes[] = {
-    { "Grid", 0, false, { "columns", "rows", "gap", "padding", "style", NULL }, true },
+    { "Grid", 0, false, { "columns", "sm", "md", "lg", "xl", "xxl", "rows", "gap", "padding", "style", NULL }, true },
     { "Column", 0, false, { "gap", "padding", "style", NULL }, true },
-    { "Row", 0, false, { "gap", "padding", "style", NULL }, true },
+    { "Row", 0, false, { "gap", "padding", "stack", "style", NULL }, true },
     { "List", 0, false, { "width", "height", "selected", "selection", "count", "item", "on_drop", "focus", "style", NULL }, true },
     { "Table", 0, false, { "count", "item", "width", "height", "selected", "selection", "sort", "on_activate", "focus", "style", NULL }, true },
     { "Scroll", 0, false, { "width", "height", "style", NULL }, true },
@@ -807,6 +807,91 @@ static void ui_grid_sizes(Parser *p, StmtVec *out, Expr *sizes, const char *meth
     }
 }
 
+/* ---- Responsive windows (spec §10.2) ---- */
+
+/* A breakpoint: `Md` is `widgets.Breakpoint.Md`; another expression (`s.width`, a parameter
+   `b`) is one already. */
+static Expr *ui_breakpoint(Parser *p, Expr *value) {
+    Name name = value->kind == EXPR_NAME ? value->as.name : ui_name("", value->offset);
+    if (name.length && name.text[0] >= 'A' && name.text[0] <= 'Z') return ui_variant(p, value, "Breakpoint", name);
+    return value;
+}
+
+/* The breakpoints of a grid, from the narrowest, and their properties. */
+static const char *const ui_grid_widths[] = { "sm", "md", "lg", "xl", "xxl" };
+static const char *const ui_grid_breakpoints[] = { "Sm", "Md", "Lg", "Xl", "Xxl" };
+
+/* The columns of a grid: `columns: [...]`, or, with `md: [...]` and the other breakpoints,
+   `if (ui_frame.at_least(widgets.Breakpoint.Md)) { md } else { columns }`, the widest first. */
+static void ui_grid_columns(Parser *p, StmtVec *out, const UiArgs *args, size_t start, size_t length) {
+    StmtVec base = {0};
+    ui_grid_sizes(p, &base, ui_prop(args, "columns"), "grid_column");
+    Stmt *chosen = NULL;
+    for (size_t i = 0; i < sizeof ui_grid_widths / sizeof *ui_grid_widths; i++) {
+        Expr *sizes = ui_prop(args, ui_grid_widths[i]);
+        if (!sizes) continue;
+        if (!chosen) chosen = ui_block(p, &base, start, length);
+        StmtVec wide = {0};
+        ui_grid_sizes(p, &wide, sizes, "grid_column");
+        Expr *at = ui_variant(p, sizes, "Breakpoint", ui_name(ui_grid_breakpoints[i], sizes->offset));
+        Stmt *when = new_stmt(p, STMT_IF, sizes->offset);
+        when->length = sizes->length;
+        when->as.if_.cond = ui_frame_call(p, sizes->offset, sizes->length, "at_least", &at, 1);
+        when->as.if_.then_block = ui_block(p, &wide, sizes->offset, sizes->length);
+        when->as.if_.else_stmt = chosen;
+        chosen = when;
+    }
+    if (!chosen) {
+        for (size_t i = 0; i < base.count; i++) SOSU_VEC_PUSH(out, base.items[i]);
+        free(base.items);
+        return;
+    }
+    SOSU_VEC_PUSH(out, chosen);
+}
+
+/* `from: Md` and `until: Lg` on a node: taken out of `args`; the condition of the width of the
+   window for the node to be described, `ui_frame.at_least(...) && ui_frame.below(...)`, or NULL. */
+static Expr *ui_take_widths(Parser *p, UiArgs *args, bool *valid) {
+    Expr *from = NULL, *until = NULL;
+    size_t kept = 0;
+    for (size_t i = 0; i < args->props.count; i++) {
+        UiProp prop = args->props.items[i];
+        bool is_from = name_text_is(prop.name, "from");
+        if (!is_from && !name_text_is(prop.name, "until")) {
+            args->props.items[kept++] = prop;
+            continue;
+        }
+        if (is_from ? from : until) {
+            error_at(p, "E0215", prop.name.offset, prop.name.length, "`%.*s` is given twice", (int)prop.name.length,
+                     prop.name.text);
+            *valid = false;
+            continue;
+        }
+        if (is_from) from = prop.value;
+        else until = prop.value;
+    }
+    args->props.count = kept;
+    Expr *cond = NULL;
+    if (from) {
+        Expr *at = ui_breakpoint(p, from);
+        cond = ui_frame_call(p, from->offset, from->length, "at_least", &at, 1);
+    }
+    if (until) {
+        Expr *at = ui_breakpoint(p, until);
+        Expr *below = ui_frame_call(p, until->offset, until->length, "below", &at, 1);
+        if (cond) {
+            Expr *both = ui_expr(p, EXPR_BINARY, from->offset, until->offset + until->length - from->offset);
+            both->as.binary.op = TOK_AMP_AMP;
+            both->as.binary.left = cond;
+            both->as.binary.right = below;
+            cond = both;
+        } else {
+            cond = below;
+        }
+    }
+    return cond;
+}
+
 /* `template: FileItem(f)` (spec §10.10): the component `FileItem` called with the frame, as a
    node, in a scope of its own: `ui_frame.push_id(site); FileItem(ui_frame, f); ui_frame.pop_id();`. */
 static void ui_template(Parser *p, StmtVec *out, Expr *call) {
@@ -957,6 +1042,11 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
     bool in_tree = p->ui_in_tree;
     bool in_component = p->ui_in_component;
     bool placed = true;
+    /* `from:` and `until:`: the node, its cell and its tooltip in `if (width) { ... }` */
+    Expr *widths = ui_take_widths(p, &args, &placed);
+    StmtVec *target = out;
+    StmtVec shown = {0};
+    if (widths) out = &shown;
     Stmt *cell = ui_take_cell(p, &args, start, length, &placed);
     if (cell) SOSU_VEC_PUSH(out, cell);
     Expr *tip = NULL;  /* `tooltip:`, on any node: `ui_frame.tooltip(text)` after it */
@@ -1083,8 +1173,14 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         } else if (name_text_is(node, "Column") || name_text_is(node, "Row")) {
             Expr *layout[2] = { ui_layout_size(p, ui_prop(&args, "gap"), start),
                                 ui_layout_size(p, ui_prop(&args, "padding"), start) };
-            const char *open = name_text_is(node, "Row") ? "row_with" : "column";
-            SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, layout, 2)));
+            Expr *stack = ui_prop(&args, "stack");
+            if (stack) {  /* `Row(stack: Md)`: f.row_stacked(widgets.Breakpoint.Md, gap, padding) */
+                Expr *stacked[3] = { ui_breakpoint(p, stack), layout[0], layout[1] };
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "row_stacked", stacked, 3)));
+            } else {
+                const char *open = name_text_is(node, "Row") ? "row_with" : "column";
+                SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, open, layout, 2)));
+            }
             ui_parse_children(p, out);
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "end", NULL, 0)));
         } else if (name_text_is(node, "Text") || name_text_is(node, "Title")) {
@@ -1438,7 +1534,7 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             Expr *layout[2] = { ui_layout_size(p, ui_prop(&args, "gap"), start),
                                 ui_layout_size(p, ui_prop(&args, "padding"), start) };
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, "grid", layout, 2)));
-            ui_grid_sizes(p, out, ui_prop(&args, "columns"), "grid_column");
+            ui_grid_columns(p, out, &args, start, length);
             ui_grid_sizes(p, out, ui_prop(&args, "rows"), "grid_row");
             p->panic = false;
             VEC(uint64_t) cells = { p->ui_cells.items, p->ui_cells.count, p->ui_cells.cap };
@@ -1453,6 +1549,13 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
         }
     }
     if (tip && placed) SOSU_VEC_PUSH(out, ui_frame_stmt(p, tip->offset, tip->length, "tooltip", ui_translate(p, &args, tip)));
+    if (widths) {
+        Stmt *when = new_stmt(p, STMT_IF, start);
+        when->length = length;
+        when->as.if_.cond = widths;
+        when->as.if_.then_block = ui_block(p, &shown, start, length);
+        SOSU_VEC_PUSH(target, when);
+    }
     p->ui_in_grid = in_grid;
     p->ui_in_tabs = in_tabs;
     p->ui_in_tree = in_tree;

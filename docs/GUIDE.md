@@ -2800,9 +2800,9 @@ Values come first, in order; then properties, by name, in any order. `{ }` says 
 
 | Node | For | Value | Properties | `{ }` |
 |---|---|---|---|---|
-| `Grid` | rows and columns of sized cells | - | `columns`, `rows`, `gap`, `padding`, `style` | yes |
+| `Grid` | rows and columns of sized cells | - | `columns`, `sm`, `md`, `lg`, `xl`, `xxl`, `rows`, `gap`, `padding`, `style` | yes |
 | `Column` | nodes one under the other | - | `gap`, `padding`, `style` | yes |
-| `Row` | nodes side by side | - | `gap`, `padding`, `style` | yes |
+| `Row` | nodes side by side | - | `gap`, `padding`, `stack`, `style` | yes |
 | `List` | a scrolling list of items, chosen with the mouse or the keyboard | - | `width`, `height`, `selected`, `selection`, `count`, `item`, `on_drop`, `focus`, `style` | yes |
 | `Table` | rows and sortable columns, only the rows in view described | - | `count`, `item`, `width`, `height`, `selected`, `selection`, `sort`, `on_activate`, `focus`, `style` | yes |
 | `Scroll` | any content, scrolled | - | `width`, `height`, `style` | yes |
@@ -2837,7 +2837,7 @@ Values come first, in order; then properties, by name, in any order. `{ }` says 
 | `Separator` | a line between entries of a menu | - | - | - |
 | `ContextMenu` | the menu of a right click | - | - | yes |
 
-Inside a `Grid`, every node also takes `row`, `col`, `span` and `row_span`, its cell; `align` places a node in its cell, or across a `Column` or a `Row`.
+Inside a `Grid`, every node also takes `row`, `col`, `span` and `row_span`, its cell; `align` places a node in its cell, or across a `Column` or a `Row`. Every node takes `from` and `until`, the widths of the window where it is shown (24.9), and `tooltip`.
 
 ### 24.7 Reference: what the properties mean
 
@@ -2846,6 +2846,9 @@ Inside a `Grid`, every node also takes `row`, `col`, `span` and `row_span`, its 
 | `gap`, `padding` | layouts, `Group`, `Item`, `TitleBar` | the room between nodes, and around them, in pixels (`gap` is 8 and `padding` 0 by default) |
 | `width`, `height` | fields, lists, `Scroll`, `Progress` | a size: a number of pixels, or `Fill` (what is left) and `Auto` (what it needs) where a list or a grid takes them |
 | `columns`, `rows` | `Grid` | the sizes of its columns and rows: `[120, Auto, Fill, Fill(2)]` |
+| `sm`, `md`, `lg`, `xl`, `xxl` | `Grid` | the sizes of its columns from that width of the window on, in place of `columns` |
+| `from`, `until` | every node | a breakpoint (`Md`): the node is shown only from that width of the window, or only below it |
+| `stack` | `Row` | a breakpoint: below it, the row is a column |
 | `style` | most nodes | a `style` block of the file, applied to this node |
 | `bind` | inputs, `Dropdown`, `Tabs` | the variable the widget edits, read and written at each frame; its window parameter is `keeps` |
 | `on_click`, `on_enter`, `on_change` | buttons and inputs | what runs: a method (`s.save`), or a call (`s.save(1)`) |
@@ -2935,9 +2938,39 @@ The selectors of a theme: `Window`, `Text`, `Title`, `Button`, `TextField`, `Che
 
 `theme Dark` becomes a function, `Dark()`, that gives a `widgets.Theme`; `style Danger` becomes `Danger()`, a `widgets.Style`. The program chooses its theme at any time with `ui.theme = some(screen.Dark())`; without one, `widgets.default_theme()` applies, and `widgets.light_theme()` is a light theme given by `ui`. `app.system_theme()` and the event `SystemThemeChanged` tell what the user chose, for a program that follows the system. The cascade goes from the default theme, to the selector of the widget, its states, then the styles of the node in their order; `color` and `font_size` are inherited by the nodes inside. [Section 10.7 of the specification](SPEC.md) gives the details, and `examples/themes` shows it working.
 
-### 24.9 Phones
+### 24.9 Windows that follow their width
 
-The same program runs on Android and iOS: `sosuc package --target android` makes an APK, and `--target ios-sim` an application for the iOS simulator (on a Mac). Files go through the platform (`app.data_folder`, `app.read_asset`), never through fixed paths. `[app]` of `sosu.toml` gives the identifier, the name, the version, the icon and the asset files of the application.
+A window can be narrow (a phone, a window made small) or wide. Breakpoints, as in the grid of Bootstrap, name the widths from which a layout changes: `Xs` (from 0), `Sm` (576), `Md` (768), `Lg` (992), `Xl` (1200) and `Xxl` (1400), in pixels of `ui`, so a phone 1080 pixels wide at a scale of 3 is 360 pixels wide, `Xs`.
+
+```csharp
+window Files(keeps state.Files* s) {
+    Row(stack: Md, gap: 16) {
+        List(selected: s.folder, width: 240, height: 400, from: Md) {
+            for (i32 i in 0..s.folder_count) {
+                Text(s.folder_names[i])
+            }
+        }
+        Grid(columns: [Fill, 44], md: [Fill, 120, 44], lg: [Fill, 120, 200, 44]) {
+            for (i32 i in 0..s.count) {
+                Text(s.names[i])
+                Text(s.sizes[i], from: Md)
+                Text(s.dates[i], from: Lg)
+                Button("Open", on_click: s.open(i))
+            }
+        }
+    }
+}
+```
+
+- `from: Md` shows a node only when the window is at least that wide, `until: Md` only when it is narrower. A node that is not shown takes no cell in a grid: the next one takes its place.
+- `md: [...]` on a `Grid` gives its columns from that width on; `columns` holds below the smallest one given. The nodes go into the next free cell, so with one column they stack, and with several they sit side by side.
+- `Row(stack: Md)` is a row from `Md`, a column below: a side bar beside the content on a desktop, above it on a phone.
+
+A program that describes its widgets in Sosu asks the frame: `f.at_least(widgets.Breakpoint.Md)`, `f.below(...)`, `f.breakpoint()`. `showcase/courier` hides the state of a download below `Lg`, and its progress below `Md`.
+
+### 24.10 Phones
+
+The same program runs on Android and iOS: `sosuc package --target android` makes an APK, and `--target ios-sim` an application for the iOS simulator (on a Mac). Files go through the platform (`app.data_folder`, `app.read_asset`), never through fixed paths. The screen of a phone is narrow: a window made for the desktop adapts to it with breakpoints (24.9). `[app]` of `sosu.toml` gives the identifier, the name, the version, the icon and the asset files of the application.
 
 ## 25. C, and Sosu from Other Languages
 

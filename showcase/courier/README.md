@@ -25,6 +25,8 @@ The handler of the window starts threads from its methods, so it implements `app
 
 The field of the URL holds 256 characters at most.
 
+The window follows its width (responsive layouts, spec 10.2): narrower than 992 pixels, the state of each download is hidden; narrower than 768 (a phone), its progress and the limit of bandwidth too, and a download is its name and its three buttons. `Grid(columns: [...], md: [...], lg: [...])` gives the columns for each width, and `from: Md` hides a widget below it.
+
 ## Build
 
 From this folder, with `sosuc` built at the root of the repository:
