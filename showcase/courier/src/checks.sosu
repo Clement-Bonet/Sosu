@@ -89,7 +89,7 @@ test "the folder of the downloads: created, made again once deleted, kept for th
     assert(text.starts_with(m.info.text(), "Files go to "));
 }
 
-test "the list kept between two runs, and the finished downloads cleared" {
+test "the list and the limit kept between two runs, and the finished downloads cleared" {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
     str top = fixture.temp_dir(&arena, "courier-list");
@@ -98,6 +98,8 @@ test "the list kept between two runs, and the finished downloads cleared" {
     model.Model* first = arena.new(model.Model, &arena, top);
     first.list_file = fs.join(&arena, top, "downloads.json");
     first.show_demo();
+    first.limit = 12;
+    first.unit = model.RateUnit.Mega;
     first.save();
     str written = match (io.read_file(&arena, first.list_file)) {
         ok(t) => t,
@@ -112,6 +114,7 @@ test "the list kept between two runs, and the finished downloads cleared" {
         none => json.Value.Null,
     };
     assert(json.len(list) == 6);
+    assert(model.number_at(root, "limit", 0) == 12 && model.number_at(root, "unit", 0) == 1);  // 12 MB/s
     json.Value running = match (json.at(list, 0)) {
         some(v) => v,
         none => json.Value.Null,
@@ -119,7 +122,7 @@ test "the list kept between two runs, and the finished downloads cleared" {
     assert(model.number_at(running, "state", 0) == model.PAUSED as i64);
     assert(model.bool_at(running, "resume"));
     // read again: names and states; nothing to start again here
-    str again = "{\"version\": 1, \"downloads\": [{\"address\": \"https://h/a.zip\", \"name\": \"a.zip\", \"path\": \"p/a.zip\", \"part\": \"p/a.zip.part\", \"state\": 5, \"done\": 10, \"total\": 10}, {\"address\": \"https://h/b.iso\", \"name\": \"b.iso\", \"state\": 3, \"done\": 4, \"total\": 9, \"resume\": false}, {\"address\": \"https://h/c\", \"name\": \"c\", \"state\": 6, \"problem\": \"not found (404)\"}, {\"name\": \"no address: left out\"}]}";
+    str again = "{\"version\": 1, \"limit\": 8, \"unit\": 2, \"downloads\": [{\"address\": \"https://h/a.zip\", \"name\": \"a.zip\", \"path\": \"p/a.zip\", \"part\": \"p/a.zip.part\", \"state\": 5, \"done\": 10, \"total\": 10}, {\"address\": \"https://h/b.iso\", \"name\": \"b.iso\", \"state\": 3, \"done\": 4, \"total\": 9, \"resume\": false}, {\"address\": \"https://h/c\", \"name\": \"c\", \"state\": 6, \"problem\": \"not found (404)\"}, {\"name\": \"no address: left out\"}]}";
     match (io.write_file(&arena, first.list_file, again)) {
         ok => { },
         err(e) => {
@@ -130,12 +133,24 @@ test "the list kept between two runs, and the finished downloads cleared" {
     second.list_file = first.list_file;
     second.load();
     assert(second.count() == 3);
+    assert(second.limit == 8 && second.limit_kb() == 8 * 1024 * 1024);  // 8 GB/s
     assert(check.same_text(second.name_at(0), "a.zip") && check.same_text(second.action_at(0), model.ICON_DONE));
     assert(check.same_text(second.action_at(1), model.ICON_RESUME));  // paused
     assert(check.same_text(second.action_at(2), model.ICON_RETRY));  // failed
     assert(second.has_done());
     second.clear_done();
     assert(second.count() == 2 && !second.has_done() && check.same_text(second.name_at(0), "b.iso"));
+    // another unit chosen: saved at the next frame
+    second.unit = model.RateUnit.Kilo;
+    second.update(0);
+    json.Value now_saved = match (io.read_file(&arena, first.list_file)) {
+        ok(t) => match (json.parse(&arena, t)) {
+            ok(v) => v,
+            err(e) => json.Value.Null,
+        },
+        err(e) => json.Value.Null,
+    };
+    assert(model.number_at(now_saved, "limit", 0) == 8 && model.number_at(now_saved, "unit", -1) == 0);
     // a file that is not JSON: an empty list
     match (io.write_file(&arena, first.list_file, "not json")) {
         ok => { },
@@ -144,7 +159,7 @@ test "the list kept between two runs, and the finished downloads cleared" {
     model.Model* third = arena.new(model.Model, &arena, top);
     third.list_file = first.list_file;
     third.load();
-    assert(third.count() == 0);
+    assert(third.count() == 0 && third.limit == 0);
 }
 
 test "Content-Range, the wait of the limit, the share, the attempts" {
@@ -176,6 +191,9 @@ test "Content-Range, the wait of the limit, the share, the attempts" {
     assert(model.share(0, 3) == 0);
     assert(model.share(300, 3) == 102400);
     assert(model.share(2, 4) == 1024);  // at least 1 KB/s each
+    // the field in its unit: 8 KB/s and 12 MB/s are the rates given to one download
+    assert(model.share(8 * model.kb_of(model.RateUnit.Kilo), 1) == 8 * 1024);
+    assert(model.share(12 * model.kb_of(model.RateUnit.Mega), 1) == 12 * 1024 * 1024);
     assert(model.retry_delay_ms(1) == 1000 && model.retry_delay_ms(3) == 4000 && model.retry_delay_ms(6) == 30000);
     assert(model.retry_delay_ms(9) == 30000);
     assert(worker.worth_again(503) && worker.worth_again(429) && !worker.worth_again(404));

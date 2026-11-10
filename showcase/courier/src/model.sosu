@@ -68,6 +68,19 @@ pub i64 kb_of(RateUnit unit) {
     };
 }
 
+// The number of a unit in the saved list, and back (an unknown number: KB/s).
+pub i64 unit_number(RateUnit unit) {
+    return match (unit) {
+        Kilo => 0,
+        Mega => 1,
+        Giga => 2,
+    };
+}
+
+pub RateUnit unit_from(i64 n) {
+    return n == 2 ? Giga : n == 1 ? Mega : Kilo;
+}
+
 // The rate of each download that runs, in bytes per second, when `running` share `limit_kb`
 // (0: no limit); at least 1 KB/s each.
 pub i64 share(i64 limit_kb, i64 running) {
@@ -108,6 +121,8 @@ pub class Model {
     pub mut i64 limit;  // the field of the limit, in `unit` (0: none)
     pub mut RateUnit unit;
     mut i64 applied_kb;
+    mut i64 saved_limit;  // the limit and its unit as `list_file` keeps them
+    mut i64 saved_unit;
     pub mut str dir;  // where the new downloads go
     pub mut str settings;  // the file that keeps `dir` between two runs ("": none)
     pub mut str list_file;  // the file that keeps the list between two runs ("": none)
@@ -126,6 +141,8 @@ pub class Model {
         limit = 0;
         unit = Kilo;
         applied_kb = 0;
+        saved_limit = 0;
+        saved_unit = 0;
         self.dir = dir;
         settings = "";
         list_file = "";
@@ -516,6 +533,9 @@ pub class Model {
                 start(i);
             }
         }
+        if (limit != saved_limit || unit_number(unit) != saved_unit) {
+            changed = true;  // the limit is kept with the list
+        }
         if (changed) {
             save();
         }
@@ -776,10 +796,12 @@ pub class Model {
         }
     }
 
-    // Writes the list to `list_file`, as JSON: a download that runs is kept paused, and
-    // `resume` says whether it starts again.
+    // Writes the list to `list_file`, as JSON, with the limit of bandwidth and its unit: a download
+    // that runs is kept paused, and `resume` says whether it starts again.
     pub void save() uses io {
         changed = false;
+        saved_limit = limit;
+        saved_unit = unit_number(unit);
         if (list_file.len == 0) {
             return;
         }
@@ -806,16 +828,19 @@ pub class Model {
             };
             all[i] = json.Value.Object(m);
         }
-        mut json.Member[] top = scratch.alloc_slice(json.Member, 2);
+        mut json.Member[] top = scratch.alloc_slice(json.Member, 4);
         top[0] = json.Member{ key: "version", value: json.Value.Number(1.0) };
-        top[1] = json.Member{ key: "downloads", value: json.Value.Array(all) };
+        top[1] = json.Member{ key: "limit", value: json.Value.Number(limit as f64) };
+        top[2] = json.Member{ key: "unit", value: json.Value.Number(unit_number(unit) as f64) };
+        top[3] = json.Member{ key: "downloads", value: json.Value.Array(all) };
         match (io.write_file(&scratch, list_file, json.write_pretty(&scratch, json.Value.Object(top)))) {
             ok => { },
             err(e) => { },
         }
     }
 
-    // Reads the list of `list_file`, and starts again the downloads that ran when Courier closed.
+    // Reads the list of `list_file` and the limit, and starts again the downloads that ran when
+    // Courier closed.
     pub void load() uses io, time, threads {
         if (list_file.len == 0) {
             return;
@@ -833,6 +858,11 @@ pub class Model {
                 return;
             },
         };
+        i64 kept = number_at(root, "limit", 0);
+        limit = kept > 0 && kept <= 1000000 ? kept : 0;  // the bounds of its field
+        unit = unit_from(number_at(root, "unit", 0));
+        saved_limit = limit;
+        saved_unit = unit_number(unit);
         json.Value list = match (json.get(root, "downloads")) {
             some(v) => v,
             none => {
