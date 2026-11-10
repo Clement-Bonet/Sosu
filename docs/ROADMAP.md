@@ -34,21 +34,21 @@ In all, an effort of about 82, 6 to 9 days of work and 2.5 to 4.5 million output
 - November 1, in a fifth session of its own: `platform.dialogs` (about 400 lines of Sosu and 120 of tests in the package, and `examples/dialogs`): open one file or several, save, choose a folder, message boxes, on SDL3; the answer of a file dialog, given by SDL on a thread of its own, comes back to the loop of `app.run` as an event. Work 4 is done; the dialogs are still to be tried by hand.
 - November 1, in a sixth session of its own: work 5. `git` and the C compiler run with their arguments, never through a shell (`Command` in `src/lib/shell.c`: CreateProcess, or fork and execvp; the environment of MSVC read once from `vcvarsall.bat`; Gradle run by `java` from its wrapper, the clang of the NDK with `--target`); `void!E` a value, a type such as `ui8*` given to a call; the fuzzing (`tests/fuzz.c`: 40 000 runs of libFuzzer under ASan, with MSVC, found no crash); the time of `sosuc` measured (`tests/bench.c`), which found four lookups that grew with the program, made constant by hash tables: 318 000 lines took 6.0 s, now 1.1 s; the grammar and the error codes frozen, the compatibility policy (§13.2).
 
-## What remains (November 1, 2026)
+## What remains (November 10, 2026)
 
-Estimated again from the pace above. The versions: `0.2.0` with the packages of work 4, which was done first (`render.image` moved to the package `image`); `0.3.0` when work 5 is done (it changes the language: the two limits below); `0.2.x` for fixes in between.
+Estimated again from the pace above. Works 1 to 5, 7, 8 and 10 are done, and `0.5.2` is the last version; works 6 and 9 remain before 1.0, then the 0.x versions tried by others (§13.1).
 
 | # | Work | What remains | Output tokens |
 |---|---|---|---|
 | 4 | Standard library | Done (§8.0, §8.3, §10.11), the dialogs and the sound tried by hand on Windows 11. Added on November 8, 2026: the package `net` (DNS, TCP, UDP, an HTTP client, HTTPS with Mbed TLS 4.1 LTS given as C sources), tried against a real server on Windows and Linux; the server of `net.http` and WebSocket stay after 1.0. Added on November 9, 2026: `showcase/courier`, a download manager on `net`, and interfaces with an effect parameter (§5.4), so that a window starts threads (`app.Handler<uses threads>`) | 0 |
 | 5 | Quality | Done (§13.1, §13.2): the CI of 0.3.0 passes on Linux (gcc, clang), macOS (with the iOS simulator), Windows and Android, with the fuzzing (`make fuzz`, and `make fuzz-ogg` for stb_vorbis) and `make bench` | 0 |
 | 6 | Tooling | Begun: references and rename in `sosuc lsp`, `sosuc doc` for any package (the generator of `docs/REFERENCE.md` is now in `src/lib/docgen.c`), long lines broken by `sosuc fmt` at 120 characters, and the VS Code extension 0.2.0 (its own repository: references, rename, `sosuc doc`). Remains: releasing them | 200 to 350 k |
-| 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`), the guide from the first program to a window (`docs/QUICK_GUIDE.md`), and the complete guide (`docs/GUIDE.md`), both run by `tests/program_tests.c`. Remains: the examples of the packages of §8.2 | 150 to 300 k |
+| 7 | Documentation | Done: the reference of `std` and of the packages (`docs/REFERENCE.md`), the guide from the first program to a window (`docs/QUICK_GUIDE.md`), and the complete guide (`docs/GUIDE.md`), both run by `tests/program_tests.c`. Done on November 10, 2026: an example for each package of §8.3 (`examples/checksums`, `archive`, `orbit`, `wordcount`, `thumbnail`, `bookshelf`, `fetch`, `greetings`), run by `tests/program_tests.c` and linked from the guide (§22.9) and the README | 0 |
 | 8 | Interface | Done on November 10, 2026: responsive windows (step 15, §10.12: breakpoints, `from:` and `until:`, the columns of a `Grid` by width, `Row(stack: ...)`, `showcase/courier` adapted); the menus with the keyboard were already done (§10.6), only the specification still called them open | 0 |
 | 9 | Distribution | Done: version numbers checked against the tag, release notes, archives for Windows x64, Linux x64 and ARM64, macOS universal, with their SHA-256. Remains: installers, signed binaries | 60 to 150 k |
 | 10 | Dangling pointers | Added on November 4, 2026 (§13.1), and reduced on November 6, 2026: Sosu does not promise memory safety. Done on November 6, 2026 (§6.1, §7.7) | 0 |
 
-In all, about 0.75 to 1.4 million output tokens: 0.35 to 0.65 weeks of the Pro quota. With the quota renewed each week, the works would end in the second half of November, a new session for each work. This total and this date do not count work 10: its design has to be settled first.
+In all, about 0.26 to 0.5 million output tokens: 0.12 to 0.23 weeks of the Pro quota, a new session for each work.
 
 What tokens do not buy, and sets the pace as much:
 

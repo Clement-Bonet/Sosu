@@ -1,0 +1,11 @@
+SQLite 3.54.1
+4 books, the last one has the key 4
+by Le Guin:
+  'A Wizard of Earthsea' | 1968
+  'The Left Hand of Darkness' | 1969
+by "x' OR '1'='1": 0 rows
+out:
+  'Kindred' | 'Ada' | '2026-11-24'
+  'The Left Hand of Darkness' | 'Grace' | '2026-12-01'
+the loan of book 42: a constraint refused the statement
+the oldest book, after the rollback: 1968

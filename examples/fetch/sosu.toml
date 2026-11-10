@@ -1,0 +1,8 @@
+# The package net (spec §8.3): an HTTP client and a small server of its own, on this machine
+# only. No window. Run it from the root of the repository: sosuc run examples/fetch
+[package]
+name = "fetch"
+version = "0.1.0"
+
+[dependencies]
+net = { path = "../../packages/net" }

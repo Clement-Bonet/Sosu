@@ -1,0 +1,8 @@
+# The package i18n (spec §10.7): texts in English, French and Russian, from gettext catalogs.
+# No window. Run it from the root of the repository: sosuc run examples/greetings
+[package]
+name = "greetings"
+version = "0.1.0"
+
+[dependencies]
+i18n = { path = "../../packages/i18n" }

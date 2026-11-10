@@ -1,0 +1,7 @@
+log: 1440 lines, 70057 bytes, CRC-32 3355370898
+gzip -1: 9708 bytes (13%), read back the same: true
+gzip -6: 9353 bytes (13%), read back the same: true
+gzip -9: 9351 bytes (13%), read back the same: true
+zlib: 9341 bytes, Adler-32 489149139
+damaged: wrong checksum
+limited to 4096 bytes: too large for the room given

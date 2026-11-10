@@ -1,0 +1,9 @@
+# The package testing (spec §8.3): a library that counts words, and its tests. Run them from the
+# root of the repository: sosuc test examples/wordcount (--bench to measure, --update to write
+# the golden file again)
+[package]
+name = "wordcount"
+version = "0.1.0"
+
+[dependencies]
+testing = { path = "../../packages/testing" }

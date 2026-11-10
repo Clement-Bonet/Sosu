@@ -1,0 +1,99 @@
+// The package crypto (spec §8.3): the checksum of a file, a link signed with HMAC-SHA256 and
+// checked again, and a random token for a session.
+import std.io;
+import std.text;
+import crypto.base64;
+import crypto.hex;
+import crypto.hmac;
+import crypto.secure;
+import crypto.sha256;
+
+// The key of the server. A real one comes from `secure.fill`, kept secret, never from the code.
+str KEY = "a key kept by the server only";
+
+// A link to `path` that stays valid until `expires` (seconds of the epoch): the path, the date,
+// and the HMAC of both, in base64 for URLs.
+str signed_link(Arena* arena, str path, i64 expires) {
+    text.TextBuilder* message = text.builder(arena);
+    message.push(path);
+    message.push("|");
+    message.push_i64(expires);
+    mut ui8[32] mac = hmac.with_sha256(KEY.bytes, message.text().bytes);
+    text.TextBuilder* link = text.builder(arena);
+    link.push(path);
+    link.push("?expires=");
+    link.push_i64(expires);
+    link.push("&sig=");
+    link.push(base64.encode_url(arena, mac[0..32]));
+    return link.text();
+}
+
+// Whether the signature of `link` is the one the server would write, at `now`.
+bool valid(Arena* arena, str link, i64 now) {
+    usize query = match (text.find(link, "?expires=")) {
+        some(i) => i,
+        none => {
+            return false;
+        },
+    };
+    usize sig = match (text.find(link, "&sig=")) {
+        some(i) => i,
+        none => {
+            return false;
+        },
+    };
+    str path = text.slice(link, 0, query);
+    str expires = text.slice(link, query + 9, sig);
+    i64 until = match (text.parse_i64(expires)) {
+        ok(n) => n,
+        err(e) => {
+            return false;
+        },
+    };
+    ui8[] given = match (base64.decode_url(arena, text.slice(link, sig + 5, link.len))) {
+        some(bytes) => bytes,
+        none => {
+            return false;
+        },
+    };
+    text.TextBuilder* message = text.builder(arena);
+    message.push(path);
+    message.push("|");
+    message.push(expires);
+    mut ui8[32] expected = hmac.with_sha256(KEY.bytes, message.text().bytes);
+    // compared in a time that does not depend on where they differ
+    return hmac.equal(given, expected[0..32]) && now <= until;
+}
+
+i32 main() uses io, random {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+
+    // the checksum of a file, as `sha256sum` prints it; here a file of the release, in memory
+    str file = "Sosu 0.5.2\nThe examples of the packages.\n";
+    mut ui8[32] sum = sha256.sum(file.bytes);
+    io.print("sha256  {}  notes.txt", hex.encode(&arena, sum[0..32]));
+    // the same, read by parts, as a large file is
+    mut sha256.Sha256 parts = sha256.start();
+    parts.update(file.bytes[0..11]);
+    parts.update(file.bytes[11..file.bytes.len]);
+    mut ui8[32] again = parts.finish();
+    io.print("by parts, the same: {}", hmac.equal(sum[0..32], again[0..32]));
+
+    // a signed link, checked; then changed, and refused
+    str link = signed_link(&arena, "/files/report.pdf", 1800000000);
+    io.print("link: {}", link);
+    io.print("valid now: {}", valid(&arena, link, 1700000000));
+    io.print("valid after it expires: {}", valid(&arena, link, 1800000001));
+    str other = text.replace(&arena, link, "report", "salary");
+    io.print("valid for another file: {}", valid(&arena, other, 1700000000));
+    str later = text.replace(&arena, link, "1800000000", "1900000000");
+    io.print("valid with another date: {}", valid(&arena, later, 1700000000));
+
+    // a token for a session, from the generator of the system: different at each run
+    match (secure.token(&arena, 16)) {
+        some(token) => io.print("session token: {} hexadecimal digits", token.len),
+        none => io.print("no random numbers on this system"),
+    }
+    return 0;
+}

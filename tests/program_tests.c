@@ -6,13 +6,15 @@
 #include "test.h"
 
 /* End-to-end tests: `sosuc run` / `sosuc test` on the packages of tests/programs, which
-   compiles them through the C compiler, then compares the output with expected.txt.
+   compiles them through the C compiler, then compares the output with expected.txt. The
+   examples of the packages (examples/<name>, spec §8.3) are run the same way; their expected
+   output is tests/examples/<name>.txt, so that their folders hold only the example.
    Usage (from the repository root): program_tests <path to sosuc> */
 
 typedef struct {
     const char *command; /* with its options */
     const char *program;
-    const char *expected; /* file in the program folder */
+    const char *expected; /* file in the program folder; NULL for an example: tests/examples/<name>.txt */
     int exit_code;
     const char *args; /* after `--`, for the program; NULL: none */
 } Case;
@@ -64,6 +66,15 @@ static const Case cases[] = {
     { "test", "databases", "expected.txt", 0, NULL }, /* the packages db and sqlite (spec §8.2) */
     { "run", "effects", "expected.txt", 0, NULL }, /* an interface with an effect parameter (spec §5.4) */
     { "test", "network", "expected.txt", 0, NULL }, /* the package net (spec §8.2) */
+    /* the examples of the packages of 1.0 (spec §8.3) */
+    { "run", "examples/checksums", NULL, 0, NULL },  /* crypto */
+    { "run", "examples/archive", NULL, 0, NULL },    /* compress */
+    { "run", "examples/orbit", NULL, 0, NULL },      /* math */
+    { "test", "examples/wordcount", NULL, 0, NULL }, /* testing */
+    { "run", "examples/thumbnail", NULL, 0, NULL },  /* image */
+    { "run", "examples/bookshelf", NULL, 0, NULL },  /* db and sqlite */
+    { "run", "examples/fetch", NULL, 0, NULL },      /* net, with a server of its own */
+    { "run", "examples/greetings", NULL, 0, NULL },  /* i18n */
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */
@@ -427,15 +438,24 @@ int main(int argc, char **argv) {
 #else
         const char *sep = "/";
 #endif
-        char command[512], output[256], expected_path[256];
-        snprintf(output, sizeof output, "build%s%s.out", sep, c->program);
-        snprintf(command, sizeof command, "%s %s tests/programs/%s%s%s > %s 2> build%s%s.err", argv[1], c->command,
-                 c->program, c->args ? " -- " : "", c->args ? c->args : "", output, sep, c->program);
+        /* an example is named by its folder, examples/<name>; a test program by its name */
+        const char *slash = strchr(c->program, '/');
+        const char *name = slash ? slash + 1 : c->program;
+        char command[1024], output[256], expected_path[256], folder[256];
+        if (slash) {
+            snprintf(folder, sizeof folder, "%s", c->program);
+            snprintf(expected_path, sizeof expected_path, "tests/examples/%s.txt", name);
+        } else {
+            snprintf(folder, sizeof folder, "tests/programs/%s", c->program);
+            snprintf(expected_path, sizeof expected_path, "tests/programs/%s/%s", c->program, c->expected);
+        }
+        snprintf(output, sizeof output, "build%s%s.out", sep, name);
+        snprintf(command, sizeof command, "%s %s %s%s%s > %s 2> build%s%s.err", argv[1], c->command, folder,
+                 c->args ? " -- " : "", c->args ? c->args : "", output, sep, name);
         int status = run(command);
         CHECK(status == c->exit_code, "%s %s: exit code %d, expected %d (see build/%s.err)", c->command, c->program,
-              status, c->exit_code, c->program);
+              status, c->exit_code, name);
 
-        snprintf(expected_path, sizeof expected_path, "tests/programs/%s/%s", c->program, c->expected);
         char *actual = read_text(output);
         char *expected = read_text(expected_path);
         CHECK(actual && expected && strcmp(actual, expected) == 0, "%s %s: output differs\n--- got:\n%s--- expected:\n%s",

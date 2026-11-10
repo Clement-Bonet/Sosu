@@ -1,0 +1,7 @@
+test words, without their punctuation, in lowercase ... ok
+test words counted, the most frequent first ... ok
+test the mean length of the words ... ok
+test the report of a file, kept in a golden file ... ok
+test counting a long text, measured with --bench ... ok
+
+5 tests, 5 passed, 0 failed

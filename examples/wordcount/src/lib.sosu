@@ -1,0 +1,150 @@
+// The package testing (spec §8.3): a small library that counts the words of a text, and its
+// tests, run by `sosuc test examples/wordcount`. `testing.check` shows what differs when a
+// test fails, `testing.fixture` reads the files of tests/data and keeps the expected report in
+// a golden file, and `testing.bench` measures the counting with `sosuc test --bench`.
+import std.map;
+import std.sort;
+import std.text;
+import testing.bench;
+import testing.check;
+import testing.fixture;
+
+pub struct Count {
+    pub str word;
+    pub i64 times;
+}
+
+// The words of `s`, in lowercase, without the punctuation around them.
+pub str[] words_of(Arena* arena, str s) {
+    str[] raw = text.words(arena, s);
+    mut str[] words = arena.alloc_slice(str, raw.len);
+    mut usize n = 0;
+    for (str w in raw) {
+        mut usize start = 0;
+        mut usize end = w.len;
+        while (start < end && !letter(w.bytes[start])) {
+            start += 1;
+        }
+        while (end > start && !letter(w.bytes[end - 1])) {
+            end -= 1;
+        }
+        if (end > start) {
+            words[n] = text.to_lower(arena, text.slice(w, start, end));
+            n += 1;
+        }
+    }
+    return words[0..n];
+}
+
+// A letter or a digit of ASCII, or a byte of a character beyond ASCII.
+bool letter(ui8 b) {
+    return b >= 0x80 || b >= 0x30 && b <= 0x39 || b >= 0x41 && b <= 0x5A || b >= 0x61 && b <= 0x7A || b == 0x27;
+}
+
+// Each word of `s` once, with how many times it is there: the most frequent first, then in the
+// order of the alphabet.
+pub Count[] counted(Arena* arena, str s) {
+    map.HashMap<str, i64>* times = map.new<str, i64>(arena);
+    for (str w in words_of(arena, s)) {
+        i64 before = match (times.get(w)) {
+            some(t) => t,
+            none => 0,
+        };
+        times.put(w, before + 1);
+    }
+    str[] keys = times.keys(arena);
+    mut Count[] counts = arena.alloc_slice(Count, keys.len);
+    for (usize i in 0..keys.len) {
+        counts[i] = Count{ word: keys[i], times: match (times.get(keys[i])) {
+            some(t) => t,
+            none => 0,
+        } };
+    }
+    sort.sort_by(counts, (Count a, Count b) => a.times > b.times || a.times == b.times && a.word < b.word);
+    return counts;
+}
+
+// The mean length of the words, in bytes (0 for none).
+pub f64 mean_length(str[] words) {
+    if (words.len == 0) {
+        return 0.0;
+    }
+    mut usize total = 0;
+    for (str w in words) {
+        total += w.len;
+    }
+    return total as f64 / words.len as f64;
+}
+
+// The `top` most frequent words of `s`, a line each, then the totals.
+pub str report(Arena* arena, str s, usize top) {
+    str[] words = words_of(arena, s);
+    Count[] counts = counted(arena, s);
+    text.TextBuilder* b = text.builder(arena);
+    for (usize i in 0..min(top, counts.len)) {
+        b.push(counts[i].word);
+        b.push(" ");
+        b.push_i64(counts[i].times);
+        b.push("\n");
+    }
+    b.push("words: ");
+    b.push_u64(words.len as ui64);
+    b.push(", different: ");
+    b.push_u64(counts.len as ui64);
+    b.push(", mean length: ");
+    b.push_f64(mean_length(words), 2);
+    b.push("\n");
+    return b.text();
+}
+
+// ---- Tests ----
+
+test "words, without their punctuation, in lowercase" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    str[] words = words_of(&arena, "  Hello, world! (It's) -- \"hello\" again.\n");
+    // joined, a list of texts compares as one text, which shows where it differs
+    assert(check.same_text(text.join(&arena, words, " "), "hello world it's hello again"));
+}
+
+test "words counted, the most frequent first" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    Count[] counts = counted(&arena, "b a c a b a");
+    mut i64[3] times = [0, 0, 0];
+    for (usize i in 0..3) {
+        times[i] = counts[i].times;
+    }
+    mut i64[3] expected = [3, 2, 1];
+    assert(check.same_items(times[0..3], expected[0..3]));
+    assert(counts[0].word == "a" && counts[2].word == "c");
+}
+
+test "the mean length of the words" {
+    mut str[3] words = ["a", "bb", "cccc"];
+    assert(check.near(mean_length(words[0..3]), 7.0 / 3.0, 0.000001));
+    assert(mean_length(words[0..0]) == 0.0);
+}
+
+test "the report of a file, kept in a golden file" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    // tests/data/poem.txt, found from the folder of the package
+    str poem = fixture.read(&arena, "tests/data/poem.txt");
+    str got = report(&arena, poem, 5);
+    assert(check.contains(got, "words: "));
+    // compared with tests/data/report.txt, which `sosuc test --update` writes again
+    assert(fixture.golden(&arena, "tests/data/report.txt", got));
+}
+
+test "counting a long text, measured with --bench" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    str long = text.repeat(&arena, "the quick brown fox jumps over the lazy dog ", 200);
+    bench.Measure m = bench.run("count 1800 words", () => {
+        mut Arena scratch = Arena.new(256 * KB);
+        defer scratch.free();
+        bench.keep(counted(&scratch, long).len as i64);
+    });
+    assert(m.runs >= 1);
+}

@@ -1,0 +1,114 @@
+// The packages db and sqlite (spec §8.3): the books of a small library and their loans, in a
+// database in memory. Statements with parameters (never text joined to SQL), a statement
+// prepared once and run for each book, a transaction, a join, and a refused loan.
+import std.io;
+import std.text;
+import db.db;
+import sqlite.sqlite;
+
+str SCHEMA = "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT NOT NULL, author TEXT NOT NULL, year INTEGER); CREATE TABLE loans (book INTEGER NOT NULL REFERENCES books (id), reader TEXT NOT NULL, until TEXT NOT NULL);";
+
+struct Book {
+    str title;
+    str author;
+    i64 year;
+}
+
+// The rows of `rows`, one line each, their columns as SQL writes them.
+str!db.DbError listed(Arena* arena, db.Rows* rows) uses io {
+    text.TextBuilder* b = text.builder(arena);
+    while (try rows.next()) {
+        b.push("  ");
+        for (usize i in 0..rows.columns()) {
+            if (i > 0) {
+                b.push(" | ");
+            }
+            b.push(db.describe(arena, rows.value(arena, i)));
+        }
+        b.push("\n");
+    }
+    rows.close();
+    return ok(b.text());
+}
+
+bool!db.DbError library(Arena* arena, keeps db.Connection* c) uses io {
+    try c.script(SCHEMA);
+
+    // the books, all together or none: one statement prepared, run for each
+    mut Book[4] books = [
+        Book{ title: "The Left Hand of Darkness", author: "Ursula K. Le Guin", year: 1969 },
+        Book{ title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", year: 1968 },
+        Book{ title: "Kindred", author: "Octavia E. Butler", year: 1979 },
+        Book{ title: "Hackers & Painters", author: "Paul Graham", year: 2004 },
+    ];
+    try c.begin();
+    db.Statement* insert = try c.prepare(arena, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)");
+    for (Book book in books) {
+        mut db.Value[3] p = [db.Value.Text(book.title), db.Value.Text(book.author), db.Value.Integer(book.year)];
+        try insert.execute(p[0..3]);
+    }
+    insert.close();
+    try c.commit();
+    io.print("{} books, the last one has the key {}", books.len, c.last_insert_id());
+
+    // a search: the text the user typed stays a parameter, even with a quote in it
+    mut db.Value[1] author = [db.Value.Text("Ursula K. Le Guin")];
+    db.Rows* found = try c.query(arena, "SELECT title, year FROM books WHERE author = ? ORDER BY year", author[0..1]);
+    io.print("by Le Guin:\n{}", text.trim_end(try listed(arena, found)));
+    mut db.Value[1] typed = [db.Value.Text("x' OR '1'='1")];
+    db.Rows* none = try c.query(arena, "SELECT title FROM books WHERE author = ?", typed[0..1]);
+    io.print("by \"x' OR '1'='1\": {} rows", text.lines(arena, try listed(arena, none)).len);
+
+    // two loans, then the books out, by a join
+    mut db.Value[3] first = [db.Value.Integer(3), db.Value.Text("Ada"), db.Value.Text("2026-11-24")];
+    mut db.Value[3] second = [db.Value.Integer(1), db.Value.Text("Grace"), db.Value.Text("2026-12-01")];
+    try c.execute("INSERT INTO loans (book, reader, until) VALUES (?, ?, ?)", first[0..3]);
+    try c.execute("INSERT INTO loans (book, reader, until) VALUES (?, ?, ?)", second[0..3]);
+    db.Rows* out = try db.select(
+        arena,
+        c,
+        "SELECT books.title, loans.reader, loans.until FROM loans JOIN books ON books.id = loans.book ORDER BY loans.until"
+    );
+    io.print("out:\n{}", text.trim_end(try listed(arena, out)));
+
+    // a loan of a book that is not there: the foreign key refuses it
+    mut db.Value[3] unknown = [db.Value.Integer(42), db.Value.Text("Alan"), db.Value.Text("2026-12-10")];
+    match (c.execute("INSERT INTO loans (book, reader, until) VALUES (?, ?, ?)", unknown[0..3])) {
+        ok(n) => io.print("the loan of book 42 was taken"),
+        err(e) => io.print("the loan of book 42: {}", db.message(e)),
+    }
+
+    // a transaction given up: the year changed, then rolled back
+    try c.begin();
+    try db.run(c, "UPDATE books SET year = 0");
+    try c.rollback();
+    mut db.Value[1] nothing = [db.Value.Null];
+    match (try db.scalar(arena, c, "SELECT min(year) FROM books", nothing[0..0])) {
+        some(v) => io.print("the oldest book, after the rollback: {}", db.describe(arena, v)),
+        none => io.print("no book"),
+    }
+    return ok(true);
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    io.print("SQLite {}", sqlite.version(&arena));
+    db.Connection* c = match (sqlite.memory(&arena)) {
+        ok(c) => c,
+        err(e) => {
+            io.print("cannot open: {}", db.message(e));
+            return 1;
+        },
+    };
+    defer c.close();
+    match (library(&arena, c)) {
+        ok(b) => {
+            return 0;
+        },
+        err(e) => {
+            io.print("error: {} ({})", db.message(e), c.message(&arena));
+            return 1;
+        },
+    }
+}
