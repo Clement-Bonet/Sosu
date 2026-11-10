@@ -1,0 +1,4 @@
+doubled: 32
+worked: 13
+runs: 3
+plain: 2

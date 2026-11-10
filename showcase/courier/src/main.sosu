@@ -1,0 +1,192 @@
+// Courier: a download manager. Paste a URL and press Download; each download can be paused and
+// resumed, starts again by itself after an error (from where it stopped), and all of them keep
+// to the limit of bandwidth of the title bar. Files go to Downloads/Courier.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run .` from this folder.
+// `--snapshot out.png` writes the window in a picture, without opening it.
+import std.fs;
+import std.io;
+import std.os;
+import std.text;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import image.png;
+import ui.widgets;
+import courier.checks;
+import courier.files;
+import courier.model;
+import courier.screen;
+
+canvas.Color background() {
+    return canvas.Color{ r: 24, g: 26, b: 36 };
+}
+
+// Its methods start and stop the threads of the downloads, and read the clock: `uses time, threads`.
+class App : app.Handler<uses time, threads>, app.TitleBar {
+    mut widgets.Ui ui;
+    model.Model* state;
+
+    void init(keeps model.Model* state) {
+        ui = widgets.Ui{ };
+        self.state = state;
+    }
+
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io, time, threads {
+        match (e) {
+            Quit => {
+                state.stop();  // the threads end before the program does
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Dialog(answer) => {  // the folder chosen for the downloads
+                state.folder_answered(answer);
+            },
+            TextInput(text) => {
+                ui.type_text(text);
+            },
+            Key(code, down, mods) => {
+                bool ctrl = mods.ctrl || mods.command;
+                if (down && ctrl && code == 118) {  // Ctrl+V: a URL pasted
+                    mut Arena paste = Arena.new(4 * KB);
+                    defer paste.free();
+                    ui.type_text(app.clipboard(&paste));
+                } else {
+                    ui.key(code, down, mods.shift, ctrl);
+                }
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io, time, threads {
+        ui.clock(app.now_ms());
+        state.update(app.now_ms() as i64);
+        paint(surface);
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+    }
+
+    void paint(canvas.Canvas* surface) uses io, time, threads {
+        surface.clear(background());
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Courier(&f, state);
+        f.finish();
+    }
+}
+
+i32 main() uses io, time, threads {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    bool snap = args.len >= 2 && args[0] == "--snapshot";
+    model.Model* m = arena.new(model.Model, &arena, files.folder(&arena));
+    m.system = app.system(&arena);
+    // the folder chosen in a run before, kept in the folder of the data of Courier
+    m.settings = fs.join(&arena, app.data_folder(&arena, "courier"), "folder.txt");
+    if (!snap) {  // the list of the downloads, as Courier left it
+        m.list_file = fs.join(&arena, app.data_folder(&arena, "courier"), "downloads.json");
+        m.load();
+    }
+    match (io.read_file(&arena, m.settings)) {
+        ok(saved) => {
+            m.set_dir(text.trim(saved));  // made again if it was deleted
+        },
+        err(e) => { },
+    }
+    App* handler = arena.new(App, m);
+    match (app.read_asset(&arena, "assets/NotoSans-Regular.ttf")) {
+        some(bytes) => {
+            match (truetype.parse(&arena, bytes)) {
+                ok(font) => {
+                    match (icons(&arena)) {  // the icons of the buttons, behind Noto Sans
+                        some(f) => {
+                            font.fallback = some(f);
+                        },
+                        none => {
+                            io.print("Font Awesome not found: the icons of the buttons are missing");
+                        },
+                    }
+                    handler.ui.font = some(font);
+                },
+                err(e) => {
+                    io.print("Noto Sans is not readable: the built-in font is used");
+                },
+            }
+        },
+        none => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+    if (snap) {
+        return snapshot(&arena, handler, args[1]);
+    }
+    widgets.Window window = screen.CourierConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    app.Config config = app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar };
+    return app.run(config, handler as app.Handler<uses time, threads>*);
+}
+
+// Font Awesome, from assets/.
+truetype.Font*? icons(Arena* arena) uses io {
+    return match (app.read_asset(arena, "assets/fa-solid-900.ttf")) {
+        some(bytes) => match (truetype.parse(arena, bytes)) {
+            ok(f) => some(f),
+            err(e) => none,
+        },
+        none => none,
+    };
+}
+
+// The window in a picture, with downloads shown in their states (no thread runs).
+i32 snapshot(Arena* arena, App* handler, str file) uses io, time, threads {
+    model.Model* m = handler.state;
+    m.limit = 2;
+    m.unit = model.RateUnit.Mega;
+    m.show_demo();
+    mut canvas.Canvas surface = canvas.create(arena, 1040, 640);
+    handler.ui.custom_title_bar = true;
+    handler.ui.clock(0);
+    handler.paint(&surface);
+    return match (png.save(arena, file, surface.image())) {
+        ok() => 0,
+        err(e) => 1,
+    };
+}

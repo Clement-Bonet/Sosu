@@ -437,6 +437,13 @@ static void fmt_type(Fmt *f, const TypeExpr *type) {
         fmt_type(f, type->as.fn.ret);
         fmt_effects(f, type->as.fn.effects);
         break;
+    case TYPE_EFFECTS:
+        put(f, "uses ");
+        for (size_t i = 0; i < type->as.effects.count; i++) {
+            if (i) put(f, ", ");
+            put_name(f, type->as.effects.items[i]);
+        }
+        break;
     }
 }
 

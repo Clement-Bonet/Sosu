@@ -92,7 +92,7 @@ I define the language, review the changes, and the CI tests every change on Wind
 | 9. Libraries for other languages, then mobile | done: `export "C"` and `sosuc build --lib` (static) or `--lib=shared`, with a C header and errors returned to the host (spec §9.2); `--target android-*` and `ios-*`, `sosuc package --target android` (an APK) and `ios-sim` (spec §11.5). The CI builds the APK and the application for the simulator; running them on an emulator, a simulator or a phone is done by hand, and iOS stays a preview until it has run on an iPhone (spec §13.1) |
 | 10. Generics | done: functions, structs, enums and classes with type parameters and constraints, effects as parameters, `std.vec.Vec<T>` and `std.map.HashMap<K, V>` (spec §5.4) |
 | 11. `sosuc bindgen`, `sosuc package`, cross-compilation | done: constants of modules; the declarations of C headers as Sosu modules, checked by the C compiler (`platform` binds SDL3 so); desktop packages with their archive; `--target windows-arm64`, `linux-arm64`, `macos-universal`..., another system with clang and a sysroot (spec §11.6) |
-| Version 1.0 | in progress: works 1 to 4 done (lambdas, generic interfaces, threads and channels, C sources in a package; the modules of `std`, spec §8.0, and the packages `crypto`, `compress`, `math`, `testing`, `image`, `audio`, `db`, `sqlite` and `platform.dialogs`, spec §8.3, in [docs/REFERENCE.md](docs/REFERENCE.md)); its content and order in spec §13.1, the estimates in [docs/ROADMAP.md](docs/ROADMAP.md), the libraries to come in spec §8.2 |
+| Version 1.0 | in progress: works 1 to 4 done (lambdas, generic interfaces, threads and channels, C sources in a package; the modules of `std`, spec §8.0, and the packages `crypto`, `compress`, `math`, `testing`, `image`, `audio`, `db`, `sqlite`, `net` (TCP, UDP, HTTP and HTTPS) and `platform.dialogs`, spec §8.3, in [docs/REFERENCE.md](docs/REFERENCE.md)); its content and order in spec §13.1, the estimates in [docs/ROADMAP.md](docs/ROADMAP.md), the libraries to come in spec §8.2 |
 
 `sosuc run` compiles a package to C, then to a native program, and runs it. The generated C keeps
 `#line` directives to the `.sosu` files, and checks integer overflow, division by zero, indexes and
@@ -195,7 +195,7 @@ examples/     window (shapes, keyboard and mouse), form (widgets), editor and wo
               drawn with `render` into PNGs)
 showcase/     whole applications: beatbox (a drum machine), disktiles (the sizes of a disk as tiles),
               notes (Markdown notes), pixelforge (a pixel art editor), queens (a puzzle),
-              sheets (a spreadsheet), vault (a password manager)
+              sheets (a spreadsheet), vault (a password manager), courier (a download manager)
 tests/        unit tests, .sosu samples from the spec, test packages, programs run end to end,
               and window (a window test run by the CI)
 docs/         specification, error codes, library reference, roadmap
@@ -273,7 +273,9 @@ folder (`../../build/sosuc run .`):
 - `showcase/pixelforge`: a pixel art editor, with layers, frames, onion skin and sprite sheets;
 - `showcase/queens`: the puzzle of the queens and the coloured regions, each grid with one solution;
 - `showcase/sheets`: a spreadsheet with about 120 functions, reading and writing `.ods` and `.csv`;
-- `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software).
+- `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software);
+- `showcase/courier`: a download manager, on the package `net`: downloads that pause, start again after an error from where
+  they stopped, and keep to a limit of bandwidth.
 
 On Windows:
 

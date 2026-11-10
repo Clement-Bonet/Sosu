@@ -6,6 +6,7 @@ extern "C" {
     ui64 sosu_channel_new(ui64 size, ui64 capacity) uses threads;
     bool sosu_channel_send(ui64 channel, ui8* value) uses threads;
     ui64 sosu_channel_receive(ui64 channel) uses threads;
+    ui64 sosu_channel_try_receive(ui64 channel) uses threads;
     void sosu_channel_close(ui64 channel) uses threads;
     void sosu_channel_free(ui64 channel) uses threads;
 }
@@ -28,6 +29,22 @@ pub struct Channel<T: Send> {
         mut ui64 at = 0;
         unsafe {
             at = sosu_channel_receive(id);
+        }
+        if (at == 0) {
+            return none;
+        }
+        unsafe {
+            T* value = at as T*;
+            return some(*value);
+        }
+    }
+
+    // The next value if one is there, without waiting: none while the channel is empty (a
+    // window reads what its threads sent at each frame, and goes on).
+    pub T? try_receive() uses threads {
+        mut ui64 at = 0;
+        unsafe {
+            at = sosu_channel_try_receive(id);
         }
         if (at == 0) {
             return none;

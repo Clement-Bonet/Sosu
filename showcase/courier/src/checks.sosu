@@ -1,0 +1,600 @@
+// courier.checks: the tests of Courier (`sosuc test .`): names and sizes, the arithmetic of the
+// limit and of the attempts, and downloads against a server of the test, on threads: whole,
+// paused then resumed (Range), cut by the server then resumed, refused, and kept to a rate.
+import std.channel;
+import std.fs;
+import std.io;
+import std.json;
+import std.text;
+import std.thread;
+import std.time;
+import net.ip;
+import net.tcp;
+import testing.check;
+import testing.fixture;
+import courier.files;
+import courier.job;
+import courier.model;
+import courier.worker;
+
+test "names of files, free names, sizes" {
+    mut Arena arena = Arena.new(8 * KB);
+    defer arena.free();
+    assert(check.same_text(files.name_for(&arena, "https://example.org/a/b/report.pdf?x=1#top"), "report.pdf"));
+    assert(check.same_text(files.name_for(&arena, "https://example.org/"), "example.org"));
+    assert(check.same_text(files.name_for(&arena, "http://h/what%20ever:a*b"), "what_20ever_a_b"));
+    assert(check.same_text(files.name_for(&arena, "http://h/.."), "download"));
+    assert(check.same_text(files.name_for(&arena, "not a url"), "download"));
+    assert(check.same_text(files.name_for(&arena, "https://dl.dafont.com/dl/?f=daydream_3"), "dl"));  // the last part that is not empty
+    assert(check.same_text(given(&arena, "attachment; filename=daydream_3.zip"), "daydream_3.zip"));
+    assert(check.same_text(given(&arena, "attachment; filename=\"a b.zip\"; size=3"), "a_b.zip"));
+    assert(check.same_text(
+        given(&arena, "attachment; FILENAME*=UTF-8''r%C3%A9sum%C3%A9.pdf; filename=\"resume.pdf\""),
+        "résumé.pdf"
+    ));
+    assert(check.same_text(given(&arena, "attachment; filename=\"../../etc/passwd\""), "passwd"));  // never a path
+    assert(check.same_text(given(&arena, "inline"), "(none)"));
+    assert(check.same_text(given(&arena, "attachment; filename=\"..\""), "(none)"));
+    str[] mac = files.show_command(&arena, "macOS", "/Users/ada/a.zip");
+    assert(mac.len == 3 && check.same_text(mac[0], "open") && check.same_text(mac[1], "-R"));
+    str[] linux = files.show_command(&arena, "Linux", "/home/ada/a b.zip");
+    assert(check.same_text(linux[0], "dbus-send")
+            && check.same_text(linux[6], "array:string:file:///home/ada/a%20b.zip"));
+    str dir = fixture.temp_dir(&arena, "courier-names");
+    defer forget(&arena, dir);
+    match (io.write_file(&arena, fs.join(&arena, dir, "a.zip"), "x")) {
+        ok => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    mut str[1] taken = ["a (2).zip"];
+    assert(check.same_text(files.free_name(&arena, dir, "a.zip", taken[0..1]), "a (3).zip"));
+    assert(check.same_text(files.free_name(&arena, dir, "b", taken[0..0]), "b"));
+    assert(check.same_text(files.size_text(&arena, 512), "512 B"));
+    assert(check.same_text(files.size_text(&arena, 1536), "1.5 KB"));
+    assert(check.same_text(files.size_text(&arena, 5 * 1024 * 1024), "5.0 MB"));
+}
+
+test "the folder of the downloads: created, made again once deleted, kept for the next run, an empty one ignored" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    str top = fixture.temp_dir(&arena, "courier-folder");
+    defer forget(&arena, top);
+    model.Model* m = arena.new(model.Model, &arena, top);
+    m.settings = fs.join(&arena, top, "folder.txt");
+    str chosen = fs.join(&arena, fs.join(&arena, top, "new"), "inner");
+    m.set_dir(chosen);
+    assert(check.same_text(m.dir, chosen) && fs.is_dir(&arena, chosen));
+    match (io.read_file(&arena, m.settings)) {
+        ok(saved) => {
+            assert(check.same_text(saved, chosen));
+        },
+        err(e) => {
+            assert(false);
+        },
+    }
+    assert(text.starts_with(m.info.text(), "Files go to "));
+    m.set_dir("");
+    assert(check.same_text(m.dir, chosen));
+    // deleted since: made again when it is chosen at the start, and before a file is written
+    forget(&arena, fs.join(&arena, top, "new"));
+    assert(!fs.is_dir(&arena, chosen));
+    m.set_dir(chosen);
+    assert(fs.is_dir(&arena, chosen) && check.same_text(m.dir, chosen));
+    forget(&arena, fs.join(&arena, top, "new"));
+    assert(files.ensure_folder_of(&arena, fs.join(&arena, chosen, "file.zip.part")));
+    assert(fs.is_dir(&arena, chosen));
+    assert(files.ensure_folder_of(&arena, fs.join(&arena, chosen, "other.zip")));  // already there
+    assert(text.starts_with(m.info.text(), "Files go to "));
+}
+
+test "the list and the limit kept between two runs, and the finished downloads cleared" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str top = fixture.temp_dir(&arena, "courier-list");
+    defer forget(&arena, top);
+    // saved: the downloads that run are kept paused, to start again
+    model.Model* first = arena.new(model.Model, &arena, top);
+    first.list_file = fs.join(&arena, top, "downloads.json");
+    first.show_demo();
+    first.limit = 12;
+    first.unit = model.RateUnit.Mega;
+    first.save();
+    str written = match (io.read_file(&arena, first.list_file)) {
+        ok(t) => t,
+        err(e) => "",
+    };
+    json.Value root = match (json.parse(&arena, written)) {
+        ok(v) => v,
+        err(e) => json.Value.Null,
+    };
+    json.Value list = match (json.get(root, "downloads")) {
+        some(v) => v,
+        none => json.Value.Null,
+    };
+    assert(json.len(list) == 6);
+    assert(model.number_at(root, "limit", 0) == 12 && model.number_at(root, "unit", 0) == 1);  // 12 MB/s
+    json.Value running = match (json.at(list, 0)) {
+        some(v) => v,
+        none => json.Value.Null,
+    };
+    assert(model.number_at(running, "state", 0) == model.PAUSED as i64);
+    assert(model.bool_at(running, "resume"));
+    // read again: names and states; nothing to start again here
+    str again = "{\"version\": 1, \"limit\": 8, \"unit\": 2, \"downloads\": [{\"address\": \"https://h/a.zip\", \"name\": \"a.zip\", \"path\": \"p/a.zip\", \"part\": \"p/a.zip.part\", \"state\": 5, \"done\": 10, \"total\": 10}, {\"address\": \"https://h/b.iso\", \"name\": \"b.iso\", \"state\": 3, \"done\": 4, \"total\": 9, \"resume\": false}, {\"address\": \"https://h/c\", \"name\": \"c\", \"state\": 6, \"problem\": \"not found (404)\"}, {\"name\": \"no address: left out\"}]}";
+    match (io.write_file(&arena, first.list_file, again)) {
+        ok => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    model.Model* second = arena.new(model.Model, &arena, top);
+    second.list_file = first.list_file;
+    second.load();
+    assert(second.count() == 3);
+    assert(second.limit == 8 && second.limit_kb() == 8 * 1024 * 1024);  // 8 GB/s
+    assert(check.same_text(second.name_at(0), "a.zip") && check.same_text(second.action_at(0), model.ICON_DONE));
+    assert(check.same_text(second.action_at(1), model.ICON_RESUME));  // paused
+    assert(check.same_text(second.action_at(2), model.ICON_RETRY));  // failed
+    assert(second.has_done());
+    second.clear_done();
+    assert(second.count() == 2 && !second.has_done() && check.same_text(second.name_at(0), "b.iso"));
+    // another unit chosen: saved at the next frame
+    second.unit = model.RateUnit.Kilo;
+    second.update(0);
+    json.Value now_saved = match (io.read_file(&arena, first.list_file)) {
+        ok(t) => match (json.parse(&arena, t)) {
+            ok(v) => v,
+            err(e) => json.Value.Null,
+        },
+        err(e) => json.Value.Null,
+    };
+    assert(model.number_at(now_saved, "limit", 0) == 8 && model.number_at(now_saved, "unit", -1) == 0);
+    // a file that is not JSON: an empty list
+    match (io.write_file(&arena, first.list_file, "not json")) {
+        ok => { },
+        err(e) => { },
+    }
+    model.Model* third = arena.new(model.Model, &arena, top);
+    third.list_file = first.list_file;
+    third.load();
+    assert(third.count() == 0 && third.limit == 0);
+}
+
+test "Content-Range, the wait of the limit, the share, the attempts" {
+    match (worker.content_range("bytes 100-199/1000")) {
+        some(r) => {
+            assert(r.first == 100 && r.total == 1000);
+        },
+        none => {
+            assert(false);
+        },
+    }
+    match (worker.content_range("bytes 5-9/*")) {
+        some(r) => {
+            assert(r.first == 5 && r.total == -1);
+        },
+        none => {
+            assert(false);
+        },
+    }
+    assert(match (worker.content_range("items 1-2/3")) {
+        some(r) => false,
+        none => true,
+    });
+    assert(worker.wait_ms(1000, 0, 0) == 0);  // no limit
+    assert(worker.wait_ms(50000, 400, 100000) == 100);  // 50 KB at 100 KB/s take 500 ms
+    assert(worker.wait_ms(50000, 900, 100000) == 0);
+    assert(model.kb_of(model.RateUnit.Kilo) == 1 && model.kb_of(model.RateUnit.Mega) == 1024);
+    assert(model.kb_of(model.RateUnit.Giga) == 1024 * 1024);
+    assert(model.share(0, 3) == 0);
+    assert(model.share(300, 3) == 102400);
+    assert(model.share(2, 4) == 1024);  // at least 1 KB/s each
+    // the field in its unit: 8 KB/s and 12 MB/s are the rates given to one download
+    assert(model.share(8 * model.kb_of(model.RateUnit.Kilo), 1) == 8 * 1024);
+    assert(model.share(12 * model.kb_of(model.RateUnit.Mega), 1) == 12 * 1024 * 1024);
+    assert(model.retry_delay_ms(1) == 1000 && model.retry_delay_ms(3) == 4000 && model.retry_delay_ms(6) == 30000);
+    assert(model.retry_delay_ms(9) == 30000);
+    assert(worker.worth_again(503) && worker.worth_again(429) && !worker.worth_again(404));
+}
+
+// Deletes a folder of a test, whatever happens.
+void forget(Arena* arena, str dir) uses io {
+    match (fs.remove_all(arena, dir)) {
+        ok => { },
+        err(e) => { },
+    }
+}
+
+// The next value of a channel of numbers, or -1 once it is closed.
+i64 next_of(channel.Channel<i64> c) uses threads {
+    return match (c.receive()) {
+        some(n) => n,
+        none => -1,
+    };
+}
+
+// The name a Content-Disposition gives, or "(none)".
+str given(Arena* arena, str value) {
+    return match (files.disposition_name(arena, value)) {
+        some(n) => n,
+        none => "(none)",
+    };
+}
+
+// ---- A server of the test ----
+
+// The byte at `i` of the files the server gives.
+ui8 byte_at(i64 i) {
+    return ((i * 7 + 3) % 251) as ui8;
+}
+
+// What the server of a test does with each connection, in turn (at most 4).
+struct Plan {
+    channel.Channel<ui16> port;  // where it says its port
+    i64 size;  // the size of its file
+    i32 connections;
+    i32[4] behaviors;  // 0: the file (or its end, after Range); 1: half of it, then the connection cut; 2: 404; 3: the file, named by the server
+    channel.Channel<i64> asked;  // the first byte asked by each connection (Range), for the test
+}
+
+// Serves the connections of `plan`: gives how many it served.
+i32 serve(Arena* arena, Plan plan) uses io, threads {
+    tcp.Listener* listener = match (tcp.listen(arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            bool told = plan.port.send(0);
+            return 0;
+        },
+    };
+    defer listener.close();
+    bool told = plan.port.send(listener.port());
+    mut i32 served = 0;
+    for (i32 k in 0..plan.connections) {
+        tcp.Stream* s = match (listener.accept(arena)) {
+            ok(s) => s,
+            err(e) => {
+                return served;
+            },
+        };
+        answer(arena, s, plan, plan.behaviors[k as usize]);
+        s.close();
+        served += 1;
+    }
+    return served;
+}
+
+void answer(Arena* arena, tcp.Stream* s, Plan plan, i32 behavior) uses io, threads {
+    mut ui8[] got = arena.alloc_slice(ui8, 4096);
+    mut usize size = 0;
+    mut bool head = false;
+    while (!head && size < got.len) {
+        usize n = match (s.read(got[size..got.len])) {
+            ok(n) => n,
+            err(e) => 0,
+        };
+        if (n == 0) {
+            return;
+        }
+        size += n;
+        head = size >= 4 && got[size - 4] == 13 && got[size - 3] == 10 && got[size - 2] == 13 && got[size - 1] == 10;
+    }
+    str request = match (str.from_bytes(got[0..size])) {
+        ok(t) => t,
+        err(e) => "",
+    };
+    mut i64 first = 0;
+    match (text.find(request, "\r\nRange: bytes=")) {
+        some(at) => {
+            usize start = at + 15;
+            mut usize end = start;
+            while (end < request.len && request.bytes[end] >= 48 && request.bytes[end] <= 57) {
+                end += 1;
+            }
+            first = match (text.parse_i64(text.slice(request, start, end))) {
+                ok(n) => n,
+                err(e) => 0,
+            };
+        },
+        none => { },
+    }
+    bool sent = plan.asked.send(first);
+    if (behavior == 2) {
+        write(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+    text.TextBuilder* b = text.builder(arena);
+    if (first > 0) {
+        b.push("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes ");
+        b.push_i64(first);
+        b.push("-");
+        b.push_i64(plan.size - 1);
+        b.push("/");
+        b.push_i64(plan.size);
+        b.push("\r\n");
+    } else {
+        b.push("HTTP/1.1 200 OK\r\n");
+    }
+    if (behavior == 3) {
+        b.push("Content-Disposition: attachment; filename=\"font.zip\"\r\n");
+    }
+    b.push("Content-Length: ");
+    b.push_i64(plan.size - first);
+    b.push("\r\n\r\n");
+    write(s, b.text());
+    i64 stop = behavior == 1 ? first + (plan.size - first) / 2 : plan.size;
+    mut ui8[] block = arena.alloc_slice(ui8, 8192);
+    mut i64 at = first;
+    while (at < stop) {
+        i64 n = stop - at < 8192 ? stop - at : 8192;
+        for (i64 i in 0..n) {
+            block[i as usize] = byte_at(at + i);
+        }
+        match (s.write_all(block[0..n as usize])) {
+            ok => { },
+            err(e) => {
+                return;  // the client paused: it closed its end
+            },
+        }
+        at += n;
+    }
+}
+
+void write(tcp.Stream* s, str t) uses io {
+    match (s.write_text(t)) {
+        ok => { },
+        err(e) => { },
+    }
+}
+
+// ---- Downloads against it ----
+
+// A download of the test: its job, made for the server at `port`.
+job.Job job_for(
+    ui16 port,
+    str path,
+    i64 offset,
+    i64 rate,
+    channel.Channel<job.Command> control,
+    channel.Channel<job.Event> events
+) {
+    mut Arena scratch = Arena.new(2 * KB);
+    defer scratch.free();
+    text.TextBuilder* b = text.builder(&scratch);
+    b.push("http://127.0.0.1:");
+    b.push_u64(port as ui64);
+    b.push("/file.bin");
+    str address = b.text();
+    mut ui8[2048] url = [0; 2048];
+    for (usize i in 0..address.len) {
+        url[i] = address.bytes[i];
+    }
+    mut ui8[1024] file = [0; 1024];
+    for (usize i in 0..path.len) {
+        file[i] = path.bytes[i];
+    }
+    return job.Job{
+        id: 1,
+        url: url,
+        url_len: address.len,
+        path: file,
+        path_len: path.len,
+        offset: offset,
+        rate: rate,
+        timeout_ms: 5000,
+        control: control,
+        events: events
+    };
+}
+
+// The last event of a download: the first that is not PROGRESS (after `first_progress` is
+// called on the first PROGRESS, if given).
+job.Event last_event(
+    channel.Channel<job.Event> events,
+    channel.Channel<job.Command> control,
+    bool pause_at_progress
+) uses threads {
+    mut bool paused = false;
+    while (true) {
+        job.Event e = match (events.receive()) {
+            some(x) => x,
+            none => {
+                return job.Event{
+                    id: 0,
+                    kind: 0,
+                    done: 0,
+                    total: 0,
+                    error: 0,
+                    status: 0,
+                    again: false,
+                    name: [0; 128],
+                    name_len: 0
+                };
+            },
+        };
+        if (e.kind != job.PROGRESS) {
+            return e;
+        }
+        if (pause_at_progress && !paused && e.done > 0) {
+            bool sent = control.send(job.Command.Pause);
+            paused = true;
+        }
+    }
+    return job.Event{
+        id: 0,
+        kind: 0,
+        done: 0,
+        total: 0,
+        error: 0,
+        status: 0,
+        again: false,
+        name: [0; 128],
+        name_len: 0
+    };
+}
+
+// Whether the file at `path` holds the `size` bytes of the server.
+bool whole(Arena* arena, str path, i64 size) uses io {
+    ui8[] bytes = match (io.read_bytes(arena, path)) {
+        ok(b) => b,
+        err(e) => {
+            return false;
+        },
+    };
+    if (bytes.len as i64 != size) {
+        return false;
+    }
+    for (usize i in 0..bytes.len) {
+        if (bytes[i] != byte_at(i as i64)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+test "downloads: whole, paused and resumed, cut and resumed, refused, kept to a rate" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    str dir = fixture.temp_dir(&arena, "courier-downloads");
+    defer forget(&arena, dir);
+    str path = fs.join(&arena, dir, "file.bin.part");
+    channel.Channel<job.Event> events = channel.new<job.Event>(256);
+    channel.Channel<job.Command> control = channel.new<job.Command>(8);
+    channel.Channel<ui16> ports = channel.new<ui16>(1);
+    channel.Channel<i64> asked = channel.new<i64>(8);
+    i64 size = 200000;
+
+    // whole, then again after a Pause at the first progress (at 100 KB/s: about two seconds),
+    // resumed from the bytes written
+    mut thread.Thread<Plan, i32>* t = thread.spawn(
+        &arena,
+        serve,
+        Plan{ port: ports, size: size, connections: 3, behaviors: [0, 0, 0, 0], asked: asked }
+    );
+    mut ui16 port = match (ports.receive()) {
+        some(p) => p,
+        none => 0,
+    };
+    assert(port != 0);
+    auto first = thread.spawn(&arena, worker.run, job_for(port, path, 0, 0, control, events));
+    mut job.Event e = last_event(events, control, false);
+    assert(e.kind == job.DONE && e.done == size && e.total == size);
+    assert(first.join() == size);
+    assert(whole(&arena, path, size));
+    assert(next_of(asked) == 0);
+    match (fs.remove_file(&arena, path)) {
+        ok => { },
+        err(x) => { },
+    }
+    auto paused = thread.spawn(&arena, worker.run, job_for(port, path, 0, 100000, control, events));
+    e = last_event(events, control, true);
+    assert(e.kind == job.PAUSED && e.done > 0 && e.done < size);
+    i64 kept = paused.join();
+    assert(kept == e.done);
+    assert(next_of(asked) == 0);
+    auto resumed = thread.spawn(&arena, worker.run, job_for(port, path, kept, 0, control, events));
+    e = last_event(events, control, false);
+    assert(e.kind == job.DONE && e.done == size);
+    assert(resumed.join() == size);
+    assert(next_of(asked) == kept);  // Range: bytes=<kept>-
+    assert(whole(&arena, path, size));
+    assert(t.join() == 3);
+
+    // cut by the server halfway: a failure worth trying again, then resumed
+    match (fs.remove_file(&arena, path)) {
+        ok => { },
+        err(x) => { },
+    }
+    t = thread.spawn(
+        &arena,
+        serve,
+        Plan{ port: ports, size: size, connections: 2, behaviors: [1, 0, 0, 0], asked: asked }
+    );
+    port = match (ports.receive()) {
+        some(p) => p,
+        none => 0,
+    };
+    auto cut = thread.spawn(&arena, worker.run, job_for(port, path, 0, 0, control, events));
+    e = last_event(events, control, false);
+    assert(e.kind == job.FAILED && e.error == job.NETWORK && e.again && e.done == size / 2);
+    i64 half = cut.join();
+    auto again = thread.spawn(&arena, worker.run, job_for(port, path, half, 0, control, events));
+    e = last_event(events, control, false);
+    assert(e.kind == job.DONE && e.done == size);
+    i64 total = again.join();
+    assert(whole(&arena, path, size));
+    assert(next_of(asked) == 0 && next_of(asked) == half);
+    assert(t.join() == 2);
+
+    // refused: 404 is not worth trying again
+    t = thread.spawn(
+        &arena,
+        serve,
+        Plan{ port: ports, size: size, connections: 1, behaviors: [2, 0, 0, 0], asked: asked }
+    );
+    port = match (ports.receive()) {
+        some(p) => p,
+        none => 0,
+    };
+    auto refused = thread.spawn(
+        &arena,
+        worker.run,
+        job_for(port, fs.join(&arena, dir, "missing.part"), 0, 0, control, events)
+    );
+    e = last_event(events, control, false);
+    assert(e.kind == job.FAILED && e.error == job.SERVER && e.status == 404 && !e.again);
+    i64 none_done = refused.join();
+    assert(next_of(asked) == 0);
+    assert(t.join() == 1);
+
+    // named by the server: the events carry the name
+    match (fs.remove_file(&arena, path)) {
+        ok => { },
+        err(x) => { },
+    }
+    t = thread.spawn(
+        &arena,
+        serve,
+        Plan{ port: ports, size: size, connections: 1, behaviors: [3, 0, 0, 0], asked: asked }
+    );
+    port = match (ports.receive()) {
+        some(p) => p,
+        none => 0,
+    };
+    auto named = thread.spawn(&arena, worker.run, job_for(port, path, 0, 0, control, events));
+    e = last_event(events, control, false);
+    mut ui8[128] name_bytes = e.name;
+    assert(e.kind == job.DONE && check.same_text(job.text_of(&arena, name_bytes[0..128], e.name_len), "font.zip"));
+    i64 named_done = named.join();
+    assert(next_of(asked) == 0);
+    assert(t.join() == 1);
+
+    // kept to 100 KB/s: 200 KB take about two seconds
+    match (fs.remove_file(&arena, path)) {
+        ok => { },
+        err(x) => { },
+    }
+    t = thread.spawn(
+        &arena,
+        serve,
+        Plan{ port: ports, size: size, connections: 1, behaviors: [0, 0, 0, 0], asked: asked }
+    );
+    port = match (ports.receive()) {
+        some(p) => p,
+        none => 0,
+    };
+    ui64 began = time.monotonic_ms();
+    auto slow = thread.spawn(&arena, worker.run, job_for(port, path, 0, 100000, control, events));
+    e = last_event(events, control, false);
+    ui64 took = time.monotonic_ms() - began;
+    assert(e.kind == job.DONE && whole(&arena, path, size));
+    assert(took >= 1500);  // 200 000 bytes at 100 000 per second: 2 s, less the first block
+    i64 slow_done = slow.join();
+    assert(next_of(asked) == 0);
+    assert(t.join() == 1);
+    events.free();
+    control.free();
+    ports.free();
+    asked.free();
+}

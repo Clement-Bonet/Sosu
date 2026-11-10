@@ -124,6 +124,13 @@ static void print_type(Printer *pr, const TypeExpr *type) {
             }
         }
         break;
+    case TYPE_EFFECTS:
+        fputs("uses ", pr->out);
+        for (size_t i = 0; i < type->as.effects.count; i++) {
+            if (i) fputs(", ", pr->out);
+            print_name(pr, type->as.effects.items[i]);
+        }
+        break;
     }
 }
 

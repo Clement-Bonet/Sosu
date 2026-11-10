@@ -35,6 +35,7 @@ typedef enum {
     TYPE_SLICE,   /* T[] */
     TYPE_RESULT,  /* T!E */
     TYPE_FN,      /* fn(A, B) -> R uses io */
+    TYPE_EFFECTS, /* `uses io, E`: the last type argument, for an effect parameter of an interface */
 } TypeKind;
 
 struct TypeExpr {
@@ -49,6 +50,7 @@ struct TypeExpr {
         struct { TypeExpr *element; uint64_t size; Path size_name; } array; /* size_name: `ui8[NAME]` */
         struct { TypeExpr *value; TypeExpr *error; } result;
         struct { TypeExpr **params; bool *keeps; size_t param_count; TypeExpr *ret; Path effects; } fn; /* keeps: `keeps` before a parameter */
+        Path effects; /* EFFECTS */
     } as;
 };
 

@@ -74,6 +74,7 @@ build\sosuc.exe test showcase\pixelforge || exit /b 1
 build\sosuc.exe test showcase\queens || exit /b 1
 build\sosuc.exe test showcase\sheets || exit /b 1
 build\sosuc.exe test showcase\vault || exit /b 1
+build\sosuc.exe test showcase\courier || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

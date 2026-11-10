@@ -1,0 +1,64 @@
+// courier.job: what the window and the threads of the downloads say to each other, through
+// channels (spec 5.6): values without pointers, so the URL and the path travel as bytes.
+import std.channel;
+
+// What the window asks of a download that runs.
+pub enum Command {
+    Pause,  // stop now, keeping what was written: a resume goes on from there
+    Limit(i64 rate),  // the most bytes per second from now on (0: no limit)
+}
+
+// What happened to a download, for the window.
+pub i32 PROGRESS = 1;  // more bytes written
+pub i32 DONE = 2;  // the whole file is there
+pub i32 PAUSED = 3;  // stopped by a Pause
+pub i32 FAILED = 4;  // stopped by an error
+
+// The errors of a download.
+pub i32 NO_ERROR = 0;
+pub i32 NETWORK = 1;  // the connection failed or was cut: tried again
+pub i32 SERVER = 2;  // the server answered with an error (`status`); 5xx, 408 and 429 are tried again
+pub i32 DISK = 3;  // the file cannot be written
+pub i32 REFUSED = 4;  // an URL, a certificate or an answer that trying again cannot change
+
+pub struct Event {
+    pub i32 id;
+    pub i32 kind;  // PROGRESS, DONE, PAUSED, FAILED
+    pub i64 done;  // the bytes in the file
+    pub i64 total;  // the size of the file, or -1 if the server did not say
+    pub i32 error;  // FAILED: NETWORK, SERVER, DISK or REFUSED
+    pub i32 status;  // SERVER: the status of HTTP
+    pub bool again;  // FAILED: whether trying again may succeed
+    pub ui8[128] name;  // the name of the file the server gives (Content-Disposition), if any
+    pub usize name_len;
+}
+
+// The longest URL and path a download takes.
+pub usize MAX_URL = 2048;
+pub usize MAX_PATH = 1024;
+
+// A download given to its thread.
+pub struct Job {
+    pub i32 id;
+    pub ui8[2048] url;
+    pub usize url_len;
+    pub ui8[1024] path;  // the file being written (its name ends in `.part`)
+    pub usize path_len;
+    pub i64 offset;  // the bytes already in the file: asked from there (Range)
+    pub i64 rate;  // the most bytes per second (0: no limit)
+    pub i32 timeout_ms;
+    pub channel.Channel<Command> control;
+    pub channel.Channel<Event> events;
+}
+
+// The text held in `bytes[0..len]`, in `arena`.
+pub str text_of(Arena* arena, ui8[] bytes, usize len) {
+    mut ui8[] copy = arena.alloc_slice(ui8, len);
+    for (usize i in 0..len) {
+        copy[i] = bytes[i];
+    }
+    return match (str.from_bytes(copy)) {
+        ok(t) => t,
+        err(e) => "",
+    };
+}
