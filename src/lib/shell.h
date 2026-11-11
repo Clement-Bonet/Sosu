@@ -62,6 +62,10 @@ char *shell_last_entry(const char *dir);
    them. Each name and the array are new; NULL with 0 if there are none. */
 char **shell_files_ending(const char *dir, const char *suffix, size_t *count);
 
+/* The files of `dir` and of its subfolders that end in `suffix`, as paths relative to `dir` with
+   `/` (`a/b.cpp`), sorted; folders whose name starts with `.` are skipped. NULL with 0 if none. */
+char **shell_files_below(const char *dir, const char *suffix, size_t *count);
+
 /* The time of the last change of the file at `path` (seconds, or finer, from some origin of the
    system) and its size; false if it is not there. */
 bool shell_file_stamp(const char *path, long long *time, long long *size);

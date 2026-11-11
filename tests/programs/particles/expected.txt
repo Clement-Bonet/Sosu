@@ -1,0 +1,3 @@
+particles drawn: 80
+a cloud in the open: ok
+a cloud behind the cube is hidden: ok

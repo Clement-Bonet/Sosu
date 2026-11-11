@@ -1,10 +1,12 @@
 // render3d without a window (spec §8.2): a cube on a ground, lit by a sun from the upper left,
 // drawn into a target of 128 by 128 pixels and read back. The ground away from the cube is lit,
 // the ground where the cube casts its shadow is darker, the top of the cube is brighter than its
-// front (which the sun does not light), and a cube behind the camera is left out.
+// front (which the sun does not light), and a cube behind the camera is left out. A skinned cube,
+// all its vertices on one joint, is drawn where the palette of its item puts that joint.
 import std.io;
 import math.linear;
 import image.image;
+import model.model;
 import gpu.gpu;
 import render3d.render3d;
 
@@ -61,6 +63,43 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
     }
     render3d.Stats s = r.stats();
     io.print("drawn: {}, left out: {}", s.drawn, s.culled);
+
+    // a skinned cube: its vertices on joint 0, which the palette moves 3 to the left
+    model.Model plain = render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]);
+    model.Mesh m0 = plain.meshes[0];
+    mut model.Influence[] influences = arena.alloc_slice(model.Influence, m0.vertices.len);
+    for (usize i in 0..influences.len) {
+        influences[i].weights[0] = 1.0;
+    }
+    mut model.Mesh[] skinned_meshes = arena.alloc_slice(model.Mesh, 1);
+    skinned_meshes[0] = model.Mesh{ name: m0.name, vertices: m0.vertices, indices: m0.indices, material: m0.material,
+            bounds: m0.bounds, influences: some(influences) };
+    mut model.Node[] nodes = arena.alloc_slice(model.Node, 1);
+    nodes[0] = model.Node{ name: "skinned", local: linear.identity4(), meshes: plain.nodes[0].meshes, children: plain.nodes[0].children,
+            skin: some(0) };
+    mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, 1);
+    binds[0] = linear.identity4();
+    mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
+    skins[0] = model.Skin{ name: "one", joints: plain.roots, inverse_binds: binds };
+    model.Model skinned = model.Model{ meshes: skinned_meshes, materials: plain.materials, images: plain.images, nodes: nodes,
+            roots: plain.roots, skins: some(skins) };
+    render3d.Uploaded* moved = try r.upload(arena, skinned);
+    mut linear.Mat4[] palette = arena.alloc_slice(linear.Mat4, 1);
+    palette[0] = linear.translation(linear.vec3(-3.0, 1.0, 0.0));
+    mut render3d.Item[1] dancers = [render3d.Item{ model: moved, transform: linear.identity4(), palette: some(palette) }];
+    gpu.Frame second = try device.commands();
+    r.draw_into(second, target, camera, dancers[0..1]);
+    try second.submit_and_wait();
+    image.Image img2 = try device.read_texture(arena, target);
+    i32[2] there = screen(camera, linear.vec3(-3.0, 2.0, 0.0));
+    i32[2] rest = screen(camera, linear.vec3(0.0, 2.0, 0.0));
+    ui32 green = img2.at(there[0], there[1]) >> 8 & 0xFF;
+    ui32 empty = img2.at(rest[0], rest[1]) >> 8 & 0xFF;
+    io.print("skinned cube where its joint is: {}", green > 80 && empty < 40 ? "ok" : "no");
+    if (green <= 80 || empty >= 40) {
+        io.print("green there {}, at rest {}", green, empty);
+    }
+    r.release(moved);
 
     device.release_texture(target);
     r.release(box);

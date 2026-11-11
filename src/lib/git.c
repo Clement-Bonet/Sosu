@@ -7,6 +7,7 @@
 
 #include "path.h"
 #include "shell.h"
+#include "source.h"
 
 /* ---- sosu.lock ---- */
 
@@ -179,27 +180,27 @@ static bool move_dir(const char *from, const char *to) {
     return false;
 }
 
-static bool holds_package(const char *dir) {
-    char *manifest = path_join(dir, "sosu.toml");
-    bool found = shell_file_exists(manifest);
-    free(manifest);
+static bool holds_checkout(const char *dir, bool package) {
+    char *marker = path_join(dir, package ? "sosu.toml" : ".git");
+    bool found = package ? shell_file_exists(marker) : shell_dir_exists(marker) || shell_file_exists(marker);
+    free(marker);
     return found;
 }
 
-char *git_cached(const char *deps_dir, const char *name, const char *commit) {
+char *git_cached(const char *deps_dir, const char *name, const char *commit, bool package) {
     char *dir = checkout_dir(deps_dir, name, commit);
-    if (holds_package(dir)) return dir;
+    if (holds_checkout(dir, package)) return dir;
     free(dir);
     return NULL;
 }
 
 char *git_fetch(const char *deps_dir, const char *name, const char *url, const char *kind, const char *ref,
-                const char *commit, char **commit_out, char **error) {
+                const char *commit, bool package, char **commit_out, char **error) {
     *commit_out = NULL;
     *error = NULL;
     if (commit) {
         char *dir = checkout_dir(deps_dir, name, commit);
-        if (holds_package(dir)) {
+        if (holds_checkout(dir, package)) {
             *commit_out = sosu_strdup(commit);
             return dir;
         }
@@ -215,18 +216,32 @@ char *git_fetch(const char *deps_dir, const char *name, const char *url, const c
 
     char *target = commit ? sosu_strdup(commit) : strcmp(kind, "tag") == 0 ? sosu_format("refs/tags/%s", ref)
                                                                          : sosu_strdup(ref);
+    /* First the files of that commit alone, without the history (a tag, or a full commit that the
+       server gives: GitHub does); else, an abbreviated rev or a server that refuses, all of it. */
+    const char *init[] = { "init", "--quiet", "--", work, NULL };
+    char *git_dir = sosu_format("--git-dir=%s/.git", work); /* a local URL stays relative to here */
+    const char *shallow[] = { git_dir, "fetch", "--quiet", "--depth", "1", "--", url, target, NULL };
+    const char *checkout_fetched[] = { "-C", work, "-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD", NULL };
     const char *clone[] = { "clone", "--quiet", "--no-checkout", "--", url, work, NULL };
     const char *checkout[] = { "-C", work, "-c", "advice.detachedHead=false", "checkout", "--quiet", target, NULL };
     const char *rev_parse[] = { "-C", work, "rev-parse", "HEAD", NULL };
     char *what_clone = sosu_format("cannot clone `%s`", url);
     char *what_checkout = sosu_format("cannot check out %s `%s`", commit ? "the commit" : kind, commit ? commit : ref);
     char *dir = NULL;
-    if (run_git(clone, log, what_clone, error) && run_git(checkout, log, what_checkout, error) &&
+    bool fetched = commit ? is_commit(commit) : strcmp(kind, "tag") == 0 || is_commit(ref);
+    if (fetched) {
+        char *ignored = NULL;
+        fetched = run_git(init, log, what_clone, &ignored) && run_git(shallow, log, what_clone, &ignored) &&
+                  run_git(checkout_fetched, log, what_checkout, &ignored);
+        free(ignored);
+        if (!fetched) shell_remove_dir(work);
+    }
+    if ((fetched || (run_git(clone, log, what_clone, error) && run_git(checkout, log, what_checkout, error))) &&
         run_git(rev_parse, log, "cannot read the commit", error)) {
         char *found = first_line(log);
         if (is_commit(found)) {
             dir = checkout_dir(deps_dir, name, found);
-            if (holds_package(dir)) {
+            if (holds_checkout(dir, package)) {
                 shell_remove_dir(work);
             } else {
                 shell_remove_dir(dir);
@@ -247,7 +262,51 @@ char *git_fetch(const char *deps_dir, const char *name, const char *url, const c
     free(target);
     free(what_clone);
     free(what_checkout);
+    free(git_dir);
     free(work);
     free(log);
     return dir;
+}
+
+char **git_remote_tags(const char *url, size_t *count, char **error) {
+    *count = 0;
+    *error = NULL;
+    char *log = sosu_format("%s/sosu-tags-%u.log", ".", (unsigned)rand());
+    const char *args[] = { "ls-remote", "--tags", "--refs", "--", url, NULL };
+    char *what = sosu_format("cannot list the tags of `%s`", url);
+    char **tags = NULL;
+    if (run_git(args, log, what, error)) {
+        SourceFile text;
+        if (source_load(&text, log)) {
+            size_t cap = 0;
+            const char *c = text.text;
+            const char *end = text.text + text.length;
+            while (c < end) {
+                const char *line_end = memchr(c, '\n', (size_t)(end - c));
+                if (!line_end) line_end = end;
+                const char *ref = NULL;
+                for (const char *p = c; p + 10 <= line_end; p++) {
+                    if (memcmp(p, "refs/tags/", 10) == 0) {
+                        ref = p + 10;
+                        break;
+                    }
+                }
+                if (ref) {
+                    size_t n = (size_t)(line_end - ref);
+                    while (n > 0 && (ref[n - 1] == '\r' || ref[n - 1] == ' ')) n--;
+                    if (*count == cap) {
+                        cap = cap ? cap * 2 : 16;
+                        tags = sosu_realloc(tags, cap * sizeof *tags);
+                    }
+                    tags[(*count)++] = sosu_format("%.*s", (int)n, ref);
+                }
+                c = line_end + 1;
+            }
+            source_free(&text);
+        }
+    }
+    remove(log);
+    free(log);
+    free(what);
+    return tags;
 }

@@ -1,0 +1,3 @@
+# sosu.lock: the commit of each git dependency, written by sosuc. Keep it in version control.
+native.jolt https://github.com/jrouwe/JoltPhysics tag v5.6.0 e77f175595e64cb44218cc9d9d56fc365ad0e36a
+native.recast https://github.com/recastnavigation/recastnavigation tag v1.6.0 6dc1667f580357e8a2154c28b7867bea7e8ad3a7

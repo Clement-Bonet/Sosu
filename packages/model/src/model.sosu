@@ -9,6 +9,7 @@ import std.text;
 import std.vec;
 import math.linear;
 import math.geometry;
+import math.curve;
 import image.image;
 import image.png;
 import image.jpeg;
@@ -20,6 +21,13 @@ pub struct Vertex {
     pub mut f32[2] uv;  // 0, 0 at the top left of the texture, as glTF and `gpu` have it
 }
 
+// The joints that move a vertex and their weights (whose sum is 1): indices into the `joints` of
+// the skin of the node that holds the mesh. Unused places have a weight of 0.
+pub struct Influence {
+    pub mut ui16[4] joints;
+    pub mut f32[4] weights;
+}
+
 // Triangles of one material: three indices of `vertices` each.
 pub struct Mesh {
     pub str name;
@@ -27,6 +35,7 @@ pub struct Mesh {
     pub ui32[] indices;
     pub mut usize? material;  // in `Model.materials`
     pub geometry.Aabb bounds;  // in the space of the mesh
+    pub Influence[]? influences = none;  // one per vertex, for a mesh moved by a skin
 }
 
 // A material of metal and roughness, as glTF has it (OBJ gives its color and texture).
@@ -45,6 +54,41 @@ pub struct Node {
     pub linear.Mat4 local;
     pub usize[] meshes;  // in `Model.meshes`
     pub usize[] children;  // in `Model.nodes`
+    pub usize? skin = none;  // in `Model.skins`: what moves its meshes
+    // `local` taken apart, as animations change it (identity for a node given by a matrix that
+    // is not one of translation, rotation and scale)
+    pub linear.Transform? transform = none;
+}
+
+// A skeleton: the nodes that are its joints, and for each the matrix that brings a vertex from
+// the space of the mesh into that of the joint at rest (its inverse bind matrix).
+pub struct Skin {
+    pub str name;
+    pub usize[] joints;  // in `Model.nodes`
+    pub linear.Mat4[] inverse_binds;  // one per joint
+}
+
+// What a channel of an animation moves.
+pub enum Target {
+    Translation,
+    Rotation,  // a quaternion, x y z w
+    Scale,
+}
+
+// The keys of one property of one node. `values` holds 3 numbers per key (4 for a rotation); for
+// `Hermite`, three such groups per key: the tangent in, the value, the tangent out, as glTF has them.
+pub struct Channel {
+    pub usize node;  // in `Model.nodes`
+    pub Target target;
+    pub curve.Interpolation mode;
+    pub f32[] times;  // seconds, increasing
+    pub f32[] values;
+}
+
+pub struct Animation {
+    pub str name;
+    pub Channel[] channels;
+    pub f32 duration;  // the last time of its channels
 }
 
 pub struct Model {
@@ -53,6 +97,23 @@ pub struct Model {
     pub image.Image[] images;
     pub Node[] nodes;
     pub usize[] roots;  // the nodes of the scene shown, without a parent
+    pub Skin[]? skins = none;
+    pub Animation[]? animations = none;
+
+    // The animation named `name`.
+    pub Animation? animation(str name) {
+        return match (animations) {
+            some(list) => {
+                for (Animation a in list) {
+                    if (a.name == name) {
+                        return some(a);
+                    }
+                }
+                return none;
+            },
+            none => none,
+        };
+    }
 }
 
 // What went wrong. `Damaged` says what, for a message.
@@ -259,7 +320,9 @@ pub Model with_textures(Arena* arena, Model m, str folder) uses io {
         materials: materials.items(),
         images: images.items(),
         nodes: m.nodes,
-        roots: m.roots
+        roots: m.roots,
+        skins: m.skins,
+        animations: m.animations
     };
 }
 

@@ -1,0 +1,303 @@
+// math.curve: values that change over time (spec §8.2). A `Curve` is keys of time and value, read
+// between them by steps, by straight lines, or by the cubic splines of Hermite that glTF gives with
+// their tangents; `Curve3` is the same for a `Vec3`, and a `Gradient` is colors over 0..1. `anim`
+// samples the channels of clips with them, `particles` the sizes and colors over the life of a
+// particle. Before the first key a curve holds the first value, after the last the last value.
+import math.linear;
+
+pub enum Interpolation {
+    Step,     // the value of the key before, until the next
+    Linear,   // a straight line between two keys
+    Hermite,  // a cubic spline through the keys, with the tangents given (glTF's CUBICSPLINE)
+}
+
+// A key: a value at a time, and its tangents (for `Hermite` only), in value per second.
+pub struct Key {
+    pub f32 time;
+    pub f32 value;
+    pub f32 in_tangent = 0.0;
+    pub f32 out_tangent = 0.0;
+}
+
+pub Key key(f32 time, f32 value) {
+    return Key{ time: time, value: value };
+}
+
+// Where `t` falls among keys of `count` times read by `time_of`: the key before (or 0) and the
+// fraction of the way to the next (0 before the first key, 1 after the last).
+struct Span {
+    usize index;
+    f32 fraction;
+    f32 width;  // the time between the two keys
+}
+
+// The cubic of Hermite at `s` (0..1), from `v0` with the tangent `m0` to `v1` with `m1`, both
+// already multiplied by the width of the span.
+pub f32 hermite(f32 v0, f32 m0, f32 v1, f32 m1, f32 s) {
+    f32 s2 = s * s;
+    f32 s3 = s2 * s;
+    return (2.0 * s3 - 3.0 * s2 + 1.0) * v0 + (s3 - 2.0 * s2 + s) * m0 + (-2.0 * s3 + 3.0 * s2) * v1 + (s3 - s2) * m1;
+}
+
+pub struct Curve {
+    pub Key[] keys;  // by time, increasing
+    pub Interpolation mode = Interpolation.Linear;
+
+    Span span(f32 t) {
+        usize n = keys.len;
+        if (n == 0 || t <= keys[0].time) {
+            return Span{ index: 0, fraction: 0.0, width: 0.0 };
+        }
+        if (t >= keys[n - 1].time) {
+            return Span{ index: n - 1, fraction: 0.0, width: 0.0 };
+        }
+        // the last key at or before t
+        mut usize low = 0;
+        mut usize high = n - 1;
+        while (high - low > 1) {
+            usize middle = (low + high) / 2;
+            if (keys[middle].time <= t) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        f32 width = keys[low + 1].time - keys[low].time;
+        return Span{ index: low, fraction: width > 0.0 ? (t - keys[low].time) / width : 0.0, width: width };
+    }
+
+    // The value at `t`; 0 for a curve without keys.
+    pub f32 sample(f32 t) {
+        if (keys.len == 0) {
+            return 0.0;
+        }
+        Span s = span(t);
+        Key a = keys[s.index];
+        if (s.width == 0.0) {
+            return a.value;
+        }
+        Key b = keys[s.index + 1];
+        return match (mode) {
+            Step => a.value,
+            Linear => a.value + (b.value - a.value) * s.fraction,
+            Hermite => hermite(a.value, a.out_tangent * s.width, b.value, b.in_tangent * s.width, s.fraction),
+        };
+    }
+
+    // The time of the last key: the length of a clip.
+    pub f32 duration() {
+        return keys.len == 0 ? 0.0 : keys[keys.len - 1].time;
+    }
+
+    // True when the times increase, or stay, from key to key, and none is NaN.
+    pub bool valid() {
+        for (usize i in 0..keys.len) {
+            Key k = keys[i];
+            if (k.time != k.time || k.value != k.value || (i > 0 && k.time < keys[i - 1].time)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// A curve that holds `value` at every time.
+pub Curve constant(Arena* arena, f32 value) {
+    mut Key[] keys = arena.alloc_slice(Key, 1);
+    keys[0] = key(0.0, value);
+    return Curve{ keys: keys, mode: Interpolation.Step };
+}
+
+// A straight line from `from` at 0 to `to` at 1: a size over the life of a particle.
+pub Curve line(Arena* arena, f32 from, f32 to) {
+    mut Key[] keys = arena.alloc_slice(Key, 2);
+    keys[0] = key(0.0, from);
+    keys[1] = key(1.0, to);
+    return Curve{ keys: keys, mode: Interpolation.Linear };
+}
+
+// A curve of the keys, copied; none when their times decrease or a number is NaN.
+pub Curve? of(Arena* arena, Key[] keys, Interpolation mode) {
+    mut Key[] copy = arena.alloc_slice(Key, keys.len);
+    for (usize i in 0..keys.len) {
+        copy[i] = keys[i];
+    }
+    Curve c = Curve{ keys: copy, mode: mode };
+    return c.valid() ? some(c) : none;
+}
+
+pub struct Key3 {
+    pub f32 time;
+    pub linear.Vec3 value;
+    pub linear.Vec3 in_tangent = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
+    pub linear.Vec3 out_tangent = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
+}
+
+pub Key3 key3(f32 time, linear.Vec3 value) {
+    return Key3{ time: time, value: value };
+}
+
+// The same as a `Curve`, for a `Vec3`: a position, a scale, a velocity.
+pub struct Curve3 {
+    pub Key3[] keys;
+    pub Interpolation mode = Interpolation.Linear;
+
+    Span span(f32 t) {
+        usize n = keys.len;
+        if (n == 0 || t <= keys[0].time) {
+            return Span{ index: 0, fraction: 0.0, width: 0.0 };
+        }
+        if (t >= keys[n - 1].time) {
+            return Span{ index: n - 1, fraction: 0.0, width: 0.0 };
+        }
+        mut usize low = 0;
+        mut usize high = n - 1;
+        while (high - low > 1) {
+            usize middle = (low + high) / 2;
+            if (keys[middle].time <= t) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        f32 width = keys[low + 1].time - keys[low].time;
+        return Span{ index: low, fraction: width > 0.0 ? (t - keys[low].time) / width : 0.0, width: width };
+    }
+
+    pub linear.Vec3 sample(f32 t) {
+        if (keys.len == 0) {
+            return linear.vec3(0.0, 0.0, 0.0);
+        }
+        Span s = span(t);
+        Key3 a = keys[s.index];
+        if (s.width == 0.0) {
+            return a.value;
+        }
+        Key3 b = keys[s.index + 1];
+        return match (mode) {
+            Step => a.value,
+            Linear => a.value.lerp(b.value, s.fraction),
+            Hermite => linear.vec3(
+                hermite(a.value.x, a.out_tangent.x * s.width, b.value.x, b.in_tangent.x * s.width, s.fraction),
+                hermite(a.value.y, a.out_tangent.y * s.width, b.value.y, b.in_tangent.y * s.width, s.fraction),
+                hermite(a.value.z, a.out_tangent.z * s.width, b.value.z, b.in_tangent.z * s.width, s.fraction)
+            ),
+        };
+    }
+
+    pub f32 duration() {
+        return keys.len == 0 ? 0.0 : keys[keys.len - 1].time;
+    }
+
+    pub bool valid() {
+        for (usize i in 0..keys.len) {
+            Key3 k = keys[i];
+            if (k.time != k.time || (i > 0 && k.time < keys[i - 1].time)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// A color of a gradient, at `at` in 0..1: linear RGBA.
+pub struct Stop {
+    pub f32 at;
+    pub linear.Vec4 color;
+}
+
+pub Stop stop(f32 at, linear.Vec4 color) {
+    return Stop{ at: at, color: color };
+}
+
+// Colors over 0..1, mixed in straight lines between their stops.
+pub struct Gradient {
+    pub Stop[] stops;  // by `at`, increasing
+
+    pub linear.Vec4 sample(f32 t) {
+        usize n = stops.len;
+        if (n == 0) {
+            return linear.vec4(1.0, 1.0, 1.0, 1.0);
+        }
+        if (t <= stops[0].at) {
+            return stops[0].color;
+        }
+        for (usize i in 1..n) {
+            if (t < stops[i].at) {
+                Stop a = stops[i - 1];
+                Stop b = stops[i];
+                f32 width = b.at - a.at;
+                return width > 0.0 ? a.color.lerp(b.color, (t - a.at) / width) : b.color;
+            }
+        }
+        return stops[n - 1].color;
+    }
+}
+
+// From `from` at 0 to `to` at 1.
+pub Gradient gradient(Arena* arena, linear.Vec4 from, linear.Vec4 to) {
+    mut Stop[] stops = arena.alloc_slice(Stop, 2);
+    stops[0] = stop(0.0, from);
+    stops[1] = stop(1.0, to);
+    return Gradient{ stops: stops };
+}
+
+// One color at every time.
+pub Gradient solid(Arena* arena, linear.Vec4 color) {
+    mut Stop[] stops = arena.alloc_slice(Stop, 1);
+    stops[0] = stop(0.0, color);
+    return Gradient{ stops: stops };
+}
+
+bool close(f32 a, f32 b) {
+    return abs(a - b) <= 0.0001;
+}
+
+test "curves: steps, lines, before and after" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut Key[3] keys = [key(0.0, 1.0), key(1.0, 3.0), key(3.0, -1.0)];
+    Curve c = match (of(&arena, keys[0..3], Interpolation.Linear)) {
+        some(x) => x,
+        none => constant(&arena, 0.0),
+    };
+    assert(close(c.sample(-5.0), 1.0) && close(c.sample(0.5), 2.0) && close(c.sample(2.0), 1.0));
+    assert(close(c.sample(3.0), -1.0) && close(c.sample(9.0), -1.0) && close(c.duration(), 3.0));
+    Curve s = Curve{ keys: c.keys, mode: Interpolation.Step };
+    assert(close(s.sample(0.99), 1.0) && close(s.sample(1.0), 3.0) && close(s.sample(2.9), 3.0));
+    mut Key[2] backwards = [key(1.0, 0.0), key(0.0, 1.0)];
+    assert(match (of(&arena, backwards[0..2], Interpolation.Linear)) {
+        some(x) => false,
+        none => true,
+    });
+    assert(close(line(&arena, 0.2, 1.2).sample(0.5), 0.7) && close(constant(&arena, 4.0).sample(7.0), 4.0));
+    assert(close(Curve{ keys: arena.alloc_slice(Key, 0) }.sample(1.0), 0.0));
+}
+
+test "curves of Hermite: through their keys, with their tangents" {
+    // y = t³ on 0..2: its keys and its derivatives 3t² give it back exactly
+    mut Key[3] keys = [
+        Key{ time: 0.0, value: 0.0, in_tangent: 0.0, out_tangent: 0.0 },
+        Key{ time: 1.0, value: 1.0, in_tangent: 3.0, out_tangent: 3.0 },
+        Key{ time: 2.0, value: 8.0, in_tangent: 12.0, out_tangent: 12.0 }
+    ];
+    Curve c = Curve{ keys: keys[0..3], mode: Interpolation.Hermite };
+    assert(close(c.sample(0.5), 0.125) && close(c.sample(1.5), 3.375) && close(c.sample(1.0), 1.0));
+    // a flat tangent eases in and out
+    mut Key[2] ease = [key(0.0, 0.0), key(1.0, 1.0)];
+    Curve e = Curve{ keys: ease[0..2], mode: Interpolation.Hermite };
+    assert(close(e.sample(0.5), 0.5) && e.sample(0.1) < 0.1);
+}
+
+test "curves of vectors and gradients" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    mut Key3[2] keys = [key3(0.0, linear.vec3(0.0, 0.0, 0.0)), key3(2.0, linear.vec3(2.0, 4.0, -2.0))];
+    Curve3 c = Curve3{ keys: keys[0..2] };
+    assert(c.sample(1.0).near(linear.vec3(1.0, 2.0, -1.0), 0.0001) && c.sample(5.0).near(linear.vec3(2.0, 4.0, -2.0), 0.0001));
+    Gradient g = gradient(&arena, linear.vec4(1.0, 1.0, 1.0, 1.0), linear.vec4(0.0, 0.0, 0.0, 0.0));
+    assert(g.sample(0.25).near(linear.vec4(0.75, 0.75, 0.75, 0.75), 0.0001) && g.sample(2.0).near(linear.vec4(0.0, 0.0, 0.0, 0.0), 0.0001));
+    mut Stop[3] stops = [stop(0.0, linear.vec4(1.0, 0.0, 0.0, 1.0)), stop(0.5, linear.vec4(0.0, 1.0, 0.0, 1.0)), stop(1.0, linear.vec4(0.0, 0.0, 1.0, 0.0))];
+    Gradient three = Gradient{ stops: stops[0..3] };
+    assert(three.sample(0.75).near(linear.vec4(0.0, 0.5, 0.5, 0.5), 0.0001) && three.sample(0.5).near(linear.vec4(0.0, 1.0, 0.0, 1.0), 0.0001));
+}

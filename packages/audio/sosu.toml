@@ -10,3 +10,4 @@ c = ["native/ogg.c"]  # includes native/vendor/stb_vorbis.c
 
 [dependencies]
 platform = { path = "../platform" }  # SDL3 and its declarations (platform.sdl_c)
+math = { path = "../math" }  # audio.spatial: vectors and rotations

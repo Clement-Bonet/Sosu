@@ -1,0 +1,41 @@
+a sphere of radius 0 is not a shape: ok
+a body of no shape is dead: ok
+a hull of 3 points is not a shape: ok
+mass of a ball of water of 0.5 m: ok
+advance runs one step per frame: ok
+free fall for one second: ok
+advance(0.05) runs 3 steps: ok
+a contact began with the floor: ok
+the ball rests on the floor: ok
+the stack stands: ok
+the stack sleeps: ok
+an impulse wakes it: ok
+a ray hits the floor: ok
+a ray hits the pole: ok
+a ray on layer 1 misses the poles: ok
+ray_all finds both poles, the nearest first: ok
+a sphere cast stops on the floor: ok
+overlap finds the pole: ok
+overlap on layer 1 finds nothing: ok
+a body whose mask leaves out the floor falls through it: ok
+the other one stands on it: ok
+the ball enters the sensor, then leaves it: ok
+a body is alive: ok
+a removed body is dead: ok
+a mesh: ok
+a dynamic body of a mesh is refused: ok
+a static mesh: ok
+a heightfield: ok
+a static heightfield: ok
+a compound weighs its parts: ok
+it lands on the mesh: ok
+a ball lands on the heightfield: ok
+the kinematic body reaches its place: ok
+it pushed the box ahead of it: ok
+the character stands on the floor: ok
+it climbs the step: ok
+it stops at the wall: ok
+it jumps: ok
+none for a character shorter than its width: ok
+sync writes the position and the rotation, and keeps the scale: ok
+the same steps twice give the same world: ok

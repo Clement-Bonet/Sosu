@@ -145,3 +145,42 @@ under their own licenses.
   `tf-psa-crypto/include/psa/crypto_config.h`, which includes the choices of Sosu
   (`packages/net/native/sosu_tls_config.h`, `sosu_crypto_config.h`: no file written, no
   session kept, threads). `packages/net/native/UPDATING.md` says how to take a new version.
+
+## Box2D
+
+- Files: none in the repository. `packages/physics2d/sosu.toml` names it as a native dependency
+  (`[native.box2d]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `physics2d` and compiles its `src/` into it, with `packages/physics2d/native/physics2d.c` and
+  `box2d_avx2.c`
+- Source: <https://github.com/erincatto/box2d>, tag `v3.2.0` (commit
+  `178495ba35695aefe9c321e569d2277f06db3b90`), pinned by `sosu.lock`
+- Written by Erin Catto and its contributors
+- License: the MIT license (Copyright (c) 2022 Erin Catto), in `LICENSE` of the repository; a
+  program that ships `physics2d` carries this notice
+- Not changed. `box2d_avx2.c` includes its `contact_solver_w8.c` so that MSVC compiles it without
+  `/arch:AVX2` (Box2D calls it only on processors that have AVX2)
+
+## Jolt Physics
+
+- Files: none in the repository. `packages/physics/sosu.toml` names it as a native dependency
+  (`[native.jolt]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `physics` and compiles its `Jolt/` into it, with `packages/physics/native/physics.cpp`
+- Source: <https://github.com/jrouwe/JoltPhysics>, tag `v5.6.0` (commit
+  `e77f175595e64cb44218cc9d9d56fc365ad0e36a`), pinned by `sosu.lock`
+- Written by Jorrit Rouwe and its contributors
+- License: the MIT license (Copyright 2021 Jorrit Rouwe), in `LICENSE` of the repository; a program
+  that ships `physics` carries this notice
+- Not changed
+
+## Recast & Detour
+
+- Files: none in the repository. `packages/nav/sosu.toml` names it as a native dependency
+  (`[native.recast]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `nav` and compiles its `Recast/`, `Detour/` and `DetourCrowd/` into it, with
+  `packages/nav/native/nav.cpp`
+- Source: <https://github.com/recastnavigation/recastnavigation>, tag `v1.6.0` (commit
+  `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`), pinned by `sosu.lock`
+- Written by Mikko Mononen and its contributors
+- License: the zlib license (Copyright (c) 2009 Mikko Mononen), in `License.txt` of the
+  repository: a program that ships `nav` may say so in its documentation, which is not required
+- Not changed

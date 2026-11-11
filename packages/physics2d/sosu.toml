@@ -1,0 +1,20 @@
+# Rigid bodies in the plane (spec §8.2, physics2d), on Box2D 3 (MIT, THIRD_PARTY_NOTICES.md), which
+# is C: taken from its repository at a tag, pinned by sosu.lock, never copied here (§9.1).
+[package]
+name = "physics2d"
+version = "0.1.0"
+
+[native.box2d]
+git = "https://github.com/erincatto/box2d"
+tag = "v3.2.0"
+c = ["src/"]
+include = ["include", "src"]
+exclude = ["src/contact_solver_w8.c"]  # compiled by native/box2d_avx2.c
+defines = ["_ISOC11_SOURCE"]  # aligned_alloc of C11, which glibc hides under -std=c99
+
+[link]
+c = ["native/physics2d.c", "native/box2d_avx2.c"]
+
+[dependencies]
+math = { path = "../math" }
+scene = { path = "../scene" }  # sync: the transforms of entities

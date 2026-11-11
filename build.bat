@@ -61,6 +61,8 @@ build\sosuc.exe check tests\window || exit /b 1
 build\sosuc.exe test packages\math || exit /b 1
 build\sosuc.exe test packages\model || exit /b 1
 build\sosuc.exe test packages\scene || exit /b 1
+build\sosuc.exe test packages\anim || exit /b 1
+build\sosuc.exe test packages\particles || exit /b 1
 build\sosuc.exe check packages\assets || exit /b 1
 build\sosuc.exe test packages\image || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1
@@ -72,6 +74,7 @@ build\sosuc.exe check examples\workspace || exit /b 1
 build\sosuc.exe check examples\themes || exit /b 1
 build\sosuc.exe check examples\containers || exit /b 1
 build\sosuc.exe check packages\audio || exit /b 1
+build\sosuc.exe test packages\audio || exit /b 1
 build\sosuc.exe check examples\sound || exit /b 1
 build\sosuc.exe check examples\dialogs || exit /b 1
 rem its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)

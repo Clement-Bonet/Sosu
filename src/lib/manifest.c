@@ -10,6 +10,7 @@ typedef enum {
     SECTION_UNKNOWN,
     SECTION_LINK,
     SECTION_APP, /* [app]: what a phone shows of the program (spec §11.5) */
+    SECTION_NATIVE, /* [native.<name>]: C or C++ sources from a Git repository (spec §9.1) */
 } Section;
 
 const char *const link_section_names[LINK_SECTION_COUNT] = { "", "windows", "linux", "macos", "android", "ios",
@@ -273,6 +274,30 @@ static void parse_header(Toml *t) {
         section = SECTION_DEPENDENCIES;
     } else if (key_is(t, key_start, key_length, "app")) {
         section = SECTION_APP;
+    } else if (key_length > 7 && memcmp(t->s + key_start, "native.", 7) == 0) {
+        size_t name_start = key_start + 7, name_length = key_length - 7;
+        char *name = sosu_format("%.*s", (int)name_length, t->s + name_start);
+        if (!is_identifier(name)) {
+            error_at(t, "E0409", name_start, name_length, "`%s` is not a valid name of a native dependency", name);
+            free(name);
+            return;
+        }
+        for (size_t i = 0; i < t->manifest->natives.count; i++) {
+            if (strcmp(t->manifest->natives.items[i].name, name) == 0) {
+                error_at(t, "E0408", key_start, key_length, "the section [%.*s] appears twice", (int)key_length,
+                         t->s + key_start);
+                free(name);
+                return;
+            }
+        }
+        NativeDep dep = {0};
+        dep.name = name;
+        dep.offset = name_start;
+        dep.length = name_length;
+        SOSU_VEC_PUSH(&t->manifest->natives, dep);
+        t->section = SECTION_NATIVE;
+        t->link = -1;
+        return;
     } else {
         for (int i = 0; i < LINK_SECTION_COUNT; i++) {
             char *name = i == LINK_ALL ? sosu_strdup("link") : sosu_format("link.%s", link_section_names[i]);
@@ -286,8 +311,8 @@ static void parse_header(Toml *t) {
     if (section == SECTION_UNKNOWN) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown section [%.*s]",
                                  (int)key_length, t->s + key_start);
-        diag_help(d, "sosu.toml contains [package], [dependencies], [app], [link] and [link.<target>] "
-                     "(windows, linux, macos, android, ios; windows-arm64, linux-x64...)");
+        diag_help(d, "sosu.toml contains [package], [dependencies], [app], [link], [link.<target>] "
+                     "(windows, linux, macos, android, ios; windows-arm64, linux-x64...) and [native.<name>]");
         return;
     }
     int index = section == SECTION_LINK ? 3 + link : section == SECTION_APP ? 15 : (int)section; /* link sections after the others */
@@ -348,13 +373,46 @@ static void parse_link_entry(Toml *t, size_t key_start, size_t key_length) {
                      : key_is(t, key_start, key_length, "frameworks")   ? &section->frameworks
                      : key_is(t, key_start, key_length, "copy")         ? &section->copy
                      : key_is(t, key_start, key_length, "c")            ? &section->c
+                     : key_is(t, key_start, key_length, "cpp")          ? &section->cpp
                      : key_is(t, key_start, key_length, "include")      ? &section->include
                      : key_is(t, key_start, key_length, "defines")      ? &section->defines
                      : NULL;
     if (!list) {
         Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [%s]", (int)key_length,
                                  t->s + key_start, t->link == LINK_ALL ? "link" : "link.<target>");
-        diag_help(d, "a link section contains `libs`, `paths`, `frameworks`, `copy`, `c`, `include`, `defines` and `subsystem`");
+        diag_help(d, "a link section contains `libs`, `paths`, `frameworks`, `copy`, `c`, `cpp`, `include`, `defines` and `subsystem`");
+        return;
+    }
+    if (list->count > 0) {
+        error_at(t, "E0408", key_start, key_length, "duplicate key `%.*s`", (int)key_length, t->s + key_start);
+        return;
+    }
+    parse_string_array(t, list);
+}
+
+/* `git`, `tag`, `rev`, `c`, `cpp`, `include`, `defines` and `exclude` in [native.<name>]. */
+static void parse_native_entry(Toml *t, size_t key_start, size_t key_length) {
+    NativeDep *dep = &t->manifest->natives.items[t->manifest->natives.count - 1];
+    char **field = key_is(t, key_start, key_length, "git") ? &dep->git
+                 : key_is(t, key_start, key_length, "tag") ? &dep->tag
+                 : key_is(t, key_start, key_length, "rev") ? &dep->rev
+                 : NULL;
+    if (field) {
+        t->free_text = true; /* checked as the git dependencies are (git.c, E0404) */
+        set_string(t, field, key_start, key_length);
+        t->free_text = false;
+        return;
+    }
+    StringList *list = key_is(t, key_start, key_length, "c")       ? &dep->c
+                     : key_is(t, key_start, key_length, "cpp")     ? &dep->cpp
+                     : key_is(t, key_start, key_length, "include") ? &dep->include
+                     : key_is(t, key_start, key_length, "defines") ? &dep->defines
+                     : key_is(t, key_start, key_length, "exclude") ? &dep->exclude
+                     : NULL;
+    if (!list) {
+        Diagnostic *d = error_at(t, "E0402", key_start, key_length, "unknown key `%.*s` in [native.%s]", (int)key_length,
+                                 t->s + key_start, dep->name);
+        diag_help(d, "a native dependency has `git` with `tag` or `rev`, and `c`, `cpp`, `include`, `defines` and `exclude`");
         return;
     }
     if (list->count > 0) {
@@ -426,6 +484,7 @@ static void parse_line(Toml *t) {
     case SECTION_LINK: parse_link_entry(t, key_start, key_length); break;
     case SECTION_APP: parse_app_entry(t, key_start, key_length); break;
     case SECTION_DEPENDENCIES: parse_dependency(t, key_start, key_length); break;
+    case SECTION_NATIVE: parse_native_entry(t, key_start, key_length); break;
     case SECTION_UNKNOWN: /* already reported: ignore its content */
         while (t->pos < t->len && t->s[t->pos] != '\n') t->pos++;
         break;
@@ -474,6 +533,15 @@ static void validate(Toml *t) {
             if (help) diag_help(d, "%s", help);
         }
     }
+    for (size_t i = 0; i < m->natives.count; i++) {
+        const NativeDep *dep = &m->natives.items[i];
+        const char *problem = !dep->git ? "needs a `git` URL"
+                            : !dep->tag && !dep->rev ? "needs a `tag` or a `rev`: its version is always pinned"
+                            : dep->tag && dep->rev ? "cannot have both a `tag` and a `rev`"
+                            : dep->c.count == 0 && dep->cpp.count == 0 ? "names no `c` nor `cpp` files"
+                            : NULL;
+        if (problem) error_at(t, "E0404", dep->offset, dep->length, "native dependency `%s` %s", dep->name, problem);
+    }
 }
 
 bool manifest_parse(Manifest *manifest, const SourceFile *file, DiagList *diags) {
@@ -512,10 +580,23 @@ void manifest_free(Manifest *manifest) {
         free(dep->rev);
     }
     free(manifest->deps.items);
+    for (size_t i = 0; i < manifest->natives.count; i++) {
+        NativeDep *dep = &manifest->natives.items[i];
+        free(dep->name);
+        free(dep->git);
+        free(dep->tag);
+        free(dep->rev);
+        StringList *lists[] = { &dep->c, &dep->cpp, &dep->include, &dep->defines, &dep->exclude };
+        for (size_t j = 0; j < sizeof lists / sizeof *lists; j++) {
+            for (size_t k = 0; k < lists[j]->count; k++) free(lists[j]->items[k]);
+            free(lists[j]->items);
+        }
+    }
+    free(manifest->natives.items);
     for (int i = 0; i < LINK_SECTION_COUNT; i++) {
         StringList *lists[] = { &manifest->link[i].libs, &manifest->link[i].paths, &manifest->link[i].frameworks,
-                                &manifest->link[i].copy, &manifest->link[i].c, &manifest->link[i].include,
-                                &manifest->link[i].defines };
+                                &manifest->link[i].copy, &manifest->link[i].c, &manifest->link[i].cpp,
+                                &manifest->link[i].include, &manifest->link[i].defines };
         for (size_t j = 0; j < sizeof lists / sizeof *lists; j++) {
             for (size_t k = 0; k < lists[j]->count; k++) free(lists[j]->items[k]);
             free(lists[j]->items);

@@ -1,0 +1,94 @@
+// particles drawn without a window (spec §8.2): a green cube of render3d, a cloud of red light in
+// the open and another behind the cube, drawn into a target of 128 by 128 pixels and read back. The
+// open cloud is red; the one behind the cube is hidden by the depth of the scene.
+import std.io;
+import math.linear;
+import image.image;
+import gpu.gpu;
+import render3d.render3d;
+import particles.particles;
+import particles.draw;
+
+ui32 SIZE = 128;
+
+i32[2] screen(render3d.Camera camera, linear.Vec3 p) {
+    linear.Vec4 clip = camera.view_projection(1.0).mul_vec(linear.vec4(p.x, p.y, p.z, 1.0));
+    f32 x = (clip.x / clip.w + 1.0) / 2.0 * SIZE as f32;
+    f32 y = (1.0 - clip.y / clip.w) / 2.0 * SIZE as f32;
+    return [x as i32, y as i32];
+}
+
+ui32 channel(image.Image img, render3d.Camera camera, linear.Vec3 p, ui32 shift) {
+    i32[2] at = screen(camera, p);
+    return img.at(at[0], at[1]) >> shift & 0xFF;
+}
+
+particles.System* cloud(Arena* arena, linear.Vec3 at) {
+    particles.System* s = particles.system(arena, particles.Emitter{
+        rate: 0.0,
+        speed: particles.exactly(0.0),
+        size: particles.exactly(1.2),
+        life: particles.exactly(10.0),
+        color: linear.vec4(1.0, 0.1, 0.1, 1.0),
+        blending: particles.Blending.Additive
+    });
+    s.move_to(linear.translation(at));
+    s.burst(40);
+    return s;
+}
+
+void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    render3d.Renderer* r = try render3d.create(arena, device, render3d.Options{ shadow_size: 256 });
+    r.sun = render3d.Sun{ direction: linear.vec3(0.0, -1.0, -1.0), shadows: false };
+    render3d.Uploaded* box = try r.upload(arena, render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]));
+    render3d.Camera camera = render3d.Camera{ position: linear.vec3(0.0, 1.0, 8.0), target: linear.vec3(0.0, 1.0, 0.0) };
+    mut render3d.Item[1] items = [render3d.item(box, linear.translation(linear.vec3(-2.0, 1.0, 2.0)))];
+    draw.Drawer* d = try draw.drawer(arena, device);
+    particles.System* open = cloud(arena, linear.vec3(2.0, 1.0, 0.0));
+    particles.System* hidden = cloud(arena, linear.vec3(-3.0, 1.0, -2.0));
+    open.advance(0.1);
+    hidden.advance(0.1);
+    mut draw.Sprite[2] sprites = [draw.sprite(open, none), draw.sprite(hidden, none)];
+    gpu.Texture target = try device.target(SIZE, SIZE);
+    gpu.Frame frame = try device.commands();
+    r.draw_into(frame, target, camera, items[0..1]);
+    try d.draw_into(frame, target, camera, sprites[0..2]);
+    try frame.submit_and_wait();
+    image.Image img = try device.read_texture(arena, target);
+    ui32 red_open = channel(img, camera, linear.vec3(2.0, 1.0, 0.0), 0);
+    ui32 red_hidden = channel(img, camera, linear.vec3(-2.0, 1.0, 2.0), 0);
+    ui32 green_hidden = channel(img, camera, linear.vec3(-2.0, 1.0, 2.0), 8);
+    io.print("particles drawn: {}", d.drawn());
+    io.print("a cloud in the open: {}", red_open > 150 ? "ok" : "missing");
+    io.print("a cloud behind the cube is hidden: {}", red_hidden < 100 && green_hidden > 60 ? "ok" : "no");
+    if (red_open <= 150 || red_hidden >= 100 || green_hidden <= 60) {
+        io.print("red in the open {}, red at the cube {}, green at the cube {}", red_open, red_hidden, green_hidden);
+    }
+    device.release_texture(target);
+    d.close();
+    r.release(box);
+    r.close();
+    return ok();
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ debug: true })) {
+        ok(x) => x,
+        err(e) => {
+            io.print("gpu: no device ({}: {})", gpu.message(e), gpu.last_error(&arena));
+            return 77;
+        },
+    };
+    mut i32 status = 0;
+    match (run(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("particles: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    device.close();
+    return status;
+}

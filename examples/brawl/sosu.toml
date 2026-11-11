@@ -1,0 +1,25 @@
+# A small game in the third person (spec §8.2): the libraries of 3D together. A character
+# animated by `anim`, moved by `physics` with a gamepad or the keyboard, enemies that follow it on
+# the navigation mesh of `nav`, sparks of `particles` and sounds placed by `audio.spatial`; drawn
+# by `render3d`, with the overlay of `gpu`. Everything is made in code.
+[package]
+name = "brawl"
+version = "0.1.0"
+
+[app]
+id = "org.sosu.brawl"
+name = "Sosu brawl"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+gpu = { path = "../../packages/gpu" }
+render3d = { path = "../../packages/render3d" }
+render = { path = "../../packages/render" }
+model = { path = "../../packages/model" }
+math = { path = "../../packages/math" }
+image = { path = "../../packages/image" }
+physics = { path = "../../packages/physics" }
+nav = { path = "../../packages/nav" }
+anim = { path = "../../packages/anim" }
+particles = { path = "../../packages/particles" }
+audio = { path = "../../packages/audio" }

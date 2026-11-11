@@ -213,6 +213,7 @@ pub struct PipelineDesc {
     pub Shader fragment;
     pub Layout layout;
     pub bool depth = true;  // tested against, and written to, the depth of the frame
+    pub bool depth_write = true;  // false: tested only (what is seen through, as particles)
     pub Cull cull = Back;
     pub Blend blend = Opaque;
     // Writes a color: false for a pipeline that draws the depth alone (`frame.depth_pass`: the
@@ -235,7 +236,8 @@ pub struct SamplerDesc {
 pub struct Clear {
     pub Color color;
     pub bool depth = true;
-    // Keep what the target holds instead of clearing it: to draw over a pass before (gpu.overlay).
+    // Keep what the target holds, its color and its depth, instead of clearing it: to draw over a
+    // pass before (gpu.overlay, particles over a scene).
     pub bool keep = false;
 }
 
@@ -694,7 +696,7 @@ pub class Device {
             info.multisample_state.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
 
             info.depth_stencil_state.enable_depth_test = desc.depth;
-            info.depth_stencil_state.enable_depth_write = desc.depth;
+            info.depth_stencil_state.enable_depth_write = desc.depth && desc.depth_write;
             info.depth_stencil_state.compare_op = sdl_c.SDL_GPU_COMPAREOP_LESS;
 
             sdl_c.SDL_GPUColorTargetDescription* target = scratch.alloc(sdl_c.SDL_GPUColorTargetDescription);
@@ -1291,11 +1293,13 @@ pub struct Frame {
                     depth = scratch.alloc(sdl_c.SDL_GPUDepthStencilTargetInfo);
                     depth.texture = texture as sdl_c.SDL_GPUTexture*;
                     depth.clear_depth = 1.0;
-                    depth.load_op = sdl_c.SDL_GPU_LOADOP_CLEAR;
-                    depth.store_op = sdl_c.SDL_GPU_STOREOP_DONT_CARE;
+                    // kept for a pass after that keeps it (`keep`): particles drawn behind what
+                    // the scene drew
+                    depth.load_op = clear.keep ? sdl_c.SDL_GPU_LOADOP_LOAD : sdl_c.SDL_GPU_LOADOP_CLEAR;
+                    depth.store_op = sdl_c.SDL_GPU_STOREOP_STORE;
                     depth.stencil_load_op = sdl_c.SDL_GPU_LOADOP_DONT_CARE;
                     depth.stencil_store_op = sdl_c.SDL_GPU_STOREOP_DONT_CARE;
-                    depth.cycle = true;
+                    depth.cycle = !clear.keep;  // cycling would give a texture without what was drawn
                 }
             }
             sdl_c.SDL_GPURenderPass* pass = sdl_c.SDL_BeginGPURenderPass(commands, color, 1, depth);
@@ -1452,6 +1456,14 @@ pub struct Pass {
     pub void draw_indexed(ui32 indices, ui32 instances) uses io {
         unsafe {
             sdl_c.SDL_DrawGPUIndexedPrimitives(pass, indices, instances, 0, 0, 0);
+        }
+    }
+
+    // `indices` indices of the bound index buffer from the index `first`: a part of a buffer that
+    // holds the vertices of many things.
+    pub void draw_indexed_range(ui32 indices, ui32 first) uses io {
+        unsafe {
+            sdl_c.SDL_DrawGPUIndexedPrimitives(pass, indices, 1, first, 0, 0);
         }
     }
 

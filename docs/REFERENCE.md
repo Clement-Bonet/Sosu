@@ -28,6 +28,7 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [audio.mixer](#audiomixer) | Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly |
 | [audio.ogg](#audioogg) | Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1) |
 | [audio.resample](#audioresample) | A sound at another rate (44 100 Hz to 48 000, for the device or the mixer) |
+| [audio.spatial](#audiospatial) | Sounds placed in 3D (spec §8.2), over `audio.mixer` |
 | [audio.wav](#audiowav) | WAV files (RIFF), read and written in Sosu |
 | [compress.checksum](#compresschecksum) | The checksums of the containers, Adler-32 (zlib) and CRC-32 (gzip, PNG, zip) |
 | [compress.deflate](#compressdeflate) | The deflate stream (RFC 1951), without container |
@@ -45,6 +46,7 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [image.jpeg](#imagejpeg) | JPEG files (ITU T.81), read and written in Sosu |
 | [image.ops](#imageops) | Images transformed: cropped, resized (bilinear or Lanczos), rotated by quarter turns or by any angle, flipped |
 | [image.png](#imagepng) | PNG files, read and written in Sosu |
+| [math.curve](#mathcurve) | Values that change over time (spec §8.2) |
 | [math.geometry](#mathgeometry) | The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling) |
 | [math.linear](#mathlinear) | Vectors, matrices, quaternions and transforms of f32, for `render` and 3D |
 | [net.http](#nethttp) | An HTTP/1.1 client |
@@ -2071,6 +2073,111 @@ pub audio.Sound to_rate(Arena* arena, audio.Sound s, i32 rate)
 pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality quality) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && audio.fits(rate as i64, s.channels as i64, frames_at(s.frames(), s.rate, rate) as i64)
 ```
 
+## audio.spatial
+
+Sounds placed in 3D (spec §8.2), over `audio.mixer`. Each `update` (once a frame, before the device takes the next samples) works out, for each source, its volume from its distance to the listener, its panning from its direction, and its speed from their relative velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click. The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d).
+
+### enum `Rolloff`
+
+How the volume falls between `near` and `far`.
+
+```sosu
+pub enum Rolloff {
+    Inverse,  // near / distance, as OpenAL: the default
+    Linear,  // a straight line from 1 at near to 0 at far
+    Exponential,  // (near / distance)², as a sound in the open
+}
+```
+
+### struct `Placed`
+
+How a source is placed and heard.
+
+```sosu
+pub struct Placed
+```
+
+- `pub mut linear.Vec3 position`
+- `pub mut linear.Vec3 velocity = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 }`  
+  m/s, for Doppler
+- `pub mut f32 volume = 1.0`
+- `pub f32 speed = 1.0`  
+  of the sound itself, before Doppler
+- `pub bool looping = false`
+- `pub f32 near = 1.0`  
+  meters: full volume within
+- `pub f32 far = 50.0`  
+  meters: silent beyond
+- `pub Rolloff rolloff = Rolloff.Inverse`
+- `pub f32 doppler = 1.0`  
+  0: no change of speed
+
+### struct `Source`
+
+A source of a space: a handle, dead once its sound ended or was stopped.
+
+```sosu
+pub struct Source
+```
+
+
+### struct `Heard`
+
+What `update` gave the mixer for a source.
+
+```sosu
+pub struct Heard
+```
+
+- `pub f32 volume`
+- `pub f32 pan`
+- `pub f32 speed`
+
+### `SOUND`
+
+The speed of sound, m/s.
+
+```sosu
+pub f32 SOUND = 343.0
+```
+
+### `attenuation`
+
+The share of `volume` heard at `distance`.
+
+```sosu
+pub f32 attenuation(Placed p, f32 distance)
+```
+
+### class `Space`
+
+```sosu
+pub class Space
+```
+
+- `pub void listener(linear.Transform t, linear.Vec3 moving)`  
+  Where the listener is (a camera, the head of the player) and how fast it moves.
+- `pub Source play(keeps audio.Sound sound, Placed p)`  
+  `sound` placed by `p`, heard from the next `update` (silent until then).
+- `pub bool playing(Source s)`
+- `pub void move(Source s, linear.Vec3 position_now, linear.Vec3 velocity_now)`  
+  The source moved, and its velocity.
+- `pub void set_volume(Source s, f32 volume)`
+- `pub void stop(Source s)`
+- `pub Heard heard(Source s)`  
+  What the last `update` gave the mixer for `s`.
+- `pub void update()`  
+  The volume, panning and speed of every source, given to the mixer; the sources whose sound ended are forgotten.
+- `pub usize count()`
+
+### `space`
+
+A space that plays its sources through `m`.
+
+```sosu
+pub Space* space(keeps Arena* arena, keeps mixer.Mixer* m)
+```
+
 ## audio.wav
 
 WAV files (RIFF), read and written in Sosu. Read: integers of 8 (unsigned), 16, 24 and 32 bits and floats of 32 and 64 bits, in the plain header or the extensible one (WAVE_FORMAT_EXTENSIBLE), 1 to `audio.MAX_CHANNELS` channels; the chunks it does not know are skipped. Every read is checked: a damaged file gives `Damaged`, never a read outside of its bytes; a data chunk longer than the file is cut to it (as a recording stopped before its header was finished), and a sound beyond `audio.fits` is refused before its samples are allocated. Written: the 44 bytes of the plain header, then the samples, integers rounded and cut to their range.
@@ -3178,6 +3285,163 @@ Writes `img` as a PNG file at `path`.
 
 ```sosu
 pub void!io.IoError save(Arena* arena, str path, image.Image img) uses io
+```
+
+## math.curve
+
+Values that change over time (spec §8.2). A `Curve` is keys of time and value, read between them by steps, by straight lines, or by the cubic splines of Hermite that glTF gives with their tangents; `Curve3` is the same for a `Vec3`, and a `Gradient` is colors over 0..1. `anim` samples the channels of clips with them, `particles` the sizes and colors over the life of a particle. Before the first key a curve holds the first value, after the last the last value.
+
+### enum `Interpolation`
+
+```sosu
+pub enum Interpolation {
+    Step,  // the value of the key before, until the next
+    Linear,  // a straight line between two keys
+    Hermite,  // a cubic spline through the keys, with the tangents given (glTF's CUBICSPLINE)
+}
+```
+
+### struct `Key`
+
+A key: a value at a time, and its tangents (for `Hermite` only), in value per second.
+
+```sosu
+pub struct Key
+```
+
+- `pub f32 time`
+- `pub f32 value`
+- `pub f32 in_tangent = 0.0`
+- `pub f32 out_tangent = 0.0`
+
+### `key`
+
+```sosu
+pub Key key(f32 time, f32 value)
+```
+
+### `hermite`
+
+The cubic of Hermite at `s` (0..1), from `v0` with the tangent `m0` to `v1` with `m1`, both already multiplied by the width of the span.
+
+```sosu
+pub f32 hermite(f32 v0, f32 m0, f32 v1, f32 m1, f32 s)
+```
+
+### struct `Curve`
+
+```sosu
+pub struct Curve
+```
+
+- `pub Key[] keys`  
+  by time, increasing
+- `pub Interpolation mode = Interpolation.Linear`
+- `pub f32 sample(f32 t)`  
+  The value at `t`; 0 for a curve without keys.
+- `pub f32 duration()`  
+  The time of the last key: the length of a clip.
+- `pub bool valid()`  
+  True when the times increase, or stay, from key to key, and none is NaN.
+
+### `constant`
+
+A curve that holds `value` at every time.
+
+```sosu
+pub Curve constant(Arena* arena, f32 value)
+```
+
+### `line`
+
+A straight line from `from` at 0 to `to` at 1: a size over the life of a particle.
+
+```sosu
+pub Curve line(Arena* arena, f32 from, f32 to)
+```
+
+### `of`
+
+A curve of the keys, copied; none when their times decrease or a number is NaN.
+
+```sosu
+pub Curve? of(Arena* arena, Key[] keys, Interpolation mode)
+```
+
+### struct `Key3`
+
+```sosu
+pub struct Key3
+```
+
+- `pub f32 time`
+- `pub linear.Vec3 value`
+- `pub linear.Vec3 in_tangent = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 }`
+- `pub linear.Vec3 out_tangent = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 }`
+
+### `key3`
+
+```sosu
+pub Key3 key3(f32 time, linear.Vec3 value)
+```
+
+### struct `Curve3`
+
+The same as a `Curve`, for a `Vec3`: a position, a scale, a velocity.
+
+```sosu
+pub struct Curve3
+```
+
+- `pub Key3[] keys`
+- `pub Interpolation mode = Interpolation.Linear`
+- `pub linear.Vec3 sample(f32 t)`
+- `pub f32 duration()`
+- `pub bool valid()`
+
+### struct `Stop`
+
+A color of a gradient, at `at` in 0..1: linear RGBA.
+
+```sosu
+pub struct Stop
+```
+
+- `pub f32 at`
+- `pub linear.Vec4 color`
+
+### `stop`
+
+```sosu
+pub Stop stop(f32 at, linear.Vec4 color)
+```
+
+### struct `Gradient`
+
+Colors over 0..1, mixed in straight lines between their stops.
+
+```sosu
+pub struct Gradient
+```
+
+- `pub Stop[] stops`  
+  by `at`, increasing
+- `pub linear.Vec4 sample(f32 t)`
+
+### `gradient`
+
+From `from` at 0 to `to` at 1.
+
+```sosu
+pub Gradient gradient(Arena* arena, linear.Vec4 from, linear.Vec4 to)
+```
+
+### `solid`
+
+One color at every time.
+
+```sosu
+pub Gradient solid(Arena* arena, linear.Vec4 color)
 ```
 
 ## math.geometry

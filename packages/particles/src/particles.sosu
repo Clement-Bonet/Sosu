@@ -1,0 +1,527 @@
+// particles.particles: systems of particles on the processor (spec §8.2), in Sosu. An `Emitter`
+// says how particles are born (a rate and bursts, a shape, ranges for their life, speed, size and
+// turn), what moves them (gravity, drag toward the wind, a turbulence of noise) and how they change
+// over their life (curves of size and speed, a gradient of color). A `System` runs one: the same
+// seed gives the same particles, so an effect plays the same in a replay. `particles.draw` draws
+// them as billboards. A few thousand particles per system.
+import std.vec;
+import std.random;
+import std.math;
+import math.linear;
+import math.curve;
+
+pub struct Range {
+    pub f32 low;
+    pub f32 high;
+}
+
+pub Range range(f32 low, f32 high) {
+    return Range{ low: low, high: high };
+}
+
+pub Range exactly(f32 value) {
+    return Range{ low: value, high: value };
+}
+
+// Where particles are born, in the frame of the system (its `place`), and the way they go.
+pub enum Shape {
+    Point,                     // at the origin, every way
+    Sphere(f32 radius),        // in a ball, outward
+    Cone(f32 angle, f32 radius),  // from a disc of `radius` in the plane y = 0, up y within `angle` (radians) of it
+    Box(linear.Vec3 half),     // in a box, up y
+    Surface(linear.Vec3[] triangles),  // on triangles (three corners each), along their normal
+}
+
+// A count of particles born at once, `time` seconds into each cycle of the emitter.
+pub struct Burst {
+    pub f32 time;
+    pub ui32 count;
+}
+
+// How a particle faces: the camera, or stretched along its velocity (sparks, rain).
+pub enum Facing {
+    Camera,
+    Velocity(f32 stretch),  // its length grows by `stretch` times its speed
+}
+
+pub enum Blending {
+    Alpha,     // sorted from far to near
+    Additive,  // light: fire, sparks, magic
+}
+
+pub struct Emitter {
+    pub f32 rate = 10.0;  // particles per second
+    pub Burst[]? bursts = none;
+    pub f32 cycle = 1.0;  // seconds: the bursts happen again each cycle
+    pub bool looping = true;  // false: the emitter stops after one cycle
+    pub Shape shape = Shape.Point;
+    pub Range life = Range{ low: 1.0, high: 1.0 };   // seconds
+    pub Range speed = Range{ low: 1.0, high: 1.0 };  // meters per second, at birth
+    pub Range size = Range{ low: 0.1, high: 0.1 };   // meters, at birth
+    pub Range rotation = Range{ low: 0.0, high: 0.0 };  // radians, at birth
+    pub Range spin = Range{ low: 0.0, high: 0.0 };      // radians per second
+    pub f32 gravity = 0.0;  // times 9.81 m/s², down
+    pub f32 drag = 0.0;     // per second: how fast a particle takes the speed of the wind
+    pub linear.Vec3 wind = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
+    pub f32 turbulence = 0.0;  // m/s² of the noise
+    pub f32 turbulence_scale = 1.0;  // meters: the size of its swirls
+    pub curve.Curve? size_over_life = none;   // times the size at birth, over 0..1 of the life
+    pub curve.Curve? speed_over_life = none;  // times the speed
+    pub curve.Gradient? color_over_life = none;  // times `color`
+    pub linear.Vec4 color = linear.Vec4{ x: 1.0, y: 1.0, z: 1.0, w: 1.0 };
+    pub ui32 frames = 1;   // of a flipbook, played over the life
+    pub ui32 columns = 1;  // of the flipbook in its texture, read row after row from the top left
+    pub Facing facing = Facing.Camera;
+    pub Blending blending = Blending.Alpha;
+    pub usize max = 1000;  // particles alive at most: the others are not born
+    pub ui64 seed = 1;
+}
+
+pub struct Particle {
+    pub mut linear.Vec3 position;
+    pub mut linear.Vec3 velocity;
+    pub mut f32 age;
+    pub f32 life;
+    pub f32 size;      // at birth
+    pub mut f32 rotation;
+    pub f32 spin;
+    pub f32 offset;    // where it reads the noise
+
+    // How far through its life, 0 to 1.
+    pub f32 progress() {
+        return life > 0.0 ? min(age / life, 1.0) : 1.0;
+    }
+}
+
+f32 rand(random.Rng* r) {
+    return r.unit() as f32;
+}
+
+f32 pick(random.Rng* r, Range x) {
+    return x.low + (x.high - x.low) * rand(r);
+}
+
+// A direction of length 1, every way alike.
+linear.Vec3 unit_vector(random.Rng* r) {
+    f32 z = rand(r) * 2.0 - 1.0;
+    f32 a = rand(r) * 6.2831855;
+    f32 s = math.sqrt(max(0.0, 1.0 - z * z) as f64) as f32;
+    return linear.vec3(s * math.cos(a as f64) as f32, s * math.sin(a as f64) as f32, z);
+}
+
+// ---- Noise: value noise of a hashed lattice, smooth, the same everywhere ----
+
+f32 lattice(i64 x, i64 y, i64 z, ui64 salt) {
+    mut ui64 h = wrapping_mul(x as ui64, 0x9E3779B97F4A7C15) ^ wrapping_mul(y as ui64, 0xC2B2AE3D27D4EB4F)
+            ^ wrapping_mul(z as ui64, 0x165667B19E3779F9) ^ salt;
+    h = wrapping_mul(h ^ h >> 29, 0xBF58476D1CE4E5B9);
+    h = h ^ h >> 32;
+    return (h & 0xFFFFFF) as f32 / 8388607.5 - 1.0;  // -1 to 1
+}
+
+f32 smooth(f32 t) {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+f32 noise(linear.Vec3 p, ui64 salt) {
+    f32 fx = math.floor(p.x as f64) as f32;
+    f32 fy = math.floor(p.y as f64) as f32;
+    f32 fz = math.floor(p.z as f64) as f32;
+    i64 x = fx as i64;
+    i64 y = fy as i64;
+    i64 z = fz as i64;
+    f32 tx = smooth(p.x - fx);
+    f32 ty = smooth(p.y - fy);
+    f32 tz = smooth(p.z - fz);
+    mut f32 total = 0.0;
+    for (i64 k in 0..8) {
+        i64 dx = k & 1;
+        i64 dy = k >> 1 & 1;
+        i64 dz = k >> 2 & 1;
+        f32 w = (dx == 1 ? tx : 1.0 - tx) * (dy == 1 ? ty : 1.0 - ty) * (dz == 1 ? tz : 1.0 - tz);
+        total += w * lattice(x + dx, y + dy, z + dz, salt);
+    }
+    return total;
+}
+
+linear.Vec3 noise3(linear.Vec3 p) {
+    return linear.vec3(noise(p, 1), noise(p, 2), noise(p, 3));
+}
+
+// ---- Systems ----
+
+pub class System {
+    pub Emitter emitter;
+    vec.Vec<Particle>* list;
+    mut random.Rng rng;
+    mut f32 time;      // since it started
+    mut f32 owed;      // particles of the rate not born yet (a fraction)
+    mut linear.Mat4 place;
+    mut f32[] areas;   // of the surface, summed: to pick a triangle by its area
+    mut bool stopped;
+
+    void init(keeps Arena* arena, keeps Emitter emitter) {
+        self.emitter = emitter;
+        list = vec.new<Particle>(arena);
+        rng = random.seeded(emitter.seed);
+        time = 0.0;
+        owed = 0.0;
+        place = linear.identity4();
+        stopped = false;
+        areas = arena.alloc_slice(f32, 0);
+        match (emitter.shape) {
+            Surface(triangles) => {
+                usize n = triangles.len / 3;
+                areas = arena.alloc_slice(f32, n);
+                mut f32 total = 0.0;
+                for (usize i in 0..n) {
+                    linear.Vec3 a = triangles[3 * i];
+                    total += triangles[3 * i + 1].sub(a).cross(triangles[3 * i + 2].sub(a)).length() / 2.0;
+                    areas[i] = total;
+                }
+            },
+            _ => { },
+        }
+    }
+
+    // Where the system is: its particles are born there, then live in the world.
+    pub void move_to(linear.Mat4 m) {
+        place = m;
+    }
+
+    pub usize count() {
+        return list.len();
+    }
+
+    pub Particle[] particles() {
+        return list.items();
+    }
+
+    pub f32 elapsed() {
+        return time;
+    }
+
+    // No particle born from now on; those alive live on.
+    pub void stop() {
+        stopped = true;
+    }
+
+    // True once a stopped emitter (or one that does not loop, after its cycle) has no particle left.
+    pub bool finished() {
+        return (stopped || (!emitter.looping && time >= emitter.cycle)) && list.len() == 0;
+    }
+
+    // `n` particles now.
+    pub void burst(usize n) {
+        for (usize i in 0..n) {
+            born();
+        }
+    }
+
+    pub void clear() {
+        list.clear();
+    }
+
+    void born() {
+        if (list.len() >= emitter.max) {
+            return;
+        }
+        mut linear.Vec3 at = linear.vec3(0.0, 0.0, 0.0);
+        mut linear.Vec3 way = linear.vec3(0.0, 1.0, 0.0);
+        match (emitter.shape) {
+            Point => {
+                way = unit_vector(&rng);
+            },
+            Sphere(radius) => {
+                way = unit_vector(&rng);
+                at = way.scale(radius * math.cbrt(rand(&rng) as f64) as f32);
+            },
+            Cone(angle, radius) => {
+                f32 a = rand(&rng) * 6.2831855;
+                f32 r = radius * math.sqrt(rand(&rng) as f64) as f32;
+                at = linear.vec3(r * math.cos(a as f64) as f32, 0.0, r * math.sin(a as f64) as f32);
+                // a direction within `angle` of y, the same share of the cap everywhere
+                f32 c = 1.0 - rand(&rng) * (1.0 - math.cos(angle as f64) as f32);
+                f32 s = math.sqrt(max(0.0, 1.0 - c * c) as f64) as f32;
+                f32 b = rand(&rng) * 6.2831855;
+                way = linear.vec3(s * math.cos(b as f64) as f32, c, s * math.sin(b as f64) as f32);
+            },
+            Box(half) => {
+                at = linear.vec3((rand(&rng) * 2.0 - 1.0) * half.x, (rand(&rng) * 2.0 - 1.0) * half.y,
+                        (rand(&rng) * 2.0 - 1.0) * half.z);
+            },
+            Surface(triangles) => {
+                if (areas.len > 0) {
+                    f32 total = areas[areas.len - 1];
+                    f32 target = rand(&rng) * total;
+                    mut usize k = 0;
+                    while (k + 1 < areas.len && areas[k] < target) {
+                        k += 1;
+                    }
+                    linear.Vec3 a = triangles[3 * k];
+                    linear.Vec3 b = triangles[3 * k + 1];
+                    linear.Vec3 c = triangles[3 * k + 2];
+                    mut f32 u = rand(&rng);
+                    mut f32 v = rand(&rng);
+                    if (u + v > 1.0) {
+                        u = 1.0 - u;
+                        v = 1.0 - v;
+                    }
+                    at = a.add(b.sub(a).scale(u)).add(c.sub(a).scale(v));
+                    way = b.sub(a).cross(c.sub(a)).normalized();
+                }
+            },
+        }
+        f32 speed = pick(&rng, emitter.speed);
+        list.push(Particle{
+            position: place.transform_point(at),
+            velocity: place.transform_vector(way).normalized().scale(speed),
+            age: 0.0,
+            life: max(pick(&rng, emitter.life), 0.0001),
+            size: pick(&rng, emitter.size),
+            rotation: pick(&rng, emitter.rotation),
+            spin: pick(&rng, emitter.spin),
+            offset: rand(&rng) * 100.0
+        });
+    }
+
+    // The system `dt` seconds later: the old particles moved and those at the end of their life
+    // gone, then the new ones born.
+    pub void advance(f32 dt) {
+        if (dt <= 0.0) {
+            return;
+        }
+        Emitter e = emitter;
+        linear.Vec3 fall = linear.vec3(0.0, -9.81 * e.gravity, 0.0);
+        mut usize i = 0;
+        while (i < list.len()) {
+            mut Particle p = list.items()[i];
+            p.age += dt;
+            if (p.age >= p.life) {
+                // the last one takes its place: the order changes, the same way each time
+                Particle last = match (list.pop()) {
+                    some(x) => x,
+                    none => p,
+                };
+                if (i < list.len()) {
+                    list.set(i, last);
+                }
+                continue;
+            }
+            mut linear.Vec3 v = p.velocity.add(fall.scale(dt));
+            if (e.drag > 0.0) {
+                v = v.add(e.wind.sub(v).scale(min(e.drag * dt, 1.0)));
+            }
+            if (e.turbulence > 0.0) {
+                linear.Vec3 q = p.position.scale(1.0 / max(e.turbulence_scale, 0.0001)).add(linear.vec3(p.offset, time * 0.5, 0.0));
+                v = v.add(noise3(q).scale(e.turbulence * dt));
+            }
+            f32 t = p.progress();
+            f32 pace = match (e.speed_over_life) {
+                some(c) => c.sample(t),
+                none => 1.0,
+            };
+            p.velocity = v;
+            p.position = p.position.add(v.scale(pace * dt));
+            p.rotation += p.spin * dt;
+            list.set(i, p);
+            i += 1;
+        }
+        // births: the rate, and the bursts of the cycle crossed
+        f32 before = time;
+        time += dt;
+        bool emitting = !stopped && (e.looping || before < e.cycle);
+        if (!emitting) {
+            return;
+        }
+        f32 until = e.looping ? time : min(time, e.cycle);
+        owed += e.rate * (until - before);
+        while (owed >= 0.9999) {  // ten steps of 0.01 at 10 a second: f32 gives 0.99999
+            born();
+            owed -= 1.0;
+        }
+        match (e.bursts) {
+            some(list_of) => {
+                if (e.cycle > 0.0) {
+                    for (Burst b in list_of) {
+                        // each time `b.time + k * cycle` in (before, until]
+                        f32 first = math.ceil(((before - b.time) / e.cycle) as f64) as f32;
+                        mut f32 k = max(first, 0.0);
+                        while (b.time + k * e.cycle <= until && (e.looping || k < 1.0)) {
+                            if (b.time + k * e.cycle > before || (before == 0.0 && b.time == 0.0 && k == 0.0)) {
+                                burst(b.count as usize);
+                            }
+                            k += 1.0;
+                        }
+                    }
+                }
+            },
+            none => { },
+        }
+    }
+
+    // The size and color of `p` now: its size at birth times the curve, `color` times the gradient.
+    pub f32 size_of(Particle p) {
+        return match (emitter.size_over_life) {
+            some(c) => p.size * c.sample(p.progress()),
+            none => p.size,
+        };
+    }
+
+    pub linear.Vec4 color_of(Particle p) {
+        return match (emitter.color_over_life) {
+            some(g) => emitter.color.mul(g.sample(p.progress())),
+            none => emitter.color,
+        };
+    }
+
+    // The frame of the flipbook `p` shows.
+    pub ui32 frame_of(Particle p) {
+        if (emitter.frames <= 1) {
+            return 0;
+        }
+        return min((p.progress() * emitter.frames as f32) as ui32, emitter.frames - 1);
+    }
+}
+
+// A system of `e`, at the origin until `move_to`.
+pub System* system(keeps Arena* arena, keeps Emitter e) {
+    return arena.new(System, arena, e);
+}
+
+pub Emitter emitter() {
+    return Emitter{};
+}
+
+bool close(f32 a, f32 b, f32 eps) {
+    return abs(a - b) <= eps;
+}
+
+test "a rate, bursts, lives" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    System* s = system(&arena, Emitter{ rate: 10.0, life: exactly(0.5) });
+    for (i32 i in 0..10) {
+        s.advance(0.01);
+    }
+    assert(s.count() == 1);  // 10 a second, for 0.1 s
+    for (i32 i in 0..40) {
+        s.advance(0.01);
+    }
+    assert(s.count() == 5 && s.particles()[0].age <= 0.5);  // they live half a second
+    mut Burst[2] bursts = [Burst{ time: 0.0, count: 20 }, Burst{ time: 0.5, count: 5 }];
+    vec.Vec<Burst>* list = vec.new<Burst>(&arena);
+    list.push(bursts[0]);
+    list.push(bursts[1]);
+    System* b = system(&arena, Emitter{ rate: 0.0, bursts: some(list.items()), cycle: 1.0, life: exactly(10.0) });
+    b.advance(0.1);
+    assert(b.count() == 20);
+    b.advance(0.5);
+    assert(b.count() == 25);
+    b.advance(0.5);  // the next cycle: 20 again at 1.0
+    assert(b.count() == 45);
+    System* once = system(&arena, Emitter{ rate: 100.0, looping: false, cycle: 0.1, life: exactly(0.2) });
+    once.advance(0.05);
+    once.advance(0.1);
+    assert(once.count() == 10);
+    once.advance(0.3);
+    assert(once.count() == 0 && once.finished());
+    System* full = system(&arena, Emitter{ rate: 1000.0, max: 30, life: exactly(10.0) });
+    full.advance(1.0);
+    assert(full.count() == 30);
+}
+
+test "gravity, drag and wind, speed over life" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    // up at 10 m/s, under gravity: after a second, 10 - 9.81 / 2 high (by steps: within 0.1)
+    System* s = system(&arena, Emitter{ rate: 0.0, shape: Shape.Cone(0.0, 0.0), speed: exactly(10.0), gravity: 1.0, life: exactly(5.0) });
+    s.burst(1);
+    for (i32 i in 0..100) {
+        s.advance(0.01);
+    }
+    Particle p = s.particles()[0];
+    assert(close(p.position.y, 10.0 - 9.81 / 2.0, 0.1) && close(p.velocity.y, 0.19, 0.01));
+    assert(close(p.position.x, 0.0, 0.0001));
+    // drag toward a wind of 3 m/s along x: the particle takes its speed
+    System* w = system(&arena, Emitter{ rate: 0.0, speed: exactly(0.0), drag: 2.0, wind: linear.vec3(3.0, 0.0, 0.0), life: exactly(9.0) });
+    w.burst(1);
+    for (i32 i in 0..500) {
+        w.advance(0.01);
+    }
+    assert(close(w.particles()[0].velocity.x, 3.0, 0.01));
+    // a speed that falls to 0 over the life: the particle stops halfway along its first way
+    mut curve.Key[2] keys = [curve.key(0.0, 1.0), curve.key(1.0, 0.0)];
+    System* slow = system(&arena, Emitter{ rate: 0.0, shape: Shape.Cone(0.0, 0.0), speed: exactly(2.0), life: exactly(1.0),
+            speed_over_life: some(curve.Curve{ keys: keys[0..2] }) });
+    slow.burst(1);
+    for (i32 i in 0..99) {
+        slow.advance(0.01);
+    }
+    assert(close(slow.particles()[0].position.y, 1.0, 0.03));
+}
+
+test "shapes, sizes and colors over the life, flipbooks" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    System* ball = system(&arena, Emitter{ rate: 0.0, shape: Shape.Sphere(2.0), speed: exactly(1.0), life: exactly(1.0) });
+    ball.move_to(linear.translation(linear.vec3(10.0, 0.0, 0.0)));
+    ball.burst(200);
+    for (Particle p in ball.particles()) {
+        assert(p.position.distance(linear.vec3(10.0, 0.0, 0.0)) <= 2.0001 && close(p.velocity.length(), 1.0, 0.0001));
+    }
+    System* cone = system(&arena, Emitter{ rate: 0.0, shape: Shape.Cone(0.5, 1.0), speed: exactly(1.0), life: exactly(1.0) });
+    cone.burst(200);
+    for (Particle p in cone.particles()) {
+        assert(close(p.position.y, 0.0, 0.0001) && linear.vec2(p.position.x, p.position.z).length() <= 1.0001);
+        assert(p.velocity.y >= math.cos(0.5) as f32 - 0.0001);  // within the angle of y
+    }
+    mut linear.Vec3[3] tri = [linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0), linear.vec3(0.0, 0.0, -1.0)];
+    vec.Vec<linear.Vec3>* corners = vec.new<linear.Vec3>(&arena);
+    for (linear.Vec3 c in tri) {
+        corners.push(c);
+    }
+    System* skin = system(&arena, Emitter{ rate: 0.0, shape: Shape.Surface(corners.items()), speed: exactly(1.0), life: exactly(1.0) });
+    skin.burst(50);
+    for (Particle p in skin.particles()) {
+        assert(close(p.position.y, 0.0, 0.0001) && p.position.x >= -0.0001 && p.position.z <= 0.0001
+                && p.position.x - p.position.z <= 1.0001 && close(p.velocity.y, 1.0, 0.0001));
+    }
+    System* fade = system(&arena, Emitter{ rate: 0.0, size: exactly(0.5), life: exactly(1.0), frames: 4,
+            size_over_life: some(curve.line(&arena, 1.0, 3.0)),
+            color_over_life: some(curve.gradient(&arena, linear.vec4(1.0, 1.0, 1.0, 1.0), linear.vec4(1.0, 0.0, 0.0, 0.0))) });
+    fade.burst(1);
+    fade.advance(0.5);
+    Particle p = fade.particles()[0];
+    assert(close(fade.size_of(p), 1.0, 0.0001) && fade.color_of(p).near(linear.vec4(1.0, 0.5, 0.5, 0.5), 0.0001));
+    assert(fade.frame_of(p) == 2);
+}
+
+test "the same seed gives the same particles" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    Emitter e = Emitter{ rate: 200.0, shape: Shape.Cone(0.4, 0.3), life: range(0.5, 1.5), speed: range(1.0, 3.0),
+            gravity: 0.2, drag: 0.5, wind: linear.vec3(1.0, 0.0, 0.0), turbulence: 4.0, seed: 42 };
+    System* a = system(&arena, e);
+    System* b = system(&arena, e);
+    for (i32 i in 0..120) {
+        a.advance(1.0 / 60.0);
+        b.advance(1.0 / 60.0);
+    }
+    assert(a.count() == b.count() && a.count() > 100);
+    for (usize i in 0..a.count()) {
+        Particle x = a.particles()[i];
+        Particle y = b.particles()[i];
+        assert(x.position.x == y.position.x && x.position.y == y.position.y && x.position.z == y.position.z);
+    }
+    Emitter other = Emitter{ rate: 200.0, shape: Shape.Cone(0.4, 0.3), life: range(0.5, 1.5), speed: range(1.0, 3.0), seed: 43 };
+    System* c = system(&arena, other);
+    c.advance(0.1);
+    System* d = system(&arena, Emitter{ rate: 200.0, shape: Shape.Cone(0.4, 0.3), life: range(0.5, 1.5), speed: range(1.0, 3.0), seed: 42 });
+    d.advance(0.1);
+    assert(c.particles()[0].velocity.x != d.particles()[0].velocity.x);
+    // noise is smooth: near points give near values
+    f32 n0 = noise(linear.vec3(0.3, 0.7, 1.1), 1);
+    f32 n1 = noise(linear.vec3(0.3001, 0.7, 1.1), 1);
+    assert(abs(n0 - n1) < 0.01 && abs(n0) <= 1.0);
+}

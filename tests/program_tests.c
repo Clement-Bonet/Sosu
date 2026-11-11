@@ -45,6 +45,10 @@ static const Case cases[] = {
     { "run", "kept_closures", "expected.txt", 0, NULL }, /* closures in an arena (spec §6.1, rule 5) */
     { "run", "iterators", "expected.txt", 0, NULL },
     { "run", "csources", "expected.txt", 0, NULL },
+    { "run", "cppsources", "expected.txt", 0, NULL }, /* [link] cpp: C++ files of a package (spec §9.1) */
+    { "run", "physics2d", "expected.txt", 0, NULL }, /* physics2d on Box2D, a [native.box2d] (spec §8.2) */
+    { "run", "physics", "expected.txt", 0, NULL }, /* physics on Jolt, a [native.jolt] of C++ (spec §8.2) */
+    { "run", "nav", "expected.txt", 0, NULL }, /* nav on Recast and Detour, and A* on grids (spec §8.2) */
     { "run", "threads", "expected.txt", 0, NULL },
     { "run", "thread_closure", "expected.txt", 101, NULL },
     { "run", "mathematics", "expected.txt", 0, NULL },
@@ -77,6 +81,8 @@ static const Case cases[] = {
     { "run", "examples/bookshelf", NULL, 0, NULL },  /* db and sqlite */
     { "run", "examples/fetch", NULL, 0, NULL },      /* net, with a server of its own */
     { "run", "examples/greetings", NULL, 0, NULL },  /* i18n */
+    /* the libraries of 3D together, played for five seconds by a script, without a window */
+    { "run", "examples/brawl", NULL, 0, "--check" },
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */
@@ -298,6 +304,20 @@ static void test_gpu(const char *sosuc) {
     free(actual);
     free(expected);
 
+    /* particles: drawn over a scene of render3d, hidden by what is nearer; its shaders carried in C */
+    snprintf(command, sizeof command,
+             "%s shaders packages/particles --c native/particles_shaders.c --check > build/gpu_shaders.out 2>&1", sosuc);
+    CHECK(run(command) == 0, "packages/particles/native/particles_shaders.c is out of date (see build/gpu_shaders.out)");
+    snprintf(command, sizeof command, "%s run tests/programs/particles > build/particles.out 2> build/particles.err", sosuc);
+    status = run(command);
+    CHECK(status == 0, "run particles: exit code %d (see build/particles.out and build/particles.err)", status);
+    actual = read_text("build/particles.out");
+    expected = read_text("tests/programs/particles/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run particles: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+
     /* assets: files loaded by threads, failures, a release, and a texture loaded again */
     snprintf(command, sizeof command, "%s run tests/programs/assets > build/assets.out 2> build/assets.err", sosuc);
     status = run(command);
@@ -494,6 +514,110 @@ static void test_android(const char *sosuc) {
           "libmain.so for android-x64 is not an ELF library for x86_64");
 }
 
+static void write_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    CHECK(file != NULL, "cannot write %s", path);
+    if (!file) return;
+    fputs(text, file);
+    fclose(file);
+}
+
+/* git in build/native_test/lib */
+static bool lib_git(const char *args) {
+    char command[512];
+    snprintf(command, sizeof command,
+             "git -C build/native_test/lib -c user.name=test -c user.email=test@example.com %s > build/native_git.out 2>&1",
+             args);
+    return run(command) == 0;
+}
+
+static void write_app_manifest(const char *tag, const char *c) {
+    char text[1024];
+    snprintf(text, sizeof text,
+             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n"
+             "# C and C++ files of a Git repository\n"
+             "[native.lib]\ngit = \"../lib\"\ntag = \"%s\"\nc = [\"%s\"]\ncpp = [\"cpp/\"]\ninclude = [\"include\"]\n"
+             "defines = [\"LIB_BASE=100\"]\n",
+             tag, c);
+    write_file("build/native_test/app/sosu.toml", text);
+}
+
+/* [native.<name>] (spec §9.1): the C and C++ files of a Git repository, cloned at a tag and kept in
+   sosu.lock; `dir/ **` (no space) takes those of the subfolders (two files of one name among them), `dir/` those
+   of a folder; a path above the clone is refused. `sosuc deps upgrade` moves the tag to the newest
+   version, not to a pre-release. */
+static void test_native(const char *sosuc) {
+#ifdef _WIN32
+    run("rmdir /s /q build\\native_test > NUL 2>&1");
+    run("mkdir build\\native_test\\lib\\src\\a build\\native_test\\lib\\src\\b build\\native_test\\lib\\cpp "
+        "build\\native_test\\lib\\include build\\native_test\\app\\src");
+#else
+    run("rm -rf build/native_test");
+    run("mkdir -p build/native_test/lib/src/a build/native_test/lib/src/b build/native_test/lib/cpp "
+        "build/native_test/lib/include build/native_test/app/src");
+#endif
+    write_file("build/native_test/lib/include/lib.h", "int lib_a(void);\nint lib_b(void);\n");
+    write_file("build/native_test/lib/src/a/part.c", "#include \"lib.h\"\nint lib_a(void) { return LIB_BASE + 1; }\n");
+    write_file("build/native_test/lib/src/b/part.c", "#include \"lib.h\"\nint lib_b(void) { return 2; }\n");
+    write_file("build/native_test/lib/cpp/version.cpp",
+               "#include <string>\nextern \"C\" int lib_version(void) { return (int)std::string(\"v1\").size(); }\n");
+    write_file("build/native_test/app/src/main.sosu",
+               "import std.io;\n\nextern \"C\" {\n    i32 lib_a();\n    i32 lib_b();\n    i32 lib_version();\n}\n\n"
+               "i32 main() uses io {\n    unsafe {\n        io.print(\"{} {} {}\", lib_a(), lib_b(), lib_version());\n    }\n"
+               "    return 0;\n}\n");
+    bool ready = lib_git("init --quiet") && lib_git("add .") && lib_git("commit --quiet -m one") && lib_git("tag v1.0.0");
+    CHECK(ready, "native: cannot create the test repository (is git installed?)");
+    if (!ready) return;
+
+    char command[1024];
+    write_app_manifest("v1.0.0", "src/**");
+    snprintf(command, sizeof command, "%s run build/native_test/app > build/native.out 2> build/native.err", sosuc);
+    CHECK(run(command) == 0, "native: run failed (see build/native.err)");
+    char *out = read_text("build/native.out");
+    CHECK(out && strcmp(out, "101 2 2\n") == 0, "native: output `%s`, expected `101 2 2`", out ? out : "(none)");
+    free(out);
+    char *lock = read_text("build/native_test/app/sosu.lock");
+    CHECK(lock && strstr(lock, "\nnative.lib ../lib tag v1.0.0 "), "native: sosu.lock\n%s", lock ? lock : "(none)");
+    free(lock);
+
+    /* newer tags: a pre-release is skipped */
+    write_file("build/native_test/lib/src/b/part.c", "#include \"lib.h\"\nint lib_b(void) { return 3; }\n");
+    CHECK(lib_git("commit --quiet -am two") && lib_git("tag v1.2.0") && lib_git("tag v2.0-beta") && lib_git("tag nightly"),
+          "native: second commit");
+    snprintf(command, sizeof command, "%s deps upgrade build/native_test/app > build/native_deps.out 2> build/native.err",
+             sosuc);
+    CHECK(run(command) == 0, "native: deps upgrade failed (see build/native.err)");
+    char *manifest = read_text("build/native_test/app/sosu.toml");
+    CHECK(manifest && strstr(manifest, "tag = \"v1.2.0\""), "native: deps upgrade wrote\n%s", manifest ? manifest : "");
+    CHECK(manifest && strstr(manifest, "# C and C++ files of a Git repository\n"), "native: the comments are kept");
+    free(manifest);
+    snprintf(command, sizeof command, "%s deps upgrade build/native_test/app > build/native_deps.out 2> build/native.err",
+             sosuc);
+    CHECK(run(command) == 0, "native: deps upgrade, already the newest");
+    out = read_text("build/native_deps.out");
+    CHECK(out && strstr(out, "lib: v1.2.0 is the newest"), "native: deps upgrade said `%s`", out ? out : "");
+    free(out);
+    snprintf(command, sizeof command, "%s run build/native_test/app > build/native.out 2> build/native.err", sosuc);
+    CHECK(run(command) == 0, "native: run after the upgrade failed (see build/native.err)");
+    out = read_text("build/native.out");
+    CHECK(out && strcmp(out, "101 3 2\n") == 0, "native: output after the upgrade `%s`", out ? out : "(none)");
+    free(out);
+    lock = read_text("build/native_test/app/sosu.lock");
+    CHECK(lock && strstr(lock, "\nnative.lib ../lib tag v1.2.0 "), "native: sosu.lock upgraded\n%s", lock ? lock : "");
+    free(lock);
+    snprintf(command, sizeof command, "%s deps upgrade build/native_test/app other > build/native_deps.out 2> build/native.err",
+             sosuc);
+    CHECK(run(command) == 2, "native: deps upgrade of an unknown name is refused");
+
+    /* a path above the clone */
+    write_app_manifest("v1.2.0", "../src/**");
+    snprintf(command, sizeof command, "%s build build/native_test/app > build/native.out 2> build/native.err", sosuc);
+    CHECK(run(command) != 0, "native: a path above the repository was accepted");
+    char *err = read_text("build/native.err");
+    CHECK(err && strstr(err, "leaves its repository"), "native: the refusal says `%s`", err ? err : "");
+    free(err);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fputs("usage: program_tests <path to sosuc>\n", stderr);
@@ -542,6 +666,7 @@ int main(int argc, char **argv) {
     test_stack_overflow(argv[1]);
     test_package(argv[1]);
     test_android(argv[1]);
+    test_native(argv[1]);
 
     /* `assert(a == b)` shows both sides, on the error output (spec §7.3) */
     char *sides = read_text("build/checks.err");

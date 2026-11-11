@@ -41,6 +41,8 @@ test: all
 	./build/sosuc test packages/math
 	./build/sosuc test packages/model
 	./build/sosuc test packages/scene
+	./build/sosuc test packages/anim
+	./build/sosuc test packages/particles
 	./build/sosuc check packages/assets
 	./build/sosuc test packages/image
 	./build/sosuc test packages/render
@@ -52,6 +54,7 @@ test: all
 	./build/sosuc check examples/themes
 	./build/sosuc check examples/containers
 	./build/sosuc check packages/audio
+	./build/sosuc test packages/audio
 	./build/sosuc check examples/sound
 	./build/sosuc check examples/dialogs
 	@# 3D (spec 8.2): built to the end, through the C compiler, without opening its window

@@ -2,15 +2,18 @@
 // positions, normals, texture coordinates and indices), materials of metal and roughness with
 // their base color and its texture (PNG and JPEG), the tree of nodes (a matrix, or a translation,
 // a rotation and a scale) and the scene shown. Buffers and images may be in the .glb, written as
-// base64 in the file, or in files beside it (`load`, or `decode_with` and those files). Skins,
-// animations, morph targets and sparse accessors come later. Every read is checked against the
-// bytes it reads: a damaged or hostile file gives an error.
+// base64 in the file, or in files beside it (`load`, or `decode_with` and those files). Skins
+// (their joints and inverse bind matrices, and the joints and weights of the vertices) and
+// animations (channels of translation, rotation and scale, by steps, lines or cubic splines) are
+// read for `anim`; morph targets and sparse accessors come later. Every read is checked against
+// the bytes it reads: a damaged or hostile file gives an error.
 import std.io;
 import std.json;
 import std.text;
 import std.vec;
 import std.fs;
 import math.linear;
+import math.curve;
 import image.image;
 import image.png;
 import image.jpeg;
@@ -297,6 +300,12 @@ ui32 index_at(Layout l, usize i) {
     return l.type == 5121 ? l.bytes[at] as ui32 : l.type == 5123 ? le16(l.bytes, at) : le32(l.bytes, at);
 }
 
+// The component `c` of the element `i` of an accessor of whole numbers (8 or 16 bits).
+ui32 index_at_component(Layout l, usize i, usize c) {
+    usize at = l.offset + i * l.stride + c * size_of_component(l.type);
+    return l.type == 5121 ? l.bytes[at] as ui32 : le16(l.bytes, at);
+}
+
 // The meshes of the mesh `m` of the document: one per primitive.
 void!model.ModelError read_mesh(keeps Arena* arena, Document d, usize m, vec.Vec<model.Mesh>* out, usize materials) {
     json.Value mesh = item(array(d.root, "meshes"), m);
@@ -359,6 +368,42 @@ void!model.ModelError read_mesh(keeps Arena* arena, Document d, usize m, vec.Vec
             },
             none => { },
         }
+        mut model.Influence[]? influences = none;
+        match (index(attributes, "JOINTS_0")) {
+            some(a) => {
+                Layout joints = try layout_of(d, a, model.MAX_VERTICES);
+                usize w = match (index(attributes, "WEIGHTS_0")) {
+                    some(x) => x,
+                    none => {
+                        return err(damaged("glTF: joints without their weights"));
+                    },
+                };
+                Layout weights = try layout_of(d, w, model.MAX_VERTICES);
+                if (joints.count != positions.count || weights.count != positions.count || joints.components != 4
+                        || weights.components != 4 || joints.normalized || (joints.type != 5121 && joints.type != 5123)) {
+                    return err(damaged("glTF: joints or weights that do not match the positions"));
+                }
+                mut model.Influence[] list = arena.alloc_slice(model.Influence, positions.count);
+                for (usize i in 0..positions.count) {
+                    mut f32 sum = 0.0;
+                    for (usize k in 0..4) {
+                        list[i].joints[k] = index_at_component(joints, i, k) as ui16;
+                        f32 weight = component(weights, i, k);
+                        list[i].weights[k] = weight > 0.0 ? weight : 0.0;  // NaN and below 0: nothing
+                        sum += list[i].weights[k];
+                    }
+                    if (sum > 0.0) {
+                        for (usize k in 0..4) {
+                            list[i].weights[k] = list[i].weights[k] / sum;
+                        }
+                    } else {
+                        list[i].weights[0] = 1.0;
+                    }
+                }
+                influences = some(list);
+            },
+            none => { },
+        }
         mut ui32[] indices = arena.alloc_slice(ui32, 0);
         match (index(prim, "indices")) {
             some(a) => {
@@ -403,10 +448,123 @@ void!model.ModelError read_mesh(keeps Arena* arena, Document d, usize m, vec.Vec
             vertices: vertices,
             indices: indices,
             material: material,
-            bounds: model.bounds_of(vertices)
+            bounds: model.bounds_of(vertices),
+            influences: influences
         });
     }
     return ok();
+}
+
+// An animation of the document: its channels of translation, rotation and scale (those of the
+// weights of morph targets are left out, until `anim` has them).
+model.Animation!model.ModelError read_animation(Arena* arena, Document d, json.Value a, usize node_count) {
+    json.Value? samplers = array(a, "samplers");
+    json.Value? channel_list = array(a, "channels");
+    vec.Vec<model.Channel>* channels = vec.new(arena);
+    mut f32 duration = 0.0;
+    for (usize c in 0..count(channel_list)) {
+        json.Value channel = item(channel_list, c);
+        json.Value target = match (json.get(channel, "target")) {
+            some(t) => t,
+            none => {
+                return err(damaged("glTF: a channel without its target"));
+            },
+        };
+        str path = match (json.get(target, "path")) {
+            some(p) => match (json.as_str(p)) {
+                some(st) => st,
+                none => "",
+            },
+            none => "",
+        };
+        if (path == "weights") {
+            continue;
+        }
+        model.Target what = path == "translation" ? model.Target.Translation
+                : path == "rotation" ? model.Target.Rotation
+                : model.Target.Scale;
+        if (path != "translation" && path != "rotation" && path != "scale") {
+            return err(damaged("glTF: a channel of an unknown path"));
+        }
+        usize node = match (index(target, "node")) {
+            some(n) => n,
+            none => node_count,
+        };
+        if (node >= node_count) {
+            continue;  // no node: glTF lets an extension give it, which is not read
+        }
+        usize sampler = match (index(channel, "sampler")) {
+            some(sm) => sm,
+            none => count(samplers),
+        };
+        if (sampler >= count(samplers)) {
+            return err(damaged("glTF: a channel of a sampler that is not there"));
+        }
+        json.Value smp = item(samplers, sampler);
+        str kind = match (json.get(smp, "interpolation")) {
+            some(i) => match (json.as_str(i)) {
+                some(st) => st,
+                none => "LINEAR",
+            },
+            none => "LINEAR",
+        };
+        curve.Interpolation mode = kind == "STEP" ? curve.Interpolation.Step
+                : kind == "CUBICSPLINE" ? curve.Interpolation.Hermite
+                : curve.Interpolation.Linear;
+        if (kind != "STEP" && kind != "CUBICSPLINE" && kind != "LINEAR") {
+            return err(damaged("glTF: an interpolation that glTF does not have"));
+        }
+        usize input = match (index(smp, "input")) {
+            some(i) => i,
+            none => {
+                return err(damaged("glTF: a sampler without its times"));
+            },
+        };
+        usize output = match (index(smp, "output")) {
+            some(o) => o,
+            none => {
+                return err(damaged("glTF: a sampler without its values"));
+            },
+        };
+        Layout times = try layout_of(d, input, model.MAX_VERTICES);
+        Layout values = try layout_of(d, output, model.MAX_VERTICES);
+        usize per_key = kind == "CUBICSPLINE" ? 3 : 1;
+        usize width = match (what) {
+            Rotation => 4,
+            _ => 3,
+        };
+        if (times.components != 1 || times.type != 5126 || times.count == 0 || values.components != width
+                || times.count > values.count / per_key || values.count != times.count * per_key) {
+            return err(damaged("glTF: the times and values of a sampler do not match"));
+        }
+        mut f32[] t = arena.alloc_slice(f32, times.count);
+        for (usize i in 0..times.count) {
+            t[i] = component(times, i, 0);
+            if (t[i] != t[i] || t[i] < 0.0 || (i > 0 && t[i] < t[i - 1])) {
+                return err(damaged("glTF: times of a sampler that do not increase"));
+            }
+        }
+        mut f32[] v = arena.alloc_slice(f32, values.count * width);
+        for (usize i in 0..values.count) {
+            for (usize k in 0..width) {
+                f32 x = component(values, i, k);
+                v[i * width + k] = x == x ? x : 0.0;
+            }
+        }
+        duration = max(duration, t[t.len - 1]);
+        channels.push(model.Channel{ node: node, target: what, mode: mode, times: t, values: v });
+    }
+    return ok(model.Animation{
+        name: match (json.get(a, "name")) {
+            some(nm) => match (json.as_str(nm)) {
+                some(st) => st,
+                none => "",
+            },
+            none => "",
+        },
+        channels: channels.items(),
+        duration: duration
+    });
 }
 
 // The image of the image `i` of the document, decoded.
@@ -631,6 +789,7 @@ pub model.Model!model.ModelError decode_with(Arena* arena, ui8[] data, File[] fi
     for (usize n in 0..node_count) {
         json.Value node = item(node_list, n);
         mut linear.Mat4 local = linear.identity4();
+        mut linear.Transform placed_as = linear.transform();
         json.Value? matrix = array(node, "matrix");
         if (count(matrix) == 16) {
             for (usize k in 0..16) {
@@ -639,6 +798,7 @@ pub model.Model!model.ModelError decode_with(Arena* arena, ui8[] data, File[] fi
                     none => 0.0,
                 };
             }
+            placed_as = linear.decompose(local);
         } else {
             mut f32[3] t = [0.0, 0.0, 0.0];
             mut f32[4] r = [0.0, 0.0, 0.0, 1.0];
@@ -674,6 +834,7 @@ pub model.Model!model.ModelError decode_with(Arena* arena, ui8[] data, File[] fi
                 scale: linear.vec3(s[0], s[1], s[2])
             };
             local = placed.to_mat4();
+            placed_as = placed;
         }
         vec.Vec<usize>* own_meshes = vec.new(arena);
         match (index(node, "mesh")) {
@@ -706,7 +867,88 @@ pub model.Model!model.ModelError decode_with(Arena* arena, ui8[] data, File[] fi
                 none => "",
             },
             none => "",
-        }, local: local, meshes: own_meshes.items(), children: children.items() });
+        }, local: local, meshes: own_meshes.items(), children: children.items(), skin: index(node, "skin"),
+                transform: some(placed_as) });
+    }
+
+    // skins: their joints, nodes of the document, and their inverse bind matrices
+    json.Value? skin_list = array(root, "skins");
+    vec.Vec<model.Skin>* skins = vec.new(arena);
+    for (usize k in 0..count(skin_list)) {
+        json.Value skin = item(skin_list, k);
+        json.Value? joint_list = array(skin, "joints");
+        usize joint_count = count(joint_list);
+        if (joint_count == 0 || joint_count > 65536) {
+            return err(damaged("glTF: a skin without joints, or of more than 65536"));
+        }
+        mut usize[] joints = arena.alloc_slice(usize, joint_count);
+        for (usize j in 0..joint_count) {
+            joints[j] = match (json.as_i64(item(joint_list, j))) {
+                some(x) => x >= 0 && x < node_count as i64 ? x as usize : node_count,
+                none => node_count,
+            };
+            if (joints[j] >= node_count) {
+                return err(damaged("glTF: a joint that is not a node"));
+            }
+        }
+        mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, joint_count);
+        for (usize j in 0..joint_count) {
+            binds[j] = linear.identity4();
+        }
+        match (index(skin, "inverseBindMatrices")) {
+            some(a) => {
+                Layout read = try layout_of(d, a, 65536);
+                if (read.components != 16 || read.type != 5126 || read.count < joint_count) {
+                    return err(damaged("glTF: inverse bind matrices that do not match the joints"));
+                }
+                for (usize j in 0..joint_count) {
+                    for (usize c in 0..16) {
+                        binds[j].m[c] = component(read, j, c);
+                    }
+                }
+            },
+            none => { },
+        }
+        skins.push(model.Skin{ name: match (json.get(skin, "name")) {
+            some(nm) => match (json.as_str(nm)) {
+                some(st) => st,
+                none => "",
+            },
+            none => "",
+        }, joints: joints, inverse_binds: binds });
+    }
+    // a node's skin is there, and the joints of its meshes are among it
+    for (model.Node node in nodes.items()) {
+        match (node.skin) {
+            some(k) => {
+                if (k >= skins.len()) {
+                    return err(damaged("glTF: a node of a skin that is not there"));
+                }
+                usize joint_count = skins.items()[k].joints.len;
+                for (usize m in node.meshes) {
+                    match (meshes.items()[m].influences) {
+                        some(list) => {
+                            for (model.Influence inf in list) {
+                                for (usize c in 0..4) {
+                                    if (inf.joints[c] as usize >= joint_count && inf.weights[c] > 0.0) {
+                                        return err(damaged("glTF: a vertex of a joint beyond its skin"));
+                                    }
+                                }
+                            }
+                        },
+                        none => { },
+                    }
+                }
+            },
+            none => { },
+        }
+    }
+
+    // animations
+    json.Value? animation_list = array(root, "animations");
+    vec.Vec<model.Animation>* animations = vec.new(arena);
+    for (usize k in 0..count(animation_list)) {
+        animations.push(try read_animation(arena, d, item(animation_list, k), node_count));
     }
 
     // the scene shown: `scene`, else the first, else every node without a parent
@@ -741,7 +983,9 @@ pub model.Model!model.ModelError decode_with(Arena* arena, ui8[] data, File[] fi
         materials: materials.items(),
         images: images.items(),
         nodes: nodes.items(),
-        roots: roots.items()
+        roots: roots.items(),
+        skins: some(skins.items()),
+        animations: some(animations.items())
     });
 }
 
@@ -1001,6 +1245,165 @@ test "damaged and unsupported documents" {
     });
     assert(match (decode(&arena, bytes_of("not JSON"))) {
         ok(m) => false,
+        err(e) => true,
+    });
+}
+
+// Little-endian bytes, as a buffer of glTF holds them.
+class Bytes {
+    vec.Vec<ui8>* out;
+
+    void init(keeps Arena* arena) {
+        out = vec.new<ui8>(arena);
+    }
+
+    void u8(ui32 x) {
+        out.push((x & 0xFF) as ui8);
+    }
+
+    void u16(ui32 x) {
+        u8(x);
+        u8(x >> 8);
+    }
+
+    void f(f32 x) {
+        mut f32 v = x;
+        mut ui32 bits = 0;
+        unsafe {
+            bits = *(&v as ui32*);
+        }
+        u16(bits & 0xFFFF);
+        u16(bits >> 16);
+    }
+}
+
+// A skinned triangle on two joints (node 0 the root, node 1 its child at y = 1), its first vertex
+// on joint 0, the two others half on each; an animation "wave" that turns joint 1 a quarter about
+// z by a line over one second, and moves joint 0 by a cubic spline from x = 0 to x = 2.
+str skinned_json(Arena* arena) {
+    Bytes* b = arena.new(Bytes, arena);
+    f32[9] positions = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0];
+    for (f32 x in positions) {
+        b.f(x);  // 0: 36 bytes
+    }
+    for (i32 i in [0, 1, 2]) {
+        b.u16(i as ui32);  // 36: 6 bytes
+    }
+    b.u16(0);  // to 44
+    for (i32 j in [0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0]) {
+        b.u8(j as ui32);  // 44: joints, 12 bytes
+    }
+    f32[12] weights = [1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.25, 0.25, 0.0, 0.0];
+    for (f32 x in weights) {
+        b.f(x);  // 56: weights, 48 bytes (the last vertex sums to 0.5: brought to 1)
+    }
+    for (usize m in 0..2) {
+        for (usize c in 0..16) {
+            // the inverse of the rest: identity, and down by 1 for joint 1
+            b.f(c % 5 == 0 ? 1.0 : m == 1 && c == 13 ? -1.0 : 0.0);  // 104: 128 bytes
+        }
+    }
+    b.f(0.0);
+    b.f(1.0);  // 232: times
+    f32[8] turns = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.70710677, 0.70710677];
+    for (f32 x in turns) {
+        b.f(x);  // 240: rotations, 32 bytes
+    }
+    f32[18] spline = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for (f32 x in spline) {
+        b.f(x);  // 272: in, value, out for each key, 72 bytes
+    }
+    str uri = joined(arena, "data:application/octet-stream;base64,", base64.encode(arena, b.out.items()));
+    mut str[16] parts = [
+        "{\"asset\": {\"version\": \"2.0\"}, \"buffers\": [{\"uri\": \"", uri, "\", \"byteLength\": 344}], ",
+        "\"bufferViews\": [{\"buffer\": 0, \"byteOffset\": 0, \"byteLength\": 344}], ",
+        "\"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 36, \"componentType\": 5123, \"count\": 3, \"type\": \"SCALAR\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 44, \"componentType\": 5121, \"count\": 3, \"type\": \"VEC4\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 56, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC4\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 104, \"componentType\": 5126, \"count\": 2, \"type\": \"MAT4\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 232, \"componentType\": 5126, \"count\": 2, \"type\": \"SCALAR\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 240, \"componentType\": 5126, \"count\": 2, \"type\": \"VEC4\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 272, \"componentType\": 5126, \"count\": 6, \"type\": \"VEC3\"}], ",
+        "\"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0, \"JOINTS_0\": 2, \"WEIGHTS_0\": 3}, \"indices\": 1}]}], ",
+        "\"nodes\": [{\"name\": \"root\", \"children\": [1]}, {\"name\": \"tip\", \"translation\": [0, 1, 0]}, {\"name\": \"body\", \"mesh\": 0, \"skin\": 0}], \"skins\": [{\"joints\": [0, 1], \"inverseBindMatrices\": 4}], ",
+        "\"animations\": [{\"name\": \"wave\", \"samplers\": [{\"input\": 5, \"output\": 6}, {\"input\": 5, \"output\": 7, \"interpolation\": \"CUBICSPLINE\"}], ",
+        "\"channels\": [{\"sampler\": 0, \"target\": {\"node\": 1, \"path\": \"rotation\"}}, {\"sampler\": 1, \"target\": {\"node\": 0, \"path\": \"translation\"}}]}]}",
+    ];
+    return text.join(arena, parts[0..16], "");
+}
+
+test "a skin and an animation" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str doc = skinned_json(&arena);
+    model.Model m = match (decode(&arena, bytes_of(doc))) {
+        ok(read) => read,
+        err(e) => {
+            io.print("{}", model.message(e));
+            assert(false);
+            return;
+        },
+    };
+    model.Skin skin = match (m.skins) {
+        some(list) => list[0],
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(skin.joints.len == 2 && skin.joints[1] == 1);
+    assert(skin.inverse_binds[1].transform_point(linear.vec3(0.0, 1.0, 0.0)).near(linear.vec3(0.0, 0.0, 0.0), 0.0001));
+    assert(match (m.nodes[2].skin) {
+        some(k) => k == 0,
+        none => false,
+    });
+    model.Influence[] inf = match (m.meshes[0].influences) {
+        some(list) => list,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(inf.len == 3 && inf[1].joints[1] == 1 && abs(inf[1].weights[1] - 0.5) < 0.0001);
+    assert(abs(inf[2].weights[0] - 0.5) < 0.0001 && abs(inf[2].weights[1] - 0.5) < 0.0001);  // brought to 1
+    assert(match (m.nodes[1].transform) {
+        some(t) => t.position.near(linear.vec3(0.0, 1.0, 0.0), 0.0001),
+        none => false,
+    });
+    model.Animation wave = match (m.animation("wave")) {
+        some(a) => a,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(wave.channels.len == 2 && abs(wave.duration - 1.0) < 0.0001);
+    model.Channel turn = wave.channels[0];
+    assert(turn.node == 1 && turn.times.len == 2 && turn.values.len == 8 && abs(turn.values[7] - 0.70710677) < 0.0001);
+    assert(match (turn.target) {
+        Rotation => true,
+        _ => false,
+    });
+    model.Channel moved = wave.channels[1];
+    assert(moved.values.len == 18 && abs(moved.values[12] - 2.0) < 0.0001);
+    assert(match (moved.mode) {
+        Hermite => true,
+        _ => false,
+    });
+    assert(match (m.animation("none")) {
+        some(a) => false,
+        none => true,
+    });
+    // a joint of a vertex beyond the skin, and times that go back
+    str beyond = text.replace(&arena, doc, "\"joints\": [0, 1]", "\"joints\": [0]");
+    assert(match (decode(&arena, bytes_of(beyond))) {
+        ok(read) => false,
+        err(e) => true,
+    });
+    str missing = text.replace(&arena, doc, "\"joints\": [0, 1]", "\"joints\": [0, 7]");
+    assert(match (decode(&arena, bytes_of(missing))) {
+        ok(read) => false,
         err(e) => true,
     });
 }

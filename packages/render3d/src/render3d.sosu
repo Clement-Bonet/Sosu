@@ -2,7 +2,8 @@
 // GPU (its meshes, textures and materials); each frame, `draw` takes a camera and the models to
 // show, each placed by a matrix, leaves out the meshes that the camera cannot see, draws the map
 // of the shadows of the sun, then the scene, lit as glTF describes its materials (metal and
-// roughness) by the sun, up to four point lights and an ambient light.
+// roughness) by the sun, up to four point lights and an ambient light. A mesh moved by a skin is
+// drawn by the joints of the palette its item gives (`anim.palette`), up to 128 joints.
 import std.vec;
 import math.linear;
 import math.geometry;
@@ -23,7 +24,16 @@ extern "C" {
     ui8* sosu_shader_shadow_frag_spv(usize* size) uses io;
     ui8* sosu_shader_shadow_frag_dxil(usize* size) uses io;
     ui8* sosu_shader_shadow_frag_msl(usize* size) uses io;
+    ui8* sosu_shader_skinned_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_skinned_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_skinned_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_skinned_shadow_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_skinned_shadow_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_skinned_shadow_vert_msl(usize* size) uses io;
 }
+
+// The joints of a skinned mesh, at most: the size of the uniform buffer of its vertex shader.
+pub usize MAX_JOINTS = 128;
 
 usize MAX_POINT_LIGHTS = 4;
 
@@ -67,10 +77,13 @@ pub struct Options {
     pub ui32 shadow_size = 2048;  // the side of the map of shadows, in pixels
 }
 
-// A model on the GPU, placed by a matrix in a scene.
+// A model on the GPU, placed by a matrix in a scene. `palette`: the matrices of the joints of its
+// skin (`anim.palette`), for its skinned meshes, which are drawn at rest without it; these meshes
+// are placed by `transform` alone, as glTF has it (not by their node), and never left out.
 pub struct Item {
     pub Uploaded* model;
     pub linear.Mat4 transform;
+    pub linear.Mat4[]? palette = none;
 }
 
 pub Item item(Uploaded* m, linear.Mat4 transform) {
@@ -89,6 +102,21 @@ struct GpuMesh {
     ui32 count;
     usize? material;
     geometry.Aabb bounds;
+    bool skinned;  // its vertices are `SkinnedVertex`
+}
+
+// A vertex of a skinned mesh, as skinned.vert reads it: that of the model, its four joints (as
+// floats) and their weights.
+struct SkinnedVertex {
+    f32[3] position;
+    f32[3] normal;
+    f32[2] uv;
+    f32[4] joints;
+    f32[4] weights;
+}
+
+struct SkinUniform {
+    mut linear.Mat4[128] joints;
 }
 
 // A model sent to the GPU by `Renderer.upload`.
@@ -137,6 +165,7 @@ struct Draw {
     GpuMesh mesh;
     Uploaded* owner;
     linear.Mat4 world;
+    linear.Mat4[]? palette;
 }
 
 ui8[] copied(Arena* arena, ui8* bytes, usize size) {
@@ -150,7 +179,7 @@ ui8[] copied(Arena* arena, ui8* bytes, usize size) {
 }
 
 // The code of a shader of the package: `which` is 0 for lit.vert, 1 lit.frag, 2 shadow.vert,
-// 3 shadow.frag.
+// 3 shadow.frag, 4 skinned.vert, 5 skinned_shadow.vert.
 ui8[] code_of(Arena* arena, gpu.ShaderFormat format, usize which) uses io {
     mut usize size = 0;
     mut ui8* bytes = "".to_cstr(arena);
@@ -159,15 +188,21 @@ ui8[] code_of(Arena* arena, gpu.ShaderFormat format, usize which) uses io {
             Spirv => which == 0 ? sosu_shader_lit_vert_spv(&size)
                     : which == 1 ? sosu_shader_lit_frag_spv(&size)
                     : which == 2 ? sosu_shader_shadow_vert_spv(&size)
-                    : sosu_shader_shadow_frag_spv(&size),
+                    : which == 3 ? sosu_shader_shadow_frag_spv(&size)
+                    : which == 4 ? sosu_shader_skinned_vert_spv(&size)
+                    : sosu_shader_skinned_shadow_vert_spv(&size),
             Dxil => which == 0 ? sosu_shader_lit_vert_dxil(&size)
                     : which == 1 ? sosu_shader_lit_frag_dxil(&size)
                     : which == 2 ? sosu_shader_shadow_vert_dxil(&size)
-                    : sosu_shader_shadow_frag_dxil(&size),
+                    : which == 3 ? sosu_shader_shadow_frag_dxil(&size)
+                    : which == 4 ? sosu_shader_skinned_vert_dxil(&size)
+                    : sosu_shader_skinned_shadow_vert_dxil(&size),
             Msl => which == 0 ? sosu_shader_lit_vert_msl(&size)
                     : which == 1 ? sosu_shader_lit_frag_msl(&size)
                     : which == 2 ? sosu_shader_shadow_vert_msl(&size)
-                    : sosu_shader_shadow_frag_msl(&size),
+                    : which == 3 ? sosu_shader_shadow_frag_msl(&size)
+                    : which == 4 ? sosu_shader_skinned_vert_msl(&size)
+                    : sosu_shader_skinned_shadow_vert_msl(&size),
         };
     }
     return copied(arena, bytes, size);
@@ -178,6 +213,8 @@ pub class Renderer {
     gpu.Device* device;
     gpu.Pipeline lit;
     gpu.Pipeline shadow;
+    gpu.Pipeline lit_skinned;
+    gpu.Pipeline shadow_skinned;
     gpu.Texture shadow_map;
     gpu.Sampler shadow_sampler;
     gpu.Sampler albedo_sampler;
@@ -193,6 +230,8 @@ pub class Renderer {
         keeps gpu.Device* device,
         gpu.Pipeline lit,
         gpu.Pipeline shadow,
+        gpu.Pipeline lit_skinned,
+        gpu.Pipeline shadow_skinned,
         gpu.Texture shadow_map,
         gpu.Sampler shadow_sampler,
         gpu.Sampler albedo_sampler,
@@ -202,6 +241,8 @@ pub class Renderer {
         self.device = device;
         self.lit = lit;
         self.shadow = shadow;
+        self.lit_skinned = lit_skinned;
+        self.shadow_skinned = shadow_skinned;
         self.shadow_map = shadow_map;
         self.shadow_sampler = shadow_sampler;
         self.albedo_sampler = albedo_sampler;
@@ -243,16 +284,48 @@ pub class Renderer {
                     indices: try device.buffer(gpu.Usage.Index, 4),
                     count: 0,
                     material: none,
-                    bounds: mesh.bounds
+                    bounds: mesh.bounds,
+                    skinned: false
                 });
                 continue;
+            }
+            match (mesh.influences) {
+                some(influences) => {
+                    if (influences.len == mesh.vertices.len) {
+                        mut Arena scratch = Arena.new(mesh.vertices.len * 64 + 64);
+                        defer scratch.free();
+                        mut SkinnedVertex[] skinned = scratch.alloc_slice(SkinnedVertex, mesh.vertices.len);
+                        for (usize i in 0..mesh.vertices.len) {
+                            model.Vertex v = mesh.vertices[i];
+                            model.Influence f = influences[i];
+                            skinned[i] = SkinnedVertex{
+                                position: v.position,
+                                normal: v.normal,
+                                uv: v.uv,
+                                joints: [f.joints[0] as f32, f.joints[1] as f32, f.joints[2] as f32, f.joints[3] as f32],
+                                weights: f.weights
+                            };
+                        }
+                        up.meshes.push(GpuMesh{
+                            vertices: try device.buffer_of(gpu.Usage.Vertex, skinned),
+                            indices: try device.buffer_of(gpu.Usage.Index, mesh.indices),
+                            count: mesh.indices.len as ui32,
+                            material: mesh.material,
+                            bounds: mesh.bounds,
+                            skinned: true
+                        });
+                        continue;
+                    }
+                },
+                none => { },
             }
             up.meshes.push(GpuMesh{
                 vertices: try device.buffer_of(gpu.Usage.Vertex, mesh.vertices),
                 indices: try device.buffer_of(gpu.Usage.Index, mesh.indices),
                 count: mesh.indices.len as ui32,
                 material: mesh.material,
-                bounds: mesh.bounds
+                bounds: mesh.bounds,
+                skinned: false
             });
         }
         return ok(up);
@@ -319,9 +392,11 @@ pub class Renderer {
                     if (mesh.count == 0) {
                         continue;
                     }
-                    Draw d = Draw{ mesh: mesh, owner: up, world: worlds[n] };
+                    // a skinned mesh: placed by the item alone, its joints carry the rest; it may be
+                    // anywhere its joints take it, so it is not left out
+                    Draw d = Draw{ mesh: mesh, owner: up, world: mesh.skinned ? it.transform : worlds[n], palette: it.palette };
                     casters.push(d);
-                    if (frustum.sees_box(mesh.bounds.transformed(worlds[n]))) {
+                    if (mesh.skinned || frustum.sees_box(mesh.bounds.transformed(worlds[n]))) {
                         seen.push(d);
                     } else {
                         culled += 1;
@@ -333,13 +408,22 @@ pub class Renderer {
         // the map of the shadows of the sun
         if (sun.shadows) {
             gpu.Pass pass = frame.depth_pass(shadow_map);
-            pass.bind(shadow);
-            for (Draw d in casters.items()) {
-                mut ShadowUniform u = ShadowUniform{ model: d.world, light_view_projection: light };
-                pass.vertex_uniform(0, &u);
-                pass.vertices(d.mesh.vertices);
-                pass.indices(d.mesh.indices, gpu.IndexSize.U32);
-                pass.draw_indexed(d.mesh.count, 1);
+            for (bool skinned in [false, true]) {
+                pass.bind(skinned ? shadow_skinned : shadow);
+                for (Draw d in casters.items()) {
+                    if (d.mesh.skinned != skinned) {
+                        continue;
+                    }
+                    mut ShadowUniform u = ShadowUniform{ model: d.world, light_view_projection: light };
+                    pass.vertex_uniform(0, &u);
+                    if (skinned) {
+                        mut SkinUniform joints = skin_of(d.palette);
+                        pass.vertex_uniform(1, &joints);
+                    }
+                    pass.vertices(d.mesh.vertices);
+                    pass.indices(d.mesh.indices, gpu.IndexSize.U32);
+                    pass.draw_indexed(d.mesh.count, 1);
+                }
             }
             pass.end();
         }
@@ -372,13 +456,22 @@ pub class Renderer {
             lights.point_color[i * 4 + 3] = p.intensity;
         }
         pass.fragment_uniform(0, &lights);
+        mut bool skinned_bound = false;
         for (Draw d in seen.items()) {
+            if (d.mesh.skinned != skinned_bound) {
+                pass.bind(d.mesh.skinned ? lit_skinned : lit);
+                skinned_bound = d.mesh.skinned;
+            }
             mut ObjectUniform object = ObjectUniform{
                 model: d.world,
                 view_projection: view_projection,
                 light_view_projection: light
             };
             pass.vertex_uniform(0, &object);
+            if (d.mesh.skinned) {
+                mut SkinUniform joints = skin_of(d.palette);
+                pass.vertex_uniform(1, &joints);
+            }
             mut gpu.Texture albedo = white;
             mut MaterialUniform material = MaterialUniform{
                 base_color: [1.0, 1.0, 1.0, 1.0],
@@ -421,11 +514,30 @@ pub class Renderer {
     pub void close() uses io {
         device.release_pipeline(lit);
         device.release_pipeline(shadow);
+        device.release_pipeline(lit_skinned);
+        device.release_pipeline(shadow_skinned);
         device.release_texture(shadow_map);
         device.release_texture(white);
         device.release_sampler(shadow_sampler);
         device.release_sampler(albedo_sampler);
     }
+}
+
+// The joints of a palette for the vertex shader: the identity (the rest) without one, or beyond
+// `MAX_JOINTS`.
+SkinUniform skin_of(linear.Mat4[]? palette) {
+    mut SkinUniform u = SkinUniform{ joints: [linear.identity4(); 128] };
+    match (palette) {
+        some(p) => {
+            if (p.len <= MAX_JOINTS) {
+                for (usize j in 0..p.len) {
+                    u.joints[j] = p[j];
+                }
+            }
+        },
+        none => { },
+    }
+    return u;
 }
 
 // The renderer of `device`, its pipelines and its map of shadows made.
@@ -479,10 +591,42 @@ pub Renderer*!gpu.GpuError create(keeps Arena* arena, keeps gpu.Device* device, 
         cull: gpu.Cull.Off,
         color: false
     });  // the back faces cast shadows too: thin walls, leaves
+    gpu.Shader skinned_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 4),
+        entry: entry,
+        uniform_buffers: 2
+    });
+    gpu.Shader skinned_shadow_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 5),
+        entry: entry,
+        uniform_buffers: 2
+    });
+    mut gpu.Attribute[5] skinned_attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(SkinnedVertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float3, offset: offset_of(SkinnedVertex, normal) as ui32 },
+        gpu.Attribute{ location: 2, format: gpu.Format.Float2, offset: offset_of(SkinnedVertex, uv) as ui32 },
+        gpu.Attribute{ location: 3, format: gpu.Format.Float4, offset: offset_of(SkinnedVertex, joints) as ui32 },
+        gpu.Attribute{ location: 4, format: gpu.Format.Float4, offset: offset_of(SkinnedVertex, weights) as ui32 },
+    ];
+    gpu.Layout skinned_layout = gpu.Layout{ stride: size_of(SkinnedVertex) as ui32, attributes: skinned_attributes[0..5] };
+    gpu.Pipeline lit_skinned = try device.pipeline(gpu.PipelineDesc{ vertex: skinned_vs, fragment: lit_fs, layout: skinned_layout });
+    gpu.Pipeline shadow_skinned = try device.pipeline(gpu.PipelineDesc{
+        vertex: skinned_shadow_vs,
+        fragment: shadow_fs,
+        layout: skinned_layout,
+        cull: gpu.Cull.Off,
+        color: false
+    });
     device.release_shader(lit_vs);
     device.release_shader(lit_fs);
     device.release_shader(shadow_vs);
     device.release_shader(shadow_fs);
+    device.release_shader(skinned_vs);
+    device.release_shader(skinned_shadow_vs);
     gpu.Texture shadow_map = try device.depth_target(options.shadow_size, options.shadow_size);
     gpu.Sampler shadow_sampler = try device.sampler(gpu.SamplerDesc{
         filter: gpu.Filter.Linear,
@@ -494,7 +638,8 @@ pub Renderer*!gpu.GpuError create(keeps Arena* arena, keeps gpu.Device* device, 
     mut image.Image one = image.create(&scratch, 1, 1);
     one.set(0, 0, 0xFFFFFFFF);
     gpu.Texture white = try device.texture_of(one, false);
-    return ok(arena.new(Renderer, arena, device, lit, shadow, shadow_map, shadow_sampler, albedo_sampler, white));
+    return ok(arena.new(Renderer, arena, device, lit, shadow, lit_skinned, shadow_skinned, shadow_map, shadow_sampler,
+            albedo_sampler, white));
 }
 
 // A cube of side 2 around the origin, its faces with their normals and texture coordinates: a

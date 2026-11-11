@@ -1,0 +1,9 @@
+# The package nav (spec §8.2): a path around an obstacle, two rooms that are not connected, the
+# nearest point, a mesh saved and loaded again, a crowd; A* on grids.
+[package]
+name = "navtest"
+version = "0.1.0"
+
+[dependencies]
+nav = { path = "../../../packages/nav" }
+math = { path = "../../../packages/math" }

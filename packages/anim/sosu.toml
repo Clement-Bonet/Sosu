@@ -1,0 +1,11 @@
+# Skeletal animation (spec §8.2), in Sosu: skeletons and clips of glTF (model), poses sampled,
+# blended, added and masked, state machines with cross-fades and blend trees, events, root motion,
+# and the matrices of skinning.
+[package]
+name = "anim"
+version = "0.1.0"
+
+[dependencies]
+math = { path = "../math" }
+model = { path = "../model" }
+image = { path = "../image" }

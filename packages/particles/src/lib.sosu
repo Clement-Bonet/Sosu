@@ -1,0 +1,4 @@
+// particles: systems of particles (spec §8.2). Programs import `particles.particles`, and
+// `particles.draw` to draw them.
+import particles.particles;
+import particles.draw;

@@ -1,0 +1,1185 @@
+// anim.anim: skeletal animation (spec §8.2), in Sosu. A `Skeleton` is the joints of a skin of a
+// model; a `Clip` is the channels of one of its animations, read by joint; a `Pose` is a transform
+// per joint. Poses are sampled, blended, added and masked; a `Machine` plays states (clips, or
+// blend trees by one or two parameters) and moves between them by cross-fades when the conditions
+// on its parameters hold, as Unity's Animator does, declared in code. It gives the events of its
+// clips and what the root moved. `palette` gives the matrices that skinning reads. Everything is
+// memory in an arena, without effects: the machines of many characters can advance in threads.
+import std.vec;
+import math.linear;
+import math.curve;
+import model.model;
+import image.image;
+
+// ---- Skeletons and poses ----
+
+pub struct Skeleton {
+    pub str[] names;
+    pub i32[] parents;  // the joint above each, -1 for a root
+    pub linear.Transform[] rest;  // where each joint is, relative to its parent, without animation
+    pub linear.Mat4[] inverse_binds;
+    pub usize[] nodes;  // the node of each joint, in its model
+    pub usize[] order;  // the joints, each after its parent
+    pub linear.Mat4[] above;  // for a root: where the nodes above the skeleton put it; else identity
+
+    pub usize count() {
+        return names.len;
+    }
+
+    // The joint named `name`.
+    pub usize? joint(str name) {
+        for (usize j in 0..names.len) {
+            if (names[j] == name) {
+                return some(j);
+            }
+        }
+        return none;
+    }
+
+    // The joint of the node `node` of the model.
+    pub usize? joint_of_node(usize node) {
+        for (usize j in 0..nodes.len) {
+            if (nodes[j] == node) {
+                return some(j);
+            }
+        }
+        return none;
+    }
+}
+
+linear.Transform rest_of(model.Node n) {
+    return match (n.transform) {
+        some(t) => t,
+        none => linear.decompose(n.local),
+    };
+}
+
+// The skeleton of the skin `skin` of `m`; none when the model has no such skin.
+pub Skeleton? skeleton(Arena* arena, keeps model.Model m, usize skin) {
+    model.Skin[] list = match (m.skins) {
+        some(l) => l,
+        none => {
+            return none;
+        },
+    };
+    if (skin >= list.len) {
+        return none;
+    }
+    model.Skin s = list[skin];
+    usize n = s.joints.len;
+    usize node_count = m.nodes.len;
+    // the parent of each node, and the joint of each node
+    mut i64[] node_parent = arena.alloc_slice(i64, node_count);
+    mut i64[] joint_of = arena.alloc_slice(i64, node_count);
+    for (usize i in 0..node_count) {
+        node_parent[i] = -1;
+        joint_of[i] = -1;
+    }
+    for (usize i in 0..node_count) {
+        for (usize c in m.nodes[i].children) {
+            node_parent[c] = i as i64;
+        }
+    }
+    for (usize j in 0..n) {
+        joint_of[s.joints[j]] = j as i64;
+    }
+    linear.Mat4[] world = model.world_matrices(arena, m, linear.identity4());
+    mut str[] names = arena.alloc_slice(str, n);
+    mut i32[] parents = arena.alloc_slice(i32, n);
+    mut linear.Transform[] rest = arena.alloc_slice(linear.Transform, n);
+    mut linear.Mat4[] above = arena.alloc_slice(linear.Mat4, n);
+    mut usize[] depth = arena.alloc_slice(usize, n);
+    for (usize j in 0..n) {
+        usize node = s.joints[j];
+        names[j] = m.nodes[node].name;
+        rest[j] = rest_of(m.nodes[node]);
+        above[j] = linear.identity4();
+        // the nearest joint above, through nodes that are not joints
+        mut i64 up = node_parent[node];
+        mut usize steps = 0;
+        while (up >= 0 && joint_of[up as usize] < 0 && steps < node_count) {
+            up = node_parent[up as usize];
+            steps += 1;
+        }
+        parents[j] = up >= 0 ? joint_of[up as usize] as i32 : -1;
+        if (parents[j] < 0 && node_parent[node] >= 0) {
+            above[j] = world[node_parent[node] as usize];
+        }
+    }
+    // depths, then the joints by depth: each after its parent
+    mut usize deepest = 0;
+    for (usize j in 0..n) {
+        mut usize d = 0;
+        mut i32 at = parents[j];
+        while (at >= 0 && d <= n) {
+            d += 1;
+            at = parents[at as usize];
+        }
+        depth[j] = d;
+        deepest = max(deepest, d);
+    }
+    mut usize[] order = arena.alloc_slice(usize, n);
+    mut usize placed = 0;
+    for (usize d in 0..deepest + 1) {
+        for (usize j in 0..n) {
+            if (depth[j] == d) {
+                order[placed] = j;
+                placed += 1;
+            }
+        }
+    }
+    mut usize[] nodes = arena.alloc_slice(usize, n);
+    for (usize j in 0..n) {
+        nodes[j] = s.joints[j];
+    }
+    return some(Skeleton{
+        names: names,
+        parents: parents,
+        rest: rest,
+        inverse_binds: s.inverse_binds,
+        nodes: nodes,
+        order: order,
+        above: above
+    });
+}
+
+// A transform per joint of a skeleton.
+pub struct Pose {
+    pub linear.Transform[] joints;
+}
+
+// The rest pose of `s`, in `arena`.
+pub Pose rest_pose(Arena* arena, Skeleton s) {
+    mut linear.Transform[] joints = arena.alloc_slice(linear.Transform, s.rest.len);
+    for (usize j in 0..joints.len) {
+        joints[j] = s.rest[j];
+    }
+    return Pose{ joints: joints };
+}
+
+pub void copy(Pose from, Pose to) {
+    mut linear.Transform[] out = to.joints;
+    for (usize j in 0..min(from.joints.len, out.len)) {
+        out[j] = from.joints[j];
+    }
+}
+
+linear.Transform mix(linear.Transform a, linear.Transform b, f32 w) {
+    return linear.Transform{
+        position: a.position.lerp(b.position, w),
+        rotation: a.rotation.slerp(b.rotation, w),
+        scale: a.scale.lerp(b.scale, w)
+    };
+}
+
+// `out` = `a` toward `b` by `w` (0: a, 1: b): positions and scales by lines, rotations the short
+// way. `out` may be `a` or `b`.
+pub void blend(Pose a, Pose b, f32 w, Pose out) {
+    mut linear.Transform[] o = out.joints;
+    for (usize j in 0..o.len) {
+        o[j] = mix(a.joints[j], b.joints[j], w);
+    }
+}
+
+// The same, for the joints of `mask` only; the others are those of `a`.
+pub void blend_masked(Pose a, Pose b, f32 w, Mask mask, Pose out) {
+    mut linear.Transform[] o = out.joints;
+    for (usize j in 0..o.len) {
+        o[j] = mask.joints[j] ? mix(a.joints[j], b.joints[j], w) : a.joints[j];
+    }
+}
+
+// What `p` changes from `reference`, as an additive pose: for a layer that leans or breathes.
+pub void difference(Pose p, Pose reference, Pose out) {
+    mut linear.Transform[] o = out.joints;
+    for (usize j in 0..o.len) {
+        linear.Transform a = p.joints[j];
+        linear.Transform r = reference.joints[j];
+        o[j] = linear.Transform{
+            position: a.position.sub(r.position),
+            rotation: r.rotation.conjugate().mul(a.rotation).normalized(),
+            scale: linear.vec3(
+                r.scale.x != 0.0 ? a.scale.x / r.scale.x : 1.0,
+                r.scale.y != 0.0 ? a.scale.y / r.scale.y : 1.0,
+                r.scale.z != 0.0 ? a.scale.z / r.scale.z : 1.0
+            )
+        };
+    }
+}
+
+// `under` with `additive` (made by `difference`) added by `w`.
+pub void add(Pose under, Pose additive, f32 w, Pose out) {
+    mut linear.Transform[] o = out.joints;
+    linear.Quat none_turn = linear.identity_quat();
+    linear.Vec3 ones = linear.vec3(1.0, 1.0, 1.0);
+    for (usize j in 0..o.len) {
+        linear.Transform b = under.joints[j];
+        linear.Transform d = additive.joints[j];
+        o[j] = linear.Transform{
+            position: b.position.add(d.position.scale(w)),
+            rotation: b.rotation.mul(none_turn.slerp(d.rotation, w)).normalized(),
+            scale: b.scale.mul(ones.lerp(d.scale, w))
+        };
+    }
+}
+
+// The joints that a masked blend changes.
+pub struct Mask {
+    pub bool[] joints;
+}
+
+// `from` and every joint below it: the upper body from the spine.
+pub Mask mask(Arena* arena, Skeleton s, usize from) {
+    mut bool[] joints = arena.alloc_slice(bool, s.count());
+    for (usize j in s.order) {
+        joints[j] = j == from || (s.parents[j] >= 0 && joints[s.parents[j] as usize]);
+    }
+    return Mask{ joints: joints };
+}
+
+// Where each joint is in the space of the model: the roots placed by what is above them, each
+// child by its parent.
+pub void world_matrices(Skeleton s, Pose p, linear.Mat4[] out) {
+    mut linear.Mat4[] w = out;
+    for (usize j in s.order) {
+        linear.Mat4 local = p.joints[j].to_mat4();
+        w[j] = s.parents[j] < 0 ? s.above[j].mul(local) : w[s.parents[j] as usize].mul(local);
+    }
+}
+
+// The matrices of skinning: for each joint, from the space of the mesh at rest to where the pose
+// puts it (its world matrix times its inverse bind matrix). A vertex is the sum of its four
+// joints' matrices times it, by their weights, as glTF has it.
+pub void palette(Skeleton s, Pose p, linear.Mat4[] out) {
+    world_matrices(s, p, out);
+    mut linear.Mat4[] w = out;
+    for (usize j in 0..s.count()) {
+        w[j] = w[j].mul(s.inverse_binds[j]);
+    }
+}
+
+// ---- Clips ----
+
+struct Track {
+    usize joint;
+    model.Target target;
+    curve.Interpolation mode;
+    f32[] times;
+    f32[] values;
+}
+
+// A time named in a clip: a foot that lands.
+pub struct Event {
+    pub f32 time;
+    pub str name;
+}
+
+pub class Clip {
+    pub str name;
+    pub f32 duration;
+    Track[] tracks;
+    linear.Transform[] rest;
+    vec.Vec<Event>* events;
+
+    void init(keeps Arena* arena, keeps str name, f32 duration, keeps Track[] tracks, keeps linear.Transform[] rest) {
+        self.name = name;
+        self.duration = duration;
+        self.tracks = tracks;
+        self.rest = rest;
+        events = vec.new<Event>(arena);
+    }
+
+    // `name` at `time` (seconds) of the clip, given by a machine when it plays across it.
+    pub void event(f32 time, keeps str name) {
+        events.push(Event{ time: time, name: name });
+    }
+
+    pub Event[] event_list() {
+        return events.items();
+    }
+
+    // The pose at `t` seconds (held at the ends): the rest pose, and what the clip moves.
+    pub void sample(Pose out, f32 t) {
+        mut linear.Transform[] o = out.joints;
+        for (usize j in 0..min(o.len, rest.len)) {
+            o[j] = rest[j];
+        }
+        for (Track k in tracks) {
+            if (k.joint >= o.len) {
+                continue;
+            }
+            mut linear.Transform x = o[k.joint];
+            match (k.target) {
+                Translation => {
+                    x.position = sample3(k, t);
+                },
+                Scale => {
+                    x.scale = sample3(k, t);
+                },
+                Rotation => {
+                    x.rotation = sample_quat(k, t);
+                },
+            }
+            o[k.joint] = x;
+        }
+    }
+
+    // The translation of `joint` at `t`, or its rest.
+    pub linear.Vec3 position_at(usize joint, f32 t) {
+        for (Track k in tracks) {
+            if (k.joint == joint) {
+                match (k.target) {
+                    Translation => {
+                        return sample3(k, t);
+                    },
+                    _ => { },
+                }
+            }
+        }
+        return joint < rest.len ? rest[joint].position : linear.vec3(0.0, 0.0, 0.0);
+    }
+}
+
+// The key before `t` and how far toward the next (0 at the ends).
+struct Where {
+    usize key;
+    f32 fraction;
+    f32 width;
+}
+
+Where locate(f32[] times, f32 t) {
+    usize n = times.len;
+    if (n == 0 || t <= times[0]) {
+        return Where{ key: 0, fraction: 0.0, width: 0.0 };
+    }
+    if (t >= times[n - 1]) {
+        return Where{ key: n - 1, fraction: 0.0, width: 0.0 };
+    }
+    mut usize low = 0;
+    mut usize high = n - 1;
+    while (high - low > 1) {
+        usize middle = (low + high) / 2;
+        if (times[middle] <= t) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    f32 width = times[low + 1] - times[low];
+    return Where{ key: low, fraction: width > 0.0 ? (t - times[low]) / width : 0.0, width: width };
+}
+
+// The component `c` of the key `k` of a track of `width` numbers per value: for `Hermite`, `part`
+// 0 is the tangent in, 1 the value, 2 the tangent out.
+f32 value_of(Track k, usize key, usize part, usize c, usize width) {
+    usize per = match (k.mode) {
+        Hermite => 3,
+        _ => 1,
+    };
+    usize p = per == 3 ? part : 0;
+    usize at = (key * per + p) * width + c;
+    return at < k.values.len ? k.values[at] : 0.0;
+}
+
+f32 component_at(Track k, Where w, usize c, usize width) {
+    f32 a = value_of(k, w.key, 1, c, width);
+    if (w.width == 0.0) {
+        return a;
+    }
+    f32 b = value_of(k, w.key + 1, 1, c, width);
+    return match (k.mode) {
+        Step => a,
+        Linear => a + (b - a) * w.fraction,
+        Hermite => curve.hermite(a, value_of(k, w.key, 2, c, width) * w.width, b, value_of(k, w.key + 1, 0, c, width) * w.width,
+                w.fraction),
+    };
+}
+
+linear.Vec3 sample3(Track k, f32 t) {
+    Where w = locate(k.times, t);
+    return linear.vec3(component_at(k, w, 0, 3), component_at(k, w, 1, 3), component_at(k, w, 2, 3));
+}
+
+linear.Quat sample_quat(Track k, f32 t) {
+    Where w = locate(k.times, t);
+    match (k.mode) {
+        Linear => {
+            linear.Quat a = linear.Quat{ x: value_of(k, w.key, 1, 0, 4), y: value_of(k, w.key, 1, 1, 4),
+                    z: value_of(k, w.key, 1, 2, 4), w: value_of(k, w.key, 1, 3, 4) }.normalized();
+            if (w.width == 0.0) {
+                return a;
+            }
+            linear.Quat b = linear.Quat{ x: value_of(k, w.key + 1, 1, 0, 4), y: value_of(k, w.key + 1, 1, 1, 4),
+                    z: value_of(k, w.key + 1, 1, 2, 4), w: value_of(k, w.key + 1, 1, 3, 4) }.normalized();
+            return a.slerp(b, w.fraction);
+        },
+        _ => {
+            // steps, and cubic splines component by component, then made a rotation again (glTF)
+            return linear.Quat{ x: component_at(k, w, 0, 4), y: component_at(k, w, 1, 4), z: component_at(k, w, 2, 4),
+                    w: component_at(k, w, 3, 4) }.normalized();
+        },
+    };
+}
+
+// The clip of `animation` for `s`: its channels of the joints of the skeleton (the others are
+// left out).
+pub Clip* clip(keeps Arena* arena, keeps Skeleton s, keeps model.Animation animation) {
+    vec.Vec<Track>* tracks = vec.new<Track>(arena);
+    for (model.Channel c in animation.channels) {
+        match (s.joint_of_node(c.node)) {
+            some(j) => {
+                tracks.push(Track{ joint: j, target: c.target, mode: c.mode, times: c.times, values: c.values });
+            },
+            none => { },
+        }
+    }
+    return arena.new(Clip, arena, animation.name, animation.duration, tracks.items(), s.rest);
+}
+
+// ---- Machines ----
+
+pub enum Compare {
+    Above,    // the number is above the value
+    Below,
+    IsTrue,   // a boolean
+    IsFalse,
+    Triggered,  // a trigger set since it was last used: a transition uses it up
+}
+
+// A condition on a parameter, named here, found by the machine once.
+pub struct Condition {
+    pub str parameter;
+    pub Compare compare;
+    pub f32 value = 0.0;
+}
+
+pub Condition when(str parameter, Compare compare, f32 value) {
+    return Condition{ parameter: parameter, compare: compare, value: value };
+}
+
+// A clip of a blend tree, at its place: `x` (and `y`) the values of the parameters where it plays
+// alone.
+pub struct BlendPoint {
+    pub f32 x;
+    pub f32 y = 0.0;
+    pub Clip* clip;
+}
+
+pub BlendPoint at(f32 x, keeps Clip* clip) {
+    return BlendPoint{ x: x, clip: clip };
+}
+
+pub BlendPoint at2(f32 x, f32 y, keeps Clip* clip) {
+    return BlendPoint{ x: x, y: y, clip: clip };
+}
+
+// A state of a machine.
+pub struct State {
+    usize index;
+
+    pub bool same(State o) {
+        return index == o.index;
+    }
+}
+
+// A parameter of a machine, found by its name once.
+pub struct Param {
+    usize index;
+}
+
+struct StateData {
+    str name;
+    BlendPoint[] points;  // one for a clip
+    f32[] w;  // the weights of the points, worked out at each advance
+    i64 px;  // the parameters of a blend tree, -1 for none
+    i64 py;
+    mut f32 speed;
+    mut bool looping;
+}
+
+struct Transition {
+    usize from;  // -1 as usize: from any state
+    usize to;
+    i64 parameter;  // -1: none (after `exit` only)
+    Compare compare;
+    f32 value;
+    f32 exit;  // the share of the state played before it may leave, -1 for none
+    f32 fade;
+}
+
+usize ANY = 0xFFFFFFFFFFFFFFFF;
+
+pub class Machine {
+    Skeleton skeleton;
+    Arena* arena;
+    vec.Vec<StateData>* states;
+    vec.Vec<Transition>* transitions;
+    vec.Vec<str>* names;
+    vec.Vec<f32>* values;
+    vec.Vec<bool>* triggers;
+    vec.Vec<Event>* fired;
+    mut usize current;
+    mut f32 phase;  // of the current state, 0..1
+    mut i64 next;  // the state faded to, -1 for none
+    mut f32 next_phase;
+    mut f32 fade_time;
+    mut f32 fade_length;
+    mut bool root_motion;
+    mut linear.Vec3 delta;
+    mut bool started;
+    Pose out;
+    Pose scratch_a;
+    Pose scratch_b;
+    Pose scratch_c;
+
+    void init(keeps Arena* arena, keeps Skeleton skeleton) {
+        self.arena = arena;
+        self.skeleton = skeleton;
+        states = vec.new<StateData>(arena);
+        transitions = vec.new<Transition>(arena);
+        names = vec.new<str>(arena);
+        values = vec.new<f32>(arena);
+        triggers = vec.new<bool>(arena);
+        fired = vec.new<Event>(arena);
+        current = 0;
+        phase = 0.0;
+        next = -1;
+        next_phase = 0.0;
+        fade_time = 0.0;
+        fade_length = 0.0;
+        root_motion = false;
+        delta = linear.vec3(0.0, 0.0, 0.0);
+        started = false;
+        out = rest_pose(arena, skeleton);
+        scratch_a = rest_pose(arena, skeleton);
+        scratch_b = rest_pose(arena, skeleton);
+        scratch_c = rest_pose(arena, skeleton);
+    }
+
+    // The parameter named `name`, made on first use (0, false, not triggered).
+    pub Param param(keeps str name) {
+        for (usize i in 0..names.len()) {
+            if (names.items()[i] == name) {
+                return Param{ index: i };
+            }
+        }
+        names.push(name);
+        values.push(0.0);
+        triggers.push(false);
+        return Param{ index: names.len() - 1 };
+    }
+
+    pub void set_param(Param p, f32 value) {
+        values.set(p.index, value);
+    }
+
+    pub void set(keeps str name, f32 value) {
+        set_param(param(name), value);
+    }
+
+    pub void set_bool(keeps str name, bool value) {
+        set_param(param(name), value ? 1.0 : 0.0);
+    }
+
+    // Set until a transition uses it.
+    pub void trigger(keeps str name) {
+        triggers.set(param(name).index, true);
+    }
+
+    pub f32 get(keeps str name) {
+        return values.items()[param(name).index];
+    }
+
+    State add(keeps str name, keeps BlendPoint[] points, i64 px, i64 py) {
+        states.push(StateData{ name: name, points: points, w: arena.alloc_slice(f32, points.len), px: px, py: py, speed: 1.0,
+                looping: true });
+        return State{ index: states.len() - 1 };
+    }
+
+    // A state that plays `c`, looping. The first state made is the one the machine starts in.
+    pub State state(keeps str name, keeps Clip* c) {
+        vec.Vec<BlendPoint>* one = vec.new<BlendPoint>(arena);
+        one.push(at(0.0, c));
+        return add(name, one.items(), -1, -1);
+    }
+
+    // A state that blends its clips by the parameter `x`: the two around its value, by a line (as
+    // walk to run by speed). The points are kept by increasing `x`.
+    pub State state_blend1(keeps str name, keeps str x, keeps BlendPoint[] points) {
+        vec.Vec<BlendPoint>* sorted = vec.new<BlendPoint>(arena);
+        for (BlendPoint p in points) {
+            sorted.push(p);
+        }
+        for (usize i in 1..sorted.len()) {
+            mut usize k = i;
+            while (k > 0 && sorted.items()[k - 1].x > sorted.items()[k].x) {
+                BlendPoint t = sorted.items()[k];
+                sorted.set(k, sorted.items()[k - 1]);
+                sorted.set(k - 1, t);
+                k -= 1;
+            }
+        }
+        return add(name, sorted.items(), param(x).index as i64, -1);
+    }
+
+    // A state that blends its clips by two parameters (as the direction of a strafe): each by the
+    // inverse of its squared distance to the point of the parameters.
+    pub State state_blend2(keeps str name, keeps str x, keeps str y, keeps BlendPoint[] points) {
+        vec.Vec<BlendPoint>* copy = vec.new<BlendPoint>(arena);
+        for (BlendPoint p in points) {
+            copy.push(p);
+        }
+        return add(name, copy.items(), param(x).index as i64, param(y).index as i64);
+    }
+
+    // How fast a state plays (1 by default), and whether it loops (else it holds its last pose).
+    pub void configure(State s, f32 speed, bool looping) {
+        mut StateData d = states.items()[s.index];
+        d.speed = speed;
+        d.looping = looping;
+        states.set(s.index, d);
+    }
+
+    // From `from` to `to` when `c` holds, by a cross-fade of `fade` seconds.
+    pub void transition(State from, State to, keeps Condition c, f32 fade) {
+        transitions.push(Transition{ from: from.index, to: to.index, parameter: param(c.parameter).index as i64,
+                compare: c.compare, value: c.value, exit: -1.0, fade: max(fade, 0.0) });
+    }
+
+    // From any state but `to` when `c` holds (a hit, a death).
+    pub void transition_any(State to, keeps Condition c, f32 fade) {
+        transitions.push(Transition{ from: ANY, to: to.index, parameter: param(c.parameter).index as i64,
+                compare: c.compare, value: c.value, exit: -1.0, fade: max(fade, 0.0) });
+    }
+
+    // From `from` to `to` once `exit` (0..1) of `from` has played: an attack back to idle.
+    pub void transition_after(State from, State to, f32 exit, f32 fade) {
+        transitions.push(Transition{ from: from.index, to: to.index, parameter: -1, compare: Compare.Above,
+                value: 0.0, exit: exit, fade: max(fade, 0.0) });
+    }
+
+    pub void use_root_motion(bool on) {
+        root_motion = on;
+    }
+
+    pub State current_state() {
+        return State{ index: current };
+    }
+
+    pub str current_name() {
+        return states.len() == 0 ? "" : states.items()[current].name;
+    }
+
+    // True during a cross-fade.
+    pub bool fading() {
+        return next >= 0;
+    }
+
+    // `s` now, from its start, without a fade.
+    pub void play(State s) {
+        current = s.index;
+        phase = 0.0;
+        next = -1;
+    }
+
+    // The weights of the points of a state, for its parameters now, into `w`.
+    void weights(StateData d, f32[] w) {
+        mut f32[] o = w;
+        usize n = d.points.len;
+        for (usize i in 0..n) {
+            o[i] = 0.0;
+        }
+        if (n == 1 || d.px < 0) {
+            o[0] = 1.0;
+            return;
+        }
+        f32 x = values.items()[d.px as usize];
+        if (d.py < 0) {
+            if (x <= d.points[0].x) {
+                o[0] = 1.0;
+                return;
+            }
+            if (x >= d.points[n - 1].x) {
+                o[n - 1] = 1.0;
+                return;
+            }
+            for (usize i in 1..n) {
+                if (x <= d.points[i].x) {
+                    f32 span = d.points[i].x - d.points[i - 1].x;
+                    f32 t = span > 0.0 ? (x - d.points[i - 1].x) / span : 1.0;
+                    o[i - 1] = 1.0 - t;
+                    o[i] = t;
+                    return;
+                }
+            }
+            return;
+        }
+        f32 y = values.items()[d.py as usize];
+        mut f32 total = 0.0;
+        for (usize i in 0..n) {
+            f32 dx = x - d.points[i].x;
+            f32 dy = y - d.points[i].y;
+            f32 d2 = dx * dx + dy * dy;
+            if (d2 < 0.000001) {
+                for (usize k in 0..n) {
+                    o[k] = k == i ? 1.0 : 0.0;
+                }
+                return;
+            }
+            o[i] = 1.0 / d2;
+            total += o[i];
+        }
+        for (usize i in 0..n) {
+            o[i] = o[i] / total;
+        }
+    }
+
+    // The length of a state at its weights: those of its clips, by their weights.
+    f32 length_of(StateData d, f32[] w) {
+        mut f32 total = 0.0;
+        for (usize i in 0..d.points.len) {
+            total += w[i] * d.points[i].clip.duration;
+        }
+        return total;
+    }
+
+    // The point of the largest weight: its events and its root motion are those of the state.
+    usize dominant(f32[] w, usize n) {
+        mut usize best = 0;
+        for (usize i in 0..n) {
+            if (w[i] > w[best]) {
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    // The pose of a state at `p`, into `target` (uses scratch_c).
+    void sample_state(StateData d, f32[] w, f32 p, Pose target) {
+        mut f32 taken = 0.0;
+        for (usize i in 0..d.points.len) {
+            if (w[i] <= 0.0) {
+                continue;
+            }
+            Clip* c = d.points[i].clip;
+            if (taken == 0.0) {
+                c.sample(target, p * c.duration);
+            } else {
+                c.sample(scratch_c, p * c.duration);
+                blend(target, scratch_c, w[i] / (taken + w[i]), target);
+            }
+            taken += w[i];
+        }
+    }
+
+    // The new phase of a state after `dt`, and the events and root motion of its dominant clip
+    // between the two phases; adds the motion to `delta` by `weight`.
+    f32 advance_state(StateData d, f32[] w, f32 from, f32 dt, f32 weight, bool events) {
+        f32 length = length_of(d, w);
+        mut f32 to = from;
+        if (length > 0.0) {
+            to = from + dt * d.speed / length;
+        }
+        bool wrapped = d.looping && to >= 1.0;
+        if (d.looping) {
+            while (to >= 1.0) {
+                to -= 1.0;
+            }
+        } else {
+            to = min(to, 1.0);
+        }
+        Clip* c = d.points[dominant(w, d.points.len)].clip;
+        if (events) {
+            for (Event e in c.events.items()) {
+                f32 at = c.duration > 0.0 ? e.time / c.duration : 0.0;
+                bool crossed = wrapped ? (at > from || at <= to) : (at > from && at <= to);
+                if (crossed) {
+                    fired.push(e);
+                }
+            }
+        }
+        if (root_motion && skeleton.order.len > 0) {
+            usize root = skeleton.order[0];
+            linear.Vec3 start = c.position_at(root, from * c.duration);
+            linear.Vec3 end = c.position_at(root, to * c.duration);
+            mut linear.Vec3 moved = end.sub(start);
+            if (wrapped) {
+                moved = c.position_at(root, c.duration).sub(start).add(end.sub(c.position_at(root, 0.0)));
+            }
+            delta = delta.add(moved.scale(weight));
+        }
+        return to;
+    }
+
+    bool holds(Transition t) {
+        if (t.exit >= 0.0 && phase < t.exit) {
+            return false;
+        }
+        if (t.parameter < 0) {
+            return true;
+        }
+        usize p = t.parameter as usize;
+        f32 v = values.items()[p];
+        return match (t.compare) {
+            Above => v > t.value,
+            Below => v < t.value,
+            IsTrue => v != 0.0,
+            IsFalse => v == 0.0,
+            Triggered => triggers.items()[p],
+        };
+    }
+
+    // The machine `dt` seconds later: a transition taken if one holds, the states played, the
+    // pose made. The events and the root motion are those of this call.
+    pub void advance(f32 dt) {
+        fired.clear();
+        delta = linear.vec3(0.0, 0.0, 0.0);
+        if (states.len() == 0) {
+            return;
+        }
+        if (next < 0) {
+            for (Transition t in transitions.items()) {
+                if ((t.from == current || (t.from == ANY && t.to != current)) && holds(t)) {
+                    if (t.parameter >= 0) {
+                        match (t.compare) {
+                            Triggered => {
+                                triggers.set(t.parameter as usize, false);
+                            },
+                            _ => { },
+                        }
+                    }
+                    if (t.fade <= 0.0) {
+                        current = t.to;
+                        phase = 0.0;
+                    } else {
+                        next = t.to as i64;
+                        next_phase = 0.0;
+                        fade_time = 0.0;
+                        fade_length = t.fade;
+                    }
+                    break;
+                }
+            }
+        }
+        StateData a = states.items()[current];
+        f32[] wa = a.w;
+        weights(a, wa);
+        mut f32 mixing = 0.0;
+        if (next >= 0) {
+            fade_time += dt;
+            mixing = min(fade_time / fade_length, 1.0);
+        }
+        phase = advance_state(a, wa, phase, dt, 1.0 - mixing, next < 0 || mixing < 0.5);
+        sample_state(a, wa, phase, out);
+        if (next >= 0) {
+            StateData b = states.items()[next as usize];
+            f32[] wb = b.w;
+            weights(b, wb);
+            next_phase = advance_state(b, wb, next_phase, dt, mixing, mixing >= 0.5);
+            sample_state(b, wb, next_phase, scratch_b);
+            blend(out, scratch_b, mixing, out);
+            if (mixing >= 1.0) {
+                current = next as usize;
+                phase = next_phase;
+                next = -1;
+            }
+        }
+        if (root_motion && skeleton.order.len > 0) {
+            // the root stays over its rest place: the program moves the character by `root_delta`
+            usize root = skeleton.order[0];
+            mut linear.Transform[] o = out.joints;
+            mut linear.Transform r = o[root];
+            r.position = linear.vec3(skeleton.rest[root].position.x, r.position.y, skeleton.rest[root].position.z);
+            o[root] = r;
+        }
+    }
+
+    // The pose of the last `advance`.
+    pub Pose pose() {
+        return out;
+    }
+
+    // The events crossed during the last `advance`.
+    pub Event[] events() {
+        return fired.items();
+    }
+
+    // What the root joint moved during the last `advance`, in the space of its parent, with
+    // `use_root_motion`: x and z, for the program to move the character by; y stays in the pose.
+    pub linear.Vec3 root_delta() {
+        return linear.vec3(delta.x, 0.0, delta.z);
+    }
+}
+
+// A machine for `s`, in `arena`; its first state is where it starts.
+pub Machine* machine(keeps Arena* arena, keeps Skeleton s) {
+    return arena.new(Machine, arena, s);
+}
+
+// ---- Tests: a model made here ----
+
+f32[] floats(Arena* arena, f32[] values) {
+    mut f32[] out = arena.alloc_slice(f32, values.len);
+    for (usize i in 0..values.len) {
+        out[i] = values[i];
+    }
+    return out;
+}
+
+usize[] none_of(Arena* arena) {
+    return arena.alloc_slice(usize, 0);
+}
+
+usize[] one_of(Arena* arena, usize x) {
+    mut usize[] out = arena.alloc_slice(usize, 1);
+    out[0] = x;
+    return out;
+}
+
+model.Node node_at(str name, linear.Vec3 at, usize[] children, Arena* arena) {
+    linear.Transform t = linear.Transform{ position: at, rotation: linear.identity_quat(), scale: linear.vec3(1.0, 1.0, 1.0) };
+    return model.Node{ name: name, local: t.to_mat4(), meshes: none_of(arena), children: children, transform: some(t) };
+}
+
+// An armature at z = 5; under it a hip at y = 1, a spine 1 above it, a head 1 above that. The
+// skin names its joints spine, hip, head: a child before its parent. "walk" moves the hip from x = 0
+// to x = 2 in a second and turns the spine a quarter about y; "idle" turns the head about x; "jump"
+// lifts the hip to y = 2 by steps.
+model.Model rig(Arena* arena) {
+    mut model.Node[] nodes = arena.alloc_slice(model.Node, 5);
+    nodes[0] = node_at("armature", linear.vec3(0.0, 0.0, 5.0), one_of(arena, 1), arena);
+    nodes[1] = node_at("hip", linear.vec3(0.0, 1.0, 0.0), one_of(arena, 2), arena);
+    nodes[2] = node_at("spine", linear.vec3(0.0, 1.0, 0.0), one_of(arena, 3), arena);
+    nodes[3] = node_at("head", linear.vec3(0.0, 1.0, 0.0), none_of(arena), arena);
+    nodes[4] = node_at("body", linear.vec3(0.0, 0.0, 0.0), none_of(arena), arena);
+    // inverse binds: the inverse of where each joint is at rest
+    mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, 3);
+    f32[3] heights = [2.0, 1.0, 3.0];
+    for (usize j in 0..3) {
+        binds[j] = linear.translation(linear.vec3(0.0, -heights[j], -5.0));
+    }
+    mut usize[] joints = arena.alloc_slice(usize, 3);
+    joints[0] = 2;
+    joints[1] = 1;
+    joints[2] = 3;
+    mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
+    skins[0] = model.Skin{ name: "rig", joints: joints, inverse_binds: binds };
+    f32 h = 0.70710677;
+    mut model.Channel[] walk = arena.alloc_slice(model.Channel, 2);
+    mut f32[2] t01 = [0.0, 1.0];
+    mut f32[2] t02 = [0.0, 2.0];
+    mut f32[2] t05 = [0.0, 0.5];
+    mut f32[6] slide = [0.0, 1.0, 0.0, 2.0, 1.0, 0.0];
+    mut f32[8] turn_y = [0.0, 0.0, 0.0, 1.0, 0.0, h, 0.0, h];
+    mut f32[8] turn_x = [0.0, 0.0, 0.0, 1.0, h, 0.0, 0.0, h];
+    mut f32[6] lift = [0.0, 1.0, 0.0, 0.0, 2.0, 0.0];
+    walk[0] = model.Channel{ node: 1, target: model.Target.Translation, mode: curve.Interpolation.Linear,
+            times: floats(arena, t01[0..2]), values: floats(arena, slide[0..6]) };
+    walk[1] = model.Channel{ node: 2, target: model.Target.Rotation, mode: curve.Interpolation.Linear,
+            times: floats(arena, t01[0..2]), values: floats(arena, turn_y[0..8]) };
+    mut model.Channel[] idle = arena.alloc_slice(model.Channel, 1);
+    idle[0] = model.Channel{ node: 3, target: model.Target.Rotation, mode: curve.Interpolation.Linear,
+            times: floats(arena, t02[0..2]), values: floats(arena, turn_x[0..8]) };
+    mut model.Channel[] jump = arena.alloc_slice(model.Channel, 1);
+    jump[0] = model.Channel{ node: 1, target: model.Target.Translation, mode: curve.Interpolation.Step,
+            times: floats(arena, t05[0..2]), values: floats(arena, lift[0..6]) };
+    mut model.Animation[] animations = arena.alloc_slice(model.Animation, 3);
+    animations[0] = model.Animation{ name: "walk", channels: walk, duration: 1.0 };
+    animations[1] = model.Animation{ name: "idle", channels: idle, duration: 2.0 };
+    animations[2] = model.Animation{ name: "jump", channels: jump, duration: 1.0 };
+    mut usize[] roots = arena.alloc_slice(usize, 2);
+    roots[0] = 0;
+    roots[1] = 4;
+    return model.Model{
+        meshes: arena.alloc_slice(model.Mesh, 0),
+        materials: arena.alloc_slice(model.Material, 0),
+        images: arena.alloc_slice(image.Image, 0),
+        nodes: nodes,
+        roots: roots,
+        skins: some(skins),
+        animations: some(animations)
+    };
+}
+
+Skeleton rig_skeleton(Arena* arena, keeps model.Model m) {
+    return match (skeleton(arena, m, 0)) {
+        some(s) => s,
+        none => Skeleton{ names: arena.alloc_slice(str, 0), parents: arena.alloc_slice(i32, 0),
+                rest: arena.alloc_slice(linear.Transform, 0), inverse_binds: arena.alloc_slice(linear.Mat4, 0),
+                nodes: arena.alloc_slice(usize, 0), order: arena.alloc_slice(usize, 0), above: arena.alloc_slice(linear.Mat4, 0) },
+    };
+}
+
+Clip* clip_named(keeps Arena* arena, keeps Skeleton s, keeps model.Model m, str name) {
+    return match (m.animation(name)) {
+        some(a) => clip(arena, s, a),
+        none => clip(arena, s, model.Animation{ name: "", channels: arena.alloc_slice(model.Channel, 0), duration: 0.0 }),
+    };
+}
+
+test "a skeleton: its parents, its order, what is above it" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    model.Model m = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, m);
+    assert(s.count() == 3 && s.names[0] == "spine" && s.names[1] == "hip");
+    assert(s.parents[0] == 1 && s.parents[1] == -1 && s.parents[2] == 0);
+    assert(s.order[0] == 1 && s.order[1] == 0 && s.order[2] == 2);  // each after its parent
+    assert(s.above[1].transform_point(linear.vec3(0.0, 0.0, 0.0)).near(linear.vec3(0.0, 0.0, 5.0), 0.0001));
+    assert(match (s.joint("head")) {
+        some(j) => j == 2,
+        none => false,
+    });
+    assert(match (skeleton(&arena, m, 3)) {
+        some(x) => false,
+        none => true,
+    });
+    // at rest, the palette is the identity: each joint where its inverse bind matrix expects it
+    mut linear.Mat4[] matrices = arena.alloc_slice(linear.Mat4, 3);
+    palette(s, rest_pose(&arena, s), matrices);
+    for (linear.Mat4 x in matrices) {
+        assert(x.near(linear.identity4(), 0.0001));
+    }
+}
+
+test "clips sampled, blended, added, masked" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    model.Model m = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, m);
+    Clip* walk = clip_named(&arena, s, m, "walk");
+    Clip* idle = clip_named(&arena, s, m, "idle");
+    Pose a = rest_pose(&arena, s);
+    walk.sample(a, 0.5);
+    assert(a.joints[1].position.near(linear.vec3(1.0, 1.0, 0.0), 0.0001));
+    assert(a.joints[0].rotation.near(linear.from_axis_angle(linear.vec3(0.0, 1.0, 0.0), 0.7853982), 0.0001));
+    assert(a.joints[2].rotation.near(linear.identity_quat(), 0.0001));  // walk does not move the head: its rest
+    walk.sample(a, 7.0);
+    assert(a.joints[1].position.near(linear.vec3(2.0, 1.0, 0.0), 0.0001));  // held at the end
+    // the palette moves a vertex of the head with the hip (the spine turns about y: the head is above it)
+    mut linear.Mat4[] matrices = arena.alloc_slice(linear.Mat4, 3);
+    palette(s, a, matrices);
+    assert(matrices[2].transform_point(linear.vec3(0.0, 3.0, 5.0)).near(linear.vec3(2.0, 3.0, 5.0), 0.0001));
+    // a blend halfway
+    Pose b = rest_pose(&arena, s);
+    walk.sample(a, 1.0);
+    idle.sample(b, 2.0);
+    Pose mixed = rest_pose(&arena, s);
+    blend(a, b, 0.5, mixed);
+    assert(mixed.joints[1].position.near(linear.vec3(1.0, 1.0, 0.0), 0.0001));
+    assert(mixed.joints[2].rotation.near(linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), 0.7853982), 0.0001));
+    // a mask from the spine: the hip stays that of `b`
+    Pose masked = rest_pose(&arena, s);
+    Mask upper = mask(&arena, s, 0);
+    assert(upper.joints[0] && !upper.joints[1] && upper.joints[2]);
+    blend_masked(b, a, 1.0, upper, masked);
+    assert(masked.joints[1].position.near(linear.vec3(0.0, 1.0, 0.0), 0.0001));
+    assert(masked.joints[0].rotation.near(a.joints[0].rotation, 0.0001));
+    // additive: the turn of the head of idle, added halfway over walk
+    Pose additive = rest_pose(&arena, s);
+    difference(b, rest_pose(&arena, s), additive);
+    Pose added = rest_pose(&arena, s);
+    add(a, additive, 0.5, added);
+    assert(added.joints[2].rotation.near(linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), 0.7853982), 0.0001));
+    assert(added.joints[1].position.near(linear.vec3(2.0, 1.0, 0.0), 0.0001));
+    // steps
+    Clip* jump = clip_named(&arena, s, m, "jump");
+    jump.sample(a, 0.49);
+    assert(a.joints[1].position.near(linear.vec3(0.0, 1.0, 0.0), 0.0001));
+    jump.sample(a, 0.5);
+    assert(a.joints[1].position.near(linear.vec3(0.0, 2.0, 0.0), 0.0001));
+}
+
+bool fired(Machine* m, str name) {
+    for (Event e in m.events()) {
+        if (e.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+test "a machine: transitions, fades, events, triggers, root motion" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    model.Model mdl = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, mdl);
+    Clip* walk = clip_named(&arena, s, mdl, "walk");
+    Clip* idle = clip_named(&arena, s, mdl, "idle");
+    Clip* jump = clip_named(&arena, s, mdl, "jump");
+    walk.event(0.5, "step");
+    Machine* m = machine(&arena, s);
+    State standing = m.state("idle", idle);
+    State walking = m.state("walk", walk);
+    State jumping = m.state("jump", jump);
+    m.configure(jumping, 1.0, false);
+    m.transition(standing, walking, when("speed", Compare.Above, 0.1), 0.2);
+    m.transition(walking, standing, when("speed", Compare.Below, 0.1), 0.2);
+    m.transition_any(jumping, when("jump", Compare.Triggered, 0.0), 0.0);
+    m.transition_after(jumping, standing, 1.0, 0.0);
+    m.advance(0.1);
+    assert(m.current_name() == "idle" && !m.fading());
+    m.set("speed", 1.0);
+    m.advance(0.1);
+    assert(m.fading() && m.current_name() == "idle");
+    m.advance(0.1);
+    assert(!m.fading() && m.current_name() == "walk");
+    // the step at the middle of walk
+    mut bool stepped = false;
+    for (i32 i in 0..10) {
+        m.advance(0.1);
+        stepped = stepped || fired(m, "step");
+    }
+    assert(stepped);
+    // a trigger: jump from any state, at once, then back to idle once it has played
+    m.trigger("jump");
+    m.advance(0.05);
+    assert(m.current_name() == "jump");
+    m.advance(0.1);
+    assert(m.current_name() == "jump");  // the trigger was used up: not again
+    m.set("speed", 0.0);
+    for (i32 i in 0..12) {
+        m.advance(0.1);
+    }
+    assert(m.current_name() == "idle");
+    // root motion: walk moves the hip 2 m a second, which the machine gives rather than plays
+    m.set("speed", 1.0);
+    m.play(walking);
+    m.use_root_motion(true);
+    m.advance(0.25);
+    assert(abs(m.root_delta().x - 0.5) < 0.001 && abs(m.pose().joints[1].position.x) < 0.0001);
+    // across the end of the loop: from 0.75 to 0.25, still 1 m
+    m.advance(0.5);
+    m.advance(0.5);
+    assert(abs(m.root_delta().x - 1.0) < 0.001);
+}
+
+test "blend trees by one and by two parameters" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    model.Model mdl = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, mdl);
+    Clip* walk = clip_named(&arena, s, mdl, "walk");
+    Clip* jump = clip_named(&arena, s, mdl, "jump");
+    Machine* m = machine(&arena, s);
+    vec.Vec<BlendPoint>* points = vec.new<BlendPoint>(&arena);
+    points.push(at(4.0, jump));
+    points.push(at(2.0, walk));  // sorted by the machine
+    m.state_blend1("move", "speed", points.items());
+    m.set("speed", 3.0);
+    m.advance(0.0);
+    // halfway between walk at its start and jump at its start: the hip at x 0, y 1
+    assert(m.pose().joints[1].position.near(linear.vec3(0.0, 1.0, 0.0), 0.0001));
+    m.set("speed", 10.0);
+    m.advance(0.6);  // jump alone: its step at 0.5 lifts the hip
+    assert(m.pose().joints[1].position.near(linear.vec3(0.0, 2.0, 0.0), 0.0001));
+    Machine* m2 = machine(&arena, s);
+    vec.Vec<BlendPoint>* corners = vec.new<BlendPoint>(&arena);
+    corners.push(at2(0.0, 0.0, walk));
+    corners.push(at2(1.0, 1.0, jump));
+    m2.state_blend2("strafe", "x", "y", corners.items());
+    m2.set("x", 1.0);
+    m2.set("y", 1.0);
+    m2.advance(0.6);
+    assert(m2.pose().joints[1].position.near(linear.vec3(0.0, 2.0, 0.0), 0.0001));  // on a point: that clip alone
+}

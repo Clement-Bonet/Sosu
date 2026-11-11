@@ -1,0 +1,13 @@
+# particles drawn without a window (spec §8.2): over a scene of render3d, hidden by what is nearer.
+# It needs a device of the GPU: it exits with 77 where there is none (skipped).
+[package]
+name = "particlestest"
+version = "0.1.0"
+
+[dependencies]
+particles = { path = "../../../packages/particles" }
+render3d = { path = "../../../packages/render3d" }
+gpu = { path = "../../../packages/gpu" }
+math = { path = "../../../packages/math" }
+image = { path = "../../../packages/image" }
+model = { path = "../../../packages/model" }

@@ -1,10 +1,12 @@
 // audio: sound, in Sosu on SDL3 (spec §8.2). Programs import `audio.audio` (a `Sound` and its
 // samples), `audio.mixer` (several sounds played together, with their volume and panning),
 // `audio.resample` (a sound at another rate), `audio.wav` and `audio.ogg` (files read, and WAV
-// written) and `audio.device` (the devices of the system: play and record).
+// written), `audio.device` (the devices of the system: play and record) and `audio.spatial` (sounds
+// placed in 3D).
 import audio.audio;
 import audio.mixer;
 import audio.resample;
 import audio.wav;
 import audio.ogg;
 import audio.device;
+import audio.spatial;

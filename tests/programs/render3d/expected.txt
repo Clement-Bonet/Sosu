@@ -2,3 +2,4 @@ lit ground: ok
 shadow: ok
 top brighter than the front: ok
 drawn: 2, left out: 1
+skinned cube where its joint is: ok

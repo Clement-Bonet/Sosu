@@ -54,6 +54,9 @@ static void usage(FILE *out) {
           "  lsp     run the language server (Language Server Protocol, on stdin and stdout)\n"
           "  i18n extract [package] [-o messages.locale.default.sosu]\n"
           "          write the template of the catalogs of translations (spec 10.7)\n"
+          "  deps upgrade [package] [name]\n"
+          "          move each git dependency pinned by a tag to the newest version tag of its\n"
+          "          repository, in sosu.toml (spec 8.1, 9.1)\n"
           "  doc [package] [-o file.md]\n"
           "          write the reference of the public API of a package (default: build/doc/<name>.md)\n"
           "\n"
@@ -361,6 +364,7 @@ typedef struct {
     StringList frameworks;
     StringList copy;
     StringList sources;  /* C files compiled with the program ([link] c), and their folders and defines */
+    StringList cpp_sources; /* C++ files ([link] cpp), compiled by the C++ compiler */
     StringList includes;
     StringList defines;
     bool window; /* a package is for programs with windows: no console in release (Windows) */
@@ -426,6 +430,49 @@ static char *checked(const Package *package, char *path, const char *key, bool f
     return path;
 }
 
+/* The files of a native dependency named by `pattern`, relative to its clone `root`: `dir/ **` (no space) the
+   files of `suffix` of a folder and of its subfolders, `dir/` those of the folder, else one file.
+   A pattern that goes above the clone, or is absolute, is refused (reported). */
+static void add_native_files(const Package *package, const NativeDep *dep, const char *root, const char *pattern,
+                             const char *suffix, StringList *into) {
+    size_t length = strlen(pattern);
+    if (strstr(pattern, "..") || pattern[0] == '/' || pattern[0] == '\\' || (length > 1 && pattern[1] == ':')) {
+        fprintf(stderr, "sosuc: the path `%s` of [native.%s] of the package `%s` leaves its repository\n", pattern,
+                dep->name, package->name);
+        return;
+    }
+    bool below = length >= 3 && strcmp(pattern + length - 3, "/**") == 0;
+    bool folder = !below && length > 0 && (pattern[length - 1] == '/' || pattern[length - 1] == '\\');
+    if (below || folder) {
+        char *relative = sosu_format("%.*s", (int)(length - (below ? 3 : 1)), pattern);
+        char *dir = relative[0] ? path_join(root, relative) : sosu_strdup(root);
+        size_t count = 0;
+        char **names = below ? shell_files_below(dir, suffix, &count) : shell_files_ending(dir, suffix, &count);
+        if (count == 0) {
+            fprintf(stderr, "sosuc: no %s file in `%s` of [native.%s] of the package `%s`\n", suffix, pattern, dep->name,
+                    package->name);
+        }
+        for (size_t k = 0; k < count; k++) {
+            char *relative_file = relative[0] ? sosu_format("%s/%s", relative, names[k]) : sosu_strdup(names[k]);
+            bool left_out = false;
+            for (size_t e = 0; e < dep->exclude.count; e++) left_out |= strcmp(dep->exclude.items[e], relative_file) == 0;
+            if (!left_out) add_unique(into, path_join(dir, names[k]));
+            free(relative_file);
+            free(names[k]);
+        }
+        free(names);
+        free(dir);
+        free(relative);
+        return;
+    }
+    char *file = path_join(root, pattern);
+    if (!shell_file_exists(file)) {
+        fprintf(stderr, "sosuc: the file `%s` of [native.%s] of the package `%s` is not in its repository\n", pattern,
+                dep->name, package->name);
+    }
+    add_unique(into, file);
+}
+
 /* [link] and [link.<target>] of every package (the host, or `android`, `ios`): a dependency's
    libraries reach the program. */
 static void collect_links(const Program *program, Links *links, const Target *target) {
@@ -452,25 +499,31 @@ static void collect_links(const Program *program, Links *links, const Target *ta
                 char *file = link_path(package, link->copy.items[j], target);
                 add_unique(&links->copy, checked(package, file, "copy", false));
             }
-            for (size_t j = 0; j < link->c.count; j++) {
-                char *file = link_path(package, link->c.items[j], target);
-                const char *written = link->c.items[j];
-                size_t length = strlen(written);
-                if (length > 0 && (written[length - 1] == '/' || written[length - 1] == '\\')) {
-                    /* a folder: its C files, not those of its subfolders */
-                    size_t end = strlen(file);
-                    if (end > 0 && (file[end - 1] == '/' || file[end - 1] == '\\')) file[end - 1] = '\0';
-                    size_t count = 0;
-                    char **names = checked(package, file, "c", true) ? shell_files_ending(file, ".c", &count) : NULL;
-                    for (size_t k = 0; k < count; k++) {
-                        add_unique(&links->sources, path_join(file, names[k]));
-                        free(names[k]);
+            for (int lang = 0; lang < 2; lang++) {  /* [link] c, then cpp */
+                const StringList *given = lang == 0 ? &link->c : &link->cpp;
+                StringList *into = lang == 0 ? &links->sources : &links->cpp_sources;
+                const char *key = lang == 0 ? "c" : "cpp";
+                for (size_t j = 0; j < given->count; j++) {
+                    char *file = link_path(package, given->items[j], target);
+                    const char *written = given->items[j];
+                    size_t length = strlen(written);
+                    if (length > 0 && (written[length - 1] == '/' || written[length - 1] == '\\')) {
+                        /* a folder: its files of that language, not those of its subfolders */
+                        size_t end = strlen(file);
+                        if (end > 0 && (file[end - 1] == '/' || file[end - 1] == '\\')) file[end - 1] = '\0';
+                        size_t count = 0;
+                        char **names = checked(package, file, key, true)
+                                           ? shell_files_ending(file, lang == 0 ? ".c" : ".cpp", &count) : NULL;
+                        for (size_t k = 0; k < count; k++) {
+                            add_unique(into, path_join(file, names[k]));
+                            free(names[k]);
+                        }
+                        free(names);
+                        free(file);
+                        continue;
                     }
-                    free(names);
-                    free(file);
-                    continue;
+                    add_unique(into, checked(package, file, key, false));
                 }
-                add_unique(&links->sources, checked(package, file, "c", false));
             }
             for (size_t j = 0; j < link->include.count; j++) {
                 add_unique(&links->includes, link_path(package, link->include.items[j], target));
@@ -478,13 +531,29 @@ static void collect_links(const Program *program, Links *links, const Target *ta
             for (size_t j = 0; j < link->defines.count; j++) add_unique(&links->defines, sosu_strdup(link->defines.items[j]));
             if (link->subsystem && strcmp(link->subsystem, "window") == 0) links->window = true;
         }
+        /* [native.<name>]: the files of its clone (spec §9.1) */
+        for (size_t n = 0; n < package->manifest.natives.count; n++) {
+            const char *root = package->native_roots ? package->native_roots[n] : NULL;
+            if (!root) continue; /* not fetched: already reported */
+            const NativeDep *dep = &package->manifest.natives.items[n];
+            for (size_t j = 0; j < dep->c.count; j++) add_native_files(package, dep, root, dep->c.items[j], ".c", &links->sources);
+            for (size_t j = 0; j < dep->cpp.count; j++) {
+                add_native_files(package, dep, root, dep->cpp.items[j], ".cpp", &links->cpp_sources);
+            }
+            for (size_t j = 0; j < dep->include.count; j++) {
+                const char *relative = dep->include.items[j];
+                if (strstr(relative, "..") || relative[0] == '/' || (relative[0] && relative[1] == ':')) continue;
+                add_unique(&links->includes, strcmp(relative, ".") == 0 ? sosu_strdup(root) : path_join(root, relative));
+            }
+            for (size_t j = 0; j < dep->defines.count; j++) add_unique(&links->defines, sosu_strdup(dep->defines.items[j]));
+        }
     }
 }
 
 static void free_links(Links *links) {
     free(links->resource);
     StringList *lists[] = { &links->libs, &links->paths, &links->frameworks, &links->copy, &links->sources,
-                            &links->includes, &links->defines };
+                            &links->cpp_sources, &links->includes, &links->defines };
     for (size_t i = 0; i < sizeof lists / sizeof *lists; i++) {
         for (size_t j = 0; j < lists[i]->count; j++) free(lists[i]->items[j]);
         free(lists[i]->items);
@@ -529,7 +598,12 @@ static char *source_object(const char *path, const char *dir, const char *extens
     const char *back = strrchr(path, '\\');
     const char *base = back && (!slash || back > slash) ? back + 1 : slash ? slash + 1 : path;
     const char *dot = strrchr(base, '.');
-    char *object = sosu_format("%s/%.*s%s", dir, (int)(dot ? (size_t)(dot - base) : strlen(base)), base, extension);
+    /* the name of the file and a hash of its path: two files of one name in two folders (a
+       library of many folders, two packages) get two objects */
+    uint32_t hash = 2166136261u;
+    for (const char *c = path; *c; c++) hash = (hash ^ (uint8_t)(*c == '\\' ? '/' : *c)) * 16777619u;
+    char *object = sosu_format("%s/%.*s-%08x%s", dir, (int)(dot ? (size_t)(dot - base) : strlen(base)), base,
+                               (unsigned)hash, extension);
     char *native = shell_path(object);
     free(object);
     return native;
@@ -713,14 +787,14 @@ static bool file_holds(const char *path, const char *text) {
 /* The C files of the packages, as objects of `obj_dir` added to `link` (the command that links
    the program): those that changed are compiled again, with `base` (the compiler and its
    options) and the folders and defines of [link]. False if the C compiler failed. */
-static bool package_objects(const Links *links, const char *obj_dir, const Command *base, bool msvc, const char *log,
-                            Command *link) {
-    if (links->sources.count == 0) return true;
+static bool package_objects(const Links *links, const StringList *files, const char *obj_dir, const Command *base,
+                            bool msvc, const char *log, Command *link) {
+    if (files->count == 0) return true;
     shell_make_dir(obj_dir);
     StringList dirs = {0}; /* the folders of headers and of sources */
     for (size_t i = 0; i < links->includes.count; i++) add_unique(&dirs, sosu_strdup(links->includes.items[i]));
-    for (size_t i = 0; i < links->sources.count; i++) {
-        char *dir = sosu_strdup(links->sources.items[i]);
+    for (size_t i = 0; i < files->count; i++) {
+        char *dir = sosu_strdup(files->items[i]);
         char *slash = strrchr(dir, '/');
         char *back = strrchr(dir, '\\');
         if (back && (!slash || back > slash)) slash = back;
@@ -730,7 +804,7 @@ static bool package_objects(const Links *links, const char *obj_dir, const Comma
     long long newest = 0;
     for (size_t i = 0; i < dirs.count; i++) {
         /* a compiled file counts in its own key only, so that a change recompiles it alone */
-        long long t = shell_newest_time(dirs.items[i], links->sources.items, links->sources.count);
+        long long t = shell_newest_time(dirs.items[i], files->items, files->count);
         if (t > newest) newest = t;
         free(dirs.items[i]);
     }
@@ -741,62 +815,47 @@ static bool package_objects(const Links *links, const char *obj_dir, const Comma
     char *native_dir = shell_path(obj_dir);
     if (msvc) {
         command_add(&compile, "/c");
-        command_addf(&compile, "/Fo%s\\", native_dir);
         command_addf(&compile, "/Fd%s\\", native_dir);
     } else {
         command_add(&compile, "-c");
     }
     add_source_flags(&compile, links, msvc);
     bool ok = true;
-    Command batch = {0}; /* MSVC: the files that changed, compiled at once */
-    for (size_t i = 0; i < compile.count; i++) command_add(&batch, compile.items[i]);
-    size_t stale = 0;
-    char **keys = sosu_alloc(links->sources.count * sizeof *keys);
-    for (size_t i = 0; i < links->sources.count; i++) {
-        const char *source = links->sources.items[i];
+    /* each file to its own object, named by its path too: two files of one name in two folders */
+    for (size_t i = 0; i < files->count; i++) {
+        const char *source = files->items[i];
         char *object = source_object(source, obj_dir, msvc ? ".obj" : ".o");
         char *key_file = sosu_format("%s.key", object);
-        keys[i] = object_key(&compile, source, newest);
-        bool kept = shell_file_exists(object) && file_holds(key_file, keys[i]);
-        if (!kept) {
+        char *key = object_key(&compile, source, newest);
+        bool kept = shell_file_exists(object) && file_holds(key_file, key);
+        if (!kept && ok) {
             remove(key_file); /* until it is compiled again */
             char *native = shell_path(source);
+            Command one = {0};
+            for (size_t k = 0; k < compile.count; k++) command_add(&one, compile.items[k]);
             if (msvc) {
-                command_add(&batch, native);
-            } else if (ok) {
-                Command one = {0};
-                for (size_t k = 0; k < compile.count; k++) command_add(&one, compile.items[k]);
+                command_addf(&one, "/Fo%s", object);
+                command_add(&one, native);
+#ifdef _WIN32
+                ok = run_logged(&one, log);
+#endif
+            } else {
                 command_add(&one, native);
                 command_add(&one, "-o");
                 command_add(&one, object);
-                ok = run(&one) && write_file(key_file, keys[i]);
+                ok = run(&one);
             }
+            ok = ok && write_file(key_file, key);
             free(native);
-            stale++;
         }
         command_add(link, object);
+        free(key);
         free(key_file);
         free(object);
     }
-#ifdef _WIN32
-    if (msvc && stale > 0) {
-        ok = run_logged(&batch, log);
-        for (size_t i = 0; ok && i < links->sources.count; i++) {
-            char *object = source_object(links->sources.items[i], obj_dir, ".obj");
-            char *key_file = sosu_format("%s.key", object);
-            if (!shell_file_exists(key_file) || !file_holds(key_file, keys[i])) ok = write_file(key_file, keys[i]);
-            free(key_file);
-            free(object);
-        }
-    } else
+#ifndef _WIN32
+    (void)log; /* MSVC only */
 #endif
-    {
-        (void)log;
-        (void)stale; /* counted for the MSVC batch only */
-        command_free(&batch);
-    }
-    for (size_t i = 0; i < links->sources.count; i++) free(keys[i]);
-    free(keys);
     command_free(&compile);
     free(native_dir);
     return ok;
@@ -811,6 +870,25 @@ static char *objects_dir(const char *build_dir, const Target *target, bool optim
 }
 
 /* Compiles the generated C file with the runtime. Returns false if the C compiler failed. */
+/* The C++ driver of the C compiler `cc`: `gcc` gives `g++`, `clang` `clang++`, `cc` `c++`, with
+   the folder and the prefix of a cross compiler kept (`aarch64-linux-gnu-gcc`). Static string. */
+static const char *cpp_compiler(const char *cc) {
+    static char name[1024];
+    size_t n = strlen(cc);
+    if (n + 3 >= sizeof name) return "c++";
+    memcpy(name, cc, n + 1);
+    if (n >= 3 && strcmp(name + n - 3, "gcc") == 0) {
+        strcpy(name + n - 3, "g++");
+    } else if (n >= 5 && strcmp(name + n - 5, "clang") == 0) {
+        strcpy(name + n, "++");
+    } else if (n >= 2 && strcmp(name + n - 2, "cc") == 0 && (n == 2 || name[n - 3] == '/' || name[n - 3] == '-')) {
+        strcpy(name + n - 2, "c++");
+    } else {
+        return "c++";
+    }
+    return name;
+}
+
 /* Flags given to every C compilation of the next `compile_c` (`sosuc fuzz`), NULL-ended; NULL
    for none. */
 static const char *const *extra_c_flags = NULL;
@@ -845,7 +923,18 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         add_all(&base, options);
         if (extra_c_flags) add_all(&base, extra_c_flags);
         char *obj_dir = objects_dir(build_dir, target, optimize);
-        if (ok) ok = package_objects(links, obj_dir, &base, true, log, &cl);
+        if (ok) ok = package_objects(links, &links->sources, obj_dir, &base, true, log, &cl);
+        if (ok && links->cpp_sources.count > 0) {
+            /* C++ ([link] cpp): the same compiler, as C++17, without exceptions nor RTTI; the C++
+               library comes with the objects that need it */
+            Command cpp = {0};
+            const char *cpp_options[] = { "cl", "/nologo", "/std:c++17", "/TP", "/EHs-c-", "/GR-", "/utf-8", "/W0", "/Zi",
+                                          optimize ? "/O2" : "/Od", NULL };
+            add_all(&cpp, cpp_options);
+            if (extra_c_flags) add_all(&cpp, extra_c_flags);
+            ok = package_objects(links, &links->cpp_sources, obj_dir, &cpp, true, log, &cl);
+            command_free(&cpp);
+        }
         free(obj_dir);
         command_free(&base);
         command_add(&cl, c);
@@ -884,7 +973,19 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         command_add(&command, c_file);
         command_add(&command, runtime_c);
         char *obj_dir = objects_dir(build_dir, target, optimize);
-        if (ok) ok = package_objects(links, obj_dir, &base, false, NULL, &command);
+        if (ok) ok = package_objects(links, &links->sources, obj_dir, &base, false, NULL, &command);
+        if (ok && links->cpp_sources.count > 0) {
+            /* C++ ([link] cpp): the C++ driver of the compiler (g++, clang++, c++) */
+            Command cpp = {0};
+            command_add(&cpp, cpp_compiler(command.items[0]));
+            for (size_t i = 1; i < base.count && strcmp(base.items[i], "-std=c99") != 0; i++) command_add(&cpp, base.items[i]);
+            const char *cpp_options[] = { "-std=c++17", "-fno-exceptions", "-fno-rtti", "-g", optimize ? "-O2" : "-O0", "-w",
+                                          "-fno-strict-aliasing", NULL };
+            add_all(&cpp, cpp_options);
+            if (extra_c_flags) add_all(&cpp, extra_c_flags);
+            ok = package_objects(links, &links->cpp_sources, obj_dir, &cpp, false, NULL, &command);
+            command_free(&cpp);
+        }
         free(obj_dir);
         command_free(&base);
         if (links->resource) command_add(&command, links->resource);
@@ -892,6 +993,10 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         command_add(&command, exe);
         add_link_arguments(&command, links, false);
         if (optimize && links->window && for_windows) command_add(&command, "-mwindows"); /* MinGW: the same */
+        if (links->cpp_sources.count > 0) {  /* the C++ library: libc++ on Apple, libstdc++ elsewhere */
+            command_add(&command, strcmp(target_system(target), "macos-arm64") == 0 ||
+                                          strcmp(target_system(target), "macos-x64") == 0 ? "-lc++" : "-lstdc++");
+        }
         if (!for_windows) { /* std.thread (spec §5.6), std.math */
             command_add(&command, "-pthread");
             command_add(&command, "-lm");
@@ -1233,6 +1338,10 @@ static void free_library_files(LibraryFiles *files) {
 /* Compiles the generated C file of a library, and the runtime, into `files`. */
 static bool compile_library(const char *build_dir, const char *c_file, const char *name, const char *lib, bool optimize,
                             bool shared, const Links *links, const LibraryFiles *files) {
+    if (links->cpp_sources.count > 0) {
+        fputs("sosuc: the C++ files of [link] cpp are not built into libraries yet (spec 9.1)\n", stderr);
+        return false;
+    }
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
@@ -1494,6 +1603,10 @@ static char *mobile_dir(const char *build_dir, const Target *target) {
    `libmain.a` that the Xcode project links (iOS); its entry is `SDL_main`. */
 static bool compile_mobile(const char *out_dir, const char *c_file, const char *lib, bool optimize, const Links *links,
                            const Target *target, char **built) {
+    if (links->cpp_sources.count > 0) {
+        fputs("sosuc: the C++ files of [link] cpp are not built for phones yet (spec 9.1)\n", stderr);
+        return false;
+    }
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *level = optimize ? "-O2" : "-O0";
@@ -2995,6 +3108,180 @@ static int command_fuzz(int argc, char **argv, const char *argv0, DiagFormat for
     return status;
 }
 
+/* The numbers of a tag of version, `v5.6.0` or `1.2`, into `parts` (at most 8); 0 when it is not
+   one (a tag of a pre-release, `v2.0-beta`, is not). */
+static size_t version_parts(const char *tag, unsigned long *parts) {
+    const char *c = tag;
+    if (*c == 'v' || *c == 'V') c++;
+    size_t n = 0;
+    while (*c && n < 8) {
+        if (*c < '0' || *c > '9') return 0;
+        unsigned long value = 0;
+        while (*c >= '0' && *c <= '9') {
+            value = value * 10 + (unsigned long)(*c - '0');
+            if (value > 1000000000ul) return 0;
+            c++;
+        }
+        parts[n++] = value;
+        if (*c == '.') {
+            c++;
+        } else if (*c) {
+            return 0;
+        }
+    }
+    return *c ? 0 : n;
+}
+
+/* True if the version `a` comes after `b`. */
+static bool version_after(const unsigned long *a, size_t na, const unsigned long *b, size_t nb) {
+    for (size_t i = 0; i < na || i < nb; i++) {
+        unsigned long x = i < na ? a[i] : 0, y = i < nb ? b[i] : 0;
+        if (x != y) return x > y;
+    }
+    return false;
+}
+
+/* The newest tag of version of `url` after `current`, or NULL (none newer, or no tag of version). */
+static char *newest_tag(const char *url, const char *current, char **error) {
+    size_t count = 0;
+    char **tags = git_remote_tags(url, &count, error);
+    unsigned long best[8], now[8];
+    size_t best_n = version_parts(current, now);
+    memcpy(best, now, sizeof best);
+    char *found = NULL;
+    for (size_t i = 0; i < count; i++) {
+        unsigned long parts[8];
+        size_t n = version_parts(tags[i], parts);
+        if (n > 0 && version_after(parts, n, best, best_n)) {
+            free(found);
+            found = sosu_strdup(tags[i]);
+            memcpy(best, parts, sizeof best);
+            best_n = n;
+        }
+        free(tags[i]);
+    }
+    free(tags);
+    return found;
+}
+
+/* `text` with the first `"old"` after `from` (and before `until`) replaced by `"new"`; NULL when
+   it is not there. */
+static char *replace_quoted(const char *text, size_t from, size_t until, const char *old, const char *new_value) {
+    char *quoted = sosu_format("\"%s\"", old);
+    size_t n = strlen(quoted);
+    char *result = NULL;
+    for (size_t i = from; i + n <= until; i++) {
+        if (memcmp(text + i, quoted, n) == 0) {
+            result = sosu_format("%.*s\"%s\"%s", (int)i, text, new_value, text + i + n);
+            break;
+        }
+    }
+    free(quoted);
+    return result;
+}
+
+/* `sosuc deps upgrade [package] [name]` (spec 8.1, 9.1): each git dependency of the package (or the
+   one named) that has a `tag`, moved to the newest tag of version of its repository, written in
+   its sosu.toml; the next build fetches it and writes sosu.lock. A `rev` stays as it is. */
+static int command_deps(int argc, char **argv) {
+    if (argc < 1 || strcmp(argv[0], "upgrade") != 0) {
+        fputs("usage: sosuc deps upgrade [package] [name]\n", stderr);
+        return 2;
+    }
+    const char *dir = argc > 1 ? argv[1] : ".";
+    const char *only = argc > 2 ? argv[2] : NULL;
+    char *path = path_join(dir, "sosu.toml");
+    SourceFile file;
+    if (!source_load(&file, path)) {
+        fprintf(stderr, "sosuc: no sosu.toml in `%s`\n", dir);
+        free(path);
+        return 2;
+    }
+    DiagList diags = {0};
+    Manifest manifest;
+    bool parsed = manifest_parse(&manifest, &file, &diags);
+    if (!parsed) {
+        diag_print_text(&diags, stderr);
+        manifest_free(&manifest);
+        diag_free(&diags);
+        source_free(&file);
+        free(path);
+        return 1;
+    }
+    char *text = sosu_format("%.*s", (int)file.length, file.text);
+    int status = 0;
+    size_t changed = 0, seen = 0;
+    size_t total = manifest.deps.count + manifest.natives.count;
+    for (size_t i = 0; i < total; i++) {
+        bool native = i >= manifest.deps.count;
+        const char *name = native ? manifest.natives.items[i - manifest.deps.count].name : manifest.deps.items[i].name;
+        const char *git = native ? manifest.natives.items[i - manifest.deps.count].git : manifest.deps.items[i].git;
+        const char *tag = native ? manifest.natives.items[i - manifest.deps.count].tag : manifest.deps.items[i].tag;
+        size_t offset = native ? manifest.natives.items[i - manifest.deps.count].offset : manifest.deps.items[i].offset;
+        if (!git || (only && strcmp(only, name) != 0)) continue;
+        seen++;
+        if (!tag) {
+            printf("%s: pinned by a rev, left as it is\n", name);
+            continue;
+        }
+        char *url = git_is_local(git) ? path_join(dir, git) : sosu_strdup(git);
+        char *error = NULL;
+        char *newer = newest_tag(url, tag, &error);
+        if (error) {
+            fprintf(stderr, "sosuc: %s: %s\n", name, error);
+            status = 2;
+        } else if (!newer) {
+            printf("%s: %s is the newest\n", name, tag);
+        } else if (git_check_source(git, newer)) {
+            fprintf(stderr, "sosuc: %s: the tag `%s` has characters that sosu.toml refuses\n", name, newer);
+            status = 2;
+        } else {
+            /* the value of `tag` of this dependency: after its name, before the next section */
+            size_t until = strlen(text);
+            for (size_t k = offset; k + 1 < until; k++) {
+                if (text[k] == '\n' && text[k + 1] == '[') {
+                    until = k;
+                    break;
+                }
+            }
+            size_t limit = native ? until : offset;
+            if (!native) { /* an inline table: on the line of its name */
+                limit = offset;
+                while (limit < until && text[limit] != '\n') limit++;
+            }
+            char *updated = replace_quoted(text, offset, limit, tag, newer);
+            if (updated) {
+                free(text);
+                text = updated;
+                printf("%s: %s -> %s\n", name, tag, newer);
+                changed++;
+            } else {
+                fprintf(stderr, "sosuc: %s: cannot find its tag `%s` in sosu.toml\n", name, tag);
+                status = 2;
+            }
+        }
+        free(newer);
+        free(error);
+        free(url);
+    }
+    if (only && seen == 0) {
+        fprintf(stderr, "sosuc: no git dependency named `%s`\n", only);
+        status = 2;
+    }
+    if (changed > 0 && !write_file(path, text)) {
+        fprintf(stderr, "sosuc: cannot write `%s`\n", path);
+        status = 2;
+    } else if (changed > 0) {
+        printf("sosu.toml written: the next build fetches the new versions and writes sosu.lock\n");
+    }
+    free(text);
+    manifest_free(&manifest);
+    diag_free(&diags);
+    source_free(&file);
+    free(path);
+    return status;
+}
+
 /* `sosuc doc`: the reference of what a package makes `pub`, with the comments written above it
    (spec 7.6), in Markdown: one section per module of the package, interface and catalog files
    aside. */
@@ -3136,6 +3423,7 @@ int main(int argc, char **argv) {
     if (strcmp(command, "doc") == 0) return command_doc(argc - 2, argv + 2, argv[0]);
     if (strcmp(command, "bindgen") == 0) return command_bindgen(argc - 2, argv + 2);
     if (strcmp(command, "shaders") == 0) return command_shaders(argc - 2, argv + 2);
+    if (strcmp(command, "deps") == 0) return command_deps(argc - 2, argv + 2);
     if (strcmp(command, "fuzz") == 0) return command_fuzz(argc - 2, argv + 2, argv[0], FORMAT_TEXT);
 
     DiagFormat format = FORMAT_TEXT;

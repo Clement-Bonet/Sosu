@@ -1,0 +1,784 @@
+// brawl: a small game in the third person (spec §8.2) that uses the libraries of 3D together. A
+// character of boxes, skinned and animated by a state machine of `anim` (idle, walk and run blended
+// by its speed, a strike), walks with a gamepad or ZQSD (WASD by their place) across a level of
+// `physics` (Jolt's character, crates that fall and are pushed); enemies follow it on the
+// navigation mesh of `nav` and avoid each other; a strike that reaches one throws sparks of
+// `particles` and a hit placed in 3D by `audio.spatial`, and the feet sound where they land.
+// Everything is made in code: no file. The window's button closes it.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/brawl`.
+import std.io;
+import std.math;
+import std.text;
+import std.time;
+import std.vec;
+import std.os;
+import math.linear;
+import math.curve;
+import model.model;
+import gpu.gpu;
+import gpu.overlay;
+import render.canvas;
+import render3d.render3d;
+import platform.app;
+import platform.gamepad;
+import platform.actions;
+import physics.physics;
+import nav.nav;
+import anim.anim;
+import particles.particles;
+import particles.draw;
+import audio.audio;
+import audio.device;
+import audio.spatial;
+import brawl.rig;
+import brawl.level;
+import brawl.sounds;
+
+usize ENEMIES = 4;
+f32 WALK = 2.2;
+f32 RUN = 5.0;
+// Where the camera is, from the hero.
+linear.Vec3 camera_offset() {
+    return linear.vec3(0.0, 7.0, 9.0);
+}
+
+// A character's animation: its machine and the matrices of its skin.
+struct Body {
+    anim.Machine* machine;
+    linear.Mat4[] palette;
+}
+
+struct Enemy {
+    nav.CrowdAgent agent;
+    Body body;
+    mut f32 yaw;
+    mut bool alive;
+    mut f32 away;  // seconds until it comes back, once hit
+    mut f32 cooldown;  // until its next strike
+    usize spawn;
+}
+
+// The angle about y that turns a character (facing -z) toward `d`.
+f32 yaw_toward(linear.Vec3 d) {
+    return math.atan2(-d.x as f64, -d.z as f64) as f32;
+}
+
+// The shortest turn from `a` to `b`, at most `step`.
+f32 turn(f32 a, f32 b, f32 step) {
+    mut f32 d = b - a;
+    while (d > 3.14159265) {
+        d -= 6.2831853;
+    }
+    while (d < -3.14159265) {
+        d += 6.2831853;
+    }
+    return a + max(-step, min(step, d));
+}
+
+linear.Mat4 placed(linear.Vec3 at, f32 yaw) {
+    return linear.translation(at).mul(linear.rotation_y(yaw));
+}
+
+// What the game is made of before its window opens: the input, the level and its physics, the
+// navigation mesh and its crowd, the characters and their machines, the sparks and the sounds.
+struct Pieces {
+    gamepad.Pads* pads;
+    actions.Input* input;
+    actions.Action move;
+    actions.Action run;
+    actions.Action strike;
+    level.Block[] blocks;
+    physics.World* world;
+    physics.Body[] crates;
+    physics.Character* hero;
+    nav.Mesh* mesh;
+    nav.Crowd* crowd;
+    anim.Skeleton skeleton;
+    Body hero_body;
+    Enemy[] enemies;
+    linear.Vec3[] spawns;
+    particles.System* sparks;
+    audio.Sound hit_sound;
+    audio.Sound step_sound;
+    audio.Sound swing_sound;
+    str problem;
+}
+
+anim.Clip* clip_of(keeps Arena* arena, keeps anim.Skeleton skeleton, keeps model.Model data, keeps str name) {
+    return match (data.animation(name)) {
+        some(a) => anim.clip(arena, skeleton, a),
+        none => anim.clip(arena, skeleton, model.Animation{ name: name, channels: arena.alloc_slice(model.Channel, 0), duration: 1.0 }),
+    };
+}
+
+// A body: a machine (locomotion blended by speed, and a strike), and its palette.
+Body body_of(keeps Arena* arena, keeps anim.Skeleton skeleton, keeps model.Model data) {
+    anim.Machine* m = anim.machine(arena, skeleton);
+    anim.Clip* idle = clip_of(arena, skeleton, data, "idle");
+    anim.Clip* walk = clip_of(arena, skeleton, data, "walk");
+    anim.Clip* running = clip_of(arena, skeleton, data, "run");
+    anim.Clip* blow = clip_of(arena, skeleton, data, "strike");
+    walk.event(0.0, "step");
+    walk.event(0.5, "step");
+    running.event(0.0, "step");
+    running.event(0.3, "step");
+    blow.event(0.12, "swing");
+    vec.Vec<anim.BlendPoint>* points = vec.new<anim.BlendPoint>(arena);
+    points.push(anim.at(0.0, idle));
+    points.push(anim.at(WALK, walk));
+    points.push(anim.at(RUN, running));
+    anim.State moving = m.state_blend1("move", "speed", points.items());
+    anim.State striking = m.state("strike", blow);
+    m.configure(striking, 1.0, false);
+    m.transition_any(striking, anim.when("strike", anim.Compare.Triggered, 0.0), 0.05);
+    m.transition_after(striking, moving, 1.0, 0.15);
+    return Body{ machine: m, palette: arena.alloc_slice(linear.Mat4, skeleton.count()) };
+}
+
+curve.Gradient spark_colors(Arena* arena) {
+    return curve.gradient(arena, linear.vec4(1.0, 1.0, 0.8, 1.0), linear.vec4(1.0, 0.2, 0.0, 0.0));
+}
+
+// The pieces of the game; none (and why, printed) when one cannot be made.
+Pieces? make(keeps Arena* arena) uses io {
+    // input: move (the left stick, or the keys by their place), run (held), strike
+    gamepad.Pads* pads = gamepad.open(arena);
+    actions.Devices* devices = actions.system(arena);
+    actions.Map* play = actions.map(arena, "play");
+    actions.Action move = play.vector("move").stick(gamepad.Stick.LeftStick).keys(actions.Scan.W, actions.Scan.S, actions.Scan.A,
+            actions.Scan.D);
+    actions.Action run = play.button("run").pad(gamepad.Button.East).key(actions.Scan.LeftShift);
+    actions.Action strike = play.button("strike").pad(gamepad.Button.South).key(actions.Scan.Space);
+    actions.Input* input = actions.input(arena, devices, pads);
+    input.enable(play);
+
+    // the level: its blocks are static bodies; crates fall on it
+    level.Block[] blocks = level.blocks(arena);
+    physics.World* world = physics.world(arena, physics.options());
+    physics.Shape slab = physics.box(linear.vec3(level.SIZE + 2.0, 0.5, level.SIZE + 2.0));
+    world.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: slab, position: linear.vec3(0.0, -0.5, 0.0) });
+    slab.release();
+    for (level.Block b in blocks) {
+        physics.Shape box_shape = physics.box(b.half);
+        world.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: box_shape, position: b.center() });
+        box_shape.release();
+    }
+    physics.Shape crate_shape = physics.box(linear.vec3(0.4, 0.4, 0.4));
+    linear.Vec3[] spots = level.crate_spots(arena);
+    vec.Vec<physics.Body>* crates = vec.new<physics.Body>(arena);
+    for (usize i in 0..spots.len) {
+        crates.push(world.body(physics.BodyDesc{ shape: crate_shape, position: spots[i], mass: 20.0, friction: 0.6,
+                rotation: linear.from_axis_angle(linear.vec3(0.3, 1.0, 0.2), i as f32 * 0.7) }));
+    }
+    crate_shape.release();
+    world.optimize();
+    physics.Character* hero = match (world.character(physics.CharacterDesc{ position: linear.vec3(0.0, 0.0, 4.0), height: 1.7, radius: 0.3 })) {
+        some(c) => c,
+        none => {
+            io.print("brawl: no character");
+            return none;
+        },
+    };
+
+    // the navigation mesh, and a crowd on it
+    level.Triangles* tris = level.triangles(arena, blocks);
+    nav.Mesh* mesh = match (nav.build(arena, tris.vertices.items(), tris.indices.items(), nav.Agent{ radius: 0.4, height: 1.7 })) {
+        ok(m) => m,
+        err(e) => {
+            io.print("brawl: {}", nav.message(e));
+            return none;
+        },
+    };
+    nav.Crowd* crowd = match (mesh.crowd(arena, 16, 0.6)) {
+        some(c) => c,
+        none => {
+            io.print("brawl: no crowd");
+            return none;
+        },
+    };
+
+    // the characters: one skeleton and its clips for all
+    model.Model hero_data = rig.character(arena, [0.25, 0.45, 0.9, 1.0]);
+    anim.Skeleton skeleton = match (anim.skeleton(arena, hero_data, 0)) {
+        some(sk) => sk,
+        none => {
+            io.print("brawl: no skeleton");
+            return none;
+        },
+    };
+    linear.Vec3[] spawns = level.spawn_spots(arena);
+    vec.Vec<Enemy>* enemies = vec.new<Enemy>(arena);
+    for (usize i in 0..ENEMIES) {
+        model.Model enemy_data = rig.character(arena, [0.9, 0.3, 0.25, 1.0]);
+        nav.CrowdAgent agent = match (crowd.add(spawns[i], nav.AgentDesc{ speed: 2.6 + i as f32 * 0.3 })) {
+            some(x) => x,
+            none => {
+                io.print("brawl: the crowd is full");
+                return none;
+            },
+        };
+        enemies.push(Enemy{ agent: agent, body: body_of(arena, skeleton, enemy_data), yaw: 0.0, alive: true, away: 0.0, cooldown: 1.0,
+                spawn: i });
+    }
+
+    // sparks: a burst at each hit
+    particles.System* sparks = particles.system(arena, particles.Emitter{
+        rate: 0.0,
+        shape: particles.Shape.Sphere(0.15),
+        life: particles.range(0.25, 0.6),
+        speed: particles.range(3.0, 7.0),
+        size: particles.range(0.05, 0.09),
+        gravity: 1.2,
+        drag: 1.5,
+        color_over_life: some(spark_colors(arena)),
+        facing: particles.Facing.Velocity(0.05),
+        blending: particles.Blending.Additive,
+        max: 600,
+        seed: 5
+    });
+    return some(Pieces{
+        pads: pads,
+        input: input,
+        move: move,
+        run: run,
+        strike: strike,
+        blocks: blocks,
+        world: world,
+        crates: crates.items(),
+        hero: hero,
+        mesh: mesh,
+        crowd: crowd,
+        skeleton: skeleton,
+        hero_body: body_of(arena, skeleton, hero_data),
+        enemies: enemies.items(),
+        spawns: spawns,
+        sparks: sparks,
+        hit_sound: sounds.hit(arena),
+        step_sound: sounds.step(arena),
+        swing_sound: sounds.swing(arena),
+        problem: ""
+    });
+}
+
+class Game : app.WindowHandler<uses time> {
+    mut Arena arena;
+    mut Arena pixels;
+    mut canvas.Canvas surface;
+    mut gpu.Device*? screen;
+    mut render3d.Renderer*? renderer;
+    mut draw.Drawer*? drawer;
+    mut overlay.Overlay*? hud;
+    mut render3d.Uploaded*? hero_model;
+    mut render3d.Uploaded*? enemy_model;
+    mut render3d.Uploaded*? block_model;
+    mut render3d.Uploaded*? crate_model;
+    mut render3d.Uploaded*? floor_model;
+    gamepad.Pads* pads;
+    actions.Input* input;
+    actions.Action move;
+    actions.Action run;
+    actions.Action strike;
+    physics.World* world;
+    physics.Character* hero;
+    physics.Body[] crates;
+    level.Block[] blocks;
+    nav.Mesh* mesh;
+    nav.Crowd* crowd;
+    anim.Skeleton skeleton;
+    Body hero_body;
+    mut Enemy[4] enemies;
+    linear.Vec3[] spawns;
+    particles.System* sparks;
+    mut device.Player*? player;
+    mut spatial.Space*? space;
+    audio.Sound hit_sound;
+    audio.Sound step_sound;
+    audio.Sound swing_sound;
+    mut f32 hero_yaw;
+    mut ui64 last;
+    mut f32 chase;  // until the enemies are given the place of the hero again
+    mut ui32 hits;
+    mut ui32 touched;
+    mut str problem;
+
+    void init(keeps Pieces p) {
+        arena = Arena.new(64 * KB);
+        pixels = Arena.new(1 * KB);
+        surface = canvas.create(&pixels, 0, 0);
+        screen = none;
+        renderer = none;
+        drawer = none;
+        hud = none;
+        hero_model = none;
+        enemy_model = none;
+        block_model = none;
+        crate_model = none;
+        floor_model = none;
+        player = none;
+        space = none;
+        problem = p.problem;
+        hero_yaw = 0.0;
+        last = 0;
+        chase = 0.0;
+        hits = 0;
+        touched = 0;
+        pads = p.pads;
+        input = p.input;
+        move = p.move;
+        run = p.run;
+        strike = p.strike;
+        blocks = p.blocks;
+        world = p.world;
+        crates = p.crates;
+        hero = p.hero;
+        mesh = p.mesh;
+        crowd = p.crowd;
+        skeleton = p.skeleton;
+        hero_body = p.hero_body;
+        spawns = p.spawns;
+        for (usize i in 0..ENEMIES) {
+            enemies[i] = p.enemies[i];
+        }
+        sparks = p.sparks;
+        hit_sound = p.hit_sound;
+        step_sound = p.step_sound;
+        swing_sound = p.swing_sound;
+    }
+
+    override void on_start(app.Window window) uses io, time {
+        gpu.Device* d = match (gpu.open(&arena, window, gpu.Options{ })) {
+            ok(opened) => opened,
+            err(e) => {
+                io.print("brawl: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                app.request_quit();
+                return;
+            },
+        };
+        screen = some(d);
+        match (build(d)) {
+            ok() => { },
+            err(e) => {
+                io.print("brawl: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                app.request_quit();
+            },
+        }
+        // sound, if there is a device: the game is played without one too
+        match (device.open_player(&arena, device.Output{ })) {
+            some(p) => {
+                player = some(p);
+                space = some(spatial.space(&arena, p.sounds));
+            },
+            none => {
+                io.print("brawl: no sound ({})", device.last_error(&arena));
+            },
+        }
+        if (problem.len > 0) {
+            io.print("brawl: {}", problem);
+        }
+        last = time.monotonic_ns();
+    }
+
+    void!gpu.GpuError build(keeps gpu.Device* d) keeps self uses io {
+        render3d.Renderer* r = try render3d.create(&arena, d, render3d.Options{ });
+        r.sun = render3d.Sun{ direction: linear.vec3(-0.5, -1.0, -0.35), shadow_extent: 22.0 };
+        r.ambient = linear.vec3(0.12, 0.13, 0.16);
+        renderer = some(r);
+        drawer = some(try draw.drawer(&arena, d));
+        hud = some(try overlay.create(&arena, d));
+        floor_model = some(try r.upload(&arena, render3d.ground(&arena, level.SIZE * 2.0 + 2.0, [0.45, 0.47, 0.42, 1.0])));
+        block_model = some(try r.upload(&arena, render3d.cube(&arena, [0.6, 0.58, 0.55, 1.0])));
+        crate_model = some(try r.upload(&arena, render3d.cube(&arena, [0.7, 0.5, 0.28, 1.0])));
+        hero_model = some(try r.upload(&arena, rig.character(&arena, [0.25, 0.45, 0.9, 1.0])));
+        enemy_model = some(try r.upload(&arena, rig.character(&arena, [0.9, 0.3, 0.25, 1.0])));
+        return ok();
+    }
+
+    override bool on_event(app.Event e) uses io, time {
+        return match (e) {
+            Quit => false,
+            _ => true,
+        };
+    }
+
+    // A sound at `at`, if there is sound.
+    void sound_at(audio.Sound s, linear.Vec3 at, f32 volume) uses io {
+        match (space) {
+            some(sp) => {
+                sp.play(s, spatial.Placed{ position: at, volume: volume, near: 2.0, far: 40.0 });
+            },
+            none => { },
+        }
+    }
+
+    // The strike of the hero: the enemies within reach in front of it are hit, the crates near pushed.
+    void strike_now() uses io {
+        linear.Vec3 at = hero.position();
+        linear.Vec3 front = linear.vec3(-math.sin(hero_yaw as f64) as f32, 0.0, -math.cos(hero_yaw as f64) as f32);
+        for (usize i in 0..ENEMIES) {
+            mut Enemy e = enemies[i];
+            if (!e.alive) {
+                continue;
+            }
+            linear.Vec3 p = crowd.position(e.agent);
+            linear.Vec3 d = p.sub(at);
+            f32 dist = linear.vec3(d.x, 0.0, d.z).length();
+            if (dist < 1.7 && (dist < 0.5 || linear.vec3(d.x, 0.0, d.z).scale(1.0 / dist).dot(front) > 0.3)) {
+                linear.Vec3 spot = p.add(linear.vec3(0.0, 1.2, 0.0));
+                sparks.move_to(linear.translation(spot));
+                sparks.burst(60);
+                sound_at(hit_sound, spot, 1.0);
+                crowd.remove(e.agent);
+                e.alive = false;
+                e.away = 2.5;
+                hits += 1;
+            }
+            enemies[i] = e;
+        }
+        for (physics.Body c in crates) {
+            linear.Vec3 d = c.position().sub(at);
+            f32 dist = d.length();
+            if (dist < 2.2 && dist > 0.01) {
+                c.add_impulse(linear.vec3(d.x, 0.6, d.z).normalized().scale(140.0), linear.vec3(0.0, 0.0, 0.0));
+            }
+        }
+    }
+
+    // True when every crate fell on the level and lies there (none below the floor, none moving fast).
+    bool crates_resting() {
+        for (physics.Body c in crates) {
+            physics.State s = c.state();
+            if (s.position.y < 0.0 || s.velocity.length() > 0.5) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void animate(Body b, f32 speed, f32 dt) {
+        b.machine.set("speed", speed);
+        b.machine.advance(dt);
+        anim.palette(skeleton, b.machine.pose(), b.palette);
+    }
+
+    override void on_frame(app.Window window) uses io, time {
+        gpu.Device* d = match (screen) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        ui64 now = time.monotonic_ns();
+        f32 dt = max(0.0, min(0.1, (now - last) as f32 / 1000000000.0));
+        last = now;
+        pads.update();
+        input.update();
+        render3d.Camera camera = simulate(dt, input.vector(move), input.pressed(run), input.triggered(strike));
+        render(d, camera);
+    }
+
+    // The game `dt` seconds later, the hero moved by `v` (the stick: forward is +y), running or
+    // not, striking or not; gives the camera.
+    render3d.Camera simulate(f32 dt, linear.Vec2 v, bool running, bool striking) uses io {
+        // the hero: seen from the camera (forward is -z)
+        f32 amount = min(v.length(), 1.0);
+        f32 pace = running ? RUN : WALK;
+        mut linear.Vec3 velocity = linear.vec3(0.0, 0.0, 0.0);
+        if (amount > 0.15) {
+            linear.Vec3 dir = linear.vec3(v.x, 0.0, -v.y).normalized();
+            hero_yaw = turn(hero_yaw, yaw_toward(dir), dt * 10.0);
+            velocity = dir.scale(pace * amount);
+        }
+        if (striking) {
+            hero_body.machine.trigger("strike");
+            strike_now();
+        }
+        hero.update(dt, velocity);
+        world.advance(dt);
+        linear.Vec3 hero_at = hero.position();
+        animate(hero_body, linear.vec3(velocity.x, 0.0, velocity.z).length(), dt);
+        for (anim.Event e in hero_body.machine.events()) {
+            sound_at(e.name == "step" ? step_sound : swing_sound, hero_at, e.name == "step" ? 0.35 : 0.6);
+        }
+
+        // the enemies: given the place of the hero twice a second, moved by the crowd
+        chase -= dt;
+        bool again = chase <= 0.0;
+        if (again) {
+            chase = 0.5;
+        }
+        for (usize i in 0..ENEMIES) {
+            mut Enemy e = enemies[i];
+            if (!e.alive) {
+                e.away -= dt;
+                if (e.away <= 0.0) {
+                    match (crowd.add(spawns[(e.spawn + hits as usize) % spawns.len], nav.AgentDesc{ speed: 2.6 + i as f32 * 0.3 })) {
+                        some(agent) => {
+                            e = Enemy{ agent: agent, body: e.body, yaw: e.yaw, alive: true, away: 0.0, cooldown: 1.0, spawn: e.spawn };
+                        },
+                        none => { },
+                    }
+                }
+                enemies[i] = e;
+                continue;
+            }
+            if (again) {
+                crowd.go_to(e.agent, hero_at);
+            }
+            enemies[i] = e;
+        }
+        crowd.update(dt);
+        for (usize i in 0..ENEMIES) {
+            mut Enemy e = enemies[i];
+            if (!e.alive) {
+                continue;
+            }
+            linear.Vec3 p = crowd.position(e.agent);
+            linear.Vec3 vel = crowd.velocity(e.agent);
+            f32 speed = linear.vec3(vel.x, 0.0, vel.z).length();
+            linear.Vec3 to_hero = hero_at.sub(p);
+            if (speed > 0.2) {
+                e.yaw = turn(e.yaw, yaw_toward(vel), dt * 8.0);
+            } else {
+                e.yaw = turn(e.yaw, yaw_toward(to_hero), dt * 8.0);
+            }
+            e.cooldown -= dt;
+            if (linear.vec3(to_hero.x, 0.0, to_hero.z).length() < 1.1 && e.cooldown <= 0.0) {
+                e.body.machine.trigger("strike");
+                e.cooldown = 1.4;
+                touched += 1;
+                sound_at(hit_sound, hero_at.add(linear.vec3(0.0, 1.0, 0.0)), 0.5);
+            }
+            animate(e.body, speed, dt);
+            for (anim.Event ev in e.body.machine.events()) {
+                if (ev.name == "step") {
+                    sound_at(step_sound, p, 0.2);
+                }
+            }
+            enemies[i] = e;
+        }
+        sparks.advance(dt);
+
+        // the camera follows the hero; the listener is the camera
+        linear.Vec3 target = hero_at.add(linear.vec3(0.0, 1.0, 0.0));
+        linear.Vec3 eye = target.add(camera_offset());
+        render3d.Camera camera = render3d.Camera{ position: eye, target: target, fov_y: 0.9 };
+        match (space) {
+            some(sp) => {
+                f32 pitch = math.atan2(camera_offset().y as f64, camera_offset().z as f64) as f32;
+                sp.listener(linear.Transform{ position: eye, rotation: linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), -pitch),
+                        scale: linear.vec3(1.0, 1.0, 1.0) }, velocity);
+                sp.update();
+            },
+            none => { },
+        }
+        match (player) {
+            some(p) => {
+                p.update();
+            },
+            none => { },
+        }
+        return camera;
+    }
+
+    void render(gpu.Device* d, render3d.Camera camera) uses io {
+        render3d.Renderer* r = match (renderer) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        gpu.Frame frame = match (d.begin()) {
+            some(f) => f,
+            none => {
+                return;
+            },
+        };
+        mut Arena scratch = Arena.new(16 * KB);
+        defer scratch.free();
+        vec.Vec<render3d.Item>* items = vec.new<render3d.Item>(&scratch);
+        match (floor_model) {
+            some(m) => {
+                items.push(render3d.item(m, linear.identity4()));
+            },
+            none => { },
+        }
+        match (block_model) {
+            some(m) => {
+                for (level.Block b in blocks) {
+                    items.push(render3d.item(m, b.matrix()));
+                }
+            },
+            none => { },
+        }
+        match (crate_model) {
+            some(m) => {
+                for (physics.Body c in crates) {
+                    physics.State s = c.state();
+                    items.push(render3d.item(m, linear.translation(s.position).mul(s.rotation.to_mat4()).mul(linear.scaling(linear.vec3(0.4, 0.4, 0.4)))));
+                }
+            },
+            none => { },
+        }
+        match (hero_model) {
+            some(m) => {
+                items.push(render3d.Item{ model: m, transform: placed(hero.position(), hero_yaw), palette: some(hero_body.palette) });
+            },
+            none => { },
+        }
+        match (enemy_model) {
+            some(m) => {
+                for (usize i in 0..ENEMIES) {
+                    Enemy e = enemies[i];
+                    if (e.alive) {
+                        items.push(render3d.Item{ model: m, transform: placed(crowd.position(e.agent), e.yaw), palette: some(e.body.palette) });
+                    }
+                }
+            },
+            none => { },
+        }
+        r.draw(frame, camera, items.items());
+        match (drawer) {
+            some(dr) => {
+                mut draw.Sprite[1] sprites = [draw.sprite(sparks, none)];
+                match (dr.draw(frame, camera, sprites[0..1])) {
+                    ok() => { },
+                    err(e) => { },
+                }
+            },
+            none => { },
+        }
+        match (hud) {
+            some(h) => {
+                draw_text(frame);
+                match (h.draw(frame, &surface)) {
+                    ok() => { },
+                    err(e) => { },
+                }
+            },
+            none => { },
+        }
+        frame.submit();
+    }
+
+    void draw_text(gpu.Frame frame) {
+        if (surface.width != frame.width as i32 || surface.height != frame.height as i32) {
+            pixels.free();
+            pixels = Arena.new(1 * MB);
+            surface = canvas.create(&pixels, frame.width as i32, frame.height as i32);
+        }
+        surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });
+        surface.fill_rounded(canvas.Rect{ x: 12.0, y: 12.0, w: 700.0, h: 64.0 }, 8.0, canvas.Color{ r: 20, g: 22, b: 30, a: 190 });
+        surface.text(24.0, 22.0, "ZQSD / stick: walk   Shift / East: run   Space / South: strike",
+                canvas.Color{ r: 230, g: 232, b: 240 }, 2);
+        mut Arena line = Arena.new(1 * KB);
+        defer line.free();
+        text.TextBuilder* t = text.builder(&line);
+        t.push("hits: ");
+        t.push_u64(hits as ui64);
+        t.push("   touched: ");
+        t.push_u64(touched as ui64);
+        surface.text(24.0, 48.0, t.text(), canvas.Color{ r: 255, g: 170, b: 40 }, 2);
+    }
+
+    override void on_stop(app.Window window) uses io, time {
+        match (player) {
+            some(p) => {
+                p.close();
+            },
+            none => { },
+        }
+        match (hud) {
+            some(h) => {
+                h.release();
+            },
+            none => { },
+        }
+        match (drawer) {
+            some(dr) => {
+                dr.close();
+            },
+            none => { },
+        }
+        match (renderer) {
+            some(r) => {
+                for (render3d.Uploaded*? m in [floor_model, block_model, crate_model, hero_model, enemy_model]) {
+                    match (m) {
+                        some(x) => {
+                            r.release(x);
+                        },
+                        none => { },
+                    }
+                }
+                r.close();
+            },
+            none => { },
+        }
+        match (screen) {
+            some(d) => {
+                d.close();
+            },
+            none => { },
+        }
+        crowd.close();
+        mesh.close();
+        hero.close();
+        world.close();
+        pixels.free();
+        arena.free();
+    }
+}
+
+// Without a window (`-- --check`, for the CI): the game played for five seconds by a script, the
+// hero walking to an enemy and striking; what happened, printed.
+i32 check(Game* game) uses io {
+    linear.Vec3 start = game.hero.position();
+    mut ui32 strikes = 0;
+    for (i32 frame in 0..300) {
+        f32 dt = 1.0 / 60.0;
+        // toward the nearest enemy alive, then strikes when it is near
+        linear.Vec3 at = game.hero.position();
+        mut f32 best = 1000.0;
+        mut linear.Vec3 goal = at;
+        for (usize i in 0..ENEMIES) {
+            if (game.enemies[i].alive) {
+                linear.Vec3 p = game.crowd.position(game.enemies[i].agent);
+                f32 d = p.distance(at);
+                if (d < best) {
+                    best = d;
+                    goal = p;
+                }
+            }
+        }
+        linear.Vec3 to = goal.sub(at);
+        linear.Vec2 v = best < 1.2 || best > 999.0 ? linear.vec2(0.0, 0.0) : linear.vec2(to.x, -to.z).normalized();
+        bool hit = best < 1.4 && frame % 20 == 0;
+        if (hit) {
+            strikes += 1;
+        }
+        game.simulate(dt, v, false, hit);
+    }
+    linear.Vec3 end = game.hero.position();
+    io.print("brawl: the hero moved: {}", end.distance(start) > 1.0 ? "yes" : "no");
+    io.print("brawl: the hero stands on the floor: {}", abs(end.y) < 0.1 ? "yes" : "no");
+    io.print("brawl: strikes: {}, hits: {}", strikes > 0 ? "some" : "none", game.hits > 0 ? "some" : "none");
+    io.print("brawl: crates at rest on the level: {}", game.crates_resting() ? "yes" : "no");
+    return game.hits > 0 && end.distance(start) > 1.0 && abs(end.y) < 0.1 ? 0 : 1;
+}
+
+i32 main() uses io, time {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    Pieces pieces = match (make(&arena)) {
+        some(p) => p,
+        none => {
+            return 1;
+        },
+    };
+    Game* game = arena.new(Game, pieces);
+    for (str a in os.args(&arena)) {
+        if (a == "--check") {
+            return check(game);
+        }
+    }
+    return app.run_window(app.Config{ title: "Sosu brawl", width: 1200, height: 760 }, game as app.WindowHandler<uses time>*);
+}

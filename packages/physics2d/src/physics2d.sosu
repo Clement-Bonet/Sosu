@@ -1,0 +1,544 @@
+// physics2d.physics2d: rigid bodies in the plane (spec §8.2), on Box2D 3 (C, MIT), taken from its
+// repository by [native.box2d] and reached through native/physics2d.c. A `World` steps at a fixed
+// rate: `advance(dt)` runs as many steps as the time given holds and keeps the rest, so that the
+// simulation does not depend on the frame rate. Bodies, shapes and joints are handles. Contacts are
+// read after the steps, never called back. Box2D allocates through the C library, not in arenas:
+// `close` releases the world and all it holds. Units are meters, kilograms and seconds, angles in
+// radians, counterclockwise, y up.
+import std.vec;
+import math.linear;
+import scene.scene;
+
+extern "C" {
+    ui8* sosu_b2_world(f32 gx, f32 gy, bool sleep);
+    void sosu_b2_world_free(ui8* world);
+    void sosu_b2_step(ui8* world, f32 dt, i32 substeps);
+    void sosu_b2_set_gravity(ui8* world, f32 gx, f32 gy);
+    i32 sosu_b2_awake_count(ui8* world);
+    ui64 sosu_b2_body(ui8* world, i32 kind, f32 x, f32 y, f32 angle, f32 damping, f32 angular_damping,
+                      f32 gravity_scale, bool bullet, bool fixed_rotation);
+    bool sosu_b2_body_valid(ui64 body);
+    void sosu_b2_body_destroy(ui64 body);
+    void sosu_b2_body_state(ui64 body, f32* out);
+    f32 sosu_b2_body_mass(ui64 body);
+    bool sosu_b2_body_awake(ui64 body);
+    void sosu_b2_body_set_awake(ui64 body, bool awake);
+    void sosu_b2_body_set_velocity(ui64 body, f32 vx, f32 vy, f32 spin);
+    void sosu_b2_body_teleport(ui64 body, f32 x, f32 y, f32 angle);
+    void sosu_b2_body_force(ui64 body, f32 fx, f32 fy, f32 torque);
+    void sosu_b2_body_impulse(ui64 body, f32 ix, f32 iy, f32 angular);
+    ui64 sosu_b2_circle(ui64 body, f32 cx, f32 cy, f32 radius, f32 density, f32 friction, f32 restitution,
+                        ui64 layers, ui64 mask, bool sensor);
+    ui64 sosu_b2_capsule(ui64 body, f32 x1, f32 y1, f32 x2, f32 y2, f32 radius, f32 density, f32 friction,
+                         f32 restitution, ui64 layers, ui64 mask, bool sensor);
+    ui64 sosu_b2_box(ui64 body, f32 hw, f32 hh, f32 cx, f32 cy, f32 angle, f32 density, f32 friction,
+                     f32 restitution, ui64 layers, ui64 mask, bool sensor);
+    ui64 sosu_b2_polygon(ui64 body, f32* xy, i32 count, f32 radius, f32 density, f32 friction, f32 restitution,
+                         ui64 layers, ui64 mask, bool sensor);
+    ui64 sosu_b2_segment(ui64 body, f32 x1, f32 y1, f32 x2, f32 y2, f32 friction, f32 restitution, ui64 layers,
+                         ui64 mask);
+    ui64 sosu_b2_chain(ui64 body, f32* xy, i32 count, bool loop, f32 friction, f32 restitution, ui64 layers,
+                       ui64 mask);
+    ui64 sosu_b2_shape_body(ui64 shape);
+    ui64 sosu_b2_ray(ui8* world, f32 ox, f32 oy, f32 tx, f32 ty, ui64 mask, f32* out);
+    i32 sosu_b2_overlap_box(ui8* world, f32 x0, f32 y0, f32 x1, f32 y1, ui64 mask, ui64* out, i32 capacity);
+    i32 sosu_b2_contacts(ui8* world, i32 ended, ui64* shapes, i32 capacity);
+    i32 sosu_b2_sensor_events(ui8* world, i32 ended, ui64* shapes, i32 capacity);
+    ui64 sosu_b2_joint(ui8* world, i32 kind, ui64 a, ui64 b, f32 ax, f32 ay, f32 bx, f32 by, f32 dx, f32 dy,
+                       bool collide, bool limit, f32 lower, f32 upper, bool motor, f32 speed, f32 max_force);
+    void sosu_b2_joint_destroy(ui64 joint);
+}
+
+// Every layer: what a shape collides with, and a query sees, by default.
+pub ui64 ALL = 0xFFFFFFFFFFFFFFFF;
+
+pub struct Options {
+    pub f32 gravity_x = 0.0;
+    pub f32 gravity_y = -9.81;
+    pub f32 step = 0.016666668;  // 1/60 s
+    pub i32 substeps = 4;         // of each step, for stiff stacks and joints
+    pub bool sleep = true;        // bodies at rest stop being simulated until touched
+    pub i32 max_steps = 8;        // at most, in one `advance`: a long pause does not freeze the program
+}
+
+pub enum Kind {
+    Static,     // never moves: floors, walls
+    Dynamic,    // moved by forces and contacts
+    Kinematic,  // moved by its velocity, set by the program; pushes the dynamic bodies
+}
+
+pub struct BodyDesc {
+    pub Kind kind = Kind.Dynamic;
+    pub linear.Vec2 position = linear.Vec2{ x: 0.0, y: 0.0 };
+    pub f32 angle = 0.0;
+    pub f32 damping = 0.0;          // of the linear velocity, per second
+    pub f32 angular_damping = 0.0;
+    pub f32 gravity_scale = 1.0;
+    pub bool bullet = false;        // a fast body, checked against the dynamic ones too
+    pub bool fixed_rotation = false;
+}
+
+// What a shape is made of, and the layers it is on and collides with: two shapes collide when
+// each one's `mask` has a layer of the other.
+pub struct Material {
+    pub f32 density = 1.0;  // kg per m², gives the mass of a dynamic body
+    pub f32 friction = 0.6;
+    pub f32 restitution = 0.0;  // 0: no bounce, 1: all of it
+    pub ui64 layers = 1;
+    pub ui64 mask = 0xFFFFFFFFFFFFFFFF;
+    pub bool sensor = false;  // detects what enters and leaves it, without contact
+}
+
+pub Material material() {
+    return Material{};
+}
+
+// A shape, attached to its body.
+pub struct Shape {
+    ui64 id;
+
+    pub bool same(Shape o) {
+        return id == o.id;
+    }
+
+    // The body it belongs to.
+    pub Body body() {
+        unsafe {
+            return Body{ id: sosu_b2_shape_body(id) };
+        }
+    }
+}
+
+// The position, angle and velocities of a body.
+pub struct State {
+    pub linear.Vec2 position;
+    pub f32 angle;
+    pub linear.Vec2 velocity;
+    pub f32 spin;  // radians per second
+}
+
+// A body: a handle, dead once removed (`alive`).
+pub struct Body {
+    ui64 id;
+
+    pub bool same(Body o) {
+        return id == o.id;
+    }
+
+    pub bool alive() {
+        unsafe {
+            return sosu_b2_body_valid(id);
+        }
+    }
+
+    pub State state() {
+        mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            sosu_b2_body_state(id, &v[0]);
+        }
+        return State{
+            position: linear.vec2(v[0], v[1]),
+            angle: v[2],
+            velocity: linear.vec2(v[3], v[4]),
+            spin: v[5]
+        };
+    }
+
+    pub linear.Vec2 position() {
+        return state().position;
+    }
+
+    pub f32 angle() {
+        return state().angle;
+    }
+
+    pub f32 mass() {
+        unsafe {
+            return sosu_b2_body_mass(id);
+        }
+    }
+
+    pub bool awake() {
+        unsafe {
+            return sosu_b2_body_awake(id);
+        }
+    }
+
+    pub void wake() {
+        unsafe {
+            sosu_b2_body_set_awake(id, true);
+        }
+    }
+
+    pub void sleep() {
+        unsafe {
+            sosu_b2_body_set_awake(id, false);
+        }
+    }
+
+    pub void set_velocity(linear.Vec2 v, f32 spin) {
+        unsafe {
+            sosu_b2_body_set_velocity(id, v.x, v.y, spin);
+        }
+    }
+
+    // Moved there at once, without crossing what is between.
+    pub void teleport(linear.Vec2 p, f32 angle) {
+        unsafe {
+            sosu_b2_body_teleport(id, p.x, p.y, angle);
+        }
+    }
+
+    // A force at the center, in newtons, for the next steps until set again (cleared after each).
+    pub void add_force(linear.Vec2 f, f32 torque) {
+        unsafe {
+            sosu_b2_body_force(id, f.x, f.y, torque);
+        }
+    }
+
+    // A change of momentum at once, in N·s.
+    pub void add_impulse(linear.Vec2 i, f32 angular) {
+        unsafe {
+            sosu_b2_body_impulse(id, i.x, i.y, angular);
+        }
+    }
+
+    pub Shape circle(f32 radius, Material m) {
+        return circle_at(linear.vec2(0.0, 0.0), radius, m);
+    }
+
+    // A circle whose center is at `center` in the frame of the body.
+    pub Shape circle_at(linear.Vec2 center, f32 radius, Material m) {
+        unsafe {
+            return Shape{ id: sosu_b2_circle(id, center.x, center.y, radius, m.density, m.friction, m.restitution,
+                    m.layers, m.mask, m.sensor) };
+        }
+    }
+
+    // A box of half sizes `half`, centered on the body.
+    pub Shape box(linear.Vec2 half, Material m) {
+        return box_at(half, linear.vec2(0.0, 0.0), 0.0, m);
+    }
+
+    pub Shape box_at(linear.Vec2 half, linear.Vec2 center, f32 angle, Material m) {
+        unsafe {
+            return Shape{ id: sosu_b2_box(id, half.x, half.y, center.x, center.y, angle, m.density, m.friction,
+                    m.restitution, m.layers, m.mask, m.sensor) };
+        }
+    }
+
+    // Two half circles of `radius` around `a` and `b`, joined.
+    pub Shape capsule(linear.Vec2 a, linear.Vec2 b, f32 radius, Material m) {
+        unsafe {
+            return Shape{ id: sosu_b2_capsule(id, a.x, a.y, b.x, b.y, radius, m.density, m.friction, m.restitution,
+                    m.layers, m.mask, m.sensor) };
+        }
+    }
+
+    // The convex hull of 3 to 8 points, with rounded corners of `radius`; none when they make no
+    // hull (on a line, too many).
+    pub Shape? polygon(linear.Vec2[] points, f32 radius, Material m) {
+        if (points.len < 3 || points.len > 8) {
+            return none;
+        }
+        mut f32[16] xy = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        for (usize i in 0..points.len) {
+            xy[2 * i] = points[i].x;
+            xy[2 * i + 1] = points[i].y;
+        }
+        mut ui64 s = 0;
+        unsafe {
+            s = sosu_b2_polygon(id, &xy[0], points.len as i32, radius, m.density, m.friction, m.restitution,
+                    m.layers, m.mask, m.sensor);
+        }
+        return s == 0 ? none : some(Shape{ id: s });
+    }
+
+    // A segment, without area: for the static bodies of a level.
+    pub Shape segment(linear.Vec2 a, linear.Vec2 b, Material m) {
+        unsafe {
+            return Shape{ id: sosu_b2_segment(id, a.x, a.y, b.x, b.y, m.friction, m.restitution, m.layers, m.mask) };
+        }
+    }
+
+    // Segments through the points (2 at least, 3 for a loop), closed when `loop`: the ground of a
+    // level, solid on one side only, the right of the direction of the points (a ground walked on
+    // from above goes from right to left; a loop around a level, clockwise). False with fewer.
+    pub bool chain(Arena* scratch, linear.Vec2[] points, bool loop, Material m) {
+        if (points.len < (loop ? 3 : 2)) {
+            return false;
+        }
+        mut f32[] xy = scratch.alloc_slice(f32, points.len * 2);
+        for (usize i in 0..points.len) {
+            xy[2 * i] = points[i].x;
+            xy[2 * i + 1] = points[i].y;
+        }
+        unsafe {
+            return sosu_b2_chain(id, &xy[0], points.len as i32, loop, m.friction, m.restitution, m.layers, m.mask) != 0;
+        }
+    }
+}
+
+// A joint between two bodies.
+pub struct Joint {
+    ui64 id;
+}
+
+// The limits and the motor of a joint: angles for a hinge, lengths for a distance, translations
+// for a slider.
+pub struct JointOptions {
+    pub bool collide = false;  // the two bodies still collide with each other
+    pub bool limit = false;
+    pub f32 lower = 0.0;
+    pub f32 upper = 0.0;
+    pub bool motor = false;
+    pub f32 speed = 0.0;       // of the motor: radians or meters per second
+    pub f32 max_force = 0.0;   // of the motor: N·m for a hinge, N otherwise
+}
+
+pub JointOptions joint_options() {
+    return JointOptions{};
+}
+
+// A contact that began or ended during the last `advance`, or a shape that entered or left a
+// sensor (`sensor`: `a` is the sensor).
+pub struct Contact {
+    pub Shape a;
+    pub Shape b;
+    pub bool began;
+    pub bool sensor;
+}
+
+// What a ray hit first.
+pub struct Hit {
+    pub Shape shape;
+    pub Body body;
+    pub linear.Vec2 point;
+    pub linear.Vec2 normal;
+    pub f32 distance;
+}
+
+usize EVENTS = 256;
+
+pub class World {
+    ui8* handle;
+    Arena* arena;
+    Options options;
+    mut f32 left;  // the time not stepped yet
+    mut ui64 steps;
+    mut bool closed;
+    vec.Vec<Contact>* events;
+    ui64[] buffer;
+
+    void init(keeps Arena* arena, keeps ui8* handle, Options options) {
+        self.arena = arena;
+        self.handle = handle;
+        self.options = options;
+        left = 0.0;
+        steps = 0;
+        closed = false;
+        events = vec.new<Contact>(arena);
+        buffer = arena.alloc_slice(ui64, EVENTS * 2);
+    }
+
+    pub void set_gravity(linear.Vec2 g) {
+        unsafe {
+            sosu_b2_set_gravity(handle, g.x, g.y);
+        }
+    }
+
+    pub Body body(BodyDesc d) {
+        i32 kind = match (d.kind) {
+            Static => 0,
+            Dynamic => 1,
+            Kinematic => 2,
+        };
+        unsafe {
+            return Body{ id: sosu_b2_body(handle, kind, d.position.x, d.position.y, d.angle, d.damping,
+                    d.angular_damping, d.gravity_scale, d.bullet, d.fixed_rotation) };
+        }
+    }
+
+    // The body, its shapes and its joints. Its handle is dead after.
+    pub void remove(Body b) {
+        unsafe {
+            sosu_b2_body_destroy(b.id);
+        }
+    }
+
+    void read_events(i32 ended, bool sensor) {
+        mut i32 count = 0;
+        unsafe {
+            count = sensor ? sosu_b2_sensor_events(handle, ended, &buffer[0], buffer.len as i32)
+                    : sosu_b2_contacts(handle, ended, &buffer[0], buffer.len as i32);
+        }
+        usize n = min(count as usize, EVENTS);
+        for (usize i in 0..n) {
+            events.push(Contact{
+                a: Shape{ id: buffer[2 * i] },
+                b: Shape{ id: buffer[2 * i + 1] },
+                began: ended == 0,
+                sensor: sensor
+            });
+        }
+    }
+
+    // One step of `options.step`, now.
+    pub void step() {
+        unsafe {
+            sosu_b2_step(handle, options.step, options.substeps);
+        }
+        steps += 1;
+        read_events(0, false);
+        read_events(1, false);
+        read_events(0, true);
+        read_events(1, true);
+    }
+
+    // As many steps as `dt` (seconds) holds with what was left before, at most `max_steps`; the
+    // rest waits for the next call. The contacts of these steps replace those of the last call.
+    pub i32 advance(f32 dt) {
+        events.clear();
+        left += max(dt, 0.0);
+        mut i32 done = 0;
+        // a step is due within a ten-thousandth of it: 0.05 s holds three steps of 1/60, which f32
+        // rounds below
+        f32 due = options.step * 0.9999;
+        while (left >= due && done < options.max_steps) {
+            step();
+            left = max(left - options.step, 0.0);
+            done += 1;
+        }
+        if (done == options.max_steps && left >= due) {
+            left = 0.0;  // behind: the time is dropped rather than caught up
+        }
+        return done;
+    }
+
+    // How far the world is into its next step, from 0 to 1: to draw between two states.
+    pub f32 alpha() {
+        return left / options.step;
+    }
+
+    // The steps run since the world was made.
+    pub ui64 step_count() {
+        return steps;
+    }
+
+    // The contacts that began or ended, and the sensors entered or left, during the last `advance`.
+    pub Contact[] contacts() {
+        return events.items();
+    }
+
+    pub usize awake() {
+        unsafe {
+            return sosu_b2_awake_count(handle) as usize;
+        }
+    }
+
+    // The first shape on the segment from `from` to `to`, on a layer of `mask`.
+    pub Hit? ray(linear.Vec2 from, linear.Vec2 to, ui64 mask) {
+        mut f32[5] out = [0.0, 0.0, 0.0, 0.0, 0.0];
+        mut ui64 s = 0;
+        linear.Vec2 d = to.sub(from);
+        unsafe {
+            s = sosu_b2_ray(handle, from.x, from.y, d.x, d.y, mask, &out[0]);
+        }
+        if (s == 0) {
+            return none;
+        }
+        Shape shape = Shape{ id: s };
+        return some(Hit{
+            shape: shape,
+            body: shape.body(),
+            point: linear.vec2(out[0], out[1]),
+            normal: linear.vec2(out[2], out[3]),
+            distance: out[4] * d.length()
+        });
+    }
+
+    // The shapes whose bounds overlap the box from `low` to `high`, on a layer of `mask`.
+    pub Shape[] overlap(Arena* into, linear.Vec2 low, linear.Vec2 high, ui64 mask) {
+        mut i32 count = 0;
+        unsafe {
+            count = sosu_b2_overlap_box(handle, low.x, low.y, high.x, high.y, mask, &buffer[0], buffer.len as i32);
+        }
+        usize n = min(count as usize, buffer.len);
+        mut Shape[] shapes = into.alloc_slice(Shape, n);
+        for (usize i in 0..n) {
+            shapes[i] = Shape{ id: buffer[i] };
+        }
+        return shapes;
+    }
+
+    Joint joint(i32 kind, Body a, Body b, linear.Vec2 anchor_a, linear.Vec2 anchor_b, linear.Vec2 axis, JointOptions o) {
+        unsafe {
+            return Joint{ id: sosu_b2_joint(handle, kind, a.id, b.id, anchor_a.x, anchor_a.y, anchor_b.x, anchor_b.y,
+                    axis.x, axis.y, o.collide, o.limit, o.lower, o.upper, o.motor, o.speed, o.max_force) };
+        }
+    }
+
+    // The two bodies turn around `anchor` (in the world); the limits are angles.
+    pub Joint hinge(Body a, Body b, linear.Vec2 anchor, JointOptions o) {
+        return joint(0, a, b, anchor, anchor, linear.vec2(1.0, 0.0), o);
+    }
+
+    // `anchor_a` and `anchor_b` (in the world) kept at the distance they are now; the limits are
+    // lengths.
+    pub Joint distance(Body a, Body b, linear.Vec2 anchor_a, linear.Vec2 anchor_b, JointOptions o) {
+        return joint(1, a, b, anchor_a, anchor_b, linear.vec2(1.0, 0.0), o);
+    }
+
+    // The two bodies held together at `anchor`.
+    pub Joint weld(Body a, Body b, linear.Vec2 anchor) {
+        return joint(2, a, b, anchor, anchor, linear.vec2(1.0, 0.0), JointOptions{});
+    }
+
+    // `b` slides along `axis` relative to `a`, without turning; the limits are translations.
+    pub Joint slider(Body a, Body b, linear.Vec2 anchor, linear.Vec2 axis, JointOptions o) {
+        return joint(3, a, b, anchor, anchor, axis, o);
+    }
+
+    pub void remove_joint(Joint j) {
+        unsafe {
+            sosu_b2_joint_destroy(j.id);
+        }
+    }
+
+    // The world and all it holds. The handles are dead after.
+    pub void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        unsafe {
+            sosu_b2_world_free(handle);
+        }
+    }
+}
+
+// A world, empty. Its events and buffers are kept in `arena`; Box2D's memory, outside.
+pub World* world(keeps Arena* arena, Options options) {
+    unsafe {
+        ui8* handle = sosu_b2_world(options.gravity_x, options.gravity_y, options.sleep);
+        assert(handle as ui64 != 0);
+        return arena.new(World, arena, handle, options);
+    }
+}
+
+pub Options options() {
+    return Options{};
+}
+
+// The positions and angles of the bodies of `bodies` written into the transforms of their
+// entities: x and y, and a turn around z; z and the scale are left as they are. Static bodies
+// are skipped, and dead ones.
+pub void sync(scene.World* scene_world, scene.Table<Body>* bodies) {
+    bodies.join(scene_world.transforms, (scene.Entity e, Body* b, linear.Transform* t) => {
+        if (b.alive()) {
+            State s = b.state();
+            t.position = linear.vec3(s.position.x, s.position.y, t.position.z);
+            t.rotation = linear.from_axis_angle(linear.vec3(0.0, 0.0, 1.0), s.angle);
+        }
+    });
+}
