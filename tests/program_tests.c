@@ -297,6 +297,17 @@ static void test_gpu(const char *sosuc) {
           actual ? actual : "(none)\n", expected ? expected : "(none)\n");
     free(actual);
     free(expected);
+
+    /* assets: files loaded by threads, failures, a release, and a texture loaded again */
+    snprintf(command, sizeof command, "%s run tests/programs/assets > build/assets.out 2> build/assets.err", sosuc);
+    status = run(command);
+    CHECK(status == 0, "run assets: exit code %d (see build/assets.out and build/assets.err)", status);
+    actual = read_text("build/assets.out");
+    expected = read_text("tests/programs/assets/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run assets: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
 }
 
 static void test_bindgen(const char *sosuc) {

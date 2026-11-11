@@ -838,8 +838,8 @@ Status: design, after 1.0. Nothing below changes the language, except `offset_of
 | `model.gltf`, `model.obj`, `model.fbx` | meshes, materials, a tree of nodes, skins and animations, read from glTF 2.0 (`.gltf` and `.glb`), OBJ and FBX (ufbx) | Sosu (`std.json`, `crypto.base64`, `image`) | available (0.7.0) without skins and animations, below |
 | `render3d` | a camera, materials (PBR, metal and roughness, as glTF), lights, shadow maps, meshes drawn in batches, objects outside the frustum skipped | Sosu, on `gpu` | available (0.7.0) without batches of instances, below |
 | `gpu.overlay` | a `render.canvas.Canvas` drawn over the 3D, so that `render` and `ui` work on top of a scene | Sosu, on `gpu` | after |
-| `scene` | entities as handles, components in tables, a hierarchy of transforms, prefabs, scenes saved as JSON | Sosu | after |
-| `assets` | files loaded in the background into handles, a cache by path, hot reload while debugging | Sosu (`std.thread`, `std.fs`) | after |
+| `scene` | entities as handles, components in tables, a hierarchy of transforms, prefabs, scenes saved as JSON | Sosu | available (0.7.0), below |
+| `assets` | files loaded in the background into handles, a cache by path, hot reload while debugging | Sosu (`std.thread`, `std.fs`) | available (0.7.0), below |
 | `physics` | 3D rigid bodies, shapes, collision layers, ray and shape queries, contacts, a character controller | Jolt Physics 5 (C++, MIT) through joltc (MIT), as sources | after |
 | `physics2d` | the same for the plane: bodies, shapes, joints, queries | Box2D 3 (C, MIT), as sources | after |
 | `nav` | navigation meshes built from the level, paths, crowds of agents; paths on grids | Recast and Detour (C++, zlib), as sources, behind a C file of the package; Sosu for the grids | after |
@@ -1155,7 +1155,7 @@ if (input.triggered(jump)) { ... }
 
 #### Scene and assets
 
-Status: design, after 1.0. The other libraries of the 3D engine meet here. `render3d` draws the entities that have a mesh. `physics` moves those that have a body. `anim` poses those that have a skeleton. `audio.spatial` places those that make a sound.
+Status: available (0.7.0), `scene` and `assets`, with their tests (`sosuc test packages/scene`, `tests/programs/assets`); what differs from the design is said in each part. The other libraries of the 3D engine meet here. `render3d` draws the entities that have a mesh. `physics` moves those that have a body. `anim` poses those that have a skeleton. `audio.spatial` places those that make a sound.
 
 ##### `scene`
 
@@ -1192,6 +1192,13 @@ world.propagate();                                   // the world matrices, pare
   - A prefab is a saved subtree. `scene.instantiate(world, prefab)` gives the root of a new copy.
   - `model.gltf` gives a prefab too: its nodes become entities, its meshes and materials assets.
 - Effects: none. A `World` is memory in an arena, and its functions are pure.
+- What is written (0.7.0):
+  - `scene.world(arena)` gives a `World*`, and `world.table<T>()` a `Table<T>*`. `spawn_at(name, transform, parent)` spawns with a name, a transform and a parent at once; `count()`, `entities(arena)`, `children(arena, e)`, `parent_of(e)`, `clear_parent(e)`. `set_parent` refuses a cycle and says so (false).
+  - A table checks the generation of what it holds: a despawned entity is dead in every table at once without the world knowing its tables, and its components stay until the place is given again, `set` replaces them, or `compact()` drops them; `each` and `join` skip them. `join` is there, the smaller table driving.
+  - `propagate()` writes `world_matrices` with matrices (parent times local), not `Transform.then`, so that a scale that differs between axes stays exact; a parent is placed once, before its children.
+  - Saving is `scene.save`: `writer(arena, world)` (every living entity) or `prefab(arena, world, root)` (a root and its children, the root without its parent), `add(table, codec)` for each table of the program, `written()` for the text; `read(arena, world, text, parent)` and `instantiate` (the same, for a prefab) spawn its entities, `Reader.add(table, codec)` reads a table back, `root_entity()` gives the root of a prefab. A damaged text (JSON that does not parse, a number that is not an entity of the file, a parent that is the entity itself) spawns nothing; a cycle of parents in a file leaves those entities at the root. At most `MAX_ENTITIES` (2^20). `Codec<T>` has `name()`, `write(out, value)` and `read(arena, value)`.
+  - `scene.models`: `spawn_model(world, model, nodes, name, transform, parent)` spawns the nodes of a model of `model` under one entity, their transforms taken apart from their matrices (`linear.decompose`, added to `math.linear`), and a table of `NodeOf` says which node each entity stands for, so that the program finds its meshes.
+  - Not yet: the check, in a debug build, that a pointer of `get` is not used after a `set` or `remove` of its table.
 
 ##### `assets`
 
@@ -1209,6 +1216,13 @@ match (store.get(crate)) { some(t) => { ... }, none => { /* still loading */ } }
 - Files are found with `app.read_asset` (§11.5), so the assets travel in the APK and the bundles.
 - Hot reload, on the desktop in a debug build: `store.watch(true)` looks at the dates of the files loaded every half second (`std.fs`). A file that changed is loaded again behind the same handle, and the next `get` gives the new content. That covers textures, models, sounds and shaders, with `sosuc shaders` run again for a `.hlsl` file. Nothing is watched on phones.
 - `store.release(h)` frees an asset; `store.close()` frees the rest.
+- What is written (0.7.0), and how it differs:
+  - `assets.open(arena, device, threads)` takes `gpu.Device*?`: none for a program that loads only sounds and models. One type of handle, `Handle`, with `get_texture`, `get_sound`, `get_model` and `get_shader` (Sosu has no overloading), and `model_file(path)` for a model (`model` is the name of the package). `update(budget_ms)`.
+  - Threads share no memory, and a channel carries values without pointers (§5.6): a thread cannot give its decoded image. The threads of the store read and decode textures (PNG, JPEG) and sounds (WAV, Ogg Vorbis), and send their pixels and samples back in pieces of 4 KB (`Words`, an array of 1 024 words), which `update` puts together, then sends to the GPU with their mipmaps.
+  - Models (glTF, OBJ, FBX by their extension, with the textures they name) and shaders are read by `update` in the thread of the store's owner, one a frame when there is time left: a glTF reads the files beside it, and a shader is small.
+  - `state(h)` is `Loading`, `Ready` or `Failed(message)` ("the file is not there", "not an image of PNG or JPEG that decodes"...); `wait(h)` reads the answers of the threads until `h` is ready or failed. An answer for a load asked again since is dropped (a version per load).
+  - `watch(true)` compares the dates of the files every half second; the dates of the system are in seconds, so a file changed twice in one second is seen once. Not on Android nor iOS.
+  - The pieces of a load go to the arena of the store: a texture loaded again many times grows it. Releasing that memory comes with a store of its own arenas.
 - No preparation step at first: the loaders read PNG, JPEG, glTF and the compiled shaders as they are. A step of `sosuc` that prepares assets (mipmaps computed beforehand, compressed textures BC7 and ASTC, meshes optimized for the cache of vertices) comes when loading times ask for it.
 
 #### Physics and navigation

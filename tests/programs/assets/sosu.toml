@@ -1,0 +1,14 @@
+# The package assets (spec §8.2): files written by the test, loaded by the threads of a store,
+# waited for, failed, released, and loaded again when one changes. It needs a device of the GPU for
+# its textures: it exits with 77 where there is none (skipped).
+[package]
+name = "assetstest"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../../packages/platform" }
+assets = { path = "../../../packages/assets" }
+gpu = { path = "../../../packages/gpu" }
+image = { path = "../../../packages/image" }
+audio = { path = "../../../packages/audio" }
+model = { path = "../../../packages/model" }

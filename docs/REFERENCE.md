@@ -3656,6 +3656,14 @@ A transform that changes nothing.
 pub Transform transform()
 ```
 
+### `decompose`
+
+The transform that `m` applies: its translation, rotation and scale, `to_mat4` giving `m` back (a matrix with a shear gives the nearest; a mirror makes the scale on x negative).
+
+```sosu
+pub Transform decompose(Mat4 m)
+```
+
 ## net.http
 
 An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }

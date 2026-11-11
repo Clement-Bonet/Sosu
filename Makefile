@@ -40,6 +40,8 @@ test: all
 	./build/sosuc check tests/window
 	./build/sosuc test packages/math
 	./build/sosuc test packages/model
+	./build/sosuc test packages/scene
+	./build/sosuc check packages/assets
 	./build/sosuc test packages/image
 	./build/sosuc test packages/render
 	./build/sosuc test packages/ui
