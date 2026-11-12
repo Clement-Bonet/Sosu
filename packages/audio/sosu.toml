@@ -13,7 +13,7 @@ rev = "f12e197fd462e4c22873fbd70d11b1d2f2c1dc3c"
 include = ["."]
 
 [link]
-c = ["native/ogg.c", "native/dr.c"]  # ogg.c includes native/vendor/stb_vorbis.c
+c = ["native/ogg.c", "native/dr.c", "native/kemar.c"]  # ogg.c includes native/vendor/stb_vorbis.c; kemar.c is written by native/kemar.py
 
 [dependencies]
 platform = { path = "../platform" }  # SDL3 and its declarations (platform.sdl_c)

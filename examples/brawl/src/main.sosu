@@ -3,7 +3,10 @@
 // by its speed, a strike), walks with a gamepad or ZQSD (WASD by their place) across a level of
 // `physics` (Jolt's character, crates that fall and are pushed); enemies follow it on the
 // navigation mesh of `nav` and avoid each other; a strike that reaches one throws sparks of
-// `particles` and a hit placed in 3D by `audio.spatial`, and the feet sound where they land.
+// `particles` (simulated on the GPU by `particles.compute`, bouncing off the floor and off what the
+// scene drew: blocks and crates) and a hit placed in 3D by `audio.spatial`, and the feet sound where
+// they land. H (or North) hears the sounds as through headphones (`audio.hrtf`): before, behind and
+// above told apart, rather than panned.
 // Everything is made in code: no file. The window's button closes it.
 // On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/brawl`.
 import std.io;
@@ -27,9 +30,12 @@ import nav.nav;
 import anim.anim;
 import particles.particles;
 import particles.draw;
+import particles.compute;
 import audio.audio;
 import audio.device;
+import audio.mixer;
 import audio.spatial;
+import audio.hrtf;
 import brawl.rig;
 import brawl.level;
 import brawl.sounds;
@@ -87,6 +93,7 @@ struct Pieces {
     actions.Action move;
     actions.Action run;
     actions.Action strike;
+    actions.Action headphones;
     level.Block[] blocks;
     physics.World* world;
     physics.Body[] crates;
@@ -155,6 +162,7 @@ Pieces? make(keeps Arena* arena) uses io {
             actions.Scan.D);
     actions.Action run = play.button("run").pad(gamepad.Button.East).key(actions.Scan.LeftShift);
     actions.Action strike = play.button("strike").pad(gamepad.Button.South).key(actions.Scan.Space);
+    actions.Action headphones = play.button("headphones").pad(gamepad.Button.North).key(actions.Scan.H);
     actions.Input* input = actions.input(arena, devices, pads);
     input.enable(play);
 
@@ -250,6 +258,7 @@ Pieces? make(keeps Arena* arena) uses io {
         move: move,
         run: run,
         strike: strike,
+        headphones: headphones,
         blocks: blocks,
         world: world,
         crates: crates.items(),
@@ -275,6 +284,7 @@ class Game : app.WindowHandler<uses time> {
     mut gpu.Device*? screen;
     mut render3d.Renderer*? renderer;
     mut draw.Drawer*? drawer;
+    mut compute.GpuSystem*? gpu_sparks;  // the sparks on the GPU, once the window has one
     mut overlay.Overlay*? hud;
     mut render3d.Uploaded*? hero_model;
     mut render3d.Uploaded*? enemy_model;
@@ -286,6 +296,7 @@ class Game : app.WindowHandler<uses time> {
     actions.Action move;
     actions.Action run;
     actions.Action strike;
+    actions.Action headphones;
     physics.World* world;
     physics.Character* hero;
     physics.Body[] crates;
@@ -299,6 +310,7 @@ class Game : app.WindowHandler<uses time> {
     particles.System* sparks;
     mut device.Player*? player;
     mut spatial.Space*? space;
+    mut hrtf.Hrtf*? head;  // the responses of KEMAR at the rate of the device, made at the first H
     audio.Sound hit_sound;
     audio.Sound step_sound;
     audio.Sound swing_sound;
@@ -317,6 +329,7 @@ class Game : app.WindowHandler<uses time> {
         screen = none;
         renderer = none;
         drawer = none;
+        gpu_sparks = none;
         hud = none;
         hero_model = none;
         enemy_model = none;
@@ -325,6 +338,7 @@ class Game : app.WindowHandler<uses time> {
         floor_model = none;
         player = none;
         space = none;
+        head = none;
         problem = p.problem;
         eye_at = linear.vec3(0.0, 8.0, 13.0);
         hero_yaw = 0.0;
@@ -337,6 +351,7 @@ class Game : app.WindowHandler<uses time> {
         move = p.move;
         run = p.run;
         strike = p.strike;
+        headphones = p.headphones;
         blocks = p.blocks;
         world = p.world;
         crates = p.crates;
@@ -394,6 +409,9 @@ class Game : app.WindowHandler<uses time> {
         r.ambient = linear.vec3(0.12, 0.13, 0.16);
         renderer = some(r);
         drawer = some(try draw.drawer(&arena, d));
+        compute.GpuSystem* g = try compute.gpu_system(&arena, d, sparks.emitter);
+        g.collide_with_depth(0.4);  // off the blocks and the crates, as the camera sees them
+        gpu_sparks = some(g);
         hud = some(try overlay.create(&arena, d));
         floor_model = some(try r.upload(&arena, render3d.ground(&arena, level.SIZE * 2.0 + 2.0, [0.45, 0.47, 0.42, 1.0])));
         block_model = some(try r.upload(&arena, render3d.cube(&arena, [0.6, 0.58, 0.55, 1.0])));
@@ -407,6 +425,37 @@ class Game : app.WindowHandler<uses time> {
         return match (e) {
             Quit => false,
             _ => true,
+        };
+    }
+
+    // The sounds heard as through headphones, or panned again.
+    void toggle_headphones() uses io {
+        match (player) {
+            some(p) => {
+                mixer.Mixer* m = p.sounds;
+                if (m.binaural()) {
+                    m.no_hrtf();
+                    return;
+                }
+                if (m.channels != 2) {
+                    io.print("brawl: headphones need a stereo output ({} channels)", m.channels);
+                    return;
+                }
+                hrtf.Hrtf* h = match (head) {
+                    some(made) => made,
+                    none => hrtf.kemar(&arena, m.rate),
+                };
+                head = some(h);
+                m.use_hrtf(h);
+            },
+            none => { },
+        }
+    }
+
+    bool hearing_through_head() {
+        return match (player) {
+            some(p) => p.sounds.binaural(),
+            none => false,
         };
     }
 
@@ -443,8 +492,17 @@ class Game : app.WindowHandler<uses time> {
             f32 dist = linear.vec3(d.x, 0.0, d.z).length();
             if (dist < 1.7 && (dist < 0.5 || linear.vec3(d.x, 0.0, d.z).scale(1.0 / dist).dot(front) > 0.3)) {
                 linear.Vec3 spot = p.add(linear.vec3(0.0, 1.2, 0.0));
-                sparks.move_to(linear.translation(spot));
-                sparks.burst(60);
+                // on the GPU when there is one (the window); on the processor without (`--check`)
+                match (gpu_sparks) {
+                    some(g) => {
+                        g.move_to(linear.translation(spot));
+                        g.burst(120);
+                    },
+                    none => {
+                        sparks.move_to(linear.translation(spot));
+                        sparks.burst(60);
+                    },
+                }
                 sound_at(hit_sound, spot, 1.0);
                 crowd.remove(e.agent);
                 e.alive = false;
@@ -524,8 +582,11 @@ class Game : app.WindowHandler<uses time> {
         last = now;
         pads.update();
         input.update();
+        if (input.triggered(headphones)) {
+            toggle_headphones();
+        }
         render3d.Camera camera = simulate(dt, input.vector(move), input.pressed(run), input.triggered(strike));
-        render(d, camera);
+        render(d, camera, dt);
     }
 
     // The game `dt` seconds later, the hero moved by `v` (the stick: forward is +y), running or
@@ -634,7 +695,7 @@ class Game : app.WindowHandler<uses time> {
         return camera;
     }
 
-    void render(gpu.Device* d, render3d.Camera camera) uses io {
+    void render(gpu.Device* d, render3d.Camera camera, f32 dt) uses io {
         render3d.Renderer* r = match (renderer) {
             some(x) => x,
             none => {
@@ -691,6 +752,14 @@ class Game : app.WindowHandler<uses time> {
             none => { },
         }
         r.draw(frame, camera, items.items());
+        // after the scene: the sparks on the GPU see its depth
+        match (gpu_sparks) {
+            some(g) => {
+                g.simulate(frame, dt, camera);
+                g.draw(frame, camera, none);
+            },
+            none => { },
+        }
         match (drawer) {
             some(dr) => {
                 mut draw.Sprite[1] sprites = [draw.sprite(sparks, none)];
@@ -731,6 +800,7 @@ class Game : app.WindowHandler<uses time> {
         t.push_u64(hits as ui64);
         t.push("   touched: ");
         t.push_u64(touched as ui64);
+        t.push(hearing_through_head() ? "   H: headphones (on)" : "   H: headphones (off)");
         surface.text(24.0, 48.0, t.text(), canvas.Color{ r: 255, g: 170, b: 40 }, 2);
     }
 
@@ -750,6 +820,12 @@ class Game : app.WindowHandler<uses time> {
         match (drawer) {
             some(dr) => {
                 dr.close();
+            },
+            none => { },
+        }
+        match (gpu_sparks) {
+            some(g) => {
+                g.close();
             },
             none => { },
         }

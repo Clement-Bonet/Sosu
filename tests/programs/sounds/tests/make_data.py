@@ -291,12 +291,12 @@ def crc32(data):
     return crc
 
 
-def page(packets, granule, sequence, kind):
+def page(packets, granule, sequence, kind, serial=0x536F7375):
     lacing = bytearray()
     for p in packets:
         lacing += bytes([255] * (len(p) // 255) + [len(p) % 255])
     assert len(lacing) <= 255
-    header = struct.pack("<4sBBqIIIB", b"OggS", 0, kind, granule, 0x536F7375, sequence, 0, len(lacing)) + lacing
+    header = struct.pack("<4sBBqIIIB", b"OggS", 0, kind, granule, serial, sequence, 0, len(lacing)) + lacing
     body = b"".join(packets)
     crc = crc32(header + body)
     return header[:22] + struct.pack("<I", crc) + header[26:] + body
@@ -307,16 +307,16 @@ PER_PAGE = 10
 TRIM = 50  # the last granule position cuts the last block
 
 
-def ogg(comment_packet=None, setup_packet=None, last_granule=None):
-    pages = [page([identification()], 0, 0, 0x02),
-             page([comment_packet or comment(), setup_packet or setup()], 0, 1, 0)]
+def ogg(comment_packet=None, setup_packet=None, last_granule=None, serial=0x536F7375):
+    pages = [page([identification()], 0, 0, 0x02, serial),
+             page([comment_packet or comment(), setup_packet or setup()], 0, 1, 0, serial)]
     for start in range(0, PACKETS, PER_PAGE):
         end = start + PER_PAGE
         granule = (end - 1) * HALF - (TRIM if end == PACKETS else 0)
         if end == PACKETS and last_granule is not None:
             granule = last_granule
         packets = [audio_packet(p) for p in range(start, end)]
-        pages.append(page(packets, granule, len(pages), 0x04 if end == PACKETS else 0))
+        pages.append(page(packets, granule, len(pages), 0x04 if end == PACKETS else 0, serial))
     return b"".join(pages)
 
 
@@ -357,6 +357,9 @@ def ogg_files():
     write("bad_crc.ogg", bytes(damaged))
     write("bad_not_vorbis.ogg", page([b"\x01theora" + b"\0" * 22], 0, 0, 0x02))
     write("bad_long.ogg", ogg(last_granule=0x80000004))  # a length above INT_MAX (make fuzz-ogg)
+    # chained: two logical streams one after the other (as a radio recorded, or tracks joined)
+    write("chained.ogg", tone + ogg(serial=0x536F7376))
+    write("bad_chained.ogg", tone + tone[:len(tone) // 2] + b"OggS\x00\x02")  # its second link cut, then a page cut
 
 
 class BigBits:

@@ -390,7 +390,10 @@ struct Track {
     model.Target target;
     curve.Interpolation mode;
     f32[] times;
-    f32[] values;
+    f32[] values;   // empty when compressed: `packed`
+    ui16[] packed;  // a compressed track: each number `low[c] + packed * step[c]`, c its component
+    f32[] low;
+    f32[] step;
 }
 
 // A time named in a clip: a foot that lands.
@@ -465,7 +468,7 @@ pub class Clip {
                 Hermite => 3,
                 _ => 1,
             };
-            usize width = k.values.len / (k.times.len * per);
+            usize width = numbers(k) / (k.times.len * per);
             Where w = locate(k.times, t);
             for (usize c in 0..min(width, o.len)) {
                 o[c] = component_at(k, w, c, width);
@@ -473,6 +476,18 @@ pub class Clip {
             return true;
         }
         return false;
+    }
+
+    // The bytes its keys take: times, numbers, and the ranges of the compressed tracks.
+    pub usize bytes() {
+        mut usize n = 0;
+        for (Track k in tracks) {
+            n += 4 * (k.times.len + k.values.len + k.low.len + k.step.len) + 2 * k.packed.len;
+        }
+        for (Track k in morphs) {
+            n += 4 * (k.times.len + k.values.len + k.low.len + k.step.len) + 2 * k.packed.len;
+        }
+        return n;
     }
 
     // The translation of `joint` at `t`, or its rest.
@@ -529,7 +544,26 @@ f32 value_of(Track k, usize key, usize part, usize c, usize width) {
     };
     usize p = per == 3 ? part : 0;
     usize at = (key * per + p) * width + c;
+    if (k.packed.len > 0) {
+        return at < k.packed.len && c < k.low.len ? k.low[c] + k.packed[at] as f32 * k.step[c] : 0.0;
+    }
     return at < k.values.len ? k.values[at] : 0.0;
+}
+
+// The numbers of a track, compressed or not.
+usize numbers(Track k) {
+    return k.packed.len > 0 ? k.packed.len : k.values.len;
+}
+
+usize per_key(Track k) {
+    return match (k.mode) {
+        Hermite => 3,
+        _ => 1,
+    };
+}
+
+usize width_of(Track k) {
+    return k.times.len == 0 ? 0 : numbers(k) / (k.times.len * per_key(k));
 }
 
 f32 component_at(Track k, Where w, usize c, usize width) {
@@ -583,17 +617,240 @@ pub Clip* clip(keeps Arena* arena, keeps Skeleton s, keeps model.Animation anima
             _ => false,
         };
         if (weights) {
-            morphs.push(Track{ joint: c.node, target: c.target, mode: c.mode, times: c.times, values: c.values });
+            morphs.push(plain(arena, c.node, c));
             continue;
         }
         match (s.joint_of_node(c.node)) {
             some(j) => {
-                tracks.push(Track{ joint: j, target: c.target, mode: c.mode, times: c.times, values: c.values });
+                tracks.push(plain(arena, j, c));
             },
             none => { },
         }
     }
     return arena.new(Clip, arena, animation.name, animation.duration, tracks.items(), morphs.items(), s.rest);
+}
+
+Track plain(Arena* arena, usize joint, keeps model.Channel c) {
+    return Track{ joint: joint, target: c.target, mode: c.mode, times: c.times, values: c.values,
+            packed: arena.alloc_slice(ui16, 0), low: arena.alloc_slice(f32, 0), step: arena.alloc_slice(f32, 0) };
+}
+
+// ---- Compressed clips ----
+
+// How far a compressed clip may stray from its clip, in the space of each joint (a joint far down
+// a chain moves by the errors above it too). The numbers kept in 16 bits add up to a step of
+// their range / 65 535.
+pub struct Tolerance {
+    pub f32 position = 0.0001;  // meters
+    pub f32 rotation = 0.0005;  // radians
+    pub f32 scale = 0.0001;
+    pub f32 weight = 0.001;     // of a morph target
+}
+
+// The angle between two rotations, in radians (q and -q are the same).
+f32 turn_between(linear.Quat a, linear.Quat b) {
+    // 4 atan2(|p - q|, |p + q|): exact near 0, where 2 acos(p . q) loses its digits in f32
+    linear.Quat p = a.normalized();
+    mut linear.Quat q = b.normalized();
+    if (p.dot(q) < 0.0) {
+        q = linear.Quat{ x: -q.x, y: -q.y, z: -q.z, w: -q.w };
+    }
+    f64 dx = (p.x - q.x) as f64;
+    f64 dy = (p.y - q.y) as f64;
+    f64 dz = (p.z - q.z) as f64;
+    f64 dw = (p.w - q.w) as f64;
+    f64 sx = (p.x + q.x) as f64;
+    f64 sy = (p.y + q.y) as f64;
+    f64 sz = (p.z + q.z) as f64;
+    f64 sw = (p.w + q.w) as f64;
+    return 4.0 * math.atan2(math.sqrt(dx * dx + dy * dy + dz * dz + dw * dw), math.sqrt(sx * sx + sy * sy + sz * sz + sw * sw)) as f32;
+}
+
+linear.Quat key_quat(Track k, usize key) {
+    return linear.Quat{ x: value_of(k, key, 1, 0, 4), y: value_of(k, key, 1, 1, 4), z: value_of(k, key, 1, 2, 4),
+            w: value_of(k, key, 1, 3, 4) };
+}
+
+// Whether the keys between `a` and `b` are within `tolerance` of what is sampled from `a` and `b`
+// alone: a line (a slerp for a rotation), or the value of `a` held for steps.
+bool spans(Track k, usize a, usize b, usize width, f32 tolerance) {
+    bool rotation = match (k.target) {
+        Rotation => true,
+        _ => false,
+    };
+    bool step = match (k.mode) {
+        Step => true,
+        _ => false,
+    };
+    f32 length = k.times[b] - k.times[a];
+    for (usize i in a + 1..b) {
+        f32 f = step || length <= 0.0 ? 0.0 : (k.times[i] - k.times[a]) / length;
+        if (rotation) {
+            linear.Quat q = key_quat(k, a).normalized().slerp(key_quat(k, b).normalized(), f);
+            if (turn_between(q, key_quat(k, i)) > tolerance) {
+                return false;
+            }
+        } else {
+            for (usize c in 0..width) {
+                f32 va = value_of(k, a, 1, c, width);
+                f32 v = va + (value_of(k, b, 1, c, width) - va) * f;
+                if (abs(v - value_of(k, i, 1, c, width)) > tolerance) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Whether every key is within `tolerance` of `value` (the rest of the joint).
+bool all_near(Track k, usize width, f32[] value, f32 tolerance) {
+    for (usize i in 0..k.times.len) {
+        match (k.target) {
+            Rotation => {
+                linear.Quat r = linear.Quat{ x: value[0], y: value[1], z: value[2], w: value[3] };
+                if (turn_between(r, key_quat(k, i)) > tolerance) {
+                    return false;
+                }
+            },
+            _ => {
+                for (usize c in 0..width) {
+                    if (abs(value_of(k, i, 1, c, width) - value[c]) > tolerance) {
+                        return false;
+                    }
+                }
+            },
+        }
+    }
+    return true;
+}
+
+// The keys of `k` that matter: those that a line (a slerp, a step) from the key kept before cannot
+// give within `tolerance`, and the last; a track that does not change keeps one key. Cubic splines
+// keep all of theirs.
+usize[] kept_keys(Arena* arena, Track k, usize width, f32 tolerance) {
+    usize n = k.times.len;
+    vec.Vec<usize>* kept = vec.new<usize>(arena);
+    bool hermite = match (k.mode) {
+        Hermite => true,
+        _ => false,
+    };
+    if (hermite || n <= 2) {
+        for (usize i in 0..n) {
+            kept.push(i);
+        }
+        return kept.items();
+    }
+    mut f32[4] first = [0.0, 0.0, 0.0, 0.0];
+    for (usize c in 0..min(width, 4)) {
+        first[c] = value_of(k, 0, 1, c, width);
+    }
+    if (width <= 4 && all_near(k, width, first[0..4], tolerance)) {
+        kept.push(0);
+        return kept.items();
+    }
+    kept.push(0);
+    mut usize a = 0;
+    for (usize j in 2..n) {
+        if (!spans(k, a, j, width, tolerance)) {
+            kept.push(j - 1);
+            a = j - 1;
+        }
+    }
+    kept.push(n - 1);
+    return kept.items();
+}
+
+// `k` with only the keys `kept`, its numbers in 16 bits over the range of each component.
+Track packed_track(Arena* arena, Track k, usize width, usize[] kept) {
+    usize per = per_key(k);
+    usize group = per * width;
+    mut f32[] times = arena.alloc_slice(f32, kept.len);
+    mut f32[] chosen = arena.alloc_slice(f32, kept.len * group);
+    for (usize i in 0..kept.len) {
+        times[i] = k.times[kept[i]];
+        for (usize part in 0..per) {
+            for (usize c in 0..width) {
+                chosen[(i * per + part) * width + c] = value_of(k, kept[i], per == 3 ? part : 1, c, width);
+            }
+        }
+    }
+    mut f32[] low = arena.alloc_slice(f32, width);
+    mut f32[] step = arena.alloc_slice(f32, width);
+    for (usize c in 0..width) {
+        mut f32 least = chosen[c];
+        mut f32 most = chosen[c];
+        for (usize at in 0..kept.len * per) {
+            least = min(least, chosen[at * width + c]);
+            most = max(most, chosen[at * width + c]);
+        }
+        low[c] = least;
+        step[c] = (most - least) / 65535.0;
+    }
+    mut ui16[] packed = arena.alloc_slice(ui16, chosen.len);
+    for (usize at in 0..chosen.len) {
+        usize c = at % width;
+        f32 q = step[c] > 0.0 ? (chosen[at] - low[c]) / step[c] + 0.5 : 0.0;
+        packed[at] = min(max(q, 0.0), 65535.0) as ui16;
+    }
+    return Track{ joint: k.joint, target: k.target, mode: k.mode, times: times, values: arena.alloc_slice(f32, 0),
+            packed: packed, low: low, step: step };
+}
+
+// The tracks of `from`, compressed; those that stay at the rest of their joint left out.
+Track[] compress_tracks(Arena* arena, Track[] from, linear.Transform[] rest, Tolerance t) {
+    vec.Vec<Track>* out = vec.new<Track>(arena);
+    for (Track k in from) {
+        usize width = width_of(k);
+        if (width == 0) {
+            continue;
+        }
+        f32 tolerance = match (k.target) {
+            Translation => t.position,
+            Rotation => t.rotation,
+            Scale => t.scale,
+            Weights => t.weight,
+        };
+        usize[] kept = kept_keys(arena, k, width, tolerance);
+        if (kept.len == 1 && k.joint < rest.len) {
+            linear.Transform r = rest[k.joint];
+            mut f32[4] at_rest = [0.0, 0.0, 0.0, 0.0];
+            mut bool known = true;
+            match (k.target) {
+                Translation => {
+                    at_rest = [r.position.x, r.position.y, r.position.z, 0.0];
+                },
+                Scale => {
+                    at_rest = [r.scale.x, r.scale.y, r.scale.z, 0.0];
+                },
+                Rotation => {
+                    at_rest = [r.rotation.x, r.rotation.y, r.rotation.z, r.rotation.w];
+                },
+                Weights => {
+                    known = false;
+                },
+            }
+            if (known && all_near(k, width, at_rest[0..4], tolerance)) {
+                continue;  // the rest of the joint: what `sample` starts from
+            }
+        }
+        out.push(packed_track(arena, k, width, kept));
+    }
+    return out.items();
+}
+
+// `c` made smaller, as Ozz and ACL do it: the keys that a line (a slerp for rotations) through the
+// keys around them gives within `tolerance` removed, the tracks that stay at the rest of their
+// joint left out, and the numbers kept in 16 bits over the range of each track. It samples as `c`
+// does, within `tolerance`; its events are those of `c`. `bytes()` says what each takes.
+pub Clip* compress(keeps Arena* arena, keeps Clip* c, Tolerance tolerance) {
+    Track[] tracks = compress_tracks(arena, c.tracks, c.rest, tolerance);
+    Track[] morphs = compress_tracks(arena, c.morphs, arena.alloc_slice(linear.Transform, 0), tolerance);
+    Clip* out = arena.new(Clip, arena, c.name, c.duration, tracks, morphs, c.rest);
+    for (Event e in c.event_list()) {
+        out.event(e.time, e.name);
+    }
+    return out;
 }
 
 // ---- Machines ----
@@ -1539,4 +1796,93 @@ test "a machine blends the weights of morph targets" {
     w[0] = 0.3;
     w[1] = 0.6;
     assert(!mm.morph_weights(4, w) && w[0] == 0.3 && w[1] == 0.6);
+}
+
+test "a clip compressed: fewer keys, in 16 bits, the same poses within the tolerance" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    model.Model m = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, m);
+    // two seconds at 60 keys a second, as an exporter bakes them: the hip slides at a steady speed,
+    // the spine turns at one, the head nods along a sine, the hip keeps its scale (its rest), and a
+    // morph target of the body rises and stays
+    usize n = 121;
+    mut f32[] times = arena.alloc_slice(f32, n);
+    mut f32[] slide = arena.alloc_slice(f32, 3 * n);
+    mut f32[] turn = arena.alloc_slice(f32, 4 * n);
+    mut f32[] nod = arena.alloc_slice(f32, 4 * n);
+    mut f32[] same = arena.alloc_slice(f32, 3 * n);
+    mut f32[] weight = arena.alloc_slice(f32, n);
+    for (usize i in 0..n) {
+        f32 t = i as f32 / 60.0;
+        times[i] = t;
+        slide[3 * i] = t;
+        slide[3 * i + 1] = 1.0;
+        slide[3 * i + 2] = 0.0;
+        linear.Quat q = linear.from_axis_angle(linear.vec3(0.0, 1.0, 0.0), 0.8 * t);
+        linear.Quat h = linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), 0.5 * math.sin((3.0 * t) as f64) as f32);
+        turn[4 * i] = q.x;
+        turn[4 * i + 1] = q.y;
+        turn[4 * i + 2] = q.z;
+        turn[4 * i + 3] = q.w;
+        nod[4 * i] = h.x;
+        nod[4 * i + 1] = h.y;
+        nod[4 * i + 2] = h.z;
+        nod[4 * i + 3] = h.w;
+        same[3 * i] = 1.0;
+        same[3 * i + 1] = 1.0;
+        same[3 * i + 2] = 1.0;
+        weight[i] = min(t, 1.0);
+    }
+    mut model.Channel[] channels = arena.alloc_slice(model.Channel, 5);
+    channels[0] = model.Channel{ node: 1, target: model.Target.Translation, mode: curve.Interpolation.Linear, times: times, values: slide };
+    channels[1] = model.Channel{ node: 2, target: model.Target.Rotation, mode: curve.Interpolation.Linear, times: times, values: turn };
+    channels[2] = model.Channel{ node: 3, target: model.Target.Rotation, mode: curve.Interpolation.Linear, times: times, values: nod };
+    channels[3] = model.Channel{ node: 1, target: model.Target.Scale, mode: curve.Interpolation.Linear, times: times, values: same };
+    channels[4] = model.Channel{ node: 4, target: model.Target.Weights, mode: curve.Interpolation.Linear, times: times, values: weight };
+    Clip* baked = clip(&arena, s, model.Animation{ name: "baked", channels: channels, duration: 2.0 });
+    baked.event(0.5, "step");
+    Tolerance tolerance = Tolerance{ };
+    Clip* small = compress(&arena, baked, tolerance);
+    // the slide, the turn and the weight in two or three keys, the scale gone, the nod in fewer
+    assert(small.tracks.len == 3 && small.tracks[0].times.len == 2 && small.tracks[1].times.len == 2);
+    assert(small.tracks[2].times.len < n && small.morphs[0].times.len == 3);
+    assert(small.bytes() * 4 < baked.bytes() && small.event_list().len == 1);
+    // the poses, at times between the keys too
+    Pose a = rest_pose(&arena, s);
+    Pose b = rest_pose(&arena, s);
+    mut f32[1] wa = [0.0];
+    mut f32[1] wb = [0.0];
+    mut f32 worst_position = 0.0;
+    mut f32 worst_angle = 0.0;
+    mut f32 worst_scale = 0.0;
+    mut f32 worst_weight = 0.0;
+    for (usize i in 0..401) {
+        f32 t = i as f32 / 200.0;
+        baked.sample(a, t);
+        small.sample(b, t);
+        for (usize j in 0..3) {
+            worst_position = max(worst_position, a.joints[j].position.sub(b.joints[j].position).length());
+            worst_angle = max(worst_angle, turn_between(a.joints[j].rotation, b.joints[j].rotation));
+            worst_scale = max(worst_scale, a.joints[j].scale.sub(b.joints[j].scale).length());
+        }
+        assert(baked.weights_at(4, t, wa[0..1]) && small.weights_at(4, t, wb[0..1]));
+        worst_weight = max(worst_weight, abs(wa[0] - wb[0]));
+    }
+    // the tolerance, and the step of 16 bits (2 / 65 535 for a rotation, a little more than one
+    // millionth of a radian per unit)
+    assert(worst_position <= tolerance.position + 0.0001 && worst_scale <= tolerance.scale);
+    assert(worst_angle <= tolerance.rotation + 0.0002 && worst_weight <= tolerance.weight + 0.0001);
+    // a looser tolerance keeps fewer keys of the nod
+    Clip* smaller = compress(&arena, baked, Tolerance{ rotation: 0.01 });
+    assert(smaller.tracks[2].times.len < small.tracks[2].times.len && smaller.bytes() < small.bytes());
+    // steps and cubic splines: their samples kept
+    Clip* jump = clip_named(&arena, s, m, "jump");
+    Clip* jump_small = compress(&arena, jump, tolerance);
+    for (usize i in 0..21) {
+        f32 t = i as f32 / 20.0;
+        jump.sample(a, t);
+        jump_small.sample(b, t);
+        assert(a.joints[1].position.near(b.joints[1].position, 0.0001));
+    }
 }

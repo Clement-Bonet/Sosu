@@ -16,6 +16,8 @@ bad_huge_codebook.ogg: sound too large
 bad_crc.ogg: 8000 Hz, 2 channels, 4942 frames
 bad_not_vorbis.ogg: damaged sound
 bad_long.ogg: 8000 Hz, 2 channels, 4992 frames
+chained.ogg: 8000 Hz, 2 channels, 9884 frames
+bad_chained.ogg: 8000 Hz, 2 channels, 6094 frames
 tone_decoded.wav: 8000 Hz, 2 channels, 4942 frames
 pcm8.wav: 8000 Hz, 2 channels, 2000 frames
 pcm24.wav: 8000 Hz, 2 channels, 2000 frames

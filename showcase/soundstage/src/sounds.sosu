@@ -1,0 +1,69 @@
+// soundstage.sounds: the sounds placed around the listener, made here, each a loop of a whole
+// number of cycles (no click where it starts again). Clicks of noise are the easiest to place by
+// ear: they hold every frequency, which the head filters by direction; a chime rings with few, an
+// engine hums low.
+import std.math;
+import audio.audio;
+
+// Noise, the same at each run: a generator of Lehmer-like steps on 32 bits.
+struct Noise {
+    mut ui64 state;
+}
+
+f32 next(Noise* n) {
+    n.state = (n.state * 1664525 + 1013904223) % 4294967296;
+    return (n.state >> 8) as f32 / 16777216.0 * 2.0 - 1.0;
+}
+
+// Four bursts of noise a second, each 30 ms, dying out.
+pub audio.Sound clicks(Arena* arena, i32 rate) {
+    audio.Sound s = audio.create(arena, rate, 1, rate as usize);
+    mut f32[] x = s.samples;
+    mut Noise n = Noise{ state: 7 };
+    usize every = rate as usize / 4;
+    usize burst = rate as usize * 30 / 1000;
+    for (usize i in 0..x.len) {
+        usize at = i % every;
+        x[i] = at < burst ? 0.6 * next(&n) * math.exp(-5.0 * at as f64 / burst as f64) as f32 : 0.0;
+    }
+    return s;
+}
+
+// A bell struck every 1.5 s: partials of 660 Hz as a bell has them (1, 2, 2.76, 5.4), the high
+// ones dying first.
+pub audio.Sound chime(Arena* arena, i32 rate) {
+    audio.Sound s = audio.create(arena, rate, 1, rate as usize * 3 / 2);
+    mut f32[] x = s.samples;
+    mut f64[4] ratios = [1.0, 2.0, 2.76, 5.4];
+    mut f64[4] gains = [0.35, 0.2, 0.15, 0.08];
+    mut f64[4] decays = [2.5, 3.5, 5.0, 8.0];
+    for (usize i in 0..x.len) {
+        f64 t = i as f64 / rate as f64;
+        mut f64 v = 0.0;
+        for (usize k in 0..4) {
+            v += gains[k] * math.exp(-decays[k] * t) * math.sin(2.0 * math.PI * 660.0 * ratios[k] * t);
+        }
+        f64 attack = min(t / 0.004, 1.0);  // no click at the strike
+        x[i] = (v * attack) as f32;
+    }
+    return s;
+}
+
+// An engine: the harmonics of 80 Hz, a slow throb, and a little noise; a second, 80 whole cycles.
+pub audio.Sound engine(Arena* arena, i32 rate) {
+    audio.Sound s = audio.create(arena, rate, 1, rate as usize);
+    mut f32[] x = s.samples;
+    mut Noise n = Noise{ state: 11 };
+    mut f32 rumble = 0.0;
+    for (usize i in 0..x.len) {
+        f64 t = i as f64 / rate as f64;
+        mut f64 v = 0.0;
+        for (usize k in 1..9) {
+            v += math.sin(2.0 * math.PI * 80.0 * k as f64 * t) / k as f64;
+        }
+        f64 throb = 0.75 + 0.25 * math.sin(2.0 * math.PI * 4.0 * t);
+        rumble += (next(&n) - rumble) * 0.05;
+        x[i] = (0.22 * v * throb) as f32 + rumble * 0.3;
+    }
+    return s;
+}

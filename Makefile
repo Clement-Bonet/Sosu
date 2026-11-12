@@ -72,6 +72,8 @@ test: all
 	./build/sosuc test showcase/sheets
 	./build/sosuc test showcase/vault
 	./build/sosuc test showcase/courier
+	./build/sosuc test showcase/audioplayer
+	./build/sosuc test showcase/soundstage
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done

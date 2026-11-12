@@ -27,6 +27,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         n = sosu_audio_ogg_read(v, channels, out, 65536);
         total += n;
     }
+    /* back to the start, as audio.stream does at the end of a sound that loops, and read again */
+    if (channels >= 1 && channels <= 8 && sosu_audio_ogg_rewind(v)) sosu_audio_ogg_read(v, channels, out, 65536);
+    /* its length (the links of a chained file), a seek into the middle and to its last frame, as
+       audio.stream does */
+    int64_t length = sosu_audio_ogg_length(v);
+    if (channels >= 1 && channels <= 8 && length > 0) {
+        if (sosu_audio_ogg_seek(v, length / 2)) sosu_audio_ogg_read(v, channels, out, 65536);
+        if (sosu_audio_ogg_seek(v, length - 1)) sosu_audio_ogg_read(v, channels, out, 65536);
+    }
     sosu_audio_ogg_close(v);
     return 0;
 }

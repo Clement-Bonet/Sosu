@@ -1,0 +1,250 @@
+// audio.spectrum: what frequencies a sound holds, for a meter or a visualizer (spec §8.2). `fft` is
+// the fast Fourier transform (radix 2, in place); an `Analyzer` takes a window of samples (a Hann
+// window against the leaks between bins), and gives `bands` on a scale of octaves, from 0 (silence,
+// -72 dB) to 1 (a sine at full scale, 0 dB), which rise at once and fall slowly, and `peaks`, which
+// hold a moment before they fall: what the bars of a player show.
+import std.math;
+
+// `re` and `im` (as many, a power of 2) replaced by their discrete Fourier transform:
+// X[k] = Σ x[n] e^(-2πi kn/N).
+pub void fft(f32[] re, f32[] im)
+    requires re.len == im.len && (re.len & (re.len - 1)) == 0
+{
+    mut f32[] r = re;
+    mut f32[] m = im;
+    usize n = r.len;
+    if (n < 2) {
+        return;
+    }
+    // the samples in the order of their bits reversed
+    mut usize j = 0;
+    for (usize i in 1..n) {
+        mut usize bit = n >> 1;
+        while ((j & bit) != 0) {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if (i < j) {
+            f32 tr = r[i];
+            r[i] = r[j];
+            r[j] = tr;
+            f32 ti = m[i];
+            m[i] = m[j];
+            m[j] = ti;
+        }
+    }
+    // the butterflies, stage by stage; the turns from a recurrence in f64
+    mut usize length = 2;
+    while (length <= n) {
+        f64 angle = -2.0 * math.PI / length as f64;
+        f64 step_re = math.cos(angle);
+        f64 step_im = math.sin(angle);
+        usize half = length / 2;
+        mut usize start = 0;
+        while (start < n) {
+            mut f64 w_re = 1.0;
+            mut f64 w_im = 0.0;
+            for (usize k in 0..half) {
+                usize a = start + k;
+                usize b = a + half;
+                f32 br = (r[b] as f64 * w_re - m[b] as f64 * w_im) as f32;
+                f32 bi = (r[b] as f64 * w_im + m[b] as f64 * w_re) as f32;
+                r[b] = r[a] - br;
+                m[b] = m[a] - bi;
+                r[a] = r[a] + br;
+                m[a] = m[a] + bi;
+                f64 next = w_re * step_re - w_im * step_im;
+                w_im = w_re * step_im + w_im * step_re;
+                w_re = next;
+            }
+            start += length;
+        }
+        length *= 2;
+    }
+}
+
+// The level below which a band shows nothing, in dB below full scale.
+pub f32 FLOOR_DB = 72.0;
+
+pub class Analyzer {
+    pub usize size;   // the samples of a window, a power of 2
+    pub i32 rate;
+    f32[] window;     // Hann
+    f32[] re;
+    f32[] im;
+    f32[] edges;      // the frequencies between the bands: one more than the bands
+    pub f32[] bands;  // 0 to 1, each frame
+    pub f32[] peaks;
+    f32[] held;       // how long each peak has stayed, in seconds
+    pub mut f32 fall;  // what a band loses per second, of the whole height: 1.6
+    pub mut f32 hold;  // seconds a peak stays before it falls: 0.6
+
+    void init(keeps Arena* arena, usize size, i32 rate, usize count, f32 low, f32 high) {
+        self.size = size;
+        self.rate = rate;
+        fall = 1.6;
+        hold = 0.6;
+        window = arena.alloc_slice(f32, size);
+        for (usize i in 0..size) {
+            window[i] = (0.5 - 0.5 * math.cos(2.0 * math.PI * i as f64 / size as f64)) as f32;
+        }
+        re = arena.alloc_slice(f32, size);
+        im = arena.alloc_slice(f32, size);
+        bands = arena.alloc_slice(f32, count);
+        peaks = arena.alloc_slice(f32, count);
+        held = arena.alloc_slice(f32, count);
+        edges = arena.alloc_slice(f32, count + 1);
+        f32 top = min(high, rate as f32 / 2.0);
+        f64 ratio = (top / low) as f64;
+        for (usize i in 0..count + 1) {
+            edges[i] = low * math.pow(ratio, i as f64 / count as f64) as f32;
+        }
+    }
+
+    // The frequency (Hz) between the bands `i - 1` and `i`.
+    pub f32 edge(usize i) {
+        return edges[min(i, edges.len - 1)];
+    }
+
+    // The amplitude of the bin `k`: 1 for a sine at full scale (through a Hann window, a sine of
+    // amplitude A gives A·N/4 in its bin).
+    f64 amplitude_at(usize k) {
+        f64 x = re[k] as f64;
+        f64 y = im[k] as f64;
+        return math.sqrt(x * x + y * y) * 4.0 / size as f64;
+    }
+
+    f32 db_of(f64 amplitude) {
+        return amplitude <= 0.0000001 ? -140.0 : (20.0 * math.log10(amplitude)) as f32;
+    }
+
+    // `mono` (its last `size` samples; fewer: the rest silent) analyzed, `dt` seconds after the last
+    // call: the bands and the peaks moved.
+    pub void analyze(f32[] mono, f32 dt) {
+        usize n = min(mono.len, size);
+        usize from = mono.len - n;
+        for (usize i in 0..size) {
+            re[i] = i < n ? mono[from + i] * window[i] : 0.0;
+            im[i] = 0.0;
+        }
+        fft(re, im);
+        f32 per_bin = rate as f32 / size as f32;
+        for (usize b in 0..bands.len) {
+            mut f32 db = -140.0;
+            if (edges[b + 1] - edges[b] < per_bin) {
+                // narrower than a bin (the bass): between the two bins around its middle, so that
+                // the bands that share a bin do not show the same step
+                f32 middle = math.sqrt((edges[b] * edges[b + 1]) as f64) as f32 / per_bin;
+                usize k = min(middle as usize, size / 2 - 2);
+                f64 t = (middle - k as f32) as f64;
+                db = db_of(amplitude_at(k) * (1.0 - t) + amplitude_at(k + 1) * t);
+            } else {
+                // the loudest bin of the band
+                usize first = (edges[b] / per_bin) as usize;
+                usize last = max((edges[b + 1] / per_bin) as usize, first);
+                for (usize k in first..min(last + 1, size / 2)) {
+                    db = max(db, db_of(amplitude_at(k)));
+                }
+            }
+            f32 level = max(0.0, min(1.0, (db + FLOOR_DB) / FLOOR_DB));
+            bands[b] = level >= bands[b] ? level : max(level, bands[b] - fall * dt);
+            if (bands[b] >= peaks[b]) {
+                peaks[b] = bands[b];
+                held[b] = 0.0;
+            } else {
+                held[b] += dt;
+                if (held[b] > hold) {
+                    peaks[b] = max(bands[b], peaks[b] - fall * 0.5 * dt);
+                }
+            }
+        }
+    }
+
+    // Everything back to silence.
+    pub void clear() {
+        for (usize b in 0..bands.len) {
+            bands[b] = 0.0;
+            peaks[b] = 0.0;
+            held[b] = 0.0;
+        }
+    }
+}
+
+// An analyzer of windows of `size` samples (a power of 2: 2048 at 44.1 kHz gives bins of 21.5 Hz)
+// at `rate`, in `count` bands from `low` to `high` Hz on a scale of octaves.
+pub Analyzer* analyzer(keeps Arena* arena, usize size, i32 rate, usize count, f32 low, f32 high)
+    requires size >= 2 && (size & (size - 1)) == 0 && count > 0 && low > 0.0 && high > low
+{
+    return arena.new(Analyzer, arena, size, rate, count, low, high);
+}
+
+test "the Fourier transform of an impulse, of a sine, and back" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    // an impulse: every bin at 1
+    mut f32[] re = arena.alloc_slice(f32, 64);
+    mut f32[] im = arena.alloc_slice(f32, 64);
+    re[0] = 1.0;
+    fft(re, im);
+    for (usize k in 0..64) {
+        assert(abs(re[k] - 1.0) < 0.00001 && abs(im[k]) < 0.00001);
+    }
+    // a cosine of 5 cycles: its two bins at N/2, nothing elsewhere
+    for (usize i in 0..64) {
+        re[i] = math.cos(2.0 * math.PI * 5.0 * i as f64 / 64.0) as f32;
+        im[i] = 0.0;
+    }
+    fft(re, im);
+    for (usize k in 0..64) {
+        f32 want = k == 5 || k == 59 ? 32.0 : 0.0;
+        assert(abs(re[k] - want) < 0.001 && abs(im[k]) < 0.001);
+    }
+    // Parseval on noise: the energy is the same, times N
+    mut f32[] x = arena.alloc_slice(f32, 1024);
+    mut f32[] y = arena.alloc_slice(f32, 1024);
+    mut f64 energy = 0.0;
+    mut ui32 seed = 7;
+    for (usize i in 0..1024) {
+        seed = wrapping_add(wrapping_mul(seed, 1664525), 1013904223);
+        x[i] = (seed >> 8) as f32 / 8388608.0 - 1.0;
+        energy += x[i] as f64 * x[i] as f64;
+    }
+    fft(x, y);
+    mut f64 spectral = 0.0;
+    for (usize k in 0..1024) {
+        spectral += x[k] as f64 * x[k] as f64 + y[k] as f64 * y[k] as f64;
+    }
+    assert(abs(spectral / 1024.0 - energy) < energy * 0.0001);
+}
+
+test "an analyzer: a sine in its band, its level, the fall and the peak" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    Analyzer* a = analyzer(&arena, 2048, 44100, 32, 30.0, 16000.0);
+    mut f32[] sine = arena.alloc_slice(f32, 2048);
+    for (usize i in 0..2048) {
+        sine[i] = 0.5 * math.sin(2.0 * math.PI * 1000.0 * i as f64 / 44100.0) as f32;
+    }
+    a.analyze(sine, 0.016);
+    // the band of 1 kHz: -6 dB, that is 66 of 72; far ones near nothing
+    mut usize band = 0;
+    for (usize b in 0..32) {
+        if (a.edge(b) <= 1000.0 && a.edge(b + 1) > 1000.0) {
+            band = b;
+        }
+    }
+    assert(abs(a.bands[band] - 66.0 / 72.0) < 0.02);
+    assert(a.bands[0] < 0.2 && a.bands[31] < 0.2);
+    for (usize b in 0..32) {
+        assert(a.bands[b] <= a.bands[band]);
+    }
+    // silence after: the band falls by `fall` a second, the peak holds, then falls slower
+    mut f32[] quiet = arena.alloc_slice(f32, 2048);
+    a.analyze(quiet, 0.25);
+    assert(abs(a.bands[band] - (66.0 / 72.0 - 0.4)) < 0.02 && abs(a.peaks[band] - 66.0 / 72.0) < 0.02);
+    a.analyze(quiet, 0.5);
+    assert(a.bands[band] == 0.0 && a.peaks[band] < 66.0 / 72.0 && a.peaks[band] > 0.5);
+    a.clear();
+    assert(a.peaks[band] == 0.0);
+}

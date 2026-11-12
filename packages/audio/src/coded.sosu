@@ -1,5 +1,7 @@
-// audio.coded: what audio.mp3 and audio.flac share, the loop that takes the samples of a decoder of
-// dr_libs (native/dr.c) into a `Sound`. Not for programs: they import audio.mp3 or audio.flac.
+// audio.coded: what audio.mp3, audio.flac and audio.stream share: the decoders of dr_libs
+// (native/dr.c) and of stb_vorbis (native/ogg.c) behind one `Decoder`, and the loop that takes all
+// the samples of one into a `Sound`. Not for programs: they import audio.mp3, audio.flac,
+// audio.ogg or audio.stream.
 import audio.audio;
 
 extern "C" {
@@ -13,11 +15,144 @@ extern "C" {
     i32 sosu_audio_flac_rate(ui8* decoder);
     i32 sosu_audio_flac_read(ui8* decoder, i32 channels, f32* out, i32 floats);
     void sosu_audio_flac_close(ui8* decoder);
+    i32 sosu_audio_mp3_rewind(ui8* decoder);
+    i32 sosu_audio_flac_rewind(ui8* decoder);
+    ui8* sosu_audio_ogg_open(ui8* data, i32 size, ui8* memory, i32 memory_size, i32* error);
+    i32 sosu_audio_ogg_channels(ui8* decoder);
+    i32 sosu_audio_ogg_rate(ui8* decoder);
+    i32 sosu_audio_ogg_read(ui8* decoder, i32 channels, f32* out, i32 floats);
+    i32 sosu_audio_ogg_rewind(ui8* decoder);
+    i64 sosu_audio_ogg_length(ui8* decoder);
+    i32 sosu_audio_ogg_seek(ui8* decoder, i64 frame);
+    i64 sosu_audio_mp3_length(ui8* decoder);
+    i32 sosu_audio_mp3_seek(ui8* decoder, i64 frame);
+    i64 sosu_audio_flac_length(ui8* decoder);
+    i32 sosu_audio_flac_seek(ui8* decoder, i64 frame);
+    void sosu_audio_ogg_close(ui8* decoder);
 }
 
 pub enum Codec {
     Mp3,
     Flac,
+    Ogg,
+}
+
+// The codec of a file by its first bytes (`audio.wav` is not decoded here: its samples are there).
+pub Codec? codec_of(ui8[] data) {
+    if (data.len >= 42 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61 && data[3] == 0x43) {
+        return some(Codec.Flac);
+    }
+    if (data.len >= 27 && data[0] == 0x4F && data[1] == 0x67 && data[2] == 0x67 && data[3] == 0x53) {
+        return some(Codec.Ogg);
+    }
+    if (data.len >= 10 && data[0] == 0x49 && data[1] == 0x44 && data[2] == 0x33) {
+        return some(Codec.Mp3);
+    }
+    if (data.len >= 4 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 && (data[1] & 0x06) == 0x02) {
+        return some(Codec.Mp3);
+    }
+    return none;
+}
+
+// A decoder open on the bytes of a file, which must live as long as it.
+pub struct Decoder {
+    pub Codec codec;
+    ui8* handle;
+    pub i32 channels;
+    pub i32 rate;
+}
+
+// A decoder of `codec` on `data`, its memory (`MEMORY`) taken from `arena`.
+pub Decoder!audio.AudioError open(Arena* arena, Codec codec, keeps ui8[] data) {
+    if (data.len == 0 || data.len > 0x7FFFFFFF) {
+        return err(data.len == 0 ? audio.AudioError.Damaged : audio.AudioError.TooLarge);
+    }
+    mut ui8[] memory = arena.alloc_slice(ui8, MEMORY as usize);
+    mut i32 error = 0;
+    mut ui8* handle = &memory[0];
+    mut i32 channels = 0;
+    mut i32 rate = 0;
+    unsafe {
+        handle = match (codec) {
+            Mp3 => sosu_audio_mp3_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Flac => sosu_audio_flac_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Ogg => sosu_audio_ogg_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+        };
+        if (handle as ui64 == 0) {
+            return err(error == 1 ? audio.AudioError.TooLarge : audio.AudioError.Damaged);
+        }
+        channels = match (codec) {
+            Mp3 => sosu_audio_mp3_channels(handle),
+            Flac => sosu_audio_flac_channels(handle),
+            Ogg => sosu_audio_ogg_channels(handle),
+        };
+        rate = match (codec) {
+            Mp3 => sosu_audio_mp3_rate(handle),
+            Flac => sosu_audio_flac_rate(handle),
+            Ogg => sosu_audio_ogg_rate(handle),
+        };
+    }
+    Decoder d = Decoder{ codec: codec, handle: handle, channels: channels, rate: rate };
+    if (!audio.fits(rate as i64, channels as i64, 0)) {
+        finish(d);
+        return err(audio.AudioError.Unsupported);
+    }
+    return ok(d);
+}
+
+// Up to `out.len / channels` frames decoded into `out`; the frames given, 0 at the end.
+pub usize read_into(Decoder d, f32[] out) {
+    usize c = d.channels as usize;
+    if (out.len < c) {
+        return 0;
+    }
+    i32 floats = min(out.len / c * c, 0x7FFFFFF0) as i32;
+    i32 frames = read(d.codec, d.handle, d.channels, &out[0], floats);
+    return frames <= 0 ? 0 : frames as usize;
+}
+
+// Back to the start of the file; false when the decoder cannot.
+pub bool rewind(Decoder d) {
+    unsafe {
+        i32 done = match (d.codec) {
+            Mp3 => sosu_audio_mp3_rewind(d.handle),
+            Flac => sosu_audio_flac_rewind(d.handle),
+            Ogg => sosu_audio_ogg_rewind(d.handle),
+        };
+        return done != 0;
+    }
+}
+
+// The frames of the file, 0 when the decoder cannot say.
+pub ui64 length(Decoder d) {
+    unsafe {
+        i64 n = match (d.codec) {
+            Mp3 => sosu_audio_mp3_length(d.handle),
+            Flac => sosu_audio_flac_length(d.handle),
+            Ogg => sosu_audio_ogg_length(d.handle),
+        };
+        return n <= 0 ? 0 : n as ui64;
+    }
+}
+
+// To the frame `frame` of the file; false when the decoder cannot (past the end, a damaged file).
+pub bool seek(Decoder d, ui64 frame) {
+    if (frame > 0x7FFFFFFFFFFFFFFF) {
+        return false;
+    }
+    unsafe {
+        i32 done = match (d.codec) {
+            Mp3 => sosu_audio_mp3_seek(d.handle, frame as i64),
+            Flac => sosu_audio_flac_seek(d.handle, frame as i64),
+            Ogg => sosu_audio_ogg_seek(d.handle, frame as i64),
+        };
+        return done != 0;
+    }
+}
+
+// The decoder closed (its memory is the arena's).
+pub void finish(Decoder d) {
+    close(d.codec, d.handle);
 }
 
 // The memory a decoder may take: its state, and the buffers of a frame (FLAC: up to 65 535 samples
@@ -33,6 +168,9 @@ void close(Codec codec, ui8* decoder) {
             Flac => {
                 sosu_audio_flac_close(decoder);
             },
+            Ogg => {
+                sosu_audio_ogg_close(decoder);
+            },
         }
     }
 }
@@ -42,6 +180,7 @@ i32 read(Codec codec, ui8* decoder, i32 channels, f32* out, i32 floats) {
         return match (codec) {
             Mp3 => sosu_audio_mp3_read(decoder, channels, out, floats),
             Flac => sosu_audio_flac_read(decoder, channels, out, floats),
+            Ogg => sosu_audio_ogg_read(decoder, channels, out, floats),
         };
     }
 }
@@ -58,6 +197,7 @@ pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] data) {
         decoder = match (codec) {
             Mp3 => sosu_audio_mp3_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
             Flac => sosu_audio_flac_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Ogg => sosu_audio_ogg_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
         };
         if (decoder as ui64 == 0) {
             return err(error == 1 ? audio.AudioError.TooLarge : audio.AudioError.Damaged);
@@ -70,10 +210,12 @@ pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] data) {
         channels = match (codec) {
             Mp3 => sosu_audio_mp3_channels(decoder),
             Flac => sosu_audio_flac_channels(decoder),
+            Ogg => sosu_audio_ogg_channels(decoder),
         };
         rate = match (codec) {
             Mp3 => sosu_audio_mp3_rate(decoder),
             Flac => sosu_audio_flac_rate(decoder),
+            Ogg => sosu_audio_ogg_rate(decoder),
         };
     }
     if (!audio.fits(rate as i64, channels as i64, 0)) {

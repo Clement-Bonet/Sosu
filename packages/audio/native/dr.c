@@ -120,6 +120,21 @@ int32_t sosu_audio_mp3_read(void *v, int32_t channels, float *out, int32_t float
     return (int32_t)drmp3_read_pcm_frames_f32((drmp3 *)v, (drmp3_uint64)(floats / channels), out);
 }
 
+/* Back to the start, for a sound that loops (audio.stream): 1 when it could. */
+int32_t sosu_audio_mp3_rewind(void *v) {
+    return drmp3_seek_to_pcm_frame((drmp3 *)v, 0) ? 1 : 0;
+}
+
+/* The frames of the file (0 when unknown: dr_mp3 reads the headers of every frame to count them,
+   then comes back to where it was), and a frame to go to (1 when it could). */
+int64_t sosu_audio_mp3_length(void *v) {
+    return (int64_t)drmp3_get_pcm_frame_count((drmp3 *)v);
+}
+
+int32_t sosu_audio_mp3_seek(void *v, int64_t frame) {
+    return frame >= 0 && drmp3_seek_to_pcm_frame((drmp3 *)v, (drmp3_uint64)frame) ? 1 : 0;
+}
+
 void sosu_audio_mp3_close(void *v) {
     drmp3_uninit((drmp3 *)v);
 }
@@ -154,6 +169,19 @@ int32_t sosu_audio_flac_rate(void *v) {
 int32_t sosu_audio_flac_read(void *v, int32_t channels, float *out, int32_t floats) {
     if (channels <= 0 || floats < channels) return 0;
     return (int32_t)drflac_read_pcm_frames_f32((drflac *)v, (drflac_uint64)(floats / channels), out);
+}
+
+int32_t sosu_audio_flac_rewind(void *v) {
+    return drflac_seek_to_pcm_frame((drflac *)v, 0) ? 1 : 0;
+}
+
+int64_t sosu_audio_flac_length(void *v) {
+    drflac_uint64 n = ((drflac *)v)->totalPCMFrameCount;
+    return n > (drflac_uint64)INT64_MAX ? 0 : (int64_t)n;
+}
+
+int32_t sosu_audio_flac_seek(void *v, int64_t frame) {
+    return frame >= 0 && drflac_seek_to_pcm_frame((drflac *)v, (drflac_uint64)frame) ? 1 : 0;
 }
 
 void sosu_audio_flac_close(void *v) {

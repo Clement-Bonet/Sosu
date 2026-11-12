@@ -116,6 +116,22 @@ under their own licenses.
   an overflow that gives wrong samples, so the fuzzing compiles it with `-fwrapv`. A fault found
   in them is fixed by taking a newer commit (`SECURITY.md`).
 
+## KEMAR head-related impulse responses (MIT Media Lab)
+
+- Files: `packages/audio/native/kemar.c`, written by `packages/audio/native/kemar.py` from the
+  "compact" set (`compact.zip`: 368 WAV files, two ears, 128 frames at 44.1 kHz, for elevations of
+  -40 to 90 degrees and azimuths of 0 to 180), for the responses of `audio.hrtf`
+- Source: <https://sound.media.mit.edu/resources/KEMAR.html>, `compact.zip` (231 461 bytes, SHA-256
+  `0bcd69f8e8760cf8eacff4a89594ceca7d44fb94f28ecf0bf19970003bbfb3e0`, taken in November 2026)
+- Measured by Bill Gardner and Keith Martin, MIT Media Lab, 1994 ("HRTF Measurements of a KEMAR
+  Dummy-Head Microphone", MIT Media Lab Perceptual Computing Technical Report #280; "HRTF
+  measurements of a KEMAR", J. Acoust. Soc. Am. 97 (6), 1995)
+- License: "This data is Copyright 1994 by the MIT Media Laboratory. It is provided free with no
+  restrictions on use, provided the authors are cited when the data is used in any research or
+  commercial application." A program that uses `audio.hrtf` cites them, as here
+- Not changed: the samples are those of the files, as 16-bit integers; `audio.hrtf` cuts each
+  response at its onset, resamples it to the rate of the mixer and scales them all by one number
+
 ## ufbx
 
 - Files: `packages/model/native/vendor/ufbx.c` and `ufbx.h` (version 0.23.1), and its license

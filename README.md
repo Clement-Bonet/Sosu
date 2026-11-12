@@ -288,7 +288,11 @@ folder (`../../build/sosuc run .`):
 - `showcase/sheets`: a spreadsheet with about 120 functions, reading and writing `.ods` and `.csv`;
 - `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software);
 - `showcase/courier`: a download manager, on the package `net`: downloads that pause, start again after an error from where
-  they stopped, and keep to a limit of bandwidth.
+  they stopped, and keep to a limit of bandwidth;
+- `showcase/audioplayer`: an audio player for WAV, Ogg Vorbis, MP3 and FLAC, played as they are read, with the spectrum of
+  what plays (a Fourier transform written in Sosu);
+- `showcase/soundstage`: a sound placed around the listener (ahead, behind, left, right, above) or turning around the
+  head, heard panned or through a head (`audio.hrtf`, for headphones), and drawn from above.
 
 On Windows:
 

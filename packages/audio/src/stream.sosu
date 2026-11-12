@@ -1,0 +1,323 @@
+// audio.stream: a long sound (music, ambiance) read as it plays, rather than decoded whole: an Ogg
+// Vorbis, MP3 or FLAC file decoded into a ring of a few seconds, which the mixer plays in a loop,
+// and which `update` fills again behind it. A song of four minutes takes a ring of 2 seconds (about
+// 700 KB at 44.1 kHz in stereo) and its decoder (4 MB), rather than 80 MB of samples. At its end the
+// stream stops, or starts again, without a gap, when it loops. A WAV file plays the same way, from
+// its samples decoded whole (they are what the file holds).
+//
+// The ring keeps the last `Options.history` seconds played: `peek` reads what the device plays now
+// (it plays a little behind the mixer), for a meter or a spectrum.
+//
+// The program calls `update` often: each frame, or with `device.Player.update`. Between two calls,
+// the mixer must not play more than the ring holds beyond its history, else it plays again what it
+// played. The bytes of the file must live as long as the stream.
+import std.io;
+import audio.audio;
+import audio.mixer;
+import audio.coded;
+import audio.wav;
+
+pub struct Options {
+    pub f32 volume = 1.0;
+    pub f32 pan = 0.0;
+    pub bool looping = false;
+    pub f32 seconds = 2.0;   // the length of the ring
+    pub f32 history = 0.25;  // of it, what stays behind the voice for `peek`
+}
+
+pub class Stream {
+    coded.Decoder? decoder;  // none: the samples of a WAV file, `whole`
+    audio.Sound whole;
+    mut usize cursor;        // in `whole`
+    mixer.Mixer* mix;
+    audio.Sound ring;
+    mut ui32 voice;
+    bool looping;
+    usize length;      // the frames of the ring
+    usize back;        // of them, kept behind the voice
+    ui64 total;        // the frames of the file, 0 when unknown
+    mut f32 volume;
+    f32 pan;
+    mut ui64 start;    // the frame of the file where the ring started (0, or where `seek` went)
+    mut ui64 written;  // the frames put into the ring since `start`
+    mut f64 played;    // the frames the mixer has read since `start`
+    mut f64 last;      // where the voice was at the last `update`, in frames of the ring
+    mut bool ended;    // the decoder gave its last frame
+    mut ui64 end_at;   // the frame (since `start`) where the sound ends, once `ended`
+    mut bool closed;
+
+    void init(keeps coded.Decoder? decoder, keeps audio.Sound whole, keeps mixer.Mixer* mix, keeps audio.Sound ring,
+            usize back, ui64 total, Options options) {
+        self.decoder = decoder;
+        self.whole = whole;
+        self.mix = mix;
+        self.ring = ring;
+        self.back = back;
+        self.total = total;
+        looping = options.looping;
+        volume = options.volume;
+        pan = options.pan;
+        length = ring.frames();
+        cursor = 0;
+        voice = 0;
+        start = 0;
+        written = 0;
+        played = 0.0;
+        last = 0.0;
+        ended = false;
+        end_at = 0;
+        closed = false;
+    }
+
+    // Up to `out.len / channels` frames of the file from where it is; 0 at its end.
+    usize read(f32[] out) {
+        match (decoder) {
+            some(d) => {
+                return coded.read_into(d, out);
+            },
+            none => {
+                usize c = whole.channels as usize;
+                usize n = min(out.len / c, whole.frames() - min(cursor, whole.frames()));
+                mut f32[] o = out;
+                for (usize i in 0..n * c) {
+                    o[i] = whole.samples[cursor * c + i];
+                }
+                cursor += n;
+                return n;
+            },
+        }
+    }
+
+    bool go_to(ui64 frame) {
+        match (decoder) {
+            some(d) => {
+                return frame == 0 ? coded.rewind(d) : coded.seek(d, frame);
+            },
+            none => {
+                if (frame > whole.frames() as ui64) {
+                    return false;
+                }
+                cursor = frame as usize;
+                return true;
+            },
+        }
+    }
+
+    // `frames` frames decoded into the ring from `written`, silence after the end; the start again
+    // when it loops.
+    void fill(ui64 frames) {
+        usize c = ring.channels as usize;
+        mut f32[] samples = ring.samples;
+        mut ui64 left = frames;
+        mut i32 rewinds = 0;
+        while (left > 0) {
+            usize at = (written % length as ui64) as usize;
+            usize room = min(length - at, left as usize);
+            mut usize got = 0;
+            if (!ended) {
+                got = read(samples[at * c..(at + room) * c]);
+                if (got == 0) {
+                    // the end of the file: again from its start, once (a file of no frame ends)
+                    if (looping && rewinds == 0 && go_to(0)) {
+                        rewinds += 1;
+                        continue;
+                    }
+                    ended = true;
+                    end_at = written;
+                }
+            }
+            if (ended) {
+                for (usize i in at * c..(at + room) * c) {
+                    samples[i] = 0.0;
+                }
+                got = room;
+            } else {
+                rewinds = 0;
+            }
+            written += got as ui64;
+            left -= got as ui64;
+        }
+    }
+
+    // The ring filled from the current place of the file, and played from its start.
+    void begin() {
+        written = 0;
+        played = 0.0;
+        last = 0.0;
+        ended = false;
+        end_at = 0;
+        fill((length - back) as ui64);
+        voice = mix.play_with(ring, mixer.Play{ volume: volume, pan: pan, speed: 1.0, looping: true });
+    }
+
+    // What the mixer played since the last call, and the ring filled again behind it; the voice
+    // stopped once the sound has ended. Call it often (each frame).
+    pub void update() {
+        if (closed) {
+            return;
+        }
+        f64 at = mix.position(voice);
+        if (at < 0.0) {
+            return;  // stopped
+        }
+        // the voice goes around the ring: where it is now, after where it was, or around again
+        f64 moved = at >= last ? at - last : length as f64 - last + at;
+        played += moved;
+        last = at;
+        ui64 done = played as ui64;
+        if (ended && done >= end_at) {
+            mix.stop(voice);
+            return;
+        }
+        ui64 ahead = written - min(done, written);
+        if (ahead < (length - back) as ui64) {
+            fill((length - back) as ui64 - ahead);
+        }
+    }
+
+    // Whether it still plays (its end not reached, not stopped).
+    pub bool playing() {
+        return !closed && mix.playing(voice);
+    }
+
+    // The frames it has played since the start (around again when it loops).
+    pub ui64 played_frames() {
+        return start + played as ui64;
+    }
+
+    // Where it is in the file, in frames (its start again after a loop, when its length is known).
+    pub ui64 position() {
+        ui64 p = start + played as ui64;
+        return total > 0 && looping ? p % total : total > 0 ? min(p, total) : p;
+    }
+
+    // The frames of the file, 0 when its decoder cannot say; `rate` of them a second.
+    pub ui64 frames() {
+        return total;
+    }
+
+    pub i32 rate() {
+        return ring.rate;
+    }
+
+    pub i32 channels() {
+        return ring.channels;
+    }
+
+    // To the frame `frame` of the file, the ring decoded again from there: false (and nothing
+    // changed) past its end, or when the decoder cannot.
+    pub bool seek(ui64 frame) {
+        if (closed || (total > 0 && frame >= total) || !go_to(frame)) {
+            return false;
+        }
+        mix.stop(voice);
+        start = frame;
+        begin();
+        return true;
+    }
+
+    // The voice of the mixer that plays it now (another after `seek`), for its panning, filter and
+    // reverberation; `audio.spatial` places it with `Space.attach`.
+    pub ui32 voice_id() {
+        return voice;
+    }
+
+    pub void set_volume(f32 v) {
+        volume = v;
+        mix.set_volume(voice, v);
+    }
+
+    // `out.len` frames mixed down to one channel, from `offset` frames after where the voice is (a
+    // negative offset: what it played, as far back as `Options.history`); what the ring does not
+    // hold (yet, or any more) is silent. The frames given.
+    pub usize peek(f32[] out, i64 offset) {
+        mut f32[] o = out;
+        usize c = ring.channels as usize;
+        i64 now = played as i64;
+        i64 oldest = max(now - back as i64, 0);
+        i64 newest = written as i64;  // not included
+        mut usize given = 0;
+        for (usize i in 0..o.len) {
+            i64 f = now + offset + i as i64;
+            if (f < oldest || f >= newest) {
+                o[i] = 0.0;
+                continue;
+            }
+            usize at = (f as ui64 % length as ui64) as usize;
+            mut f32 sum = 0.0;
+            for (usize k in 0..c) {
+                sum += ring.samples[at * c + k];
+            }
+            o[i] = sum / c as f32;
+            given += 1;
+        }
+        return given;
+    }
+
+    pub void stop() {
+        mix.stop(voice);
+    }
+
+    // Stopped, and its decoder closed.
+    pub void close() {
+        if (closed) {
+            return;
+        }
+        mix.stop(voice);
+        match (decoder) {
+            some(d) => {
+                coded.finish(d);
+            },
+            none => { },
+        }
+        closed = true;
+    }
+}
+
+// The file `data` (Ogg Vorbis, MP3, FLAC or WAV) played as it is read, through `m`. `arena` keeps
+// its ring and its decoder; `data` must live as long as the stream.
+pub Stream*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data, keeps mixer.Mixer* m, Options options) {
+    mut coded.Decoder? decoder = none;
+    mut audio.Sound whole = audio.Sound{ rate: 44100, channels: 1, samples: arena.alloc_slice(f32, 0) };
+    mut i32 rate = 0;
+    mut i32 channels = 0;
+    mut ui64 total = 0;
+    if (wav.is_wav(data)) {
+        whole = try wav.decode(arena, data);
+        rate = whole.rate;
+        channels = whole.channels;
+        total = whole.frames() as ui64;
+    } else {
+        coded.Codec codec = match (coded.codec_of(data)) {
+            some(c) => c,
+            none => {
+                return err(audio.AudioError.UnknownFormat);
+            },
+        };
+        coded.Decoder d = try coded.open(arena, codec, data);
+        decoder = some(d);
+        rate = d.rate;
+        channels = d.channels;
+        total = coded.length(d);
+    }
+    if (channels <= 0 || rate <= 0) {
+        return err(audio.AudioError.Damaged);
+    }
+    usize frames = max((max(options.seconds, 0.05) * rate as f32) as usize, 64);
+    usize back = min((max(options.history, 0.0) * rate as f32) as usize, frames / 2);
+    audio.Sound ring = audio.create(arena, rate, channels, frames);
+    Stream* s = arena.new(Stream, decoder, whole, m, ring, back, total, options);
+    s.begin();
+    return ok(s);
+}
+
+// The file at `path`, read whole into `arena`, played as it is decoded.
+pub Stream*!audio.AudioError load(keeps Arena* arena, str path, keeps mixer.Mixer* m, Options options) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(audio.AudioError.Unreadable);
+        },
+    };
+    return open(arena, data, m, options);
+}

@@ -27,6 +27,14 @@ static void decode(int flac, const uint8_t *data, size_t size, uint8_t *memory, 
         n = flac ? sosu_audio_flac_read(v, channels, out, 65536) : sosu_audio_mp3_read(v, channels, out, 65536);
         total += n;
     }
+    /* back to the start, as audio.stream does at the end of a sound that loops, and read again */
+    if (channels >= 1 && channels <= 8 && (flac ? sosu_audio_flac_rewind(v) : sosu_audio_mp3_rewind(v))) {
+        if (flac) {
+            sosu_audio_flac_read(v, channels, out, 65536);
+        } else {
+            sosu_audio_mp3_read(v, channels, out, 65536);
+        }
+    }
     if (flac) {
         sosu_audio_flac_close(v);
     } else {

@@ -12,6 +12,7 @@ import audio.wav;
 import audio.ogg;
 import audio.mp3;
 import audio.flac;
+import audio.stream;
 import testing.check;
 import testing.fixture;
 
@@ -164,6 +165,39 @@ test "an Ogg Vorbis file, as the specification decodes it" {
     }
 }
 
+test "a chained Ogg Vorbis file: its two streams one after the other" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    audio.Sound tone = read_ogg(&arena, "tests/data/tone.ogg");
+    ui8[] data = fixture.read_bytes(&arena, "tests/data/chained.ogg");
+    audio.Sound both = read_ogg(&arena, "tests/data/chained.ogg");
+    assert(both.rate == 8000 && both.channels == 2 && both.frames() == 2 * 4942);
+    assert(largest_difference(both.samples[0..2 * 4942], tone.samples) == 0.0);
+    assert(largest_difference(both.samples[2 * 4942..4 * 4942], tone.samples) == 0.0);
+    // played as it is read: its length, the two streams, a seek into the second, a loop
+    mixer.Mixer* a = mixer.create(&arena, 8000, 2);
+    a.play(both);
+    f32[] expected = mixed(&arena, a, none, 2 * 4942);
+    mixer.Mixer* b = mixer.create(&arena, 8000, 2);
+    stream.Stream* s = match (stream.open(&arena, data, b, stream.Options{ seconds: 0.1, looping: true })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(s.frames() == 2 * 4942);
+    f32[] played = mixed(&arena, b, some(s), 2 * 4942);
+    assert(largest_difference(played, expected) == 0.0);
+    f32[] again = mixed(&arena, b, some(s), 1000);  // looped: the first stream again
+    assert(largest_difference(again, expected[0..2000]) == 0.0);
+    assert(s.seek(4942 + 3000) && s.position() == 4942 + 3000);
+    f32[] second = mixed(&arena, b, some(s), 1942);
+    assert(largest_difference(second, expected[2 * (4942 + 3000)..4 * 4942]) == 0.0);
+    assert(s.seek(1000) && !s.seek(2 * 4942));
+    s.close();
+}
+
 test "a FLAC file, sample for sample" {
     mut Arena arena = Arena.new(2 * MB);
     defer arena.free();
@@ -209,6 +243,156 @@ test "MP3 frames: their length and their tone" {
     assert(largest_difference(tagged.samples, tone.samples) == 0.0);
 }
 
+// What `m` mixes in `frames` frames, by blocks of 256, the stream `s` (if any) updated after each.
+f32[] mixed(Arena* arena, mixer.Mixer* m, stream.Stream*? s, usize frames) {
+    usize c = m.channels as usize;
+    mut f32[] out = arena.alloc_slice(f32, frames * c);
+    mut usize at = 0;
+    while (at < frames) {
+        usize n = min(256, frames - at);
+        m.mix(out[at * c..(at + n) * c]);
+        match (s) {
+            some(x) => {
+                x.update();
+            },
+            none => { },
+        }
+        at += n;
+    }
+    return out;
+}
+
+test "a stream: the samples of the whole sound, its end, its loop" {
+    mut Arena arena = Arena.new(32 * MB);
+    defer arena.free();
+    ui8[] data = fixture.read_bytes(&arena, "tests/data/tone.flac");
+    audio.Sound whole = match (flac.decode(&arena, data)) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    usize length = whole.frames();  // 13 288
+    // the whole sound, played once
+    mixer.Mixer* a = mixer.create(&arena, 44100, 2);
+    a.play(whole);
+    f32[] expected = mixed(&arena, a, none, length + 3000);
+    // the same, read as it plays through a ring of 0.05 s: around it about six times
+    mixer.Mixer* b = mixer.create(&arena, 44100, 2);
+    stream.Stream* once = match (stream.open(&arena, data, b, stream.Options{ seconds: 0.05 })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    f32[] got = mixed(&arena, b, some(once), length + 3000);
+    assert(largest_difference(got, expected) == 0.0);
+    assert(!once.playing() && once.played_frames() >= length as ui64);
+    once.close();
+    // looping: the start again right after the end, without a gap
+    mixer.Mixer* c = mixer.create(&arena, 44100, 2);
+    stream.Stream* again = match (stream.open(&arena, data, c, stream.Options{ seconds: 0.05, looping: true })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    f32[] looped = mixed(&arena, c, some(again), 2 * length + 500);
+    mut f64 worst = 0.0;
+    for (usize i in 0..(length + 500) * 2) {
+        f64 want = i < length * 2 ? expected[i] as f64 : expected[i - length * 2] as f64;
+        worst = max(worst, abs(looped[length * 2 + i] as f64 - want));
+    }
+    assert(worst == 0.0 && again.playing());
+    again.close();
+    assert(!again.playing());
+    // an MP3, and a file that is not one
+    mixer.Mixer* d = mixer.create(&arena, 48000, 1);
+    ui8[] mp3_data = fixture.read_bytes(&arena, "tests/data/tone.mp3");
+    audio.Sound mp3_whole = match (mp3.decode(&arena, mp3_data)) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    mixer.Mixer* e = mixer.create(&arena, 48000, 1);
+    e.play(mp3_whole);
+    stream.Stream* song = match (stream.open(&arena, mp3_data, d, stream.Options{ seconds: 0.1 })) {
+        ok(x) => x,
+        err(err_value) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(largest_difference(mixed(&arena, d, some(song), 24000), mixed(&arena, e, none, 24000)) == 0.0);
+    song.close();
+    mut ui8[16] noise = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    bool refused = match (stream.open(&arena, noise[0..16], d, stream.Options{ })) {
+        ok(x) => false,
+        err(r) => r == audio.AudioError.UnknownFormat,
+    };
+    assert(refused);
+}
+
+test "a stream: its length, a seek, what it plays now, a WAV file" {
+    mut Arena arena = Arena.new(32 * MB);
+    defer arena.free();
+    ui8[] data = fixture.read_bytes(&arena, "tests/data/tone.flac");
+    audio.Sound whole = match (flac.decode(&arena, data)) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    mixer.Mixer* a = mixer.create(&arena, 44100, 2);
+    a.play(whole);
+    f32[] expected = mixed(&arena, a, none, 13288);
+    // its length, and a seek: from there, the samples of the whole sound from there
+    mixer.Mixer* b = mixer.create(&arena, 44100, 2);
+    stream.Stream* s = match (stream.open(&arena, data, b, stream.Options{ seconds: 0.1 })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(s.frames() == 13288 && s.rate() == 44100 && s.channels() == 2);
+    f32[] first = mixed(&arena, b, some(s), 3000);
+    assert(largest_difference(first, expected[0..6000]) == 0.0 && s.position() == 3000);
+    // what it played: the last 256 frames, as one channel
+    mut f32[] now = arena.alloc_slice(f32, 256);
+    assert(s.peek(now, -256) == 256);
+    mut f64 worst = 0.0;
+    for (usize i in 0..256) {
+        usize f = 3000 - 256 + i;
+        worst = max(worst, abs(now[i] as f64 - (whole.samples[2 * f] as f64 + whole.samples[2 * f + 1] as f64) / 2.0));
+    }
+    assert(worst < 0.000001);
+    assert(s.seek(9000) && s.position() == 9000);
+    f32[] after = mixed(&arena, b, some(s), 4288);
+    assert(largest_difference(after, expected[18000..26576]) == 0.0);
+    assert(!s.seek(20000));  // past its end: nothing changed
+    s.close();
+    // MP3: its length; a WAV file, played the same way from its samples
+    ui8[] mp3_data = fixture.read_bytes(&arena, "tests/data/tone.mp3");
+    stream.Stream* song = match (stream.open(&arena, mp3_data, b, stream.Options{ })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(song.frames() == 23040);
+    song.close();
+    mixer.Mixer* c = mixer.create(&arena, 44100, 2);
+    stream.Stream* w = match (stream.open(&arena, fixture.read_bytes(&arena, "tests/data/tone_flac.wav"), c,
+            stream.Options{ seconds: 0.05 })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(w.frames() == 13288 && largest_difference(mixed(&arena, c, some(w), 13288), expected) == 0.0);
+    w.close();
+}
+
 // What reading a file gives: its rate, channels and frames, or the error.
 str outcome(Arena* arena, str name) uses io {
     ui8[] data = fixture.read_bytes(arena, join(arena, "tests/data/", name));
@@ -238,7 +422,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[33] names = [
+    str[35] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -257,6 +441,8 @@ test "damaged and hostile files" {
         "bad_crc.ogg",
         "bad_not_vorbis.ogg",
         "bad_long.ogg",
+        "chained.ogg",
+        "bad_chained.ogg",
         "tone_decoded.wav",
         "pcm8.wav",
         "pcm24.wav",

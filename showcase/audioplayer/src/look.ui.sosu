@@ -1,0 +1,43 @@
+// The look of the audio player (spec §10.7): a dark theme, teal for what plays, and the big button
+// of play and pause.
+
+theme Dusk {
+    accent: #40D2BE
+    surface: #2A2B3D
+    color: #D8DAEE
+    field: #16161F
+
+    Window { background: #1B1B29 }
+    Title { color: accent }
+    Button {
+        background: surface
+        radius: 6
+        padding: 10
+        hover { background: #3A3C55 }
+        pressed { background: field }
+        disabled { color: #5C5F7A, background: field }
+    }
+    Slider {
+        accent: #40D2BE
+    }
+    List {
+        background: field
+    }
+}
+
+style Big {
+    background: #40D2BE
+    color: #16161F
+    radius: 22
+    padding: 14
+    hover { background: #5EE3D0 }
+    pressed { background: #2FB3A1 }
+}
+
+style Muted {
+    color: #8A8DAA
+}
+
+style Track {
+    color: #40D2BE
+}
