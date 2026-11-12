@@ -19,6 +19,7 @@ bad_long.ogg: 8000 Hz, 2 channels, 4992 frames
 chained.ogg: 8000 Hz, 2 channels, 9884 frames
 bad_chained.ogg: 8000 Hz, 2 channels, 6094 frames
 bad_seek.ogg: 8000 Hz, 2 channels, 1152 frames
+bad_seek_shift.ogg: 8000 Hz, 2 channels, 4942 frames
 tone_decoded.wav: 8000 Hz, 2 channels, 4942 frames
 pcm8.wav: 8000 Hz, 2 channels, 2000 frames
 pcm24.wav: 8000 Hz, 2 channels, 2000 frames

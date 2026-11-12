@@ -4512,13 +4512,13 @@ static int vorbis_search_for_page_pushdata(vorb *f, const uint8 *data, int data_
                n = f->page_crc_tests++;
                f->scan[n].bytes_left = len-j;
                f->scan[n].crc_so_far = crc;
-               f->scan[n].goal_crc = data[i+22] + (data[i+23] << 8) + (data[i+24]<<16) + (data[i+25]<<24);
+               f->scan[n].goal_crc = data[i+22] + (data[i+23] << 8) + (data[i+24]<<16) + ((uint32)data[i+25]<<24);  // Sosu: uint32, not int
                // if the last frame on a page is continued to the next, then
                // we can't recover the sample_loc immediately
                if (data[i+27+data[i+26]-1] == 255)
                   f->scan[n].sample_loc = ~0;
                else
-                  f->scan[n].sample_loc = data[i+6] + (data[i+7] << 8) + (data[i+ 8]<<16) + (data[i+ 9]<<24);
+                  f->scan[n].sample_loc = data[i+6] + (data[i+7] << 8) + (data[i+ 8]<<16) + ((uint32)data[i+ 9]<<24);  // Sosu: uint32, not int
                f->scan[n].bytes_done = i+j;
                if (f->page_crc_tests == STB_VORBIS_PUSHDATA_CRC_COUNT)
                   break;
@@ -4789,7 +4789,8 @@ static int get_seek_page_info(stb_vorbis *f, ProbedPage *z)
    z->page_end = z->page_start + 27 + header[26] + len;
 
    // read the last-decoded sample out of the data
-   z->last_decoded_sample = header[6] + (header[7] << 8) + (header[8] << 16) + (header[9] << 24);
+   // Sosu: shifted as uint32: a byte of 128 or more shifted by 24 in an int was undefined
+   z->last_decoded_sample = header[6] + (header[7] << 8) + (header[8] << 16) + ((uint32) header[9] << 24);
 
    // restore file state to where we were
    set_file_offset(f, z->page_start);

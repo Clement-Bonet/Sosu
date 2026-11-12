@@ -196,20 +196,24 @@ test "a chained Ogg Vorbis file: its two streams one after the other" {
     assert(largest_difference(second, expected[2 * (4942 + 3000)..4 * 4942]) == 0.0);
     assert(s.seek(1000) && !s.seek(2 * 4942));
     s.close();
-    // pages out of order, found by the fuzzing: a seek fails, it does not stop the program (an
-    // assert of stb_vorbis did, in a build with them)
-    ui8[] hostile = fixture.read_bytes(&arena, "tests/data/bad_seek.ogg");
-    match (stream.open(&arena, hostile, b, stream.Options{ seconds: 0.1 })) {
-        ok(h) => {
-            ui64 length = h.frames();
-            if (length > 0) {
-                h.seek(length / 2);
-                h.seek(length - 1);
-            }
-            mixed(&arena, b, some(h), 2000);
-            h.close();
-        },
-        err(e) => { },
+    // found by the fuzzing: pages out of order (an assert of stb_vorbis stopped the program, in a
+    // build with them), and a granule position of a byte above 127 (shifted in an `int`): a seek
+    // fails or lands, the program goes on
+    mut str[2] hostile = ["tests/data/bad_seek.ogg", "tests/data/bad_seek_shift.ogg"];
+    for (str name in hostile) {
+        ui8[] bytes = fixture.read_bytes(&arena, name);
+        match (stream.open(&arena, bytes, b, stream.Options{ seconds: 0.1 })) {
+            ok(h) => {
+                ui64 length = h.frames();
+                if (length > 0) {
+                    h.seek(length / 2);
+                    h.seek(length - 1);
+                }
+                mixed(&arena, b, some(h), 2000);
+                h.close();
+            },
+            err(e) => { },
+        }
     }
 }
 
@@ -437,7 +441,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[36] names = [
+    str[37] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -459,6 +463,7 @@ test "damaged and hostile files" {
         "chained.ogg",
         "bad_chained.ogg",
         "bad_seek.ogg",
+        "bad_seek_shift.ogg",
         "tone_decoded.wav",
         "pcm8.wav",
         "pcm24.wav",
