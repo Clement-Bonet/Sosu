@@ -28,6 +28,14 @@ pub struct Influence {
     pub mut f32[4] weights;
 }
 
+// A morph target: what it moves each vertex by (3 numbers each), and its normals by (empty
+// when the file gives none), at a weight of 1: a smile, a blink.
+pub struct Morph {
+    pub str name;
+    pub f32[] positions;
+    pub f32[] normals;
+}
+
 // Triangles of one material: three indices of `vertices` each.
 pub struct Mesh {
     pub str name;
@@ -36,6 +44,49 @@ pub struct Mesh {
     pub mut usize? material;  // in `Model.materials`
     pub geometry.Aabb bounds;  // in the space of the mesh
     pub Influence[]? influences = none;  // one per vertex, for a mesh moved by a skin
+    pub Morph[]? morphs = none;  // its morph targets
+    pub f32[]? weights = none;   // their weights when nothing animates them
+}
+
+// The vertices of `m` moved by its morph targets at `weights` (one per target; the missing ones
+// count 0), into `out` (as many as its vertices): each position plus the weighted sum of what the
+// targets move it by, each normal likewise, then made of length 1 again.
+pub void morph(Mesh m, f32[] weights, Vertex[] out) {
+    mut Vertex[] o = out;
+    for (usize i in 0..min(m.vertices.len, o.len)) {
+        o[i] = m.vertices[i];
+    }
+    Morph[] list = match (m.morphs) {
+        some(l) => l,
+        none => {
+            return;
+        },
+    };
+    for (usize t in 0..min(list.len, weights.len)) {
+        f32 w = weights[t];
+        if (w == 0.0) {
+            continue;
+        }
+        Morph target = list[t];
+        for (usize i in 0..min(m.vertices.len, o.len)) {
+            mut Vertex v = o[i];
+            if (target.positions.len >= (i + 1) * 3) {
+                v.position = [v.position[0] + w * target.positions[3 * i], v.position[1] + w * target.positions[3 * i + 1],
+                        v.position[2] + w * target.positions[3 * i + 2]];
+            }
+            if (target.normals.len >= (i + 1) * 3) {
+                v.normal = [v.normal[0] + w * target.normals[3 * i], v.normal[1] + w * target.normals[3 * i + 1],
+                        v.normal[2] + w * target.normals[3 * i + 2]];
+            }
+            o[i] = v;
+        }
+    }
+    for (usize i in 0..min(m.vertices.len, o.len)) {
+        mut Vertex v = o[i];
+        linear.Vec3 n = linear.vec3(v.normal[0], v.normal[1], v.normal[2]).normalized();
+        v.normal = [n.x, n.y, n.z];
+        o[i] = v;
+    }
 }
 
 // A material of metal and roughness, as glTF has it (OBJ gives its color and texture).
@@ -73,9 +124,11 @@ pub enum Target {
     Translation,
     Rotation,  // a quaternion, x y z w
     Scale,
+    Weights,   // of the morph targets of the meshes of the node: one number per target
 }
 
-// The keys of one property of one node. `values` holds 3 numbers per key (4 for a rotation); for
+// The keys of one property of one node. `values` holds 3 numbers per key (4 for a rotation, one
+// per morph target for weights); for
 // `Hermite`, three such groups per key: the tangent in, the value, the tangent out, as glTF has them.
 pub struct Channel {
     pub usize node;  // in `Model.nodes`

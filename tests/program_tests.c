@@ -49,6 +49,8 @@ static const Case cases[] = {
     { "run", "physics2d", "expected.txt", 0, NULL }, /* physics2d on Box2D, a [native.box2d] (spec §8.2) */
     { "run", "physics", "expected.txt", 0, NULL }, /* physics on Jolt, a [native.jolt] of C++ (spec §8.2) */
     { "run", "nav", "expected.txt", 0, NULL }, /* nav on Recast and Detour, and A* on grids (spec §8.2) */
+    /* Jolt built to give the same steps on every machine: one fingerprint for MSVC, gcc, clang, x64, ARM */
+    { "run", "determinism", "expected.txt", 0, NULL },
     { "run", "threads", "expected.txt", 0, NULL },
     { "run", "thread_closure", "expected.txt", 101, NULL },
     { "run", "mathematics", "expected.txt", 0, NULL },

@@ -44,6 +44,17 @@ pub enum Facing {
     Velocity(f32 stretch),  // its length grows by `stretch` times its speed
 }
 
+// A plane particles collide with: the points p where normal · p = offset, its solid side behind
+// the normal (a floor at y = 0: normal (0, 1, 0), offset 0).
+pub struct Plane {
+    pub linear.Vec3 normal;
+    pub f32 offset = 0.0;
+}
+
+pub Plane floor_at(f32 y) {
+    return Plane{ normal: linear.vec3(0.0, 1.0, 0.0), offset: y };
+}
+
 pub enum Blending {
     Alpha,     // sorted from far to near
     Additive,  // light: fire, sparks, magic
@@ -73,6 +84,10 @@ pub struct Emitter {
     pub ui32 columns = 1;  // of the flipbook in its texture, read row after row from the top left
     pub Facing facing = Facing.Camera;
     pub Blending blending = Blending.Alpha;
+    pub Plane[]? planes = none;  // what the particles collide with
+    pub f32 bounce = 0.3;    // of the speed into a plane, given back
+    pub f32 friction = 0.2;  // of the speed along a plane, lost at each contact
+    pub bool die_on_contact = false;  // rain: gone where it lands
     pub usize max = 1000;  // particles alive at most: the others are not born
     pub ui64 seed = 1;
 }
@@ -324,6 +339,28 @@ pub class System {
             p.velocity = v;
             p.position = p.position.add(v.scale(pace * dt));
             p.rotation += p.spin * dt;
+            mut bool landed = false;
+            match (e.planes) {
+                some(planes) => {
+                    for (Plane plane in planes) {
+                        linear.Vec3 n = plane.normal.normalized();
+                        f32 depth = n.dot(p.position) - plane.offset;
+                        if (depth < 0.0) {
+                            landed = true;
+                            p.position = p.position.sub(n.scale(depth));  // back on the plane
+                            f32 into = p.velocity.dot(n);
+                            if (into < 0.0) {
+                                linear.Vec3 along = p.velocity.sub(n.scale(into));
+                                p.velocity = along.scale(1.0 - e.friction).sub(n.scale(into * e.bounce));
+                            }
+                        }
+                    }
+                },
+                none => { },
+            }
+            if (landed && e.die_on_contact) {
+                p.age = p.life;  // gone at the next step
+            }
             list.set(i, p);
             i += 1;
         }
@@ -495,6 +532,60 @@ test "shapes, sizes and colors over the life, flipbooks" {
     Particle p = fade.particles()[0];
     assert(close(fade.size_of(p), 1.0, 0.0001) && fade.color_of(p).near(linear.vec4(1.0, 0.5, 0.5, 0.5), 0.0001));
     assert(fade.frame_of(p) == 2);
+}
+
+test "collisions with planes: a bounce, rest, rain" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    vec.Vec<Plane>* planes = vec.new<Plane>(&arena);
+    planes.push(floor_at(0.0));
+    planes.push(Plane{ normal: linear.vec3(-1.0, 0.0, 0.0), offset: -2.0 });  // a wall at x = 2, facing -x
+    System* s = system(&arena, Emitter{ rate: 0.0, shape: Shape.Cone(0.0, 0.0), speed: exactly(0.0), gravity: 1.0,
+            life: exactly(20.0), planes: some(planes.items()), bounce: 0.5, friction: 0.0 });
+    s.move_to(linear.translation(linear.vec3(0.0, 5.0, 0.0)));
+    s.burst(1);
+    mut f32 lowest = 10.0;
+    mut f32 rose = 0.0;
+    mut bool fell = false;
+    for (i32 i in 0..300) {
+        s.advance(0.005);
+        Particle p = s.particles()[0];
+        lowest = min(lowest, p.position.y);
+        if (p.velocity.y < -1.0) {
+            fell = true;
+        }
+        if (fell && p.velocity.y > rose) {
+            rose = p.velocity.y;
+        }
+    }
+    // it struck at about 9.9 m/s, and came up at about half of it
+    assert(lowest >= 0.0 && rose > 4.0 && rose < 5.5);
+    for (i32 i in 0..2000) {
+        s.advance(0.005);
+    }
+    assert(abs(s.particles()[0].position.y) < 0.01 && abs(s.particles()[0].velocity.y) < 0.5);
+    // thrown at the wall: kept on its side
+    System* thrown = system(&arena, Emitter{ rate: 0.0, shape: Shape.Cone(0.0, 0.0), speed: exactly(0.0), life: exactly(5.0),
+            planes: some(planes.items()) });
+    thrown.burst(1);
+    for (i32 i in 0..200) {
+        thrown.advance(0.01);
+        if (i == 0) {
+            mut Particle p = thrown.particles()[0];
+            p.velocity = linear.vec3(10.0, 0.0, 0.0);
+            thrown.list.set(0, p);
+        }
+    }
+    assert(thrown.particles()[0].position.x <= 2.0001 && thrown.particles()[0].velocity.x <= 0.0);
+    // rain: gone where it lands
+    System* rain = system(&arena, Emitter{ rate: 0.0, shape: Shape.Cone(0.0, 0.0), speed: exactly(0.0), gravity: 1.0,
+            life: exactly(20.0), planes: some(planes.items()), die_on_contact: true });
+    rain.move_to(linear.translation(linear.vec3(0.0, 1.0, 0.0)));
+    rain.burst(10);
+    for (i32 i in 0..100) {
+        rain.advance(0.01);
+    }
+    assert(rain.count() == 0);
 }
 
 test "the same seed gives the same particles" {

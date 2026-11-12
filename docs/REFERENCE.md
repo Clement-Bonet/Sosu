@@ -1951,7 +1951,7 @@ pub Recorder*? open_recorder(Arena* arena, Input input) uses io requires input.r
 
 ## audio.mixer
 
-Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound. A voice may go through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water.
+Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound. A voice may go through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for each channel.
 
 ### struct `Play`
 
@@ -1978,6 +1978,10 @@ pub class Mixer
 - `pub i32 channels`
 - `pub mut f32 volume`  
   of everything, 1 by default
+- `pub void set_room(f32 size, f32 damp)`  
+  The room of the reverberation: `size` from 0 (small, short) to 1 (a hall), `damping` from 0 (bright) to 1 (dull walls).
+- `pub void set_reverb(ui32 id, f32 send)`  
+  The share of the sound `id` sent to the reverberation, from 0 (none: the default) to 1.
 - `pub ui32 play(keeps audio.Sound sound)`  
   Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
 - `pub ui32 play_with(keeps audio.Sound sound, Play how) requires how.speed > 0.0`
@@ -2115,6 +2119,8 @@ pub struct Placed
   0: no change of speed
 - `pub mut f32 occlusion = 0.0`  
   0: heard directly, 1: behind a wall
+- `pub f32 reverb = 0.0`  
+  its own share sent to the reverberation, over that of the space
 
 ### struct `Source`
 
@@ -2161,6 +2167,8 @@ pub f32 attenuation(Placed p, f32 distance)
 pub class Space
 ```
 
+- `pub void set_reverb(f32 amount, f32 size, f32 damping)`  
+  How much the place rings, from 0 (outside: the default) to 1 (a cave), and the room of the reverberation of the mixer: far sources are heard more through it than near ones.
 - `pub void listener(linear.Transform t, linear.Vec3 moving)`  
   Where the listener is (a camera, the head of the player) and how fast it moves.
 - `pub Source play(keeps audio.Sound sound, Placed p)`  

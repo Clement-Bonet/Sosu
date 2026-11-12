@@ -979,8 +979,11 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
             Command cpp = {0};
             command_add(&cpp, cpp_compiler(command.items[0]));
             for (size_t i = 1; i < base.count && strcmp(base.items[i], "-std=c99") != 0; i++) command_add(&cpp, base.items[i]);
+            /* -ffp-contract=off: no multiplication and addition fused into one, whose last bit differs
+               from the two (clang fuses by default): what Jolt needs to give the same steps on every
+               machine (JPH_CROSS_PLATFORM_DETERMINISTIC); MSVC is /fp:precise already */
             const char *cpp_options[] = { "-std=c++17", "-fno-exceptions", "-fno-rtti", "-g", optimize ? "-O2" : "-O0", "-w",
-                                          "-fno-strict-aliasing", NULL };
+                                          "-fno-strict-aliasing", "-ffp-contract=off", NULL };
             add_all(&cpp, cpp_options);
             if (extra_c_flags) add_all(&cpp, extra_c_flags);
             ok = package_objects(links, &links->cpp_sources, obj_dir, &cpp, false, NULL, &command);

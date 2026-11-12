@@ -135,6 +135,12 @@ Body body_of(keeps Arena* arena, keeps anim.Skeleton skeleton, keeps model.Model
     return Body{ machine: m, palette: arena.alloc_slice(linear.Mat4, skeleton.count()) };
 }
 
+particles.Plane[] ground(Arena* arena) {
+    mut particles.Plane[] planes = arena.alloc_slice(particles.Plane, 1);
+    planes[0] = particles.floor_at(0.0);
+    return planes;
+}
+
 curve.Gradient spark_colors(Arena* arena) {
     return curve.gradient(arena, linear.vec4(1.0, 1.0, 0.8, 1.0), linear.vec4(1.0, 0.2, 0.0, 0.0));
 }
@@ -233,6 +239,8 @@ Pieces? make(keeps Arena* arena) uses io {
         color_over_life: some(spark_colors(arena)),
         facing: particles.Facing.Velocity(0.05),
         blending: particles.Blending.Additive,
+        planes: some(ground(arena)),  // they bounce on the floor
+        bounce: 0.35,
         max: 600,
         seed: 5
     });

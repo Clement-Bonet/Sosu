@@ -30,6 +30,7 @@ pub struct Placed {
     pub Rolloff rolloff = Rolloff.Inverse;
     pub f32 doppler = 1.0;  // 0: no change of speed
     pub mut f32 occlusion = 0.0;  // 0: heard directly, 1: behind a wall
+    pub f32 reverb = 0.0;  // its own share sent to the reverberation, over that of the space
 }
 
 // A source of a space: a handle, dead once its sound ended or was stopped.
@@ -85,6 +86,7 @@ pub class Space {
     mut linear.Vec3 position;
     mut linear.Quat rotation;
     mut linear.Vec3 velocity;
+    mut f32 zone;  // the reverberation of the place: 0 outside, 1 a cave
 
     void init(keeps Arena* arena, keeps mixer.Mixer* mix) {
         self.mix = mix;
@@ -92,6 +94,14 @@ pub class Space {
         position = linear.vec3(0.0, 0.0, 0.0);
         rotation = linear.identity_quat();
         velocity = linear.vec3(0.0, 0.0, 0.0);
+        zone = 0.0;
+    }
+
+    // How much the place rings, from 0 (outside: the default) to 1 (a cave), and the room of the
+    // reverberation of the mixer: far sources are heard more through it than near ones.
+    pub void set_reverb(f32 amount, f32 size, f32 damping) {
+        zone = clamp(amount, 0.0, 1.0);
+        mix.set_room(size, damping);
     }
 
     // Where the listener is (a camera, the head of the player) and how fast it moves.
@@ -217,6 +227,9 @@ pub class Space {
             }
             d.heard = Heard{ volume: volume, pan: pan, speed: speed, cutoff: cutoff };
             mix.set_lowpass(d.voice, cutoff);
+            // the farther, the more of it is heard through the room
+            f32 reach = clamp((distance - p.near) / max(p.far - p.near, 0.0001), 0.0, 1.0);
+            mix.set_reverb(d.voice, clamp(p.reverb + zone * (0.3 + 0.7 * reach), 0.0, 1.0));
             mix.set_volume(d.voice, volume);
             mix.set_pan(d.voice, pan);
             mix.set_speed(d.voice, max(speed, 0.0001));
@@ -259,6 +272,34 @@ test "a low-pass filter softens what is high" {
     }
     assert(energy[1] < energy[0] * 0.01);  // 6 kHz: mostly gone
     assert(energy[3] > energy[2] * 0.8);   // 100 Hz: kept
+}
+
+test "a reverberation rings after the sound" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 48000, 2);
+    audio.Sound click = audio.tone(&arena, 48000, 800.0, 0.01, 0.8);
+    mut f32[] out = arena.alloc_slice(f32, 9600);  // 0.1 s
+    mut f32[2] tail = [0.0, 0.0];
+    for (usize case_index in 0..2) {
+        m.stop_all();
+        ui32 id = m.play(click);
+        if (case_index == 1) {
+            m.set_reverb(id, 1.0);
+        }
+        m.mix(out);  // the click, and the first echoes
+        m.mix(out);  // 0.1 to 0.2 s: the click has ended
+        for (f32 x in out) {
+            tail[case_index] += x * x;
+        }
+    }
+    assert(tail[0] == 0.0 && tail[1] > 0.0001);
+    // left and right differ: the lines of the right are longer
+    mut f32 difference = 0.0;
+    for (usize f in 0..4800) {
+        difference += abs(out[2 * f] - out[2 * f + 1]);
+    }
+    assert(difference > 0.001);
 }
 
 test "distance: near, the rolloffs, far" {

@@ -101,6 +101,30 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
     }
     r.release(moved);
 
+    // a cube whose vertices are replaced (as a morph target does): moved 3 to the right
+    model.Model plain2 = render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]);
+    render3d.Uploaded* shifted = try r.upload(arena, plain2);
+    mut model.Vertex[] vertices = arena.alloc_slice(model.Vertex, plain2.meshes[0].vertices.len);
+    for (usize i in 0..vertices.len) {
+        mut model.Vertex v = plain2.meshes[0].vertices[i];
+        v.position = [v.position[0] + 3.0, v.position[1] + 1.0, v.position[2]];
+        vertices[i] = v;
+    }
+    r.update_vertices(shifted, 0, vertices);
+    mut render3d.Item[1] morphed = [render3d.item(shifted, linear.identity4())];
+    gpu.Frame third = try device.commands();
+    r.draw_into(third, target, camera, morphed[0..1]);
+    try third.submit_and_wait();
+    image.Image img3 = try device.read_texture(arena, target);
+    i32[2] right_side = screen(camera, linear.vec3(3.0, 2.0, 0.0));
+    ui32 green_there = img3.at(right_side[0], right_side[1]) >> 8 & 0xFF;
+    ui32 green_rest = img3.at(rest[0], rest[1]) >> 8 & 0xFF;
+    io.print("vertices replaced on the GPU: {}", green_there > 80 && green_rest < 40 ? "ok" : "no");
+    if (green_there <= 80 || green_rest >= 40) {
+        io.print("green there {}, at rest {}", green_there, green_rest);
+    }
+    r.release(shifted);
+
     device.release_texture(target);
     r.release(box);
     r.release(floor);

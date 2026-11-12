@@ -331,6 +331,45 @@ pub class Renderer {
         return ok(up);
     }
 
+    // The vertices of the mesh `mesh` of `up` replaced by `vertices` (as many as it has): a mesh
+    // moved by its morph targets (`model.morph`), a ground that changes. Nothing for another count.
+    pub void update_vertices(Uploaded* up, usize mesh, model.Vertex[] vertices) uses io {
+        if (up.released || mesh >= up.meshes.len() || mesh >= up.data.meshes.len) {
+            return;
+        }
+        model.Mesh m = up.data.meshes[mesh];
+        GpuMesh g = up.meshes.items()[mesh];
+        if (vertices.len != m.vertices.len || g.count == 0) {
+            return;
+        }
+        // its bounds follow its vertices: the camera leaves out what it cannot see
+        up.meshes.set(mesh, GpuMesh{ vertices: g.vertices, indices: g.indices, count: g.count, material: g.material,
+                bounds: model.bounds_of(vertices), skinned: g.skinned });
+        if (!g.skinned) {
+            device.upload(g.vertices, vertices);
+            return;
+        }
+        match (m.influences) {
+            some(influences) => {
+                mut Arena scratch = Arena.new(vertices.len * 64 + 64);
+                defer scratch.free();
+                mut SkinnedVertex[] skinned = scratch.alloc_slice(SkinnedVertex, vertices.len);
+                for (usize i in 0..vertices.len) {
+                    model.Influence f = influences[i];
+                    skinned[i] = SkinnedVertex{
+                        position: vertices[i].position,
+                        normal: vertices[i].normal,
+                        uv: vertices[i].uv,
+                        joints: [f.joints[0] as f32, f.joints[1] as f32, f.joints[2] as f32, f.joints[3] as f32],
+                        weights: f.weights
+                    };
+                }
+                device.upload(g.vertices, skinned);
+            },
+            none => { },
+        }
+    }
+
     // Frees what `upload` sent to the GPU.
     pub void release(Uploaded* up) uses io {
         if (up.released) {

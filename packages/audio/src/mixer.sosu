@@ -4,7 +4,10 @@
 // interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before.
 // A change of volume or panning moves over one buffer, so that it does not click. A mixer of one
 // channel ignores the panning, and averages the two channels of a stereo sound. A voice may go
-// through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water.
+// through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may
+// send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall
+// (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for
+// each channel.
 import std.math;
 import std.vec;
 import audio.audio;
@@ -34,6 +37,24 @@ struct Voice {
     mut f32 cutoff;  // Hz of the low-pass filter, 0 for none
     mut f32 low_l;   // what the filter holds, by channel
     mut f32 low_r;
+    mut f32 send;    // the share sent to the reverberation
+}
+
+// A filter of the reverberation: a line of delay, where it is, and what its comb keeps of the
+// high frequencies.
+struct Line {
+    f32[] buffer;
+    mut usize at;
+    mut f32 store;
+}
+
+// The delays of Freeverb at 44.1 kHz: those of the combs, then of the all-pass filters; the right
+// channel is 23 samples longer, so that the two are not the same.
+usize SPREAD = 23;
+
+usize delay_of(usize i) {
+    mut usize[6] delays = [1116, 1188, 1277, 1356, 556, 441];
+    return delays[i];
 }
 
 // The gains of the left and right channels for `pan` and `volume`. A mono sound is placed with
@@ -58,6 +79,10 @@ pub class Mixer {
     pub mut f32 volume;  // of everything, 1 by default
     vec.Vec<Voice>* voices;
     mut ui32 next_id;
+    vec.Vec<f32>* wet;  // what the voices send to the reverberation, by frame
+    vec.Vec<Line>* lines;  // 4 combs then 2 all-pass filters, for the left, then for the right
+    mut f32 room;  // the feedback of the combs: how long the room rings
+    mut f32 damping;
 
     void init(keeps Arena* arena, i32 rate, i32 channels)
         requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2)
@@ -67,6 +92,34 @@ pub class Mixer {
         volume = 1.0;
         voices = vec.new(arena);
         next_id = 1;
+        wet = vec.new<f32>(arena);
+        lines = vec.new<Line>(arena);
+        for (usize side in 0..2) {
+            for (usize i in 0..6) {
+                usize at_441 = delay_of(i) + side * SPREAD;
+                usize length = max(at_441 * rate as usize / 44100, 1);
+                lines.push(Line{ buffer: arena.alloc_slice(f32, length), at: 0, store: 0.0 });
+            }
+        }
+        room = 0.84;
+        damping = 0.2;
+    }
+
+    // The room of the reverberation: `size` from 0 (small, short) to 1 (a hall), `damping` from 0
+    // (bright) to 1 (dull walls).
+    pub void set_room(f32 size, f32 damp) {
+        room = 0.7 + 0.28 * max(0.0, min(1.0, size));
+        damping = 0.4 * max(0.0, min(1.0, damp));
+    }
+
+    // The share of the sound `id` sent to the reverberation, from 0 (none: the default) to 1.
+    pub void set_reverb(ui32 id, f32 send) {
+        match (find(id)) {
+            some(voice) => {
+                voice.send = max(0.0, min(1.0, send));
+            },
+            none => { },
+        }
     }
 
     // Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
@@ -93,7 +146,8 @@ pub class Mixer {
             started: false,
             cutoff: 0.0,
             low_l: 0.0,
-            low_r: 0.0
+            low_r: 0.0,
+            send: 0.0
         });
         return id;
     }
@@ -192,6 +246,12 @@ pub class Mixer {
             out[i] = 0.0;
         }
         usize frames = out.len / channels as usize;
+        while (wet.len() < frames) {
+            wet.push(0.0);
+        }
+        for (usize f in 0..frames) {
+            wet.set(f, 0.0);
+        }
         mut usize i = 0;
         while (i < voices.len()) {
             if (add(voices.at(i), out, frames)) {
@@ -200,8 +260,68 @@ pub class Mixer {
                 voices.remove(i);
             }
         }
+        reverberate(out, frames);
         for (usize j in 0..out.len) {
             out[j] = max(-1.0, min(1.0, out[j] * volume));
+        }
+    }
+
+    // One sample through a damped comb of feedback `room`.
+    f32 comb(Line* l, f32 input) {
+        mut f32[] b = l.buffer;
+        f32 output = b[l.at];
+        l.store = output * (1.0 - damping) + l.store * damping;
+        b[l.at] = input + l.store * room;
+        l.at = l.at + 1 == b.len ? 0 : l.at + 1;
+        return output;
+    }
+
+    f32 pass(Line* l, f32 input) {
+        mut f32[] b = l.buffer;
+        f32 delayed = b[l.at];
+        b[l.at] = input + delayed * 0.5;
+        l.at = l.at + 1 == b.len ? 0 : l.at + 1;
+        return delayed - input;
+    }
+
+    // What the voices sent, through the reverberation, added to `out`.
+    void reverberate(f32[] out, usize frames) {
+        mut bool any = false;
+        for (usize f in 0..frames) {
+            any = any || wet.items()[f] != 0.0;
+        }
+        // nothing sent, and the tail rung out: nothing to do (the lines keep their silence)
+        mut bool ringing = any;
+        if (!ringing) {
+            for (Line l in lines.items()) {
+                if (l.store > 0.00001 || l.store < -0.00001) {
+                    ringing = true;
+                    break;
+                }
+            }
+        }
+        if (!ringing) {
+            return;
+        }
+        for (usize f in 0..frames) {
+            f32 input = wet.items()[f] * 0.015;  // the combs add up: Freeverb's fixed gain
+            mut f32[2] side = [0.0, 0.0];
+            for (usize c in 0..2) {
+                mut f32 sum = 0.0;
+                for (usize k in 0..4) {
+                    sum += comb(lines.at(c * 6 + k), input);
+                }
+                for (usize k in 4..6) {
+                    sum = pass(lines.at(c * 6 + k), sum);
+                }
+                side[c] = sum;
+            }
+            if (channels == 1) {
+                out[f] += (side[0] + side[1]) * 0.5;
+            } else {
+                out[2 * f] += side[0];
+                out[2 * f + 1] += side[1];
+            }
         }
     }
 
@@ -244,6 +364,9 @@ pub class Mixer {
             } else {
                 out[2 * f] += gl * l;
                 out[2 * f + 1] += gr * r;
+            }
+            if (v.send > 0.0) {
+                wet.set(f, wet.items()[f] + (gl * l + gr * r) * 0.5 * v.send);
             }
             v.position += v.step;
         }

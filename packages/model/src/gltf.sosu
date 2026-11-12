@@ -5,8 +5,9 @@
 // base64 in the file, or in files beside it (`load`, or `decode_with` and those files). Skins
 // (their joints and inverse bind matrices, and the joints and weights of the vertices) and
 // animations (channels of translation, rotation and scale, by steps, lines or cubic splines) are
-// read for `anim`; morph targets and sparse accessors come later. Every read is checked against
-// the bytes it reads: a damaged or hostile file gives an error.
+// read for `anim`, and morph targets (what they move positions and normals by, their names, their
+// weights) with the channels that animate them; sparse accessors come later. Every read is
+// checked against the bytes it reads: a damaged or hostile file gives an error.
 import std.io;
 import std.json;
 import std.text;
@@ -443,13 +444,74 @@ void!model.ModelError read_mesh(keeps Arena* arena, Document d, usize m, vec.Vec
             },
             none => { },
         }
+        // morph targets: what each moves the positions (and normals) by
+        mut model.Morph[]? morphs = none;
+        json.Value? target_list = array(prim, "targets");
+        if (count(target_list) > 0) {
+            if (count(target_list) > 256) {
+                return err(damaged("glTF: more than 256 morph targets"));
+            }
+            json.Value? names = match (json.get(mesh, "extras")) {
+                some(extras) => array(extras, "targetNames"),
+                none => none,
+            };
+            mut model.Morph[] list = arena.alloc_slice(model.Morph, count(target_list));
+            for (usize t in 0..list.len) {
+                json.Value target = item(target_list, t);
+                mut f32[] moved = arena.alloc_slice(f32, 0);
+                mut f32[] turned = arena.alloc_slice(f32, 0);
+                for (usize which in 0..2) {
+                    match (index(target, which == 0 ? "POSITION" : "NORMAL")) {
+                        some(a) => {
+                            Layout read = try layout_of(d, a, model.MAX_VERTICES);
+                            if (read.count != vertices.len || read.components != 3) {
+                                return err(damaged("glTF: a morph target that does not match the positions"));
+                            }
+                            mut f32[] values = arena.alloc_slice(f32, read.count * 3);
+                            for (usize i in 0..read.count) {
+                                for (usize c in 0..3) {
+                                    f32 x = component(read, i, c);
+                                    values[3 * i + c] = x == x ? x : 0.0;
+                                }
+                            }
+                            if (which == 0) {
+                                moved = values;
+                            } else {
+                                turned = values;
+                            }
+                        },
+                        none => { },
+                    }
+                }
+                str target_name = match (json.as_str(item(names, t))) {
+                    some(st) => st,
+                    none => "",
+                };
+                list[t] = model.Morph{ name: target_name, positions: moved, normals: turned };
+            }
+            morphs = some(list);
+        }
+        mut f32[]? weights = none;
+        json.Value? weight_list = array(mesh, "weights");
+        if (count(weight_list) > 0 && count(weight_list) <= 256) {
+            mut f32[] w = arena.alloc_slice(f32, count(weight_list));
+            for (usize t in 0..w.len) {
+                w[t] = match (json.as_f64(item(weight_list, t))) {
+                    some(x) => x as f32,
+                    none => 0.0,
+                };
+            }
+            weights = some(w);
+        }
         out.push(model.Mesh{
             name: name,
             vertices: vertices,
             indices: indices,
             material: material,
             bounds: model.bounds_of(vertices),
-            influences: influences
+            influences: influences,
+            morphs: morphs,
+            weights: weights
         });
     }
     return ok();
@@ -477,13 +539,11 @@ model.Animation!model.ModelError read_animation(Arena* arena, Document d, json.V
             },
             none => "",
         };
-        if (path == "weights") {
-            continue;
-        }
         model.Target what = path == "translation" ? model.Target.Translation
                 : path == "rotation" ? model.Target.Rotation
+                : path == "weights" ? model.Target.Weights
                 : model.Target.Scale;
-        if (path != "translation" && path != "rotation" && path != "scale") {
+        if (path != "translation" && path != "rotation" && path != "scale" && path != "weights") {
             return err(damaged("glTF: a channel of an unknown path"));
         }
         usize node = match (index(target, "node")) {
@@ -529,12 +589,20 @@ model.Animation!model.ModelError read_animation(Arena* arena, Document d, json.V
         Layout times = try layout_of(d, input, model.MAX_VERTICES);
         Layout values = try layout_of(d, output, model.MAX_VERTICES);
         usize per_key = kind == "CUBICSPLINE" ? 3 : 1;
+        // weights: one scalar per morph target in each key, as many as the values hold
+        bool scalar = match (what) {
+            Weights => true,
+            _ => false,
+        };
+        usize groups = times.count * per_key;
         usize width = match (what) {
             Rotation => 4,
+            Weights => groups > 0 && values.count % groups == 0 ? values.count / groups : 0,
             _ => 3,
         };
-        if (times.components != 1 || times.type != 5126 || times.count == 0 || values.components != width
-                || times.count > values.count / per_key || values.count != times.count * per_key) {
+        usize per_value = scalar ? 1 : width;
+        if (times.components != 1 || times.type != 5126 || times.count == 0 || values.components != per_value || width == 0
+                || width > 256 || times.count > values.count / per_key || values.count != groups * (scalar ? width : 1)) {
             return err(damaged("glTF: the times and values of a sampler do not match"));
         }
         mut f32[] t = arena.alloc_slice(f32, times.count);
@@ -544,11 +612,11 @@ model.Animation!model.ModelError read_animation(Arena* arena, Document d, json.V
                 return err(damaged("glTF: times of a sampler that do not increase"));
             }
         }
-        mut f32[] v = arena.alloc_slice(f32, values.count * width);
+        mut f32[] v = arena.alloc_slice(f32, values.count * per_value);
         for (usize i in 0..values.count) {
-            for (usize k in 0..width) {
+            for (usize k in 0..per_value) {
                 f32 x = component(values, i, k);
-                v[i * width + k] = x == x ? x : 0.0;
+                v[i * per_value + k] = x == x ? x : 0.0;
             }
         }
         duration = max(duration, t[t.len - 1]);
@@ -1403,6 +1471,87 @@ test "a skin and an animation" {
     });
     str missing = text.replace(&arena, doc, "\"joints\": [0, 1]", "\"joints\": [0, 7]");
     assert(match (decode(&arena, bytes_of(missing))) {
+        ok(read) => false,
+        err(e) => true,
+    });
+}
+
+test "morph targets, their weights and the channels that animate them" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Bytes* b = arena.new(Bytes, &arena);
+    f32[9] positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    for (f32 x in positions) {
+        b.f(x);  // 0: 36 bytes
+    }
+    for (i32 i in [0, 1, 2]) {
+        b.u16(i as ui32);  // 36: 6 bytes
+    }
+    b.u16(0);  // to 44
+    f32[9] lift = [0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0];
+    for (f32 x in lift) {
+        b.f(x);  // 44: the target moves the second vertex 2 up, 36 bytes
+    }
+    b.f(0.0);
+    b.f(1.0);  // 80: times
+    b.f(0.0);
+    b.f(1.0);  // 88: the weight of the target at each time
+    str uri = joined(&arena, "data:application/octet-stream;base64,", base64.encode(&arena, b.out.items()));
+    mut str[14] parts = [
+        "{\"asset\": {\"version\": \"2.0\"}, \"buffers\": [{\"uri\": \"", uri, "\", \"byteLength\": 96}], ",
+        "\"bufferViews\": [{\"buffer\": 0, \"byteOffset\": 0, \"byteLength\": 96}], ",
+        "\"accessors\": [{\"bufferView\": 0, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 36, \"componentType\": 5123, \"count\": 3, \"type\": \"SCALAR\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 44, \"componentType\": 5126, \"count\": 3, \"type\": \"VEC3\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 80, \"componentType\": 5126, \"count\": 2, \"type\": \"SCALAR\"}, ",
+        "{\"bufferView\": 0, \"byteOffset\": 88, \"componentType\": 5126, \"count\": 2, \"type\": \"SCALAR\"}], ",
+        "\"meshes\": [{\"primitives\": [{\"attributes\": {\"POSITION\": 0}, \"indices\": 1, \"targets\": [{\"POSITION\": 2}]}], ",
+        "\"weights\": [0.25], \"extras\": {\"targetNames\": [\"lift\"]}}], ",
+        "\"nodes\": [{\"name\": \"face\", \"mesh\": 0}], ",
+        "\"animations\": [{\"name\": \"raise\", \"samplers\": [{\"input\": 3, \"output\": 4}], ",
+        "\"channels\": [{\"sampler\": 0, \"target\": {\"node\": 0, \"path\": \"weights\"}}]}]}",
+    ];
+    str doc = text.join(&arena, parts[0..14], "");
+    model.Model m = match (decode(&arena, bytes_of(doc))) {
+        ok(read) => read,
+        err(e) => {
+            io.print("{}", model.message(e));
+            assert(false);
+            return;
+        },
+    };
+    model.Mesh face = m.meshes[0];
+    model.Morph[] morphs = match (face.morphs) {
+        some(list) => list,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(morphs.len == 1 && morphs[0].name == "lift" && morphs[0].positions[4] == 2.0 && morphs[0].normals.len == 0);
+    assert(match (face.weights) {
+        some(w) => w.len == 1 && w[0] == 0.25,
+        none => false,
+    });
+    mut model.Vertex[] moved = arena.alloc_slice(model.Vertex, 3);
+    mut f32[1] half = [0.5];
+    model.morph(face, half[0..1], moved);
+    assert(moved[1].position[1] == 1.0 && moved[0].position[1] == 0.0 && moved[2].position[1] == 1.0);
+    model.Channel c = match (m.animation("raise")) {
+        some(a) => a.channels[0],
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(c.node == 0 && c.values.len == 2 && c.values[1] == 1.0);
+    assert(match (c.target) {
+        Weights => true,
+        _ => false,
+    });
+    // a target of the wrong count
+    str short = text.replace(&arena, doc, "\"byteOffset\": 44, \"componentType\": 5126, \"count\": 3", "\"byteOffset\": 44, \"componentType\": 5126, \"count\": 2");
+    assert(match (decode(&arena, bytes_of(short))) {
         ok(read) => false,
         err(e) => true,
     });

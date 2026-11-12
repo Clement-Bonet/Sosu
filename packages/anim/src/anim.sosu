@@ -403,13 +403,16 @@ pub class Clip {
     pub str name;
     pub f32 duration;
     Track[] tracks;
+    Track[] morphs;  // the weights of morph targets: `joint` is the node of the meshes
     linear.Transform[] rest;
     vec.Vec<Event>* events;
 
-    void init(keeps Arena* arena, keeps str name, f32 duration, keeps Track[] tracks, keeps linear.Transform[] rest) {
+    void init(keeps Arena* arena, keeps str name, f32 duration, keeps Track[] tracks, keeps Track[] morphs,
+            keeps linear.Transform[] rest) {
         self.name = name;
         self.duration = duration;
         self.tracks = tracks;
+        self.morphs = morphs;
         self.rest = rest;
         events = vec.new<Event>(arena);
     }
@@ -444,9 +447,32 @@ pub class Clip {
                 Rotation => {
                     x.rotation = sample_quat(k, t);
                 },
+                Weights => { },
             }
             o[k.joint] = x;
         }
+    }
+
+    // The weights of the morph targets of the meshes of the node `node` at `t`, into `out` (one per
+    // target); false when the clip does not animate them (`out` left as it is).
+    pub bool weights_at(usize node, f32 t, f32[] out) {
+        mut f32[] o = out;
+        for (Track k in morphs) {
+            if (k.joint != node || k.times.len == 0) {
+                continue;
+            }
+            usize per = match (k.mode) {
+                Hermite => 3,
+                _ => 1,
+            };
+            usize width = k.values.len / (k.times.len * per);
+            Where w = locate(k.times, t);
+            for (usize c in 0..min(width, o.len)) {
+                o[c] = component_at(k, w, c, width);
+            }
+            return true;
+        }
+        return false;
     }
 
     // The translation of `joint` at `t`, or its rest.
@@ -550,7 +576,16 @@ linear.Quat sample_quat(Track k, f32 t) {
 // left out).
 pub Clip* clip(keeps Arena* arena, keeps Skeleton s, keeps model.Animation animation) {
     vec.Vec<Track>* tracks = vec.new<Track>(arena);
+    vec.Vec<Track>* morphs = vec.new<Track>(arena);
     for (model.Channel c in animation.channels) {
+        bool weights = match (c.target) {
+            Weights => true,
+            _ => false,
+        };
+        if (weights) {
+            morphs.push(Track{ joint: c.node, target: c.target, mode: c.mode, times: c.times, values: c.values });
+            continue;
+        }
         match (s.joint_of_node(c.node)) {
             some(j) => {
                 tracks.push(Track{ joint: j, target: c.target, mode: c.mode, times: c.times, values: c.values });
@@ -558,7 +593,7 @@ pub Clip* clip(keeps Arena* arena, keeps Skeleton s, keeps model.Animation anima
             none => { },
         }
     }
-    return arena.new(Clip, arena, animation.name, animation.duration, tracks.items(), s.rest);
+    return arena.new(Clip, arena, animation.name, animation.duration, tracks.items(), morphs.items(), s.rest);
 }
 
 // ---- Machines ----
@@ -656,6 +691,10 @@ pub class Machine {
     Pose scratch_a;
     Pose scratch_b;
     Pose scratch_c;
+    mut f32 mixed;  // the share of the state faded to, at the last advance (0 without a fade)
+    vec.Vec<f32>* morph_base;  // for `morph_weights`: the weights given, one clip's, their sum
+    vec.Vec<f32>* morph_one;
+    vec.Vec<f32>* morph_sum;
 
     void init(keeps Arena* arena, keeps Skeleton skeleton) {
         self.arena = arena;
@@ -679,6 +718,10 @@ pub class Machine {
         scratch_a = rest_pose(arena, skeleton);
         scratch_b = rest_pose(arena, skeleton);
         scratch_c = rest_pose(arena, skeleton);
+        mixed = 0.0;
+        morph_base = vec.new<f32>(arena);
+        morph_one = vec.new<f32>(arena);
+        morph_sum = vec.new<f32>(arena);
     }
 
     // The parameter named `name`, made on first use (0, false, not triggered).
@@ -1009,6 +1052,7 @@ pub class Machine {
                 next = -1;
             }
         }
+        mixed = next >= 0 ? mixing : 0.0;
         if (root_motion && skeleton.order.len > 0) {
             // the root stays over its rest place: the program moves the character by `root_delta`
             usize root = skeleton.order[0];
@@ -1017,6 +1061,65 @@ pub class Machine {
             r.position = linear.vec3(skeleton.rest[root].position.x, r.position.y, skeleton.rest[root].position.z);
             o[root] = r;
         }
+    }
+
+    // The weights of the morph targets of the meshes of the node `node` at the last `advance`, blended
+    // as the pose is: by the weights of the points of a blend tree, and across a fade. `out` holds
+    // the weights to start from (those of the mesh, or of the last frame): a clip that does not
+    // animate them counts with those. False, and `out` left as it is, when no clip playing animates
+    // them.
+    pub bool morph_weights(usize node, f32[] out) {
+        mut f32[] o = out;
+        usize n = o.len;
+        while (morph_base.len() < n) {
+            morph_base.push(0.0);
+            morph_one.push(0.0);
+            morph_sum.push(0.0);
+        }
+        for (usize i in 0..n) {
+            morph_base.set(i, o[i]);
+            morph_sum.set(i, 0.0);
+        }
+        if (states.len() == 0) {
+            return false;
+        }
+        mut bool any = add_morphs(states.items()[current], phase, 1.0 - mixed, node, n);
+        if (next >= 0) {
+            bool faded = add_morphs(states.items()[next as usize], next_phase, mixed, node, n);
+            any = any || faded;
+        }
+        if (any) {
+            for (usize i in 0..n) {
+                o[i] = morph_sum.items()[i];
+            }
+        }
+        return any;
+    }
+
+    // The weights of the clips of a state at `p`, by the weights of its points and by `weight`,
+    // added to `morph_sum`; true when one of them animates `node`.
+    bool add_morphs(StateData d, f32 p, f32 weight, usize node, usize n) {
+        mut bool any = false;
+        if (weight <= 0.0) {
+            return false;
+        }
+        for (usize i in 0..d.points.len) {
+            f32 w = d.w[i] * weight;
+            if (w <= 0.0) {
+                continue;
+            }
+            for (usize k in 0..n) {
+                morph_one.set(k, morph_base.items()[k]);
+            }
+            Clip* c = d.points[i].clip;
+            if (c.weights_at(node, p * c.duration, morph_one.items()[0..n])) {
+                any = true;
+            }
+            for (usize k in 0..n) {
+                morph_sum.set(k, morph_sum.items()[k] + w * morph_one.items()[k]);
+            }
+        }
+        return any;
     }
 
     // The pose of the last `advance`.
@@ -1372,4 +1475,68 @@ test "a joint looks at a target, within its angle" {
     linear.Vec3 d = where_is(&arena, s, q, 2).sub(linear.vec3(0.0, -1.0, 0.0));
     assert(abs(angle_between(d, linear.vec3(0.0, -1.0, 0.0)) - 0.3) < 0.001);
     assert(between(linear.vec3(1.0, 0.0, 0.0), linear.vec3(-1.0, 0.0, 0.0)).rotate(linear.vec3(1.0, 0.0, 0.0)).near(linear.vec3(-1.0, 0.0, 0.0), 0.0001));
+}
+
+test "the weights of morph targets in a clip" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    model.Model m = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, m);
+    // the body (node 4) has two targets: the first from 0 to 1, the second from 1 to 0, in a second
+    mut f32[2] times = [0.0, 1.0];
+    mut f32[4] values = [0.0, 1.0, 1.0, 0.0];
+    mut model.Channel[] channels = arena.alloc_slice(model.Channel, 1);
+    channels[0] = model.Channel{ node: 4, target: model.Target.Weights, mode: curve.Interpolation.Linear,
+            times: floats(&arena, times[0..2]), values: floats(&arena, values[0..4]) };
+    Clip* smile = clip(&arena, s, model.Animation{ name: "smile", channels: channels, duration: 1.0 });
+    mut f32[] w = arena.alloc_slice(f32, 2);
+    assert(smile.weights_at(4, 0.25, w) && abs(w[0] - 0.25) < 0.0001 && abs(w[1] - 0.75) < 0.0001);
+    assert(!smile.weights_at(3, 0.25, w));
+    // the joints are not moved by it
+    Pose p = rest_pose(&arena, s);
+    smile.sample(p, 0.5);
+    assert(p.joints[1].position.near(linear.vec3(0.0, 1.0, 0.0), 0.0001));
+}
+
+test "a machine blends the weights of morph targets" {
+    mut Arena arena = Arena.new(128 * KB);
+    defer arena.free();
+    model.Model m = rig(&arena);
+    Skeleton s = rig_skeleton(&arena, m);
+    // smile: the first target from 0 to 1 in a second; blink: the second held at 1
+    mut f32[2] times = [0.0, 1.0];
+    mut f32[4] rising = [0.0, 0.0, 1.0, 0.0];
+    mut f32[4] closed = [0.0, 1.0, 0.0, 1.0];
+    mut model.Channel[] a = arena.alloc_slice(model.Channel, 1);
+    a[0] = model.Channel{ node: 4, target: model.Target.Weights, mode: curve.Interpolation.Linear,
+            times: floats(&arena, times[0..2]), values: floats(&arena, rising[0..4]) };
+    mut model.Channel[] b = arena.alloc_slice(model.Channel, 1);
+    b[0] = model.Channel{ node: 4, target: model.Target.Weights, mode: curve.Interpolation.Linear,
+            times: floats(&arena, times[0..2]), values: floats(&arena, closed[0..4]) };
+    Clip* smile = clip(&arena, s, model.Animation{ name: "smile", channels: a, duration: 1.0 });
+    Clip* blink = clip(&arena, s, model.Animation{ name: "blink", channels: b, duration: 1.0 });
+    Clip* still = clip(&arena, s, model.Animation{ name: "still", channels: arena.alloc_slice(model.Channel, 0), duration: 1.0 });
+    Machine* mm = machine(&arena, s);
+    State smiling = mm.state("smile", smile);
+    State blinking = mm.state("blink", blink);
+    State standing = mm.state("still", still);
+    mm.transition(smiling, blinking, when("blink", Compare.IsTrue, 0.0), 0.4);
+    mm.transition(blinking, standing, when("still", Compare.IsTrue, 0.0), 0.0);
+    mut f32[] w = arena.alloc_slice(f32, 2);
+    mm.advance(0.5);
+    assert(mm.morph_weights(4, w) && abs(w[0] - 0.5) < 0.0001 && abs(w[1]) < 0.0001);
+    assert(!mm.morph_weights(3, w));  // another node: left as it is
+    // a fade of 0.4 s, halfway: half of each
+    mm.set_bool("blink", true);
+    mm.advance(0.2);
+    assert(mm.fading() && mm.morph_weights(4, w));
+    assert(abs(w[0] - 0.5 * 0.7) < 0.0001 && abs(w[1] - 0.5) < 0.0001);
+    mm.advance(0.2);
+    assert(!mm.fading() && mm.morph_weights(4, w) && abs(w[0]) < 0.0001 && abs(w[1] - 1.0) < 0.0001);
+    // a state whose clip does not animate them: false, the weights given kept
+    mm.set_bool("still", true);
+    mm.advance(0.1);
+    w[0] = 0.3;
+    w[1] = 0.6;
+    assert(!mm.morph_weights(4, w) && w[0] == 0.3 && w[1] == 0.6);
 }
