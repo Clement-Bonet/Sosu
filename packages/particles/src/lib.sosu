@@ -1,4 +1,5 @@
 // particles: systems of particles (spec §8.2). Programs import `particles.particles`, and
-// `particles.draw` to draw them.
+// `particles.draw` to draw them; `particles.compute` simulates and draws a system on the GPU.
 import particles.particles;
 import particles.draw;
+import particles.compute;

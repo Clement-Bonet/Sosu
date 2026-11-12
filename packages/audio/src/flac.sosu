@@ -1,0 +1,33 @@
+// audio.flac: FLAC files (native FLAC, not in Ogg), read by dr_flac (dr_libs, public domain or MIT
+// No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by
+// native/dr.c, which checks the CRC of its frames. Every allocation of the decoder comes from
+// `coded.MEMORY` bytes of the arena: a file that asks for more gives `TooLarge`, and the samples
+// decoded stop at `audio.MAX_SAMPLES`. The CI fuzzes it, but it is C: a file from an unknown source
+// is still safer read in a process of its own.
+import std.io;
+import audio.audio;
+import audio.coded;
+
+// Whether `data` starts as a FLAC file: "fLaC".
+pub bool is_flac(ui8[] data) {
+    return data.len >= 42 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61 && data[3] == 0x43;
+}
+
+// The sound of the FLAC file `data`.
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data) {
+    if (!is_flac(data)) {
+        return err(audio.AudioError.UnknownFormat);
+    }
+    return coded.decode(arena, coded.Codec.Flac, data);
+}
+
+// The sound of the FLAC file at `path`.
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(audio.AudioError.Unreadable);
+        },
+    };
+    return decode(arena, data);
+}

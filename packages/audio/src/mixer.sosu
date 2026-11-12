@@ -7,7 +7,11 @@
 // through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may
 // send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall
 // (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for
-// each channel.
+// each channel. A mixer of 6 channels gives 5.1, of 8 channels 7.1, in the order of SDL (front left,
+// front right, center, LFE, back left, back right, then side left and side right): a voice given a
+// direction (`set_direction`) is placed between the two speakers around it, with equal power; one
+// without is placed by its panning over the front, a stereo sound to the front left and right. The
+// LFE channel is left silent: the system makes it from the others when it wants it.
 import std.math;
 import std.vec;
 import audio.audio;
@@ -31,9 +35,11 @@ struct Voice {
     mut f32 volume;
     mut f32 pan;
     mut bool looping;
-    mut f32 left;  // the gains of the last frame mixed
-    mut f32 right;
+    mut f32[8] last_l;  // the gains of the last frame mixed, from the left and the right of the sound,
+    mut f32[8] last_r;  // to each channel of the mixer
     mut bool started;
+    mut bool directed;  // placed by `angle` rather than by `pan`
+    mut f32 angle;
     mut f32 cutoff;  // Hz of the low-pass filter, 0 for none
     mut f32 low_l;   // what the filter holds, by channel
     mut f32 low_r;
@@ -72,7 +78,56 @@ f32[2] gains(i32 channels, f32 volume, f32 pan) {
     return [volume * min(1.0, 1.0 - p), volume * min(1.0, 1.0 + p)];
 }
 
-// The sound of `channels` channels (1 or 2) at `rate` frames per second, from its voices.
+// The direction of the speaker `c` of a mixer of 5.1 (6 channels) or 7.1 (8), in degrees: 0 ahead,
+// 90 right, as ITU-R BS.775 places them; 999 for the LFE channel, which is not placed.
+f32 speaker_at(i32 channels, usize c) {
+    mut f32[8] five = [-30.0, 30.0, 0.0, 999.0, -110.0, 110.0, 999.0, 999.0];
+    mut f32[8] seven = [-30.0, 30.0, 0.0, 999.0, -150.0, 150.0, -90.0, 90.0];
+    return channels == 8 ? seven[c] : five[c];
+}
+
+// The gains of the speakers of a mixer of 5.1 or 7.1 for a sound from `angle` (radians, 0 ahead,
+// toward +right): the two speakers around it, with equal power, the others silent.
+pub f32[8] speaker_gains(i32 channels, f32 angle) {
+    mut f32[8] g = [0.0; 8];
+    f32 degrees = math.fmod((angle * 57.29578) as f64 + 540.0, 360.0) as f32 - 180.0;  // -180..180
+    usize n = min(channels as usize, 8);
+    for (usize i in 0..n) {
+        f32 a = speaker_at(channels, i);
+        if (a > 900.0) {
+            continue;
+        }
+        // the next speaker turning right from `i`
+        mut usize next = i;
+        mut f32 gap = 1000.0;
+        for (usize j in 0..n) {
+            f32 b = speaker_at(channels, j);
+            if (j == i || b > 900.0) {
+                continue;
+            }
+            f32 d = math.fmod((b - a) as f64 + 360.0, 360.0) as f32;
+            if (d > 0.0 && d < gap) {
+                gap = d;
+                next = j;
+            }
+        }
+        f32 from = math.fmod((degrees - a) as f64 + 360.0, 360.0) as f32;
+        if (from < gap) {
+            f32 t = from / gap;
+            if (t <= 0.0) {
+                g[i] = 1.0;
+            } else {
+                g[i] = math.cos((t * 1.5707964) as f64) as f32;
+                g[next] = math.sin((t * 1.5707964) as f64) as f32;
+            }
+            return g;
+        }
+    }
+    return g;
+}
+
+// The sound of `channels` channels (1, 2, 6 for 5.1 or 8 for 7.1) at `rate` frames per second, from
+// its voices.
 pub class Mixer {
     pub i32 rate;
     pub i32 channels;
@@ -85,7 +140,7 @@ pub class Mixer {
     mut f32 damping;
 
     void init(keeps Arena* arena, i32 rate, i32 channels)
-        requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2)
+        requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2 || channels == 6 || channels == 8)
     {
         self.rate = rate;
         self.channels = channels;
@@ -141,9 +196,11 @@ pub class Mixer {
             volume: how.volume,
             pan: how.pan,
             looping: how.looping,
-            left: 0.0,
-            right: 0.0,
+            last_l: [0.0; 8],
+            last_r: [0.0; 8],
             started: false,
+            directed: false,
+            angle: 0.0,
             cutoff: 0.0,
             low_l: 0.0,
             low_r: 0.0,
@@ -183,6 +240,18 @@ pub class Mixer {
         match (find(id)) {
             some(voice) => {
                 voice.pan = pan;
+            },
+            none => { },
+        }
+    }
+
+    // Where the sound `id` comes from, for a mixer of 5.1 or 7.1: `angle` in radians, 0 ahead, pi/2
+    // right, pi behind; a stereo sound is heard as one. A mixer of 1 or 2 channels uses its panning.
+    pub void set_direction(ui32 id, f32 angle) {
+        match (find(id)) {
+            some(voice) => {
+                voice.directed = true;
+                voice.angle = angle;
             },
             none => { },
         }
@@ -316,12 +385,50 @@ pub class Mixer {
                 }
                 side[c] = sum;
             }
+            usize n = channels as usize;
             if (channels == 1) {
                 out[f] += (side[0] + side[1]) * 0.5;
             } else {
-                out[2 * f] += side[0];
-                out[2 * f + 1] += side[1];
+                out[n * f] += side[0];
+                out[n * f + 1] += side[1];
             }
+            // around the listener: the back (and the sides) ring too, a little less
+            if (channels >= 6) {
+                out[n * f + 4] += side[0] * 0.7;
+                out[n * f + 5] += side[1] * 0.7;
+            }
+            if (channels == 8) {
+                out[n * f + 6] += side[0] * 0.7;
+                out[n * f + 7] += side[1] * 0.7;
+            }
+        }
+    }
+
+    // The gains of `v` now, from the left and from the right of its sound, to each channel.
+    void targets(Voice* v, audio.Sound s, f32[] to_l, f32[] to_r) {
+        mut f32[] tl = to_l;
+        mut f32[] tr = to_r;
+        for (usize c in 0..8) {
+            tl[c] = 0.0;
+            tr[c] = 0.0;
+        }
+        if (channels == 1) {
+            tl[0] = v.volume * 0.5;
+            tr[0] = v.volume * 0.5;
+            return;
+        }
+        if (channels == 2 || (!v.directed && s.channels != 1)) {
+            f32[2] g = gains(s.channels, v.volume, v.pan);
+            tl[0] = g[0];
+            tr[1] = g[1];
+            return;
+        }
+        f32 a = v.directed ? v.angle : max(-1.0, min(1.0, v.pan)) * 0.5235988;  // the front, 30 degrees each side
+        f32[8] g = speaker_gains(channels, a);
+        for (usize c in 0..8) {
+            // a mono sound reads its left twice: take it once
+            tl[c] = s.channels == 1 ? v.volume * g[c] : v.volume * g[c] * 0.5;
+            tr[c] = s.channels == 1 ? 0.0 : v.volume * g[c] * 0.5;
         }
     }
 
@@ -332,11 +439,14 @@ pub class Mixer {
         if (length == 0) {
             return false;
         }
-        f32[2] target = channels == 1 ? [v.volume, v.volume] : gains(s.channels, v.volume, v.pan);
+        usize n = channels as usize;
+        mut f32[8] target_l = [0.0; 8];
+        mut f32[8] target_r = [0.0; 8];
+        targets(v, s, target_l[0..8], target_r[0..8]);
         // the share of the input the filter takes at each sample: 1 - e^(-2π fc / rate)
         f32 k = v.cutoff > 0.0 ? 1.0 - math.exp(-6.283185307 * v.cutoff as f64 / rate as f64) as f32 : 1.0;
-        f32 left0 = v.started ? v.left : target[0];
-        f32 right0 = v.started ? v.right : target[1];
+        f32[8] start_l = v.started ? v.last_l : target_l;
+        f32[8] start_r = v.started ? v.last_r : target_r;
         v.started = true;
         for (usize f in 0..frames) {
             if (v.position >= length as f64) {
@@ -346,8 +456,6 @@ pub class Mixer {
                 v.position = math.fmod(v.position, length as f64);
             }
             f32 t = (f + 1) as f32 / frames as f32;
-            f32 gl = left0 + (target[0] - left0) * t;
-            f32 gr = right0 + (target[1] - right0) * t;
             usize at = v.position as usize;
             f32 frac = (v.position - at as f64) as f32;
             usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
@@ -359,19 +467,18 @@ pub class Mixer {
                 l = v.low_l;
                 r = v.low_r;
             }
-            if (channels == 1) {
-                out[f] += (gl * l + gr * r) * 0.5;
-            } else {
-                out[2 * f] += gl * l;
-                out[2 * f + 1] += gr * r;
+            for (usize c in 0..n) {
+                f32 gl = start_l[c] + (target_l[c] - start_l[c]) * t;
+                f32 gr = start_r[c] + (target_r[c] - start_r[c]) * t;
+                out[n * f + c] += gl * l + gr * r;
             }
             if (v.send > 0.0) {
-                wet.set(f, wet.items()[f] + (gl * l + gr * r) * 0.5 * v.send);
+                wet.set(f, wet.items()[f] + v.volume * (l + r) * 0.5 * v.send);
             }
             v.position += v.step;
         }
-        v.left = target[0];
-        v.right = target[1];
+        v.last_l = target_l;
+        v.last_r = target_r;
         return v.looping || v.position < length as f64;
     }
 }

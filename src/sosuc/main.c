@@ -570,6 +570,12 @@ static void append(char **text, const char *fmt, const char *value) {
 
 /* The folders of headers and the defines of the packages' C files (spec §9.1). */
 static void add_source_flags(Command *command, const Links *links, bool msvc) {
+    /* -fwrapv: C written elsewhere (stb_vorbis, dr_libs, Box2D, ufbx...) may add or multiply the
+       numbers of a hostile file in `int` without checks; the overflow wraps, a wrong number, rather
+       than being undefined, which the optimizer may turn into anything (MSVC has no such option).
+       Where one command compiles the generated C with them (a shared library, Android), it gets it
+       too: what Sosu gives in release, modulo 2^n arithmetic (spec §5.1). */
+    if (!msvc) command_add(command, "-fwrapv");
     for (size_t i = 0; i < links->includes.count; i++) {
         char *native = shell_path(links->includes.items[i]);
         command_addf(command, msvc ? "/I%s" : "-I%s", native);

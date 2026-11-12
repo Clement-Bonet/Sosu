@@ -1,6 +1,6 @@
 // assets.assets: the files of a game loaded in the background (spec §8.2). `texture`, `sound`,
 // `model` and `shader` give a handle at once, the same for the same path; the threads of the store
-// read and decode textures (PNG, JPEG) and sounds (WAV, Ogg Vorbis), and send their pixels and
+// read and decode textures (PNG, JPEG) and sounds (WAV, Ogg Vorbis, MP3, FLAC), and send their pixels and
 // samples back in pieces of 4 KB, since threads share no memory (§5.6). Each frame, `update` takes
 // what came, within a budget of milliseconds, sends the textures to the GPU, and reads one model or
 // shader if there is time. `state` says where an asset is; `wait` blocks until it is there. With
@@ -19,6 +19,8 @@ import image.jpeg;
 import audio.audio;
 import audio.wav;
 import audio.ogg;
+import audio.mp3;
+import audio.flac;
 import model.model;
 import model.gltf;
 import model.obj;
@@ -171,6 +173,12 @@ i32 work(Arena* arena, Worker w) uses io, threads {
                     } : ogg.is_ogg(bytes) ? match (ogg.decode(&scratch, bytes)) {
                         ok(s) => some(s),
                         err(e) => none,
+                    } : flac.is_flac(bytes) ? match (flac.decode(&scratch, bytes)) {
+                        ok(s) => some(s),
+                        err(e) => none,
+                    } : mp3.is_mp3(bytes) ? match (mp3.decode(&scratch, bytes)) {
+                        ok(s) => some(s),
+                        err(e) => none,
                     } : none;
                     match (decoded) {
                         some(sound) => {
@@ -189,7 +197,7 @@ i32 work(Arena* arena, Worker w) uses io, threads {
                             w.results.send(Message.Done(j.slot, j.version));
                         },
                         none => {
-                            fail(w, j, "not a sound of WAV or Ogg Vorbis that decodes");
+                            fail(w, j, "not a sound of WAV, Ogg Vorbis, MP3 or FLAC that decodes");
                         },
                     }
                 }
@@ -329,7 +337,7 @@ pub class Assets {
         return ask(path, TEXTURE);
     }
 
-    // A sound (WAV, Ogg Vorbis).
+    // A sound (WAV, Ogg Vorbis, MP3, FLAC).
     pub Handle sound(keeps str path) uses io, threads {
         return ask(path, SOUND);
     }

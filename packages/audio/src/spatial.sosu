@@ -4,7 +4,9 @@
 // velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click.
 // The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d).
 // A source behind the listener is a little duller, and one the program says hidden
-// (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still.
+// (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still. The place rings
+// (`set_reverb`), or the zones of reverberation the listener walks through (`add_zone`): a cave, a
+// hall, a corridor, each a box, which fade into one another over `blend` meters.
 import std.math;
 import std.vec;
 import math.linear;
@@ -52,6 +54,36 @@ struct SourceData {
     mut Heard heard;
 }
 
+// A zone of reverberation: a box of the world, from its corner `low` to `high`, and its room. The
+// listener inside hears it fully; outside, it fades over `blend` meters.
+pub struct Zone {
+    pub linear.Vec3 low;
+    pub linear.Vec3 high;
+    pub f32 blend = 2.0;
+    pub f32 amount = 0.6;   // how much it rings, from 0 to 1
+    pub f32 size = 0.5;     // the room of the mixer: 0 small, 1 a hall
+    pub f32 damping = 0.5;  // 0 bright, 1 dull walls
+}
+
+// The reverberation heard where the listener is.
+pub struct Reverb {
+    pub f32 amount;
+    pub f32 size;
+    pub f32 damping;
+}
+
+// How much the listener at `at` is in `z`: 1 inside, down to 0 at `blend` meters out.
+pub f32 inside(Zone z, linear.Vec3 at) {
+    f32 dx = max(max(z.low.x - at.x, at.x - z.high.x), 0.0);
+    f32 dy = max(max(z.low.y - at.y, at.y - z.high.y), 0.0);
+    f32 dz = max(max(z.low.z - at.z, at.z - z.high.z), 0.0);
+    f32 d = math.sqrt((dx * dx + dy * dy + dz * dz) as f64) as f32;
+    if (d <= 0.0) {
+        return 1.0;
+    }
+    return z.blend > 0.0 ? clamp(1.0 - d / z.blend, 0.0, 1.0) : 0.0;
+}
+
 // The speed of sound, m/s.
 pub f32 SOUND = 343.0;
 
@@ -86,7 +118,9 @@ pub class Space {
     mut linear.Vec3 position;
     mut linear.Quat rotation;
     mut linear.Vec3 velocity;
-    mut f32 zone;  // the reverberation of the place: 0 outside, 1 a cave
+    mut Reverb outside;  // that of `set_reverb`, out of every zone
+    mut Reverb now;      // that of the last `update`
+    vec.Vec<Zone>* zones;
 
     void init(keeps Arena* arena, keeps mixer.Mixer* mix) {
         self.mix = mix;
@@ -94,14 +128,67 @@ pub class Space {
         position = linear.vec3(0.0, 0.0, 0.0);
         rotation = linear.identity_quat();
         velocity = linear.vec3(0.0, 0.0, 0.0);
-        zone = 0.0;
+        outside = Reverb{ amount: 0.0, size: 0.5, damping: 0.5 };
+        now = outside;
+        zones = vec.new<Zone>(arena);
     }
 
     // How much the place rings, from 0 (outside: the default) to 1 (a cave), and the room of the
-    // reverberation of the mixer: far sources are heard more through it than near ones.
+    // reverberation of the mixer: far sources are heard more through it than near ones. With
+    // zones, it is what is heard out of all of them.
     pub void set_reverb(f32 amount, f32 size, f32 damping) {
-        zone = clamp(amount, 0.0, 1.0);
+        outside = Reverb{ amount: clamp(amount, 0.0, 1.0), size: clamp(size, 0.0, 1.0), damping: clamp(damping, 0.0, 1.0) };
+        now = outside;
         mix.set_room(size, damping);
+    }
+
+    // A zone of reverberation, from the next `update`; its index.
+    pub usize add_zone(Zone z) {
+        zones.push(z);
+        return zones.len() - 1;
+    }
+
+    // The zone `index` changed (a door closed: its amount lowered).
+    pub void set_zone(usize index, Zone z) {
+        if (index < zones.len()) {
+            zones.set(index, z);
+        }
+    }
+
+    pub void clear_zones() {
+        zones.clear();
+    }
+
+    // The reverberation of the last `update`: that of the zones around the listener, by how much it
+    // is in each (zones that overlap share), and that of `set_reverb` for the rest.
+    pub Reverb reverb() {
+        return now;
+    }
+
+    void place_reverb() {
+        if (zones.len() == 0) {
+            return;
+        }
+        mut f32 total = 0.0;
+        for (Zone z in zones.items()) {
+            total += inside(z, position);
+        }
+        f32 scale = total > 1.0 ? 1.0 / total : 1.0;
+        f32 rest = 1.0 - min(total, 1.0);
+        mut f32 amount = outside.amount * rest;
+        mut f32 size = outside.size * rest;
+        mut f32 damping = outside.damping * rest;
+        for (Zone z in zones.items()) {
+            f32 w = inside(z, position) * scale;
+            amount += w * clamp(z.amount, 0.0, 1.0);
+            size += w * clamp(z.size, 0.0, 1.0);
+            damping += w * clamp(z.damping, 0.0, 1.0);
+        }
+        Reverb r = Reverb{ amount: amount, size: size, damping: damping };
+        if (r.size != now.size || r.damping != now.damping) {
+            mix.set_room(r.size, r.damping);
+        }
+        now = r;
     }
 
     // Where the listener is (a camera, the head of the player) and how fast it moves.
@@ -185,6 +272,7 @@ pub class Space {
     // The volume, panning and speed of every source, given to the mixer; the sources whose sound
     // ended are forgotten.
     pub void update() {
+        place_reverb();
         linear.Quat back = rotation.conjugate();
         mut usize i = 0;
         while (i < sources.len()) {
@@ -200,8 +288,10 @@ pub class Space {
             mut f32 pan = 0.0;
             mut f32 speed = p.speed;
             mut f32 cutoff = 0.0;
+            mut f32 angle = 0.0;  // for 5.1 and 7.1: 0 ahead, toward +right
             if (distance > 0.0001) {
                 linear.Vec3 local = back.rotate(to_source);
+                angle = math.atan2(local.x as f64, -local.z as f64) as f32;
                 f32 flat = math.sqrt((local.x * local.x + local.z * local.z) as f64) as f32;
                 if (flat > 0.0001) {
                     pan = clamp(local.x / flat, -1.0, 1.0);
@@ -229,9 +319,12 @@ pub class Space {
             mix.set_lowpass(d.voice, cutoff);
             // the farther, the more of it is heard through the room
             f32 reach = clamp((distance - p.near) / max(p.far - p.near, 0.0001), 0.0, 1.0);
-            mix.set_reverb(d.voice, clamp(p.reverb + zone * (0.3 + 0.7 * reach), 0.0, 1.0));
+            mix.set_reverb(d.voice, clamp(p.reverb + now.amount * (0.3 + 0.7 * reach), 0.0, 1.0));
             mix.set_volume(d.voice, volume);
             mix.set_pan(d.voice, pan);
+            if (mix.channels > 2) {
+                mix.set_direction(d.voice, angle);
+            }
             mix.set_speed(d.voice, max(speed, 0.0001));
             i += 1;
         }
@@ -300,6 +393,71 @@ test "a reverberation rings after the sound" {
         difference += abs(out[2 * f] - out[2 * f + 1]);
     }
     assert(difference > 0.001);
+}
+
+test "zones of reverberation the listener walks through" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 48000, 2);
+    Space* sp = space(&arena, m);
+    sp.set_reverb(0.1, 0.2, 0.0);
+    // a cave from x = 0 to 10, a hall from x = 14 to 30, each fading over 2 m
+    sp.add_zone(Zone{ low: linear.vec3(0.0, -5.0, -5.0), high: linear.vec3(10.0, 5.0, 5.0), amount: 1.0, size: 0.9, damping: 0.6 });
+    sp.add_zone(Zone{ low: linear.vec3(14.0, -5.0, -5.0), high: linear.vec3(30.0, 5.0, 5.0), amount: 0.5, size: 1.0, damping: 0.2 });
+    mut f32[6] at = [-5.0, 5.0, 11.0, 12.0, 20.0, 13.0];
+    mut f32[6] amount = [0.1, 1.0, 0.55, 0.1, 0.5, 0.3];
+    for (usize i in 0..6) {
+        linear.Transform t = linear.Transform{ position: linear.vec3(at[i], 0.0, 0.0), rotation: linear.identity_quat(), scale: linear.vec3(1.0, 1.0, 1.0) };
+        sp.listener(t, linear.vec3(0.0, 0.0, 0.0));
+        sp.update();
+        assert(close(sp.reverb().amount, amount[i], 0.0001));
+    }
+    // in the cave: its room
+    sp.listener(linear.Transform{ position: linear.vec3(5.0, 0.0, 0.0), rotation: linear.identity_quat(), scale: linear.vec3(1.0, 1.0, 1.0) }, linear.vec3(0.0, 0.0, 0.0));
+    sp.update();
+    assert(close(sp.reverb().size, 0.9, 0.0001) && close(sp.reverb().damping, 0.6, 0.0001));
+    // a zone and the place around it share: halfway out of the cave, half of each
+    assert(close(inside(Zone{ low: linear.vec3(0.0, 0.0, 0.0), high: linear.vec3(1.0, 1.0, 1.0) }, linear.vec3(2.0, 0.5, 0.5)), 0.5, 0.0001));
+}
+
+test "5.1 and 7.1: a sound between the two speakers around it" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    // 5.1: front left, right, center, LFE, back left, back right
+    f32[8] ahead = mixer.speaker_gains(6, 0.0);
+    assert(close(ahead[2], 1.0, 0.0001) && close(ahead[0] + ahead[1] + ahead[3] + ahead[4] + ahead[5], 0.0, 0.0001));
+    f32[8] right = mixer.speaker_gains(6, 1.5707964);  // 90 degrees: between 30 and 110
+    assert(close(right[1] * right[1] + right[5] * right[5], 1.0, 0.0001) && right[1] > 0.1 && right[5] > 0.1);
+    f32[8] behind = mixer.speaker_gains(6, 3.1415927);
+    assert(close(behind[4], behind[5], 0.0001) && close(behind[4] * behind[4] * 2.0, 1.0, 0.0001));
+    // 7.1: side right at 90 degrees, alone
+    f32[8] side = mixer.speaker_gains(8, 1.5707964);
+    assert(close(side[7], 1.0, 0.0001) && close(side[1] + side[5], 0.0, 0.0001));
+    // a space of 7.1: a source behind on the left goes to the back left
+    mixer.Mixer* m = mixer.create(&arena, 48000, 8);
+    Space* sp = space(&arena, m);
+    audio.Sound hum = audio.tone(&arena, 48000, 200.0, 0.5, 0.5);
+    sp.play(hum, Placed{ position: linear.vec3(-1.0, 0.0, 1.73), near: 5.0 });  // 150 degrees to the left
+    sp.update();
+    mut f32[] out = arena.alloc_slice(f32, 8 * 4800);
+    m.mix(out);
+    m.mix(out);
+    mut f32[8] energy = [0.0; 8];
+    for (usize f in 0..4800) {
+        for (usize c in 0..8) {
+            energy[c] += out[8 * f + c] * out[8 * f + c];
+        }
+    }
+    for (usize c in 0..8) {
+        assert(c == 4 ? energy[c] > 10.0 : energy[c] < energy[4] * 0.01);
+    }
+    // a stereo sound without a direction: to the front left and right
+    mixer.Mixer* five = mixer.create(&arena, 48000, 6);
+    audio.Sound wide = audio.with_channels(&arena, hum, 2);
+    five.play(wide);
+    mut f32[] o6 = arena.alloc_slice(f32, 6 * 480);
+    five.mix(o6);
+    assert(abs(o6[6 * 100]) > 0.01 && close(o6[6 * 100], o6[6 * 100 + 1], 0.0001) && o6[6 * 100 + 2] == 0.0 && o6[6 * 100 + 4] == 0.0);
 }
 
 test "distance: near, the rolloffs, far" {

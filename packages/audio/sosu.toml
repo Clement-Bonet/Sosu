@@ -1,12 +1,19 @@
 # Sound (spec §8.2): play and record on the devices of the system (SDL3, through `platform`),
-# a mixer of several sounds, resampling, WAV read and written in Sosu, and Ogg Vorbis read by
-# stb_vorbis, given as C sources.
+# a mixer of several sounds, resampling, WAV read and written in Sosu, Ogg Vorbis read by
+# stb_vorbis, given as C sources, and MP3 and FLAC read by dr_mp3 and dr_flac, taken from their
+# repository at a commit, pinned by sosu.lock, never copied here (§9.1).
 [package]
 name = "audio"
 version = "0.1.0"
 
+# dr_libs has no tags of its own libraries: a commit. Its headers only; native/dr.c compiles them.
+[native.dr_libs]
+git = "https://github.com/mackron/dr_libs"
+rev = "f12e197fd462e4c22873fbd70d11b1d2f2c1dc3c"
+include = ["."]
+
 [link]
-c = ["native/ogg.c"]  # includes native/vendor/stb_vorbis.c
+c = ["native/ogg.c", "native/dr.c"]  # ogg.c includes native/vendor/stb_vorbis.c
 
 [dependencies]
 platform = { path = "../platform" }  # SDL3 and its declarations (platform.sdl_c)

@@ -22,6 +22,7 @@ jobs:
           path: |
             build/fuzz_corpus
             build/fuzz_ogg_corpus
+            build/fuzz_coded_corpus
             build/fuzz_manifest_corpus
             build/fuzz_ui_corpus
             build/fuzz_bindgen_corpus
@@ -38,6 +39,10 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: make fuzz-ogg FUZZ_TIME=1800
+      - name: Fuzz the MP3 and FLAC decoders
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-coded FUZZ_TIME=1800
       - name: Fuzz sosu.toml
         if: ${{ !cancelled() }}
         timeout-minutes: 40

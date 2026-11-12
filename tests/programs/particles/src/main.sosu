@@ -1,6 +1,8 @@
 // particles drawn without a window (spec §8.2): a green cube of render3d, a cloud of red light in
 // the open and another behind the cube, drawn into a target of 128 by 128 pixels and read back. The
-// open cloud is red; the one behind the cube is hidden by the depth of the scene.
+// open cloud is red; the one behind the cube is hidden by the depth of the scene. Then systems on the
+// GPU (particles.compute): moved as the processor moves them, onto a floor; thrown at the cube, they
+// bounce off what the scene drew; drawn from their buffer.
 import std.io;
 import math.linear;
 import image.image;
@@ -8,6 +10,7 @@ import gpu.gpu;
 import render3d.render3d;
 import particles.particles;
 import particles.draw;
+import particles.compute;
 
 ui32 SIZE = 128;
 
@@ -71,6 +74,133 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
     return ok();
 }
 
+// Systems simulated by the GPU.
+void!gpu.GpuError run_gpu(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    f32 dt = 1.0 / 60.0;
+    // a fall onto a floor: the same as on the processor, the bounces too
+    particles.Emitter falling = particles.Emitter{
+        rate: 0.0,
+        shape: particles.Shape.Box(linear.vec3(1.0, 0.5, 1.0)),
+        speed: particles.range(0.0, 2.0),
+        life: particles.exactly(10.0),
+        gravity: 1.0,
+        drag: 0.3,
+        wind: linear.vec3(1.0, 0.0, 0.0),
+        planes: some(floor_of(arena)),
+        bounce: 0.5,
+        max: 300,
+        seed: 7
+    };
+    particles.System* cpu = particles.system(arena, falling);
+    compute.GpuSystem* g = try compute.gpu_system(arena, device, falling);
+    cpu.move_to(linear.translation(linear.vec3(0.0, 2.0, 0.0)));
+    g.move_to(linear.translation(linear.vec3(0.0, 2.0, 0.0)));
+    cpu.burst(256);
+    g.burst(256);
+    render3d.Camera camera = render3d.Camera{ position: linear.vec3(0.0, 1.0, 8.0), target: linear.vec3(0.0, 1.0, 0.0) };
+    // the GPU places them at its first step, and moves them from the next
+    for (i32 i in 0..91) {
+        if (i > 0) {
+            cpu.advance(dt);
+        }
+        gpu.Frame frame = try device.commands();
+        g.simulate_for(frame, dt, camera, SIZE, SIZE);
+        try frame.submit_and_wait();
+    }
+    particles.Particle[] a = cpu.particles();
+    particles.Particle[] b = try g.read(arena);
+    mut f32 worst = 0.0;
+    mut f32 lowest = 10.0;
+    for (usize i in 0..min(a.len, b.len)) {
+        worst = max(worst, a[i].position.distance(b[i].position));
+        lowest = min(lowest, b[i].position.y);
+    }
+    io.print("gpu: {} particles, as the processor moves them: {}", b.len, a.len == b.len && worst < 0.01 ? "ok" : "no");
+    io.print("gpu: on the floor: {}", lowest > -0.001 && lowest < 0.05 ? "ok" : "no");
+    if (a.len != b.len || worst >= 0.01 || lowest <= -0.001 || lowest >= 0.05) {
+        io.print("cpu {} gpu {} worst {} lowest {}", a.len, b.len, worst, lowest);
+    }
+    g.close();
+
+    // thrown at the cube of the scene, which they see only through its depth
+    render3d.Renderer* r = try render3d.create(arena, device, render3d.Options{ shadow_size: 256 });
+    r.sun = render3d.Sun{ direction: linear.vec3(0.0, -1.0, -1.0), shadows: false };
+    render3d.Uploaded* box = try r.upload(arena, render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]));
+    mut render3d.Item[1] items = [render3d.item(box, linear.translation(linear.vec3(-2.0, 1.0, 2.0)))];
+    gpu.Texture target = try device.target(SIZE, SIZE);
+    mut f32[2] nearest = [0.0, 0.0];
+    for (usize case_index in 0..2) {
+        compute.GpuSystem* thrown = try compute.gpu_system(arena, device, particles.Emitter{
+            rate: 0.0,
+            shape: particles.Shape.Cone(0.05, 0.2),
+            speed: particles.exactly(4.0),
+            life: particles.exactly(10.0),
+            bounce: 0.3,
+            max: 64,
+            seed: 3
+        });
+        if (case_index == 1) {
+            thrown.collide_with_depth(0.5);
+        }
+        // from (-2, 1, 5), toward -z: the face of the cube at z = 2.5
+        thrown.move_to(linear.translation(linear.vec3(-2.0, 1.0, 5.0)).mul(linear.rotation_x(-1.5707964)));
+        thrown.burst(64);
+        for (i32 i in 0..60) {
+            gpu.Frame frame = try device.commands();
+            r.draw_into(frame, target, camera, items[0..1]);
+            thrown.simulate_for(frame, dt, camera, SIZE, SIZE);
+            try frame.submit_and_wait();
+        }
+        particles.Particle[] list = try thrown.read(arena);
+        mut f32 z = 100.0;
+        for (particles.Particle p in list) {
+            z = min(z, p.position.z);
+        }
+        nearest[case_index] = z;
+        thrown.close();
+    }
+    io.print("gpu: through the cube without the depth: {}", nearest[0] < 2.0 ? "ok" : "no");
+    io.print("gpu: bounced off the cube with the depth: {}", nearest[1] > 2.4 ? "ok" : "no");
+    if (nearest[0] >= 2.0 || nearest[1] <= 2.4) {
+        io.print("nearest z without {} with {}", nearest[0], nearest[1]);
+    }
+
+    // drawn from its buffer: a cloud of red light in the open
+    compute.GpuSystem* light = try compute.gpu_system(arena, device, particles.Emitter{
+        rate: 0.0,
+        speed: particles.exactly(0.0),
+        size: particles.exactly(1.2),
+        life: particles.exactly(10.0),
+        color: linear.vec4(1.0, 0.1, 0.1, 1.0),
+        blending: particles.Blending.Additive,
+        max: 64
+    });
+    light.move_to(linear.translation(linear.vec3(2.0, 1.0, 0.0)));
+    light.burst(40);
+    gpu.Frame frame = try device.commands();
+    r.draw_into(frame, target, camera, items[0..1]);
+    light.simulate_for(frame, dt, camera, SIZE, SIZE);
+    light.draw_into(frame, target, camera, none);
+    try frame.submit_and_wait();
+    image.Image img = try device.read_texture(arena, target);
+    ui32 red = channel(img, camera, linear.vec3(2.0, 1.0, 0.0), 0);
+    io.print("gpu: a cloud drawn from its buffer: {}", red > 150 ? "ok" : "missing");
+    if (red <= 150) {
+        io.print("red {}", red);
+    }
+    light.close();
+    device.release_texture(target);
+    r.release(box);
+    r.close();
+    return ok();
+}
+
+particles.Plane[] floor_of(Arena* arena) {
+    mut particles.Plane[] p = arena.alloc_slice(particles.Plane, 1);
+    p[0] = particles.floor_at(0.0);
+    return p;
+}
+
 i32 main() uses io {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
@@ -83,7 +213,15 @@ i32 main() uses io {
     };
     mut i32 status = 0;
     match (run(&arena, device)) {
-        ok() => { },
+        ok() => {
+            match (run_gpu(&arena, device)) {
+                ok() => { },
+                err(e) => {
+                    io.print("particles on the gpu: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                    status = 1;
+                },
+            }
+        },
         err(e) => {
             io.print("particles: {} ({})", gpu.message(e), gpu.last_error(&arena));
             status = 1;

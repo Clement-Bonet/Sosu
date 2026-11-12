@@ -24,8 +24,11 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [std.time](#stdtime) | The clock and waiting (spec §8), with the effect `time` (spec §7.4), and the dates and times of the calendar (spec §8.2) |
 | [std.vec](#stdvec) | A list of values that grows, in the arena given at its creation (spec §5.4) |
 | [audio.audio](#audioaudio) | A sound in memory, its samples as floats of -1 to 1, interleaved by frame (the left sample, then the right one, for stereo), and the errors of the readers |
+| [audio.coded](#audiocoded) | What audio.mp3 and audio.flac share, the loop that takes the samples of a decoder of dr_libs (native/dr.c) into a `Sound` |
 | [audio.device](#audiodevice) | The sound devices of the system, through SDL3 (`SDL_AudioStream`, the C declarations of platform.sdl_c) |
+| [audio.flac](#audioflac) | FLAC files (native FLAC, not in Ogg), read by dr_flac (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c, which checks the CRC of its frames |
 | [audio.mixer](#audiomixer) | Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly |
+| [audio.mp3](#audiomp3) | MP3 files (MPEG-1, 2 and 2.5, layer III), read by dr_mp3 (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c |
 | [audio.ogg](#audioogg) | Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1) |
 | [audio.resample](#audioresample) | A sound at another rate (44 100 Hz to 48 000, for the device or the mixer) |
 | [audio.spatial](#audiospatial) | Sounds placed in 3D (spec §8.2), over `audio.mixer` |
@@ -1808,6 +1811,35 @@ The part of `s` from frame `start` to `end` (cut to the sound), sharing its samp
 pub Sound part(Sound s, usize start, usize end)
 ```
 
+## audio.coded
+
+What audio.mp3 and audio.flac share, the loop that takes the samples of a decoder of dr_libs (native/dr.c) into a `Sound`. Not for programs: they import audio.mp3 or audio.flac.
+
+### enum `Codec`
+
+```sosu
+pub enum Codec {
+    Mp3,
+    Flac,
+}
+```
+
+### `MEMORY`
+
+The memory a decoder may take: its state, and the buffers of a frame (FLAC: up to 65 535 samples for each of 8 channels).
+
+```sosu
+pub i32 MEMORY = 4194304
+```
+
+### `decode`
+
+The sound of `data`, a file of `codec` already recognized by its first bytes.
+
+```sosu
+pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] data)
+```
+
 ## audio.device
 
 The sound devices of the system, through SDL3 (`SDL_AudioStream`, the C declarations of platform.sdl_c). A `Player` plays the sounds of its mixer, `sounds`: the program calls `update()` often (each frame of a window, or every few milliseconds), which mixes what the device will need next, `ahead_ms` in advance. A `Recorder` gives what a microphone heard since its last `read`. SDL converts the samples to the format, rate and channels of the device; no callback runs on the thread of the sound, so everything stays in the thread of the program.
@@ -1861,7 +1893,7 @@ pub Device[] recording_devices(Arena* arena) uses io
 
 ### struct `Output`
 
-How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner). When the device runs dry between two calls of `update()` close together (a program slower than that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
+How a `Player` opens its device: the mixer runs at `rate` with `channels` (1, 2, 6 for 5.1 or 8 for 7.1: SDL mixes them down to what the device has), and keeps `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner). When the device runs dry between two calls of `update()` close together (a program slower than that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
 
 ```sosu
 pub struct Output
@@ -1907,7 +1939,7 @@ pub class Player
 A player on the device of `output`, or none if it cannot be opened (`last_error` says why).
 
 ```sosu
-pub Player*? open_player(Arena* arena, Output output) uses io requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE && (output.channels == 1 || output.channels == 2) && output.ahead_ms > 0 && output.ahead_ms <= 2000
+pub Player*? open_player(Arena* arena, Output output) uses io requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE && (output.channels == 1 || output.channels == 2 || output.channels == 6 || output.channels == 8) && output.ahead_ms > 0 && output.ahead_ms <= 2000
 ```
 
 ### struct `Input`
@@ -1949,9 +1981,37 @@ A recorder on the device of `input`, or none if it cannot be opened (`last_error
 pub Recorder*? open_recorder(Arena* arena, Input input) uses io requires input.rate >= audio.MIN_RATE && input.rate <= audio.MAX_RATE && input.channels >= 1 && input.channels <= audio.MAX_CHANNELS
 ```
 
+## audio.flac
+
+FLAC files (native FLAC, not in Ogg), read by dr_flac (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c, which checks the CRC of its frames. Every allocation of the decoder comes from `coded.MEMORY` bytes of the arena: a file that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The CI fuzzes it, but it is C: a file from an unknown source is still safer read in a process of its own.
+
+### `is_flac`
+
+Whether `data` starts as a FLAC file: "fLaC".
+
+```sosu
+pub bool is_flac(ui8[] data)
+```
+
+### `decode`
+
+The sound of the FLAC file `data`.
+
+```sosu
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data)
+```
+
+### `load`
+
+The sound of the FLAC file at `path`.
+
+```sosu
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io
+```
+
 ## audio.mixer
 
-Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound. A voice may go through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for each channel.
+Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound. A voice may go through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for each channel. A mixer of 6 channels gives 5.1, of 8 channels 7.1, in the order of SDL (front left, front right, center, LFE, back left, back right, then side left and side right): a voice given a direction (`set_direction`) is placed between the two speakers around it, with equal power; one without is placed by its panning over the front, a stereo sound to the front left and right. The LFE channel is left silent: the system makes it from the others when it wants it.
 
 ### struct `Play`
 
@@ -1966,9 +2026,17 @@ pub struct Play
 - `pub f32 speed = 1.0`
 - `pub bool looping = false`
 
+### `speaker_gains`
+
+The gains of the speakers of a mixer of 5.1 or 7.1 for a sound from `angle` (radians, 0 ahead, toward +right): the two speakers around it, with equal power, the others silent.
+
+```sosu
+pub f32[8] speaker_gains(i32 channels, f32 angle)
+```
+
 ### class `Mixer`
 
-The sound of `channels` channels (1 or 2) at `rate` frames per second, from its voices.
+The sound of `channels` channels (1, 2, 6 for 5.1 or 8 for 7.1) at `rate` frames per second, from its voices.
 
 ```sosu
 pub class Mixer
@@ -1989,6 +2057,8 @@ pub class Mixer
   Whether the sound `id` is still playing.
 - `pub void set_volume(ui32 id, f32 v)`
 - `pub void set_pan(ui32 id, f32 pan)`
+- `pub void set_direction(ui32 id, f32 angle)`  
+  Where the sound `id` comes from, for a mixer of 5.1 or 7.1: `angle` in radians, 0 ahead, pi/2 right, pi behind; a stereo sound is heard as one. A mixer of 1 or 2 channels uses its panning.
 - `pub void set_speed(ui32 id, f32 speed) requires speed > 0.0`
 - `pub void set_lowpass(ui32 id, f32 hz)`  
   The sound `id` through a low-pass filter of one pole at `hz` (what is above it softened, 6 dB an octave); 0 takes the filter away.
@@ -2006,6 +2076,34 @@ A mixer of `channels` channels at `rate`, in `arena`.
 
 ```sosu
 pub Mixer* create(Arena* arena, i32 rate, i32 channels)
+```
+
+## audio.mp3
+
+MP3 files (MPEG-1, 2 and 2.5, layer III), read by dr_mp3 (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c. Every allocation of the decoder comes from `coded.MEMORY` bytes of the arena: a file that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. An ID3v2 tag at the start is skipped; the CI fuzzes it, but it is C: a file from an unknown source is still safer read in a process of its own.
+
+### `is_mp3`
+
+Whether `data` starts as an MP3 file: an ID3v2 tag, or the sync of a frame of layer III.
+
+```sosu
+pub bool is_mp3(ui8[] data)
+```
+
+### `decode`
+
+The sound of the MP3 file `data`.
+
+```sosu
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data)
+```
+
+### `load`
+
+The sound of the MP3 file at `path`.
+
+```sosu
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io
 ```
 
 ## audio.ogg
@@ -2081,7 +2179,7 @@ pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality qual
 
 ## audio.spatial
 
-Sounds placed in 3D (spec §8.2), over `audio.mixer`. Each `update` (once a frame, before the device takes the next samples) works out, for each source, its volume from its distance to the listener, its panning from its direction, and its speed from their relative velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click. The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d). A source behind the listener is a little duller, and one the program says hidden (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still.
+Sounds placed in 3D (spec §8.2), over `audio.mixer`. Each `update` (once a frame, before the device takes the next samples) works out, for each source, its volume from its distance to the listener, its panning from its direction, and its speed from their relative velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click. The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d). A source behind the listener is a little duller, and one the program says hidden (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still. The place rings (`set_reverb`), or the zones of reverberation the listener walks through (`add_zone`): a cave, a hall, a corridor, each a box, which fade into one another over `blend` meters.
 
 ### enum `Rolloff`
 
@@ -2145,6 +2243,44 @@ pub struct Heard
 - `pub f32 cutoff`  
   Hz of the low-pass filter, 0 for none
 
+### struct `Zone`
+
+A zone of reverberation: a box of the world, from its corner `low` to `high`, and its room. The listener inside hears it fully; outside, it fades over `blend` meters.
+
+```sosu
+pub struct Zone
+```
+
+- `pub linear.Vec3 low`
+- `pub linear.Vec3 high`
+- `pub f32 blend = 2.0`
+- `pub f32 amount = 0.6`  
+  how much it rings, from 0 to 1
+- `pub f32 size = 0.5`  
+  the room of the mixer: 0 small, 1 a hall
+- `pub f32 damping = 0.5`  
+  0 bright, 1 dull walls
+
+### struct `Reverb`
+
+The reverberation heard where the listener is.
+
+```sosu
+pub struct Reverb
+```
+
+- `pub f32 amount`
+- `pub f32 size`
+- `pub f32 damping`
+
+### `inside`
+
+How much the listener at `at` is in `z`: 1 inside, down to 0 at `blend` meters out.
+
+```sosu
+pub f32 inside(Zone z, linear.Vec3 at)
+```
+
 ### `SOUND`
 
 The speed of sound, m/s.
@@ -2168,7 +2304,14 @@ pub class Space
 ```
 
 - `pub void set_reverb(f32 amount, f32 size, f32 damping)`  
-  How much the place rings, from 0 (outside: the default) to 1 (a cave), and the room of the reverberation of the mixer: far sources are heard more through it than near ones.
+  How much the place rings, from 0 (outside: the default) to 1 (a cave), and the room of the reverberation of the mixer: far sources are heard more through it than near ones. With zones, it is what is heard out of all of them.
+- `pub usize add_zone(Zone z)`  
+  A zone of reverberation, from the next `update`; its index.
+- `pub void set_zone(usize index, Zone z)`  
+  The zone `index` changed (a door closed: its amount lowered).
+- `pub void clear_zones()`
+- `pub Reverb reverb()`  
+  The reverberation of the last `update`: that of the zones around the listener, by how much it is in each (zones that overlap share), and that of `set_reverb` for the rest.
 - `pub void listener(linear.Transform t, linear.Vec3 moving)`  
   Where the listener is (a camera, the head of the player) and how fast it moves.
 - `pub Source play(keeps audio.Sound sound, Placed p)`  

@@ -1,0 +1,457 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct Particle
+{
+    float4 position_age;
+    float4 velocity_life;
+    float4 size_turn;
+};
+
+struct type_StructuredBuffer_Particle
+{
+    Particle _m0[1];
+};
+
+struct type_RWStructuredBuffer_Particle
+{
+    Particle _m0[1];
+};
+
+struct type_Step
+{
+    float4x4 view_projection;
+    float4x4 inverse_view_projection;
+    float4 camera;
+    float4 wind;
+    float4 forces;
+    float4 contact;
+    float4 counts;
+    float4 planes[4];
+    float4 extra;
+    float4 speeds[8];
+};
+
+kernel void main0(constant type_Step& Step [[buffer(0)]], device type_StructuredBuffer_Particle& born [[buffer(1)]], device type_RWStructuredBuffer_Particle& particles [[buffer(2)]], texture2d<float> scene_depth [[texture(0)]], sampler depth_sampler [[sampler(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
+{
+    do
+    {
+        uint _87 = uint(Step.counts.y);
+        if (gl_GlobalInvocationID.x >= _87)
+        {
+            break;
+        }
+        uint _101 = ((gl_GlobalInvocationID.x + _87) - uint(Step.counts.z)) % _87;
+        if (_101 < uint(Step.counts.w))
+        {
+            particles._m0[gl_GlobalInvocationID.x] = born._m0[_101];
+            break;
+        }
+        Particle _109 = particles._m0[gl_GlobalInvocationID.x];
+        float4 _110 = _109.position_age;
+        float4 _112 = _109.size_turn;
+        bool _121;
+        if ((isunordered(_109.velocity_life.w, 0.0) || _109.velocity_life.w > 0.0))
+        {
+            _121 = _110.w >= _109.velocity_life.w;
+        }
+        else
+        {
+            _121 = true;
+        }
+        if (_121)
+        {
+            break;
+        }
+        float _125 = _110.w + Step.counts.x;
+        float4 _126 = _110;
+        _126.w = _125;
+        if (_125 >= _109.velocity_life.w)
+        {
+            particles._m0[gl_GlobalInvocationID.x] = Particle{ _126, _109.velocity_life, _112 };
+            break;
+        }
+        float3 _137 = _109.velocity_life.xyz + (float3(0.0, -Step.forces.x, 0.0) * Step.counts.x);
+        float3 _151;
+        if (Step.wind.w > 0.0)
+        {
+            _151 = _137 + ((Step.wind.xyz - _137) * precise::min(Step.wind.w * Step.counts.x, 1.0));
+        }
+        else
+        {
+            _151 = _137;
+        }
+        float3 _381;
+        if (Step.forces.y > 0.0)
+        {
+            float3 _168 = (_126.xyz / float3(precise::max(Step.forces.z, 9.9999997473787516355514526367188e-05))) + float3(_112.w, Step.forces.w * 0.5, 0.0);
+            float3 _169 = floor(_168);
+            int3 _170 = int3(_169);
+            float3 _171 = _168 - _169;
+            float3 _175 = (_171 * _171) * (float3(3.0) - (_171 * 2.0));
+            float _177;
+            _177 = 0.0;
+            float _178;
+            for (uint _180 = 0u; _180 < 8u; _177 = _178, _180++)
+            {
+                int _186 = int(_180 & 1u);
+                int _189 = int((_180 >> 1u) & 1u);
+                int _192 = int((_180 >> 2u) & 1u);
+                float _201;
+                if (_186 == 1)
+                {
+                    _201 = _175.x;
+                }
+                else
+                {
+                    _201 = 1.0 - _175.x;
+                }
+                float _209;
+                if (_189 == 1)
+                {
+                    _209 = _175.y;
+                }
+                else
+                {
+                    _209 = 1.0 - _175.y;
+                }
+                float _218;
+                if (_192 == 1)
+                {
+                    _218 = _175.z;
+                }
+                else
+                {
+                    _218 = 1.0 - _175.z;
+                }
+                int3 _220 = _170 + int3(_186, _189, _192);
+                uint _232 = (((uint(_220.x) * 73856093u) ^ (uint(_220.y) * 19349663u)) ^ (uint(_220.z) * 83492791u)) ^ 2654435761u;
+                uint _235 = (_232 ^ (_232 >> 13u)) * 1540483477u;
+                _178 = _177 + (((_201 * _209) * _218) * ((float((_235 ^ (_235 >> 15u)) & 16777215u) * 1.1920930376163596520200371742249e-07) - 1.0));
+            }
+            float _244;
+            _244 = 0.0;
+            float _245;
+            for (uint _247 = 0u; _247 < 8u; _244 = _245, _247++)
+            {
+                int _253 = int(_247 & 1u);
+                int _256 = int((_247 >> 1u) & 1u);
+                int _259 = int((_247 >> 2u) & 1u);
+                float _268;
+                if (_253 == 1)
+                {
+                    _268 = _175.x;
+                }
+                else
+                {
+                    _268 = 1.0 - _175.x;
+                }
+                float _276;
+                if (_256 == 1)
+                {
+                    _276 = _175.y;
+                }
+                else
+                {
+                    _276 = 1.0 - _175.y;
+                }
+                float _285;
+                if (_259 == 1)
+                {
+                    _285 = _175.z;
+                }
+                else
+                {
+                    _285 = 1.0 - _175.z;
+                }
+                int3 _287 = _170 + int3(_253, _256, _259);
+                uint _299 = (((uint(_287.x) * 73856093u) ^ (uint(_287.y) * 19349663u)) ^ (uint(_287.z) * 83492791u)) ^ 1013904226u;
+                uint _302 = (_299 ^ (_299 >> 13u)) * 1540483477u;
+                _245 = _244 + (((_268 * _276) * _285) * ((float((_302 ^ (_302 >> 15u)) & 16777215u) * 1.1920930376163596520200371742249e-07) - 1.0));
+            }
+            float _311;
+            _311 = 0.0;
+            float _312;
+            for (uint _314 = 0u; _314 < 8u; _311 = _312, _314++)
+            {
+                int _320 = int(_314 & 1u);
+                int _323 = int((_314 >> 1u) & 1u);
+                int _326 = int((_314 >> 2u) & 1u);
+                float _335;
+                if (_320 == 1)
+                {
+                    _335 = _175.x;
+                }
+                else
+                {
+                    _335 = 1.0 - _175.x;
+                }
+                float _343;
+                if (_323 == 1)
+                {
+                    _343 = _175.y;
+                }
+                else
+                {
+                    _343 = 1.0 - _175.y;
+                }
+                float _352;
+                if (_326 == 1)
+                {
+                    _352 = _175.z;
+                }
+                else
+                {
+                    _352 = 1.0 - _175.z;
+                }
+                int3 _354 = _170 + int3(_320, _323, _326);
+                uint _366 = (((uint(_354.x) * 73856093u) ^ (uint(_354.y) * 19349663u)) ^ (uint(_354.z) * 83492791u)) ^ 3668339987u;
+                uint _369 = (_366 ^ (_366 >> 13u)) * 1540483477u;
+                _312 = _311 + (((_335 * _343) * _352) * ((float((_369 ^ (_369 >> 15u)) & 16777215u) * 1.1920930376163596520200371742249e-07) - 1.0));
+            }
+            _381 = _151 + (float3(_177, _244, _311) * (Step.forces.y * Step.counts.x));
+        }
+        else
+        {
+            _381 = _151;
+        }
+        float _384 = fast::clamp(_125 / _109.velocity_life.w, 0.0, 1.0) * 31.0;
+        uint _385 = uint(_384);
+        uint _387 = min((_385 + 1u), 31u);
+        float3 _403 = _126.xyz + (_381 * (mix(Step.speeds[_385 >> 2u][_385 & 3u], Step.speeds[_387 >> 2u][_387 & 3u], _384 - float(_385)) * Step.counts.x));
+        _112.y = _112.y + (_112.z * Step.counts.x);
+        uint _412 = uint(Step.extra.x);
+        float4 _414;
+        float4 _417;
+        bool _419;
+        _414 = float4(_381.x, _381.y, _381.z, _109.velocity_life.w);
+        _417 = float4(_403.x, _403.y, _403.z, _126.w);
+        _419 = false;
+        bool _420;
+        float4 _415;
+        float4 _418;
+        uint _421 = 0u;
+        for (;;)
+        {
+            bool _429;
+            if (_421 < _412)
+            {
+                _429 = _421 < 4u;
+            }
+            else
+            {
+                _429 = false;
+            }
+            if (_429)
+            {
+                float3 _434 = fast::normalize(Step.planes[_421].xyz);
+                float _439 = dot(_434, _417.xyz) - Step.planes[_421].w;
+                bool _440 = _439 < 0.0;
+                if (_440)
+                {
+                    float3 _444 = _417.xyz - (_434 * _439);
+                    float _447 = dot(_414.xyz, _434);
+                    float4 _463;
+                    if (_447 < 0.0)
+                    {
+                        float3 _461 = ((_414.xyz - (_434 * _447)) * (1.0 - Step.contact.y)) - (_434 * (_447 * Step.contact.x));
+                        _463 = float4(_461.x, _461.y, _461.z, _414.w);
+                    }
+                    else
+                    {
+                        _463 = _414;
+                    }
+                    _415 = _463;
+                    _418 = float4(_444.x, _444.y, _444.z, _417.w);
+                }
+                else
+                {
+                    _415 = _414;
+                    _418 = _417;
+                }
+                _420 = _440 ? true : _419;
+                _414 = _415;
+                _417 = _418;
+                _419 = _420;
+                _421++;
+                continue;
+            }
+            else
+            {
+                break;
+            }
+        }
+        float4 _637;
+        float4 _638;
+        bool _639;
+        if (Step.contact.w > 0.5)
+        {
+            float4 _475 = Step.view_projection * float4(_417.xyz, 1.0);
+            float _476 = _475.w;
+            float4 _634;
+            float4 _635;
+            bool _636;
+            if (_476 > 9.9999997473787516355514526367188e-05)
+            {
+                float3 _482 = _475.xyz / float3(_476);
+                float _483 = _482.x;
+                bool _491;
+                if (abs(_483) < 1.0)
+                {
+                    _491 = abs(_482.y) < 1.0;
+                }
+                else
+                {
+                    _491 = false;
+                }
+                bool _496;
+                if (_491)
+                {
+                    _496 = _482.z < 1.0;
+                }
+                else
+                {
+                    _496 = false;
+                }
+                float4 _631;
+                float4 _632;
+                bool _633;
+                if (_496)
+                {
+                    float _500 = (_483 * 0.5) + 0.5;
+                    float _503 = 0.5 - (_482.y * 0.5);
+                    float2 _504 = float2(_500, _503);
+                    float4 _508 = scene_depth.sample(depth_sampler, _504, level(0.0));
+                    float _509 = _508.x;
+                    bool _515;
+                    if (_509 < 1.0)
+                    {
+                        _515 = _482.z > _509;
+                    }
+                    else
+                    {
+                        _515 = false;
+                    }
+                    float4 _628;
+                    float4 _629;
+                    bool _630;
+                    if (_515)
+                    {
+                        float4 _525 = Step.inverse_view_projection * float4((_500 * 2.0) - 1.0, 1.0 - (_503 * 2.0), _509, 1.0);
+                        float3 _529 = _525.xyz / float3(_525.w);
+                        bool _535 = distance(_529, _417.xyz) < Step.camera.w;
+                        float4 _625;
+                        float4 _626;
+                        if (_535)
+                        {
+                            float2 _541 = _504 + float2(Step.extra.y, 0.0);
+                            float4 _554 = Step.inverse_view_projection * float4((_541.x * 2.0) - 1.0, 1.0 - (_541.y * 2.0), scene_depth.sample(depth_sampler, _541, level(0.0)).x, 1.0);
+                            float2 _562 = _504 + float2(0.0, Step.extra.z);
+                            float4 _575 = Step.inverse_view_projection * float4((_562.x * 2.0) - 1.0, 1.0 - (_562.y * 2.0), scene_depth.sample(depth_sampler, _562, level(0.0)).x, 1.0);
+                            float3 _582 = cross((_554.xyz / float3(_554.w)) - _529, (_575.xyz / float3(_575.w)) - _529);
+                            float _583 = length(_582);
+                            float3 _594;
+                            if (_583 > 9.9999999747524270787835121154785e-07)
+                            {
+                                _594 = _582 / float3(_583);
+                            }
+                            else
+                            {
+                                _594 = fast::normalize(Step.camera.xyz - _529);
+                            }
+                            float3 _603;
+                            if (dot(_594, Step.camera.xyz - _529) < 0.0)
+                            {
+                                _603 = -_594;
+                            }
+                            else
+                            {
+                                _603 = _594;
+                            }
+                            float3 _605 = _529 + (_603 * 0.00999999977648258209228515625);
+                            float _608 = dot(_414.xyz, _603);
+                            float4 _624;
+                            if (_608 < 0.0)
+                            {
+                                float3 _622 = ((_414.xyz - (_603 * _608)) * (1.0 - Step.contact.y)) - (_603 * (_608 * Step.contact.x));
+                                _624 = float4(_622.x, _622.y, _622.z, _414.w);
+                            }
+                            else
+                            {
+                                _624 = _414;
+                            }
+                            _625 = float4(_605.x, _605.y, _605.z, _417.w);
+                            _626 = _624;
+                        }
+                        else
+                        {
+                            _625 = _417;
+                            _626 = _414;
+                        }
+                        _628 = _625;
+                        _629 = _626;
+                        _630 = _535 ? true : _419;
+                    }
+                    else
+                    {
+                        _628 = _417;
+                        _629 = _414;
+                        _630 = _419;
+                    }
+                    _631 = _628;
+                    _632 = _629;
+                    _633 = _630;
+                }
+                else
+                {
+                    _631 = _417;
+                    _632 = _414;
+                    _633 = _419;
+                }
+                _634 = _631;
+                _635 = _632;
+                _636 = _633;
+            }
+            else
+            {
+                _634 = _417;
+                _635 = _414;
+                _636 = _419;
+            }
+            _637 = _634;
+            _638 = _635;
+            _639 = _636;
+        }
+        else
+        {
+            _637 = _417;
+            _638 = _414;
+            _639 = _419;
+        }
+        bool _645;
+        if (_639)
+        {
+            _645 = Step.contact.z > 0.5;
+        }
+        else
+        {
+            _645 = false;
+        }
+        float4 _650;
+        if (_645)
+        {
+            float4 _649 = _637;
+            _649.w = _638.w;
+            _650 = _649;
+        }
+        else
+        {
+            _650 = _637;
+        }
+        particles._m0[gl_GlobalInvocationID.x] = Particle{ _650, _638, _112 };
+        break;
+    } while(false);
+}
+

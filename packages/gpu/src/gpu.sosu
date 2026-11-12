@@ -1032,7 +1032,8 @@ pub class Device {
             sdl_c.SDL_GPUTextureCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTextureCreateInfo);
             info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
             info.format = depth_format;
-            info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+            // sampled too: a compute pass reads it (`ComputePass.frame_depth`), particles that hit the scene
+            info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
             info.width = w;
             info.height = h;
             info.layer_count_or_depth = 1;
@@ -1365,6 +1366,34 @@ pub struct ComputePass {
         }
     }
 
+    // A texture and its sampler, for the sampler `slot` of the compute shader.
+    pub void texture(ui32 slot, Texture t, Sampler s) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUTextureSamplerBinding binding = sdl_c.SDL_GPUTextureSamplerBinding{
+                texture: device.texture_of_handle(t),
+                sampler: device.sampler_of_handle(s)
+            };
+            sdl_c.SDL_BindGPUComputeSamplers(pass, slot, &binding, 1);
+        }
+    }
+
+    // The depth of the frames (what the passes of the window drew before, `Clear.depth`) and `s`,
+    // for the sampler `slot` of the compute shader: 0 near to 1 far. False, nothing bound, when no
+    // pass made it yet.
+    pub bool frame_depth(ui32 slot, Sampler s) uses io {
+        unsafe {
+            if (device.depth as ui64 == 0) {
+                return false;
+            }
+            mut sdl_c.SDL_GPUTextureSamplerBinding binding = sdl_c.SDL_GPUTextureSamplerBinding{
+                texture: device.depth as sdl_c.SDL_GPUTexture*,
+                sampler: device.sampler_of_handle(s)
+            };
+            sdl_c.SDL_BindGPUComputeSamplers(pass, slot, &binding, 1);
+            return true;
+        }
+    }
+
     pub void uniform<T>(ui32 slot, T* value) uses io {
         unsafe {
             sdl_c.SDL_PushGPUComputeUniformData(commands, slot, value as ui8*, size_of(T) as ui32);
@@ -1419,6 +1448,15 @@ pub struct Pass {
                 U32 => sdl_c.SDL_GPU_INDEXELEMENTSIZE_32BIT,
             };
             sdl_c.SDL_BindGPUIndexBuffer(pass, &binding, code);
+        }
+    }
+
+    // `b` as the storage buffer `slot` of the vertex shader: vertices it makes from what a compute
+    // pass left there (particles).
+    pub void vertex_storage(ui32 slot, Buffer b) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUBuffer* buffer = device.buffer_of_handle(b);
+            sdl_c.SDL_BindGPUVertexStorageBuffers(pass, slot, &buffer, 1);
         }
     }
 

@@ -1,7 +1,7 @@
 // The package audio (spec §8.2), without a sound card: WAV files of Python's `wave` module read,
 // and written byte for byte the same; an Ogg Vorbis file, as the Vorbis I specification decodes
-// it (tests/make_data.py writes both, and what to expect); damaged and hostile files; the mixer
-// and resampling, on buffers of samples.
+// it (tests/make_data.py writes both, and what to expect); a FLAC file and its samples, MP3 frames
+// and their tone; damaged and hostile files; the mixer and resampling, on buffers of samples.
 import std.io;
 import std.math;
 import std.text;
@@ -10,6 +10,8 @@ import audio.mixer;
 import audio.resample;
 import audio.wav;
 import audio.ogg;
+import audio.mp3;
+import audio.flac;
 import testing.check;
 import testing.fixture;
 
@@ -162,10 +164,57 @@ test "an Ogg Vorbis file, as the specification decodes it" {
     }
 }
 
+test "a FLAC file, sample for sample" {
+    mut Arena arena = Arena.new(2 * MB);
+    defer arena.free();
+    audio.Sound tone = match (flac.decode(&arena, fixture.read_bytes(&arena, "tests/data/tone.flac"))) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    audio.Sound expected = read_wav(&arena, "tests/data/tone_flac.wav");
+    // verbatim, fixed of orders 0 to 4, constant, left/side: lossless, the same samples exactly
+    assert(tone.rate == 44100 && tone.channels == 2 && tone.frames() == 13288);
+    assert(largest_difference(tone.samples, expected.samples) == 0.0);
+    match (flac.load(&arena, "tests/data/none.flac")) {
+        ok(x) => assert(false),
+        err(e) => assert(audio.message(e) == "the file cannot be read"),
+    }
+}
+
+test "MP3 frames: their length and their tone" {
+    mut Arena arena = Arena.new(2 * MB);
+    defer arena.free();
+    audio.Sound tone = match (mp3.decode(&arena, fixture.read_bytes(&arena, "tests/data/tone.mp3"))) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    // 20 frames of 1152 samples, one spectral line near 1021 Hz
+    assert(tone.rate == 48000 && tone.channels == 1 && tone.frames() == 23040);
+    mut usize crossings = 0;
+    usize from = 2304;  // after the first two frames, which the filters fill
+    for (usize i in from + 1..tone.frames()) {
+        if ((tone.samples[i - 1] < 0.0) != (tone.samples[i] < 0.0)) {
+            crossings += 1;
+        }
+    }
+    f64 seconds = (tone.frames() - from - 1) as f64 / 48000.0;
+    f64 hz = crossings as f64 / 2.0 / seconds;
+    assert(hz > 980.0 && hz < 1060.0);
+    assert(tone.peak() > 0.01 && tone.peak() < 1.0);
+    // an ID3v2 tag before: skipped, the same sound
+    audio.Sound tagged = match (mp3.decode(&arena, fixture.read_bytes(&arena, "tests/data/tone_id3.mp3"))) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    assert(largest_difference(tagged.samples, tone.samples) == 0.0);
+}
+
 // What reading a file gives: its rate, channels and frames, or the error.
 str outcome(Arena* arena, str name) uses io {
     ui8[] data = fixture.read_bytes(arena, join(arena, "tests/data/", name));
     audio.Sound!audio.AudioError read = text.ends_with(name, ".ogg") ? ogg.decode(arena, data)
+            : text.ends_with(name, ".flac") ? flac.decode(arena, data)
+            : text.ends_with(name, ".mp3") ? mp3.decode(arena, data)
             : wav.decode(arena, data);
     text.TextBuilder* b = text.builder(arena);
     b.push(name);
@@ -189,7 +238,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[23] names = [
+    str[33] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -213,6 +262,16 @@ test "damaged and hostile files" {
         "pcm24.wav",
         "extensible24.wav",
         "float64.wav",
+        "tone.flac",
+        "bad_truncated.flac",
+        "bad_crc.flac",
+        "bad_header.flac",
+        "bad_huge_block.flac",
+        "bad_rate.flac",
+        "tone.mp3",
+        "tone_id3.mp3",
+        "bad_truncated.mp3",
+        "bad_garbage.mp3",
     ];
     for (str name in names) {
         report.push(outcome(&arena, name));
@@ -228,6 +287,15 @@ test "damaged and hostile files" {
         err(e) => e == audio.AudioError.UnknownFormat,
     };
     assert(unknown_ogg && unknown_wav && wav.is_wav(pcm16) && !ogg.is_ogg(pcm16));
+    bool unknown_coded = match (flac.decode(&arena, pcm16)) {
+        ok(s) => false,
+        err(e) => e == audio.AudioError.UnknownFormat,
+    } && match (mp3.decode(&arena, pcm16)) {
+        ok(s) => false,
+        err(e) => e == audio.AudioError.UnknownFormat,
+    };
+    ui8[] tone_flac = fixture.read_bytes(&arena, "tests/data/tone.flac");
+    assert(unknown_coded && flac.is_flac(tone_flac) && !mp3.is_mp3(tone_flac) && !flac.is_flac(pcm16));
     assert(fixture.golden(&arena, "tests/data/report.txt", report.text()));
 }
 

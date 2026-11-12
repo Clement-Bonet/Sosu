@@ -119,6 +119,29 @@ fuzz-ogg: build/fuzz_ogg
 build/fuzz_ogg: packages/audio/native/ogg.c packages/audio/native/vendor/stb_vorbis.c tests/fuzz_ogg.c | build
 	$(FUZZ_CC) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -o $@ tests/fuzz_ogg.c -lm
 
+# The MP3 and FLAC decoders of the package audio (tests/fuzz_coded.c, dr_mp3 and dr_flac), from the
+# files of tests/programs/sounds. dr_libs is taken at the commit of packages/audio/sosu.toml, without
+# its history, into build/dr_libs. dr_flac adds and multiplies samples of a hostile file in int
+# without checks: -fwrapv makes that wrap (wrong samples, nothing else), and the check of signed
+# overflow is left out; the other checks of UBSan, and ASan, stay.
+DR_LIBS_REV := $(shell sed -n 's/^rev = "\(.*\)"/\1/p' packages/audio/sosu.toml)
+
+fuzz-coded: build/fuzz_coded
+	mkdir -p build/fuzz_coded_corpus build/fuzz_crashes
+	./build/fuzz_coded -max_total_time=$(FUZZ_TIME) -max_len=65536 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-print_final_stats=1 -artifact_prefix=build/fuzz_crashes/coded- build/fuzz_coded_corpus tests/programs/sounds/tests/data
+
+build/dr_libs/$(DR_LIBS_REV): | build
+	rm -rf build/dr_libs
+	mkdir -p build/dr_libs/src
+	cd build/dr_libs/src && git init -q && git fetch -q --depth 1 https://github.com/mackron/dr_libs $(DR_LIBS_REV) \
+		&& git checkout -q FETCH_HEAD
+	touch $@
+
+build/fuzz_coded: packages/audio/native/dr.c tests/fuzz_coded.c build/dr_libs/$(DR_LIBS_REV) | build
+	$(FUZZ_CC) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -fwrapv \
+		-fno-sanitize=signed-integer-overflow -Ibuild/dr_libs/src -o $@ tests/fuzz_coded.c -lm
+
 # sosu.toml (tests/fuzz_manifest.c), from every sosu.toml of the repository.
 fuzz-manifest: build/fuzz_manifest
 	mkdir -p build/fuzz_manifest_corpus build/fuzz_manifest_seeds build/fuzz_crashes
@@ -207,4 +230,4 @@ build/docgen: src/docgen/docgen.c src/lib/docgen.c src/lib/docgen.h src/lib/comm
 clean:
 	rm -rf build
 
-.PHONY: all test clean playground doc fuzz-ogg fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp fuzz-models
+.PHONY: all test clean playground doc fuzz-ogg fuzz-coded fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp fuzz-models

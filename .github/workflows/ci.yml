@@ -202,6 +202,7 @@ jobs:
           path: |
             build/fuzz_corpus
             build/fuzz_ogg_corpus
+            build/fuzz_coded_corpus
             build/fuzz_manifest_corpus
             build/fuzz_ui_corpus
             build/fuzz_bindgen_corpus
@@ -218,6 +219,10 @@ jobs:
       - name: Fuzz the Ogg decoder
         timeout-minutes: 5
         run: make fuzz-ogg FUZZ_TIME=120
+      # the MP3 and FLAC decoders of the package audio, C written elsewhere (dr_libs)
+      - name: Fuzz the MP3 and FLAC decoders
+        timeout-minutes: 5
+        run: make fuzz-coded FUZZ_TIME=120
       # sosu.toml, which comes with every git dependency
       - name: Fuzz sosu.toml
         timeout-minutes: 3

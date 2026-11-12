@@ -97,6 +97,25 @@ under their own licenses.
   the CI fuzzes it. A fault found later in it is fixed by taking the new commit of that branch, or
   here when that branch has none (`SECURITY.md`).
 
+## dr_mp3 and dr_flac (dr_libs)
+
+- Files: none in the repository. `packages/audio/sosu.toml` names dr_libs as a native dependency
+  (`[native.dr_libs]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `audio`, and `packages/audio/native/dr.c` compiles its `dr_mp3.h` (0.7.5) and `dr_flac.h`
+  (0.13.5) into it, for the MP3 and FLAC files of `audio.mp3` and `audio.flac`; `make fuzz-coded`
+  takes the same commit into `build/dr_libs`
+- Source: <https://github.com/mackron/dr_libs>, commit `f12e197fd462e4c22873fbd70d11b1d2f2c1dc3c`
+  (November 11, 2026; the repository has no tags of its libraries), pinned by `sosu.lock`
+- Written by David Reid and its contributors; dr_mp3 is based on minimp3, by lieff (CC0)
+- License: public domain (the Unlicense), or the MIT No Attribution license (Copyright 2020 David
+  Reid), at your option, in `LICENSE` of the repository and at the end of each file; neither asks a
+  program to carry a notice
+- Not changed. `dr.c` gives both decoders a pool of memory that only grows (4 MB of the arena),
+  leaves out their functions of files and FLAC in Ogg, and keeps the CRC checks of FLAC. The CI
+  fuzzes them; dr_flac adds and multiplies the samples of a hostile file in `int` without checks,
+  an overflow that gives wrong samples, so the fuzzing compiles it with `-fwrapv`. A fault found
+  in them is fixed by taking a newer commit (`SECURITY.md`).
+
 ## ufbx
 
 - Files: `packages/model/native/vendor/ufbx.c` and `ufbx.h` (version 0.23.1), and its license

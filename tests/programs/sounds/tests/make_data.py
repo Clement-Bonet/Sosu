@@ -9,6 +9,13 @@ Run from the repository root: python -I tests/programs/sounds/tests/make_data.py
   tone_decoded.wav, what a decoder must give from it, computed here from the Vorbis I
   specification (inverse MDCT, window, overlap-add, the last granule position), not by stb_vorbis.
 - Ogg files with hostile headers.
+- tone.flac: a FLAC file written by the minimal encoder below (verbatim, constant and fixed
+  subframes, left/side stereo, Rice codes, the CRCs), and tone_flac.wav, the same samples: FLAC is
+  lossless, so a decoder must give them exactly.
+- tone.mp3: MPEG-1 layer III frames written by hand, each granule one spectral line (Huffman table
+  1, no scale factors, no bit reservoir): a decoder must give 1152 samples a frame, a tone near
+  1021 Hz.
+- FLAC and MP3 files damaged or hostile.
 
 The files are committed: nothing here runs during the tests.
 """
@@ -352,7 +359,205 @@ def ogg_files():
     write("bad_long.ogg", ogg(last_granule=0x80000004))  # a length above INT_MAX (make fuzz-ogg)
 
 
+class BigBits:
+    """Bits written from the most significant, as FLAC and MP3 read them."""
+
+    def __init__(self):
+        self.bits = []
+
+    def put(self, value, count):
+        for i in range(count - 1, -1, -1):
+            self.bits.append((value >> i) & 1)
+
+    def align(self):
+        while len(self.bits) % 8:
+            self.bits.append(0)
+
+    def bytes(self):
+        self.align()
+        return bytes(int("".join(map(str, self.bits[i:i + 8])), 2) for i in range(0, len(self.bits), 8))
+
+
+def crc8(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def crc16(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+FLAC_RATE = 44100
+FLAC_BLOCK = 4096
+
+
+def flac_samples():
+    """Left: a tone of 440 Hz; right: one of 660 Hz, constant (1234) during the third frame."""
+    frames = []
+    total = 3 * FLAC_BLOCK + 1000
+    for i in range(total):
+        left = int(round(16000 * math.sin(2 * math.pi * 440 * i / FLAC_RATE)))
+        right = int(round(9000 * math.sin(2 * math.pi * 660 * i / FLAC_RATE))) + (i % 7) - 3
+        if 2 * FLAC_BLOCK <= i < 3 * FLAC_BLOCK:
+            right = 1234
+        frames.append((left, right))
+    return frames
+
+
+def subframe(bits, kind, samples, bps, order=0):
+    """A subframe: VERBATIM, CONSTANT, or FIXED of `order` with one Rice partition."""
+    bits.put(0, 1)
+    if kind == "constant":
+        bits.put(0b000000, 6)
+        bits.put(0, 1)
+        bits.put(samples[0] & ((1 << bps) - 1), bps)
+        return
+    if kind == "verbatim":
+        bits.put(0b000001, 6)
+        bits.put(0, 1)
+        for v in samples:
+            bits.put(v & ((1 << bps) - 1), bps)
+        return
+    bits.put(0b001000 | order, 6)
+    bits.put(0, 1)
+    for v in samples[:order]:
+        bits.put(v & ((1 << bps) - 1), bps)
+    coefficients = {0: [], 1: [1], 2: [2, -1], 3: [3, -3, 1], 4: [4, -6, 4, -1]}[order]
+    residuals = []
+    for n in range(order, len(samples)):
+        guess = sum(c * samples[n - 1 - k] for k, c in enumerate(coefficients))
+        residuals.append(samples[n] - guess)
+    zigzag = [2 * r if r >= 0 else -2 * r - 1 for r in residuals]
+    mean = sum(zigzag) / max(len(zigzag), 1)
+    k = max(0, min(14, int(math.log2(mean)) if mean >= 1 else 0))
+    bits.put(0, 2)  # Rice, parameters of 4 bits
+    bits.put(0, 4)  # partition order 0
+    bits.put(k, 4)
+    for u in zigzag:
+        bits.put(0, u >> k)
+        bits.put(1, 1)
+        bits.put(u & ((1 << k) - 1), k)
+
+
+def flac_frame(number, block):
+    """A frame of `block` (one (left, right) per sample), coded as `number` says."""
+    size = len(block)
+    header = BigBits()
+    header.put(0xFFF8, 16)  # sync, fixed block size
+    header.put(12 if size == FLAC_BLOCK else 7, 4)  # 4096, or 16 bits of size - 1 at the end
+    header.put(9, 4)  # 44.1 kHz
+    header.put(8 if number == 1 else 1, 4)  # left/side, or two independent channels
+    header.put(4, 3)  # 16 bits
+    header.put(0, 1)
+    header.put(number, 8)  # the frame number, as UTF-8 (< 128)
+    if size != FLAC_BLOCK:
+        header.put(size - 1, 16)
+    head = header.bytes()
+    body = BigBits()
+    left = [f[0] for f in block]
+    right = [f[1] for f in block]
+    if number == 0:
+        subframe(body, "verbatim", left, 16)
+        subframe(body, "fixed", right, 16, 2)
+    elif number == 1:
+        subframe(body, "fixed", left, 16, 1)
+        subframe(body, "fixed", [x - y for x, y in zip(left, right)], 17, 1)
+    elif number == 2:
+        subframe(body, "fixed", left, 16, 4)
+        subframe(body, "constant", right, 16)
+    else:
+        subframe(body, "fixed", left, 16, 3)
+        subframe(body, "fixed", right, 16, 0)
+    frame = head + bytes([crc8(head)]) + body.bytes()
+    return frame + struct.pack(">H", crc16(frame))
+
+
+def flac(frames, channels=2, rate=FLAC_RATE, max_block=FLAC_BLOCK):
+    info = BigBits()
+    info.put(FLAC_BLOCK, 16)
+    info.put(max_block, 16)
+    info.put(0, 24)
+    info.put(0, 24)
+    info.put(rate, 20)
+    info.put(channels - 1, 3)
+    info.put(15, 5)
+    info.put(len(frames), 36)
+    info.put(0, 128)  # no MD5
+    streaminfo = info.bytes()
+    out = b"fLaC" + bytes([0x80, 0, 0, len(streaminfo)]) + streaminfo
+    for n in range(0, (len(frames) + FLAC_BLOCK - 1) // FLAC_BLOCK):
+        out += flac_frame(n, frames[n * FLAC_BLOCK:(n + 1) * FLAC_BLOCK])
+    return out
+
+
+MP3_FRAMES = 20
+MP3_LINE = 24  # the spectral line of each granule: (24 + 0.5) * 48000 / 1152 = 1020.8 Hz
+
+
+def mp3_frame():
+    """One frame of MPEG-1 layer III, 128 kb/s, 48 kHz, mono: 384 bytes, its two granules alike."""
+    pairs = MP3_LINE // 2 + 1
+    granule = BigBits()
+    for p in range(pairs):
+        if p == MP3_LINE // 2:
+            granule.put(0b01, 2)  # table 1: (1, 0)
+            granule.put(0, 1)     # its sign: positive
+        else:
+            granule.put(1, 1)     # (0, 0)
+    length = len(granule.bits)
+    side = BigBits()
+    side.put(0, 9)  # main_data_begin: no reservoir
+    side.put(0, 5)
+    side.put(0, 4)  # scfsi
+    for _ in range(2):
+        side.put(length, 12)  # part2_3_length
+        side.put(pairs, 9)    # big_values
+        side.put(200, 8)      # global_gain: 2^((200 - 210) / 4)
+        side.put(0, 4)        # scalefac_compress: no scale factors
+        side.put(0, 1)        # long blocks
+        for _ in range(3):
+            side.put(1, 5)    # table 1 in the three regions
+        side.put(7, 4)
+        side.put(7, 3)
+        side.put(0, 3)        # preflag, scalefac_scale, count1table_select
+    main = BigBits()
+    main.bits = granule.bits + granule.bits
+    data = bytes([0xFF, 0xFB, 0x94, 0xC0]) + side.bytes() + main.bytes()
+    return data + b"\0" * (384 - len(data))
+
+
+def coded_files():
+    frames = flac_samples()
+    tone = flac(frames)
+    write("tone.flac", tone)
+    pcm = b"".join(struct.pack("<hh", *f) for f in frames)
+    write("tone_flac.wav", riff([chunk(b"fmt ", struct.pack("<HHIIHH", 1, 2, FLAC_RATE, FLAC_RATE * 4, 4, 16)),
+                                 chunk(b"data", pcm)]))
+    write("bad_truncated.flac", tone[:len(tone) // 2])
+    damaged = bytearray(tone)
+    damaged[len(tone) // 3] ^= 0xFF
+    write("bad_crc.flac", bytes(damaged))
+    write("bad_header.flac", tone[:4] + b"\xFF" * 60)
+    write("bad_huge_block.flac", flac(frames[:FLAC_BLOCK], channels=8, max_block=65535))  # 8 channels promised, 2 given
+    write("bad_rate.flac", flac(frames[:FLAC_BLOCK], rate=0))
+    mp3 = mp3_frame() * MP3_FRAMES
+    write("tone.mp3", mp3)
+    write("tone_id3.mp3", b"ID3\x04\x00\x00\x00\x00\x00\x0A" + b"\0" * 10 + mp3)  # an empty tag of 10 bytes first
+    write("bad_truncated.mp3", mp3[:1000])
+    write("bad_garbage.mp3", bytes([0xFF, 0xFB]) + bytes((i * 89 + 7) % 256 for i in range(3000)))
+
+
 if __name__ == "__main__":
     os.makedirs(DATA, exist_ok=True)
     wav_files()
     ogg_files()
+    coded_files()

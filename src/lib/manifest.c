@@ -538,7 +538,9 @@ static void validate(Toml *t) {
         const char *problem = !dep->git ? "needs a `git` URL"
                             : !dep->tag && !dep->rev ? "needs a `tag` or a `rev`: its version is always pinned"
                             : dep->tag && dep->rev ? "cannot have both a `tag` and a `rev`"
-                            : dep->c.count == 0 && dep->cpp.count == 0 ? "names no `c` nor `cpp` files"
+                            /* a library of headers only (dr_libs, stb): a C file of the package compiles it */
+                            : dep->c.count == 0 && dep->cpp.count == 0 && dep->include.count == 0
+                                ? "names no `c`, `cpp` nor `include`"
                             : NULL;
         if (problem) error_at(t, "E0404", dep->offset, dep->length, "native dependency `%s` %s", dep->name, problem);
     }
