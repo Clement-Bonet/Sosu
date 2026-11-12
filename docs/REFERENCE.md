@@ -1951,7 +1951,7 @@ pub Recorder*? open_recorder(Arena* arena, Input input) uses io requires input.r
 
 ## audio.mixer
 
-Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound.
+Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound. A voice may go through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water.
 
 ### struct `Play`
 
@@ -1986,6 +1986,8 @@ pub class Mixer
 - `pub void set_volume(ui32 id, f32 v)`
 - `pub void set_pan(ui32 id, f32 pan)`
 - `pub void set_speed(ui32 id, f32 speed) requires speed > 0.0`
+- `pub void set_lowpass(ui32 id, f32 hz)`  
+  The sound `id` through a low-pass filter of one pole at `hz` (what is above it softened, 6 dB an octave); 0 takes the filter away.
 - `pub void set_looping(ui32 id, bool looping)`
 - `pub void stop(ui32 id)`
 - `pub void stop_all()`
@@ -2075,7 +2077,7 @@ pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality qual
 
 ## audio.spatial
 
-Sounds placed in 3D (spec §8.2), over `audio.mixer`. Each `update` (once a frame, before the device takes the next samples) works out, for each source, its volume from its distance to the listener, its panning from its direction, and its speed from their relative velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click. The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d).
+Sounds placed in 3D (spec §8.2), over `audio.mixer`. Each `update` (once a frame, before the device takes the next samples) works out, for each source, its volume from its distance to the listener, its panning from its direction, and its speed from their relative velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click. The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d). A source behind the listener is a little duller, and one the program says hidden (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still.
 
 ### enum `Rolloff`
 
@@ -2111,6 +2113,8 @@ pub struct Placed
 - `pub Rolloff rolloff = Rolloff.Inverse`
 - `pub f32 doppler = 1.0`  
   0: no change of speed
+- `pub mut f32 occlusion = 0.0`  
+  0: heard directly, 1: behind a wall
 
 ### struct `Source`
 
@@ -2132,6 +2136,8 @@ pub struct Heard
 - `pub f32 volume`
 - `pub f32 pan`
 - `pub f32 speed`
+- `pub f32 cutoff`  
+  Hz of the low-pass filter, 0 for none
 
 ### `SOUND`
 
@@ -2163,6 +2169,8 @@ pub class Space
 - `pub void move(Source s, linear.Vec3 position_now, linear.Vec3 velocity_now)`  
   The source moved, and its velocity.
 - `pub void set_volume(Source s, f32 volume)`
+- `pub void set_occlusion(Source s, f32 amount)`  
+  How hidden the source is, from 0 (heard directly) to 1 (behind a wall): its volume lowered by up to a half, and its sound softened down to a low-pass of 600 Hz. A program finds it with a ray of `physics` between the listener and the source.
 - `pub void stop(Source s)`
 - `pub Heard heard(Source s)`  
   What the last `update` gave the mixer for `s`.

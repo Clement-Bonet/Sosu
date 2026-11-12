@@ -11,6 +11,8 @@
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
+#include <Jolt/Core/Mutex.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
@@ -28,11 +30,17 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Constraints/ConeConstraint.h>
+#include <Jolt/Physics/Constraints/DistanceConstraint.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SliderConstraint.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
 #include <cstdarg>
+#include <mutex>
 #include <cstdint>
 
 using namespace JPH;
@@ -105,9 +113,11 @@ struct Event {
     float normal[3];
 };
 
+// Jolt calls it from its threads during a step: the list is kept under a lock.
 class Contacts final : public ContactListener {
 public:
     Array<Event> *events = nullptr;
+    Mutex lock;
     void OnContactAdded(const Body &a, const Body &b, const ContactManifold &m, ContactSettings &) override {
         Event e{ a.GetID().GetIndexAndSequenceNumber(), b.GetID().GetIndexAndSequenceNumber(), 1, {}, {} };
         RVec3 p = m.GetWorldSpaceContactPointOn1(0);
@@ -117,9 +127,11 @@ public:
         e.normal[0] = m.mWorldSpaceNormal.GetX();
         e.normal[1] = m.mWorldSpaceNormal.GetY();
         e.normal[2] = m.mWorldSpaceNormal.GetZ();
+        std::lock_guard<Mutex> guard(lock);
         events->push_back(e);
     }
     void OnContactRemoved(const SubShapeIDPair &pair) override {
+        std::lock_guard<Mutex> guard(lock);
         events->push_back(Event{ pair.GetBody1ID().GetIndexAndSequenceNumber(), pair.GetBody2ID().GetIndexAndSequenceNumber(), 0,
                                  {}, {} });
     }
@@ -136,6 +148,9 @@ struct World {
     PhysicsSystem system;
     TempAllocatorImpl temp{ 16 * 1024 * 1024 };
     JobSystemSingleThreaded jobs{ cMaxPhysicsJobs };
+    JobSystemThreadPool *pool = nullptr;  // with threads: Jolt's own
+    Array<Ref<Constraint>> joints;  // a joint is its place + 1; null once removed
+    ~World() { delete pool; }
 };
 
 static ObjectLayer layer_of(World *w, uint32_t layers, uint32_t mask, bool moving) {
@@ -187,9 +202,20 @@ void *sosu_jolt_world(float gx, float gy, float gz, uint32_t max_bodies) {
     return w;
 }
 
+// Jolt's threads for the steps of `world`, `threads` of them (0: the thread of the program).
+void sosu_jolt_threads(void *world, int threads) {
+    World *w = (World *)world;
+    delete w->pool;
+    w->pool = threads > 0 ? new JobSystemThreadPool(cMaxPhysicsJobs, cMaxPhysicsBarriers, threads) : nullptr;
+}
+
 void sosu_jolt_world_free(void *world) {
     World *w = (World *)world;
     if (!w) return;
+    for (Ref<Constraint> &j : w->joints) {
+        if (j != nullptr) w->system.RemoveConstraint(j);
+    }
+    w->joints.clear();
     BodyInterface &bodies = w->system.GetBodyInterface();
     BodyIDVector ids;
     w->system.GetBodies(ids);
@@ -210,7 +236,126 @@ void sosu_jolt_set_gravity(void *world, float gx, float gy, float gz) {
 int sosu_jolt_step(void *world, float dt, int collision_steps) {
     World *w = (World *)world;
     w->events.clear();
-    return (int)w->system.Update(dt, collision_steps, &w->temp, &w->jobs);
+    JobSystem *jobs = w->pool ? (JobSystem *)w->pool : (JobSystem *)&w->jobs;
+    return (int)w->system.Update(dt, collision_steps, &w->temp, jobs);
+}
+
+// ---- joints, at places and along axes given in the world ----
+
+static Vec3 normal_to(Vec3 axis) {
+    return axis.GetNormalizedPerpendicular();
+}
+
+// kind: 0 fixed, 1 hinge (about `axis`), 2 slider (along `axis`), 3 distance (between `anchor` on
+// `a` and `other` on `b`), 4 cone (`axis` the middle of the cone, `upper` its half angle). The
+// limits are angles for a hinge, translations for a slider, lengths for a distance (-1: as they
+// are now); the motor turns or slides at `speed` with at most `strength` (N m or N). 0 when it
+// cannot be made (a body that is not there).
+uint32_t sosu_jolt_joint(void *world, int kind, uint32_t a, uint32_t b, const float *anchor, const float *other,
+                         const float *axis, bool limit, float lower, float upper, bool motor, float speed, float strength) {
+    World *w = (World *)world;
+    RVec3 p1(anchor[0], anchor[1], anchor[2]);
+    RVec3 p2(other[0], other[1], other[2]);
+    Vec3 ax(axis[0], axis[1], axis[2]);
+    ax = ax.LengthSq() > 0.0f ? ax.Normalized() : Vec3::sAxisY();
+    Ref<TwoBodyConstraintSettings> settings;
+    if (kind == 1) {
+        HingeConstraintSettings *h = new HingeConstraintSettings();
+        h->mPoint1 = h->mPoint2 = p1;
+        h->mHingeAxis1 = h->mHingeAxis2 = ax;
+        h->mNormalAxis1 = h->mNormalAxis2 = normal_to(ax);
+        if (limit) {
+            h->mLimitsMin = lower < -JPH_PI ? -JPH_PI : lower > 0.0f ? 0.0f : lower;
+            h->mLimitsMax = upper > JPH_PI ? JPH_PI : upper < 0.0f ? 0.0f : upper;
+        }
+        if (motor) h->mMotorSettings.SetTorqueLimit(strength);
+        settings = h;
+    } else if (kind == 2) {
+        SliderConstraintSettings *sl = new SliderConstraintSettings();
+        sl->mPoint1 = sl->mPoint2 = p1;
+        sl->mSliderAxis1 = sl->mSliderAxis2 = ax;
+        sl->mNormalAxis1 = sl->mNormalAxis2 = normal_to(ax);
+        if (limit) {
+            sl->mLimitsMin = lower > 0.0f ? 0.0f : lower;
+            sl->mLimitsMax = upper < 0.0f ? 0.0f : upper;
+        }
+        if (motor) sl->mMotorSettings.SetForceLimit(strength);
+        settings = sl;
+    } else if (kind == 3) {
+        DistanceConstraintSettings *d = new DistanceConstraintSettings();
+        d->mPoint1 = p1;
+        d->mPoint2 = p2;
+        if (limit) {
+            d->mMinDistance = lower;
+            d->mMaxDistance = upper;
+        }
+        settings = d;
+    } else if (kind == 4) {
+        ConeConstraintSettings *c = new ConeConstraintSettings();
+        c->mPoint1 = c->mPoint2 = p1;
+        c->mTwistAxis1 = c->mTwistAxis2 = ax;
+        c->mHalfConeAngle = upper < 0.0f ? 0.0f : upper > JPH_PI ? JPH_PI : upper;
+        settings = c;
+    } else {
+        FixedConstraintSettings *f = new FixedConstraintSettings();
+        f->mAutoDetectPoint = true;
+        settings = f;
+    }
+    TwoBodyConstraint *joint = w->system.GetBodyInterface().CreateConstraint(settings, BodyID(a), BodyID(b));
+    if (!joint) return 0;
+    if (motor && kind == 1) {
+        HingeConstraint *h = (HingeConstraint *)joint;
+        h->SetMotorState(EMotorState::Velocity);
+        h->SetTargetAngularVelocity(speed);
+    } else if (motor && kind == 2) {
+        SliderConstraint *sl = (SliderConstraint *)joint;
+        sl->SetMotorState(EMotorState::Velocity);
+        sl->SetTargetVelocity(speed);
+    }
+    w->system.AddConstraint(joint);
+    w->joints.push_back(joint);
+    w->system.GetBodyInterface().ActivateBody(BodyID(b));
+    return (uint32_t)w->joints.size();
+}
+
+static Constraint *joint_of(World *w, uint32_t joint) {
+    return joint == 0 || joint > w->joints.size() ? nullptr : w->joints[joint - 1].GetPtr();
+}
+
+void sosu_jolt_joint_remove(void *world, uint32_t joint) {
+    World *w = (World *)world;
+    Constraint *c = joint_of(w, joint);
+    if (!c) return;
+    // the bodies it held may sleep: they move again
+    if (c->GetType() == EConstraintType::TwoBodyConstraint) {
+        TwoBodyConstraint *two = (TwoBodyConstraint *)c;
+        BodyInterface &bodies = w->system.GetBodyInterface();
+        if (!two->GetBody1()->IsStatic()) bodies.ActivateBody(two->GetBody1()->GetID());
+        if (!two->GetBody2()->IsStatic()) bodies.ActivateBody(two->GetBody2()->GetID());
+    }
+    w->system.RemoveConstraint(c);
+    w->joints[joint - 1] = nullptr;
+}
+
+bool sosu_jolt_joint_valid(void *world, uint32_t joint) {
+    return joint_of((World *)world, joint) != nullptr;
+}
+
+// The angle of a hinge (radians), or the translation of a slider (m), now; 0 for the others.
+float sosu_jolt_joint_position(void *world, uint32_t joint) {
+    Constraint *c = joint_of((World *)world, joint);
+    if (!c) return 0.0f;
+    if (c->GetSubType() == EConstraintSubType::Hinge) return ((HingeConstraint *)c)->GetCurrentAngle();
+    if (c->GetSubType() == EConstraintSubType::Slider) return ((SliderConstraint *)c)->GetCurrentPosition();
+    return 0.0f;
+}
+
+// The speed of the motor of a hinge or a slider, from now.
+void sosu_jolt_joint_motor(void *world, uint32_t joint, float speed) {
+    Constraint *c = joint_of((World *)world, joint);
+    if (!c) return;
+    if (c->GetSubType() == EConstraintSubType::Hinge) ((HingeConstraint *)c)->SetTargetAngularVelocity(speed);
+    if (c->GetSubType() == EConstraintSubType::Slider) ((SliderConstraint *)c)->SetTargetVelocity(speed);
 }
 
 void sosu_jolt_optimize(void *world) {

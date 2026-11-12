@@ -4,6 +4,7 @@ import std.io;
 import math.linear;
 import scene.scene;
 import physics2d.physics2d;
+import render.canvas;
 
 void say(str name, bool holds) uses io {
     io.print("{}: {}", name, holds ? "ok" : "FAILED");
@@ -255,6 +256,24 @@ i32 main() uses io {
             none => false,
         };
         say("sync writes x, y and the turn, and keeps z", synced);
+        w.close();
+    }
+
+    // the debug view: the outlines of a box and a ball on a canvas
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body box = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(0.0, 0.0) });
+        box.box(linear.vec2(1.0, 1.0), physics2d.material());
+        physics2d.Body ball = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(3.0, 0.0) });
+        ball.circle(1.0, physics2d.material());
+        mut canvas.Canvas c = canvas.create(&arena, 200, 100);
+        c.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+        usize drawn = w.debug_draw(&c, physics2d.View{ x: 50.0, y: 50.0, scale: 20.0 }, true, false);
+        // the box from (30, 30) to (70, 70), the ball around (110, 50) of radius 20
+        bool edge = c.pixels[30 * 200 + 50] != 0xFF000000 && c.pixels[50 * 200 + 70] != 0xFF000000;
+        bool inside = c.pixels[50 * 200 + 50] == 0xFF000000;
+        bool round = c.pixels[50 * 200 + 130] != 0xFF000000 || c.pixels[50 * 200 + 129] != 0xFF000000;
+        say("the debug view draws the outlines of the shapes", drawn >= 5 && edge && inside && round);
         w.close();
     }
 

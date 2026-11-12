@@ -38,4 +38,15 @@ it stops at the wall: ok
 it jumps: ok
 none for a character shorter than its width: ok
 sync writes the position and the rotation, and keeps the scale: ok
+a pendulum keeps its length: ok
+a hinge stays within its limits: ok
+a motor turns a hinge at its speed: ok
+a slider stops at its limit: ok
+a motor drives a slider: ok
+welded boxes fall together: ok
+a rope stops the fall at its length: ok
+a cone keeps a lamp within its angle: ok
+a removed joint is dead: ok
+and its body falls freely: ok
 the same steps twice give the same world: ok
+three threads of Jolt give the same steps: ok

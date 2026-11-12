@@ -6,6 +6,7 @@
 // clips and what the root moved. `palette` gives the matrices that skinning reads. Everything is
 // memory in an arena, without effects: the machines of many characters can advance in threads.
 import std.vec;
+import std.math;
 import math.linear;
 import math.curve;
 import model.model;
@@ -256,6 +257,130 @@ pub void palette(Skeleton s, Pose p, linear.Mat4[] out) {
     for (usize j in 0..s.count()) {
         w[j] = w[j].mul(s.inverse_binds[j]);
     }
+}
+
+// ---- Inverse kinematics ----
+
+// The rotation of each joint in the space of the model, for the pose: the roots turned by what is
+// above them, each child by its parent.
+void world_rotations(Skeleton s, Pose p, linear.Quat[] out) {
+    mut linear.Quat[] g = out;
+    for (usize j in s.order) {
+        linear.Quat local = p.joints[j].rotation;
+        g[j] = s.parents[j] < 0 ? linear.decompose(s.above[j]).rotation.mul(local).normalized()
+                : g[s.parents[j] as usize].mul(local).normalized();
+    }
+}
+
+f32 angle_between(linear.Vec3 a, linear.Vec3 b) {
+    return math.acos(max(-1.0, min(1.0, a.normalized().dot(b.normalized()))) as f64) as f32;
+}
+
+// The shortest rotation from the direction `a` to `b`.
+pub linear.Quat between(linear.Vec3 a, linear.Vec3 b) {
+    linear.Vec3 x = a.normalized();
+    linear.Vec3 y = b.normalized();
+    f32 d = x.dot(y);
+    if (d > 0.999999) {
+        return linear.identity_quat();
+    }
+    if (d < -0.999999) {
+        // half a turn, about any axis across `a`
+        linear.Vec3 across = abs(x.x) < 0.9 ? linear.vec3(1.0, 0.0, 0.0).cross(x) : linear.vec3(0.0, 1.0, 0.0).cross(x);
+        return linear.from_axis_angle(across, 3.14159265);
+    }
+    return linear.from_axis_angle(x.cross(y), math.acos(d as f64) as f32);
+}
+
+// A limb of two bones reaching for `target` (in the space of the model): `end` (a hand, a foot),
+// its parent (the elbow, the knee) and its grandparent (the shoulder, the hip) turned so that `end`
+// is at `target`, or as near as the bones reach; the middle joint bends toward `pole` (a point in
+// front of the knee). `weight` from 0 (the pose as it was) to 1. The analytic solution of the
+// triangle of the two bones (the law of cosines), as Daniel Holden writes it.
+pub void two_bone(Arena* scratch, Skeleton s, Pose p, usize end, linear.Vec3 target, linear.Vec3 pole, f32 weight) {
+    if (end >= s.count() || s.parents[end] < 0) {
+        return;
+    }
+    usize mid = s.parents[end] as usize;
+    if (s.parents[mid] < 0) {
+        return;
+    }
+    usize top = s.parents[mid] as usize;
+    mut linear.Mat4[] worlds = scratch.alloc_slice(linear.Mat4, s.count());
+    mut linear.Quat[] turns = scratch.alloc_slice(linear.Quat, s.count());
+    world_matrices(s, p, worlds);
+    world_rotations(s, p, turns);
+    linear.Vec3 origin = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 a = worlds[top].transform_point(origin);
+    linear.Vec3 b = worlds[mid].transform_point(origin);
+    linear.Vec3 c = worlds[end].transform_point(origin);
+    f32 eps = 0.001;
+    f32 lab = b.sub(a).length();
+    f32 lcb = c.sub(b).length();
+    if (lab < eps || lcb < eps) {
+        return;
+    }
+    f32 lat = max(eps, min(target.sub(a).length(), lab + lcb - eps));
+    f32 ac_ab_0 = angle_between(c.sub(a), b.sub(a));
+    f32 ba_bc_0 = angle_between(a.sub(b), c.sub(b));
+    f32 ac_at_0 = angle_between(c.sub(a), target.sub(a));
+    f32 ac_ab_1 = math.acos(max(-1.0, min(1.0, (lcb * lcb - lab * lab - lat * lat) / (-2.0 * lab * lat))) as f64) as f32;
+    f32 ba_bc_1 = math.acos(max(-1.0, min(1.0, (lat * lat - lab * lab - lcb * lcb) / (-2.0 * lab * lcb))) as f64) as f32;
+    // the plane of the bend: through the limb and the pole
+    mut linear.Vec3 bend = c.sub(a).cross(pole.sub(a));
+    if (bend.length() < 0.000001) {
+        bend = c.sub(a).cross(b.sub(a));
+    }
+    if (bend.length() < 0.000001) {
+        return;  // straight, and the pole on its line: no plane to bend in
+    }
+    linear.Vec3 axis0 = bend.normalized();
+    linear.Vec3 axis1 = c.sub(a).cross(target.sub(a));
+    linear.Quat to_a = turns[top].conjugate();
+    linear.Quat to_b = turns[mid].conjugate();
+    linear.Quat r0 = linear.from_axis_angle(to_a.rotate(axis0), ac_ab_1 - ac_ab_0);
+    linear.Quat r1 = linear.from_axis_angle(to_b.rotate(axis0), ba_bc_1 - ba_bc_0);
+    linear.Quat r2 = axis1.length() > 0.000001 ? linear.from_axis_angle(to_a.rotate(axis1.normalized()), ac_at_0)
+            : linear.identity_quat();
+    mut linear.Transform[] o = p.joints;
+    linear.Transform ta = o[top];
+    linear.Transform tb = o[mid];
+    // the bend first, then the aim (both about axes in the space of the joint before either): in
+    // the world R2 R0, so here r2 r0
+    linear.Quat new_a = ta.rotation.mul(r2.mul(r0)).normalized();
+    linear.Quat new_b = tb.rotation.mul(r1).normalized();
+    o[top] = linear.Transform{ position: ta.position, rotation: ta.rotation.slerp(new_a, weight), scale: ta.scale };
+    o[mid] = linear.Transform{ position: tb.position, rotation: tb.rotation.slerp(new_b, weight), scale: tb.scale };
+}
+
+// `joint` turned so that its axis `forward` (in its own space: -z for a head that looks along -z)
+// points at `target`, by at most `max_angle` radians, and by `weight` (0 to 1).
+pub void look_at(Arena* scratch, Skeleton s, Pose p, usize joint, linear.Vec3 forward, linear.Vec3 target, f32 max_angle, f32 weight) {
+    if (joint >= s.count()) {
+        return;
+    }
+    mut linear.Mat4[] worlds = scratch.alloc_slice(linear.Mat4, s.count());
+    mut linear.Quat[] turns = scratch.alloc_slice(linear.Quat, s.count());
+    world_matrices(s, p, worlds);
+    world_rotations(s, p, turns);
+    linear.Vec3 at = worlds[joint].transform_point(linear.vec3(0.0, 0.0, 0.0));
+    linear.Vec3 now = turns[joint].rotate(forward);
+    linear.Vec3 wanted = target.sub(at);
+    if (wanted.length() < 0.000001) {
+        return;
+    }
+    mut linear.Quat turn = between(now, wanted);
+    f32 angle = angle_between(now, wanted);
+    if (angle > max_angle && angle > 0.0) {
+        turn = linear.identity_quat().slerp(turn, max_angle / angle);
+    }
+    // in the space of the joint: g' = turn g, so local' = local g⁻¹ turn g
+    linear.Quat g = turns[joint];
+    linear.Quat change = g.conjugate().mul(turn).mul(g).normalized();
+    mut linear.Transform[] o = p.joints;
+    linear.Transform t = o[joint];
+    linear.Quat turned = t.rotation.mul(change).normalized();
+    o[joint] = linear.Transform{ position: t.position, rotation: t.rotation.slerp(turned, weight), scale: t.scale };
 }
 
 // ---- Clips ----
@@ -1182,4 +1307,69 @@ test "blend trees by one and by two parameters" {
     m2.set("y", 1.0);
     m2.advance(0.6);
     assert(m2.pose().joints[1].position.near(linear.vec3(0.0, 2.0, 0.0), 0.0001));  // on a point: that clip alone
+}
+
+// An arm: a shoulder at the origin, an elbow 1 below it, a hand 1 below that (straight down).
+Skeleton arm(Arena* arena) {
+    mut model.Node[] nodes = arena.alloc_slice(model.Node, 3);
+    nodes[0] = node_at("shoulder", linear.vec3(0.0, 0.0, 0.0), one_of(arena, 1), arena);
+    nodes[1] = node_at("elbow", linear.vec3(0.0, -1.0, 0.0), one_of(arena, 2), arena);
+    nodes[2] = node_at("hand", linear.vec3(0.0, -1.0, 0.0), none_of(arena), arena);
+    mut usize[] joints = arena.alloc_slice(usize, 3);
+    mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, 3);
+    for (usize j in 0..3) {
+        joints[j] = j;
+        binds[j] = linear.identity4();
+    }
+    mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
+    skins[0] = model.Skin{ name: "arm", joints: joints, inverse_binds: binds };
+    model.Model m = model.Model{ meshes: arena.alloc_slice(model.Mesh, 0), materials: arena.alloc_slice(model.Material, 0),
+            images: arena.alloc_slice(image.Image, 0), nodes: nodes, roots: one_of(arena, 0), skins: some(skins) };
+    return rig_skeleton(arena, m);
+}
+
+linear.Vec3 where_is(Arena* arena, Skeleton s, Pose p, usize joint) {
+    mut linear.Mat4[] w = arena.alloc_slice(linear.Mat4, s.count());
+    world_matrices(s, p, w);
+    return w[joint].transform_point(linear.vec3(0.0, 0.0, 0.0));
+}
+
+test "two bones reach a target, bending toward the pole" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Skeleton s = arm(&arena);
+    Pose p = rest_pose(&arena, s);
+    linear.Vec3 target = linear.vec3(1.0, -1.0, 0.0);
+    two_bone(&arena, s, p, 2, target, linear.vec3(0.0, 0.0, 5.0), 1.0);
+    assert(where_is(&arena, s, p, 2).near(target, 0.002));
+    assert(where_is(&arena, s, p, 1).z > 0.3);  // the elbow toward the pole
+    assert(abs(where_is(&arena, s, p, 1).length() - 1.0) < 0.0001);  // the bones keep their length
+    // out of reach: the arm straight toward it
+    Pose q = rest_pose(&arena, s);
+    two_bone(&arena, s, q, 2, linear.vec3(5.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 5.0), 1.0);
+    linear.Vec3 hand = where_is(&arena, s, q, 2);
+    assert(abs(hand.length() - 2.0) < 0.01 && hand.normalized().near(linear.vec3(1.0, 0.0, 0.0), 0.01));
+    // a weight of 0: the pose as it was
+    Pose r = rest_pose(&arena, s);
+    two_bone(&arena, s, r, 2, target, linear.vec3(0.0, 0.0, 5.0), 0.0);
+    assert(where_is(&arena, s, r, 2).near(linear.vec3(0.0, -2.0, 0.0), 0.0001));
+    // from a bent pose, to another target
+    two_bone(&arena, s, p, 2, linear.vec3(-0.5, -1.2, 0.8), linear.vec3(0.0, 0.0, 5.0), 1.0);
+    assert(where_is(&arena, s, p, 2).near(linear.vec3(-0.5, -1.2, 0.8), 0.002));
+}
+
+test "a joint looks at a target, within its angle" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    Skeleton s = arm(&arena);
+    Pose p = rest_pose(&arena, s);
+    // the elbow points down (-y) toward its hand: turned to look at (1, -1, 0) from it
+    look_at(&arena, s, p, 1, linear.vec3(0.0, -1.0, 0.0), linear.vec3(1.0, -2.0, 0.0), 3.0, 1.0);
+    assert(where_is(&arena, s, p, 2).near(linear.vec3(0.70710677, -1.70710677, 0.0), 0.001));
+    // at most 0.3 radian
+    Pose q = rest_pose(&arena, s);
+    look_at(&arena, s, q, 1, linear.vec3(0.0, -1.0, 0.0), linear.vec3(1.0, -1.0, 0.0), 0.3, 1.0);
+    linear.Vec3 d = where_is(&arena, s, q, 2).sub(linear.vec3(0.0, -1.0, 0.0));
+    assert(abs(angle_between(d, linear.vec3(0.0, -1.0, 0.0)) - 0.3) < 0.001);
+    assert(between(linear.vec3(1.0, 0.0, 0.0), linear.vec3(-1.0, 0.0, 0.0)).rotate(linear.vec3(1.0, 0.0, 0.0)).near(linear.vec3(-1.0, 0.0, 0.0), 0.0001));
 }

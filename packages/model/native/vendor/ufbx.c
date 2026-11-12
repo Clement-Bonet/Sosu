@@ -1120,7 +1120,9 @@ static ufbxi_forceinline int32_t ufbxi_f64_to_i32(double value)
 
 static ufbxi_forceinline int64_t ufbxi_f64_to_i64(double value)
 {
-	if (ufbx_fabs(value) <= (double)INT64_MAX) {
+	// Sosu: below 2^63, not up to (double)INT64_MAX, which rounds up to 2^63 itself: a number of the
+	// file equal to 2^63 would not fit an int64_t (found by `sosuc fuzz`, tests/fuzz_sosu/fbx)
+	if (ufbx_fabs(value) < 9223372036854775808.0) {
 		return (int64_t)value;
 	} else {
 		return value >= 0.0 ? INT64_MAX : INT64_MIN;

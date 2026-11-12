@@ -28,4 +28,5 @@ the pendulum swings below its anchor: ok
 the slider stops at its limit: ok
 the welded boxes fall together: ok
 sync writes x, y and the turn, and keeps z: ok
+the debug view draws the outlines of the shapes: ok
 the same steps twice give the same world: ok

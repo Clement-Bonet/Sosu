@@ -1,6 +1,7 @@
 // The package physics (spec §8.2), on Jolt: each check prints its name and whether it holds,
 // against expected.txt; the numbers are compared within tolerances, not printed.
 import std.io;
+import std.math;
 import math.linear;
 import scene.scene;
 import physics.physics;
@@ -26,10 +27,12 @@ physics.Body dynamic(physics.World* w, physics.Shape shape, linear.Vec3 at) {
     return w.body(physics.BodyDesc{ shape: shape, position: at });
 }
 
-// A ball dropped and a box thrown: where they are after `steps` steps.
-linear.Vec3[] scenario(Arena* arena, i32 steps) {
+// A ball dropped and a box thrown: where they are after `steps` steps, the world stepped by
+// `threads` threads of Jolt (0: the thread of the program).
+linear.Vec3[] scenario(Arena* arena, i32 steps, i32 threads) uses threads {
     physics.World* w = physics.world(arena, physics.options());
     defer w.close();
+    w.use_threads(threads);
     physics.Shape slab = physics.box(linear.vec3(50.0, 0.5, 50.0));
     physics.Shape ball_shape = physics.sphere(0.5);
     physics.Shape crate_shape = physics.box(linear.vec3(0.5, 0.25, 0.4));
@@ -51,7 +54,7 @@ linear.Vec3[] scenario(Arena* arena, i32 steps) {
     return out;
 }
 
-i32 main() uses io {
+i32 main() uses io, threads {
     mut Arena arena = Arena.new(256 * KB);
     defer arena.free();
     physics.Shape slab = physics.box(linear.vec3(50.0, 0.5, 50.0));
@@ -328,13 +331,101 @@ i32 main() uses io {
         w.close();
     }
 
-    // the same steps from the same inputs give the same world
-    linear.Vec3[] first = scenario(&arena, 300);
-    linear.Vec3[] second = scenario(&arena, 300);
+    // joints
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        physics.Shape post_shape = physics.box(linear.vec3(0.1, 0.1, 0.1));
+        physics.Shape small = physics.box(linear.vec3(0.2, 0.2, 0.2));
+        defer post_shape.release();
+        defer small.release();
+        physics.Body post = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(0.0, 10.0, 0.0) });
+        // a pendulum about z
+        physics.Body bob = dynamic(w, ball_shape, linear.vec3(2.0, 10.0, 0.0));
+        physics.Joint swing = w.hinge(post, bob, linear.vec3(0.0, 10.0, 0.0), linear.vec3(0.0, 0.0, 1.0), physics.joint_options());
+        // a hinge held within half a radian either way
+        physics.Body flap = dynamic(w, small, linear.vec3(10.0, 10.0, 0.0));
+        physics.Body post2 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(9.0, 10.0, 0.0) });
+        physics.Joint held = w.hinge(post2, flap, linear.vec3(9.0, 10.0, 0.0), linear.vec3(0.0, 0.0, 1.0),
+                physics.JointOptions{ limit: true, lower: -0.5, upper: 0.5 });
+        // a turntable about y, driven at 2 rad/s
+        physics.Body table = dynamic(w, small, linear.vec3(20.0, 10.0, 0.0));
+        physics.Body post3 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(20.0, 9.0, 0.0) });
+        physics.Joint driven = w.hinge(post3, table, linear.vec3(20.0, 10.0, 0.0), linear.vec3(0.0, 1.0, 0.0),
+                physics.JointOptions{ motor: true, speed: 2.0, strength: 10000.0 });
+        // a slider along y that stops 1 m down; another along x driven at 1 m/s
+        physics.Body lift = dynamic(w, small, linear.vec3(30.0, 10.0, 0.0));
+        physics.Body post4 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(31.0, 10.0, 0.0) });
+        w.slider(post4, lift, linear.vec3(30.0, 10.0, 0.0), linear.vec3(0.0, 1.0, 0.0), physics.JointOptions{ limit: true, lower: -1.0, upper: 0.0 });
+        physics.Body drawer = dynamic(w, small, linear.vec3(40.0, 10.0, 0.0));
+        physics.Body post5 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(40.0, 12.0, 0.0) });
+        physics.Joint pushed = w.slider(post5, drawer, linear.vec3(40.0, 10.0, 0.0), linear.vec3(1.0, 0.0, 0.0),
+                physics.JointOptions{ motor: true, speed: 1.0, strength: 100000.0 });
+        // two boxes welded, falling together
+        physics.Body left = dynamic(w, small, linear.vec3(50.0, 10.0, 0.0));
+        physics.Body right = dynamic(w, small, linear.vec3(50.4, 10.0, 0.0));
+        w.fixed(left, right);
+        // a rope of at most 3 m
+        physics.Body hung = dynamic(w, small, linear.vec3(60.0, 9.0, 0.0));
+        physics.Body post6 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(60.0, 10.0, 0.0) });
+        w.distance(post6, hung, linear.vec3(60.0, 10.0, 0.0), linear.vec3(60.0, 9.0, 0.0), physics.JointOptions{ limit: true, lower: 0.0, upper: 3.0 });
+        // a lamp in a cone of 0.3 rad about down, hanging, then pushed hard sideways
+        physics.Body post7 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(70.0, 10.0, 0.0) });
+        physics.Body lamp = dynamic(w, small, linear.vec3(70.0, 8.0, 0.0));
+        w.cone(post7, lamp, linear.vec3(70.0, 10.0, 0.0), linear.vec3(0.0, -1.0, 0.0), 0.3);
+        lamp.add_impulse(linear.vec3(lamp.mass() * 2.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));  // would rise 0.45 rad free
+        mut f32 cone_widest = 0.0;
+        mut f32 longest = 0.0;
+        mut f32 shortest = 10.0;
+        mut f32 widest = 0.0;
+        for (i32 i in 0..120) {
+            w.step();
+            f32 d = bob.position().distance(linear.vec3(0.0, 10.0, 0.0));
+            longest = max(longest, d);
+            shortest = min(shortest, d);
+            widest = max(widest, abs(held.position()));
+            linear.Vec3 hang = lamp.position().sub(linear.vec3(70.0, 10.0, 0.0)).normalized();
+            cone_widest = max(cone_widest, math.acos(min(1.0, hang.dot(linear.vec3(0.0, -1.0, 0.0))) as f64) as f32);
+        }
+        say("a pendulum keeps its length", near(longest, 2.0, 0.02) && near(shortest, 2.0, 0.02) && bob.position().y < 10.0);
+        say("a hinge stays within its limits", widest <= 0.55 && widest > 0.4);
+        say("a motor turns a hinge at its speed", near(driven.position(), 2.0 * 2.0 - 6.2831853, 0.1) || near(driven.position(), 4.0, 0.1));
+        say("a slider stops at its limit", near(lift.position().y, 9.0, 0.02) && near(lift.position().x, 30.0, 0.01));
+        say("a motor drives a slider", near(pushed.position(), 2.0, 0.1) && near(drawer.position().y, 10.0, 0.01));
+        say("welded boxes fall together", near(right.position().x - left.position().x, 0.4, 0.01) && left.position().y < 5.0);
+        say("a rope stops the fall at its length", near(hung.position().distance(linear.vec3(60.0, 10.0, 0.0)), 3.0, 0.05));
+        say("a cone keeps a lamp within its angle", cone_widest <= 0.36 && cone_widest > 0.25);
+        for (i32 i in 0..240) {
+            w.step();
+        }
+        w.remove_joint(swing);
+        say("a removed joint is dead", !swing.alive() && held.alive());
+        f32 before = bob.position().y;
+        for (i32 i in 0..60) {
+            w.step();
+        }
+        say("and its body falls freely", bob.position().y < before && bob.state().velocity.y < -4.0);
+        w.close();
+    }
+
+    // the same steps from the same inputs give the same world, with Jolt's threads too
+    linear.Vec3[] first = scenario(&arena, 300, 0);
+    linear.Vec3[] second = scenario(&arena, 300, 0);
+    linear.Vec3[] threaded = scenario(&arena, 300, 3);
     mut bool same = true;
+    mut bool same_threaded = true;
     for (usize i in 0..first.len) {
         same = same && first[i].x == second[i].x && first[i].y == second[i].y && first[i].z == second[i].z;
+        same_threaded = same_threaded && first[i].x == threaded[i].x && first[i].y == threaded[i].y && first[i].z == threaded[i].z;
     }
     say("the same steps twice give the same world", same);
+    say("three threads of Jolt give the same steps", same_threaded);
     return 0;
+}
+
+f32 linear_sin(f32 x) {
+    return math.sin(x as f64) as f32;
+}
+
+f32 linear_cos(f32 x) {
+    return math.cos(x as f64) as f32;
 }

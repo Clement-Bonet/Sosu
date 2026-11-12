@@ -300,6 +300,7 @@ class Game : app.WindowHandler<uses time> {
     mut ui32 hits;
     mut ui32 touched;
     mut str problem;
+    mut linear.Vec3 eye_at;  // where the camera was at the last frame: the sounds are heard from there
 
     void init(keeps Pieces p) {
         arena = Arena.new(64 * KB);
@@ -317,6 +318,7 @@ class Game : app.WindowHandler<uses time> {
         player = none;
         space = none;
         problem = p.problem;
+        eye_at = linear.vec3(0.0, 8.0, 13.0);
         hero_yaw = 0.0;
         last = 0;
         chase = 0.0;
@@ -404,7 +406,16 @@ class Game : app.WindowHandler<uses time> {
     void sound_at(audio.Sound s, linear.Vec3 at, f32 volume) uses io {
         match (space) {
             some(sp) => {
-                sp.play(s, spatial.Placed{ position: at, volume: volume, near: 2.0, far: 40.0 });
+                spatial.Source source = sp.play(s, spatial.Placed{ position: at, volume: volume, near: 2.0, far: 40.0 });
+                // a block or a crate between the camera and the sound: heard through it, muffled
+                match (world.ray(eye_at, at, physics.ALL)) {
+                    some(h) => {
+                        if (h.distance < eye_at.distance(at) - 0.3) {
+                            sp.set_occlusion(source, 1.0);
+                        }
+                    },
+                    none => { },
+                }
             },
             none => { },
         }
@@ -460,6 +471,39 @@ class Game : app.WindowHandler<uses time> {
         anim.palette(skeleton, b.machine.pose(), b.palette);
     }
 
+    // The head of the hero turned toward the nearest enemy within 8 m (at most 0.9 radian), over
+    // what its machine played; then its palette again.
+    void look_around(linear.Vec3 hero_at) {
+        mut f32 best = 8.0;
+        mut linear.Vec3? seen = none;
+        for (usize i in 0..ENEMIES) {
+            if (enemies[i].alive) {
+                linear.Vec3 p = crowd.position(enemies[i].agent);
+                f32 d = p.distance(hero_at);
+                if (d < best) {
+                    best = d;
+                    seen = some(p);
+                }
+            }
+        }
+        match (seen) {
+            some(p) => {
+                match (skeleton.joint("head")) {
+                    some(head) => {
+                        // the enemy in the space of the hero (its feet at the origin, facing -z)
+                        linear.Vec3 local = linear.rotation_y(-hero_yaw).transform_point(p.add(linear.vec3(0.0, 1.5, 0.0)).sub(hero_at));
+                        mut Arena scratch = Arena.new(4 * KB);
+                        defer scratch.free();
+                        anim.look_at(&scratch, skeleton, hero_body.machine.pose(), head, linear.vec3(0.0, 0.0, -1.0), local, 0.9, 1.0);
+                        anim.palette(skeleton, hero_body.machine.pose(), hero_body.palette);
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+    }
+
     override void on_frame(app.Window window) uses io, time {
         gpu.Device* d = match (screen) {
             some(x) => x,
@@ -496,6 +540,7 @@ class Game : app.WindowHandler<uses time> {
         world.advance(dt);
         linear.Vec3 hero_at = hero.position();
         animate(hero_body, linear.vec3(velocity.x, 0.0, velocity.z).length(), dt);
+        look_around(hero_at);
         for (anim.Event e in hero_body.machine.events()) {
             sound_at(e.name == "step" ? step_sound : swing_sound, hero_at, e.name == "step" ? 0.35 : 0.6);
         }
@@ -561,6 +606,7 @@ class Game : app.WindowHandler<uses time> {
         // the camera follows the hero; the listener is the camera
         linear.Vec3 target = hero_at.add(linear.vec3(0.0, 1.0, 0.0));
         linear.Vec3 eye = target.add(camera_offset());
+        eye_at = eye;
         render3d.Camera camera = render3d.Camera{ position: eye, target: target, fov_y: 0.9 };
         match (space) {
             some(sp) => {

@@ -3,7 +3,8 @@
 // directly. A sound of another rate than the mixer is read at its own speed, by linear
 // interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before.
 // A change of volume or panning moves over one buffer, so that it does not click. A mixer of one
-// channel ignores the panning, and averages the two channels of a stereo sound.
+// channel ignores the panning, and averages the two channels of a stereo sound. A voice may go
+// through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water.
 import std.math;
 import std.vec;
 import audio.audio;
@@ -30,6 +31,9 @@ struct Voice {
     mut f32 left;  // the gains of the last frame mixed
     mut f32 right;
     mut bool started;
+    mut f32 cutoff;  // Hz of the low-pass filter, 0 for none
+    mut f32 low_l;   // what the filter holds, by channel
+    mut f32 low_r;
 }
 
 // The gains of the left and right channels for `pan` and `volume`. A mono sound is placed with
@@ -86,7 +90,10 @@ pub class Mixer {
             looping: how.looping,
             left: 0.0,
             right: 0.0,
-            started: false
+            started: false,
+            cutoff: 0.0,
+            low_l: 0.0,
+            low_r: 0.0
         });
         return id;
     }
@@ -133,6 +140,17 @@ pub class Mixer {
         match (find(id)) {
             some(voice) => {
                 voice.step = speed as f64 * voice.sound.rate as f64 / rate as f64;
+            },
+            none => { },
+        }
+    }
+
+    // The sound `id` through a low-pass filter of one pole at `hz` (what is above it softened, 6 dB
+    // an octave); 0 takes the filter away.
+    pub void set_lowpass(ui32 id, f32 hz) {
+        match (find(id)) {
+            some(voice) => {
+                voice.cutoff = max(hz, 0.0);
             },
             none => { },
         }
@@ -195,6 +213,8 @@ pub class Mixer {
             return false;
         }
         f32[2] target = channels == 1 ? [v.volume, v.volume] : gains(s.channels, v.volume, v.pan);
+        // the share of the input the filter takes at each sample: 1 - e^(-2π fc / rate)
+        f32 k = v.cutoff > 0.0 ? 1.0 - math.exp(-6.283185307 * v.cutoff as f64 / rate as f64) as f32 : 1.0;
         f32 left0 = v.started ? v.left : target[0];
         f32 right0 = v.started ? v.right : target[1];
         v.started = true;
@@ -211,8 +231,14 @@ pub class Mixer {
             usize at = v.position as usize;
             f32 frac = (v.position - at as f64) as f32;
             usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
-            f32 l = sample(s, at, next, frac, 0);
-            f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
+            mut f32 l = sample(s, at, next, frac, 0);
+            mut f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
+            if (k < 1.0) {
+                v.low_l += (l - v.low_l) * k;
+                v.low_r += (r - v.low_r) * k;
+                l = v.low_l;
+                r = v.low_r;
+            }
             if (channels == 1) {
                 out[f] += (gl * l + gr * r) * 0.5;
             } else {

@@ -8,3 +8,4 @@ version = "0.1.0"
 physics2d = { path = "../../../packages/physics2d" }
 math = { path = "../../../packages/math" }
 scene = { path = "../../../packages/scene" }
+render = { path = "../../../packages/render" }

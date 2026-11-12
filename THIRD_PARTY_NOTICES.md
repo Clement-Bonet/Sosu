@@ -109,9 +109,13 @@ under their own licenses.
 - Written by Samuli Raivio (2020) and its contributors
 - License: the MIT license (Copyright (c) 2020 Samuli Raivio), or public domain (the Unlicense), at
   your option; both are in `LICENSE`
-- Not changed by Sosu. `fbx.c` limits the memory a file may ask for (1 GB) and turns the scene to
+- Changed by Sosu: one test of `ufbxi_f64_to_i64` (`< 2^63` rather than `<= (double)INT64_MAX`, which
+  rounds up to 2^63: a number of a file equal to 2^63 did not fit the integer it was converted to,
+  found by `sosuc fuzz`), marked `// Sosu:`; the SHA-256 above is that of the file as taken. `fbx.c`
+  limits the memory a file may ask for (1 GB) and turns the scene to
   the axes and the unit of Sosu. ufbx is written to read files from anywhere and fuzzed by its
-  authors; a fault found in it is fixed by taking its new version (`SECURITY.md`).
+  authors; a fault found in it is fixed by taking its new version, or, until it has one, by a change
+  of the file marked here (`SECURITY.md`).
 
 ## SQLite
 

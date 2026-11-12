@@ -56,6 +56,13 @@ extern "C" {
     void sosu_jolt_character_update(ui8* world, ui8* character, f32 dt, f32 vx, f32 vy, f32 vz);
     i32 sosu_jolt_character_state(ui8* character, f32* out);
     void sosu_jolt_character_teleport(ui8* character, f32 px, f32 py, f32 pz);
+    void sosu_jolt_threads(ui8* world, i32 threads);
+    ui32 sosu_jolt_joint(ui8* world, i32 kind, ui32 a, ui32 b, f32* anchor, f32* other, f32* axis, bool limit, f32 lower,
+                         f32 upper, bool motor, f32 speed, f32 strength);
+    void sosu_jolt_joint_remove(ui8* world, ui32 joint);
+    bool sosu_jolt_joint_valid(ui8* world, ui32 joint);
+    f32 sosu_jolt_joint_position(ui8* world, ui32 joint);
+    void sosu_jolt_joint_motor(ui8* world, ui32 joint, f32 speed);
 }
 
 ui32 NONE = 0xFFFFFFFF;
@@ -333,6 +340,48 @@ pub struct Body {
             sosu_jolt_body_move(world as ui8*, id, &at[0], dt);
         }
     }
+}
+
+// A joint between two bodies: a handle, dead once removed (or once one of its bodies is).
+pub struct Joint {
+    ui64 world;
+    ui32 id;
+
+    pub bool alive() {
+        unsafe {
+            return sosu_jolt_joint_valid(world as ui8*, id);
+        }
+    }
+
+    // The angle of a hinge (radians, 0 where it was made), or the translation of a slider (m); 0
+    // for the others.
+    pub f32 position() {
+        unsafe {
+            return sosu_jolt_joint_position(world as ui8*, id);
+        }
+    }
+
+    // The speed of the motor of a hinge (rad/s) or a slider (m/s), from now.
+    pub void set_motor(f32 speed) {
+        unsafe {
+            sosu_jolt_joint_motor(world as ui8*, id, speed);
+        }
+    }
+}
+
+// The limits and the motor of a joint: angles for a hinge (`lower` from -π to 0, `upper` from 0 to
+// π), translations for a slider, lengths for a distance.
+pub struct JointOptions {
+    pub bool limit = false;
+    pub f32 lower = 0.0;
+    pub f32 upper = 0.0;
+    pub bool motor = false;
+    pub f32 speed = 0.0;        // rad/s or m/s
+    pub f32 strength = 1000.0;  // N m or N, at most
+}
+
+pub JointOptions joint_options() {
+    return JointOptions{};
 }
 
 // A contact that began or ended during the last `advance`, or a body that entered or left a
@@ -656,6 +705,58 @@ pub class World {
                 return none;
             }
             return some(arena.new(Character, handle, c));
+        }
+    }
+
+    // Jolt's threads for the steps of the world from now: `n` of them, 0 for the thread of the
+    // program. They touch Jolt's memory only, during `step` and `advance`; the steps are the same
+    // with any number of threads.
+    pub void use_threads(i32 n) uses threads {
+        unsafe {
+            sosu_jolt_threads(handle, max(n, 0));
+        }
+    }
+
+    Joint joint(i32 kind, Body a, Body b, linear.Vec3 anchor, linear.Vec3 other, linear.Vec3 axis, JointOptions o) {
+        mut f32[3] p = [anchor.x, anchor.y, anchor.z];
+        mut f32[3] q = [other.x, other.y, other.z];
+        mut f32[3] d = [axis.x, axis.y, axis.z];
+        unsafe {
+            return Joint{ world: handle as ui64, id: sosu_jolt_joint(handle, kind, a.id, b.id, &p[0], &q[0], &d[0], o.limit,
+                    o.lower, o.upper, o.motor, o.speed, o.strength) };
+        }
+    }
+
+    // The two bodies held as they are now.
+    pub Joint fixed(Body a, Body b) {
+        linear.Vec3 zero = linear.vec3(0.0, 0.0, 0.0);
+        return joint(0, a, b, zero, zero, linear.vec3(0.0, 1.0, 0.0), JointOptions{});
+    }
+
+    // `b` turns about `axis` through `anchor` (in the world) relative to `a`: a door, a wheel.
+    pub Joint hinge(Body a, Body b, linear.Vec3 anchor, linear.Vec3 axis, JointOptions o) {
+        return joint(1, a, b, anchor, anchor, axis, o);
+    }
+
+    // `b` slides along `axis` relative to `a`, without turning: a drawer, a lift.
+    pub Joint slider(Body a, Body b, linear.Vec3 anchor, linear.Vec3 axis, JointOptions o) {
+        return joint(2, a, b, anchor, anchor, axis, o);
+    }
+
+    // `anchor_a` on `a` and `anchor_b` on `b` (in the world) kept at the distance they are now, or
+    // between `lower` and `upper` with `limit`: a rope.
+    pub Joint distance(Body a, Body b, linear.Vec3 anchor_a, linear.Vec3 anchor_b, JointOptions o) {
+        return joint(3, a, b, anchor_a, anchor_b, linear.vec3(0.0, 1.0, 0.0), o);
+    }
+
+    // `b` hangs from `anchor`, turning freely within `half_angle` of `axis`: a shoulder, a lamp.
+    pub Joint cone(Body a, Body b, linear.Vec3 anchor, linear.Vec3 axis, f32 half_angle) {
+        return joint(4, a, b, anchor, anchor, axis, JointOptions{ upper: half_angle });
+    }
+
+    pub void remove_joint(Joint j) {
+        unsafe {
+            sosu_jolt_joint_remove(handle, j.id);
         }
     }
 

@@ -18,3 +18,5 @@ c = ["native/physics2d.c", "native/box2d_avx2.c"]
 [dependencies]
 math = { path = "../math" }
 scene = { path = "../scene" }  # sync: the transforms of entities
+render = { path = "../render" }  # the debug view, on a canvas
+image = { path = "../image" }

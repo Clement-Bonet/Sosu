@@ -3,6 +3,8 @@
 // distance to the listener, its panning from its direction, and its speed from their relative
 // velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click.
 // The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d).
+// A source behind the listener is a little duller, and one the program says hidden
+// (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still.
 import std.math;
 import std.vec;
 import math.linear;
@@ -27,6 +29,7 @@ pub struct Placed {
     pub f32 far = 50.0;  // meters: silent beyond
     pub Rolloff rolloff = Rolloff.Inverse;
     pub f32 doppler = 1.0;  // 0: no change of speed
+    pub mut f32 occlusion = 0.0;  // 0: heard directly, 1: behind a wall
 }
 
 // A source of a space: a handle, dead once its sound ended or was stopped.
@@ -39,6 +42,7 @@ pub struct Heard {
     pub f32 volume;
     pub f32 pan;
     pub f32 speed;
+    pub f32 cutoff;  // Hz of the low-pass filter, 0 for none
 }
 
 struct SourceData {
@@ -100,7 +104,7 @@ pub class Space {
     // `sound` placed by `p`, heard from the next `update` (silent until then).
     pub Source play(keeps audio.Sound sound, Placed p) {
         ui32 voice = mix.play_with(sound, mixer.Play{ volume: 0.0, pan: 0.0, speed: max(p.speed, 0.0001), looping: p.looping });
-        sources.push(SourceData{ voice: voice, placed: p, heard: Heard{ volume: 0.0, pan: 0.0, speed: p.speed } });
+        sources.push(SourceData{ voice: voice, placed: p, heard: Heard{ volume: 0.0, pan: 0.0, speed: p.speed, cutoff: 0.0 } });
         return Source{ voice: voice };
     }
 
@@ -142,6 +146,20 @@ pub class Space {
         }
     }
 
+    // How hidden the source is, from 0 (heard directly) to 1 (behind a wall): its volume lowered by
+    // up to a half, and its sound softened down to a low-pass of 600 Hz. A program finds it with a
+    // ray of `physics` between the listener and the source.
+    pub void set_occlusion(Source s, f32 amount) {
+        match (find(s)) {
+            some(d) => {
+                mut Placed p = d.placed;
+                p.occlusion = clamp(amount, 0.0, 1.0);
+                d.placed = p;
+            },
+            none => { },
+        }
+    }
+
     pub void stop(Source s) {
         mix.stop(s.voice);
     }
@@ -150,7 +168,7 @@ pub class Space {
     pub Heard heard(Source s) {
         return match (find(s)) {
             some(d) => d.heard,
-            none => Heard{ volume: 0.0, pan: 0.0, speed: 1.0 },
+            none => Heard{ volume: 0.0, pan: 0.0, speed: 1.0, cutoff: 0.0 },
         };
     }
 
@@ -171,6 +189,7 @@ pub class Space {
             mut f32 volume = p.volume * attenuation(p, distance);
             mut f32 pan = 0.0;
             mut f32 speed = p.speed;
+            mut f32 cutoff = 0.0;
             if (distance > 0.0001) {
                 linear.Vec3 local = back.rotate(to_source);
                 f32 flat = math.sqrt((local.x * local.x + local.z * local.z) as f64) as f32;
@@ -179,6 +198,9 @@ pub class Space {
                     // behind (+z, the listener facing -z): a little quieter
                     f32 behind = max(local.z / distance, 0.0);
                     volume = volume * (1.0 - 0.2 * behind);
+                    if (behind > 0.0) {
+                        cutoff = 20000.0 - 14000.0 * behind;  // down to 6 kHz right behind
+                    }
                 }
                 if (p.doppler > 0.0) {
                     linear.Vec3 u = to_source.scale(1.0 / distance);
@@ -188,7 +210,13 @@ pub class Space {
                     speed = p.speed * clamp((SOUND + toward) / (SOUND + away), 0.5, 2.0);
                 }
             }
-            d.heard = Heard{ volume: volume, pan: pan, speed: speed };
+            if (p.occlusion > 0.0) {
+                volume = volume * (1.0 - 0.5 * p.occlusion);
+                f32 hidden = 20000.0 * math.pow(0.03 as f64, p.occlusion as f64) as f32;  // 600 Hz when fully hidden
+                cutoff = cutoff > 0.0 ? min(cutoff, hidden) : hidden;
+            }
+            d.heard = Heard{ volume: volume, pan: pan, speed: speed, cutoff: cutoff };
+            mix.set_lowpass(d.voice, cutoff);
             mix.set_volume(d.voice, volume);
             mix.set_pan(d.voice, pan);
             mix.set_speed(d.voice, max(speed, 0.0001));
@@ -208,6 +236,29 @@ pub Space* space(keeps Arena* arena, keeps mixer.Mixer* m) {
 
 bool close(f32 a, f32 b, f32 eps) {
     return abs(a - b) <= eps;
+}
+
+test "a low-pass filter softens what is high" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 48000, 1);
+    audio.Sound high = audio.tone(&arena, 48000, 6000.0, 0.5, 0.5);
+    audio.Sound low = audio.tone(&arena, 48000, 100.0, 0.5, 0.5);
+    mut f32[] out = arena.alloc_slice(f32, 9600);
+    mut f32[4] energy = [0.0, 0.0, 0.0, 0.0];
+    for (usize case_index in 0..4) {
+        m.stop_all();
+        ui32 id = m.play(case_index < 2 ? high : low);
+        if (case_index % 2 == 1) {
+            m.set_lowpass(id, 300.0);
+        }
+        m.mix(out);
+        for (f32 x in out[4800..9600]) {
+            energy[case_index] += x * x;
+        }
+    }
+    assert(energy[1] < energy[0] * 0.01);  // 6 kHz: mostly gone
+    assert(energy[3] > energy[2] * 0.8);   // 100 Hz: kept
 }
 
 test "distance: near, the rolloffs, far" {
@@ -269,6 +320,19 @@ test "a space: volume, panning, Doppler, on buffers" {
     assert(right_energy > 0.01 && left_energy < right_energy * 0.001);
     s.update();
     assert(s.count() == 1);  // the stopped ones are forgotten
+    // hidden: quieter, and softened
+    s.move(right, linear.vec3(4.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
+    s.update();
+    f32 open_volume = s.heard(right).volume;
+    assert(close(s.heard(right).cutoff, 0.0, 0.0001));
+    s.set_occlusion(right, 1.0);
+    s.update();
+    assert(close(s.heard(right).volume, open_volume * 0.5, 0.0001) && close(s.heard(right).cutoff, 600.0, 1.0));
+    s.set_occlusion(right, 0.0);
+    // behind: a little duller
+    s.move(right, linear.vec3(0.0, 0.0, 4.0), linear.vec3(0.0, 0.0, 0.0));
+    s.update();
+    assert(close(s.heard(right).cutoff, 6000.0, 1.0));
     // beyond far: silent, still playing, heard again when it comes back
     s.move(right, linear.vec3(400.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
     s.update();

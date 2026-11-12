@@ -6,7 +6,9 @@
 // `close` releases the world and all it holds. Units are meters, kilograms and seconds, angles in
 // radians, counterclockwise, y up.
 import std.vec;
+import std.math;
 import math.linear;
+import render.canvas;
 import scene.scene;
 
 extern "C" {
@@ -47,6 +49,20 @@ extern "C" {
     ui64 sosu_b2_joint(ui8* world, i32 kind, ui64 a, ui64 b, f32 ax, f32 ay, f32 bx, f32 by, f32 dx, f32 dy,
                        bool collide, bool limit, f32 lower, f32 upper, bool motor, f32 speed, f32 max_force);
     void sosu_b2_joint_destroy(ui64 joint);
+    i32 sosu_b2_draw(ui8* world, bool joints, bool contacts);
+    i32 sosu_b2_drawn(ui8* world, i32 i, f32* out, ui32* color);
+}
+
+// How the world is seen on a canvas: the pixel of the origin of the world, and pixels per meter;
+// y goes up in the world, down on the canvas.
+pub struct View {
+    pub f32 x = 0.0;
+    pub f32 y = 0.0;
+    pub f32 scale = 30.0;
+
+    pub f32[2] pixel(f32 wx, f32 wy) {
+        return [x + wx * scale, y - wy * scale];
+    }
 }
 
 // Every layer: what a shape collides with, and a query sees, by default.
@@ -503,6 +519,40 @@ pub class World {
         unsafe {
             sosu_b2_joint_destroy(j.id);
         }
+    }
+
+    // The shapes of the world drawn on `c` in the colors Box2D gives them (by kind of body, asleep
+    // or awake), their outlines: a debug view. With `joints` and `contacts`, those too. Gives the
+    // number of segments and circles drawn.
+    pub usize debug_draw(canvas.Canvas* c, View view, bool joints, bool contacts) {
+        mut i32 count = 0;
+        unsafe {
+            count = sosu_b2_draw(handle, joints, contacts);
+        }
+        mut f32[4] v = [0.0, 0.0, 0.0, 0.0];
+        mut ui32 rgb = 0;
+        for (i32 i in 0..count) {
+            mut i32 kind = 0;
+            unsafe {
+                kind = sosu_b2_drawn(handle, i, &v[0], &rgb);
+            }
+            canvas.Color color = canvas.Color{ r: (rgb >> 16 & 0xFF) as ui8, g: (rgb >> 8 & 0xFF) as ui8, b: (rgb & 0xFF) as ui8 };
+            if (kind == 0) {
+                f32[2] a = view.pixel(v[0], v[1]);
+                f32[2] b = view.pixel(v[2], v[3]);
+                c.line(a[0] as i32, a[1] as i32, b[0] as i32, b[1] as i32, color);
+            } else {
+                // a circle: 24 segments
+                for (i32 k in 0..24) {
+                    f64 t0 = k as f64 * math.PI / 12.0;
+                    f64 t1 = (k + 1) as f64 * math.PI / 12.0;
+                    f32[2] a = view.pixel(v[0] + v[2] * math.cos(t0) as f32, v[1] + v[2] * math.sin(t0) as f32);
+                    f32[2] b = view.pixel(v[0] + v[2] * math.cos(t1) as f32, v[1] + v[2] * math.sin(t1) as f32);
+                    c.line(a[0] as i32, a[1] as i32, b[0] as i32, b[1] as i32, color);
+                }
+            }
+        }
+        return count as usize;
     }
 
     // The world and all it holds. The handles are dead after.

@@ -9,10 +9,13 @@
 
 typedef struct {
     b2WorldId id;
+    float *drawn; /* the primitives of the last sosu_b2_draw: 7 numbers each */
+    int count;
+    int cap;
 } World;
 
 void *sosu_b2_world(float gx, float gy, bool sleep) {
-    World *w = malloc(sizeof *w);
+    World *w = calloc(1, sizeof *w);
     if (!w) return NULL;
     b2WorldDef def = b2DefaultWorldDef();
     def.gravity = (b2Vec2){ gx, gy };
@@ -26,6 +29,7 @@ void sosu_b2_world_free(void *world) {
     World *w = world;
     if (!w) return;
     b2DestroyWorld(w->id);
+    free(w->drawn);
     free(w);
 }
 
@@ -353,4 +357,105 @@ uint64_t sosu_b2_joint(void *world, int kind, uint64_t a, uint64_t b, float ax, 
 
 void sosu_b2_joint_destroy(uint64_t joint) {
     if (joint != 0 && b2Joint_IsValid(b2LoadJointId(joint))) b2DestroyJoint(b2LoadJointId(joint));
+}
+
+/* ---- the debug view: what Box2D draws, as segments and circles in the world ---- */
+
+/* kind 0: a segment (x1, y1, x2, y2); 1: a circle (x, y, radius, 0); then the color 0xRRGGBB. */
+static void put(World *w, int kind, float a, float b, float c, float d, unsigned color) {
+    if (w->count == w->cap) {
+        int cap = w->cap ? w->cap * 2 : 256;
+        float *grown = realloc(w->drawn, (size_t)cap * 7 * sizeof *grown);
+        if (!grown) return;
+        w->drawn = grown;
+        w->cap = cap;
+    }
+    float *at = w->drawn + (size_t)w->count * 7;
+    at[0] = (float)kind;
+    at[1] = a;
+    at[2] = b;
+    at[3] = c;
+    at[4] = d;
+    at[5] = (float)(color >> 12);  /* in two parts, so that a float holds each exactly */
+    at[6] = (float)(color & 0xFFF);
+    w->count++;
+}
+
+static b2Vec2 placed(b2WorldTransform t, b2Vec2 v) {
+    b2Pos p = b2TransformWorldPoint(t, v);
+    return (b2Vec2){ (float)p.x, (float)p.y };
+}
+
+static void draw_polygon(b2WorldTransform t, const b2Vec2 *v, int n, b2HexColor color, void *context) {
+    for (int i = 0; i < n; i++) {
+        b2Vec2 a = placed(t, v[i]), b = placed(t, v[(i + 1) % n]);
+        put(context, 0, a.x, a.y, b.x, b.y, (unsigned)color);
+    }
+}
+
+static void draw_solid_polygon(b2WorldTransform t, const b2Vec2 *v, int n, float radius, b2HexColor color, void *context) {
+    (void)radius;
+    draw_polygon(t, v, n, color, context);
+}
+
+static void draw_circle(b2Pos c, float radius, b2HexColor color, void *context) {
+    put(context, 1, (float)c.x, (float)c.y, radius, 0.0f, (unsigned)color);
+}
+
+static void draw_solid_circle(b2WorldTransform t, b2Vec2 center, float radius, b2HexColor color, void *context) {
+    b2Vec2 c = placed(t, center);
+    put(context, 1, c.x, c.y, radius, 0.0f, (unsigned)color);
+    /* its turn: a radius along its x */
+    b2Vec2 edge = placed(t, (b2Vec2){ center.x + radius, center.y });
+    put(context, 0, c.x, c.y, edge.x, edge.y, (unsigned)color);
+}
+
+static void draw_capsule(b2Pos p1, b2Pos p2, float radius, b2HexColor color, void *context) {
+    float x1 = (float)p1.x, y1 = (float)p1.y, x2 = (float)p2.x, y2 = (float)p2.y;
+    float dx = x2 - x1, dy = y2 - y1;
+    float l = b2Length((b2Vec2){ dx, dy });
+    float nx = l > 0.0f ? -dy / l * radius : 0.0f, ny = l > 0.0f ? dx / l * radius : 0.0f;
+    put(context, 1, x1, y1, radius, 0.0f, (unsigned)color);
+    put(context, 1, x2, y2, radius, 0.0f, (unsigned)color);
+    put(context, 0, x1 + nx, y1 + ny, x2 + nx, y2 + ny, (unsigned)color);
+    put(context, 0, x1 - nx, y1 - ny, x2 - nx, y2 - ny, (unsigned)color);
+}
+
+static void draw_line(b2Pos p1, b2Pos p2, b2HexColor color, void *context) {
+    put(context, 0, (float)p1.x, (float)p1.y, (float)p2.x, (float)p2.y, (unsigned)color);
+}
+
+static void draw_point(b2Pos p, float size, b2HexColor color, void *context) {
+    (void)size;
+    put(context, 1, (float)p.x, (float)p.y, 0.05f, 0.0f, (unsigned)color);
+}
+
+/* The shapes (and the joints, the contacts) of the world, drawn into its list; their count. */
+int sosu_b2_draw(void *world, bool joints, bool contacts) {
+    World *w = world;
+    w->count = 0;
+    b2DebugDraw draw = b2DefaultDebugDraw();
+    draw.DrawPolygonFcn = draw_polygon;
+    draw.DrawSolidPolygonFcn = draw_solid_polygon;
+    draw.DrawCircleFcn = draw_circle;
+    draw.DrawSolidCircleFcn = draw_solid_circle;
+    draw.DrawSolidCapsuleFcn = draw_capsule;
+    draw.DrawLineFcn = draw_line;
+    draw.DrawPointFcn = draw_point;
+    draw.drawingBounds = (b2AABB){ { -1e9f, -1e9f }, { 1e9f, 1e9f } };
+    draw.drawShapes = true;
+    draw.drawJoints = joints;
+    draw.drawContacts = contacts;
+    draw.context = w;
+    b2World_Draw(w->id, &draw);
+    return w->count;
+}
+
+/* The primitive `i` of the last draw: kind, 4 numbers, color. */
+int sosu_b2_drawn(void *world, int i, float *out, unsigned *color) {
+    World *w = world;
+    const float *at = w->drawn + (size_t)i * 7;
+    for (int k = 0; k < 4; k++) out[k] = at[k + 1];
+    *color = (unsigned)at[5] << 12 | (unsigned)at[6];
+    return (int)at[0];
 }
