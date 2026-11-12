@@ -1,0 +1,22 @@
+// The fuzzing of audio.sofa and audio.hdf5 (spec §13.1, work 5): whatever bytes libFuzzer gives,
+// the reader returns responses or an error, and never stops on a check of Sosu (an index out of its
+// bounds, an overflow) nor on an `assert`; the responses it returns are used.
+import audio.audio;
+import audio.hrtf;
+import audio.sofa;
+
+void fuzz(ui8[] data) uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    match (sofa.decode(&arena, data, 48000)) {
+        ok(h) => {
+            mut f32[] left = arena.alloc_slice(f32, h.taps);
+            mut f32[] right = arena.alloc_slice(f32, h.taps);
+            f32[2] d = h.filters(0.7, 0.2, left, right);
+            assert(d[0] >= 0.0 && d[1] >= 0.0 && h.count > 0);
+        },
+        err(e) => {
+            audio.message(e);
+        },
+    }
+}

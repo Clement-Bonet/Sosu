@@ -118,7 +118,7 @@ f32 sample_at(ui8[] data, usize at, Format f) {
 
 // The float of the bits `bits` (IEEE 754), and back: computed, exactly, rather than read through
 // a pointer of another type, which the C compiler may reorder (strict aliasing).
-f32 f32_of(ui32 bits) {
+pub f32 f32_of(ui32 bits) {
     f64 sign = bits >> 31 != 0 ? -1.0 : 1.0;
     i32 e = (bits >> 23 & 0xFF) as i32;
     f64 m = (bits & 0x7FFFFF) as f64;
@@ -131,7 +131,7 @@ f32 f32_of(ui32 bits) {
     return (sign * (m + 8388608.0) * math.exp2((e - 150) as f64)) as f32;
 }
 
-f64 f64_of(ui64 bits) {
+pub f64 f64_of(ui64 bits) {
     f64 sign = bits >> 63 != 0 ? -1.0 : 1.0;
     i32 e = (bits >> 52 & 0x7FF) as i32;
     f64 m = (bits & 0xFFFFFFFFFFFFF) as f64;

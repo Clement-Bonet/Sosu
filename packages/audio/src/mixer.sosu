@@ -18,6 +18,7 @@ import std.math;
 import std.vec;
 import audio.audio;
 import audio.hrtf;
+import audio.spectrum;
 
 // How a sound is played: `volume` 0 (silent) to 1 (as it is) and above; `pan` -1 (left) to 1
 // (right); `speed` 1 at its rate (2: an octave higher, and twice as short); `looping` from its
@@ -51,22 +52,25 @@ struct Voice {
     mut i32 ears;       // its state in `Mixer.ears`, -1 for none
 }
 
-// What a voice heard through a head keeps: its input, a ring as long as a response and its delay
-// (written twice, newest first, so that what a response reads is one slice, without wrapping),
-// and the responses of the ears for its direction, then those of its new direction while they fade
-// in over a buffer (a convolution is linear: the output fades as the responses would).
+// What a voice heard through a head keeps, to convolve it by blocks (overlap-add): the block of
+// its input being filled, the output of the block before, read out meanwhile (the voice is heard
+// one block late: 5.3 ms at 48 kHz), what that block adds to the next, and the spectra of the
+// responses of its two ears for its direction (each with its delay), then those of a new
+// direction, while the output fades to them over a block (a convolution is linear: the output
+// fades as the responses would).
 struct Ears {
-    f32[] history;  // 2 × (mask + 1)
-    usize mask;
-    mut usize at;
-    mut f32[] now_l;
-    mut f32[] now_r;
-    mut f32[] next_l;
-    mut f32[] next_r;
-    mut f32[2] delay;  // in frames, of `now`
+    f32[] input;     // `block` frames
+    mut usize filled;
+    f32[] ready_l;   // `block` frames each
+    f32[] ready_r;
+    f32[] tail_l;
+    f32[] tail_r;
+    mut f32[] now;   // 4 × size: the left ear (real, imaginary), then the right
+    mut f32[] next;
     mut f32 azimuth;   // of `now`
     mut f32 elevation;
-    mut bool ready;
+    mut bool ready;    // `now` made
+    mut usize flushed; // the silent frames given since its sound ended
     mut bool used;
 }
 
@@ -165,6 +169,14 @@ pub class Mixer {
     Arena* arena;
     mut hrtf.Hrtf*? head;
     vec.Vec<Ears>* ears;
+    mut usize block;               // frames convolved at a time through a head
+    mut spectrum.Plan*? plan;      // of 2 × block
+    mut f32[] work_re;             // 2 × block each: what a block is transformed in
+    mut f32[] work_im;
+    mut f32[] other_re;            // the output through the responses of a new direction
+    mut f32[] other_im;
+    mut f32[] left_response;       // `taps` each: what `hrtf.filters` gives
+    mut f32[] right_response;
 
     void init(keeps Arena* arena, i32 rate, i32 channels)
         requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2 || channels == 6 || channels == 8)
@@ -188,17 +200,46 @@ pub class Mixer {
         self.arena = arena;
         head = none;
         ears = vec.new<Ears>(arena);
+        block = 0;
+        plan = none;
+        work_re = arena.alloc_slice(f32, 0);
+        work_im = arena.alloc_slice(f32, 0);
+        other_re = arena.alloc_slice(f32, 0);
+        other_im = arena.alloc_slice(f32, 0);
+        left_response = arena.alloc_slice(f32, 0);
+        right_response = arena.alloc_slice(f32, 0);
     }
 
     // The voices that have a direction heard through `h`, for headphones: a stereo mixer, at the
-    // rate of `h`. The others are panned as before.
+    // rate of `h`. The others are panned as before. A voice heard through a head is convolved by
+    // blocks, through fast Fourier transforms, and heard one block late (256 frames at 48 kHz).
     pub void use_hrtf(keeps hrtf.Hrtf* h)
         requires channels == 2 && h.rate == rate
     {
         head = some(h);
-        for (usize i in 0..ears.len()) {
-            ears.at(i).ready = false;
+        // a block holds a response and its delay: what a block gives reaches the next one only
+        mut usize b = 64;
+        while (b < h.taps + h.longest as usize + 2) {
+            b = b * 2;
         }
+        block = b;
+        plan = some(spectrum.plan(arena, 2 * b));
+        work_re = arena.alloc_slice(f32, 2 * b);
+        work_im = arena.alloc_slice(f32, 2 * b);
+        other_re = arena.alloc_slice(f32, 2 * b);
+        other_im = arena.alloc_slice(f32, 2 * b);
+        left_response = arena.alloc_slice(f32, h.taps);
+        right_response = arena.alloc_slice(f32, h.taps);
+        // the ears made for another head are of other sizes: made again
+        for (usize i in 0..voices.len()) {
+            voices.at(i).ears = -1;
+        }
+        ears.clear();
+    }
+
+    // How late a voice heard through a head is, in frames: one block (0 when the mixer pans).
+    pub usize latency() {
+        return binaural() ? block : 0;
     }
 
     // The voices panned again.
@@ -390,7 +431,7 @@ pub class Mixer {
     }
 
     // The ears of `v`, taken from those not used, or made for it.
-    Ears* ears_of(Voice* v, hrtf.Hrtf* h) {
+    Ears* ears_of(Voice* v) {
         if (v.ears < 0) {
             mut usize found = ears.len();
             for (usize i in 0..ears.len()) {
@@ -400,26 +441,138 @@ pub class Mixer {
                 }
             }
             if (found == ears.len()) {
-                mut usize size = 64;
-                while (size < h.taps + h.longest as usize + 2) {
-                    size = size * 2;
-                }
-                ears.push(Ears{ history: arena.alloc_slice(f32, 2 * size), mask: size - 1, at: 0,
-                        now_l: arena.alloc_slice(f32, h.taps), now_r: arena.alloc_slice(f32, h.taps),
-                        next_l: arena.alloc_slice(f32, h.taps), next_r: arena.alloc_slice(f32, h.taps),
-                        delay: [0.0, 0.0], azimuth: 0.0, elevation: 0.0, ready: false, used: false });
+                ears.push(Ears{ input: arena.alloc_slice(f32, block), filled: 0,
+                        ready_l: arena.alloc_slice(f32, block), ready_r: arena.alloc_slice(f32, block),
+                        tail_l: arena.alloc_slice(f32, block), tail_r: arena.alloc_slice(f32, block),
+                        now: arena.alloc_slice(f32, 8 * block), next: arena.alloc_slice(f32, 8 * block),
+                        azimuth: 0.0, elevation: 0.0, ready: false, flushed: 0, used: false });
             }
             Ears* e = ears.at(found);
-            mut f32[] history = e.history;
-            for (usize k in 0..history.len) {
-                history[k] = 0.0;
+            mut f32[] input = e.input;
+            mut f32[] ready_l = e.ready_l;
+            mut f32[] ready_r = e.ready_r;
+            mut f32[] tail_l = e.tail_l;
+            mut f32[] tail_r = e.tail_r;
+            for (usize k in 0..block) {
+                input[k] = 0.0;
+                ready_l[k] = 0.0;
+                ready_r[k] = 0.0;
+                tail_l[k] = 0.0;
+                tail_r[k] = 0.0;
             }
-            e.at = 0;
+            e.filled = 0;
             e.ready = false;
+            e.flushed = 0;
             e.used = true;
             v.ears = found as i32;
         }
         return ears.at(v.ears as usize);
+    }
+
+    // The spectra of the responses of the two ears for `azimuth` and `elevation`, each placed after
+    // its delay, into `out` (4 × size): one transform of both, the left ear as the real part and
+    // the right as the imaginary, told apart after by their symmetry.
+    void spectra(hrtf.Hrtf* h, spectrum.Plan* p, f32 azimuth, f32 elevation, f32[] out) {
+        usize n = 2 * block;
+        mut f32[] re = work_re;
+        mut f32[] im = work_im;
+        mut f32[] o = out;
+        f32[2] delay = h.filters(azimuth, elevation, left_response, right_response);
+        usize dl = (delay[0] + 0.5) as usize;
+        usize dr = (delay[1] + 0.5) as usize;
+        for (usize k in 0..n) {
+            re[k] = 0.0;
+            im[k] = 0.0;
+        }
+        for (usize k in 0..h.taps) {
+            if (dl + k < n) {
+                re[dl + k] = left_response[k];
+            }
+            if (dr + k < n) {
+                im[dr + k] = right_response[k];
+            }
+        }
+        p.forward(re, im);
+        for (usize k in 0..n) {
+            usize m = (n - k) % n;
+            f32 a = re[k];
+            f32 b = im[k];
+            f32 c = re[m];
+            f32 d = im[m];
+            o[k] = (a + c) * 0.5;          // the left: (Z[k] + conj Z[n - k]) / 2
+            o[n + k] = (b - d) * 0.5;
+            o[2 * n + k] = (b + d) * 0.5;  // the right: (Z[k] - conj Z[n - k]) / 2i
+            o[3 * n + k] = (c - a) * 0.5;
+        }
+    }
+
+    // The block of input of `e` through the spectra `h` (4 × size), into `re` and `im`: the left
+    // ear as the real part of the output, the right as the imaginary (one inverse transform for
+    // both: their spectra are those of real signals). `x_re` and `x_im` hold the spectrum of the
+    // block.
+    void through(f32[] h, f32[] x_re, f32[] x_im, f32[] re, f32[] im) {
+        usize n = 2 * block;
+        mut f32[] r = re;
+        mut f32[] m = im;
+        for (usize k in 0..n) {
+            f32 xr = x_re[k];
+            f32 xi = x_im[k];
+            f32 lr = xr * h[k] - xi * h[n + k];
+            f32 li = xr * h[n + k] + xi * h[k];
+            f32 rr = xr * h[2 * n + k] - xi * h[3 * n + k];
+            f32 ri = xr * h[3 * n + k] + xi * h[2 * n + k];
+            r[k] = lr - ri;
+            m[k] = li + rr;
+        }
+    }
+
+    // The block of `e` filled: convolved, its output ready to be read during the next block, what
+    // it adds to the one after kept; to a new direction (that of `v`) by a fade over the block.
+    void convolve_block(Ears* e, Voice* v, hrtf.Hrtf* h, spectrum.Plan* p) {
+        usize n = 2 * block;
+        bool turning = e.azimuth != v.angle || e.elevation != v.elevation;
+        if (turning) {
+            spectra(h, p, v.angle, v.elevation, e.next);
+        }
+        // the spectrum of the block, its second half silent
+        mut f32[] re = work_re;
+        mut f32[] im = work_im;
+        for (usize k in 0..n) {
+            re[k] = k < block ? e.input[k] : 0.0;
+            im[k] = 0.0;
+        }
+        p.forward(re, im);
+        // through the responses of now, and of the new direction (in place of the spectrum)
+        through(e.now, re, im, other_re, other_im);
+        if (turning) {
+            through(e.next, re, im, re, im);
+            p.inverse(re, im);
+        }
+        p.inverse(other_re, other_im);
+        mut f32[] ready_l = e.ready_l;
+        mut f32[] ready_r = e.ready_r;
+        mut f32[] tail_l = e.tail_l;
+        mut f32[] tail_r = e.tail_r;
+        for (usize k in 0..block) {
+            mut f32 l = other_re[k];
+            mut f32 r = other_im[k];
+            if (turning) {
+                f32 t = (k + 1) as f32 / block as f32;
+                l += (re[k] - l) * t;
+                r += (im[k] - r) * t;
+            }
+            ready_l[k] = l + tail_l[k];
+            ready_r[k] = r + tail_r[k];
+            tail_l[k] = turning ? re[block + k] : other_re[block + k];
+            tail_r[k] = turning ? im[block + k] : other_im[block + k];
+        }
+        if (turning) {
+            f32[] was = e.now;
+            e.now = e.next;
+            e.next = was;
+            e.azimuth = v.angle;
+            e.elevation = v.elevation;
+        }
     }
 
     // The number of sounds playing.
@@ -564,7 +717,12 @@ pub class Mixer {
         if (v.directed) {
             match (head) {
                 some(h) => {
-                    return add_heard(v, h, out, frames);
+                    match (plan) {
+                        some(p) => {
+                            return add_heard(v, h, p, out, frames);
+                        },
+                        none => { },
+                    }
                 },
                 none => { },
             }
@@ -613,115 +771,64 @@ pub class Mixer {
     }
 
     // Adds `v` to the stereo `out` as a head hears it from its direction: its sound mixed to one
-    // channel, filtered, through the responses of the two ears; those of a new direction fade in
-    // over the buffer. False once it has ended.
-    bool add_heard(Voice* v, hrtf.Hrtf* h, f32[] out, usize frames) {
+    // channel, filtered, and convolved by blocks with the responses of the two ears, one block
+    // late. Once its sound has ended, silence still goes through until its last block and what it
+    // adds to the next are heard. False then.
+    bool add_heard(Voice* v, hrtf.Hrtf* h, spectrum.Plan* p, f32[] out, usize frames) {
         audio.Sound s = v.sound;
         usize length = s.frames();
-        Ears* e = ears_of(v, h);
-        mut bool turning = !e.ready || e.azimuth != v.angle || e.elevation != v.elevation;
-        mut f32[2] next_delay = e.delay;
-        if (turning) {
-            next_delay = h.filters(v.angle, v.elevation, e.next_l, e.next_r);
-        }
+        Ears* e = ears_of(v);
         if (!e.ready) {
-            // the first buffer: no direction before to fade from
-            f32[] l = e.now_l;
-            f32[] r = e.now_r;
-            e.now_l = e.next_l;
-            e.now_r = e.next_r;
-            e.next_l = l;
-            e.next_r = r;
-            e.delay = next_delay;
+            spectra(h, p, v.angle, v.elevation, e.now);
             e.azimuth = v.angle;
             e.elevation = v.elevation;
             e.ready = true;
-            turning = false;
         }
-        usize dl = (e.delay[0] + 0.5) as usize;
-        usize dr = (e.delay[1] + 0.5) as usize;
-        usize nl = (next_delay[0] + 0.5) as usize;
-        usize nr = (next_delay[1] + 0.5) as usize;
         f32 k = v.cutoff > 0.0 ? 1.0 - math.exp(-6.283185307 * v.cutoff as f64 / rate as f64) as f32 : 1.0;
         f32 from = v.started ? v.last_l[0] : v.volume;
         v.started = true;
-        mut f32[] history = e.history;
+        mut f32[] input = e.input;
         for (usize f in 0..frames) {
-            if (v.position >= length as f64) {
-                if (!v.looping) {
-                    break;
-                }
+            mut f32 x = 0.0;
+            if (v.position >= length as f64 && v.looping) {
                 v.position = math.fmod(v.position, length as f64);
             }
-            f32 t = (f + 1) as f32 / frames as f32;
-            usize at = v.position as usize;
-            f32 frac = (v.position - at as f64) as f32;
-            usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
-            mut f32 l = sample(s, at, next, frac, 0);
-            mut f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
-            if (k < 1.0) {
-                v.low_l += (l - v.low_l) * k;
-                v.low_r += (r - v.low_r) * k;
-                l = v.low_l;
-                r = v.low_r;
+            if (v.position < length as f64) {
+                f32 t = (f + 1) as f32 / frames as f32;
+                usize at = v.position as usize;
+                f32 frac = (v.position - at as f64) as f32;
+                usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
+                mut f32 l = sample(s, at, next, frac, 0);
+                mut f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
+                if (k < 1.0) {
+                    v.low_l += (l - v.low_l) * k;
+                    v.low_r += (r - v.low_r) * k;
+                    l = v.low_l;
+                    r = v.low_r;
+                }
+                x = (l + r) * 0.5 * (from + (v.volume - from) * t);
+                if (v.send > 0.0) {
+                    wet.set(f, wet.items()[f] + v.volume * (l + r) * 0.5 * v.send);
+                }
+                v.position += v.step;
+            } else {
+                if (e.flushed >= 2 * block) {
+                    return false;  // its last block, and what it added to the next, heard
+                }
+                e.flushed += 1;
             }
-            f32 gain = from + (v.volume - from) * t;
-            e.at = (e.at + e.mask) & e.mask;  // one back: the newest first
-            f32 x = (l + r) * 0.5 * gain;
-            history[e.at] = x;
-            history[e.at + e.mask + 1] = x;
-            mut f32 left = convolve(history, e.at, e.now_l, dl);
-            mut f32 right = convolve(history, e.at, e.now_r, dr);
-            if (turning) {
-                left += (convolve(history, e.at, e.next_l, nl) - left) * t;
-                right += (convolve(history, e.at, e.next_r, nr) - right) * t;
+            out[2 * f] += e.ready_l[e.filled];
+            out[2 * f + 1] += e.ready_r[e.filled];
+            input[e.filled] = x;
+            e.filled += 1;
+            if (e.filled == block) {
+                convolve_block(e, v, h, p);
+                e.filled = 0;
             }
-            out[2 * f] += left;
-            out[2 * f + 1] += right;
-            if (v.send > 0.0) {
-                wet.set(f, wet.items()[f] + v.volume * (l + r) * 0.5 * v.send);
-            }
-            v.position += v.step;
-        }
-        if (turning) {
-            f32[] l = e.now_l;
-            f32[] r = e.now_r;
-            e.now_l = e.next_l;
-            e.now_r = e.next_r;
-            e.next_l = l;
-            e.next_r = r;
-            e.delay = next_delay;
-            e.azimuth = v.angle;
-            e.elevation = v.elevation;
         }
         v.last_l[0] = v.volume;
-        return v.looping || v.position < length as f64;
+        return v.looping || v.position < length as f64 || e.flushed < 2 * block;
     }
-}
-
-// The output of the response `h`, `delay` frames late, for the input `history` whose newest frame
-// is at `at` (the older after it).
-f32 convolve(f32[] history, usize at, f32[] h, usize delay) {
-    f32[] x = history[at + delay..at + delay + h.len];
-    // four sums apart: the processor adds them side by side, where one would wait on itself
-    mut f32 s0 = 0.0;
-    mut f32 s1 = 0.0;
-    mut f32 s2 = 0.0;
-    mut f32 s3 = 0.0;
-    usize n = h.len - h.len % 4;
-    mut usize k = 0;
-    while (k < n) {
-        s0 += h[k] * x[k];
-        s1 += h[k + 1] * x[k + 1];
-        s2 += h[k + 2] * x[k + 2];
-        s3 += h[k + 3] * x[k + 3];
-        k += 4;
-    }
-    while (k < h.len) {
-        s0 += h[k] * x[k];
-        k += 1;
-    }
-    return (s0 + s1) + (s2 + s3);
 }
 
 // The sample of `channel` between the frames `at` and `next` of `s`, `frac` of the way.

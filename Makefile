@@ -33,6 +33,7 @@ test: all
 	./build/sosuc fuzz --replay tests/fuzz_sosu/gltf -- tests/fuzz_sosu/gltf/corpus > /dev/null
 	./build/sosuc fuzz --replay tests/fuzz_sosu/obj -- tests/fuzz_sosu/obj/corpus > /dev/null
 	./build/sosuc fuzz --replay tests/fuzz_sosu/fbx -- tests/fuzz_sosu/fbx/corpus > /dev/null
+	./build/sosuc fuzz --replay tests/fuzz_sosu/sofa -- tests/fuzz_sosu/sofa/corpus > /dev/null
 	./build/sosuc check tests/packages/app
 	./build/sosuc check packages/platform
 	./build/sosuc test packages/platform
@@ -189,11 +190,11 @@ build/fuzz_lsp: $(LIB_SRC) $(LIB_HDR) tests/fuzz_lsp.c | build
 		-o $@ $(LIB_SRC) tests/fuzz_lsp.c
 
 # The readers of models of the package model, code of Sosu fuzzed by `sosuc fuzz` (spec 13.1,
-# work 5): glTF, OBJ and FBX, FUZZ_TIME seconds each, from the seeds of tests/fuzz_sosu/<name>/corpus;
+# work 5): glTF, OBJ, FBX and SOFA (package audio), FUZZ_TIME seconds each, from the seeds of tests/fuzz_sosu/<name>/corpus;
 # their inputs kept in build/fuzz_<name>_corpus, a crash in build/fuzz_crashes/<name>-.
 fuzz-models: build/sosuc
-	mkdir -p build/fuzz_gltf_corpus build/fuzz_obj_corpus build/fuzz_fbx_corpus build/fuzz_crashes
-	for t in gltf obj fbx; do \
+	mkdir -p build/fuzz_gltf_corpus build/fuzz_obj_corpus build/fuzz_fbx_corpus build/fuzz_sofa_corpus build/fuzz_crashes
+	for t in gltf obj fbx sofa; do \
 		SOSU_CC=$(FUZZ_CC) ./build/sosuc fuzz tests/fuzz_sosu/$$t -- -max_total_time=$(FUZZ_TIME) -max_len=8192 -timeout=10 \
 			-rss_limit_mb=2048 -detect_leaks=0 -print_final_stats=1 -artifact_prefix=build/fuzz_crashes/$$t- \
 			build/fuzz_$${t}_corpus tests/fuzz_sosu/$$t/corpus || exit 1; \

@@ -16,6 +16,12 @@ Run from the repository root: python -I tests/programs/sounds/tests/make_data.py
   1, no scale factors, no bit reservoir): a decoder must give 1152 samples a frame, a tone near
   1021 Hz.
 - FLAC and MP3 files damaged or hostile.
+- small.sofa and cartesian.sofa: SOFA files (HDF5, as netCDF-4 writes them, by the minimal writer
+  below: superblock 2, object headers 2, compact links and attributes, variables contiguous or in
+  chunks of a B-tree 1, shuffled and deflated) of six directions whose responses are a few known
+  impulses; the second gives its positions in cartesian coordinates, its ears right first, and a
+  delay for each direction. SOFA files damaged or hostile. mit_kemar_normal_pinna.sofa is not
+  written here: it is the file of sofacoustics.org (THIRD_PARTY_NOTICES.md).
 
 The files are committed: nothing here runs during the tests.
 """
@@ -24,6 +30,7 @@ import math
 import os
 import struct
 import wave
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -559,8 +566,239 @@ def coded_files():
     write("bad_garbage.mp3", bytes([0xFF, 0xFB]) + bytes((i * 89 + 7) % 256 for i in range(3000)))
 
 
+# ---- SOFA: HDF5 files of the parts audio.hdf5 reads ----
+
+def rot(x, k):
+    return ((x << k) | (x >> (32 - k))) & 0xFFFFFFFF
+
+
+def lookup3(data, init=0):
+    """Bob Jenkins' hashlittle, the checksum of the structures of HDF5 1.8."""
+    n = len(data)
+    a = b = c = (0xDEADBEEF + n + init) & 0xFFFFFFFF
+    i = 0
+    while n > 12:
+        a = (a + int.from_bytes(data[i:i + 4], "little")) & 0xFFFFFFFF
+        b = (b + int.from_bytes(data[i + 4:i + 8], "little")) & 0xFFFFFFFF
+        c = (c + int.from_bytes(data[i + 8:i + 12], "little")) & 0xFFFFFFFF
+        a = (a - c) & 0xFFFFFFFF; a ^= rot(c, 4); c = (c + b) & 0xFFFFFFFF
+        b = (b - a) & 0xFFFFFFFF; b ^= rot(a, 6); a = (a + c) & 0xFFFFFFFF
+        c = (c - b) & 0xFFFFFFFF; c ^= rot(b, 8); b = (b + a) & 0xFFFFFFFF
+        a = (a - c) & 0xFFFFFFFF; a ^= rot(c, 16); c = (c + b) & 0xFFFFFFFF
+        b = (b - a) & 0xFFFFFFFF; b ^= rot(a, 19); a = (a + c) & 0xFFFFFFFF
+        c = (c - b) & 0xFFFFFFFF; c ^= rot(b, 4); b = (b + a) & 0xFFFFFFFF
+        n -= 12
+        i += 12
+    if n == 0:
+        return c
+    tail = data[i:] + b"\0" * (12 - n)
+    a = (a + int.from_bytes(tail[0:4], "little")) & 0xFFFFFFFF
+    b = (b + int.from_bytes(tail[4:8], "little")) & 0xFFFFFFFF
+    c = (c + int.from_bytes(tail[8:12], "little")) & 0xFFFFFFFF
+    c ^= b; c = (c - rot(b, 14)) & 0xFFFFFFFF
+    a ^= c; a = (a - rot(c, 11)) & 0xFFFFFFFF
+    b ^= a; b = (b - rot(a, 25)) & 0xFFFFFFFF
+    c ^= b; c = (c - rot(b, 16)) & 0xFFFFFFFF
+    a ^= c; a = (a - rot(c, 4)) & 0xFFFFFFFF
+    b ^= a; b = (b - rot(a, 14)) & 0xFFFFFFFF
+    c ^= b; c = (c - rot(b, 24)) & 0xFFFFFFFF
+    return c
+
+
+UNDEF = 0xFFFFFFFFFFFFFFFF
+
+
+class Hdf5:
+    """A file of HDF5: its root group of variables of doubles, each with string attributes."""
+
+    def __init__(self):
+        self.out = bytearray(48)  # the superblock, written last
+        self.links = []
+
+    def add(self, data):
+        at = len(self.out)
+        self.out += data
+        while len(self.out) % 8:
+            self.out += b"\0"
+        return at
+
+    @staticmethod
+    def message(kind, body):
+        return struct.pack("<BHB", kind, len(body), 0) + body
+
+    def header(self, messages):
+        body = b"".join(messages)
+        head = b"OHDR" + bytes([2, 0x02]) + struct.pack("<I", len(body))
+        data = head + body
+        return self.add(data + struct.pack("<I", lookup3(data)))
+
+    @staticmethod
+    def dataspace(dims):
+        return Hdf5.message(1, bytes([2, len(dims), 0, 1]) + b"".join(struct.pack("<Q", d) for d in dims))
+
+    @staticmethod
+    def double():
+        return Hdf5.message(3, bytes([0x11, 0x20, 0x3F, 0x00]) + struct.pack("<IHHBBBBI", 8, 0, 64, 52, 11, 0, 52, 1023))
+
+    @staticmethod
+    def attribute(name, text):
+        n = name.encode() + b"\0"
+        value = text.encode()
+        kind = bytes([0x13, 0, 0, 0]) + struct.pack("<I", len(value))
+        space = bytes([2, 0, 0, 0])
+        body = bytes([3, 0]) + struct.pack("<HHHB", len(n), len(kind), len(space), 0) + n + kind + space + value
+        return Hdf5.message(12, body)
+
+    def variable(self, name, dims, values, attributes=(), chunk=None, filters=(2, 1), layout_version=3,
+                 tree_at=None, filter_id=None, declared=None):
+        raw = struct.pack("<%dd" % len(values), *values)
+        messages = [self.dataspace(declared or dims), self.double()]
+        if chunk is None:
+            at = self.add(raw)
+            messages.append(self.message(8, bytes([layout_version, 1]) + struct.pack("<QQ", at, len(raw))))
+        else:
+            tree = self.chunks(dims, chunk, values, filters)
+            pipe = bytes([2, len(filters)])
+            for f in filters:
+                fid = filter_id if filter_id is not None else f
+                pipe += struct.pack("<HHHI", fid, 0, 1, 8 if f == 2 else 6)
+            messages.append(self.message(11, pipe))
+            messages.append(self.message(8, bytes([layout_version, 2, len(dims) + 1])
+                                         + struct.pack("<Q", tree if tree_at is None else tree_at)
+                                         + b"".join(struct.pack("<I", c) for c in chunk) + struct.pack("<I", 8)))
+        for a, t in attributes:
+            messages.append(self.attribute(a, t))
+        self.links.append((name, self.header(messages)))
+
+    def chunks(self, dims, chunk, values, filters):
+        """The chunks of a variable, and the B-tree (version 1, one leaf) that indexes them."""
+        grid = [range(0, d, c) for d, c in zip(dims, chunk)]
+        entries = []
+
+        def walk(prefix, k):
+            if k == len(dims):
+                yield prefix
+                return
+            for o in grid[k]:
+                yield from walk(prefix + [o], k + 1)
+
+        for origin in walk([], 0):
+            cells = []
+            for i in range(math.prod(chunk)):
+                idx = []
+                r = i
+                for c in reversed(chunk):
+                    idx.append(r % c)
+                    r //= c
+                idx.reverse()
+                pos = [o + j for o, j in zip(origin, idx)]
+                if any(q >= d for q, d in zip(pos, dims)):
+                    cells.append(0.0)
+                    continue
+                flat = 0
+                for q, d in zip(pos, dims):
+                    flat = flat * d + q
+                cells.append(values[flat])
+            data = struct.pack("<%dd" % len(cells), *cells)
+            for f in filters:
+                if f == 2:  # shuffle: the first byte of every element, then the second...
+                    n = len(data) // 8
+                    data = bytes(data[(i % n) * 8 + i // n] for i in range(len(data)))
+                elif f == 1:
+                    data = zlib.compress(data, 6)
+            entries.append((origin, self.add(data), len(data)))
+        node = b"TREE" + bytes([1, 0]) + struct.pack("<HQQ", len(entries), UNDEF, UNDEF)
+        for origin, at, size in entries:
+            node += struct.pack("<II", size, 0) + b"".join(struct.pack("<Q", o) for o in origin + [0])
+            node += struct.pack("<Q", at)
+        node += struct.pack("<II", 0, 0) + b"".join(struct.pack("<Q", d) for d in list(dims) + [0])
+        return self.add(node)
+
+    def bytes(self, version=2):
+        links = []
+        for name, at in self.links:
+            n = name.encode()
+            links.append(self.message(6, bytes([1, 0, len(n)]) + n + struct.pack("<Q", at)))
+        root = self.header(links)
+        sb = b"\x89HDF\r\n\x1a\n" + bytes([version, 8, 8, 0]) + struct.pack("<QQQQ", 0, UNDEF, len(self.out), root)
+        self.out[0:48] = sb + struct.pack("<I", lookup3(sb))
+        return bytes(self.out)
+
+
+# Six directions (SOFA: the azimuth turning left from ahead), and for each ear the frame of its
+# impulse and its height: the left first and louder for a sound on the left.
+SOFA_TAPS = 32
+SOFA_PLACES = [(0, 0), (90, 0), (270, 0), (180, 0), (0, 90), (45, -30)]
+SOFA_EARS = [((8, 0.5), (8, 0.5)), ((4, 0.8), (12, 0.2)), ((12, 0.2), (4, 0.8)), ((8, 0.35), (8, 0.35)),
+             ((6, 0.4), (6, 0.4)), ((6, 0.6), (9, 0.35))]
+
+
+def sofa_response(onset, height):
+    h = [0.0] * SOFA_TAPS
+    h[onset] = height
+    h[onset + 1] = -height / 2
+    h[onset + 3] = height / 4
+    return h
+
+
+def sofa(cartesian=False, right_first=False, delays=None, version=2, dims=None, layout_version=3, tree_at=None,
+         filter_id=None, links=None, receivers=None):
+    f = Hdf5()
+    ir = []
+    for ears in SOFA_EARS:
+        order = [ears[1], ears[0]] if right_first else [ears[0], ears[1]]
+        for onset, height in order:
+            ir += sofa_response(onset, height)
+    m = len(SOFA_PLACES)
+    f.variable("Data.IR", [m, 2, SOFA_TAPS], ir, chunk=[4, 1, SOFA_TAPS], layout_version=layout_version,
+               tree_at=tree_at, filter_id=filter_id, declared=dims)
+    f.variable("Data.SamplingRate", [1], [44100.0], [("Units", "hertz")])
+    if cartesian:
+        where = []
+        for az, el in SOFA_PLACES:
+            a, e = math.radians(az), math.radians(el)
+            where += [1.2 * math.cos(e) * math.cos(a), 1.2 * math.cos(e) * math.sin(a), 1.2 * math.sin(e)]
+        f.variable("SourcePosition", [m, 3], where, [("Type", "cartesian"), ("Units", "metre")])
+    else:
+        where = []
+        for az, el in SOFA_PLACES:
+            where += [float(az), float(el), 1.2]
+        f.variable("SourcePosition", [m, 3], where, [("Type", "spherical"), ("Units", "degree, degree, metre")])
+    ears = [0.0, 0.09, 0.0, 0.0, -0.09, 0.0]
+    if right_first:
+        ears = ears[3:] + ears[:3]
+    f.variable("ReceiverPosition", [2, 3, 1], ears, [("Type", "cartesian")], declared=receivers)
+    if delays is None:
+        f.variable("Data.Delay", [1, 2], [0.0, 0.0])
+    else:
+        f.variable("Data.Delay", [m, 2], delays)
+    if links is not None:
+        f.links = [(name, at if name not in links else links[name]) for name, at in f.links]
+    return f.bytes(version)
+
+
+def sofa_files():
+    write("small.sofa", sofa())
+    # the same heads: cartesian, the right ear first, 3 frames of delay on the left and 1 on the right
+    delays = []
+    for _ in SOFA_PLACES:
+        delays += [1.0, 3.0]  # right first
+    write("cartesian.sofa", sofa(cartesian=True, right_first=True, delays=delays))
+    good = sofa()
+    write("bad_truncated.sofa", good[:len(good) // 2])
+    write("bad_superblock0.sofa", sofa(version=0))
+    write("bad_huge.sofa", sofa(dims=[1 << 40, 2, SOFA_TAPS]))
+    write("bad_layout4.sofa", sofa(layout_version=4))
+    write("bad_tree.sofa", sofa(tree_at=60))
+    write("bad_filter.sofa", sofa(filter_id=32001))  # blosc: not read
+    write("bad_link.sofa", sofa(links={"Data.IR": 1 << 40}))
+    write("not_sofa.sofa", Hdf5().bytes())
+    write("bad_receivers.sofa", sofa(receivers=[2, 3, 0]))  # no position of the ears: found by fuzzing
+
+
 if __name__ == "__main__":
     os.makedirs(DATA, exist_ok=True)
     wav_files()
     ogg_files()
     coded_files()
+    sofa_files()

@@ -1,0 +1,784 @@
+// audio.hdf5: the parts of HDF5 (the format of netCDF-4) that SOFA files use, read from the bytes
+// of a file, for audio.sofa. Not a library of HDF5: what a file of variables written by netCDF-4
+// holds, and only that.
+//
+// - The superblock of version 2 or 3 (that of netCDF-4 and of HDF5 1.8 and later); versions 0 and 1
+//   give `Unsupported`.
+// - Object headers of version 1 and 2, their continuations.
+// - The links of the root group: compact (link messages), or dense (a fractal heap whose root
+//   block is direct, or indirect over direct blocks, indexed by a B-tree of version 2 of one node).
+// - Variables: their dataspace, a type of floats of 4 or 8 bytes in little-endian order, their
+//   layout of version 3 (compact, contiguous, or in chunks indexed by a B-tree of version 1), the
+//   filters deflate, shuffle and Fletcher-32 (not checked); their attributes when compact, and
+//   the value of those that are fixed strings.
+//
+// Every read is checked: a read outside of the file, or a structure that does not hold, gives
+// `Damaged`, never a read outside of its bytes; what the file asks for is bounded (`MAX_ELEMENTS`
+// elements, `MAX_DEPTH` levels of a B-tree, `MAX_BLOCKS` blocks of a header).
+import std.vec;
+import compress.zlib;
+import audio.audio;
+import audio.wav;
+
+// The elements a variable may hold: as many floats as `audio.MAX_SAMPLES`.
+pub usize MAX_ELEMENTS = 67108864;
+usize MAX_DEPTH = 16;
+usize MAX_BLOCKS = 256;
+usize MAX_LINKS = 4096;
+usize MAX_RANK = 8;
+ui64 UNDEFINED = 0xFFFFFFFFFFFFFFFF;
+
+// A message of an object header: its type, where its body is, and its size.
+struct Message {
+    ui32 kind;
+    usize at;
+    usize size;
+}
+
+pub struct Link {
+    pub str name;
+    pub usize header;  // the address of the object header it names
+}
+
+pub struct Attribute {
+    pub str name;
+    pub str text;  // the value of a fixed string, "" for another type
+}
+
+// A variable (a dataset): what it holds and where.
+pub struct Variable {
+    pub usize[] dims;
+    usize element;     // bytes of one element
+    bool floats;       // IEEE floats in little-endian order
+    i32 layout;        // 0 compact, 1 contiguous, 2 chunks
+    usize address;     // compact: the data in the header; contiguous: the data; chunks: the B-tree
+    usize length;      // compact and contiguous: bytes
+    usize[] chunk;     // chunks: the dimensions of one, as many as `dims`
+    ui32[] filters;    // in the order they were applied when written
+    pub Attribute[] attributes;
+
+    // The number of elements.
+    pub usize count() {
+        mut usize n = 1;
+        for (usize d in dims) {
+            n = n * d;
+        }
+        return n;
+    }
+
+    // The value of the string attribute `name`.
+    pub str? text_of(str name) {
+        for (Attribute a in attributes) {
+            if (a.name == name) {
+                return some(a.text);
+            }
+        }
+        return none;
+    }
+}
+
+pub class File {
+    ui8[] data;
+    Arena* arena;
+    mut bool bad;   // a read outside of the file, or a structure that does not hold
+    usize offsets;  // bytes of an address
+    usize lengths;  // bytes of a length
+    usize root;     // the object header of the root group
+
+    void init(keeps Arena* arena, keeps ui8[] data, usize offsets, usize lengths, usize root) {
+        self.arena = arena;
+        self.data = data;
+        bad = false;
+        self.offsets = offsets;
+        self.lengths = lengths;
+        self.root = root;
+    }
+
+    // ---- Reading bytes, checked ----
+
+    // Whether `n` bytes from `at` are in the file; marks the file bad when not.
+    bool within(usize at, usize n) {
+        if (at > data.len || n > data.len - at) {
+            bad = true;
+            return false;
+        }
+        return true;
+    }
+
+    // The unsigned number of `n` bytes (1 to 8) at `at`, little-endian; 0 outside of the file.
+    ui64 u(usize at, usize n) {
+        if (!within(at, n) || n > 8) {
+            bad = true;
+            return 0;
+        }
+        mut ui64 x = 0;
+        mut usize i = n;
+        while (i > 0) {
+            i -= 1;
+            x = x << 8 | data[at + i] as ui64;
+        }
+        return x;
+    }
+
+    ui8 byte(usize at) {
+        return u(at, 1) as ui8;
+    }
+
+    usize address(usize at) {
+        ui64 a = u(at, offsets);
+        if (offsets == 4 && a == 0xFFFFFFFF) {
+            return UNDEFINED as usize;
+        }
+        return a as usize;
+    }
+
+    usize length(usize at) {
+        return u(at, lengths) as usize;
+    }
+
+    bool is(usize at, str signature) {
+        if (!within(at, signature.len)) {
+            return false;
+        }
+        for (usize i in 0..signature.len) {
+            if (data[at + i] != signature.bytes[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The bytes from `at`, `n` of them (empty when they are not all in the file).
+    ui8[] slice(usize at, usize n) {
+        if (!within(at, n)) {
+            return data[0..0];
+        }
+        return data[at..at + n];
+    }
+
+    // The string of `n` bytes at `at`, up to its first zero.
+    str text(usize at, usize n) {
+        ui8[] b = slice(at, n);
+        mut usize end = 0;
+        while (end < b.len && b[end] != 0) {
+            end += 1;
+        }
+        return match (str.from_bytes(b[0..end])) {
+            ok(s) => s,
+            err(e) => "",
+        };
+    }
+
+    // ---- Object headers ----
+
+    // The messages of the object header at `at`, its continuations followed.
+    Message[] messages(usize at) {
+        vec.Vec<Message>* out = vec.new<Message>(arena);
+        vec.Vec<usize>* starts = vec.new<usize>(arena);
+        vec.Vec<usize>* ends = vec.new<usize>(arena);
+        bool two = is(at, "OHDR");
+        mut bool ordered = false;
+        if (two) {
+            ui8 flags = byte(at + 5);
+            mut usize p = at + 6;
+            if (flags & 0x20 != 0) {
+                p += 16;
+            }
+            if (flags & 0x10 != 0) {
+                p += 4;
+            }
+            usize width = 1 << (flags & 3) as usize;
+            usize size = u(p, width) as usize;
+            p += width;
+            ordered = flags & 4 != 0;
+            starts.push(p);
+            ends.push(p + min(size, data.len) + 4);  // the size of the first block leaves out its checksum
+        } else {
+            if (byte(at) != 1) {
+                bad = true;
+                return out.items();
+            }
+            usize size = u(at + 8, 4) as usize;
+            starts.push(at + 16);
+            ends.push(at + 16 + min(size, data.len));
+        }
+        mut usize block = 0;
+        while (block < starts.len() && block < MAX_BLOCKS && !bad) {
+            mut usize p = starts.items()[block];
+            usize end = min(ends.items()[block], data.len);
+            usize head = two ? (ordered ? 6 : 4) : 8;
+            // version 2: 4 bytes of checksum close a block, and a gap may hold no message
+            usize last = two ? (end >= 4 ? end - 4 : 0) : end;
+            while (p + head <= last && !bad) {
+                ui32 kind = two ? byte(p) as ui32 : u(p, 2) as ui32;
+                usize size = two ? u(p + 1, 2) as usize : u(p + 2, 2) as usize;
+                p += head;
+                if (p + size > last) {
+                    break;
+                }
+                out.push(Message{ kind: kind, at: p, size: size });
+                if (kind == 0x10) {
+                    usize next = address(p);
+                    usize n = length(p + offsets);
+                    if (two) {
+                        if (!is(next, "OCHK") || n < 8) {
+                            bad = true;
+                            break;
+                        }
+                        starts.push(next + 4);
+                        ends.push(next + n);
+                    } else {
+                        starts.push(next);
+                        ends.push(next + n);
+                    }
+                }
+                p += size;
+            }
+            block += 1;
+        }
+        return out.items();
+    }
+
+    // ---- Links of the root group ----
+
+    // The link of the link message at `at`: its name and the header it names (none: a soft or an
+    // external link).
+    Link? link_at(usize at) {
+        ui8 flags = byte(at + 1);
+        mut usize p = at + 2;
+        mut ui8 kind = 0;
+        if (flags & 8 != 0) {
+            kind = byte(p);
+            p += 1;
+        }
+        if (flags & 4 != 0) {
+            p += 8;
+        }
+        if (flags & 0x10 != 0) {
+            p += 1;
+        }
+        usize width = 1 << (flags & 3) as usize;
+        usize n = u(p, width) as usize;
+        p += width;
+        str name = text(p, n);
+        p += n;
+        if (kind != 0) {
+            return none;
+        }
+        return some(Link{ name: name, header: address(p) });
+    }
+
+    // The links of the root group.
+    pub Link[]!audio.AudioError links() {
+        vec.Vec<Link>* out = vec.new<Link>(arena);
+        for (Message m in messages(root)) {
+            if (m.kind == 6) {
+                match (link_at(m.at)) {
+                    some(l) => {
+                        out.push(l);
+                    },
+                    none => { },
+                }
+            }
+            if (m.kind == 2) {
+                ui8 flags = byte(m.at + 1);
+                usize p = m.at + 2 + (flags & 1 != 0 ? 8 : 0);
+                usize heap_at = address(p);
+                usize tree_at = address(p + offsets);
+                if (heap_at != UNDEFINED as usize) {
+                    try dense_links(heap_at, tree_at, out);
+                }
+            }
+        }
+        if (bad) {
+            return err(audio.AudioError.Damaged);
+        }
+        return ok(out.items());
+    }
+
+    // The links kept in a fractal heap, by the records of its index of names.
+    void!audio.AudioError dense_links(usize heap_at, usize tree_at, vec.Vec<Link>* out) {
+        Heap heap = try heap_of(heap_at);
+        if (!is(tree_at, "BTHD")) {
+            return err(audio.AudioError.Damaged);
+        }
+        usize kind = byte(tree_at + 5) as usize;
+        usize record = u(tree_at + 10, 2) as usize;
+        usize depth = u(tree_at + 12, 2) as usize;
+        usize node = address(tree_at + 16);
+        usize count = u(tree_at + 16 + offsets, 2) as usize;
+        if (kind != 5 || depth != 0 || record < 4 + heap.id_length || count > MAX_LINKS) {
+            return err(depth != 0 ? audio.AudioError.Unsupported : audio.AudioError.Damaged);
+        }
+        if (count > 0 && !is(node, "BTLF")) {
+            return err(audio.AudioError.Damaged);
+        }
+        for (usize i in 0..count) {
+            usize id = node + 6 + i * record + 4;  // after the hash of the name
+            usize at = try object_in(heap, id);
+            match (link_at(at)) {
+                some(l) => {
+                    out.push(l);
+                },
+                none => { },
+            }
+        }
+        if (bad) {
+            return err(audio.AudioError.Damaged);
+        }
+        return ok();
+    }
+
+    // ---- Fractal heaps ----
+
+    Heap!audio.AudioError heap_of(usize at) {
+        if (!is(at, "FRHP")) {
+            return err(audio.AudioError.Damaged);
+        }
+        usize id_length = u(at + 5, 2) as usize;
+        usize filtered = u(at + 7, 2) as usize;
+        usize max_managed = u(at + 10, 4) as usize;
+        usize p = at + 14 + 10 * lengths + 2 * offsets;
+        usize width = u(p, 2) as usize;
+        usize start = length(p + 2);
+        usize max_direct = length(p + 2 + lengths);
+        usize max_bits = u(p + 2 + 2 * lengths, 2) as usize;
+        usize root_block = address(p + 6 + 2 * lengths);
+        usize rows = u(p + 6 + 2 * lengths + offsets, 2) as usize;
+        if (bad || filtered != 0) {
+            return err(bad ? audio.AudioError.Damaged : audio.AudioError.Unsupported);
+        }
+        if (width == 0 || width > 1024 || start == 0 || max_direct < start || max_bits == 0 || max_bits > 64
+                || id_length < 2 || id_length > 64) {
+            return err(audio.AudioError.Damaged);
+        }
+        usize offset_bytes = (max_bits + 7) / 8;
+        mut usize biggest = min(max_direct, max_managed);
+        mut usize bits = 0;
+        while (biggest > 0) {
+            biggest /= 2;
+            bits += 1;
+        }
+        usize length_bytes = min((bits + 7) / 8, id_length - 1 - min(offset_bytes, id_length - 1));
+        vec.Vec<Block>* blocks = vec.new<Block>(arena);
+        if (rows == 0) {
+            blocks.push(Block{ offset: 0, size: start, at: root_block });
+        } else {
+            if (!is(root_block, "FHIB")) {
+                return err(audio.AudioError.Damaged);
+            }
+            // the rows of direct blocks: their size doubles after the first two
+            mut usize direct_rows = 2;
+            mut usize s = start;
+            while (s < max_direct && direct_rows < 64) {
+                s *= 2;
+                direct_rows += 1;
+            }
+            if (rows > direct_rows) {
+                return err(audio.AudioError.Unsupported);  // indirect blocks under the root
+            }
+            mut usize q = root_block + 5 + offsets + offset_bytes;
+            mut usize offset = 0;
+            for (usize r in 0..rows) {
+                usize size = r < 2 ? start : start << (r - 1);
+                for (usize c in 0..width) {
+                    usize a = address(q);
+                    q += offsets;
+                    if (a != UNDEFINED as usize) {
+                        blocks.push(Block{ offset: offset, size: size, at: a });
+                    }
+                    offset += size;
+                }
+            }
+        }
+        if (bad) {
+            return err(audio.AudioError.Damaged);
+        }
+        return ok(Heap{ id_length: id_length, offset_bytes: offset_bytes, length_bytes: length_bytes, blocks: blocks.items() });
+    }
+
+    // Where the object of the heap ID at `id` is in the file (a managed object; a tiny one is in
+    // the ID, a huge one is not read).
+    usize!audio.AudioError object_in(Heap heap, usize id) {
+        ui8 first = byte(id);
+        usize kind = (first >> 4 & 3) as usize;
+        if (kind != 0) {
+            return err(audio.AudioError.Unsupported);
+        }
+        usize offset = u(id + 1, heap.offset_bytes) as usize;
+        usize n = u(id + 1 + heap.offset_bytes, heap.length_bytes) as usize;
+        for (Block b in heap.blocks) {
+            if (offset >= b.offset && offset - b.offset < b.size && n <= b.size - (offset - b.offset)) {
+                usize at = b.at + (offset - b.offset);
+                if (!within(at, n)) {
+                    return err(audio.AudioError.Damaged);
+                }
+                return ok(at);
+            }
+        }
+        return err(audio.AudioError.Damaged);
+    }
+
+    // ---- Variables ----
+
+    // The variable whose object header is at `at`.
+    pub Variable!audio.AudioError variable(usize at) {
+        mut usize[] dims = arena.alloc_slice(usize, 0);
+        mut bool shaped = false;
+        mut usize element = 0;
+        mut bool floats = false;
+        mut i32 layout = -1;
+        mut usize where = 0;
+        mut usize size = 0;
+        mut usize[] chunk = arena.alloc_slice(usize, 0);
+        mut ui32[] filters = arena.alloc_slice(ui32, 0);
+        vec.Vec<Attribute>* attributes = vec.new<Attribute>(arena);
+        for (Message m in messages(at)) {
+            if (m.kind == 1) {
+                dims = try dataspace(m.at);
+                shaped = true;
+            } else if (m.kind == 3) {
+                ui8 kind = byte(m.at) & 0x0F;
+                element = u(m.at + 4, 4) as usize;
+                floats = kind == 1 && byte(m.at + 1) & 1 == 0 && (element == 4 || element == 8);
+            } else if (m.kind == 8) {
+                ui8 version = byte(m.at);
+                if (version != 3) {
+                    return err(audio.AudioError.Unsupported);
+                }
+                ui8 kind = byte(m.at + 1);
+                if (kind == 0) {
+                    layout = 0;
+                    size = u(m.at + 2, 2) as usize;
+                    where = m.at + 4;
+                    if (size > m.size) {
+                        return err(audio.AudioError.Damaged);
+                    }
+                } else if (kind == 1) {
+                    layout = 1;
+                    where = address(m.at + 2);
+                    size = length(m.at + 2 + offsets);
+                } else if (kind == 2) {
+                    layout = 2;
+                    usize rank = byte(m.at + 2) as usize;
+                    if (rank < 2 || rank > MAX_RANK + 1) {
+                        return err(audio.AudioError.Damaged);
+                    }
+                    where = address(m.at + 3);
+                    mut usize[] c = arena.alloc_slice(usize, rank - 1);
+                    for (usize i in 0..rank - 1) {
+                        c[i] = u(m.at + 3 + offsets + 4 * i, 4) as usize;
+                    }
+                    chunk = c;
+                } else {
+                    return err(audio.AudioError.Unsupported);
+                }
+            } else if (m.kind == 11) {
+                filters = try pipeline(m.at);
+            } else if (m.kind == 12) {
+                match (attribute(m.at)) {
+                    some(a) => {
+                        attributes.push(a);
+                    },
+                    none => { },
+                }
+            }
+        }
+        if (bad || !shaped || layout < 0) {
+            return err(audio.AudioError.Damaged);
+        }
+        if (layout == 2 && chunk.len != dims.len) {
+            return err(audio.AudioError.Damaged);
+        }
+        return ok(Variable{ dims: dims, element: element, floats: floats, layout: layout, address: where, length: size,
+                chunk: chunk, filters: filters, attributes: attributes.items() });
+    }
+
+    usize[]!audio.AudioError dataspace(usize at) {
+        ui8 version = byte(at);
+        usize rank = byte(at + 1) as usize;
+        if (rank > MAX_RANK) {
+            return err(audio.AudioError.Unsupported);
+        }
+        usize first = version == 1 ? at + 8 : at + 4;
+        mut usize[] dims = arena.alloc_slice(usize, rank);
+        mut usize count = 1;
+        for (usize i in 0..rank) {
+            ui64 d = u(first + i * lengths, lengths);
+            if (d > MAX_ELEMENTS as ui64) {
+                return err(audio.AudioError.TooLarge);
+            }
+            dims[i] = d as usize;
+            count = count * max(dims[i], 1);
+            if (count > MAX_ELEMENTS) {
+                return err(audio.AudioError.TooLarge);
+            }
+        }
+        return ok(dims);
+    }
+
+    ui32[]!audio.AudioError pipeline(usize at) {
+        ui8 version = byte(at);
+        usize n = byte(at + 1) as usize;
+        if (n > 32) {
+            return err(audio.AudioError.Damaged);
+        }
+        mut ui32[] ids = arena.alloc_slice(ui32, n);
+        mut usize p = at + (version == 1 ? 8 : 2);
+        for (usize i in 0..n) {
+            ui32 id = u(p, 2) as ui32;
+            ids[i] = id;
+            if (version == 1 || id >= 256) {
+                usize name = u(p + 2, 2) as usize;
+                usize values = u(p + 6, 2) as usize;
+                p += 8 + (version == 1 ? (name + 7) / 8 * 8 : name) + 4 * values;
+                if (version == 1 && values % 2 == 1) {
+                    p += 4;
+                }
+            } else {
+                usize values = u(p + 4, 2) as usize;
+                p += 6 + 4 * values;
+            }
+            if (id != 1 && id != 2 && id != 3) {
+                return err(audio.AudioError.Unsupported);  // a filter other than deflate, shuffle, Fletcher-32
+            }
+        }
+        if (bad) {
+            return err(audio.AudioError.Damaged);
+        }
+        return ok(ids);
+    }
+
+    // The attribute of the message at `at`: its name, and its value when it is a fixed string.
+    Attribute? attribute(usize at) {
+        ui8 version = byte(at);
+        usize name = u(at + 2, 2) as usize;
+        usize type_size = u(at + 4, 2) as usize;
+        usize space_size = u(at + 6, 2) as usize;
+        mut usize p = at + (version == 3 ? 9 : 8);
+        usize padded_name = version == 1 ? (name + 7) / 8 * 8 : name;
+        usize padded_type = version == 1 ? (type_size + 7) / 8 * 8 : type_size;
+        usize padded_space = version == 1 ? (space_size + 7) / 8 * 8 : space_size;
+        str n = text(p, name);
+        p += padded_name;
+        usize type_at = p;
+        p += padded_type + padded_space;
+        ui8 kind = byte(type_at) & 0x0F;
+        usize size = u(type_at + 4, 4) as usize;
+        if (bad) {
+            return none;
+        }
+        if (kind == 3 && size <= 4096) {
+            return some(Attribute{ name: n, text: text(p, size) });
+        }
+        return some(Attribute{ name: n, text: "" });
+    }
+
+    // ---- Reading a variable ----
+
+    // The values of `v`, a variable of floats, in the order of its dimensions (the last the
+    // fastest).
+    pub f64[]!audio.AudioError floats_of(Variable v) {
+        if (!v.floats) {
+            return err(audio.AudioError.Unsupported);
+        }
+        usize count = v.count();
+        if (count > MAX_ELEMENTS) {
+            return err(audio.AudioError.TooLarge);
+        }
+        mut f64[] out = arena.alloc_slice(f64, count);
+        if (v.layout == 0 || v.layout == 1) {
+            if (v.address == UNDEFINED as usize || count == 0) {
+                return ok(out);  // never written: its fill value, 0
+            }
+            ui8[] bytes = slice(v.address, count * v.element);
+            if (bad) {
+                return err(audio.AudioError.Damaged);
+            }
+            for (usize i in 0..count) {
+                out[i] = value(bytes, i * v.element, v.element);
+            }
+            return ok(out);
+        }
+        if (v.address == UNDEFINED as usize) {
+            return ok(out);
+        }
+        try chunks(v, v.address, 0, out);
+        if (bad) {
+            return err(audio.AudioError.Damaged);
+        }
+        return ok(out);
+    }
+
+    // The chunks under the node of a B-tree of version 1 at `at`, put into `out`.
+    void!audio.AudioError chunks(Variable v, usize at, usize level_above, f64[] out) {
+        if (level_above > MAX_DEPTH || !is(at, "TREE") || byte(at + 4) != 1) {
+            return err(audio.AudioError.Damaged);
+        }
+        usize level = byte(at + 5) as usize;
+        usize used = u(at + 6, 2) as usize;
+        usize rank = v.dims.len;
+        usize key = 8 + 8 * (rank + 1);
+        mut usize p = at + 8 + 2 * offsets;
+        for (usize i in 0..used) {
+            usize stored = u(p, 4) as usize;
+            ui32 mask = u(p + 4, 4) as ui32;
+            mut usize[] offsets_of = arena.alloc_slice(usize, rank);
+            for (usize k in 0..rank) {
+                offsets_of[k] = u(p + 8 + 8 * k, 8) as usize;
+            }
+            usize child = address(p + key);
+            p += key + offsets;
+            if (bad) {
+                return err(audio.AudioError.Damaged);
+            }
+            if (level > 0) {
+                try chunks(v, child, level_above + 1, out);
+            } else {
+                try place(v, child, stored, mask, offsets_of, out);
+            }
+        }
+        return ok();
+    }
+
+    // One chunk: its bytes through the filters, undone in the other order, its elements put where
+    // they go.
+    void!audio.AudioError place(Variable v, usize at, usize stored, ui32 mask, usize[] origin, f64[] out) {
+        mut usize per = 1;
+        for (usize d in v.chunk) {
+            per = per * d;
+            if (per > MAX_ELEMENTS) {
+                return err(audio.AudioError.TooLarge);
+            }
+        }
+        usize expected = per * v.element;
+        mut ui8[] bytes = slice(at, stored);
+        if (bad) {
+            return err(audio.AudioError.Damaged);
+        }
+        mut usize f = v.filters.len;
+        while (f > 0) {
+            f -= 1;
+            if (mask >> f as ui32 & 1 != 0) {
+                continue;  // not applied to this chunk
+            }
+            ui32 id = v.filters[f];
+            if (id == 1) {
+                bytes = match (zlib.decompress_limit(arena, bytes, expected)) {
+                    ok(b) => b,
+                    err(e) => {
+                        return err(audio.AudioError.Damaged);
+                    },
+                };
+            } else if (id == 2) {
+                bytes = unshuffled(arena, bytes, v.element);
+            } else if (id == 3) {
+                if (bytes.len < 4) {
+                    return err(audio.AudioError.Damaged);
+                }
+                bytes = bytes[0..bytes.len - 4];
+            }
+        }
+        if (bytes.len != expected) {
+            return err(audio.AudioError.Damaged);
+        }
+        // each element of the chunk, by its index in it, counted as an odometer
+        usize rank = v.dims.len;
+        mut usize[] index = arena.alloc_slice(usize, rank);
+        mut f64[] o = out;
+        for (usize e in 0..per) {
+            mut bool inside = true;
+            mut usize flat = 0;
+            for (usize k in 0..rank) {
+                usize position = origin[k] + index[k];
+                if (position >= v.dims[k]) {
+                    inside = false;
+                }
+                flat = flat * v.dims[k] + min(position, v.dims[k]);
+            }
+            if (inside && flat < o.len) {
+                o[flat] = value(bytes, e * v.element, v.element);
+            }
+            mut usize k = rank;
+            while (k > 0) {
+                k -= 1;
+                index[k] += 1;
+                if (index[k] < v.chunk[k]) {
+                    break;
+                }
+                index[k] = 0;
+            }
+        }
+        return ok();
+    }
+}
+
+struct Block {
+    usize offset;  // in the space of the heap
+    usize size;
+    usize at;      // in the file
+}
+
+struct Heap {
+    usize id_length;
+    usize offset_bytes;
+    usize length_bytes;
+    Block[] blocks;
+}
+
+// The float of `size` bytes (4 or 8) at `at` of `bytes`, little-endian.
+f64 value(ui8[] bytes, usize at, usize size) {
+    mut ui64 x = 0;
+    mut usize i = size;
+    while (i > 0) {
+        i -= 1;
+        x = x << 8 | bytes[at + i] as ui64;
+    }
+    return size == 8 ? wav.f64_of(x) : wav.f32_of(x as ui32) as f64;
+}
+
+// The bytes of `data` as they were before the shuffle filter, which wrote the first byte of every
+// element, then the second...
+ui8[] unshuffled(Arena* arena, ui8[] data, usize size) {
+    if (size <= 1) {
+        return data;
+    }
+    usize n = data.len / size;
+    mut ui8[] out = arena.alloc_slice(ui8, data.len);
+    for (usize i in 0..n * size) {
+        out[i] = data[(i % size) * n + i / size];
+    }
+    for (usize i in n * size..data.len) {
+        out[i] = data[i];  // what is left over is kept as it is
+    }
+    return out;
+}
+
+// The file of `data`, which must live as long as it.
+pub File*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data) {
+    if (data.len < 48 || data[0] != 0x89 || data[1] != 0x48 || data[2] != 0x44 || data[3] != 0x46 || data[4] != 0x0D
+            || data[5] != 0x0A || data[6] != 0x1A || data[7] != 0x0A) {
+        return err(audio.AudioError.UnknownFormat);
+    }
+    ui8 version = data[8];
+    if (version != 2 && version != 3) {
+        return err(audio.AudioError.Unsupported);
+    }
+    usize offsets = data[9] as usize;
+    usize lengths = data[10] as usize;
+    if ((offsets != 4 && offsets != 8) || (lengths != 4 && lengths != 8)) {
+        return err(audio.AudioError.Unsupported);
+    }
+    File* f = arena.new(File, arena, data, offsets, lengths, 0);
+    usize base_address = f.address(12);
+    usize root = f.address(12 + 3 * offsets);
+    if (f.bad || base_address != 0) {
+        return err(f.bad ? audio.AudioError.Damaged : audio.AudioError.Unsupported);
+    }
+    return ok(arena.new(File, arena, data, offsets, lengths, root));
+}
+
+// Whether `data` starts as an HDF5 file.
+pub bool is_hdf5(ui8[] data) {
+    return data.len >= 8 && data[0] == 0x89 && data[1] == 0x48 && data[2] == 0x44 && data[3] == 0x46;
+}

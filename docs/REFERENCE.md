@@ -27,11 +27,13 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [audio.coded](#audiocoded) | What audio.mp3, audio.flac and audio.stream share: the decoders of dr_libs (native/dr.c) and of stb_vorbis (native/ogg.c) behind one `Decoder`, and the loop that takes all the samples of one into a `Sound` |
 | [audio.device](#audiodevice) | The sound devices of the system, through SDL3 (`SDL_AudioStream`, the C declarations of platform.sdl_c) |
 | [audio.flac](#audioflac) | FLAC files (native FLAC, not in Ogg), read by dr_flac (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c, which checks the CRC of its frames |
+| [audio.hdf5](#audiohdf5) | The parts of HDF5 (the format of netCDF-4) that SOFA files use, read from the bytes of a file, for audio.sofa |
 | [audio.hrtf](#audiohrtf) | How a head hears a sound from each direction (head-related impulse responses), for headphones: the mixer convolves a voice placed by `set_direction` and `set_elevation` with the responses of its direction, ear by ear, rather than panning it (`Mixer.use_hrtf`) |
 | [audio.mixer](#audiomixer) | Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly |
 | [audio.mp3](#audiomp3) | MP3 files (MPEG-1, 2 and 2.5, layer III), read by dr_mp3 (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c |
 | [audio.ogg](#audioogg) | Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1) |
 | [audio.resample](#audioresample) | A sound at another rate (44 100 Hz to 48 000, for the device or the mixer) |
+| [audio.sofa](#audiosofa) | Head-related impulse responses read from a SOFA file (AES69, the convention SimpleFreeFieldHRIR: the responses of the two ears of a listener, measured from many directions), as an `hrtf.Hrtf` that the mixer hears through (`Mixer.use_hrtf`): the measurements of another dummy head, or of a listener, in place of KEMAR |
 | [audio.spatial](#audiospatial) | Sounds placed in 3D (spec §8.2), over `audio.mixer` |
 | [audio.spectrum](#audiospectrum) | What frequencies a sound holds, for a meter or a visualizer (spec §8.2) |
 | [audio.stream](#audiostream) | A long sound (music, ambiance) read as it plays, rather than decoded whole: an Ogg Vorbis, MP3 or FLAC file decoded into a ring of a few seconds, which the mixer plays in a loop, and which `update` fills again behind it |
@@ -2081,9 +2083,85 @@ The sound of the FLAC file at `path`.
 pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io
 ```
 
+## audio.hdf5
+
+The parts of HDF5 (the format of netCDF-4) that SOFA files use, read from the bytes of a file, for audio.sofa. Not a library of HDF5: what a file of variables written by netCDF-4 holds, and only that.  - The superblock of version 2 or 3 (that of netCDF-4 and of HDF5 1.8 and later); versions 0 and 1   give `Unsupported`. - Object headers of version 1 and 2, their continuations. - The links of the root group: compact (link messages), or dense (a fractal heap whose root   block is direct, or indirect over direct blocks, indexed by a B-tree of version 2 of one node). - Variables: their dataspace, a type of floats of 4 or 8 bytes in little-endian order, their   layout of version 3 (compact, contiguous, or in chunks indexed by a B-tree of version 1), the   filters deflate, shuffle and Fletcher-32 (not checked); their attributes when compact, and   the value of those that are fixed strings.  Every read is checked: a read outside of the file, or a structure that does not hold, gives `Damaged`, never a read outside of its bytes; what the file asks for is bounded (`MAX_ELEMENTS` elements, `MAX_DEPTH` levels of a B-tree, `MAX_BLOCKS` blocks of a header).
+
+### `MAX_ELEMENTS`
+
+The elements a variable may hold: as many floats as `audio.MAX_SAMPLES`.
+
+```sosu
+pub usize MAX_ELEMENTS = 67108864
+```
+
+### struct `Link`
+
+```sosu
+pub struct Link
+```
+
+- `pub str name`
+- `pub usize header`  
+  the address of the object header it names
+
+### struct `Attribute`
+
+```sosu
+pub struct Attribute
+```
+
+- `pub str name`
+- `pub str text`  
+  the value of a fixed string, "" for another type
+
+### struct `Variable`
+
+A variable (a dataset): what it holds and where.
+
+```sosu
+pub struct Variable
+```
+
+- `pub usize[] dims`
+- `pub Attribute[] attributes`
+- `pub usize count()`  
+  The number of elements.
+- `pub str? text_of(str name)`  
+  The value of the string attribute `name`.
+
+### class `File`
+
+```sosu
+pub class File
+```
+
+- `pub Link[]!audio.AudioError links()`  
+  The links of the root group.
+- `pub Variable!audio.AudioError variable(usize at)`  
+  The variable whose object header is at `at`.
+- `pub f64[]!audio.AudioError floats_of(Variable v)`  
+  The values of `v`, a variable of floats, in the order of its dimensions (the last the fastest).
+
+### `open`
+
+The file of `data`, which must live as long as it.
+
+```sosu
+pub File*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data)
+```
+
+### `is_hdf5`
+
+Whether `data` starts as an HDF5 file.
+
+```sosu
+pub bool is_hdf5(ui8[] data)
+```
+
 ## audio.hrtf
 
-How a head hears a sound from each direction (head-related impulse responses), for headphones: the mixer convolves a voice placed by `set_direction` and `set_elevation` with the responses of its direction, ear by ear, rather than panning it (`Mixer.use_hrtf`). Before and behind, above and below are then told apart, as panning cannot.  The responses are those of KEMAR, a dummy head measured by Bill Gardner and Keith Martin at the MIT Media Lab (1994), their "compact" set: 368 directions on the right, from 40 degrees below to above the head, 128 frames at 44.1 kHz, compiled into the package (native/kemar.c, written by native/kemar.py; Copyright 1994 by the MIT Media Lab, without restrictions on use, the authors cited: THIRD_PARTY_NOTICES.md). The left side is the right one, the ears swapped.  Each response is cut at its onset: what is before it becomes a delay of its ear (the difference between the two is the time the sound takes around the head, up to 0.7 ms), and the responses are mixed between the four directions measured around the one asked, their delays too, without the combing that mixing two responses arriving at other times would give. They are resampled to the rate of the mixer, and scaled so that a sound ahead is as loud as it is panned in the middle.
+How a head hears a sound from each direction (head-related impulse responses), for headphones: the mixer convolves a voice placed by `set_direction` and `set_elevation` with the responses of its direction, ear by ear, rather than panning it (`Mixer.use_hrtf`). Before and behind, above and below are then told apart, as panning cannot.  The responses are those of KEMAR, a dummy head measured by Bill Gardner and Keith Martin at the MIT Media Lab (1994), their "compact" set: 368 directions on the right, from 40 degrees below to above the head, 128 frames at 44.1 kHz, compiled into the package (native/kemar.c, written by native/kemar.py; Copyright 1994 by the MIT Media Lab, without restrictions on use, the authors cited: THIRD_PARTY_NOTICES.md). The left side is the right one, the ears swapped.  Each response is cut at its onset: what is before it becomes a delay of its ear (the difference between the two is the time the sound takes around the head, up to 0.7 ms), and the responses are mixed between the four directions measured around the one asked, their delays too, without the combing that mixing two responses arriving at other times would give. They are resampled to the rate of the mixer, and scaled so that a sound ahead is as loud as it is panned in the middle. The mixer convolves by blocks, through `spectrum.Plan`: one block late (`Mixer.latency`).
 
 ### `KEMAR_RATE`
 
@@ -2106,6 +2184,10 @@ pub class Hrtf
   the directions measured
 - `pub f32 longest`  
   the longest delay, in frames
+- `pub bool mirrored`  
+  the right side only (azimuths 0 to 180), the left its mirror
+- `pub f32[2] place(usize i)`  
+  Where the direction `i` measured is: its azimuth (degrees, 90 right) and elevation.
 - `pub f32[2] filters(f32 azimuth, f32 elevation, f32[] left, f32[] right) requires left.len >= taps && right.len >= taps`  
   The responses of the left and right ears for a sound from `azimuth` (radians: 0 ahead, pi/2 right, -pi/2 left) and `elevation` (radians, above positive; held within what was measured), into `left` and `right` (`taps` each), and their delays, in frames.
 
@@ -2115,6 +2197,14 @@ The responses of KEMAR at `rate`, in `arena` (about 2 KB a direction at 48 kHz: 
 
 ```sosu
 pub Hrtf* kemar(keeps Arena* arena, i32 rate) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE
+```
+
+### `measured`
+
+The responses of `elevations.len` directions measured at `measured_rate` (`raw`: for each, the left ear then the right, `measured_taps` frames each, and `extra` frames of delay before each), at `rate`: each cut at its onset, `keep` frames kept after it (the last ones fading out), resampled, and all scaled so that a sound ahead is as loud as one panned in the middle. `mirrored`: the directions are on the right only, by rings of one elevation sorted by azimuth.
+
+```sosu
+pub Hrtf* measured(keeps Arena* arena, i32 measured_rate, i32 rate, usize measured_taps, usize keep, keeps f32[] elevations, keeps f32[] azimuths, f32[] raw, f32[] extra, bool mirrored) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && measured_rate >= audio.MIN_RATE && measured_rate <= audio.MAX_RATE && elevations.len == azimuths.len && elevations.len > 0 && keep > 0 && keep <= measured_taps && raw.len == 2 * elevations.len * measured_taps && extra.len == 2 * elevations.len
 ```
 
 ## audio.mixer
@@ -2155,7 +2245,9 @@ pub class Mixer
 - `pub mut f32 volume`  
   of everything, 1 by default
 - `pub void use_hrtf(keeps hrtf.Hrtf* h) requires channels == 2 && h.rate == rate`  
-  The voices that have a direction heard through `h`, for headphones: a stereo mixer, at the rate of `h`. The others are panned as before.
+  The voices that have a direction heard through `h`, for headphones: a stereo mixer, at the rate of `h`. The others are panned as before. A voice heard through a head is convolved by blocks, through fast Fourier transforms, and heard one block late (256 frames at 48 kHz).
+- `pub usize latency()`  
+  How late a voice heard through a head is, in frames: one block (0 when the mixer pans).
 - `pub void no_hrtf()`  
   The voices panned again.
 - `pub bool binaural()`  
@@ -2293,6 +2385,34 @@ pub audio.Sound to_rate(Arena* arena, audio.Sound s, i32 rate)
 
 ```sosu
 pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality quality) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && audio.fits(rate as i64, s.channels as i64, frames_at(s.frames(), s.rate, rate) as i64)
+```
+
+## audio.sofa
+
+Head-related impulse responses read from a SOFA file (AES69, the convention SimpleFreeFieldHRIR: the responses of the two ears of a listener, measured from many directions), as an `hrtf.Hrtf` that the mixer hears through (`Mixer.use_hrtf`): the measurements of another dummy head, or of a listener, in place of KEMAR.  A SOFA file is a netCDF-4 file, read by audio.hdf5. Its variables `Data.IR` (directions × 2 ears × frames), `Data.SamplingRate` and `SourcePosition` (spherical, in degrees: the azimuth turning left from ahead, as SOFA has it; or cartesian: x ahead, y left, z up) are read, and `Data.Delay` (frames before each response) and `ReceiverPosition` (which ear is first: the left has y > 0) when they are there. Each response is cut `KEEP_MS` after its onset, as KEMAR's compact set is: the tail of a measurement holds the room and the noise more than the head, and it would make the blocks of the mixer longer. The directions may be anywhere on the sphere: `Hrtf.filters` mixes the three nearest.
+
+### `KEEP_MS`
+
+The milliseconds kept of each response after its onset: 2.9, 128 frames at 44.1 kHz, as the compact set of KEMAR.
+
+```sosu
+pub f32 KEEP_MS = 2.9
+```
+
+### `decode`
+
+The responses of the SOFA file `data` at `rate`, in `arena`.
+
+```sosu
+pub hrtf.Hrtf*!audio.AudioError decode(keeps Arena* arena, keeps ui8[] data, i32 rate)
+```
+
+### `load`
+
+The responses of the SOFA file at `path`, at `rate`.
+
+```sosu
+pub hrtf.Hrtf*!audio.AudioError load(keeps Arena* arena, str path, i32 rate) uses io
 ```
 
 ## audio.spatial
@@ -2473,6 +2593,28 @@ What frequencies a sound holds, for a meter or a visualizer (spec §8.2). `fft` 
 pub void fft(f32[] re, f32[] im) requires re.len == im.len && (re.len & (re.len - 1)) == 0
 ```
 
+### class `Plan`
+
+A transform of one size made again and again (the convolutions of `audio.mixer` through a head): its turns and the order of its bits kept, rather than worked out each time.
+
+```sosu
+pub class Plan
+```
+
+- `pub usize size`
+- `pub void forward(f32[] re, f32[] im) requires re.len == size && im.len == size`  
+  As `fft`: `re` and `im` (`size` each) replaced by their transform.
+- `pub void inverse(f32[] re, f32[] im) requires re.len == size && im.len == size`  
+  The inverse: `re` and `im` replaced by x[n] = Σ X[k] e^(2πi kn/N) / N.
+
+### `plan`
+
+A transform of `size` (a power of 2) prepared in `arena`.
+
+```sosu
+pub Plan* plan(keeps Arena* arena, usize size) requires size >= 2 && (size & (size - 1)) == 0
+```
+
 ### `FLOOR_DB`
 
 The level below which a band shows nothing, in dB below full scale.
@@ -2598,6 +2740,20 @@ Whether `data` starts as a WAV file.
 
 ```sosu
 pub bool is_wav(ui8[] data)
+```
+
+### `f32_of`
+
+The float of the bits `bits` (IEEE 754), and back: computed, exactly, rather than read through a pointer of another type, which the C compiler may reorder (strict aliasing).
+
+```sosu
+pub f32 f32_of(ui32 bits)
+```
+
+### `f64_of`
+
+```sosu
+pub f64 f64_of(ui64 bits)
 ```
 
 ### `decode`

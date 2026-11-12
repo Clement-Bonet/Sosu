@@ -13,6 +13,8 @@ import audio.ogg;
 import audio.mp3;
 import audio.flac;
 import audio.stream;
+import audio.hrtf;
+import audio.sofa;
 import testing.check;
 import testing.fixture;
 
@@ -217,6 +219,189 @@ test "a chained Ogg Vorbis file: its two streams one after the other" {
     }
 }
 
+f32 power(f32[] x) {
+    mut f32 e = 0.0;
+    for (f32 v in x) {
+        e += v * v;
+    }
+    return e;
+}
+
+test "a SOFA file: KEMAR measured whole, read by audio.hdf5, as the compact set hears it" {
+    mut Arena arena = Arena.new(64 * MB);
+    defer arena.free();
+    // MIT's KEMAR, "normal pinna": 710 directions all around, 512 frames at 44.1 kHz, in a netCDF-4
+    // file of sofacoustics.org (its links and attributes dense, its variables in chunks, shuffled
+    // and deflated)
+    ui8[] file = fixture.read_bytes(&arena, "tests/data/mit_kemar_normal_pinna.sofa");
+    hrtf.Hrtf* h = match (sofa.decode(&arena, file, 44100)) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(h.count == 710 && h.taps == 128 && !h.mirrored);
+    // SOFA turns left from ahead: its 90 degrees are on the left, -90 here
+    mut usize left_one = h.count;
+    for (usize i in 0..h.count) {
+        f32[2] p = h.place(i);
+        if (abs(p[0] + 90.0) < 0.01 && abs(p[1]) < 0.01) {
+            left_one = i;
+        }
+    }
+    assert(left_one < h.count);
+    // on the right: the right ear louder, and first by as long as the compact set says
+    mut f32[] l = arena.alloc_slice(f32, h.taps);
+    mut f32[] r = arena.alloc_slice(f32, h.taps);
+    f32[2] d = h.filters(1.5707964, 0.0, l, r);
+    assert(power(r) > 4.0 * power(l));
+    hrtf.Hrtf* compact = hrtf.kemar(&arena, 44100);
+    mut f32[] cl = arena.alloc_slice(f32, compact.taps);
+    mut f32[] cr = arena.alloc_slice(f32, compact.taps);
+    f32[2] cd = compact.filters(1.5707964, 0.0, cl, cr);
+    f32 lag = (d[0] - d[1]) / 44.1;
+    f32 compact_lag = (cd[0] - cd[1]) / 44.1;
+    assert(lag > 0.5 && lag < 0.9 && abs(lag - compact_lag) < 0.1);
+    // on the left: the left ear first; ahead: alike, half the power in each
+    f32[2] on_left = h.filters(-1.5707964, 0.0, l, r);
+    assert(power(l) > 4.0 * power(r) && on_left[1] > on_left[0]);
+    h.filters(0.0, 0.0, l, r);
+    assert(abs(power(l) + power(r) - 1.0) < 0.001 && abs(power(l) - power(r)) < 0.25);
+    // between directions measured: no jump as the direction turns slowly
+    mut f32[] l2 = arena.alloc_slice(f32, h.taps);
+    mut f32[] r2 = arena.alloc_slice(f32, h.taps);
+    mut f32 worst = 0.0;
+    for (i32 step in 0..720) {
+        f32 a = step as f32 * 0.00872665;  // half a degree
+        h.filters(a, 0.2, l, r);
+        h.filters(a + 0.00872665, 0.2, l2, r2);
+        mut f32 change = 0.0;
+        for (usize k in 0..h.taps) {
+            change = max(change, abs(l[k] - l2[k]));
+        }
+        worst = max(worst, change);
+    }
+    assert(worst < 0.1);
+    // heard through the mixer, at 48 kHz: a click on the right, the right ear first
+    hrtf.Hrtf* h48 = match (sofa.decode(&arena, file, 48000)) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    mixer.Mixer* m = mixer.create(&arena, 48000, 2);
+    m.use_hrtf(h48);
+    audio.Sound click = audio.create(&arena, 48000, 1, 2400);
+    mut f32[] c = click.samples;
+    c[10] = 1.0;
+    ui32 id = m.play(click);
+    m.set_direction(id, 1.5707964);
+    f32[] out = mixed(&arena, m, none, 2400);
+    mut usize first_l = 0;
+    mut usize first_r = 0;
+    for (usize f in 0..2400) {
+        if (abs(out[2 * f]) > abs(out[2 * first_l])) {
+            first_l = f;
+        }
+        if (abs(out[2 * f + 1]) > abs(out[2 * first_r + 1])) {
+            first_r = f;
+        }
+    }
+    assert(first_r < first_l && abs(out[2 * first_r + 1]) > 2.0 * abs(out[2 * first_l]));
+}
+
+hrtf.Hrtf* sofa_of(Arena* arena, str name) uses io {
+    return match (sofa.decode(arena, fixture.read_bytes(arena, name), 44100)) {
+        ok(x) => x,
+        err(e) => hrtf.kemar(arena, 44100),  // fails the counts asserted
+    };
+}
+
+test "small SOFA files: their six directions as written; cartesian, the right ear first, delays" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    hrtf.Hrtf* h = sofa_of(&arena, "tests/data/small.sofa");
+    assert(h.count == 6 && h.taps == 32 && !h.mirrored);
+    // SOFA's azimuths turn left: 90 is -90 here, 270 is 90, 45 is -45
+    mut f32[12] places = [0.0, 0.0, -90.0, 0.0, 90.0, 0.0, 180.0, 0.0, 0.0, 90.0, -45.0, -30.0];
+    for (usize i in 0..6) {
+        f32[2] p = h.place(i);
+        assert(abs(abs(p[0]) - abs(places[2 * i])) < 0.001 && abs(p[1] - places[2 * i + 1]) < 0.001);
+        assert(i == 3 || i == 4 || abs(p[0] - places[2 * i]) < 0.001);
+    }
+    // on a direction measured: its responses, from their onsets (2 frames before the impulse)
+    mut f32[] l = arena.alloc_slice(f32, h.taps);
+    mut f32[] r = arena.alloc_slice(f32, h.taps);
+    f32[2] d = h.filters(-1.5707964, 0.0, l, r);
+    assert(d[0] == 2.0 && d[1] == 10.0);
+    assert(abs(l[3] + 0.5 * l[2]) < 0.00001 && abs(l[5] - 0.25 * l[2]) < 0.00001 && l[0] == 0.0 && l[1] == 0.0);
+    assert(abs(power(l) / power(r) - 16.0) < 0.001);
+    f32[2] ahead = h.filters(0.0, 0.0, l, r);
+    assert(ahead[0] == 6.0 && ahead[1] == 6.0 && abs(power(l) - 0.5) < 0.0001 && abs(power(r) - 0.5) < 0.0001);
+    // cartesian, the right ear first in the file, 3 frames before the left and 1 before the right:
+    // the same heads, the delays added
+    hrtf.Hrtf* c = sofa_of(&arena, "tests/data/cartesian.sofa");
+    assert(c.count == 6);
+    mut f32[] cl = arena.alloc_slice(f32, c.taps);
+    mut f32[] cr = arena.alloc_slice(f32, c.taps);
+    for (usize i in 0..6) {
+        f32[2] p = c.place(i);
+        f32[2] q = h.place(i);
+        assert(abs(p[1] - q[1]) < 0.001 && (abs(p[0] - q[0]) < 0.001 || abs(abs(p[0] - q[0]) - 360.0) < 0.001 || q[1] > 89.0));
+    }
+    f32[2] cd = c.filters(-1.5707964, 0.0, cl, cr);
+    h.filters(-1.5707964, 0.0, l, r);
+    assert(cd[0] == 5.0 && cd[1] == 11.0);
+    for (usize k in 0..h.taps) {
+        assert(abs(cl[k] - l[k]) < 0.00001 && abs(cr[k] - r[k]) < 0.00001);
+    }
+}
+
+test "SOFA files damaged at random: responses or an error, never a stop" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    ui8[] small = fixture.read_bytes(&arena, "tests/data/small.sofa");
+    mut ui64 state = 7;
+    mut usize readable = 0;
+    for (i32 round in 0..3000) {
+        mut Arena scratch = Arena.new(64 * KB);
+        mut ui8[] copy = scratch.alloc_slice(ui8, small.len);
+        for (usize i in 0..small.len) {
+            copy[i] = small[i];
+        }
+        mut usize n = small.len;
+        state = (state * 1103515245 + 12345) % 4294967296;
+        usize edits = 1 + (state >> 20) as usize % 4;
+        for (usize e in 0..edits) {
+            state = (state * 1103515245 + 12345) % 4294967296;
+            usize at = (state >> 4) as usize % n;
+            usize how = (state >> 2) as usize % 4;
+            if (how == 0) {
+                copy[at] = copy[at] ^ (1 << (state % 8) as ui8);
+            } else if (how == 1) {
+                copy[at] = (state >> 16) as ui8;
+            } else if (how == 2) {
+                copy[at] = 0xFF;
+            } else {
+                n = max(at, 1);
+            }
+        }
+        match (sofa.decode(&scratch, copy[0..n], 48000)) {
+            ok(h) => {
+                mut f32[] l = scratch.alloc_slice(f32, h.taps);
+                mut f32[] r = scratch.alloc_slice(f32, h.taps);
+                h.filters(0.3, 0.1, l, r);
+                readable += 1;
+            },
+            err(e) => { },
+        }
+        scratch.free();
+    }
+    assert(readable > 100);  // most single changes fall in samples, which stay readable
+}
+
 test "a FLAC file, sample for sample" {
     mut Arena arena = Arena.new(2 * MB);
     defer arena.free();
@@ -413,8 +598,29 @@ test "a stream: its length, a seek, what it plays now, a WAV file" {
 }
 
 // What reading a file gives: its rate, channels and frames, or the error.
+// What a SOFA file gives: its directions and frames, or why not.
+str sofa_outcome(keeps Arena* arena, str name, keeps ui8[] data) {
+    text.TextBuilder* b = text.builder(arena);
+    b.push(name);
+    b.push(": ");
+    match (sofa.decode(arena, data, 44100)) {
+        ok(h) => {
+            b.push_u64(h.count as ui64);
+            b.push(" directions, ");
+            b.push_u64(h.taps as ui64);
+            b.push(" frames");
+        },
+        err(e) => b.push(audio.message(e)),
+    }
+    b.push("\n");
+    return b.text();
+}
+
 str outcome(Arena* arena, str name) uses io {
     ui8[] data = fixture.read_bytes(arena, join(arena, "tests/data/", name));
+    if (text.ends_with(name, ".sofa")) {
+        return sofa_outcome(arena, name, data);
+    }
     audio.Sound!audio.AudioError read = text.ends_with(name, ".ogg") ? ogg.decode(arena, data)
             : text.ends_with(name, ".flac") ? flac.decode(arena, data)
             : text.ends_with(name, ".mp3") ? mp3.decode(arena, data)
@@ -441,7 +647,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[37] names = [
+    str[48] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -464,6 +670,17 @@ test "damaged and hostile files" {
         "bad_chained.ogg",
         "bad_seek.ogg",
         "bad_seek_shift.ogg",
+        "small.sofa",
+        "cartesian.sofa",
+        "bad_truncated.sofa",
+        "bad_superblock0.sofa",
+        "bad_huge.sofa",
+        "bad_layout4.sofa",
+        "bad_tree.sofa",
+        "bad_filter.sofa",
+        "bad_link.sofa",
+        "not_sofa.sofa",
+        "bad_receivers.sofa",
         "tone_decoded.wav",
         "pcm8.wav",
         "pcm24.wav",

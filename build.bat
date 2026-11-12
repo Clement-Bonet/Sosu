@@ -47,7 +47,7 @@ build\lsp_tests.exe || exit /b 1
 build\i18n_tests.exe || exit /b 1
 build\program_tests.exe build\sosuc.exe || exit /b 1
 for %%f in (tests\fuzz\*) do build\fuzz_replay.exe "%%f" >nul || exit /b 1
-for %%t in (gltf obj fbx) do build\sosuc.exe fuzz --replay tests\fuzz_sosu\%%t -- tests\fuzz_sosu\%%t\corpus >nul || exit /b 1
+for %%t in (gltf obj fbx sofa) do build\sosuc.exe fuzz --replay tests\fuzz_sosu\%%t -- tests\fuzz_sosu\%%t\corpus >nul || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 build\sosuc.exe check packages\platform || exit /b 1
 build\sosuc.exe test packages\platform || exit /b 1

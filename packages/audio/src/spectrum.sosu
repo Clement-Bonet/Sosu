@@ -64,6 +64,111 @@ pub void fft(f32[] re, f32[] im)
     }
 }
 
+// A transform of one size made again and again (the convolutions of `audio.mixer` through a head):
+// its turns and the order of its bits kept, rather than worked out each time.
+pub class Plan {
+    pub usize size;
+    f32[] cosines;      // cos(2πj / size), for j below size / 2
+    f32[] sines;        // -sin(2πj / size)
+    usize[] reversed;   // each index, its bits reversed
+
+    void init(usize size, keeps f32[] cosines, keeps f32[] sines, keeps usize[] reversed) {
+        self.size = size;
+        self.cosines = cosines;
+        self.sines = sines;
+        self.reversed = reversed;
+    }
+
+    // As `fft`: `re` and `im` (`size` each) replaced by their transform.
+    pub void forward(f32[] re, f32[] im)
+        requires re.len == size && im.len == size
+    {
+        mut f32[] r = re;
+        mut f32[] m = im;
+        usize n = size;
+        for (usize i in 0..n) {
+            usize j = reversed[i];
+            if (i < j) {
+                f32 tr = r[i];
+                r[i] = r[j];
+                r[j] = tr;
+                f32 ti = m[i];
+                m[i] = m[j];
+                m[j] = ti;
+            }
+        }
+        mut usize length = 2;
+        while (length <= n) {
+            usize half = length / 2;
+            usize stride = n / length;
+            mut usize start = 0;
+            while (start < n) {
+                for (usize k in 0..half) {
+                    usize a = start + k;
+                    usize b = a + half;
+                    f32 wr = cosines[k * stride];
+                    f32 wi = sines[k * stride];
+                    f32 br = r[b] * wr - m[b] * wi;
+                    f32 bi = r[b] * wi + m[b] * wr;
+                    r[b] = r[a] - br;
+                    m[b] = m[a] - bi;
+                    r[a] = r[a] + br;
+                    m[a] = m[a] + bi;
+                }
+                start += length;
+            }
+            length *= 2;
+        }
+    }
+
+    // The inverse: `re` and `im` replaced by x[n] = Σ X[k] e^(2πi kn/N) / N.
+    pub void inverse(f32[] re, f32[] im)
+        requires re.len == size && im.len == size
+    {
+        mut f32[] r = re;
+        mut f32[] m = im;
+        for (usize i in 0..size) {
+            m[i] = -m[i];
+        }
+        forward(r, m);
+        f32 scale = 1.0 / size as f32;
+        for (usize i in 0..size) {
+            r[i] = r[i] * scale;
+            m[i] = -m[i] * scale;
+        }
+    }
+}
+
+// A transform of `size` (a power of 2) prepared in `arena`.
+pub Plan* plan(keeps Arena* arena, usize size)
+    requires size >= 2 && (size & (size - 1)) == 0
+{
+    mut f32[] cosines = arena.alloc_slice(f32, size / 2);
+    mut f32[] sines = arena.alloc_slice(f32, size / 2);
+    for (usize j in 0..size / 2) {
+        f64 angle = -2.0 * math.PI * j as f64 / size as f64;
+        cosines[j] = math.cos(angle) as f32;
+        sines[j] = math.sin(angle) as f32;
+    }
+    mut usize[] reversed = arena.alloc_slice(usize, size);
+    mut usize bits = 0;
+    mut usize reach = 1;
+    while (reach < size) {
+        reach *= 2;
+        bits += 1;
+    }
+    for (usize i in 0..size) {
+        mut usize r = 0;
+        mut usize x = i;
+        for (usize b in 0..bits) {
+            r = r * 2 + x % 2;
+            x /= 2;
+        }
+        reversed[i] = r;
+    }
+    return arena.new(Plan, size, cosines, sines, reversed);
+}
+
 // The level below which a band shows nothing, in dB below full scale.
 pub f32 FLOOR_DB = 72.0;
 
@@ -247,4 +352,40 @@ test "an analyzer: a sine in its band, its level, the fall and the peak" {
     assert(a.bands[band] == 0.0 && a.peaks[band] < 66.0 / 72.0 && a.peaks[band] > 0.5);
     a.clear();
     assert(a.peaks[band] == 0.0);
+}
+
+test "a plan transforms as fft does, and back" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    Plan* p = plan(&arena, 512);
+    mut f32[] re = arena.alloc_slice(f32, 512);
+    mut f32[] im = arena.alloc_slice(f32, 512);
+    mut f32[] re2 = arena.alloc_slice(f32, 512);
+    mut f32[] im2 = arena.alloc_slice(f32, 512);
+    mut ui64 state = 99;
+    for (usize i in 0..512) {
+        state = (state * 1664525 + 1013904223) % 4294967296;
+        re[i] = (state >> 8) as f32 / 16777216.0 - 0.5;
+        im[i] = i < 100 ? 0.25 : 0.0;
+        re2[i] = re[i];
+        im2[i] = im[i];
+    }
+    fft(re, im);
+    mut f32[] kept_re = arena.alloc_slice(f32, 512);
+    for (usize i in 0..512) {
+        kept_re[i] = re2[i];
+    }
+    p.forward(re2, im2);
+    mut f32 worst = 0.0;
+    for (usize i in 0..512) {
+        worst = max(worst, max(abs(re[i] - re2[i]), abs(im[i] - im2[i])));
+    }
+    assert(worst < 0.0005);
+    p.inverse(re2, im2);
+    mut f32 back = 0.0;
+    for (usize i in 0..512) {
+        back = max(back, abs(re2[i] - kept_re[i]));
+        back = max(back, abs(im2[i] - (i < 100 ? 0.25 : 0.0)));
+    }
+    assert(back < 0.00001);
 }

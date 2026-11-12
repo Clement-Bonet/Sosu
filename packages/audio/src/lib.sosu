@@ -1,7 +1,7 @@
 // audio: sound, in Sosu on SDL3 (spec §8.2). Programs import `audio.audio` (a `Sound` and its
 // samples), `audio.mixer` (several sounds played together, with their volume and panning),
 // `audio.resample` (a sound at another rate), `audio.wav`, `audio.ogg`, `audio.mp3` and `audio.flac`
-// (files read, and WAV written), `audio.stream` (a long sound read as it plays), `audio.spectrum` (its frequencies), `audio.device` (the devices of the system: play and record) and
+// (files read, and WAV written), `audio.stream` (a long sound read as it plays), `audio.spectrum` (its frequencies), `audio.hrtf` and `audio.sofa` (heard through a head: KEMAR, or the responses of a SOFA file), `audio.device` (the devices of the system: play and record) and
 // `audio.spatial` (sounds placed in 3D).
 import audio.audio;
 import audio.mixer;
@@ -14,5 +14,7 @@ import audio.flac;
 import audio.stream;
 import audio.spectrum;
 import audio.hrtf;
+import audio.hdf5;
+import audio.sofa;
 import audio.device;
 import audio.spatial;

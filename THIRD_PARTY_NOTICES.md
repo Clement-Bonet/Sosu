@@ -139,6 +139,22 @@ under their own licenses.
 - Not changed: the samples are those of the files, as 16-bit integers; `audio.hrtf` cuts each
   response at its onset, resamples it to the rate of the mixer and scales them all by one number
 
+## KEMAR in SOFA (sofacoustics.org)
+
+- Files: `tests/programs/sounds/tests/data/mit_kemar_normal_pinna.sofa` (a copy of
+  `tests/fuzz_sosu/sofa` holds none of it): the test data of `audio.sofa` and `audio.hdf5`, not
+  compiled into any program
+- Source: <https://sofacoustics.org/data/database/mit/mit_kemar_normal_pinna.sofa> (1 171 764
+  bytes, SHA-256 `e7035994f5fd754058424c061380ee92b1d5ed58fccef2887a4266916616acdf`, taken in
+  November 2026): the full KEMAR measurements of the MIT Media Lab ("normal pinna", 710 directions,
+  512 frames at 44.1 kHz), converted to SOFA (AES69) by the SOFA project
+- Measured by Bill Gardner and Keith Martin, MIT Media Lab, 1994 (the same references as the
+  compact set above)
+- License: that of the measurements: "This data is Copyright 1994 by the MIT Media Laboratory. It
+  is provided free with no restrictions on use, provided the authors are cited when the data is
+  used in any research or commercial application."
+- Not changed
+
 ## ufbx
 
 - Files: `packages/model/native/vendor/ufbx.c` and `ufbx.h` (version 0.23.1), and its license

@@ -18,3 +18,4 @@ c = ["native/ogg.c", "native/dr.c", "native/kemar.c"]  # ogg.c includes native/v
 [dependencies]
 platform = { path = "../platform" }  # SDL3 and its declarations (platform.sdl_c)
 math = { path = "../math" }  # audio.spatial: vectors and rotations
+compress = { path = "../compress" }  # audio.hdf5: the deflate of the variables of SOFA files
