@@ -639,8 +639,9 @@ UNDEF = 0xFFFFFFFFFFFFFFFF
 class Hdf5:
     """A file of HDF5: its root group of variables of doubles, each with string attributes."""
 
-    def __init__(self):
-        self.out = bytearray(48)  # the superblock, written last
+    def __init__(self, old=False):
+        self.old = old  # a superblock of version 0 (as netCDF-4 writes it), 96 bytes
+        self.out = bytearray(96 if old else 48)  # the superblock, written last
         self.links = []
 
     def add(self, data):
@@ -748,6 +749,15 @@ class Hdf5:
             n = name.encode()
             links.append(self.message(6, bytes([1, 0, len(n)]) + n + struct.pack("<Q", at)))
         root = self.header(links)
+        if self.old:
+            # version 0: the versions of its parts, the sizes, the K of groups, the flags, then
+            # base, free space, end, driver, and the entry of the root group (its name, its header,
+            # no cache)
+            sb = b"\x89HDF\r\n\x1a\n" + bytes([0, 0, 0, 0, 0, 8, 8, 0]) + struct.pack("<HHI", 4, 16, 0)
+            sb += struct.pack("<QQQQ", 0, UNDEF, len(self.out), UNDEF)
+            sb += struct.pack("<QQII", 0, root, 0, 0) + bytes(16)
+            self.out[0:96] = sb
+            return bytes(self.out)
         sb = b"\x89HDF\r\n\x1a\n" + bytes([version, 8, 8, 0]) + struct.pack("<QQQQ", 0, UNDEF, len(self.out), root)
         self.out[0:48] = sb + struct.pack("<I", lookup3(sb))
         return bytes(self.out)
@@ -770,8 +780,8 @@ def sofa_response(onset, height):
 
 
 def sofa(cartesian=False, right_first=False, delays=None, version=2, dims=None, layout_version=3, tree_at=None,
-         filter_id=None, links=None, receivers=None):
-    f = Hdf5()
+         filter_id=None, links=None, receivers=None, old=False):
+    f = Hdf5(old)
     ir = []
     for ears in SOFA_EARS:
         order = [ears[1], ears[0]] if right_first else [ears[0], ears[1]]
@@ -807,6 +817,7 @@ def sofa(cartesian=False, right_first=False, delays=None, version=2, dims=None, 
 
 def sofa_files():
     write("small.sofa", sofa())
+    write("small_v0.sofa", sofa(old=True))  # the same, after a superblock of version 0
     # the same heads: cartesian, the right ear first, 3 frames of delay on the left and 1 on the right
     delays = []
     for _ in SOFA_PLACES:
@@ -814,7 +825,7 @@ def sofa_files():
     write("cartesian.sofa", sofa(cartesian=True, right_first=True, delays=delays))
     good = sofa()
     write("bad_truncated.sofa", good[:len(good) // 2])
-    write("bad_superblock0.sofa", sofa(version=0))
+    write("bad_superblock0.sofa", sofa(version=0))  # said 0, its fields those of 2: sizes of 0 bytes
     write("bad_huge.sofa", sofa(dims=[1 << 40, 2, SOFA_TAPS]))
     write("bad_layout4.sofa", sofa(layout_version=4))
     write("bad_tree.sofa", sofa(tree_at=60))

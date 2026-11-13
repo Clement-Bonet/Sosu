@@ -23,6 +23,7 @@ pub struct Options {
     pub bool looping = false;
     pub f32 seconds = 2.0;   // the length of the ring
     pub f32 history = 0.25;  // of it, what stays behind the voice for `peek`
+    pub usize track = 0;     // of an Ogg file of several Vorbis streams side by side, which (from 0)
 }
 
 pub class Stream {
@@ -294,7 +295,7 @@ pub Stream*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data, keeps mi
                 return err(audio.AudioError.UnknownFormat);
             },
         };
-        coded.Decoder d = try coded.open(arena, codec, data);
+        coded.Decoder d = try coded.open_track(arena, codec, data, options.track);
         decoder = some(d);
         rate = d.rate;
         channels = d.channels;

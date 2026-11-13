@@ -155,6 +155,18 @@ under their own licenses.
   used in any research or commercial application."
 - Not changed
 
+## The Viking HRTF dataset v2
+
+- Files: `tests/programs/sounds/tests/data/viking_subj_a.sofa`: test data of `audio.sofa` and
+  `audio.hdf5` (a SOFA file of the superblock of version 0), not compiled into any program
+- Source: <https://sofacoustics.org/data/database/viking/subj_A.sofa> (2 820 693 bytes, SHA-256
+  `b7d8215a3bf35ddf216b98ac029c274c683ae38138abac5bff7a9c5afa4e2a4c`, taken in November 2026), from
+  the dataset published at <https://doi.org/10.5281/zenodo.4160401>
+- By Simone Spagnol, Riccardo Miccini and Runar Unnthorsson (2020), "The Viking HRTF dataset v2"
+- License: Creative Commons Attribution 4.0 International (CC BY 4.0,
+  <https://creativecommons.org/licenses/by/4.0/>)
+- Not changed; renamed `viking_subj_a.sofa`
+
 ## ufbx
 
 - Files: `packages/model/native/vendor/ufbx.c` and `ufbx.h` (version 0.23.1), and its license
