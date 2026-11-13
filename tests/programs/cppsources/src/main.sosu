@@ -1,0 +1,16 @@
+// C++ files of the package, compiled with the program ([link] cpp, spec §9.1), called as C.
+import std.io;
+
+extern "C" {
+    i32 shapes_area(i32 side);
+    i32 shapes_sum(i32* items, usize count);
+}
+
+i32 main() uses io {
+    mut i32[4] items = [1, 2, 3, 4];
+    unsafe {
+        io.print("area: {}", shapes_area(5));
+        io.print("sum: {}", shapes_sum(&items[0], 4));
+    }
+    return 0;
+}

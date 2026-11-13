@@ -214,7 +214,7 @@ Button* back = w as? Button*; // `as?` returns Button*?
 ### 5.3 Names, values and typing rules
 
 - **Names in a function**: local variables and parameters first, then (in a method) the fields and methods of `self`, written without `self.` as in the examples (`x * x`), then the declarations of the module, then the built-in names below. A local variable cannot reuse the name of another local or parameter of the same function.
-- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet), and `hash(x) -> ui64` (§5.4), and `size_of(T) -> usize`, the size of a type in bytes (§5.6). They are part of the compiler, since they work for several types and existed before generics.
+- **Built-in names**, available everywhere without import: `some`, `none`, `ok`, `err`, `assert`, `min`, `max`, `abs`, and the modulo operations of §5.1 `wrapping_add`, `wrapping_sub`, `wrapping_mul` (two integers of the same type; `checked_*` and `saturating_*` are not implemented yet), and `hash(x) -> ui64` (§5.4), and `size_of(T) -> usize`, the size of a type in bytes (§5.6), and `offset_of(T, field) -> usize`, where a field of a struct starts, in bytes, as C lays it out (for the layouts of vertices of `gpu`, §8.2). They are part of the compiler, since they work for several types and existed before generics.
 - **The prelude**: `core.prelude` (`lib/core/src/prelude.sosu`) is loaded with every program, and its public names are used without import, after the names of the module (which can hide them). It is ordinary Sosu, kept small: for now `Utf8Error`.
 - **`self`** is a pointer to the instance (`T*`) in the methods of structs and classes; `base` is the same pointer seen as the parent class.
 - **Number literals take the expected type**: in `i64 x = 3;`, `3` is an `i64`; in `a + 1` with `a: ui8`, `1` is a `ui8`. Without an expected type, an integer literal is an `i32` and a float literal an `f64`. A literal that does not fit is an error. An integer literal is never a float: write `3.0`.
@@ -734,12 +734,13 @@ shared = { path = "../shared" }
 - The entry file of a package is `src/main.sosu` for an application, or `src/lib.sosu` for a library. The compiler loads the modules reachable by `import` from it.
 - The modules of a package may import each other.
 - The `core` and `std` packages are found in `$SOSU_HOME/lib`, or else in `../lib` next to `sosuc`: the folder of the program run, or, when it was run by its name alone (an editor runs `sosuc lsp`), the folder of PATH where it was found.
-- `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1, with the C files of a package). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
+- `sosu.toml` syntax: comments (`#`), strings, one-line lists of strings, and one-line inline tables of strings. Sections: [package], [dependencies], [link] and [link.<target>] (§9.1, with the C files of a package), [native.<name>] (§9.1, C and C++ files of a Git repository). `[package]` requires `name` and `version`. Package names, and dependency keys, are identifiers since `import` uses them; the key of a dependency must be the name of the package it points to. `core` and `std` are reserved.
 - Visibility: private by default; `pub` exports a type, a function or a method.
 - Dependencies are sources compiled with the project. `sosu.lock` pins the exact versions (tag or commit).
 - In v0, a dependency comes from a local path or a Git repository; a central registry will come later.
-- A Git dependency names a `tag` or a `rev` (a commit, possibly abbreviated); a branch is not accepted, since it moves. The compiler calls the `git` command, which must be installed: the repository is cloned into `build/deps/<name>-<commit>` of the root package, once per commit. A URL without a scheme (`../ui`, `C:/repos/ui`) is a local repository, relative to the package that declares it.
-- `sosu.lock`, next to the `sosu.toml` of the root package, is written by the compiler and kept in version control. One line per Git dependency of the program, transitive ones included: `<name> <url> tag|rev <tag or rev> <commit>`. While a dependency keeps its URL and its `tag` or `rev`, the commit of the lock is used, even if the tag has moved since, and nothing is fetched once the clone exists. Changing the `tag` or `rev` fetches the new version and updates the lock; it is not written when a dependency has an error. The locks of the dependencies themselves are not read.
+- A Git dependency names a `tag` or a `rev` (a commit, possibly abbreviated); a branch is not accepted, since it moves. The compiler calls the `git` command, which must be installed: the repository is cloned into `build/deps/<name>-<commit>` of the root package, once per commit, without its history when it can be (a tag, or a full commit that the server gives: `git fetch --depth 1`), else whole (an abbreviated rev). A URL without a scheme (`../ui`, `C:/repos/ui`) is a local repository, relative to the package that declares it.
+- `sosu.lock`, next to the `sosu.toml` of the root package, is written by the compiler and kept in version control. One line per Git dependency of the program, transitive ones included: `<name> <url> tag|rev <tag or rev> <commit>`. While a dependency keeps its URL and its `tag` or `rev`, the commit of the lock is used, even if the tag has moved since, and nothing is fetched once the clone exists. Changing the `tag` or `rev` fetches the new version and updates the lock; it is not written when a dependency has an error. The locks of the dependencies themselves are not read. A native dependency (§9.1) has its line too, named `native.<name>`.
+- `sosuc deps upgrade [package] [name]` moves each Git dependency pinned by a `tag` (or the one named), packages and `[native.*]` alike, to the newest tag of version of its repository (`git ls-remote --tags`): `v1.2.0`, `1.2`, a `v` or not; a pre-release (`v2.0-beta`) or another tag (`nightly`) is never chosen. It rewrites the `tag` in `sosu.toml`, comments and the rest kept; the next build fetches the new commit and writes `sosu.lock`. A `rev` stays as it is. There is no `latest` in `sosu.toml`: a build always gives the same program, and an upgrade is a change that is seen and committed. An unknown name exits with 2.
 - URLs, tags and revs are given to `git` as arguments, never to a shell: they may contain letters, digits and `-._~:/@+=,` only (and `\` in URLs), and not start with `-`, so that `git` reads none as an option nor as a transport that runs a command (`ext::`).
 - The other values of `sosu.toml` (the paths, libraries, C files, folders and defines of [link], the `path` of a dependency, the files of [app]) are given to the commands of the C compiler and of the tools between quotes: they cannot contain a quote, `` ` ``, `$`, `%` or a control character (E0416), which would end the quotes or be expanded inside them by cmd or sh. So a dependency, even one cloned from the repository of someone else, cannot slip a command of its own into those of the build. The `name`, `description` and `copyright` of [app], texts shown, are free (escaped where they are written).
 - No circular dependencies between packages.
@@ -798,7 +799,7 @@ SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`):
 |---|---|---|---|
 | `audio` | play and record, the devices of the system, a mixer of several sounds (volume, panning), resampling | SDL3 (`platform`) | 1.0 (done, §8.3) |
 | `audio.wav` | read and write WAV | Sosu | 1.0 (done, §8.3) |
-| `audio.ogg`, `audio.mp3`, `audio.flac` | read Ogg Vorbis, MP3, FLAC | `stb_vorbis`, `dr_mp3`, `dr_flac` (public domain), as C sources | 1.0 (Ogg: done, §8.3), after (MP3, FLAC) |
+| `audio.ogg`, `audio.mp3`, `audio.flac` | read Ogg Vorbis, MP3, FLAC | `stb_vorbis` (public domain), a C file of the package; `dr_mp3`, `dr_flac` (public domain or MIT-0), from their repository (`[native.dr_libs]`) | 1.0 (Ogg: done, §8.3), 0.7 (MP3, FLAC: done) |
 | `audio.effects` | filters (low-pass, high-pass), echo, reverberation, compression of the dynamics; analysis (levels, spectrum with `math.fft`) | Sosu | after |
 | `audio.midi` | read MIDI files, MIDI devices; a synthesizer | Sosu, SDL3 | after |
 
@@ -823,8 +824,583 @@ SDL3, already linked by `platform`, plays and records sound (`SDL_AudioStream`):
 | `regex` | regular expressions (RE2-like: linear time) | Sosu | after |
 | `platform.dialogs` | open and save files, choose a folder, message boxes of the system (SDL3 has them) | SDL3 | 1.0 (done, §10.11) |
 | `platform.notify`, `platform.tray` | notifications, the icon of the tray | the system | after |
-| `gpu` | 3D drawing and compute with SDL_GPU (Vulkan, Metal, Direct3D 12) | SDL3 | after |
 | `testing` | benchmarks, test fixtures, values compared with their difference shown | Sosu, `sosuc test` | 1.0 (done, §8.3) |
+
+#### 3D
+
+Status: design, after 1.0. Nothing below changes the language, except `offset_of`, a built-in function added beside `size_of`. Each layer is a package on the one before. `math.linear` (§8.3) is already written for the GPU: its matrices are stored by columns, and its depth after projection goes from 0 to 1.
+
+| Package | Content | How | When |
+|---|---|---|---|
+| `platform` | `app.run_window`: a window whose frames the program draws itself, without the canvas of pixels | SDL3 | after (first) |
+| `gpu` | the device, buffers, textures, samplers, shaders, pipelines, render, copy and compute passes | SDL_GPU (Vulkan, Metal, Direct3D 12), through `platform.sdl_c` | after (first) |
+| `sosuc shaders` | shaders written in HLSL, compiled to SPIR-V, DXIL and MSL, with what they use | the `shadercross` command of SDL, when it is installed | after (first) |
+| `math.geometry` | `Aabb`, `Sphere`, `Ray`, `Plane`, `Frustum`, and their tests: a ray against a box, a triangle or a sphere (picking), a box in a frustum (culling) | Sosu | available (0.7.0), below |
+| `model.gltf`, `model.obj`, `model.fbx` | meshes, materials, a tree of nodes, skins and animations, read from glTF 2.0 (`.gltf` and `.glb`), OBJ and FBX (ufbx) | Sosu (`std.json`, `crypto.base64`, `image`) | available (0.7.0), skins and animations of glTF only, below |
+| `render3d` | a camera, materials (PBR, metal and roughness, as glTF), lights, shadow maps, meshes drawn in batches, objects outside the frustum skipped | Sosu, on `gpu` | available (0.7.0) without batches of instances, below |
+| `gpu.overlay` | a `render.canvas.Canvas` drawn over the 3D, so that `render` and `ui` work on top of a scene | Sosu, on `gpu` | after |
+| `scene` | entities as handles, components in tables, a hierarchy of transforms, prefabs, scenes saved as JSON | Sosu | available (0.7.0), below |
+| `assets` | files loaded in the background into handles, a cache by path, hot reload while debugging | Sosu (`std.thread`, `std.fs`) | available (0.7.0), below |
+| `physics` | 3D rigid bodies, shapes, collision layers, ray and shape queries, contacts, a character controller | Jolt Physics 5 (C++, MIT) through joltc (MIT), as sources | after |
+| `physics2d` | the same for the plane: bodies, shapes, joints, queries | Box2D 3 (C, MIT), as sources | after |
+| `nav` | navigation meshes built from the level, paths, crowds of agents; paths on grids | Recast and Detour (C++, zlib), as sources, behind a C file of the package; Sosu for the grids | after |
+| `math.curve` | curves of keys (step, linear, Hermite) and gradients of colors, sampled by time | Sosu | after |
+| `anim` | skeletons and clips from glTF, poses sampled and blended, blend trees, state machines, root motion, events; skinning on the GPU | Sosu, on `gpu` for the skinning | after |
+| `particles` | emitters, shapes, forces, curves over the life of a particle, billboards and flipbooks; on the processor, then in compute passes | Sosu, on `gpu` | after |
+| `audio.spatial` | sounds placed in space: distance, panning by direction, Doppler effect, a listener on the camera | Sosu, on `audio.mixer` | after |
+
+##### A window drawn by the program
+
+Status: available (0.7.0): `app.run_window`, `gpu` (render and compute passes, targets, devices without a window, pixels and buffers read back), `sosuc shaders`, `offset_of`, `gpu.overlay`, `examples/cube`, `tests/programs/gpu` and `tests/programs/gpu_released`.
+
+`app.run` owns the main loop and gives the program a canvas of pixels each frame (§10.1). A 3D program needs the window itself. `app.run_window(config, handler)` runs the same loop, with the same events, and calls a `WindowHandler`:
+
+```sosu
+pub interface WindowHandler<uses E> {
+    void on_start(Window window) uses io, E;  // the window is open: open the device here
+    bool on_event(Event e) uses io, E;         // as Handler.on_event
+    void on_frame(Window window) uses io, E;
+    void on_stop(Window window) uses io, E;   // before the window closes: release the device
+}
+```
+
+- `app.Window` is a value that holds the `SDL_Window*`: `width()` and `height()` (in the coordinates of the events) and `scale()`. `gpu` reads the pointer through `window.native()`; calling SDL with it needs `unsafe`, as every call to C does.
+- `platform` does not import `gpu`, since `gpu` imports `platform` and packages have no cycles (§8.1). So the program opens its device itself, in `on_start`, and closes it in `on_stop`, which `run_window` calls before the window is destroyed.
+- While Windows holds the loop during a live resize, `run_window` still calls `on_frame`, as `run` draws its canvas.
+- A frame drawn in less than 2 ms did not wait for the screen: the loop then sleeps 14 ms rather than spin.
+- A window has either the canvas or the GPU, never both: SDL refuses an `SDL_Renderer` and a GPU device on the same window. `gpu.overlay` is how a 3D program still draws text and widgets.
+
+##### `gpu`
+
+```sosu
+// in on_start: a function that returns Scene!gpu.GpuError, for `try`
+gpu.Device* device = try gpu.open(arena, window, gpu.Options{ debug: true });
+gpu.Shader vs = try shaders.load(arena, device, "shaders/cube.vert");
+gpu.Pipeline pipeline = try device.pipeline(gpu.PipelineDesc{ vertex: vs, fragment: fs, layout: layout });
+
+// in on_frame
+match (device.begin()) {                          // none while the window is minimized
+    some(frame) => {
+        gpu.Pass pass = frame.pass(gpu.Clear{ color: gpu.rgba(0.1, 0.1, 0.12, 1.0) });
+        pass.bind(pipeline);
+        pass.vertices(mesh.vertices);
+        pass.indices(mesh.indices, gpu.IndexSize.U16);
+        pass.texture(0, crate, sampler);
+        pass.vertex_uniform(0, &transform);       // a Mat4, copied
+        pass.draw_indexed(36, 1);
+        pass.end();
+        frame.submit();
+    },
+    none => {},
+}
+```
+
+- `gpu.open(arena, window, options)` picks the driver that SDL finds (Direct3D 12 or Vulkan on Windows, Vulkan on Linux and Android, Metal on macOS and iOS), or the one named in `Options.driver` (the variable `SDL_GPU_DRIVER` of the environment chooses too). `Options.vsync` (true by default) waits for the screen; false asks for the mailbox mode where the window has it.
+- `gpu.open_headless(arena, options)` opens a device without a window, for tests, pictures made by a program, and computations. SDL_GPU needs the video subsystem even then: it is started, with SDL's `offscreen` driver where there is no display (the CI), and quit by `close()`.
+- `GpuError` is `NoDevice` (no driver takes SPIR-V, DXIL or MSL), `Unsupported`, `Failed` (SDL refused) or `NoShader(path)`. `message(e)` describes it, and `last_error(arena)` gives what SDL said.
+- `device.format()` gives the format of shaders that the device takes, and `device.driver(arena)` the driver it uses.
+- Resources are handles, not pointers: `Buffer`, `Texture`, `Sampler`, `Shader`, `Pipeline` are an index and a generation in a table of the device.
+  - A handle used after its release, or after the device closed, stops the program (an `assert` of `gpu`), in a debug build as in a release one. It is a dangling handle, never a dangling pointer, which keeps the GPU outside of what §6.1 and §7.7 must follow.
+  - Sosu has no overloading, so each kind has its release: `release_buffer`, `release_texture`, `release_sampler`, `release_shader`, `release_pipeline`.
+  - `device.close()` waits for the GPU and releases what is left. With `Options.debug`, it says how many resources the program had not released.
+- The memory of the GPU is not in an arena. A resource lives until its release or `device.close()`. The arena given to `gpu.open` holds the device and its table of handles.
+- Buffers:
+  - `device.buffer(usage, size)`, with `Usage.Vertex`, `Index`, `Indirect` or `Storage`;
+  - `device.buffer_of<T>(usage, T[] items)` creates a buffer and fills it from a view;
+  - `device.upload(buffer, items)` copies at once;
+  - `frame.upload(buffer, items)` copies before the passes of a frame, for data that changes each frame.
+- Textures: `device.texture_of(image, mipmaps)` takes an `image.Image`. Its 0xAARRGGBB pixels are the bytes of `B8G8R8A8`, alpha not premultiplied. The mipmaps are made by the GPU (`SDL_GenerateMipmapsForGPUTexture`). `device.sampler(SamplerDesc{ filter, wrap, mipmaps, anisotropy })` gives a sampler. `device.target(width, height)` gives a texture to draw into and to sample afterwards, in the format of the window (`B8G8R8A8` without one), so that the same pipelines draw into both. `device.depth_target(width, height)` gives a texture of depth that `frame.depth_pass(texture)` fills (cleared to the farthest) and a sampler of `compare` reads (`SampleCmp`): the map of the shadows of a light. The depth of frames and of these maps has one format, D32, else D16, whichever the GPU can both draw into and sample.
+- Uniforms are pushed, not kept in buffers: `pass.vertex_uniform(slot, T* value)` and `fragment_uniform` copy `size_of(T)` bytes, as SDL_GPU does. A struct given there follows the rules of `std140` that the shader expects; `offset_of` lets a test check it.
+- Vertex layout: `gpu.Layout{ stride, attributes }` lists the attributes, each a location, a format (`Float`, `Float2`, `Float3`, `Float4`, `UByte4Norm`) and an offset. The offsets come from `offset_of(Vertex, normal)`, a built-in function beside `size_of`, so that a field moved in the struct cannot leave the layout behind.
+- Pipelines: `PipelineDesc{ vertex, fragment, layout, depth, cull, blend, color }`; `color: false` draws the depth alone, into a `frame.depth_pass`. Triangles counter-clockwise are the front, as the axes of `math.linear` are right-handed. `cull` is `Back` by default (`Off`, `Front`), `blend` is `Opaque` (`Alpha`, `Additive`), and `depth` is true.
+- Frames:
+  - `device.begin()` acquires the image of the swapchain of its window and gives a `Frame`, with its `width` and `height` in pixels of the screen. It gives none while the window is minimized or hidden, as on Android in the background.
+  - `frame.pass(Clear{ color, depth, keep })` opens a render pass cleared to that color. With `depth`, the device keeps a depth texture the size of the window: D32, else D24, else D16, whichever the GPU takes. With `keep`, the pass draws over what the target holds instead of clearing it, its depth too: a pass keeps its depth for the next (`STOREOP_STORE`), so that particles drawn after the scene are hidden by it. `PipelineDesc.depth_write` false tests the depth without writing it (what is seen through). `pass.draw_indexed_range(count, first)` draws a part of an index buffer.
+  - `frame.upload_texture(texture, pixels)` copies 0xAARRGGBB pixels into a texture before the passes that follow, for a picture that changes each frame.
+  - `submit()` sends the passes and shows the frame.
+  - `device.commands()` gives a frame that does not draw into the window: its passes draw into targets with `frame.pass_into(texture, clear)`, and compute. A device without a window has only these frames.
+  - `frame.submit_and_wait()` sends the passes and waits until the GPU ran them.
+  - `device.read_texture(arena, texture)` gives the pixels of a target as an `image.Image` (0xAARRGGBB), and `device.read_buffer(buffer, out)` the start of a buffer. Both wait for the GPU, for tests and screenshots.
+- Compute:
+  - `shaders.load_compute(arena, device, "shaders/double.comp")` gives a `ComputePipeline`. Its resources and its threads (`[numthreads]`) come from its `.json`, which it needs.
+  - `frame.compute(read_write)` opens a compute pass. `read_write` lists the buffers that the shader writes, its read-write storage buffers 0, 1..., which have `Usage.Storage`.
+  - On the pass: `bind(pipeline)`, `read(slot, buffer)` (a read-only storage buffer), `texture(slot, texture, sampler)`, `frame_depth(slot, sampler)` (the depth of the frames, which the passes before drew: sampled, 0 near to 1 far; false when none was made yet), `uniform(slot, &value)`, `dispatch(x, y, z)` (groups of threads), `end()`.
+  - A render pass gives a storage buffer to its vertex shader with `pass.vertex_storage(slot, buffer)` (HLSL `StructuredBuffer` in `space0`): a pipeline without attributes makes its vertices from `SV_VertexID`, as `particles.compute` draws what its compute pass left.
+  - In HLSL, read-only storage buffers and textures are in `space0`, read-write ones in `space1`, and uniform buffers in `space2`.
+- Threads: a device belongs to the thread that opened it, as a connection of `db` does (§8.3), since threads share no memory (§5.6). Loading files and decoding images can happen in other threads, which send the pixels through a channel; the upload stays in the thread of the device.
+- Effects: every call that reaches SDL is `uses io`, as the rest of `platform`.
+
+##### Shaders
+
+SDL_GPU takes SPIR-V on Vulkan, DXIL on Direct3D 12 and MSL on Metal. One source has to become all three, and SDL_GPU also needs to know how many samplers, uniform buffers and storage buffers each shader uses.
+
+- Shaders are written in HLSL, the language that SDL's `shadercross` reads. A shading language of Sosu would need `comptime` (§13, after 2.x). The registers follow SDL_GPU:
+  - a vertex shader has its textures and samplers in `space0` and its uniform buffers in `space1`;
+  - a fragment shader has its textures and samplers in `space2` and its uniform buffers in `space3`;
+  - the attributes of a vertex are `TEXCOORD0`, `TEXCOORD1`... for locations 0, 1...
+- `sosuc shaders [package]` compiles each `shaders/<name>.vert.hlsl`, `.frag.hlsl` or `.comp.hlsl` with the `shadercross` command, which must be in the PATH, as `git` must be for Git dependencies (§8.1).
+  - `cube.vert.hlsl` gives, in `shaders/compiled/`: `cube.vert.spv`, `cube.vert.dxil`, `cube.vert.msl`, and `cube.vert.json` (its resources, from the reflection of `shadercross`: `samplers`, `storage_textures`, `storage_buffers`, `uniform_buffers`).
+  - A shader is compiled again only when its source changed: `<name>.source` keeps a hash of the source it was compiled from (FNV-1a, without the carriage returns that a checkout of Git on Windows may add). Dates would not do, since a clone gives every file the time it was written.
+  - The outputs are committed, as `sosu.lock` is, so building or packaging a program never needs `shadercross` or DXC.
+  - Exit 1 when a shader does not compile, 2 when `shadercross` cannot be run.
+- `sosuc shaders --check` compiles nothing, and exits with 1 when an output is missing or its source changed since it was compiled. `sosuc test` runs it first on a package that has `.hlsl` files, so that compiled shaders that no longer follow their sources fail the tests, on a machine without `shadercross` too.
+- `shadercross` is run without a shell, as the C compiler is. The names of the files of shaders are letters, digits, `-`, `_` and `.`, so none is read as an option.
+- `sosuc shaders [package] --c file.c` also writes the compiled shaders as a C file of the package (`file.c`, relative to it). Each file of `shaders/compiled` gets a function `sosu_shader_<name>_<format>(size_t *size)` that gives its bytes, so a package carries its shaders inside the programs that use it, as `gpu.overlay` does. With `--check`, the C file must hold what it would write.
+- `gpu.shaders.load(arena, device, path)`:
+  - `path` is the source without `.hlsl` (`shaders/cube.vert`);
+  - it reads `shaders/compiled/cube.vert` in the format the device takes, and its `.json`, with `app.read_asset`, so `shaders/compiled` is listed in the `assets` of [app] (§11.5) and travels in the APK and in the bundles;
+  - a missing file gives `NoShader(path)`;
+  - the stage is in the name (`.vert`, `.frag`), and the entry point is `main`, or `main0` in MSL (SPIRV-Cross renames `main`, which Metal reserves).
+
+##### What it is checked by
+
+- `tests/programs/gpu` opens a device without a window, where a GPU, or a GPU in software, is found: on Linux in the CI with lavapipe (the Vulkan of Mesa, on the processor). It checks:
+  - a triangle drawn into a target of 64 by 64 pixels, read back: its corner, and the clear color beside it, which also checks that the top of an image is y = 1 in clip space;
+  - depth: a near square drawn first hides a far one drawn after it;
+  - a texture of 2 by 2 pixels sampled without filtering, each quarter of its color;
+  - mipmaps: a checkerboard of single pixels, 256 a side, drawn on 64 pixels with a `Nearest` sampler, reads a texel of the level that the GPU made, gray (without mipmaps, the test sees white);
+  - the overlay: an opaque red square and a half transparent green one, drawn by `gpu.overlay` over the blue of a target;
+  - a compute shader that doubles 256 numbers and adds a uniform, read back.
+  - Pixels are compared within 2 for each channel, since two drivers do not round alike. It runs under Direct3D 12 and Vulkan on Windows (`SDL_GPU_DRIVER=vulkan`).
+  - Where no driver is found (the runners of Windows and macOS have no GPU), it exits with 77, and `tests/program_tests.c` counts it as skipped, and says so. The test also checks that its compiled shaders are up to date (`sosuc shaders --check`).
+  - `tests/programs/gpu_released` releases a buffer, makes another one that takes its line in the table of the device, then uploads to the first: the program stops with 101 and the `assert` of `gpu`, and goes no further.
+  - The test also checks that `packages/gpu/native/shaders.c` holds the compiled shaders of the overlay.
+
+##### `gpu.overlay`
+
+```sosu
+overlay.Overlay* hud = try overlay.create(arena, device);   // once, in on_start
+...
+surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });      // transparent where the 3D shows
+surface.text(...);                                          // render, or the widgets of ui
+try hud.draw(frame, &surface);                              // after the 3D passes, before submit
+```
+
+- A canvas of `render` drawn over the 3D, so that `render` and `ui` work on top of a scene. Each frame, its pixels go to a texture of its size (`frame.upload_texture`, the texture made again when the size changes), drawn over the frame by one triangle that covers it, in a pass with `keep`, blended by their alpha (`Blend.Alpha`, not premultiplied).
+- `draw(frame, surface)` draws over the window, and `draw_into(frame, target, surface)` over a texture of `device.target`. `release()` frees its pipeline, its sampler and its texture.
+- Its two shaders are in the package: `packages/gpu/shaders/overlay.*.hlsl`, compiled and written in `native/shaders.c` by `sosuc shaders packages/gpu --c native/shaders.c`, a C file of the package (§9.1). A program needs no file of its own.
+- The canvas blends a color over a pixel that is not opaque as the operator "over" of Porter and Duff (the colors weighed by their alphas): drawn on a canvas cleared transparent, a half transparent shape stays half transparent, and the edges of text keep their color instead of turning dark. Over an opaque pixel, nothing changed.
+- `examples/cube`: a textured cube turning, with `math.linear.perspective` and `look_at`, the mouse turning the camera. It is built by the CI on each desktop and for Android, and tried by hand in a window.
+- A binding check: `sosuc bindgen --check` on `SDL_gpu.h`, since its structs hold structs, arrays and pointers to arrays (§11.6).
+
+##### Open questions (with the answer proposed)
+
+- Should `render` and `ui` draw on the GPU themselves (§10, the `render` layer)? Not at first: `gpu.overlay` sends the canvas as a texture each frame, which is enough for a heads-up display and menus. Drawing on the GPU comes once `render` has a list of drawing commands rather than pixels.
+- Should Direct3D 12 be left out, to need two formats only? No: Vulkan is missing on some Windows machines, and Direct3D 12 is not. DXIL costs nothing at run time, since it is compiled beforehand.
+- Should there be physics? Not in these packages. Simple collisions come from `math.geometry`. A full engine (Jolt, in C++) would need a C wrapper, as a package of its own.
+
+##### `math.geometry` and `model`
+
+Status: available (0.7.0), tested by the tests of their packages (`sosuc test packages/math`, `sosuc test packages/model`), run by `make test`.
+
+- `math.geometry`:
+  - `Aabb` (`min`, `max`: `center`, `size`, `contains`, `overlaps`, `union`, `grown`, `transformed(m)` by a matrix, its 8 corners), `around(points)`;
+  - `Sphere` (`contains`, `overlaps`), `Plane` (`plane(point, normal)`, `distance`), `Ray` (`ray(origin, direction)`, normalized; `at(distance)`);
+  - `ray_box`, `ray_sphere`, `ray_plane` (a distance, none when missed), `ray_triangle` (Möller and Trumbore: a distance and the coordinates `u`, `v` in the triangle, from either side);
+  - `ray_from_screen(view_projection, x, y, width, height)`: the ray under the mouse, for picking;
+  - `frustum(view_projection)`: the six planes of Gribb and Hartmann for a depth of 0 to 1; `sees_box` (conservative: a box near a corner may be kept, never one in view dropped), `sees_sphere`, `sees_point`.
+- `model.model`: a `Model` of `meshes` (one material each: a primitive of glTF, a group of OBJ, a part of FBX), `materials` (metal and roughness: `base_color`, `texture`, `metallic`, `roughness`; `texture_path` for OBJ), `images`, `nodes` (a `local` matrix, meshes, children) and `roots`. `Vertex` is `position`, `normal`, `uv`, laid out for `gpu` (`size_of`, `offset_of`). `world_matrices(arena, model, origin)` places the nodes, parents first, once each even in a file that makes a cycle. `smooth_normals` and `bounds_of` serve both readers. `with_textures(arena, model, folder)` reads the textures that its materials name by a file (`texture_path`), PNG or JPEG, from `folder`: the path relative to it, else the name of the file alone in it (an FBX often keeps the absolute path of the machine where it was made); a path that goes above the folder or is absolute gives its name alone, so only files under the folder are read; a file named twice is read once, and one missing leaves its material without a texture. `obj.load` and `fbx.load` call it with the folder of the file; `parse` and `decode` do not read files.
+- `model.obj`: `parse(arena, text, materials)`, `parse_mtl(arena, text)` (`newmtl`, `Kd`, `d`, `map_Kd`, `Pm`, `Pr`), `load(arena, path)` with the MTL files that `mtllib` names beside it. Faces of 3 to 256 corners, cut from their first corner; indices from 1 or from the end; a corner used twice is one vertex; normals computed when the file gives none; the v of OBJ turned so that 0 is the top, as in glTF and `gpu`.
+- `model.gltf`: `decode(arena, bytes)` for a .glb or a .gltf whose buffers and images are written in it as base64, `decode_with(arena, bytes, files)` with the files it names, read beforehand, and `load(arena, path)`, which reads them beside it (never above it nor at an absolute path). Triangles with positions, normals (computed when missing), `TEXCOORD_0` and indices of 8, 16 or 32 bits; normalized integers; strides; materials with their base color, its texture (PNG or JPEG, from a URI or a buffer view), metal and roughness; nodes by a matrix or a translation, a rotation and a scale; the scene shown, or every node without a parent.
+- Every read is checked against its bytes: an accessor or a view beyond its buffer, an index beyond the vertices, a chunk of .glb beyond the file, a node that is its own child, give `Damaged(why)`; counts beyond `MAX_VERTICES` (2^24), `MAX_INDICES` (2^26) or `MAX_NODES` (2^20) give `TooLarge` before anything is allocated. Sparse accessors, modes other than triangles, required extensions (Draco...) and files in other folders give `Unsupported`.
+- `model.fbx`: FBX files, binary and ASCII, read by ufbx 0.23.1 (C, MIT or public domain, `THIRD_PARTY_NOTICES.md`; one line changed, a conversion of a number of the file to a 64-bit integer that `sosuc fuzz` found going beyond it, its input kept in `tests/fuzz_sosu/fbx/corpus`), given with the package as its sources (§9.1) behind `native/fbx.c`, a flat interface of plain functions. `decode(arena, bytes)` and `load(arena, path)`. The scene is turned to the axes of `math.linear` (right-handed, y up) and to meters, whatever the file used (a file in centimeters gives a model 100 times smaller than its numbers); its meshes are cut into triangles, one `model.Mesh` per material, with their normals (computed when missing) and texture coordinates (0 at the top); its materials have their base color, metal and roughness (ufbx fills them from the older models of shading, Phong and Lambert, too), and their texture when the file holds it (PNG or JPEG), else its path in `texture_path`. A file may ask for 1 GB of memory at most; beyond, or when ufbx cannot read it, `Damaged` gives what ufbx said. The corners of the triangles are not shared yet (three vertices per triangle). Tested by an ASCII FBX in centimeters written in the test (a quad, a material of Phong, a node moved by 3 m) and damaged files. `examples/viewer` reads FBX too.
+- Skins and animations of glTF, for `anim`: `Model.skins` (each `Skin` its joints, nodes of the model, and their inverse bind matrices), `Node.skin` and `Node.transform` (its translation, rotation and scale, which animations change), `Mesh.influences` (the four joints and weights of each vertex, from `JOINTS_0` and `WEIGHTS_0`, the weights brought to a sum of 1), and `Model.animations` (each `Animation` its channels of translation, rotation and scale by node, with the times and values of glTF, `Step`, `Linear` or `Hermite` for `CUBICSPLINE`; the channels of weights of morph targets are left out). `Model.animation(name)` finds one. Every index and length is checked: a vertex of a joint beyond its skin, a joint that is not a node, times that go back, values that do not match their times are damaged files. OBJ and FBX give none.
+- Morph targets of glTF: `Mesh.morphs` (each `Morph` its name from `extras.targetNames`, what it moves each position and normal by), `Mesh.weights` (those of the file), and the channels of `weights` (`Target.Weights`, one number per target in each key). `model.morph(mesh, weights, out)` gives the vertices moved by them, on the processor; `render3d` takes them by `update_vertices`.
+- Not yet: the skins, animations and morph targets of FBX, the other texture coordinates and colors of vertices, the other textures of a material (normals, occlusion, emission). The three readers are fuzzed (`sosuc fuzz`, §11.4): `tests/fuzz_sosu/gltf`, `obj` and `fbx`.
+
+##### `render3d`
+
+Status: available (0.7.0), with `tests/programs/render3d` and `examples/viewer`.
+
+```sosu
+render3d.Renderer* r = try render3d.create(arena, device, render3d.Options{ });   // in on_start
+render3d.Uploaded* house = try r.upload(arena, try gltf.load(arena, "house.glb"));
+...
+render3d.Camera camera = render3d.Camera{ position: eye, target: linear.vec3(0.0, 0.0, 0.0) };
+r.draw(frame, camera, items[0..n]);   // items: render3d.item(house, a matrix)
+frame.submit();
+```
+
+- `create(arena, device, Options{ shadow_size })` makes its two pipelines (the light, and the shadows), its map of shadows (2048 pixels a side by default) and its samplers. Its shaders are in the package, written in C by `sosuc shaders packages/render3d --c native/render3d_shaders.c`. The C files of packages need names of their own: their objects go to one folder (`gpu` has `native/shaders.c`).
+- `upload(arena, model)` sends a model of `model` to the GPU: a vertex and an index buffer per mesh, a texture with its mipmaps per image. `release(uploaded)` frees them; `close()` frees what the renderer made.
+- `Camera{ position, target, up, fov_y, near, far }` gives `view()` and `view_projection(aspect)`.
+- Light, as glTF describes its materials: metal and roughness (GGX, Smith and Schlick), the base color times its texture read as sRGB, the result written for a screen (gamma 2.2).
+  - `r.sun`: `Sun{ direction, color, intensity, shadows, shadow_extent }`. Its shadows cover a square of `shadow_extent` around the target of the camera, seen by an orthographic projection; nine samples soften their edge, and a bias that grows on the faces that turn from the light keeps them from marking the faces lit.
+  - `r.set_lights(points)`: up to four `PointLight{ position, color, intensity, range }`, fading to nothing at their range.
+  - `r.ambient`, and `r.background`, the color the frame is cleared to.
+- `draw(frame, camera, items)` draws into the window, and `draw_into(frame, target, camera, items)` into a target. Each `Item` is an uploaded model and its matrix; the nodes of the model place its meshes (`model.world_matrices`). A mesh whose bounds, moved into the world, are outside of the frustum of the camera is left out (`math.geometry`); every mesh casts its shadow. `stats()` says how many meshes the last frame drew and left out.
+- Skinned meshes (those with `influences`): drawn by two pipelines more (`skinned.vert`, `skinned_shadow.vert`), whose vertices carry their four joints and weights. `Item.palette` gives the matrices of the joints (`anim.palette`), sent as a uniform buffer of 128 matrices: a skin of more joints, or an item without a palette, is drawn at rest. As glTF has it, a skinned mesh is placed by the matrix of its item, not by its node; it is never left out, its joints may take it anywhere. `tests/programs/render3d` draws a cube of one joint where its palette moves it.
+- `r.update_vertices(uploaded, mesh, vertices)` replaces the vertices of a mesh on the GPU (as many as it has), skinned or not, and its bounds: a mesh moved by its morph targets on the processor (`model.morph`), or a ground that changes. Tested by a cube moved this way.
+- Morph targets on the GPU: `upload` sends the targets of a mesh as a storage buffer (for each target, its moves of the positions then of the normals), and every vertex shader of render3d (lit, skinned, and their shadows) adds the 8 targets of the largest weights, read by `SV_VertexID`; a mesh without has a count of 0. The weights are those of the item (`Item.morphs`: `Morphed{ mesh, weights }`, from `anim`), else those of the mesh (`Mesh.weights`); its bounds grow by what its targets can move it, so that the camera does not leave it out. Morphing comes before skinning, as glTF has it. Tested by a cube moved by a target at weights 0, 1 and 0.5, on Direct3D 12 and Vulkan.
+- `render3d.cube(arena, color)` and `render3d.ground(arena, size, color)` give models to try a scene with.
+- Normals follow the matrix of their mesh: a scale that differs between its axes bends them (the inverse transposed comes later).
+- `tests/programs/render3d`, without a window: a cube on a ground, a sun from the upper left. The ground away from the cube is lit; where the cube casts its shadow it is darker (the test fails when the shadows are turned off); the top of the cube is brighter than its front, which the sun does not reach; a cube behind the camera is left out. It runs under Direct3D 12 and Vulkan, and is skipped where there is no GPU.
+- `examples/viewer`: `sosuc run examples/viewer -- model.glb` shows a glTF, FBX or OBJ file on a ground, with the textures it names beside it; a second argument, `-- model.fbx wood.png`, gives a texture of PNG or JPEG to the materials that have none (and to a model without materials). It says on its console how many materials have a texture, and which named texture is not beside the model. The model stands lit by the sun and a blue point light, the camera turned by the mouse and brought nearer by the wheel, S turning the shadows on and off; what it draws and leaves out is written over the scene by `gpu.overlay`. Without a file, a few cubes.
+- Later: batches of instances, transparent materials sorted by distance, the other textures of glTF (normals, occlusion, emission), and cascades of shadow maps for large scenes.
+
+#### `sosuc fuzz`: fuzzing code of Sosu
+
+Status: available (0.7.0). Libraries of Sosu that read files from anywhere (`model`, and the next readers) are fuzzed as the compiler is (work 5), with libFuzzer.
+
+- A target is a package whose entry module declares `void fuzz(ui8[] data)`, with the effects it needs, instead of `main`. It reads the bytes it is given and returns: a failed check of Sosu (an index out of its bounds, an overflow, a conversion out of range) or an `assert` stops the program, which libFuzzer reports with the input that did it.
+- `sosuc fuzz [package] [-- arguments]` generates the C of the target (`CODEGEN_FUZZ`: `LLVMFuzzerTestOneInput` gives the bytes to `fuzz` as a view), compiles it with the C files of its packages and the runtime, with the sanitizers of addresses and undefined behaviour, in `build/fuzz/`, and runs it with the arguments: its corpus folders and the options of libFuzzer. It needs clang (`SOSU_CC=clang`), or MSVC with its libFuzzer on Windows, which also gets a stack of 16 MB (`/F`): the sanitizer makes every frame larger, and Windows gives the main thread 1 MB.
+- `sosuc fuzz --replay [package] -- files or folders` builds the same target with any C compiler (`SOSU_FUZZ_REPLAY`: the `main` of `sosu_rt.c` gives it each file once) and runs it on the files, those of a folder too: what `make test` and `build.bat test` replay.
+- `tests/fuzz_sosu/gltf`, `obj` and `fbx` fuzz `model.gltf`, `model.obj` (the same text read as MTL, then as OBJ) and `model.fbx`, and use what they return: every index within the vertices, every material and texture within the model, the bounds of each mesh moved by its nodes. Each has a `corpus/` of seeds and of the inputs that once failed, replayed by the tests. `make fuzz-models` runs them, FUZZ_TIME seconds each, from the corpus kept in `build/fuzz_<name>_corpus`; the CI runs them a minute each on every push, and ten minutes each every night.
+- Found at once: a `componentType` of glTF written as a large float, turned into an integer by `as`, which stops a program on a value out of range, and, while fixing it, an index of 32 bits 0xFFFFFFFF read through a float. Both are read as whole numbers now, and the first input stays in the corpus.
+
+#### Gamepads and input actions
+
+Status: available (0.7.0): `platform.gamepad`, `platform.actions`, the pads as the keys of `ui` (`pads.navigation`), `examples/pads`, `tests/programs/controls` and `tests/programs/inputs`. `with(modifier, key)` and `double_tap(ms)` are there too. Not yet: the motion of the mouse in a test. It is useful with or without 3D: `app.run` and `app.run_window` both take it.
+
+The model is that of Unity's Input System, not that of Unreal's Enhanced Input.
+
+- **Unity's model, which Sosu takes:** the program reads the state of its devices and of its actions each frame (`pressed`, `went_down`, a stick as a `Vec2`). Its actions are declared in code, in maps that it turns on and off.
+- **Unreal's model, which Sosu leaves:** callbacks bound to actions; contexts stacked by priority; triggers and modifiers kept as assets.
+
+Reading, rather than callbacks, has two reasons:
+
+- It fits a frame that the program draws from its state (§10.1), as `ui` already does.
+- It adds nothing to `app.Event`. A variant added to that public enum would break a `match` without `_`, so it would wait for 2.0 (§13.2).
+
+| Module | Content | How | When |
+|---|---|---|---|
+| `platform.gamepad` | the gamepads connected, their buttons, sticks and triggers in a common layout, rumble, the labels of their buttons | SDL3 (`SDL_Gamepad`, and its database of controllers) | after |
+| `platform.actions` | actions bound to gamepads, keys and the mouse; composites, dead zones, holds; maps turned on and off; rebinding, saved; several players | Sosu, on `platform.gamepad` | after |
+| `ui` | widgets moved through with a gamepad: the D-pad as the arrows, South as Enter, East as Escape (§10.6) | Sosu | after |
+
+##### `platform.gamepad`
+
+```sosu
+gamepad.Pads* pads = gamepad.open(arena);       // in the state of the program
+...
+pads.update();                                   // at the start of each frame
+for (gamepad.Pad* p in pads.connected()) {
+    linear.Vec2 move = p.stick(gamepad.Stick.LeftStick);   // -1..1, a radial dead zone applied
+    if (p.went_down(gamepad.Button.South)) { jump(); }
+    f32 brake = p.trigger(gamepad.Trigger.LeftTrigger);    // 0..1
+}
+```
+
+- `gamepad.open(arena)` starts the gamepad subsystem of SDL (`SDL_INIT_GAMEPAD`), which `platform` does not start for programs that have no gamepad. It gives a `Pads*`, which the program keeps in its state, as a `Mixer` of `audio`; `pads.close()` closes the pads and quits the subsystem.
+- The variants of `Stick` are `LeftStick` and `RightStick`, and those of `Trigger` `LeftTrigger` and `RightTrigger`: `Button` already has `Left` and `Right` (the D-pad) and `LeftStick` and `RightStick` (the sticks pressed). `platform` depends on `math` for `linear.Vec2`.
+- `Pads` has no global state: Sosu has none (§5).
+  - `update()` keeps the previous state and reads the current one from SDL. SDL keeps the current state up to date from the events that the loop of `platform` already pumps.
+  - Called once per frame, `update()` is what gives `went_down` and `went_up` their meaning: a change between two frames.
+- The layout is positional, as in SDL 3 and in Unity: `Button.South`, `East`, `West`, `North`, `Start`, `Back`, `Guide`, the shoulders, the stick buttons and the D-pad. `South` is A on Xbox, Cross on PlayStation, and B on Nintendo, where it sits at the bottom too.
+  - `p.label(button)` gives the letter or the symbol printed on that controller (`A`, `Cross`, `B`).
+  - `p.kind()` gives the family (`Xbox`, `PlayStation`, `Switch`, `Other`), so that a program shows the right prompts.
+- A `Pad`:
+  - `id()`, stable while the pad stays connected, and `name()`;
+  - `pressed(b)`, `went_down(b)`, `went_up(b)`;
+  - `stick(s) -> Vec2` (y up, `math.linear`), `trigger(t) -> f32`;
+  - `rumble(low, high, ms)`;
+  - `battery()`.
+  - The dead zone of a stick is radial, 0.15 by default (`set_dead_zone`), and the values are scaled again beyond it, so that a small push is not lost.
+- `pads.connected()` gives the pads in the order they came, and `pads.first()` the first, for a game of one player. `pads.went_connected()` and `pads.went_disconnected()` give the pads that came or left at the last `update()`. A pad that leaves reads as released, never as frozen: its held buttons went up at that update, and `p.is_connected()` is false.
+- `gamepad.plug_virtual(arena, name)` plugs in a pad that is not there (SDL's virtual joysticks), for tests: `press(button, down)`, `push(stick, x, y)`, `pull(trigger, amount)`, `detach()`. `Pads` reads it as a real pad, so a program can test its controls without hardware.
+- Phones and televisions: SDL reads the gamepads of Android (and Android TV) and those of iOS (Game Controller). Gyroscopes and touchpads (`SDL_GAMEPAD_SENSOR`) come later.
+- Effects: reading SDL is `uses io`, as the rest of `platform`. A `Pads` belongs to the thread of the window.
+- `tests/programs/controls` plugs in a virtual pad and checks, without hardware: its connection, a button across three updates (`went_down` once, then held, then `went_up`), a push within the dead zone read as nothing, a stick to the right and one up (y up), halfway beyond the dead zone read as 0.5, a trigger pulled and let go, and the pad unplugged with a button held, which went up. It counts the pads relative to those already connected, so a pad plugged into the machine changes nothing.
+
+##### `platform.actions`
+
+```sosu
+actions.Map* play = actions.map(arena, "play");
+actions.Action move = play.vector("move")
+    .stick(gamepad.Stick.LeftStick)
+    .keys(actions.Scan.W, actions.Scan.S, actions.Scan.A, actions.Scan.D);   // up, down, left, right
+actions.Action jump = play.button("jump").pad(gamepad.Button.South).key(actions.Scan.Space);
+actions.Action fire = play.button("fire").trigger(gamepad.Trigger.RightTrigger).mouse(app.Button.Left);
+actions.Action charge = play.button("charge").pad(gamepad.Button.West).hold(400);  // held 400 ms
+
+actions.Input* input = actions.input(arena, actions.system(arena), pads);
+input.enable(play);
+...
+pads.update();                                   // at the start of each frame, then
+input.update();
+linear.Vec2 m = input.vector(move);
+if (input.triggered(jump)) { ... }
+```
+
+- What is written differs a little from the first design. `keys(up, down, left, right)` takes four keys, not a struct. An `Input` reads its keyboard, mouse and clock through `actions.Devices`, an interface: `actions.system(arena)` reads those of SDL, and a test gives its own, whose keys it presses and whose clock it sets (`tests/programs/inputs`). `pads.update()` stays the program's, before `input.update()`, since several inputs share the pads.
+- Three kinds of actions: `button` (`pressed`, `triggered`, `released`), `axis` (an `f32`) and `vector` (a `Vec2`).
+  - A binding of another kind is converted. A trigger counts as a button beyond 0.5 (`press_point`). A key in an axis gives 1.
+  - When several bindings are active, the strongest wins, as in Unity: the stick or the keys, whichever is pushed further.
+- Bindings: gamepad buttons, sticks and triggers; keys; mouse buttons and the motion of the mouse (`mouse_delta`, for a camera). Composites:
+  - `keys(Keys{...})`: four keys make a `Vec2`, normalized on the diagonals;
+  - `axis_keys(minus, plus)`: two keys make an axis;
+  - `with(modifier, key)`: a key that counts only while a modifier is held, as Ctrl+S.
+- Keys are bound by their place on the keyboard (`Scan`, the scancodes of SDL), not by their letter. `Scan.W` is Z on a French AZERTY keyboard, so a game laid out for WASD plays as ZQSD there without a change. `actions.key_label(arena, scan)` gives the letter that the keyboard of the user prints, for prompts.
+- Processors, on a binding or an action: `dead_zone(min, max)`, `invert()`, `invert_y()`, `scale(f)`, `normalize()`.
+- Interactions, on a button: `hold(ms)` (`triggered` once it has been held that long; `progress(a)` from 0 to 1, for a gauge), `tap(ms)` (released before), `double_tap(ms)`.
+- Maps: `input.enable(map)` and `input.disable(map)`. A menu disables `play` and enables `menu`. Maps are not stacked by priority, as Unreal's contexts are. Two enabled maps that bind the same input both see it: the program enables what it means.
+- Devices and players:
+  - Each `Input` has the devices it reads: by default the keyboard, the mouse and every gamepad.
+  - `actions.players(arena, pads, n)` gives `n` inputs. The first gets the keyboard and the mouse; each gamepad is paired, as it connects or as its South is pressed, with the first player that has none. That is enough for a split screen or a couch game.
+  - `input.last_device()` says whether the keyboard or a gamepad was used last, so that the prompts follow the hands of the player.
+- Rebinding:
+  - `input.listen(action, index)` waits for the next button, key or stick pushed, and binds it in place of binding `index`. Escape or Start cancels.
+  - `input.save(arena)` writes the bindings changed as JSON (`std.json`), and `input.load(json)` reads them back; the program keeps the file in `app.data_folder`. The declarations in code stay the defaults: a binding the user never changed follows a new version of the program.
+- An action is a handle in its map, as the resources of `gpu` are, so a map can be declared once and kept in the state of the program.
+
+##### What it is checked by
+
+- `tests/programs/controls`, without hardware: SDL's virtual joysticks (`SDL_AttachVirtualJoystick`) stand for the gamepads. The test checks:
+  - `went_down` across frames, dead zones, connections and disconnections;
+  - the composites, `hold`, `tap`, maps turned on and off, and the strongest binding;
+  - the pairing of two players;
+  - a rebinding saved and read back.
+- `tests/programs/inputs`, with a keyboard, a mouse and a clock of the test and virtual pads: a button across three updates; W and D as a diagonal; a stick that wins over the keys, and `last_device`; an axis of two keys and a mouse button; a hold of 400 ms at 300 and 450 ms, firing once; a tap released in time and too late; a map turned off and another on; two players, each with a virtual pad (after those of the machine, if any), and South on the second only; South as Enter for `ui`; a key bound by `listen`, saved, read back by another input, and a damaged file refused without changing anything.
+- `pads.navigation(arena)` gives, after `pads.update()`, the pads as the keys that move through the widgets of `ui` (§10.6): the D-pad and the left stick as the arrows, repeated while held (after 400 ms, every 80 ms), South as Enter, East as Escape. The program gives these events to its interface with those of the keyboard: `ui` itself does not change.
+- `examples/pads` shows what is pressed, live: for each pad, its buttons by their place with the labels it prints, its sticks, its triggers, its battery, and a rumble on South; the buttons of the mouse; the keys of the keyboard held, by the letter the keyboard of the user prints; and two actions, `move` (a dot) and `jump` (a counter), with the hands that moved last. Every key is shown, Escape too: only the button of the window closes it. It is built by `make test`, and tried by hand, with an Xbox, a PlayStation and a Switch controller if they are at hand.
+
+##### Open questions (with the answer proposed)
+
+- Actions declared in a file, as Unity's `.inputactions`, rather than in code? In code first: the bindings are read where they are used (principle 7), and the JSON of rebinding already covers what the user changes. A file can come with `std.toml`.
+- Should gamepads also send events, for a program that wants them? Not before 2.0, since it would need new variants of `app.Event` (§13.2). After that, as `GamepadButton` and `GamepadConnected`, if programs ask for them.
+- Virtual sticks on a touch screen? Later, as an `actions` binding drawn by `ui`, so that a phone without a gamepad plays the same game.
+
+#### Scene and assets
+
+Status: available (0.7.0), `scene` and `assets`, with their tests (`sosuc test packages/scene`, `tests/programs/assets`); what differs from the design is said in each part. The other libraries of the 3D engine meet here. `render3d` draws the entities that have a mesh. `physics` moves those that have a body. `anim` poses those that have a skeleton. `audio.spatial` places those that make a sound.
+
+##### `scene`
+
+The model is a small ECS (entities, components, systems), not the objects of Unity that each have their `Update()`. With objects, the order of the calls is hidden, and objects keep pointers to each other that a destroyed object leaves dangling. With handles and tables, the program writes its systems as functions and calls them in the order it reads.
+
+```sosu
+mut scene.World world = scene.world(arena);
+mut scene.Table<Spin> spins = world.table<Spin>();   // a component of the program: a struct
+scene.Entity crate = world.spawn();
+world.transforms.set(crate, linear.transform());
+spins.set(crate, Spin{ speed: 1.5 });
+
+// each frame: the systems, in the order the program chooses
+spins.each((scene.Entity e, Spin* s) => {
+    world.transforms.get(e).rotation = ...;
+});
+world.propagate();                                   // the world matrices, parents first
+```
+
+- An `Entity` is an index and a generation, as the handles of `gpu`. `world.despawn(e)` removes its components and those of its children. An entity used afterwards is found dead (`world.alive(e)`), and its `get` gives none. It is never another entity that took its place.
+- `Table<T>` keeps the components of one type packed, in an array with an index by entity:
+  - `set`, `get(e) -> T*?`, `has`, `remove`;
+  - `each(f)`, which visits them in the order of the array;
+  - `join(other, f)`, which visits the entities that have both (the smaller table drives). Sosu has no variadic generics, so a join of three is two joins.
+  - A pointer from `get` is valid until the next `set` or `remove` on that table, as in a `std.vec` (§5.4). A debug build checks it.
+- Built-in tables:
+  - `transforms`: a `linear.Transform`, local to the parent;
+  - `parents`, with `children(e)` and `set_parent(e, p)`;
+  - `names`;
+  - `world_matrices`, written by `propagate()` with `Transform.then`.
+- Systems are not registered, and no scheduler runs them. A system that reads its tables and writes nothing else can be called from another thread on a copy (§5.6); scheduling them in parallel comes once programs need it.
+- Saving:
+  - `scene.save(arena, world, codecs)` and `scene.load` write and read JSON (`std.json`). A component is saved by a `scene.Codec<T>` that the program implements (§5.2), since Sosu has no reflection. The built-in tables have theirs.
+  - A prefab is a saved subtree. `scene.instantiate(world, prefab)` gives the root of a new copy.
+  - `model.gltf` gives a prefab too: its nodes become entities, its meshes and materials assets.
+- Effects: none. A `World` is memory in an arena, and its functions are pure.
+- What is written (0.7.0):
+  - `scene.world(arena)` gives a `World*`, and `world.table<T>()` a `Table<T>*`. `spawn_at(name, transform, parent)` spawns with a name, a transform and a parent at once; `count()`, `entities(arena)`, `children(arena, e)`, `parent_of(e)`, `clear_parent(e)`. `set_parent` refuses a cycle and says so (false).
+  - A table checks the generation of what it holds: a despawned entity is dead in every table at once without the world knowing its tables, and its components stay until the place is given again, `set` replaces them, or `compact()` drops them; `each` and `join` skip them. `join` is there, the smaller table driving.
+  - `propagate()` writes `world_matrices` with matrices (parent times local), not `Transform.then`, so that a scale that differs between axes stays exact; a parent is placed once, before its children.
+  - Saving is `scene.save`: `writer(arena, world)` (every living entity) or `prefab(arena, world, root)` (a root and its children, the root without its parent), `add(table, codec)` for each table of the program, `written()` for the text; `read(arena, world, text, parent)` and `instantiate` (the same, for a prefab) spawn its entities, `Reader.add(table, codec)` reads a table back, `root_entity()` gives the root of a prefab. A damaged text (JSON that does not parse, a number that is not an entity of the file, a parent that is the entity itself) spawns nothing; a cycle of parents in a file leaves those entities at the root. At most `MAX_ENTITIES` (2^20). `Codec<T>` has `name()`, `write(out, value)` and `read(arena, value)`.
+  - `scene.models`: `spawn_model(world, model, nodes, name, transform, parent)` spawns the nodes of a model of `model` under one entity, their transforms taken apart from their matrices (`linear.decompose`, added to `math.linear`), and a table of `NodeOf` says which node each entity stands for, so that the program finds its meshes.
+  - Not yet: the check, in a debug build, that a pointer of `get` is not used after a `set` or `remove` of its table.
+
+##### `assets`
+
+```sosu
+mut assets.Assets store = assets.open(arena, device, 2);   // two threads of loading
+assets.Handle<gpu.Texture> crate = store.texture("textures/crate.png");
+...
+store.update();                       // each frame, in the thread of the device: uploads what is ready
+match (store.get(crate)) { some(t) => { ... }, none => { /* still loading */ } }
+```
+
+- `store.texture`, `store.model`, `store.sound` and `store.shader` give a typed handle at once, and the same handle for the same path: the cache is by path.
+- Files are read and decoded in threads of the store (`std.thread`); the results come back through a channel (§5.6). `update()` uploads them to the GPU in the thread of the device, a few milliseconds at most per frame (`budget_ms`), so that a large level does not freeze a frame.
+- `store.state(h)` says `Loading`, `Ready` or `Failed(message)`. `store.wait(h)` blocks, for a loading screen or a test.
+- Files are found with `app.read_asset` (§11.5), so the assets travel in the APK and the bundles.
+- Hot reload, on the desktop in a debug build: `store.watch(true)` looks at the dates of the files loaded every half second (`std.fs`). A file that changed is loaded again behind the same handle, and the next `get` gives the new content. That covers textures, models, sounds and shaders, with `sosuc shaders` run again for a `.hlsl` file. Nothing is watched on phones.
+- `store.release(h)` frees an asset; `store.close()` frees the rest.
+- What is written (0.7.0), and how it differs:
+  - `assets.open(arena, device, threads)` takes `gpu.Device*?`: none for a program that loads only sounds and models. One type of handle, `Handle`, with `get_texture`, `get_sound`, `get_model` and `get_shader` (Sosu has no overloading), and `model_file(path)` for a model (`model` is the name of the package). `update(budget_ms)`.
+  - Threads share no memory, and a channel carries values without pointers (§5.6): a thread cannot give its decoded image. The threads of the store read and decode textures (PNG, JPEG) and sounds (WAV, Ogg Vorbis, MP3, FLAC), and send their pixels and samples back in pieces of 4 KB (`Words`, an array of 1 024 words), which `update` puts together, then sends to the GPU with their mipmaps.
+  - Models (glTF, OBJ, FBX by their extension, with the textures they name) and shaders are read by `update` in the thread of the store's owner, one a frame when there is time left: a glTF reads the files beside it, and a shader is small.
+  - `state(h)` is `Loading`, `Ready` or `Failed(message)` ("the file is not there", "not an image of PNG or JPEG that decodes"...); `wait(h)` reads the answers of the threads until `h` is ready or failed. An answer for a load asked again since is dropped (a version per load).
+  - `watch(true)` compares the dates of the files every half second; the dates of the system are in seconds, so a file changed twice in one second is seen once. Not on Android nor iOS.
+  - The pieces of a load go to the arena of the store: a texture loaded again many times grows it. Releasing that memory comes with a store of its own arenas.
+- No preparation step at first: the loaders read PNG, JPEG, glTF and the compiled shaders as they are. A step of `sosuc` that prepares assets (mipmaps computed beforehand, compressed textures BC7 and ASTC, meshes optimized for the cache of vertices) comes when loading times ask for it.
+
+#### Physics and navigation
+
+Status: available (0.7.0): `physics` on Jolt, `physics2d` on Box2D, `nav` on Recast and Detour, and `nav.grid` in Sosu, each tested by a program of `tests/programs` (`physics`, `physics2d`, `nav`). A good engine of rigid bodies is years of work: `physics` binds one rather than writing one, as `sqlite` binds SQLite, and keeps it behind an interface of Sosu. What differs from the design is said at the end.
+
+##### What the build needs
+
+Status: available (0.7.0), `[link] cpp` and `[native.<name>]` (§9.1).
+
+Jolt and Recast are C++, Box2D is C. They are taken from their repositories by `[native.<name>]` sections (§9.1), at a tag pinned by `sosu.lock`, never copied into the packages: the first build of a program that uses one clones it, without its history, into its `build/deps`. Each is reached through a C file or a C++ file of the package (`native/physics2d.c`, `native/physics.cpp`, `native/nav.cpp`): a few functions of C over numbers and pointers, declared in an `extern "C"` block of the module, so that Sosu passes no structure by value and never sees C++. C++ files are compiled with exceptions and RTTI turned off, which Jolt and Recast support. Building Jolt in debug takes about two minutes the first time; its objects are kept after.
+
+##### `physics`
+
+```sosu
+mut physics.World* w = physics.world(arena, physics.options());   // gravity, step 1/60 s
+physics.Shape slab = physics.box(linear.vec3(50.0, 0.5, 50.0));
+physics.Shape ball_shape = physics.sphere(0.5);
+w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: slab, position: linear.vec3(0.0, -0.5, 0.0) });
+physics.Body ball = w.body(physics.BodyDesc{ shape: ball_shape, position: linear.vec3(0.0, 5.0, 0.0) });
+...
+w.advance(dt);                        // fixed steps of 1/60 s, as many as dt holds
+for (physics.Contact c in w.contacts()) { ... }
+```
+
+- A `World` steps at a fixed rate (`Options.step`, 1/60 s by default). `advance(dt)` runs as many steps as the time given holds (a step due within a ten-thousandth counts, so that 0.05 s holds three steps of 1/60 in `f32`), at most `max_steps` (8), and keeps the rest; behind by more, the time is dropped rather than caught up. `alpha()` gives how far it is into the next step, to draw between two states; `step()` runs one now.
+- Shapes are made once and given to the bodies: `box`, `sphere`, `capsule`, `cylinder` (along y), `convex(points)`, `mesh(vertices, indices)` (static bodies only: a dynamic one is refused), `heightfield(heights, size, cell, corner)` and `compound(parts)`. A `Shape` is counted by Jolt: `release` gives it back, and the bodies that use it keep it. A shape that cannot be (a radius of 0, a hull of 3 points) is not `valid`, and a body made with it is dead.
+- Bodies are handles: `Static`, `Dynamic` and `Kinematic` (moved by the program with `move_to(p, q, dt)`, pushing the others). `w.body(desc)` gives a `Body`, dead from the start (`alive()` false) when it is refused, as the resources of `gpu` are. Each body has a mass (from its shape, at a density of 1000 kg/m³, or `BodyDesc.mass`), a friction, a restitution, dampings, a scale of gravity, 32 layers and the layers it collides with (two bodies collide when each one's `mask` has a layer of the other), `sensor` and `bullet`. `state()`, `set_velocity`, `add_force`, `add_impulse`, `teleport`, `sleep`, `wake`, `awake`, `mass`, and `w.remove(b)`.
+- Layers: Jolt's object layer is an index into a table of the combinations that bodies use (layers, mask, moving or not), so that 32 layers do not need Jolt's mask filter (16), while static bodies keep a tree of their own in the broad phase.
+- Queries: `ray(from, to, mask) -> Hit?`, `ray_all` (nearest first, without normals), `sphere_cast(radius, from, to, mask)`, `overlap(shape, position, rotation, mask)`. A `Hit` has its body, its point, its normal and its distance.
+- Contacts are read, not called back, as with gamepads: `w.contacts()` gives those that began (with their point and normal) or ended during the steps of the last `advance`, and the bodies that entered or left a sensor. Jolt's listener runs during the step and only fills that list.
+- `physics.Character`: Jolt's virtual character, a capsule standing on its feet that walks, climbs steps (`step`, 0.4 m) and steps down, slides along walls and walks up slopes up to `max_slope`, moved by the program each frame with `update(dt, velocity)` (a positive y jumps, from the ground only). It is not a body: rays do not see it, and it does not push bodies.
+- `physics.sync(scene_world, bodies)` copies the positions and rotations of the bodies of a `scene.Table<physics.Body>` into the `Transform`s of their entities, the scale left as it is.
+- Determinism: one build on one machine gives the same steps from the same inputs (tested twice in a row). Across machines, compilers and processors, a program asks for it in its own `sosu.toml`: `[link] defines = ["JPH_CROSS_PLATFORM_DETERMINISTIC"]` builds Jolt so (no fused multiply-add, its own functions of trigonometry); `sosuc` compiles C++ with `-ffp-contract=off` (MSVC is `/fp:precise`), as Jolt asks. `tests/programs/determinism` prints a fingerprint of the bits of a world after 300 steps (a stack knocked over, crates thrown, a pendulum), one expected value for every compiler and processor of the CI; MSVC and gcc give it.
+- Memory: Jolt allocates through the C library, not in arenas. `w.close()` releases the world and its bodies; a character is closed before its world.
+
+##### `physics2d`
+
+The same model for the plane, on Box2D 3 (C): `World` with `advance`, `step`, `alpha`; bodies made by `w.body(BodyDesc{ kind, position, angle, ... })`, then their shapes added to them (`circle`, `circle_at`, `box`, `box_at`, `capsule`, `polygon` of 3 to 8 points, `segment`, `chain` through points, open or closed, solid on its right side); a `Material` for each shape (density in kg/m², friction, restitution, 64 layers and a mask, `sensor`). Joints from the start: `hinge`, `distance`, `weld` and `slider`, with limits and a motor (`JointOptions`). Queries: `ray` and `overlap` of a box. Contacts and sensors read after the steps (`Contact.sensor`). `physics2d.sync` writes x, y and a turn around z into the `Transform`s of `scene`, z and the scale left as they are. Box2D's solver of 8 lanes (AVX2) is compiled by `native/box2d_avx2.c` rather than by `[native.box2d]` (its `exclude`), so that MSVC needs no `/arch:AVX2`: Box2D calls it only where the processor has AVX2.
+
+##### `nav`
+
+- `nav.build(arena, vertices, indices, nav.Agent{ radius, height, climb, slope })` turns the triangles of a level into a navigation mesh, with Recast, as its demo builds a single tile; the voxels are `radius / 2` across and half that up unless given. It fails with `Invalid`, `NothingWalkable` or the stage of Recast that failed (`NavError`). Building takes from milliseconds to seconds, so a program builds once and keeps the result: `mesh.bytes(arena)` and `nav.load(arena, bytes)`. Only the header of loaded bytes is checked: they must be those the program wrote, not a file of someone else.
+- `mesh.path(arena, from, to) -> linear.Vec3[]?` gives the corners of the shortest path along the mesh (Detour), both points brought onto it within `nav.REACH`, or none when either is off the mesh or the two are not connected (Detour's partial path is not given). `mesh.nearest(point)` gives the closest point on the mesh.
+- `nav.Crowd` (`mesh.crowd(arena, max_agents, max_radius)`): agents that follow their paths and avoid each other (DetourCrowd), added with `add(position, AgentDesc)`, sent with `go_to`, moved by `update(dt)`, read with `position` and `velocity`.
+- `nav.grid`: A* on a grid of cells with costs, in Sosu, for 2D games and games on tiles. A cost of 0 or less is a wall; four ways or eight (`diagonal`, a diagonal step costing √2 times its cell and never cutting the corner of a wall); a path is one of the cheapest, the same for the same grid.
+- The C++ of Recast and Detour is behind `native/nav.cpp`, whose functions the module declares in `extern "C"`.
+
+##### What differs from the design
+
+- `physics` goes to Jolt through its own `native/physics.cpp` rather than through joltc: a few functions written for the module, rather than an interface of C of the whole of Jolt (12 000 lines) compiled into each program.
+- Joints, added after the first version: `w.fixed(a, b)`, `w.hinge(a, b, anchor, axis, options)`, `w.slider(a, b, anchor, axis, options)`, `w.distance(a, b, anchor_a, anchor_b, options)` (a rope with `limit`) and `w.cone(a, b, anchor, axis, half_angle)`, at places and along axes given in the world; `JointOptions{ limit, lower, upper, motor, speed, strength }`. A `Joint` is a handle: `alive()`, `position()` (the angle of a hinge, the translation of a slider), `set_motor(speed)`, `w.remove_joint(j)` (its bodies woken: a body asleep in a joint falls when it is taken away). Jolt solves them by iterations: a limit can be passed by a few hundredths at a hard push.
+- Threads: `w.use_threads(n)` (`uses threads`, §7.4) gives Jolt a pool of `n` threads of its own for the steps, rather than `Options.threads`, so that only the program that asks for them has the effect; they touch Jolt's memory only, during `step` and `advance`, and its listener of contacts keeps its list under a lock. The steps are the same with any number of threads (tested with three against none).
+- Not yet in `physics`: contacts that persisted (only those that began or ended are given). The option of cross-platform determinism is a define of the program rather than an option of the package, since a package has no options (§9.1).
+- `World.body` gives a dead `Body` rather than none when it is refused.
+- `physics2d` draws its debug view on a canvas of `render`: `w.debug_draw(canvas, View{ x, y, scale }, joints, contacts)`, the outlines of the shapes in the colors Box2D gives them (by kind of body, asleep or awake), circles with a radius that shows their turn, and the joints and contacts when asked (Box2D's `b2World_Draw`, its primitives gathered by `native/physics2d.c`). Not yet: the queries of shapes cast.
+- `nav.save` and `nav.load` of files are `bytes` and `load` of bytes: the program writes them with `std.fs`.
+
+#### Animation and particles
+
+Status: available (0.7.0): `math.curve`, `anim` and `particles`, tested by `sosuc test packages/math`, `packages/anim` and `packages/particles`, the skinning of `render3d` and the drawing of `particles` by `tests/programs/render3d` and `tests/programs/particles`. Both are written in Sosu: they are arithmetic on arrays, which Sosu does as fast as C, and their tests need no GPU. What differs from the design is said at the end of `particles`.
+
+##### `math.curve`
+
+`Curve` (keys of time and value, read by `Step`, `Linear` or `Hermite` with the tangents of each key, one mode for the curve, as glTF has it), `Curve3` (a `Vec3`) and `Gradient` (colors of linear RGBA over 0..1, mixed in straight lines). `sample(t)` gives the value at `t`, held before the first key and after the last; `duration()`, `valid()` (times that do not go back, no NaN), `curve.of(arena, keys, mode)` (none when not valid), `constant`, `line(arena, from, to)`, `gradient(arena, from, to)`, `solid`, and `hermite(v0, m0, v1, m1, s)`. `anim` reads the cubic splines of glTF with it, and `particles` the sizes, speeds and colors over the life of a particle.
+
+##### `anim`
+
+```sosu
+// skeleton: the skin 0 of a model of model.gltf, `anim.skeleton(arena, character, 0)` (an option)
+// idle_animation: `character.animation("Idle")` (an option)
+anim.Clip* idle_clip = anim.clip(arena, skeleton, idle_animation);
+anim.Machine* m = anim.machine(arena, skeleton);
+anim.State idle = m.state("idle", idle_clip);
+anim.State run = m.state_blend1("run", "speed", points);   // [anim.at(1.5, walk_clip), anim.at(5.0, run_clip)]
+m.transition(idle, run, anim.when("speed", anim.Above, 0.1), 0.2);    // a cross-fade of 0.2 s
+m.transition(run, idle, anim.when("speed", anim.Below, 0.1), 0.25);
+...
+m.set("speed", velocity.length());
+m.advance(dt);
+for (anim.Event e in m.events()) { ... }           // "step" on the frame a foot lands
+```
+
+- A `Skeleton` is its joints (parents, rest pose, inverse bind matrices). A `Clip` is channels of translation, rotation and scale per joint, with the interpolations of glTF.
+- A `Pose` is a `linear.Transform` per joint:
+  - `clip.sample(pose, t)`;
+  - `anim.blend(a, b, w, out)` (positions and scales lerped, rotations slerped the short way);
+  - `anim.add(base, additive, w, out)`, for a layer that leans or breathes over the rest;
+  - `anim.mask(joints)`, to blend only the upper body.
+- Blend trees: `blend1` (by one parameter, as walk to run by speed) and `blend2` (by two, as the direction of a strafe).
+- State machines, as Unity's Animator, declared in code:
+  - states, transitions with conditions on parameters (numbers, booleans and triggers) and a cross-fade;
+  - `m.current()` and `m.play(state)`;
+  - the parameters are named by strings once, and the machine keeps their indices.
+- Root motion: `m.root_delta()` gives what the root joint moved during the last `advance`, for `physics.Character`, instead of the clip sliding over the ground.
+- Events: times named in a clip (`clip.event(0.42, "step")`), read with `m.events()` after `advance`, as contacts and gamepads are.
+- Skinning on the GPU: `anim.palette(skeleton, pose, out)` gives the joint matrices. `render3d` sends them in a storage buffer, and its vertex shader blends four joints per vertex, as glTF gives them.
+- Inverse kinematics, on a pose after the machine: `anim.two_bone(scratch, skeleton, pose, end, target, pole, weight)` turns the two joints above `end` (a hip and a knee, a shoulder and an elbow) so that `end` reaches `target`, or points at it out of reach, the middle joint bending toward `pole` (the analytic solution of the triangle, as Daniel Holden writes it); `anim.look_at(scratch, skeleton, pose, joint, forward, target, max_angle, weight)` turns a joint so that its axis `forward` points at `target`, by at most `max_angle`. Targets are in the space of the model; `palette` is made again after. `examples/brawl` turns the head of its hero toward the nearest enemy.
+- Morph targets: `clip.weights_at(node, t, out)` gives the weights a clip gives the targets of the meshes of a node, which `render3d` applies on the GPU (`Item.morphs`), or `model.morph` and `render3d.update_vertices` on the processor. `machine.morph_weights(node, out)`, after `advance`, blends them as the pose is: by the weights of the points of a blend tree, and across a fade; `out` holds the weights to start from (those of the mesh), which a clip that does not animate them counts with, and it is false, `out` kept, when no clip playing animates them.
+- Compressed clips: `anim.compress(arena, clip, Tolerance{ position, rotation, scale, weight })` gives a clip that samples as `clip` does within the tolerance (0.1 mm, 0.0005 rad, 0.0001, 0.001 by default, in the space of each joint), as Ozz and ACL make them: the keys that a line (a slerp for rotations, the key held for steps) through the keys kept around them gives within the tolerance are removed, a track that stays at the rest of its joint is left out, and the numbers are kept in 16 bits over the range of each component of a track. Cubic splines keep their keys. A clip baked at 60 keys a second by an exporter takes a few times less; `clip.bytes()` says what its keys take. Tested by such a clip (a slide and a turn at a steady speed, a nod along a sine, a scale at rest, a morph target), sampled between the keys against the clip it comes from.
+- A `Machine` is memory in an arena with no effects, so the machines of many characters can advance in other threads, each on its own data (§5.6).
+- What is written: `anim.skeleton(arena, model, skin)` (the parents of the joints through nodes that are not joints, their rest from `Node.transform`, an `order` with each joint after its parent, and `above`, where the nodes above a root put it); `rest_pose`, `copy`, `blend`, `blend_masked`, `difference` and `add` (an additive layer is the `difference` of a pose and a reference), `mask(arena, skeleton, joint)` (a joint and all below it), `world_matrices` and `palette`. `anim.clip(arena, skeleton, animation)` keeps the channels of the joints of the skeleton; `sample(pose, t)` starts from the rest and holds the ends; rotations are slerped (`Linear`) or read component by component then normalized (`Step`, `Hermite`). A `Machine`: `state`, `state_blend1` (the two clips around the parameter, by a line), `state_blend2` (each clip by the inverse of its squared distance to the point of the two parameters: Unity's freeform), `configure(state, speed, looping)`; `transition(from, to, condition, fade)`, `transition_any(to, condition, fade)`, `transition_after(from, to, exit, fade)`; `when(name, Above | Below | IsTrue | IsFalse | Triggered, value)`; `param(name)` once then `set_param`, or `set`, `set_bool`, `trigger` by name; `advance(dt)`, `pose()`, `events()`, `root_delta()` with `use_root_motion(true)` (x and z of the root, kept over its rest in the pose), `current_name()`, `fading()`, `play(state)`. A state plays its clips at one phase, its length the lengths of its clips by their weights; its events and root motion are those of its clip of the largest weight, and during a fade those of the state that weighs most.
+
+##### `particles`
+
+```sosu
+mut particles.System smoke = particles.system(arena, particles.Emitter{
+    rate: 40.0, shape: particles.cone(25.0, 0.2), life: particles.range(1.5, 2.5),
+    speed: particles.range(0.5, 1.0), gravity: -0.1, drag: 0.8,
+    size: curve.linear(0.2, 1.2), color: curve.gradient(gray, transparent),
+    texture: smoke_sheet, frames: 16,
+});
+...
+smoke.advance(dt);
+smoke.draw(pass, camera);
+```
+
+- An emitter has a rate and bursts; a shape (point, sphere, cone, box, the surface of a mesh); ranges for the life, speed, size and rotation of a new particle; forces (gravity, drag, wind, a turbulence of noise); and curves over the life of a particle for its size, color and speed.
+- Drawing: billboards facing the camera or stretched along their speed, a texture or a flipbook of frames, additive or alpha blending. Particles with alpha are sorted by distance.
+- First version: on the processor, a few thousand particles per system, the same results on every machine, and tests that need no GPU.
+- Collisions with planes: `Emitter.planes` (`Plane{ normal, offset }`, `floor_at(y)`), `bounce` (the speed into a plane given back), `friction` (the speed along it lost at each contact), `die_on_contact` (rain). `examples/brawl`'s sparks bounce on the floor; in its window they are a `compute.GpuSystem` that also bounces off the blocks and crates, through the depth of the scene (its `--check`, without a GPU, keeps the `System`).
+- On the GPU: `compute.gpu_system(arena, device, emitter)` gives a `GpuSystem` of `emitter.max` places, for tens of thousands of particles. The processor decides the births with the same `Emitter` (its rate, bursts, shape and ranges, its seed); `g.simulate(frame, dt, camera)` (or `simulate_for` with the size of a target) sends them and records a compute pass that moves every particle: gravity, drag toward the wind, a turbulence of noise, the curve of speed, the planes of the emitter (four at most), and, with `g.collide_with_depth(meters)`, what the scene drew before it in the frame (the depth of the frame, read by `ComputePass.frame_depth`): a particle behind a surface by less than `meters` is put back on it and bounces along its normal, found from the depth of the pixels beside; only what the camera sees can be hit. `g.draw(frame, camera, texture)` (or `draw_into`) draws them from the same buffer, by a vertex shader: nothing comes back to the processor, but `g.read(arena)` reads them back for tests. The curves of size and speed and the gradient of color are read as 32 samples. What differs from `particles.particles`: the buffer is a ring, a birth takes the place of the oldest when it is full; the noise is another one; the particles are not sorted (additive ones look the same, alpha ones may cross); `move_to`, `stop`, `burst` act as on a `System`. `tests/programs/particles` checks that, without turbulence, the GPU moves 256 particles as the processor does (within a centimeter, bounces on a floor included), that particles thrown at a cube go through it without the depth and bounce off it with it, and draws a cloud from its buffer; on Direct3D 12 and Vulkan.
+- Random numbers come from a seed per system (`std.random`), so that an effect plays the same in a replay.
+- Emitters are declared in code. They can be saved as JSON with `scene`, once an editor needs to.
+- What is written: `particles.Emitter{ rate, bursts, cycle, looping, shape, life, speed, size, rotation, spin, gravity, drag, wind, turbulence, turbulence_scale, size_over_life, speed_over_life, color_over_life, color, frames, columns, facing, blending, max, seed }`; shapes `Point`, `Sphere(radius)`, `Cone(angle, radius)`, `Box(half)` and `Surface(triangles)` (each triangle by its area, along its normal); `range(low, high)` and `exactly(v)`. A `System` (`particles.system(arena, emitter)`): `move_to(matrix)`, `advance(dt)`, `burst(n)`, `stop`, `finished`, `particles()`, `size_of`, `color_of`, `frame_of`. Drag pulls a particle toward the speed of the wind; turbulence is value noise of a hashed lattice, smooth and the same everywhere; a particle at the end of its life gives its place to the last one. `particles.draw`: `drawer(arena, device)`, then `draw(frame, camera, sprites)` or `draw_into` after the scene of `render3d`, in a pass that keeps its color and its depth; each `Sprite` a system and its texture (white squares without one). The corners of the squares are worked out on the processor, the buffers grow as needed, and each system is a part of them (`draw_indexed_range`).
+- What differs from the design: the size curve multiplies the size at birth (rather than giving it); the tests compare the particles with values worked out by hand and with a second run of the same seed, rather than with a golden file, whose numbers could differ by a bit between compilers that fuse multiplications and additions (clang on ARM); the simulation on the GPU (`particles.compute`) came after, with its own noise and without sorting.
+
+#### 3D sound
+
+Status: available (0.7.0), tested by `sosuc test packages/audio` on buffers, without a sound card. `audio.mixer` (§8.3) already places a sound with equal power, moves volume and panning without a click, and plays at a speed. `audio.spatial` computes, each frame, the volume, panning and speed of each sound from where it is.
+
+```sosu
+mut spatial.Space space = spatial.space(arena, mixer);
+spatial.Source engine = space.play(engine_sound, spatial.Placed{ position: car.position, looping: true, near: 2.0, far: 80.0 });
+...
+space.listener(camera.transform, camera.velocity);
+space.move(engine, car.position, car.velocity);
+space.update();                                     // each frame, before audio.device's update()
+```
+
+- Distance: full volume within `near`, then a rolloff (`Inverse`, the default, as OpenAL; `Linear`; `Exponential`) down to silence at `far`. A source beyond `far` stops being mixed and starts again when it comes back, in time.
+- Direction: the angle of the source around the listener gives the panning of the stereo mixer. A source behind is a little quieter and duller once `audio.effects` has a low-pass filter.
+- Doppler: the relative speed along the line between them changes the speed of the sound (`doppler: 1.0`, 0 to turn it off), bounded so that a teleported camera does not give a scream.
+- `scene` holds an `AudioSource` component, and `spatial.sync(space, world)` moves the sources with their entities. Not yet: `audio` does not depend on `scene` (nor on `model` and `image`, which `scene` brings); a program moves its sources with `space.move` from its own system.
+- What is written: `spatial.space(arena, mixer)`, `listener(transform, velocity)` (facing -z, its right +x), `play(sound, Placed{ position, velocity, volume, speed, looping, near, far, rolloff, doppler })`, `move`, `set_volume`, `stop`, `playing`, `update()`, `heard(source)` (the volume, panning and speed given to the mixer) and `attenuation(placed, distance)`. Distance: `Inverse` near / distance, `Linear`, `Exponential` (near / distance)², each fading to silence over the last tenth before `far`. A source beyond `far` is silent but keeps playing, so that it comes back in time. Direction: the panning is the side of the source seen from the listener, on its horizontal plane; a source behind is a fifth quieter. Doppler: (c + v_listener) / (c + v_source) along the line between them, the speeds bounded to half the speed of sound and the ratio to 0.5..2.
+- A low-pass filter of one pole per voice of the mixer (`mixer.set_lowpass(id, hz)`, 0 for none): a source behind the listener goes down to 6 kHz; `space.set_occlusion(source, amount)` (0 to 1) lowers it by up to a half and softens it down to 600 Hz. The program finds how hidden a source is with a ray of `physics` between the listener and the source, as `examples/brawl` does for its sounds. `Heard.cutoff` says what was given to the mixer.
+- Reverberation: `mixer.set_reverb(id, send)` sends a share of a voice to the reverberation of the mixer, `mixer.set_room(size, damping)`, as Freeverb makes it (four damped combs side by side, two all-pass filters, the right channel 23 samples longer); it costs nothing while nothing is sent and its tail has rung out. `space.set_reverb(amount, size, damping)` is the reverberation of the place (0 outside, 1 a cave): far sources are heard more through it than near ones, and `Placed.reverb` adds a share of a source of its own.
+- Zones of reverberation: `space.add_zone(Zone{ low, high, blend, amount, size, damping })` (a box of the world, its index; `set_zone`, `clear_zones`). Inside, the listener hears its room fully; outside, it fades over `blend` meters (2), `spatial.inside(zone, at)`; zones that overlap share, and what is left is the reverberation of `set_reverb`. Each `update` gives the mixer the room of where the listener is; `space.reverb()` says it (`Reverb{ amount, size, damping }`).
+- 5.1 and 7.1: a mixer (and `device.Output`) of 6 or 8 channels, in the order of SDL (front left, front right, center, LFE, back left, back right, side left, side right), which mixes them down to what the device has. `mixer.set_direction(id, angle)` (radians, 0 ahead, pi/2 right) places a voice between the two speakers around it, with equal power (`mixer.speaker_gains(channels, angle)`, the speakers at the angles of ITU-R BS.775); a voice without a direction is placed by its panning over the front, a stereo one to the front left and right. `audio.spatial` gives each source its direction. The reverberation rings in the back and side speakers too, at 0.7; the LFE channel stays silent.
+- Streams: `space.attach(stream, placed)` places a stream of `audio.stream` (music from a radio of the level, an ambiance read as it plays) as a source: its `update` is called by that of the space, which follows its voice when `seek` gives it another; its volume becomes that of `placed`, it is silent until the first `update`, and it is forgotten once it has ended or was stopped. Tested by a stream heard on its side, through a seek, to its end.
+- Headphones: `mixer.use_hrtf(hrtf.kemar(arena, rate))` (a stereo mixer, at the rate given) hears the voices that have a direction through a head: each is mixed to one channel and convolved with the head-related impulse responses of the two ears for its direction (`set_direction`) and its elevation (`set_elevation`), so that before and behind, above and below are told apart, as panning cannot; `no_hrtf()` pans them again, `binaural()`. The responses are those of KEMAR measured by Bill Gardner and Keith Martin at the MIT Media Lab (1994, the "compact" set: 368 directions on the right from 40 degrees below to above the head, 128 frames at 44.1 kHz; free, the authors cited, `THIRD_PARTY_NOTICES.md`), compiled into the package (`native/kemar.c`, 190 KB, written by `native/kemar.py`); the left side is the right one, the ears swapped. `audio.hrtf` cuts each response at its onset: what is before becomes the delay of its ear (their difference, the time the sound takes around the head, up to 0.7 ms); `hrtf.filters(azimuth, elevation, left, right)` mixes the responses of the four directions measured around the one asked, and their delays, rather than responses that arrive at other times (which would comb); they are resampled to the rate of the mixer and scaled so that a sound ahead is as loud as one panned in the middle. The mixer convolves a voice by blocks (overlap-add): 256 frames at 48 kHz (a block holds a response and its delay), through a fast Fourier transform of twice that (`spectrum.plan(arena, size)`: a `Plan` keeps its turns and the order of its bits, `forward` and `inverse`); the responses of the two ears, each after its delay, go through one transform together (the left as the real part, the right as the imaginary, told apart by their symmetry), and so do the outputs of the two ears, back. A voice heard through a head is one block late (`mixer.latency()`), and a voice whose sound ends goes on until its last block and what that adds to the next are heard. A voice whose direction changes fades from the output of the old responses to that of the new over a block, without a click; the new direction is taken at each block. Through a head, `audio.spatial` gives each source its elevation and does not make what is behind duller itself; `Heard` has the `angle` and the `elevation` given. A voice costs two transforms of 512 per block of 256 frames, four while it turns: about 0.45 % of a core in a build `--release`, 0.7 % while it moves, 3 to 4.5 % in debug (directly, 140 taps per ear cost 0.55 and 1.1 % in release, 11 % turning in debug: the responses of KEMAR are short, so the blocks win most when the voice turns, and in debug). Tested by the convolution by blocks against the direct one (one block later, within 0.0005, the end heard), a click on the right (the right ear louder, and first by 0.4 to 1 ms), noise ahead (both ears alike) and behind (less of what is high), above, a tone that goes around the head (no step between samples), and the responses of KEMAR (their delays at 44.1 and 48 kHz, the left side mirrored).
+- `showcase/soundstage` lets one hear it: a sound placed ahead, behind, left, right or above, or turning around the head, heard panned or through a head, drawn from above with the levels of the two ears; `examples/brawl` turns it on with H.
+- SOFA files: `sofa.load(arena, path, rate)` and `sofa.decode(arena, bytes, rate)` read the responses of another head, or of a listener, from a file of AES69 (the convention SimpleFreeFieldHRIR) as an `Hrtf` that `mixer.use_hrtf` takes in place of KEMAR: `Data.IR` (directions × 2 ears × frames), `Data.SamplingRate`, `SourcePosition` (spherical in degrees, the azimuth turning left from ahead as SOFA has it, or cartesian: x ahead, y left, z up), and `Data.Delay` and `ReceiverPosition` (which ear is first) when they are there. Each response is cut `sofa.KEEP_MS` (2.9 ms) after its onset, as KEMAR's compact set is, its last frames fading out. The directions may be anywhere on the sphere: `Hrtf.filters` mixes the three nearest, each by how much nearer it is than the fourth (1/d - 1/d4), so that a direction coming in or going out of the three counts for nothing then: no jump; `hrtf.measured(...)` makes an `Hrtf` of responses given, `place(i)` says where each is. A SOFA file is a netCDF-4 file: `audio.hdf5` reads, in Sosu, the parts of HDF5 it uses (the superblock 2 or 3, object headers 1 and 2 and their continuations, the links of the root group, compact or dense in a fractal heap indexed by a B-tree 2 of one node, variables of floats of 4 or 8 bytes in little-endian order, compact, contiguous or in chunks of a B-tree 1, through deflate (`compress.zlib`), shuffle and Fletcher-32, their compact attributes of fixed strings); the rest gives `Unsupported` (the superblocks 0 and 1, the layouts of version 4, other filters), a file that does not hold `Damaged`, never a read outside of its bytes; what a file asks for is bounded (`hdf5.MAX_ELEMENTS`). Tested by `mit_kemar_normal_pinna.sofa` of sofacoustics.org (the measurements of KEMAR whole: 710 directions, 512 frames; its delays between the ears within 0.1 ms of the compact set, no jump between directions, heard through the mixer), by small files of `make_data.py` (a minimal writer of HDF5: six directions of known impulses, read exactly; the same in cartesian coordinates, the right ear first, with delays) and hostile ones, by 3 000 files damaged at random in `tests/programs/sounds`, and fuzzed by `make fuzz-models` (`tests/fuzz_sosu/sofa`).
+- Later: Steam Audio (Apache 2.0) as an option for its reflections.
+
+##### What these libraries are checked by
+
+- `scene`: entities spawned, despawned and found dead; joins; `propagate` against matrices computed by hand; a scene saved and loaded again byte for byte.
+- `assets`: loading in threads, the cache by path, a file changed and reloaded behind the same handle.
+- `physics` and `physics2d`: a ball falling on a floor (its height after a second, within a tolerance), a stack of boxes that sleeps, rays and layers, the character on a step, the same steps twice from the same inputs.
+- `nav`: a path around an obstacle, two rooms that are not connected (none), a mesh saved and loaded again; A* on grids.
+- `anim`: the poses of a glTF file sampled at times compared with those that Blender exported, blends, a transition at its middle, root motion, events.
+- `particles`: a system run with a seed, its particles compared with a golden file.
+- `audio.spatial`: volume, panning and speed at chosen positions, on buffers of samples, without a sound card.
+- `examples/brawl`: a small third-person game that uses them all (written as `examples/arena` in the design; renamed so as not to be read as the arenas of memory). A character animated by a state machine walks with a gamepad or ZQSD across a level with physics. Enemies follow it on the navigation mesh, and sparks and placed sounds mark the hits. It is built by the CI and tried by hand. Everything is made in code, so it needs no file: the character is boxes on a skin of nine joints with its clips (`rig.sosu`: idle, walk and run blended by speed, a strike, the feet named by events), the level blocks that are drawn, static bodies and the triangles of the navigation mesh (`level.sosu`), the sounds synthesized (`sounds.sosu`); crates of `physics` fall at the start and a strike pushes them. H (or North on a gamepad) hears the sounds as through headphones, by the responses of KEMAR (`mixer.use_hrtf`, made at the first press), and again panned; the line of the screen says which (in a build `--release`: through a head, a voice costs about 0.5 % of a core, seven times more in debug). `sosuc run examples/brawl -- --check` plays it for five seconds by a script, without a window (the hero walks to the nearest enemy and strikes), and prints what happened: `tests/program_tests.c` runs it.
+
+##### Open questions (with the answer proposed)
+
+- An ECS, or a tree of nodes as Godot's? An ECS for the data, with the hierarchy as a component: a tree of objects with virtual methods brings back the hidden order and the dangling pointers. An editor can still show a tree.
+- Jolt, or an engine written in Sosu? Jolt: it is used by large games, it is MIT, and a rewrite would take years for a worse result. The cost is C++ in the build (`cpp = [...]`) and a few megabytes in each program that uses `physics`.
+- Steam Audio for spatial sound from the start? No. Panning and distance cover most games; HRTF is an option once `audio.effects` exists.
 
 ### 8.3 The packages of 1.0
 
@@ -835,7 +1411,7 @@ The packages of §8.2 written so far (`crypto`, `compress`, `math`, `testing`, `
 - `compress` (tested by `tests/programs/compression`, with streams of zlib and of the `gzip` command; what it writes is read by `gzip -d`): `compress.deflate`, the bare stream: `inflate(arena, data) -> ui8[]!CompressError`, `inflate_into(data, out)` for a size known before, `inflate_stream` and `inflate_stream_into`, which also say how many bytes the stream took (`Inflated`: `bytes`, `read`); at most `MAX_SIZE` bytes (1 GB, `TooLarge` beyond), or the limit given to `inflate_limit`, `inflate_stream_limit`, `zlib.decompress_limit` and `gzip.decompress_limit` (all the members); `deflate(arena, data)` (level 6) and `deflate_level(arena, data, level)`, 0 storing, 9 the smallest: matches found by hash chains in a window of 32 KB, each block written stored, with the fixed codes or with dynamic ones, whichever is the smallest (within a few percent of `gzip -6`, which also matches lazily). `CompressError` is `Damaged`, `WrongChecksum` or `TooLarge` (`message(e)` describes it). `compress.zlib` (RFC 1950): `compress`, `compress_level`, `decompress`, `decompress_into`, the Adler-32 checked. `compress.gzip` (RFC 1952): `compress`, `compress_level` (without name nor date), `decompress` (the CRC-32 and the size checked; the name, comment and extra fields of the header skipped; several members read as one). `compress.checksum`: `adler32`, `crc32`, and `adler32_from`, `crc32_from` (with the table of `crc32_table()`) to compute them by parts. `image.png` inflates the pixels of PNG files with `compress.zlib`. Every read is checked: a damaged stream gives `Damaged`, never a read outside of its bytes. Not yet: zip archives.
 - `testing` (tested by `tests/programs/checks`, whose tests named `fails:` fail on purpose, so that its messages are compared): what `assert` does not show (§7.3). `testing.check`: `same_text(actual, expected)` (the first line that differs, both versions of it and the column), `same_bytes` (the first place that differs, and the bytes around it in hexadecimal), `same_items<T: Number>` (the first index), `near(actual, expected, tolerance)` and `contains(s, part)`. Each returns whether its values agree and prints what differs when they do not; written in an `assert` (`assert(check.same_text(report, expected));`), a failure stops the test at the line of the `assert`, which a function of a library could not name. `testing.bench`: `run(name, f)` and `run_for(name, ms, f)` call `f`, a lambda, once as a test; with `sosuc test --bench`, as many times as fill about 200 ms (the runs at least doubling), then print `bench name ... 1.59 us per run (147028 runs)` and give a `Measure` (`runs`, `total_ns`, `ns_per_run()`); `keep(x)` gives a number to a C function of the package that the compiler cannot see into, so that `--release` does not remove the work that computed it. `testing.fixture`: `path(arena, relative)`, `read`, `read_bytes`, the files of the package under test, found from the folder that `sosuc test` gives (`package_dir`, "." otherwise), a file that cannot be read stopping the test with its path; `golden(arena, relative, actual)`, the text a test expects kept in a file (its `\r\n` read as `\n`), compared as `same_text`, written by `sosuc test --update` and missing an error until then; `temp_dir(arena, name)`, a new empty folder in the temporary folder of the system (`TMPDIR`, `TEMP`, `TMP`, else `/tmp`), and `remove(dir)`, for `defer`. Not yet: a test run alone by its name, and tests run in parallel.
 - `image` (tested by `tests/programs/images`, with JPEG files written by the Windows Imaging Component and the pixels it reads from them, and a JPEG file written by Sosu as that component reads it; and by `sosuc test packages/image`): `image.image`: `Image` (`width`, `height`, `pixels` 0xAARRGGBB, alpha not premultiplied; `at`, `set`, `opaque()`), `Gray` (`pixels` of `ui8`), `create`, `create_gray`, `rgba(r, g, b, a)`, `luma(pixel)` (BT.601, as JPEG), `to_gray`, `from_gray`, `premultiply` and `unpremultiply` for a pixel, `premultiplied` and `unpremultiplied` for an image, `copy_of`. `ImageError` is `Unreadable`, `UnknownFormat`, `Damaged`, `TooLarge` or `Unsupported` (`message(e)`). The readers refuse an image wider or higher than `MAX_SIDE` (16 384) or of more than `MAX_PIXELS` (2^26, 256 MB of RGBA), `fits(w, h)`; and, before allocating its pixels, an image larger than its bytes could hold (deflate gives at most 1 032 bytes a byte; a JPEG block takes 2 bits at least), so that a small hostile file cannot ask for gigabytes. Every read is checked: a damaged file gives `Damaged`, never a read outside of its bytes. `image.png`: `decode(arena, bytes)`, `load(arena, path)`, every kind of PNG file (gray, RGB, palette, with alpha or a transparent color, 1 to 16 bits, interlaced or not; the Adler-32 checked, the CRC of the chunks not); `encode(arena, img)` (RGB when every pixel is opaque, RGBA otherwise), `encode_level` (0 to 9), `encode_gray`, `save(arena, path, img)`: 8 bits, each row with the filter whose bytes add up to the least, deflated by `compress.zlib`, the data in chunks of 1 MB at most; `is_png(bytes)`. `image.jpeg`: `decode`, `load`: baseline and extended sequential files of 8 bits with Huffman codes, gray, YCbCr or RGB (Adobe's marker, or components named R, G, B), any sampling (the colors sampled less interpolated, centered, as libjpeg's "fancy" upsampling), interleaved scans or one per component, restart markers; `encode(arena, img, quality)` (1 to 100: the tables of Annex K scaled as libjpeg scales them; the colors sampled by half each way below 90, 4:2:0; alpha dropped), `encode_gray`, `save(arena, path, img, quality)`, `is_jpeg(bytes)`. `image.ops`: `crop(arena, img, x, y, w, h)` (cut to the image), `flip_horizontal`, `flip_vertical`, `rotate_90` (clockwise), `rotate_180`, `rotate_270`, `rotate(arena, img, degrees)` (clockwise, in an image grown to hold it, the corners transparent, bilinear; quarter turns exact), `resize(arena, img, w, h, filter)` with `Filter.Bilinear` or `Filter.Lanczos` (3 lobes), separable, widened when shrinking so that every pixel counts. Blending works on premultiplied alpha, so that a transparent pixel lends no color. Not yet: progressive and arithmetic JPEG, 12 bits and CMYK (`Unsupported`), the orientation of EXIF, color profiles and gamma; the filters (blur, sharpen...) and drawing an image on another.
-- `audio` (tested by `tests/programs/sounds`, with WAV files written by Python's `wave` module, read and written again byte for byte the same, an Ogg Vorbis file written by a minimal encoder and what the Vorbis I specification decodes from it, both made by `tests/make_data.py`, damaged and hostile files, the mixer and resampling, on buffers of samples; playing and recording are checked by `sosuc check`, and by `examples/sound`, tried by hand): on SDL3, through the declarations of `platform.sdl_c`. `audio.audio`: `Sound` (`rate`, `channels`, `samples`: floats of -1 to 1, interleaved by frame; `frames()`, `seconds()`, `at(frame, channel)`, `peak()`), `create`, `tone(arena, rate, frequency, seconds, amplitude)`, `faded` (in and out, without a click), `with_channels` (mono copied, several channels averaged to mono), `part` (a view), `copy_of`. `AudioError` is `Unreadable`, `UnknownFormat`, `Damaged`, `TooLarge` or `Unsupported` (`message(e)`). The readers refuse more than `MAX_CHANNELS` (8) channels, a rate outside `MIN_RATE` to `MAX_RATE` (1 000 to 384 000 Hz), or more than `MAX_SAMPLES` (2^26, 256 MB of floats), `fits(rate, channels, frames)`. `audio.mixer`: `Mixer` (`create(arena, rate, channels)`, 1 or 2 channels, `volume` of everything): `play(sound)` and `play_with(sound, Play{ volume, pan, speed, looping })` give an id, for `stop`, `playing`, `set_volume`, `set_pan`, `set_speed`, `set_looping`; `stop_all`, `active()`; `mix(out)` fills a buffer, each sample cut to -1..1, and removes the sounds that ended. A mono sound is placed with equal power (-3 dB each side in the middle), a stereo one balanced; a change of volume or panning moves over one buffer, without a click; a sound of another rate is read at its own speed, by linear interpolation. `audio.resample`: `to_rate(arena, sound, rate)`, a sinc kernel of 16 zero crossings each side in a Blackman window, widened when the rate goes down so that what is above the new half rate is removed, not folded back; `to_rate_with(..., Quality.Linear)`, cheaper; `frames_at`. `audio.wav`: `decode`, `load`: integers of 8, 16, 24 and 32 bits, floats of 32 and 64 bits, the plain or the extensible header, the other chunks skipped, a data chunk longer than the file cut to it; `encode` (16 bits), `encode_as(arena, sound, Encoding.Pcm8 / Pcm16 / Pcm24 / Float32)` (the 44 bytes of the plain header, integers rounded and cut to their range), `save`, `save_as`, `is_wav`. `audio.ogg`: `decode`, `load`, `is_ogg`: Ogg Vorbis by stb_vorbis 1.22 with the fixes of SDL, a C file of the package (§9.1), its memory taken from 4 MB of the arena (`MEMORY`, `TooLarge` beyond), its samples stopped at `MAX_SAMPLES`; that copy fixes the faults reported by GitHub Security Lab on hostile files (CVE-2023-45675 to 45682, `THIRD_PARTY_NOTICES.md`), its comment header is skipped unread, and the CI fuzzes it (`make fuzz-ogg`, `tests/fuzz_ogg.c`), but it is C: a file from an unknown source is still safer decoded in a process of its own. `audio.device`: `playback_devices(arena)` and `recording_devices` (`Device`: `id`, `name`), `open_player(arena, Output{ device, rate, channels, ahead_ms })` gives a `Player*?`, whose mixer is `sounds`: the program calls `update()` often (each frame, or every few milliseconds), which mixes what the device needs `ahead_ms` (60) in advance and queues it in an `SDL_AudioStream`; when the device runs dry between two calls less than a second apart (a program slower than that, as on a phone), it keeps twice as much in advance, up to `MOST_AHEAD_MS` (250), and `ahead_ms()` says how much it keeps now; `pause`, `resume`, `pending()`, `close`. `open_recorder(arena, Input{ device, rate, channels })` gives a `Recorder*?`: `read(out)` (the frames recorded since the last read), `take(arena)` (all of them, as a `Sound`), `pause`, `resume`, `close`; `last_error(arena)` says why a device did not open. No callback runs on the thread of the sound: everything stays in the thread of the program. Every read of a file is checked: a damaged file gives `Damaged`, never a read outside of its bytes in Sosu. Not yet: MP3 and FLAC, effects (§8.2), Ogg streams chained or seeked, a mixer fed from the thread of the sound (a program that does not call `update()` for longer than `ahead_ms` leaves a gap).
+- `audio` (tested by `tests/programs/sounds`, with WAV files written by Python's `wave` module, read and written again byte for byte the same, an Ogg Vorbis file written by a minimal encoder and what the Vorbis I specification decodes from it, both made by `tests/make_data.py`, damaged and hostile files, the mixer and resampling, on buffers of samples; playing and recording are checked by `sosuc check`, and by `examples/sound`, tried by hand): on SDL3, through the declarations of `platform.sdl_c`. `audio.audio`: `Sound` (`rate`, `channels`, `samples`: floats of -1 to 1, interleaved by frame; `frames()`, `seconds()`, `at(frame, channel)`, `peak()`), `create`, `tone(arena, rate, frequency, seconds, amplitude)`, `faded` (in and out, without a click), `with_channels` (mono copied, several channels averaged to mono), `part` (a view), `copy_of`. `AudioError` is `Unreadable`, `UnknownFormat`, `Damaged`, `TooLarge` or `Unsupported` (`message(e)`). The readers refuse more than `MAX_CHANNELS` (8) channels, a rate outside `MIN_RATE` to `MAX_RATE` (1 000 to 384 000 Hz), or more than `MAX_SAMPLES` (2^26, 256 MB of floats), `fits(rate, channels, frames)`. `audio.mixer`: `Mixer` (`create(arena, rate, channels)`, 1, 2, 6 or 8 channels, `volume` of everything): `play(sound)` and `play_with(sound, Play{ volume, pan, speed, looping })` give an id, for `stop`, `playing`, `set_volume`, `set_pan`, `set_speed`, `set_looping`; `stop_all`, `active()`; `mix(out)` fills a buffer, each sample cut to -1..1, and removes the sounds that ended. A mono sound is placed with equal power (-3 dB each side in the middle), a stereo one balanced; a change of volume or panning moves over one buffer, without a click; a sound of another rate is read at its own speed, by linear interpolation. `audio.resample`: `to_rate(arena, sound, rate)`, a sinc kernel of 16 zero crossings each side in a Blackman window, widened when the rate goes down so that what is above the new half rate is removed, not folded back; `to_rate_with(..., Quality.Linear)`, cheaper; `frames_at`. `audio.wav`: `decode`, `load`: integers of 8, 16, 24 and 32 bits, floats of 32 and 64 bits, the plain or the extensible header, the other chunks skipped, a data chunk longer than the file cut to it; `encode` (16 bits), `encode_as(arena, sound, Encoding.Pcm8 / Pcm16 / Pcm24 / Float32)` (the 44 bytes of the plain header, integers rounded and cut to their range), `save`, `save_as`, `is_wav`. `audio.ogg`: `decode`, `load`, `is_ogg`: Ogg Vorbis by stb_vorbis 1.22 with the fixes of SDL, a C file of the package (§9.1), its memory taken from 4 MB of the arena (`MEMORY`, `TooLarge` beyond), its samples stopped at `MAX_SAMPLES`; that copy fixes the faults reported by GitHub Security Lab on hostile files (CVE-2023-45675 to 45682, `THIRD_PARTY_NOTICES.md`), its comment header is skipped unread, and the CI fuzzes it (`make fuzz-ogg`, `tests/fuzz_ogg.c`), but it is C: a file from an unknown source is still safer decoded in a process of its own. `audio.mp3` and `audio.flac`: `decode`, `load`, `is_mp3` (an ID3v2 tag, or the sync of a frame of layer III), `is_flac` (`fLaC`): MPEG-1, 2 and 2.5 layer III by dr_mp3 0.7.5, native FLAC by dr_flac 0.13.5 (not FLAC in Ogg; the CRCs of its frames checked: a frame that fails is skipped), from dr_libs at a commit (`[native.dr_libs]`, §9.1, headers compiled by `native/dr.c`), their memory taken from 4 MB of the arena (`coded.MEMORY`, `TooLarge` beyond), a file that gives no sample `Damaged`; tested by `tests/programs/sounds` with a FLAC file written by a minimal encoder of `make_data.py` (verbatim, constant and fixed subframes, left/side stereo), decoded sample for sample, and MP3 frames written by hand (one spectral line: their length and their tone), and fuzzed by the CI (`make fuzz-coded`, `tests/fuzz_coded.c`), as C written elsewhere. `audio.device`: `playback_devices(arena)` and `recording_devices` (`Device`: `id`, `name`), `open_player(arena, Output{ device, rate, channels, ahead_ms })` gives a `Player*?`, whose mixer is `sounds`: the program calls `update()` often (each frame, or every few milliseconds), which mixes what the device needs `ahead_ms` (60) in advance and queues it in an `SDL_AudioStream`; when the device runs dry between two calls less than a second apart (a program slower than that, as on a phone), it keeps twice as much in advance, up to `MOST_AHEAD_MS` (250), and `ahead_ms()` says how much it keeps now; `pause`, `resume`, `pending()`, `close`. `open_recorder(arena, Input{ device, rate, channels })` gives a `Recorder*?`: `read(out)` (the frames recorded since the last read), `take(arena)` (all of them, as a `Sound`), `pause`, `resume`, `close`; `last_error(arena)` says why a device did not open. No callback runs on the thread of the sound: everything stays in the thread of the program. Every read of a file is checked: a damaged file gives `Damaged`, never a read outside of its bytes in Sosu. `audio.stream`: `open(arena, data, mixer, Options{ volume, pan, looping, seconds })` and `load` play an Ogg Vorbis, MP3 or FLAC file as it is decoded: into a ring of `seconds` (2), which the mixer plays in a loop and `s.update()` (each frame) fills again behind it, from where `mixer.position(id)` says the voice is; at the end it stops, or starts again from the start of the file without a gap (`looping`: the decoders rewind, `stb_vorbis_seek_start`, `drmp3_seek_to_pcm_frame`, `drflac_seek_to_pcm_frame`). A song of four minutes takes its ring and its decoder (4 MB) rather than 80 MB of samples. `playing`, `stop`, `close`, `played_frames`, `voice_id` (its panning, filter and reverberation are set on the mixer), `set_volume`. A WAV file plays the same way, from its samples decoded whole. `frames()` (the length of the file, 0 when the decoder cannot say: `stb_vorbis_stream_length_in_samples`, `drmp3_get_pcm_frame_count`, `totalPCMFrameCount`), `position()`, `rate()`, `channels()`; `seek(frame)` decodes the ring again from there (false past the end). The ring keeps `Options.history` seconds (0.25) behind the voice: `peek(out, offset)` gives frames mixed to one channel from `offset` frames after the voice, a negative offset reaching back to what it played, for what the device plays now (it plays `ahead_ms` behind the mixer). Tested by a FLAC file and MP3 frames played through a ring of 0.05 s, the same samples as the whole sound, its end, its loop, a seek, `peek` and a WAV file; the fuzzing rewinds too. `audio.spectrum`: `fft(re, im)` (radix 2, in place, its turns from a recurrence in f64), and `analyzer(arena, size, rate, count, low, high)`: an `Analyzer` takes the last `size` samples through a Hann window into `count` bands on a scale of octaves, from 0 (`FLOOR_DB`, -72 dB) to 1 (a sine at full scale), each the loudest bin of its band, or between the two bins around its middle for a band narrower than a bin; `bands` rise at once and fall by `fall` (1.6) a second, `peaks` hold `hold` (0.6 s) before they fall; `edge(i)`, `clear()`. Tested by an impulse, a cosine, Parseval's identity on noise, and a sine in its band at -6 dB. `showcase/audioplayer` uses both: a player of WAV, Ogg Vorbis, MP3 and FLAC with a playlist (the dialog of the system, files dropped on the window) and the spectrum of what plays, drawn into a canvas shown as an `Image`. `audio.hrtf` (headphones, §8.2 spatial sound): the responses of KEMAR, `kemar(arena, rate)`, `Hrtf.filters`, heard through `mixer.use_hrtf`; `audio.sofa` and `audio.hdf5` read others from SOFA files. A chained Ogg file (logical streams one after the other, as a radio recorded or tracks joined) is read link after link, by the decoders and by `audio.stream`: `native/ogg.c` cuts it at the pages that begin a stream after the audio of another (256 links at most), opens each in turn into the same memory, adds up their lengths from the granule positions of their last pages and seeks into the link that holds a frame; a link of other channels or of another rate ends the sound. Tested by two streams joined (each the samples of the first, a loop, a seek into the second) and the second cut, and fuzzed with a length and two seeks. Of streams grouped side by side in an Ogg file (a video: Theora and its sound; several tracks), the first Vorbis stream of each group is read: `coded.vorbis_pages` keeps its pages, whole, in a copy, and the decoders read that (a file of one stream at a time is read as it is, without a copy). Tested by a Vorbis stream beside pages of a video, two Vorbis streams side by side (the first), a group then a link of one stream, a video alone (`Damaged`), and 1 500 such files damaged at random. Not yet: effects (§8.2), a mixer fed from the thread of the sound (a program that does not call `update()` for longer than `ahead_ms` leaves a gap).
 - `db` (tested with `sqlite`): `db.db`, the interface of the databases that take SQL. `Value` is `Null`, `Integer(i64)`, `Float(f64)`, `Text(str)` or `Bytes(ui8[])`; `DbError` is `CannotOpen`, `Invalid` (the syntax, a table that is not there), `Constraint`, `Busy`, `ReadOnly`, `Mismatch` (not as many parameters as `?`), `Closed` or `Other` (`message(e)`). `Connection`, an interface (§5.2): `execute(sql, params)` gives the rows changed, `query(arena, sql, params)` gives `Rows`, `prepare(arena, sql)` a `Statement` (`execute`, `query`, `close`), `script(sql)` statements without parameters (a schema), `begin`, `commit`, `rollback`, `last_insert_id`, `message(arena)` (what the database said), `close`. Parameters are a view (`mut db.Value[2] p = [...]; c.execute(sql, p[0..2])`), never text joined to the statement. `Rows`: `next()`, `columns()`, `name(i)`, `value(arena, i)` (its texts and bytes copied into the arena given, a scratch arena per row reading many rows), `close`. Functions, enums having no methods: `run` and `select` (without parameters), `scalar` (the first column of the first row), `column(rows, name)`, `get(arena, rows, name)`, `as_i64`, `as_f64`, `as_str`, `as_bytes`, `as_bool`, `is_null`, `boolean(b)`, `describe` (a value as SQL writes it). `db.pool`: threads share no memory (§5.6), so a connection belongs to the thread that opened it; `pool.create(address, size)` gives a `Pool`, a value without pointers given to the threads, that bounds the connections open at once in all of them (a channel of tokens) and keeps the address; in each thread, `pool.local(arena, pool, sqlite.open)` gives a `Local`: `take()` (a connection given back before, or a new one when the pool allows it, waiting otherwise), `give(c)` (kept open for the next `take`, a transaction left open rolled back), `close()`; `Pool.close()` makes the `take`s give `Closed`.
 - `sqlite` (tested by `tests/programs/databases`, on databases in temporary files: each type read back, a parameter holding a quote and a statement kept as text, statements run again, transactions, the errors of SQLite, three threads writing through a pool of two connections): the driver of `db` on SQLite 3.54.1, its amalgamation given as a C file of the package (§9.1), nothing to install. `sqlite.open(arena, path)` (created if it is not there; `file:` starts a URI), `open_read_only`, `memory(arena)`, `version(arena)`. Foreign keys are checked, a text between double quotes is a name, a lock is waited for up to 5 seconds before `Busy`, one statement at a time (`script` for several), a text column that is not UTF-8 read as `Bytes`; closing a connection ends its statements and rows, and the rows of a prepared statement end when it runs again (`Closed`). Built without `load_extension` (`SQLITE_OMIT_LOAD_EXTENSION`), in its multi-thread mode (a connection used by one thread at a time).
 - `net.http.open(arena, request)` gives the head of the answer and its body to read as it comes (`Body.read`, `Body.length`, `Body.close`), for a file larger than memory; `send` is `open` followed by `read_all`.
@@ -877,7 +1453,19 @@ frameworks = ["Cocoa"]
 - A folder of `paths`, or a file of `copy` or `c`, that does not exist is reported by `sosuc` before the C compiler runs, with the package that names it (`vendor/` of `platform` not fetched gives `sosuc: the folder ... of the [link] paths of the package platform does not exist`), rather than as a library the linker cannot find.
 - Linking is transitive: the libraries of a dependency are linked into the program that uses it, which does not need to know them. Duplicates are removed.
 - The values are one-line lists of strings. [link.<target>] uses the systems of `--target` (§11.1): `windows`, `linux`, `macos`, `android`, `ios`; a section of one architecture, `[link.windows-arm64]`, adds to that of its system, and `{arch}` in a path is the architecture of the target (`vendor/SDL3/lib/{arch}`, §11.6).
-- A C library given with the package as its sources (SQLite, the decoders of §8.2), so that the user installs nothing: `c = ["vendor/sqlite3.c"]`, the C files compiled with the program (a folder written with a final `/`, `"vendor/library/"`, is its `.c` files, sorted, not those of its subfolders; two of them may not have the same name, since their objects go to one folder); each is compiled once into an object kept in `build/obj/<target>-<debug|release>/`, compiled again only when its command, its time or size, or another file of the folders of its headers and sources changes; `include = ["vendor/include"]`, the folders of their headers; `defines = ["SQLITE_OMIT_LOAD_EXTENSION", "LEVEL=2"]`. They are compiled as C99, with the program, into a shared library, or as objects of their own into a static library (§9.2), and on Android into `libmain.so`; on iOS, not yet. Their functions are declared in `extern "C"` (or by `sosuc bindgen`, §11.6). Being in [link], a C file can belong to one target only (`[link.windows] c = [...]`). Tested by `tests/programs/csources`.
+- A C library given with the package as its sources (SQLite, the decoders of §8.2), so that the user installs nothing: `c = ["vendor/sqlite3.c"]`, the C files compiled with the program (a folder written with a final `/`, `"vendor/library/"`, is its `.c` files, sorted, not those of its subfolders; each object is named by its file and a hash of its path, so two files of one name in two folders, or two packages, do not collide); each is compiled once into an object kept in `build/obj/<target>-<debug|release>/`, compiled again only when its command, its time or size, or another file of the folders of its headers and sources changes; `include = ["vendor/include"]`, the folders of their headers; `defines = ["SQLITE_OMIT_LOAD_EXTENSION", "LEVEL=2"]`. They are compiled as C99, with the program, into a shared library, or as objects of their own into a static library (§9.2), and on Android into `libmain.so`; on iOS, not yet. Their functions are declared in `extern "C"` (or by `sosuc bindgen`, §11.6). Being in [link], a C file can belong to one target only (`[link.windows] c = [...]`). Tested by `tests/programs/csources`.
+- C++ files given with the package (Jolt, Recast, §8.2): `cpp = ["native/vendor/jolt/", "native/physics.cpp"]`, the same rules as `c` (a folder written with a final `/` is its `.cpp` files). They are compiled by the C++ compiler of the target, as C++17 without exceptions nor RTTI: `cl /TP /std:c++17 /EHs-c- /GR-` with MSVC, the C++ driver of the C compiler elsewhere (`gcc` gives `g++`, `clang` `clang++`, `cc` `c++`, the prefix of a cross compiler kept), with the defines and folders of headers of [link]. A program that has one links the C++ library of the system (`-lstdc++`, `-lc++` on macOS; MSVC links its own). The code of Sosu reaches them through functions of C (`extern "C"`), as `sosuc bindgen` reads C headers only. Not yet for `--lib` nor for phones, which say so. Tested by `tests/programs/cppsources`: a class with a virtual function, a template, a static object built before `main`, beside a C file.
+- A library taken from its Git repository rather than copied into the package: a section `[native.<name>]`, with `git` and a `tag` or a `rev`, as a Git dependency (§8.1), and the keys `c`, `cpp`, `include` and `defines` of [link], whose paths are relative to the clone, and `exclude`, files of `c` and `cpp` left out (`exclude = ["src/contact_solver_w8.c"]`, which the package then compiles itself):
+
+  ```toml
+  [native.box2d]
+  git = "https://github.com/erincatto/box2d"
+  tag = "v3.2.0"
+  c = ["src/**"]
+  include = ["include", "src"]
+  ```
+
+  The repository is cloned, without its history when the server allows it (a tag, or a full commit), into `build/deps/native.<name>-<commit>` and pinned by `sosu.lock` (`native.box2d <url> tag v3.2.0 <commit>`); nothing of it is copied into the package. `dir/**` is the files of a folder and of its subfolders (folders starting with `.` skipped), `dir/` those of the folder, else one file; `include = ["."]` is the root of the clone. A library of headers only (dr_libs, stb) has `include` without `c` nor `cpp`: a C file of the package defines its implementation and includes it (`packages/audio/native/dr.c`). A path that goes above the clone (`..`) or is absolute is refused, before the C compiler runs. Its files are compiled as those of [link] (objects kept, C++ rules), for every target; a `[native.*]` needs a `c` or a `cpp`, and exactly one of `tag` and `rev` (E0404). `sosuc deps upgrade` moves its tag (§8.1). The language server does not fetch it. Tested by `tests/program_tests.c` (`test_native`): a local repository with a C file of the same name in two folders, a C++ file, the lock, an upgrade that skips a pre-release, a path above the clone.
 
 ### 9.2 Using Sosu from other languages
 
@@ -1855,7 +2443,7 @@ The web (WebAssembly) is not planned for v0; it can be added as a target later.
 
 ### 11.3 Backends
 
-1. Step 1: `sosuc` generates C99, compiled by `cc` (or by the target platform's compiler). The generated C contains `#line` directives, so that errors and the debugger point to the lines of the `.sosu` files. gcc and clang get `-fno-strict-aliasing`: a view and a `str` are read through each other in `unsafe` code, and a program may do the same with its own types.
+1. Step 1: `sosuc` generates C99, compiled by `cc` (or by the target platform's compiler). The generated C contains `#line` directives, so that errors and the debugger point to the lines of the `.sosu` files. gcc and clang get `-fno-strict-aliasing`: a view and a `str` are read through each other in `unsafe` code, and a program may do the same with its own types. The C and C++ files of the packages also get `-fwrapv`: C written elsewhere (stb_vorbis, dr_libs, Box2D, ufbx) may add or multiply the numbers of a hostile file in `int` without checks, and the overflow then wraps, a wrong number, rather than being undefined (`make fuzz-coded` found one in dr_flac).
 2. Step 2: custom x86-64 / ARM64 backend (ELF, Mach-O, PE) on the same IR.
 3. Step 3: self-hosting (Sosu compiles Sosu).
 
@@ -1872,6 +2460,7 @@ The compiler is designed as a library (`libsosu`: lexer, parser, type checking, 
 - `sosuc doc [package] [-o file.md]`: the reference of the public API of a package, in Markdown (by default `build/doc/<name>.md`): a table of its modules, then, for each one, its `pub` declarations and members with the `//` comments written above them, the comment at the top of the file as its introduction. Interface files (`.ui.sosu`), catalogs and modules without `pub` are left out. It reads the canonical form of `sosuc fmt` (§7.6). `docs/REFERENCE.md` is made the same way for `core`, `std` and the packages of §8.3 (`make doc`).
 - `sosuc build --lib[=shared]` (§9.2): a static or shared library of the `export "C"` functions of the package, with its C header, for other languages.
 - `sosuc package --target android` (an APK) or `--target ios-sim` (an application for the simulator), §11.5. `sosuc bindgen`, and `sosuc package` for the desktop: §11.6.
+- `sosuc shaders [package] [--check] [--c file.c]`: the shaders of `gpu`, compiled by `shadercross` (§8.2). `sosuc fuzz [--replay] [package] [-- arguments]`: a target of libFuzzer written in Sosu, `void fuzz(ui8[] data)`, run, or replayed on files (§8.2, `sosuc fuzz`). `sosuc deps upgrade [package] [name]`: the Git dependencies pinned by a tag moved to the newest version (§8.1).
 
 ### 11.5 Android and iOS (step 9, second part)
 
@@ -2136,7 +2725,7 @@ What 1.0 holds, in the proposed order; how long each work may take is estimated 
 
 - Android: the CI builds the APK of `examples/window` (arm64 and x86_64) on each push, but does not run it; running on the emulator or a phone, and touching the screen, is done by hand (§11.5). Supported in 1.0 once the examples of §10 have run on a phone.
 - iOS: supported in 1.0 once it has run on a device (it needs a Mac and an iPhone); until then, a preview, built by the CI for the simulator.
-- After 1.0 (2.x): the native backend (12), `comptime` (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
+- After 1.0 (2.x): 3D (§8.2: `app.run_window`, `gpu` and `sosuc shaders` first), gamepads and input actions, then the scene, assets, physics, navigation, animation, particles and 3D sound (§8.2), the native backend (12), `comptime` (13), self-hosting (14), accessibility (§10, §14.2), a central registry of packages (§8.1), WebAssembly (§11.1), the hot reload of interfaces (§10.2).
 
 ### 13.2 Compatibility policy
 

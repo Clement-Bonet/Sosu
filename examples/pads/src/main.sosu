@@ -1,0 +1,302 @@
+// What is pressed, shown live (spec §8.2): for each gamepad, its buttons, sticks and triggers,
+// with the labels that controller prints (A, Cross...); the buttons of the mouse; the keys of the
+// keyboard held, by the letter the keyboard of the user prints; and two actions of
+// platform.actions, `move` (the left stick, or WASD by their place: ZQSD on a French keyboard)
+// and `jump` (South, or Space). South also makes the pad rumble. Every key is shown, Escape too:
+// the button of the window closes it.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/pads`.
+import std.io;
+import std.text;
+import platform.app;
+import platform.gamepad;
+import platform.actions;
+import render.canvas;
+import math.linear;
+
+canvas.Color background() {
+    return canvas.Color{ r: 24, g: 26, b: 34 };
+}
+
+canvas.Color panel_color() {
+    return canvas.Color{ r: 38, g: 42, b: 54 };
+}
+
+canvas.Color idle() {
+    return canvas.Color{ r: 70, g: 76, b: 94 };
+}
+
+canvas.Color lit() {
+    return canvas.Color{ r: 255, g: 170, b: 40 };
+}
+
+canvas.Color ink() {
+    return canvas.Color{ r: 230, g: 232, b: 240 };
+}
+
+canvas.Color dim() {
+    return canvas.Color{ r: 150, g: 156, b: 172 };
+}
+
+class Viewer : app.Handler {
+    mut Arena arena;  // the pads, the actions
+    mut Arena scratch;  // what a frame writes, emptied each frame
+    gamepad.Pads* pads;
+    actions.Devices* devices;
+    actions.Input* input;
+    actions.Action move;
+    actions.Action jump;
+    mut bool[4] mouse;  // left, middle, right, other
+    mut f32 mouse_x;
+    mut f32 mouse_y;
+    mut f32 dot_x;  // moved by the action `move`
+    mut f32 dot_y;
+    mut ui32 jumps;
+
+    void init() uses io {
+        arena = Arena.new(64 * KB);
+        scratch = Arena.new(16 * KB);
+        pads = gamepad.open(&arena);
+        devices = actions.system(&arena);
+        actions.Map* play = actions.map(&arena, "play");
+        move = play.vector("move").stick(gamepad.Stick.LeftStick).keys(
+            actions.Scan.W,
+            actions.Scan.S,
+            actions.Scan.A,
+            actions.Scan.D
+        );
+        jump = play.button("jump").pad(gamepad.Button.South).key(actions.Scan.Space);
+        input = actions.input(&arena, devices, pads);
+        input.enable(play);
+        mouse = [false, false, false, false];
+        mouse_x = 0.0;
+        mouse_y = 0.0;
+        dot_x = 0.0;
+        dot_y = 0.0;
+        jumps = 0;
+    }
+
+    usize button_index(app.Button b) {
+        return match (b) {
+            Left => 0,
+            Middle => 1,
+            Right => 2,
+            Other => 3,
+        };
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Click(x, y, b) => {
+                mouse[button_index(b)] = true;
+            },
+            Release(x, y, b) => {
+                mouse[button_index(b)] = false;
+            },
+            MouseMove(x, y) => {
+                mouse_x = x;
+                mouse_y = y;
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        scratch.free();
+        scratch = Arena.new(16 * KB);
+        pads.update();
+        input.update();
+        surface.clear(background());
+        surface.text(24.0, 18.0, "Sosu pads: what is pressed", ink(), 3);
+        surface.text(24.0, 52.0, "Every key is shown, Escape too. South makes the pad rumble.", dim(), 2);
+        draw_keyboard(surface, 24.0, 84.0);
+        draw_mouse(surface, 24.0, 160.0);
+        draw_actions(surface, 24.0, 236.0);
+        mut f32 y = 360.0;
+        if (pads.connected().len == 0) {
+            surface.text(24.0, y, "No gamepad: plug one in.", dim(), 2);
+        }
+        for (gamepad.Pad* p in pads.connected()) {
+            if (p.went_down(gamepad.Button.South)) {
+                p.rumble(0.4, 0.7, 150);
+            }
+            draw_pad(surface, p, 24.0, y);
+            y += 230.0;
+        }
+    }
+
+    void panel(canvas.Canvas* surface, f32 x, f32 y, f32 w, f32 h, str title) {
+        surface.fill_rounded(canvas.Rect{ x: x, y: y, w: w, h: h }, 8.0, panel_color());
+        surface.text(x + 12.0, y + 10.0, title, dim(), 2);
+    }
+
+    // The keys held, by what the keyboard of the user prints on them.
+    void draw_keyboard(canvas.Canvas* surface, f32 x, f32 y) uses io {
+        panel(surface, x, y, 900.0, 64.0, "Keyboard");
+        text.TextBuilder* held = text.builder(&scratch);
+        for (ui32 scan in 4..232) {
+            if (devices.key(scan)) {
+                if (held.len() > 0) {
+                    held.push("  ");
+                }
+                str label = actions.key_label(&scratch, scan);
+                held.push(label.len == 0 ? "?" : label);
+            }
+        }
+        str shown = held.len() == 0 ? "(no key held)" : held.text();
+        surface.text(x + 12.0, y + 34.0, shown, held.len() == 0 ? dim() : lit(), 2);
+    }
+
+    void draw_mouse(canvas.Canvas* surface, f32 x, f32 y) uses io {
+        panel(surface, x, y, 900.0, 64.0, "Mouse");
+        str[4] names = ["Left", "Middle", "Right", "Other"];
+        for (usize i in 0..4) {
+            f32 bx = x + 12.0 + i as f32 * 130.0;
+            canvas.Rect box = canvas.Rect{ x: bx, y: y + 32.0, w: 116.0, h: 24.0 };
+            surface.fill_rounded(box, 6.0, mouse[i] ? lit() : idle());
+            surface.text(bx + 10.0, y + 36.0, names[i], mouse[i] ? background() : ink(), 2);
+        }
+        text.TextBuilder* at = text.builder(&scratch);
+        at.push("at ");
+        at.push_i64(mouse_x as i64);
+        at.push(", ");
+        at.push_i64(mouse_y as i64);
+        surface.text(x + 560.0, y + 36.0, at.text(), dim(), 2);
+    }
+
+    // The actions: a dot moved by `move`, a counter of `jump`, and which hands moved last.
+    void draw_actions(canvas.Canvas* surface, f32 x, f32 y) uses io {
+        panel(surface, x, y, 900.0, 110.0, "Actions (platform.actions)");
+        linear.Vec2 v = input.vector(move);
+        dot_x = max(-1.0, min(1.0, dot_x + v.x * 0.03));
+        dot_y = max(-1.0, min(1.0, dot_y + v.y * 0.03));
+        canvas.Rect field = canvas.Rect{ x: x + 12.0, y: y + 32.0, w: 140.0, h: 70.0 };
+        surface.stroke(field, idle(), 2.0);
+        surface.fill_circle(field.x + 70.0 + dot_x * 62.0, field.y + 35.0 - dot_y * 28.0, 7.0, lit());
+        if (input.triggered(jump)) {
+            jumps += 1;
+        }
+        text.TextBuilder* line = text.builder(&scratch);
+        line.push("move: the left stick, or ");
+        line.push(actions.key_label(&scratch, actions.scancode(actions.Scan.W)));
+        line.push(actions.key_label(&scratch, actions.scancode(actions.Scan.A)));
+        line.push(actions.key_label(&scratch, actions.scancode(actions.Scan.S)));
+        line.push(actions.key_label(&scratch, actions.scancode(actions.Scan.D)));
+        surface.text(x + 170.0, y + 36.0, line.text(), ink(), 2);
+        text.TextBuilder* count = text.builder(&scratch);
+        count.push("jump (South or Space): ");
+        count.push_u64(jumps as ui64);
+        surface.text(x + 170.0, y + 60.0, count.text(), input.pressed(jump) ? lit() : ink(), 2);
+        str hands = match (input.last_device()) {
+            KeyboardMouse => "last used: the keyboard and the mouse",
+            Pad => "last used: a gamepad",
+        };
+        surface.text(x + 170.0, y + 84.0, hands, dim(), 2);
+    }
+
+    // A round button, lit when pressed, with its label.
+    void round(canvas.Canvas* surface, gamepad.Pad* p, gamepad.Button b, f32 cx, f32 cy, str fallback) uses io {
+        bool on = p.pressed(b);
+        surface.fill_circle(cx, cy, 16.0, on ? lit() : idle());
+        str label = p.label(b);
+        str shown = label.len == 0 ? fallback : label;
+        f32 w = shown.len as f32 * 8.0;
+        surface.text(cx - w / 2.0, cy - 4.0, shown, on ? background() : ink(), 1);
+    }
+
+    // A rectangular button, lit when pressed.
+    void square(canvas.Canvas* surface, gamepad.Pad* p, gamepad.Button b, canvas.Rect r, str name) uses io {
+        bool on = p.pressed(b);
+        surface.fill_rounded(r, 4.0, on ? lit() : idle());
+        surface.text(r.x + 6.0, r.y + r.h / 2.0 - 4.0, name, on ? background() : ink(), 1);
+    }
+
+    void stick(canvas.Canvas* surface, gamepad.Pad* p, gamepad.Stick s, gamepad.Button press, f32 cx, f32 cy) {
+        linear.Vec2 v = p.stick(s);
+        surface.fill_circle(cx, cy, 34.0, p.pressed(press) ? lit() : idle());
+        surface.fill_circle(cx, cy, 30.0, panel_color());
+        surface.fill_circle(cx + v.x * 24.0, cy - v.y * 24.0, 9.0, v.length() > 0.0 ? lit() : dim());
+    }
+
+    void trigger(canvas.Canvas* surface, gamepad.Pad* p, gamepad.Trigger t, f32 x, f32 y, str name) {
+        f32 amount = p.trigger(t);
+        surface.stroke(canvas.Rect{ x: x, y: y, w: 120.0, h: 14.0 }, idle(), 2.0);
+        surface.fill(canvas.Rect{ x: x + 2.0, y: y + 2.0, w: 116.0 * amount, h: 10.0 }, lit());
+        surface.text(x, y - 14.0, name, dim(), 1);
+    }
+
+    void draw_pad(canvas.Canvas* surface, gamepad.Pad* p, f32 x, f32 y) uses io {
+        text.TextBuilder* title = text.builder(&scratch);
+        title.push(p.name(&scratch));
+        title.push(match (p.kind()) {
+            Xbox => " (Xbox)",
+            PlayStation => " (PlayStation)",
+            Switch => " (Switch)",
+            Other => "",
+        });
+        match (p.battery()) {
+            some(percent) => {
+                title.push(", battery ");
+                title.push_i64(percent as i64);
+                title.push("%");
+            },
+            none => { },
+        }
+        panel(surface, x, y, 900.0, 216.0, title.text());
+
+        // shoulders and triggers
+        trigger(surface, p, gamepad.Trigger.LeftTrigger, x + 40.0, y + 50.0, "left trigger");
+        trigger(surface, p, gamepad.Trigger.RightTrigger, x + 560.0, y + 50.0, "right trigger");
+        square(
+            surface,
+            p,
+            gamepad.Button.LeftShoulder,
+            canvas.Rect{ x: x + 180.0, y: y + 40.0, w: 90.0, h: 24.0 },
+            "shoulder"
+        );
+        square(
+            surface,
+            p,
+            gamepad.Button.RightShoulder,
+            canvas.Rect{ x: x + 440.0, y: y + 40.0, w: 90.0, h: 24.0 },
+            "shoulder"
+        );
+
+        // the D-pad
+        f32 dx = x + 90.0;
+        f32 dy = y + 130.0;
+        square(surface, p, gamepad.Button.Up, canvas.Rect{ x: dx - 14.0, y: dy - 46.0, w: 28.0, h: 30.0 }, "");
+        square(surface, p, gamepad.Button.Down, canvas.Rect{ x: dx - 14.0, y: dy + 16.0, w: 28.0, h: 30.0 }, "");
+        square(surface, p, gamepad.Button.Left, canvas.Rect{ x: dx - 46.0, y: dy - 14.0, w: 30.0, h: 28.0 }, "");
+        square(surface, p, gamepad.Button.Right, canvas.Rect{ x: dx + 16.0, y: dy - 14.0, w: 30.0, h: 28.0 }, "");
+
+        // the sticks
+        stick(surface, p, gamepad.Stick.LeftStick, gamepad.Button.LeftStick, x + 230.0, y + 150.0);
+        stick(surface, p, gamepad.Stick.RightStick, gamepad.Button.RightStick, x + 520.0, y + 150.0);
+
+        // Back, Guide, Start
+        square(surface, p, gamepad.Button.Back, canvas.Rect{ x: x + 300.0, y: y + 90.0, w: 60.0, h: 22.0 }, "back");
+        square(surface, p, gamepad.Button.Guide, canvas.Rect{ x: x + 365.0, y: y + 90.0, w: 60.0, h: 22.0 }, "guide");
+        square(surface, p, gamepad.Button.Start, canvas.Rect{ x: x + 430.0, y: y + 90.0, w: 60.0, h: 22.0 }, "start");
+
+        // the four buttons of the face, by their place
+        f32 fx = x + 680.0;
+        f32 fy = y + 130.0;
+        round(surface, p, gamepad.Button.North, fx, fy - 38.0, "N");
+        round(surface, p, gamepad.Button.West, fx - 38.0, fy, "W");
+        round(surface, p, gamepad.Button.East, fx + 38.0, fy, "E");
+        round(surface, p, gamepad.Button.South, fx, fy + 38.0, "S");
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Viewer* viewer = arena.new(Viewer);
+    i32 status = app.run(app.Config{ title: "Sosu pads", width: 960, height: 900 }, viewer as app.Handler*);
+    viewer.pads.close();
+    return status;
+}

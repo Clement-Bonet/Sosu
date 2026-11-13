@@ -88,14 +88,92 @@ under their own licenses.
 - Written by Sean Barrett (2007) and its contributors, named in the file
 - License: public domain (the Unlicense), or the MIT license (Copyright (c) 2017 Sean Barrett),
   at your option; both are at the end of the file
-- Changed by Sosu: two places, marked `// Sosu:`, both found by `make fuzz-ogg`. `get_window`
+- Changed by Sosu: four places, marked `// Sosu:`, all found by `make fuzz-ogg`. `get_window`
   compares a length with half of the block sizes instead of shifting it, which was undefined for
   the negative length of a hostile file (the window was not found either way).
   `fixup_current_playback_loc` does not cut the samples to a stream length above `INT_MAX`, which
-  overflowed an `int` and gave a negative number of samples. `ogg.c` bounds its memory and
+  overflowed an `int` and gave a negative number of samples. The seek (`seek_to_sample_coarse`,
+  `stb_vorbis_seek_frame`, `stb_vorbis_seek`) fails where it asserted what a hostile file breaks:
+  pages out of order (`tests/programs/sounds/tests/data/bad_seek.ogg`), a last page without a
+  sample, a frame that does not hold the sample sought; the asserts stopped a program built with
+  them, and without them, `right.page_start - left.page_end` wrapped around. The granule
+  positions read by the seek and by the push API are put together from their bytes as `uint32`:
+  the last byte, 128 or more, shifted by 24 in an `int` was undefined
+  (`tests/programs/sounds/tests/data/bad_seek_shift.ogg`). `ogg.c` bounds its memory and
   compiles it without the comment header (`STB_VORBIS_NO_COMMENTS`), which Sosu does not read;
   the CI fuzzes it. A fault found later in it is fixed by taking the new commit of that branch, or
   here when that branch has none (`SECURITY.md`).
+
+## dr_mp3 and dr_flac (dr_libs)
+
+- Files: none in the repository. `packages/audio/sosu.toml` names dr_libs as a native dependency
+  (`[native.dr_libs]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `audio`, and `packages/audio/native/dr.c` compiles its `dr_mp3.h` (0.7.5) and `dr_flac.h`
+  (0.13.5) into it, for the MP3 and FLAC files of `audio.mp3` and `audio.flac`; `make fuzz-coded`
+  takes the same commit into `build/dr_libs`
+- Source: <https://github.com/mackron/dr_libs>, commit `f12e197fd462e4c22873fbd70d11b1d2f2c1dc3c`
+  (November 11, 2026; the repository has no tags of its libraries), pinned by `sosu.lock`
+- Written by David Reid and its contributors; dr_mp3 is based on minimp3, by lieff (CC0)
+- License: public domain (the Unlicense), or the MIT No Attribution license (Copyright 2020 David
+  Reid), at your option, in `LICENSE` of the repository and at the end of each file; neither asks a
+  program to carry a notice
+- Not changed. `dr.c` gives both decoders a pool of memory that only grows (4 MB of the arena),
+  leaves out their functions of files and FLAC in Ogg, and keeps the CRC checks of FLAC. The CI
+  fuzzes them; dr_flac adds and multiplies the samples of a hostile file in `int` without checks,
+  an overflow that gives wrong samples, so the fuzzing compiles it with `-fwrapv`. A fault found
+  in them is fixed by taking a newer commit (`SECURITY.md`).
+
+## KEMAR head-related impulse responses (MIT Media Lab)
+
+- Files: `packages/audio/native/kemar.c`, written by `packages/audio/native/kemar.py` from the
+  "compact" set (`compact.zip`: 368 WAV files, two ears, 128 frames at 44.1 kHz, for elevations of
+  -40 to 90 degrees and azimuths of 0 to 180), for the responses of `audio.hrtf`
+- Source: <https://sound.media.mit.edu/resources/KEMAR.html>, `compact.zip` (231 461 bytes, SHA-256
+  `0bcd69f8e8760cf8eacff4a89594ceca7d44fb94f28ecf0bf19970003bbfb3e0`, taken in November 2026)
+- Measured by Bill Gardner and Keith Martin, MIT Media Lab, 1994 ("HRTF Measurements of a KEMAR
+  Dummy-Head Microphone", MIT Media Lab Perceptual Computing Technical Report #280; "HRTF
+  measurements of a KEMAR", J. Acoust. Soc. Am. 97 (6), 1995)
+- License: "This data is Copyright 1994 by the MIT Media Laboratory. It is provided free with no
+  restrictions on use, provided the authors are cited when the data is used in any research or
+  commercial application." A program that uses `audio.hrtf` cites them, as here
+- Not changed: the samples are those of the files, as 16-bit integers; `audio.hrtf` cuts each
+  response at its onset, resamples it to the rate of the mixer and scales them all by one number
+
+## KEMAR in SOFA (sofacoustics.org)
+
+- Files: `tests/programs/sounds/tests/data/mit_kemar_normal_pinna.sofa` (a copy of
+  `tests/fuzz_sosu/sofa` holds none of it): the test data of `audio.sofa` and `audio.hdf5`, not
+  compiled into any program
+- Source: <https://sofacoustics.org/data/database/mit/mit_kemar_normal_pinna.sofa> (1 171 764
+  bytes, SHA-256 `e7035994f5fd754058424c061380ee92b1d5ed58fccef2887a4266916616acdf`, taken in
+  November 2026): the full KEMAR measurements of the MIT Media Lab ("normal pinna", 710 directions,
+  512 frames at 44.1 kHz), converted to SOFA (AES69) by the SOFA project
+- Measured by Bill Gardner and Keith Martin, MIT Media Lab, 1994 (the same references as the
+  compact set above)
+- License: that of the measurements: "This data is Copyright 1994 by the MIT Media Laboratory. It
+  is provided free with no restrictions on use, provided the authors are cited when the data is
+  used in any research or commercial application."
+- Not changed
+
+## ufbx
+
+- Files: `packages/model/native/vendor/ufbx.c` and `ufbx.h` (version 0.23.1), and its license
+  `packages/model/native/vendor/LICENSE`, compiled into the programs that use the `model`
+  package (through `packages/model/native/fbx.c`), for the FBX files of `model.fbx`
+- Source: <https://github.com/ufbx/ufbx>, tag `v0.23.1` (commit
+  `26a482ae66871d7de36eb722aa060bce95bce274`, September 25, 2026): `ufbx.c` (1 181 511 bytes,
+  SHA-256 `4a956c26a708e40d82ecb0aeaee54da709d5ba7c144c9642174970059bda7e1d`), `ufbx.h`
+  (223 898 bytes, SHA-256 `f787be529af577efc04f3e3e735844a08556718dbb613d1211c2b313d72895dc`)
+- Written by Samuli Raivio (2020) and its contributors
+- License: the MIT license (Copyright (c) 2020 Samuli Raivio), or public domain (the Unlicense), at
+  your option; both are in `LICENSE`
+- Changed by Sosu: one test of `ufbxi_f64_to_i64` (`< 2^63` rather than `<= (double)INT64_MAX`, which
+  rounds up to 2^63: a number of a file equal to 2^63 did not fit the integer it was converted to,
+  found by `sosuc fuzz`), marked `// Sosu:`; the SHA-256 above is that of the file as taken. `fbx.c`
+  limits the memory a file may ask for (1 GB) and turns the scene to
+  the axes and the unit of Sosu. ufbx is written to read files from anywhere and fuzzed by its
+  authors; a fault found in it is fixed by taking its new version, or, until it has one, by a change
+  of the file marked here (`SECURITY.md`).
 
 ## SQLite
 
@@ -129,3 +207,42 @@ under their own licenses.
   `tf-psa-crypto/include/psa/crypto_config.h`, which includes the choices of Sosu
   (`packages/net/native/sosu_tls_config.h`, `sosu_crypto_config.h`: no file written, no
   session kept, threads). `packages/net/native/UPDATING.md` says how to take a new version.
+
+## Box2D
+
+- Files: none in the repository. `packages/physics2d/sosu.toml` names it as a native dependency
+  (`[native.box2d]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `physics2d` and compiles its `src/` into it, with `packages/physics2d/native/physics2d.c` and
+  `box2d_avx2.c`
+- Source: <https://github.com/erincatto/box2d>, tag `v3.2.0` (commit
+  `178495ba35695aefe9c321e569d2277f06db3b90`), pinned by `sosu.lock`
+- Written by Erin Catto and its contributors
+- License: the MIT license (Copyright (c) 2022 Erin Catto), in `LICENSE` of the repository; a
+  program that ships `physics2d` carries this notice
+- Not changed. `box2d_avx2.c` includes its `contact_solver_w8.c` so that MSVC compiles it without
+  `/arch:AVX2` (Box2D calls it only on processors that have AVX2)
+
+## Jolt Physics
+
+- Files: none in the repository. `packages/physics/sosu.toml` names it as a native dependency
+  (`[native.jolt]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `physics` and compiles its `Jolt/` into it, with `packages/physics/native/physics.cpp`
+- Source: <https://github.com/jrouwe/JoltPhysics>, tag `v5.6.0` (commit
+  `e77f175595e64cb44218cc9d9d56fc365ad0e36a`), pinned by `sosu.lock`
+- Written by Jorrit Rouwe and its contributors
+- License: the MIT license (Copyright 2021 Jorrit Rouwe), in `LICENSE` of the repository; a program
+  that ships `physics` carries this notice
+- Not changed
+
+## Recast & Detour
+
+- Files: none in the repository. `packages/nav/sosu.toml` names it as a native dependency
+  (`[native.recast]`, spec §9.1): `sosuc` clones it into the `build/deps` of the program that uses
+  `nav` and compiles its `Recast/`, `Detour/` and `DetourCrowd/` into it, with
+  `packages/nav/native/nav.cpp`
+- Source: <https://github.com/recastnavigation/recastnavigation>, tag `v1.6.0` (commit
+  `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`), pinned by `sosu.lock`
+- Written by Mikko Mononen and its contributors
+- License: the zlib license (Copyright (c) 2009 Mikko Mononen), in `License.txt` of the
+  repository: a program that ships `nav` may say so in its documentation, which is not required
+- Not changed

@@ -1,0 +1,1513 @@
+// gpu.gpu: drawing on the GPU with SDL_GPU (spec §8.2), which picks Direct3D 12 or Vulkan on
+// Windows, Vulkan on Linux and Android, Metal on macOS and iOS. A `Device` is opened on the
+// window of `app.run_window`; its resources (buffers, textures, samplers, shaders, pipelines)
+// are handles, an index and a generation in a table of the device, so that a handle used after
+// its release stops the program instead of reaching freed memory. Each frame, `begin` gives a
+// `Frame`, whose passes draw into the window, and `submit` shows it.
+import std.io;
+import std.vec;
+import platform.app;
+import platform.sdl_c;
+import image.image;
+
+// What went wrong; `last_error` gives what SDL said.
+pub enum GpuError {
+    NoDevice,  // no driver of the system takes the formats of shaders of `gpu`
+    Unsupported,  // the device cannot do what was asked
+    Failed,  // SDL refused: `last_error` says why
+    NoShader(str path),  // a file of `sosuc shaders` missing or damaged, for the format of the device
+}
+
+pub str message(GpuError e) {
+    return match (e) {
+        NoDevice => "no GPU driver takes SPIR-V, DXIL or MSL shaders",
+        Unsupported => "the GPU cannot do what was asked",
+        Failed => "SDL refused the request of the GPU",
+        NoShader(path) => "a shader is missing for the format of the GPU: run `sosuc shaders`",
+    };
+}
+
+// What SDL said of its last failure, in `arena`.
+pub str last_error(Arena* arena) uses io {
+    unsafe {
+        return copy_cstring(arena, sdl_c.SDL_GetError(), 1024);
+    }
+}
+
+// A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
+str copy_cstring(Arena* arena, ui8* text, usize limit) {
+    mut usize length = 0;
+    mut ui8[] bytes = arena.alloc_slice(ui8, 0);
+    unsafe {
+        if (text as ui64 == 0) {
+            return "";
+        }
+        while (length < limit && *(text + length) != 0) {
+            length += 1;
+        }
+        bytes = arena.alloc_slice(ui8, length);
+        for (usize i in 0..length) {
+            bytes[i] = *(text + i);
+        }
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
+}
+
+pub struct Options {
+    // The validation layers of the driver: slower, with messages for the mistakes of the program.
+    pub bool debug = false;
+    // A driver by name ("vulkan", "direct3d12", "metal"), or "" for the one SDL prefers.
+    pub str driver = "";
+    // Wait for the screen before showing a frame (no tearing, at most its rate).
+    pub bool vsync = true;
+}
+
+// The formats of the shaders that `sosuc shaders` writes (spec §8.2).
+pub enum ShaderFormat {
+    Spirv,  // Vulkan
+    Dxil,  // Direct3D 12
+    Msl,  // Metal
+}
+
+pub enum Stage {
+    Vertex,
+    Fragment,
+}
+
+// What a buffer is for.
+pub enum Usage {
+    Vertex,
+    Index,
+    Indirect,
+    Storage,  // read by the shaders
+}
+
+// The format of an attribute of a vertex.
+pub enum Format {
+    Float,
+    Float2,
+    Float3,
+    Float4,
+    UByte4Norm,  // four bytes, read as 0..1: a color 0xAABBGGRR
+}
+
+pub enum IndexSize {
+    U16,
+    U32,
+}
+
+pub enum Cull {
+    Off,
+    Back,  // the faces seen from behind are not drawn: counter-clockwise faces are the front
+    Front,
+}
+
+pub enum Blend {
+    Opaque,
+    Alpha,  // alpha not premultiplied
+    Additive,
+}
+
+pub enum Filter {
+    Nearest,
+    Linear,
+}
+
+pub enum Wrap {
+    Repeat,
+    Clamp,
+    Mirror,
+}
+
+// The resources: handles of the table of their device.
+pub struct Buffer {
+    ui32 index;
+    ui32 generation;
+}
+
+pub struct Texture {
+    ui32 index;
+    ui32 generation;
+    pub ui32 width;
+    pub ui32 height;
+}
+
+pub struct Sampler {
+    ui32 index;
+    ui32 generation;
+}
+
+pub struct Shader {
+    ui32 index;
+    ui32 generation;
+}
+
+pub struct Pipeline {
+    ui32 index;
+    ui32 generation;
+}
+
+pub struct ComputePipeline {
+    ui32 index;
+    ui32 generation;
+}
+
+// A compute shader and what it uses, as `sosuc shaders` reads them from it (its .json).
+pub struct ComputeDesc {
+    pub ShaderFormat format;
+    pub ui8[] code;
+    pub str entry = "main";
+    pub mut ui32 samplers = 0;
+    pub mut ui32 readonly_storage_textures = 0;
+    pub mut ui32 readonly_storage_buffers = 0;
+    pub mut ui32 readwrite_storage_textures = 0;
+    pub mut ui32 readwrite_storage_buffers = 0;
+    pub mut ui32 uniform_buffers = 0;
+    pub mut ui32 threads_x = 1;  // [numthreads(x, y, z)] of the shader
+    pub mut ui32 threads_y = 1;
+    pub mut ui32 threads_z = 1;
+}
+
+pub struct Color {
+    pub f32 r;
+    pub f32 g;
+    pub f32 b;
+    pub f32 a;
+}
+
+pub Color rgba(f32 r, f32 g, f32 b, f32 a) {
+    return Color{ r: r, g: g, b: b, a: a };
+}
+
+pub struct ShaderDesc {
+    pub Stage stage;
+    pub ShaderFormat format;
+    pub ui8[] code;
+    pub str entry = "main";
+    // What the shader uses, as `sosuc shaders` reads them from it (its .json).
+    pub mut ui32 samplers = 0;
+    pub mut ui32 storage_textures = 0;
+    pub mut ui32 storage_buffers = 0;
+    pub mut ui32 uniform_buffers = 0;
+}
+
+// An attribute of a vertex: its location in the shader, its format, and where it starts in the
+// vertex (`offset_of(Vertex, normal)`).
+pub struct Attribute {
+    pub ui32 location;
+    pub Format format;
+    pub ui32 offset;
+}
+
+// The vertices of one buffer: the size of one (`size_of(Vertex)`), and its attributes.
+pub struct Layout {
+    pub ui32 stride;
+    pub Attribute[] attributes;
+}
+
+pub struct PipelineDesc {
+    pub Shader vertex;
+    pub Shader fragment;
+    pub Layout layout;
+    pub bool depth = true;  // tested against, and written to, the depth of the frame
+    pub bool depth_write = true;  // false: tested only (what is seen through, as particles)
+    pub Cull cull = Back;
+    pub Blend blend = Opaque;
+    // Writes a color: false for a pipeline that draws the depth alone (`frame.depth_pass`: the
+    // map of the shadows of a light).
+    pub bool color = true;
+}
+
+pub struct SamplerDesc {
+    pub Filter filter = Linear;
+    pub Wrap wrap = Repeat;
+    pub bool mipmaps = true;
+    pub f32 anisotropy = 1.0;  // more than 1: sharper textures seen at a grazing angle
+    // Compares the depth it reads with the one the shader gives (`SampleCmp` in HLSL), for a map
+    // of shadows of `device.depth_target`: 1 when it is nearer or as near, 0 else.
+    pub bool compare = false;
+}
+
+// How a frame starts: the color it is cleared to, and whether it has a depth (for pipelines with
+// `depth`), cleared to the farthest.
+pub struct Clear {
+    pub Color color;
+    pub bool depth = true;
+    // Keep what the target holds, its color and its depth, instead of clearing it: to draw over a
+    // pass before (gpu.overlay, particles over a scene).
+    pub bool keep = false;
+}
+
+ui8 KIND_BUFFER = 1;
+ui8 KIND_TEXTURE = 2;
+ui8 KIND_SAMPLER = 3;
+ui8 KIND_SHADER = 4;
+ui8 KIND_PIPELINE = 5;
+ui8 KIND_COMPUTE = 6;
+
+// A line of the table of a device.
+struct Slot {
+    mut ui8* resource;
+    mut ui32 generation;
+    mut ui8 kind;
+    mut bool alive;
+}
+
+struct Handle {
+    ui32 index;
+    ui32 generation;
+}
+
+// A device of the GPU, on one window, or without one (`open_headless`). It belongs to the thread
+// that opened it (spec §5.6).
+pub class Device {
+    sdl_c.SDL_GPUDevice* device;
+    sdl_c.SDL_Window* window;  // 0 without a window
+    bool windowed;
+    vec.Vec<Slot>* slots;
+    i32 color_format;  // of the window, and of the targets of `target`
+    i32 depth_format;
+    mut ui8* depth;  // the depth of the frames, or 0, at depth_width by depth_height
+    mut ui32 depth_width;
+    mut ui32 depth_height;
+    bool debug;
+    mut bool closed;
+
+    void init(
+        keeps Arena* arena,
+        keeps sdl_c.SDL_GPUDevice* device,
+        keeps sdl_c.SDL_Window* window,
+        bool windowed,
+        bool debug
+    ) uses io {
+        self.device = device;
+        self.window = window;
+        self.windowed = windowed;
+        self.debug = debug;
+        slots = vec.new(arena);
+        unsafe {
+            color_format = windowed ? sdl_c.SDL_GetGPUSwapchainTextureFormat(device, window)
+                    : sdl_c.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+            // the depth of frames and of the maps of shadows: one format, that can be sampled too
+            ui32 usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            i32 kind = sdl_c.SDL_GPU_TEXTURETYPE_2D;
+            if (sdl_c.SDL_GPUTextureSupportsFormat(device, sdl_c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT, kind, usage)) {
+                depth_format = sdl_c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+            } else if (sdl_c.SDL_GPUTextureSupportsFormat(device, sdl_c.SDL_GPU_TEXTUREFORMAT_D24_UNORM, kind, usage)) {
+                depth_format = sdl_c.SDL_GPU_TEXTUREFORMAT_D24_UNORM;
+            } else {
+                depth_format = sdl_c.SDL_GPU_TEXTUREFORMAT_D16_UNORM;
+            }
+            depth = 0 as ui8*;
+        }
+        depth_width = 0;
+        depth_height = 0;
+        closed = false;
+    }
+
+    // The driver SDL uses: "vulkan", "direct3d12" or "metal".
+    pub str driver(Arena* arena) uses io {
+        unsafe {
+            return copy_cstring(arena, sdl_c.SDL_GetGPUDeviceDriver(device), 64);
+        }
+    }
+
+    // The format of shaders the device takes, of those `sosuc shaders` writes.
+    pub ShaderFormat format() uses io {
+        mut ui32 formats = 0;
+        unsafe {
+            formats = sdl_c.SDL_GetGPUShaderFormats(device);
+        }
+        if (formats & sdl_c.SDL_GPU_SHADERFORMAT_MSL != 0) {
+            return Msl;
+        }
+        if (formats & sdl_c.SDL_GPU_SHADERFORMAT_DXIL != 0) {
+            return Dxil;
+        }
+        return Spirv;
+    }
+
+    // ---- The table of handles ----
+
+    Handle add(keeps ui8* resource, ui8 kind) {
+        for (usize i in 0..slots.len()) {
+            Slot* s = slots.at(i);
+            if (!s.alive) {
+                s.resource = resource;
+                s.kind = kind;
+                s.alive = true;
+                return Handle{ index: i as ui32, generation: s.generation };
+            }
+        }
+        slots.push(Slot{ resource: resource, generation: 1, kind: kind, alive: true });
+        return Handle{ index: (slots.len() - 1) as ui32, generation: 1 };
+    }
+
+    // The resource of a handle; a handle released, or of another device, stops the program.
+    ui8* find(ui32 index, ui32 generation, ui8 kind) {
+        assert(!closed);
+        assert(index as usize < slots.len());
+        Slot* s = slots.at(index as usize);
+        assert(s.alive && s.generation == generation && s.kind == kind);  // a handle used after its release
+        return s.resource;
+    }
+
+    // Its resource, for the caller to release; the handle is dead from now on.
+    ui8* take(ui32 index, ui32 generation, ui8 kind) {
+        ui8* resource = find(index, generation, kind);
+        Slot* s = slots.at(index as usize);
+        s.alive = false;
+        s.generation += 1;
+        return resource;
+    }
+
+    sdl_c.SDL_GPUBuffer* buffer_of_handle(Buffer b) {
+        unsafe {
+            return find(b.index, b.generation, KIND_BUFFER) as sdl_c.SDL_GPUBuffer*;
+        }
+    }
+
+    sdl_c.SDL_GPUTexture* texture_of_handle(Texture t) {
+        unsafe {
+            return find(t.index, t.generation, KIND_TEXTURE) as sdl_c.SDL_GPUTexture*;
+        }
+    }
+
+    sdl_c.SDL_GPUSampler* sampler_of_handle(Sampler s) {
+        unsafe {
+            return find(s.index, s.generation, KIND_SAMPLER) as sdl_c.SDL_GPUSampler*;
+        }
+    }
+
+    sdl_c.SDL_GPUShader* shader_of_handle(Shader s) {
+        unsafe {
+            return find(s.index, s.generation, KIND_SHADER) as sdl_c.SDL_GPUShader*;
+        }
+    }
+
+    sdl_c.SDL_GPUGraphicsPipeline* pipeline_of_handle(Pipeline p) {
+        unsafe {
+            return find(p.index, p.generation, KIND_PIPELINE) as sdl_c.SDL_GPUGraphicsPipeline*;
+        }
+    }
+
+    // ---- Buffers ----
+
+    // A buffer of `size` bytes, its content undefined until an upload.
+    pub Buffer!GpuError buffer(Usage usage, ui32 size) uses io {
+        assert(!closed);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUBufferCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUBufferCreateInfo);
+            info.usage = usage_flags(usage);
+            info.size = max(size, 4);
+            sdl_c.SDL_GPUBuffer* created = sdl_c.SDL_CreateGPUBuffer(device, info);
+            if (created as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(created as ui8*, KIND_BUFFER);
+            return ok(Buffer{ index: h.index, generation: h.generation });
+        }
+    }
+
+    // A buffer holding `items`, uploaded now: vertices, indices.
+    pub Buffer!GpuError buffer_of<T>(Usage usage, T[] items) uses io {
+        ui32 size = (items.len * size_of(T)) as ui32;
+        Buffer b = try buffer(usage, size);
+        upload(b, items);
+        return ok(b);
+    }
+
+    // `items` copied to the start of `b` now, waiting for nothing: what a frame drew before
+    // still sees the former content (SDL cycles the buffer).
+    pub void upload<T>(Buffer b, T[] items) uses io {
+        if (items.len == 0) {
+            return;
+        }
+        sdl_c.SDL_GPUBuffer* target = buffer_of_handle(b);
+        unsafe {
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                return;
+            }
+            copy_to_buffer(commands, target, &items[0] as ui8*, (items.len * size_of(T)) as ui32);
+            sdl_c.SDL_SubmitGPUCommandBuffer(commands);
+        }
+    }
+
+    // A copy pass in `commands` that copies `size` bytes from `bytes` to `target`.
+    void copy_to_buffer(
+        sdl_c.SDL_GPUCommandBuffer* commands,
+        sdl_c.SDL_GPUBuffer* target,
+        ui8* bytes,
+        ui32 size
+    ) uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTransferBuffer* transfer = upload_buffer(&scratch, bytes, size);
+            if (transfer as ui64 == 0) {
+                return;
+            }
+            sdl_c.SDL_GPUCopyPass* pass = sdl_c.SDL_BeginGPUCopyPass(commands);
+            sdl_c.SDL_GPUTransferBufferLocation* source = scratch.alloc(sdl_c.SDL_GPUTransferBufferLocation);
+            source.transfer_buffer = transfer;
+            sdl_c.SDL_GPUBufferRegion* region = scratch.alloc(sdl_c.SDL_GPUBufferRegion);
+            region.buffer = target;
+            region.size = size;
+            sdl_c.SDL_UploadToGPUBuffer(pass, source, region, true);
+            sdl_c.SDL_EndGPUCopyPass(pass);
+            sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);  // freed once the GPU used it
+        }
+    }
+
+    // A transfer buffer holding a copy of `size` bytes, or 0.
+    sdl_c.SDL_GPUTransferBuffer* upload_buffer(Arena* scratch, ui8* bytes, ui32 size) uses io {
+        unsafe {
+            sdl_c.SDL_GPUTransferBufferCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTransferBufferCreateInfo);
+            info.usage = sdl_c.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+            info.size = size;
+            sdl_c.SDL_GPUTransferBuffer* transfer = sdl_c.SDL_CreateGPUTransferBuffer(device, info);
+            if (transfer as ui64 == 0) {
+                return transfer;
+            }
+            ui8* mapped = sdl_c.SDL_MapGPUTransferBuffer(device, transfer, false);
+            if (mapped as ui64 == 0) {
+                sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+                return 0 as sdl_c.SDL_GPUTransferBuffer*;
+            }
+            sdl_c.SDL_memcpy(mapped, bytes, size as usize);
+            sdl_c.SDL_UnmapGPUTransferBuffer(device, transfer);
+            return transfer;
+        }
+    }
+
+    pub void release_buffer(Buffer b) uses io {
+        unsafe {
+            sdl_c.SDL_ReleaseGPUBuffer(device, take(b.index, b.generation, KIND_BUFFER) as sdl_c.SDL_GPUBuffer*);
+        }
+    }
+
+    // ---- Textures and samplers ----
+
+    // A texture of the pixels of `img` (0xAARRGGBB, alpha not premultiplied), uploaded now; with
+    // `mipmaps`, its smaller levels made by the GPU.
+    pub Texture!GpuError texture_of(image.Image img, bool mipmaps) uses io {
+        assert(!closed);
+        // an image made by hand may not hold as many pixels as its size says: the copy below,
+        // in `unsafe`, would read beyond them
+        if (img.width <= 0 || img.height <= 0 || img.pixels.len as ui64 != img.width as ui64 * img.height as ui64) {
+            return err(Unsupported);
+        }
+        ui32 w = img.width as ui32;
+        ui32 h = img.height as ui32;
+        mut ui32 levels = 1;
+        if (mipmaps) {
+            mut ui32 side = max(w, h);
+            while (side > 1) {
+                side = side / 2;
+                levels += 1;
+            }
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTextureCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTextureCreateInfo);
+            info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
+            info.format = sdl_c.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;  // the bytes of 0xAARRGGBB
+            info.usage = mipmaps ? sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER | sdl_c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET
+                    : sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = w;
+            info.height = h;
+            info.layer_count_or_depth = 1;
+            info.num_levels = levels;
+            info.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
+            sdl_c.SDL_GPUTexture* texture = sdl_c.SDL_CreateGPUTexture(device, info);
+            if (texture as ui64 == 0) {
+                return err(Failed);
+            }
+            ui32 size = w * h * 4;
+            sdl_c.SDL_GPUTransferBuffer* transfer = upload_buffer(&scratch, &img.pixels[0] as ui8*, size);
+            if (transfer as ui64 == 0) {
+                sdl_c.SDL_ReleaseGPUTexture(device, texture);
+                return err(Failed);
+            }
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+                sdl_c.SDL_ReleaseGPUTexture(device, texture);
+                return err(Failed);
+            }
+            sdl_c.SDL_GPUCopyPass* pass = sdl_c.SDL_BeginGPUCopyPass(commands);
+            sdl_c.SDL_GPUTextureTransferInfo* source = scratch.alloc(sdl_c.SDL_GPUTextureTransferInfo);
+            source.transfer_buffer = transfer;
+            source.pixels_per_row = w;
+            source.rows_per_layer = h;
+            sdl_c.SDL_GPUTextureRegion* region = scratch.alloc(sdl_c.SDL_GPUTextureRegion);
+            region.texture = texture;
+            region.w = w;
+            region.h = h;
+            region.d = 1;
+            sdl_c.SDL_UploadToGPUTexture(pass, source, region, false);
+            sdl_c.SDL_EndGPUCopyPass(pass);
+            if (levels > 1) {
+                sdl_c.SDL_GenerateMipmapsForGPUTexture(commands, texture);
+            }
+            sdl_c.SDL_SubmitGPUCommandBuffer(commands);
+            sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+            Handle handle = add(texture as ui8*, KIND_TEXTURE);
+            return ok(Texture{ index: handle.index, generation: handle.generation, width: w, height: h });
+        }
+    }
+
+    pub void release_texture(Texture t) uses io {
+        unsafe {
+            sdl_c.SDL_ReleaseGPUTexture(device, take(t.index, t.generation, KIND_TEXTURE) as sdl_c.SDL_GPUTexture*);
+        }
+    }
+
+    pub Sampler!GpuError sampler(SamplerDesc desc) uses io {
+        assert(!closed);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUSamplerCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUSamplerCreateInfo);
+            i32 filter = match (desc.filter) {
+                Nearest => sdl_c.SDL_GPU_FILTER_NEAREST,
+                Linear => sdl_c.SDL_GPU_FILTER_LINEAR,
+            };
+            i32 wrap = match (desc.wrap) {
+                Repeat => sdl_c.SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
+                Clamp => sdl_c.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+                Mirror => sdl_c.SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT,
+            };
+            info.min_filter = filter;
+            info.mag_filter = filter;
+            info.mipmap_mode = match (desc.filter) {
+                Nearest => sdl_c.SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
+                Linear => sdl_c.SDL_GPU_SAMPLERMIPMAPMODE_LINEAR,
+            };
+            info.address_mode_u = wrap;
+            info.address_mode_v = wrap;
+            info.address_mode_w = wrap;
+            info.max_lod = desc.mipmaps ? 1000.0 : 0.0;
+            info.enable_anisotropy = desc.anisotropy > 1.0;
+            info.enable_compare = desc.compare;
+            info.compare_op = sdl_c.SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+            info.max_anisotropy = max(desc.anisotropy, 1.0);
+            sdl_c.SDL_GPUSampler* created = sdl_c.SDL_CreateGPUSampler(device, info);
+            if (created as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(created as ui8*, KIND_SAMPLER);
+            return ok(Sampler{ index: h.index, generation: h.generation });
+        }
+    }
+
+    pub void release_sampler(Sampler s) uses io {
+        unsafe {
+            sdl_c.SDL_ReleaseGPUSampler(device, take(s.index, s.generation, KIND_SAMPLER) as sdl_c.SDL_GPUSampler*);
+        }
+    }
+
+    // ---- Shaders and pipelines ----
+
+    // A shader from its compiled code, in the format the device takes (`format()`): what
+    // `shaders.load` reads from the files of `sosuc shaders`.
+    pub Shader!GpuError shader(ShaderDesc desc) uses io {
+        assert(!closed);
+        if (desc.code.len == 0) {
+            return err(Unsupported);
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUShaderCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUShaderCreateInfo);
+            info.code_size = desc.code.len;
+            info.code = &desc.code[0] as ui8*;
+            info.entrypoint = desc.entry.to_cstr(&scratch);
+            info.format = format_flag(desc.format);
+            info.stage = match (desc.stage) {
+                Vertex => sdl_c.SDL_GPU_SHADERSTAGE_VERTEX,
+                Fragment => sdl_c.SDL_GPU_SHADERSTAGE_FRAGMENT,
+            };
+            info.num_samplers = desc.samplers;
+            info.num_storage_textures = desc.storage_textures;
+            info.num_storage_buffers = desc.storage_buffers;
+            info.num_uniform_buffers = desc.uniform_buffers;
+            sdl_c.SDL_GPUShader* created = sdl_c.SDL_CreateGPUShader(device, info);
+            if (created as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(created as ui8*, KIND_SHADER);
+            return ok(Shader{ index: h.index, generation: h.generation });
+        }
+    }
+
+    pub void release_shader(Shader s) uses io {
+        unsafe {
+            sdl_c.SDL_ReleaseGPUShader(device, take(s.index, s.generation, KIND_SHADER) as sdl_c.SDL_GPUShader*);
+        }
+    }
+
+    // A pipeline that draws triangles into the window. Its shaders may be released afterwards.
+    pub Pipeline!GpuError pipeline(PipelineDesc desc) uses io {
+        assert(!closed);
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUGraphicsPipelineCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUGraphicsPipelineCreateInfo);
+            info.vertex_shader = shader_of_handle(desc.vertex);
+            info.fragment_shader = shader_of_handle(desc.fragment);
+
+            sdl_c.SDL_GPUVertexBufferDescription* buffer = scratch.alloc(sdl_c.SDL_GPUVertexBufferDescription);
+            buffer.slot = 0;
+            buffer.pitch = desc.layout.stride;
+            buffer.input_rate = sdl_c.SDL_GPU_VERTEXINPUTRATE_VERTEX;
+            usize count = desc.layout.attributes.len;
+            sdl_c.SDL_GPUVertexAttribute[] attributes = scratch.alloc_slice(
+                sdl_c.SDL_GPUVertexAttribute,
+                max(count, 1)
+            );
+            for (usize i in 0..count) {
+                Attribute a = desc.layout.attributes[i];
+                attributes[i].location = a.location;
+                attributes[i].buffer_slot = 0;
+                attributes[i].format = format_code(a.format);
+                attributes[i].offset = a.offset;
+            }
+            info.vertex_input_state.vertex_buffer_descriptions = buffer;
+            info.vertex_input_state.num_vertex_buffers = count == 0 ? 0 : 1;  // none: the shader makes its vertices
+            info.vertex_input_state.vertex_attributes = &attributes[0];
+            info.vertex_input_state.num_vertex_attributes = count as ui32;
+
+            info.primitive_type = sdl_c.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            info.rasterizer_state.fill_mode = sdl_c.SDL_GPU_FILLMODE_FILL;
+            info.rasterizer_state.cull_mode = match (desc.cull) {
+                Off => sdl_c.SDL_GPU_CULLMODE_NONE,
+                Back => sdl_c.SDL_GPU_CULLMODE_BACK,
+                Front => sdl_c.SDL_GPU_CULLMODE_FRONT,
+            };
+            info.rasterizer_state.front_face = sdl_c.SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+            info.multisample_state.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
+
+            info.depth_stencil_state.enable_depth_test = desc.depth;
+            info.depth_stencil_state.enable_depth_write = desc.depth && desc.depth_write;
+            info.depth_stencil_state.compare_op = sdl_c.SDL_GPU_COMPAREOP_LESS;
+
+            sdl_c.SDL_GPUColorTargetDescription* target = scratch.alloc(sdl_c.SDL_GPUColorTargetDescription);
+            target.format = color_format;
+            match (desc.blend) {
+                Opaque => { },
+                Alpha => {
+                    target.blend_state.enable_blend = true;
+                    target.blend_state.src_color_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                    target.blend_state.dst_color_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                    target.blend_state.color_blend_op = sdl_c.SDL_GPU_BLENDOP_ADD;
+                    target.blend_state.src_alpha_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_ONE;
+                    target.blend_state.dst_alpha_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                    target.blend_state.alpha_blend_op = sdl_c.SDL_GPU_BLENDOP_ADD;
+                },
+                Additive => {
+                    target.blend_state.enable_blend = true;
+                    target.blend_state.src_color_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                    target.blend_state.dst_color_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_ONE;
+                    target.blend_state.color_blend_op = sdl_c.SDL_GPU_BLENDOP_ADD;
+                    target.blend_state.src_alpha_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_ONE;
+                    target.blend_state.dst_alpha_blendfactor = sdl_c.SDL_GPU_BLENDFACTOR_ONE;
+                    target.blend_state.alpha_blend_op = sdl_c.SDL_GPU_BLENDOP_ADD;
+                },
+            }
+            info.target_info.color_target_descriptions = target;
+            info.target_info.num_color_targets = desc.color ? 1 : 0;
+            info.target_info.has_depth_stencil_target = desc.depth;
+            info.target_info.depth_stencil_format = depth_format;
+
+            sdl_c.SDL_GPUGraphicsPipeline* created = sdl_c.SDL_CreateGPUGraphicsPipeline(device, info);
+            if (created as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(created as ui8*, KIND_PIPELINE);
+            return ok(Pipeline{ index: h.index, generation: h.generation });
+        }
+    }
+
+    pub void release_pipeline(Pipeline p) uses io {
+        unsafe {
+            sdl_c.SDL_ReleaseGPUGraphicsPipeline(
+                device,
+                take(p.index, p.generation, KIND_PIPELINE) as sdl_c.SDL_GPUGraphicsPipeline*
+            );
+        }
+    }
+
+    // ---- Frames ----
+
+    // The next frame of the window, or none while it cannot be drawn (minimized, hidden); with
+    // `vsync`, waits for the screen.
+    pub Frame? begin() uses io {
+        assert(!closed);
+        assert(windowed);  // a device of `open_headless` draws into targets, with `commands()`
+        unsafe {
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                return none;
+            }
+            mut sdl_c.SDL_GPUTexture* target = 0 as sdl_c.SDL_GPUTexture*;
+            mut ui32 w = 0;
+            mut ui32 h = 0;
+            if (!sdl_c.SDL_WaitAndAcquireGPUSwapchainTexture(commands, window, &target, &w, &h)
+                    || target as ui64 == 0) {
+                sdl_c.SDL_SubmitGPUCommandBuffer(commands);
+                return none;
+            }
+            return some(Frame{ device: self, commands: commands, target: target, width: w, height: h });
+        }
+    }
+
+    // A frame that does not draw into the window: its passes draw into targets (`pass_into`),
+    // compute (`compute`), and `submit_and_wait` sends them. What a device without a window
+    // records its work in, and a window's device too, for work beside its frames.
+    pub Frame!GpuError commands() uses io {
+        assert(!closed);
+        unsafe {
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                return err(Failed);
+            }
+            return ok(Frame{
+                device: self,
+                commands: commands,
+                target: 0 as sdl_c.SDL_GPUTexture*,
+                width: 0,
+                height: 0
+            });
+        }
+    }
+
+    // A texture to draw into (`frame.pass_into`) and to sample afterwards, in the format of the
+    // window (B8G8R8A8 without one), so that the pipelines of the device draw into it.
+    pub Texture!GpuError target(ui32 width, ui32 height) uses io {
+        assert(!closed);
+        if (width == 0 || height == 0) {
+            return err(Unsupported);
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTextureCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTextureCreateInfo);
+            info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
+            info.format = color_format;
+            info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = width;
+            info.height = height;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            info.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
+            sdl_c.SDL_GPUTexture* texture = sdl_c.SDL_CreateGPUTexture(device, info);
+            if (texture as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(texture as ui8*, KIND_TEXTURE);
+            return ok(Texture{ index: h.index, generation: h.generation, width: width, height: height });
+        }
+    }
+
+    // A texture of depth to draw into (`frame.depth_pass`) and to sample afterwards with a
+    // sampler of `compare`: the map of the shadows of a light.
+    pub Texture!GpuError depth_target(ui32 width, ui32 height) uses io {
+        assert(!closed);
+        if (width == 0 || height == 0) {
+            return err(Unsupported);
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTextureCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTextureCreateInfo);
+            info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
+            info.format = depth_format;
+            info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = width;
+            info.height = height;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            info.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
+            sdl_c.SDL_GPUTexture* texture = sdl_c.SDL_CreateGPUTexture(device, info);
+            if (texture as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(texture as ui8*, KIND_TEXTURE);
+            return ok(Texture{ index: h.index, generation: h.generation, width: width, height: height });
+        }
+    }
+
+    // The pixels of a target, read back once the GPU drew them (it waits for it): an image of
+    // 0xAARRGGBB pixels, for tests and screenshots.
+    pub image.Image!GpuError read_texture(Arena* arena, Texture t) uses io {
+        sdl_c.SDL_GPUTexture* texture = texture_of_handle(t);
+        ui32 size = t.width * t.height * 4;
+        mut image.Image img = image.create(arena, t.width as i32, t.height as i32);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTextureRegion* region = scratch.alloc(sdl_c.SDL_GPUTextureRegion);
+            region.texture = texture;
+            region.w = t.width;
+            region.h = t.height;
+            region.d = 1;
+            sdl_c.SDL_GPUTransferBuffer* transfer = download(&scratch, size);
+            if (transfer as ui64 == 0) {
+                return err(Failed);
+            }
+            sdl_c.SDL_GPUTextureTransferInfo* into = scratch.alloc(sdl_c.SDL_GPUTextureTransferInfo);
+            into.transfer_buffer = transfer;
+            into.pixels_per_row = t.width;
+            into.rows_per_layer = t.height;
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+                return err(Failed);
+            }
+            sdl_c.SDL_GPUCopyPass* pass = sdl_c.SDL_BeginGPUCopyPass(commands);
+            sdl_c.SDL_DownloadFromGPUTexture(pass, region, into);
+            sdl_c.SDL_EndGPUCopyPass(pass);
+            if (!wait_for(commands)) {
+                sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+                return err(Failed);
+            }
+            ui8* mapped = sdl_c.SDL_MapGPUTransferBuffer(device, transfer, false);
+            if (mapped as ui64 != 0) {
+                sdl_c.SDL_memcpy(&img.pixels[0] as ui8*, mapped, size as usize);
+                sdl_c.SDL_UnmapGPUTransferBuffer(device, transfer);
+            }
+            sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+            if (mapped as ui64 == 0) {
+                return err(Failed);
+            }
+        }
+        if (color_format == sdl_c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM) {  // red and blue the other way
+            for (usize i in 0..img.pixels.len) {
+                ui32 p = img.pixels[i];
+                img.pixels[i] = p & 0xFF00FF00 | (p & 0xFF) << 16 | p >> 16 & 0xFF;
+            }
+        }
+        return ok(img);
+    }
+
+    // The start of `b` read back into `out` (as many items as `out` holds), once the GPU wrote
+    // it (it waits for it).
+    pub void!GpuError read_buffer<T>(Buffer b, T[] out) uses io {
+        if (out.len == 0) {
+            return ok();
+        }
+        sdl_c.SDL_GPUBuffer* buffer = buffer_of_handle(b);
+        ui32 size = (out.len * size_of(T)) as ui32;
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTransferBuffer* transfer = download(&scratch, size);
+            if (transfer as ui64 == 0) {
+                return err(Failed);
+            }
+            sdl_c.SDL_GPUBufferRegion* region = scratch.alloc(sdl_c.SDL_GPUBufferRegion);
+            region.buffer = buffer;
+            region.size = size;
+            sdl_c.SDL_GPUTransferBufferLocation* into = scratch.alloc(sdl_c.SDL_GPUTransferBufferLocation);
+            into.transfer_buffer = transfer;
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+                return err(Failed);
+            }
+            sdl_c.SDL_GPUCopyPass* pass = sdl_c.SDL_BeginGPUCopyPass(commands);
+            sdl_c.SDL_DownloadFromGPUBuffer(pass, region, into);
+            sdl_c.SDL_EndGPUCopyPass(pass);
+            if (!wait_for(commands)) {
+                sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+                return err(Failed);
+            }
+            ui8* mapped = sdl_c.SDL_MapGPUTransferBuffer(device, transfer, false);
+            if (mapped as ui64 != 0) {
+                sdl_c.SDL_memcpy(&out[0] as ui8*, mapped, size as usize);
+                sdl_c.SDL_UnmapGPUTransferBuffer(device, transfer);
+            }
+            sdl_c.SDL_ReleaseGPUTransferBuffer(device, transfer);
+            if (mapped as ui64 == 0) {
+                return err(Failed);
+            }
+        }
+        return ok();
+    }
+
+    // A transfer buffer of `size` bytes that the GPU writes into, or 0.
+    sdl_c.SDL_GPUTransferBuffer* download(Arena* scratch, ui32 size) uses io {
+        unsafe {
+            sdl_c.SDL_GPUTransferBufferCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTransferBufferCreateInfo);
+            info.usage = sdl_c.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+            info.size = size;
+            return sdl_c.SDL_CreateGPUTransferBuffer(device, info);
+        }
+    }
+
+    // `commands` submitted, and waited for; false if SDL refused them.
+    bool wait_for(sdl_c.SDL_GPUCommandBuffer* commands) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUFence* fence = sdl_c.SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+            if (fence as ui64 == 0) {
+                return false;
+            }
+            bool done = sdl_c.SDL_WaitForGPUFences(device, true, &fence, 1);
+            sdl_c.SDL_ReleaseGPUFence(device, fence);
+            return done;
+        }
+    }
+
+    // ---- Compute ----
+
+    // A compute pipeline from its compiled code: what `shaders.load_compute` reads from the
+    // files of `sosuc shaders`.
+    pub ComputePipeline!GpuError compute_pipeline(ComputeDesc desc) uses io {
+        assert(!closed);
+        if (desc.code.len == 0) {
+            return err(Unsupported);
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUComputePipelineCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUComputePipelineCreateInfo);
+            info.code_size = desc.code.len;
+            info.code = &desc.code[0] as ui8*;
+            info.entrypoint = desc.entry.to_cstr(&scratch);
+            info.format = format_flag(desc.format);
+            info.num_samplers = desc.samplers;
+            info.num_readonly_storage_textures = desc.readonly_storage_textures;
+            info.num_readonly_storage_buffers = desc.readonly_storage_buffers;
+            info.num_readwrite_storage_textures = desc.readwrite_storage_textures;
+            info.num_readwrite_storage_buffers = desc.readwrite_storage_buffers;
+            info.num_uniform_buffers = desc.uniform_buffers;
+            info.threadcount_x = max(desc.threads_x, 1);
+            info.threadcount_y = max(desc.threads_y, 1);
+            info.threadcount_z = max(desc.threads_z, 1);
+            sdl_c.SDL_GPUComputePipeline* created = sdl_c.SDL_CreateGPUComputePipeline(device, info);
+            if (created as ui64 == 0) {
+                return err(Failed);
+            }
+            Handle h = add(created as ui8*, KIND_COMPUTE);
+            return ok(ComputePipeline{ index: h.index, generation: h.generation });
+        }
+    }
+
+    pub void release_compute_pipeline(ComputePipeline p) uses io {
+        unsafe {
+            sdl_c.SDL_ReleaseGPUComputePipeline(
+                device,
+                take(p.index, p.generation, KIND_COMPUTE) as sdl_c.SDL_GPUComputePipeline*
+            );
+        }
+    }
+
+    sdl_c.SDL_GPUComputePipeline* compute_of_handle(ComputePipeline p) {
+        unsafe {
+            return find(p.index, p.generation, KIND_COMPUTE) as sdl_c.SDL_GPUComputePipeline*;
+        }
+    }
+
+    // The depth of the frames, at `w` by `h`, made again when the window changed size; 0 if the
+    // device cannot make it.
+    ui8* depth_at(ui32 w, ui32 h) uses io {
+        unsafe {
+            if (depth as ui64 != 0 && depth_width == w && depth_height == h) {
+                return depth;
+            }
+            if (depth as ui64 != 0) {
+                sdl_c.SDL_ReleaseGPUTexture(device, depth as sdl_c.SDL_GPUTexture*);
+                depth = 0 as ui8*;
+            }
+            mut Arena scratch = Arena.new(1 * KB);
+            defer scratch.free();
+            sdl_c.SDL_GPUTextureCreateInfo* info = scratch.alloc(sdl_c.SDL_GPUTextureCreateInfo);
+            info.type = sdl_c.SDL_GPU_TEXTURETYPE_2D;
+            info.format = depth_format;
+            // sampled too: a compute pass reads it (`ComputePass.frame_depth`), particles that hit the scene
+            info.usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = w;
+            info.height = h;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            info.sample_count = sdl_c.SDL_GPU_SAMPLECOUNT_1;
+            depth = sdl_c.SDL_CreateGPUTexture(device, info) as ui8*;
+            depth_width = w;
+            depth_height = h;
+            return depth;
+        }
+    }
+
+    // Waits for the GPU, releases what is left, and the device. With `debug`, says how many
+    // resources the program had not released.
+    pub void close() uses io {
+        if (closed) {
+            return;
+        }
+        unsafe {
+            sdl_c.SDL_WaitForGPUIdle(device);
+            mut usize left = 0;
+            for (usize i in 0..slots.len()) {
+                Slot* s = slots.at(i);
+                if (s.alive) {
+                    left += 1;
+                    release_slot(s);
+                    s.alive = false;
+                }
+            }
+            if (left > 0 && debug) {
+                io.print("gpu: {} resources were not released before close()", left);
+            }
+            if (depth as ui64 != 0) {
+                sdl_c.SDL_ReleaseGPUTexture(device, depth as sdl_c.SDL_GPUTexture*);
+            }
+            if (windowed) {
+                sdl_c.SDL_ReleaseWindowFromGPUDevice(device, window);
+            }
+            sdl_c.SDL_DestroyGPUDevice(device);
+            if (!windowed) {
+                sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_VIDEO);  // started by `open_headless`
+            }
+        }
+        closed = true;
+    }
+
+    void release_slot(Slot* s) uses io {
+        unsafe {
+            if (s.kind == KIND_BUFFER) {
+                sdl_c.SDL_ReleaseGPUBuffer(device, s.resource as sdl_c.SDL_GPUBuffer*);
+            } else if (s.kind == KIND_TEXTURE) {
+                sdl_c.SDL_ReleaseGPUTexture(device, s.resource as sdl_c.SDL_GPUTexture*);
+            } else if (s.kind == KIND_SAMPLER) {
+                sdl_c.SDL_ReleaseGPUSampler(device, s.resource as sdl_c.SDL_GPUSampler*);
+            } else if (s.kind == KIND_SHADER) {
+                sdl_c.SDL_ReleaseGPUShader(device, s.resource as sdl_c.SDL_GPUShader*);
+            } else if (s.kind == KIND_PIPELINE) {
+                sdl_c.SDL_ReleaseGPUGraphicsPipeline(device, s.resource as sdl_c.SDL_GPUGraphicsPipeline*);
+            } else if (s.kind == KIND_COMPUTE) {
+                sdl_c.SDL_ReleaseGPUComputePipeline(device, s.resource as sdl_c.SDL_GPUComputePipeline*);
+            }
+        }
+    }
+}
+
+ui32 usage_flags(Usage usage) {
+    return match (usage) {
+        Vertex => sdl_c.SDL_GPU_BUFFERUSAGE_VERTEX,
+        Index => sdl_c.SDL_GPU_BUFFERUSAGE_INDEX,
+        Indirect => sdl_c.SDL_GPU_BUFFERUSAGE_INDIRECT,
+        Storage => sdl_c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ | sdl_c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ
+                | sdl_c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
+    };
+}
+
+ui32 format_flag(ShaderFormat format) {
+    return match (format) {
+        Spirv => sdl_c.SDL_GPU_SHADERFORMAT_SPIRV,
+        Dxil => sdl_c.SDL_GPU_SHADERFORMAT_DXIL,
+        Msl => sdl_c.SDL_GPU_SHADERFORMAT_MSL,
+    };
+}
+
+i32 format_code(Format f) {
+    return match (f) {
+        Float => sdl_c.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,
+        Float2 => sdl_c.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+        Float3 => sdl_c.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+        Float4 => sdl_c.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
+        UByte4Norm => sdl_c.SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+    };
+}
+
+// Opens a device of the GPU on `window`, the window of `app.run_window`: in `on_start`.
+pub Device*!GpuError open(Arena* arena, app.Window window, Options options) uses io {
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    ui32 formats = sdl_c.SDL_GPU_SHADERFORMAT_SPIRV | sdl_c.SDL_GPU_SHADERFORMAT_DXIL | sdl_c.SDL_GPU_SHADERFORMAT_MSL;
+    sdl_c.SDL_Window* handle = window.native();
+    unsafe {
+        ui8* name = options.driver.len == 0 ? 0 as ui8* : options.driver.to_cstr(&scratch);
+        sdl_c.SDL_GPUDevice* device = sdl_c.SDL_CreateGPUDevice(formats, options.debug, name);
+        if (device as ui64 == 0) {
+            return err(NoDevice);
+        }
+        if (!sdl_c.SDL_ClaimWindowForGPUDevice(device, handle)) {
+            sdl_c.SDL_DestroyGPUDevice(device);
+            return err(Failed);
+        }
+        if (!options.vsync
+                && sdl_c.SDL_WindowSupportsGPUPresentMode(device, handle, sdl_c.SDL_GPU_PRESENTMODE_MAILBOX)) {
+            sdl_c.SDL_SetGPUSwapchainParameters(
+                device,
+                handle,
+                sdl_c.SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                sdl_c.SDL_GPU_PRESENTMODE_MAILBOX
+            );
+        }
+        return ok(arena.new(Device, arena, device, handle, true, options.debug));
+    }
+}
+
+// Opens a device of the GPU without a window: it draws into targets and computes, for tests,
+// pictures made by a program and computations (`commands()`).
+pub Device*!GpuError open_headless(Arena* arena, Options options) uses io {
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    ui32 formats = sdl_c.SDL_GPU_SHADERFORMAT_SPIRV | sdl_c.SDL_GPU_SHADERFORMAT_DXIL | sdl_c.SDL_GPU_SHADERFORMAT_MSL;
+    unsafe {
+        // SDL_GPU needs the video subsystem, even without a window; where there is no display
+        // (a server, the CI), SDL's offscreen driver gives one. `close` quits it (SDL counts).
+        if (!sdl_c.SDL_InitSubSystem(sdl_c.SDL_INIT_VIDEO)) {
+            sdl_c.SDL_SetHint(sdl_c.SDL_HINT_VIDEO_DRIVER.to_cstr(&scratch), "offscreen".to_cstr(&scratch));
+            if (!sdl_c.SDL_InitSubSystem(sdl_c.SDL_INIT_VIDEO)) {
+                return err(NoDevice);
+            }
+        }
+        ui8* name = options.driver.len == 0 ? 0 as ui8* : options.driver.to_cstr(&scratch);
+        sdl_c.SDL_GPUDevice* device = sdl_c.SDL_CreateGPUDevice(formats, options.debug, name);
+        if (device as ui64 == 0) {
+            sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_VIDEO);
+            return err(NoDevice);
+        }
+        return ok(arena.new(Device, arena, device, 0 as sdl_c.SDL_Window*, false, options.debug));
+    }
+}
+
+// A frame of the window: its passes are recorded in order, then `submit` sends them and shows it.
+pub struct Frame {
+    Device* device;
+    sdl_c.SDL_GPUCommandBuffer* commands;
+    sdl_c.SDL_GPUTexture* target;
+    pub ui32 width;  // in pixels of the screen
+    pub ui32 height;
+
+    // `items` copied to the start of `b` before the passes that follow: data that changes each
+    // frame. A pass must not be open.
+    pub void upload<T>(Buffer b, T[] items) uses io {
+        if (items.len == 0) {
+            return;
+        }
+        unsafe {
+            device.copy_to_buffer(
+                commands,
+                device.buffer_of_handle(b),
+                &items[0] as ui8*,
+                (items.len * size_of(T)) as ui32
+            );
+        }
+    }
+
+    // `pixels` (0xAARRGGBB, as many as `t` has) copied into the first level of `t` before the
+    // passes that follow: a picture that changes each frame (gpu.overlay). A pass must not be open.
+    pub void upload_texture(Texture t, ui32[] pixels) uses io {
+        assert(pixels.len as ui64 == t.width as ui64 * t.height as ui64);
+        sdl_c.SDL_GPUTexture* texture = device.texture_of_handle(t);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUTransferBuffer* transfer = device.upload_buffer(
+                &scratch,
+                &pixels[0] as ui8*,
+                t.width * t.height * 4
+            );
+            if (transfer as ui64 == 0) {
+                return;
+            }
+            sdl_c.SDL_GPUCopyPass* pass = sdl_c.SDL_BeginGPUCopyPass(commands);
+            sdl_c.SDL_GPUTextureTransferInfo* source = scratch.alloc(sdl_c.SDL_GPUTextureTransferInfo);
+            source.transfer_buffer = transfer;
+            source.pixels_per_row = t.width;
+            source.rows_per_layer = t.height;
+            sdl_c.SDL_GPUTextureRegion* region = scratch.alloc(sdl_c.SDL_GPUTextureRegion);
+            region.texture = texture;
+            region.w = t.width;
+            region.h = t.height;
+            region.d = 1;
+            sdl_c.SDL_UploadToGPUTexture(pass, source, region, true);
+            sdl_c.SDL_EndGPUCopyPass(pass);
+            sdl_c.SDL_ReleaseGPUTransferBuffer(device.device, transfer);
+        }
+    }
+
+    // A pass that draws into the window, cleared first.
+    pub Pass pass(Clear clear) uses io {
+        unsafe {
+            assert(target as ui64 != 0);  // a frame of `commands()` draws with `pass_into`
+            return open_pass(target, width, height, clear);
+        }
+    }
+
+    // A pass that draws into `t`, a texture of `device.target`, cleared first.
+    pub Pass pass_into(Texture t, Clear clear) uses io {
+        return open_pass(device.texture_of_handle(t), t.width, t.height, clear);
+    }
+
+    // A pass that draws the depth alone into `t`, a texture of `device.depth_target`, cleared to
+    // the farthest: the map of the shadows of a light, for pipelines without `color`.
+    pub Pass depth_pass(Texture t) uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUDepthStencilTargetInfo* depth = scratch.alloc(sdl_c.SDL_GPUDepthStencilTargetInfo);
+            depth.texture = device.texture_of_handle(t);
+            depth.clear_depth = 1.0;
+            depth.load_op = sdl_c.SDL_GPU_LOADOP_CLEAR;
+            depth.store_op = sdl_c.SDL_GPU_STOREOP_STORE;
+            depth.stencil_load_op = sdl_c.SDL_GPU_LOADOP_DONT_CARE;
+            depth.stencil_store_op = sdl_c.SDL_GPU_STOREOP_DONT_CARE;
+            sdl_c.SDL_GPURenderPass* pass = sdl_c.SDL_BeginGPURenderPass(
+                commands,
+                0 as sdl_c.SDL_GPUColorTargetInfo*,
+                0,
+                depth
+            );
+            return Pass{ device: device, commands: commands, pass: pass };
+        }
+    }
+
+    Pass open_pass(sdl_c.SDL_GPUTexture* into, ui32 w, ui32 h, Clear clear) uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUColorTargetInfo* color = scratch.alloc(sdl_c.SDL_GPUColorTargetInfo);
+            color.texture = into;
+            color.clear_color = sdl_c.SDL_FColor{
+                r: clear.color.r,
+                g: clear.color.g,
+                b: clear.color.b,
+                a: clear.color.a
+            };
+            color.load_op = clear.keep ? sdl_c.SDL_GPU_LOADOP_LOAD : sdl_c.SDL_GPU_LOADOP_CLEAR;
+            color.store_op = sdl_c.SDL_GPU_STOREOP_STORE;
+            mut sdl_c.SDL_GPUDepthStencilTargetInfo* depth = 0 as sdl_c.SDL_GPUDepthStencilTargetInfo*;
+            if (clear.depth) {
+                ui8* texture = device.depth_at(w, h);
+                if (texture as ui64 != 0) {
+                    depth = scratch.alloc(sdl_c.SDL_GPUDepthStencilTargetInfo);
+                    depth.texture = texture as sdl_c.SDL_GPUTexture*;
+                    depth.clear_depth = 1.0;
+                    // kept for a pass after that keeps it (`keep`): particles drawn behind what
+                    // the scene drew
+                    depth.load_op = clear.keep ? sdl_c.SDL_GPU_LOADOP_LOAD : sdl_c.SDL_GPU_LOADOP_CLEAR;
+                    depth.store_op = sdl_c.SDL_GPU_STOREOP_STORE;
+                    depth.stencil_load_op = sdl_c.SDL_GPU_LOADOP_DONT_CARE;
+                    depth.stencil_store_op = sdl_c.SDL_GPU_STOREOP_DONT_CARE;
+                    depth.cycle = !clear.keep;  // cycling would give a texture without what was drawn
+                }
+            }
+            sdl_c.SDL_GPURenderPass* pass = sdl_c.SDL_BeginGPURenderPass(commands, color, 1, depth);
+            return Pass{ device: device, commands: commands, pass: pass };
+        }
+    }
+
+    // A compute pass; `read_write` are the buffers its shader writes, its read-write storage
+    // buffers 0, 1... (they must have `Usage.Storage`).
+    pub ComputePass compute(Buffer[] read_write) uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            usize count = read_write.len;
+            sdl_c.SDL_GPUStorageBufferReadWriteBinding[] bindings = scratch.alloc_slice(
+                sdl_c.SDL_GPUStorageBufferReadWriteBinding,
+                max(count, 1)
+            );
+            for (usize i in 0..count) {
+                bindings[i].buffer = device.buffer_of_handle(read_write[i]);
+            }
+            sdl_c.SDL_GPUComputePass* pass = sdl_c.SDL_BeginGPUComputePass(
+                commands,
+                0 as sdl_c.SDL_GPUStorageTextureReadWriteBinding*,
+                0,
+                &bindings[0],
+                count as ui32
+            );
+            return ComputePass{ device: device, commands: commands, pass: pass };
+        }
+    }
+
+    // Sends the passes to the GPU and shows the frame.
+    pub void submit() uses io {
+        unsafe {
+            sdl_c.SDL_SubmitGPUCommandBuffer(commands);
+        }
+    }
+
+    // Sends the passes to the GPU and waits until it ran them: what follows reads their results.
+    pub void!GpuError submit_and_wait() uses io {
+        return device.wait_for(commands) ? ok() : err(Failed);
+    }
+}
+
+// A compute pass of a frame: a pipeline bound, its buffers and uniforms, then dispatches.
+pub struct ComputePass {
+    Device* device;
+    sdl_c.SDL_GPUCommandBuffer* commands;
+    sdl_c.SDL_GPUComputePass* pass;
+
+    pub void bind(ComputePipeline p) uses io {
+        unsafe {
+            sdl_c.SDL_BindGPUComputePipeline(pass, device.compute_of_handle(p));
+        }
+    }
+
+    // `b` as the read-only storage buffer `slot` of the shader.
+    pub void read(ui32 slot, Buffer b) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUBuffer* buffer = device.buffer_of_handle(b);
+            sdl_c.SDL_BindGPUComputeStorageBuffers(pass, slot, &buffer, 1);
+        }
+    }
+
+    // A texture and its sampler, for the sampler `slot` of the compute shader.
+    pub void texture(ui32 slot, Texture t, Sampler s) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUTextureSamplerBinding binding = sdl_c.SDL_GPUTextureSamplerBinding{
+                texture: device.texture_of_handle(t),
+                sampler: device.sampler_of_handle(s)
+            };
+            sdl_c.SDL_BindGPUComputeSamplers(pass, slot, &binding, 1);
+        }
+    }
+
+    // The depth of the frames (what the passes of the window drew before, `Clear.depth`) and `s`,
+    // for the sampler `slot` of the compute shader: 0 near to 1 far. False, nothing bound, when no
+    // pass made it yet.
+    pub bool frame_depth(ui32 slot, Sampler s) uses io {
+        unsafe {
+            if (device.depth as ui64 == 0) {
+                return false;
+            }
+            mut sdl_c.SDL_GPUTextureSamplerBinding binding = sdl_c.SDL_GPUTextureSamplerBinding{
+                texture: device.depth as sdl_c.SDL_GPUTexture*,
+                sampler: device.sampler_of_handle(s)
+            };
+            sdl_c.SDL_BindGPUComputeSamplers(pass, slot, &binding, 1);
+            return true;
+        }
+    }
+
+    pub void uniform<T>(ui32 slot, T* value) uses io {
+        unsafe {
+            sdl_c.SDL_PushGPUComputeUniformData(commands, slot, value as ui8*, size_of(T) as ui32);
+        }
+    }
+
+    // `x` by `y` by `z` groups of the threads of the shader ([numthreads]).
+    pub void dispatch(ui32 x, ui32 y, ui32 z) uses io {
+        unsafe {
+            sdl_c.SDL_DispatchGPUCompute(pass, x, y, z);
+        }
+    }
+
+    pub void end() uses io {
+        unsafe {
+            sdl_c.SDL_EndGPUComputePass(pass);
+        }
+    }
+}
+
+// A pass of a frame: a pipeline bound, its buffers and textures, then draws.
+pub struct Pass {
+    Device* device;
+    sdl_c.SDL_GPUCommandBuffer* commands;
+    sdl_c.SDL_GPURenderPass* pass;
+
+    pub void bind(Pipeline p) uses io {
+        unsafe {
+            sdl_c.SDL_BindGPUGraphicsPipeline(pass, device.pipeline_of_handle(p));
+        }
+    }
+
+    // The vertices of `b`, for the layout of the pipeline.
+    pub void vertices(Buffer b) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUBufferBinding binding = sdl_c.SDL_GPUBufferBinding{
+                buffer: device.buffer_of_handle(b),
+                offset: 0
+            };
+            sdl_c.SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+        }
+    }
+
+    pub void indices(Buffer b, IndexSize size) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUBufferBinding binding = sdl_c.SDL_GPUBufferBinding{
+                buffer: device.buffer_of_handle(b),
+                offset: 0
+            };
+            i32 code = match (size) {
+                U16 => sdl_c.SDL_GPU_INDEXELEMENTSIZE_16BIT,
+                U32 => sdl_c.SDL_GPU_INDEXELEMENTSIZE_32BIT,
+            };
+            sdl_c.SDL_BindGPUIndexBuffer(pass, &binding, code);
+        }
+    }
+
+    // `b` as the storage buffer `slot` of the vertex shader: vertices it makes from what a compute
+    // pass left there (particles).
+    pub void vertex_storage(ui32 slot, Buffer b) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUBuffer* buffer = device.buffer_of_handle(b);
+            sdl_c.SDL_BindGPUVertexStorageBuffers(pass, slot, &buffer, 1);
+        }
+    }
+
+    // A texture and its sampler, for the sampler `slot` of the fragment shader.
+    pub void texture(ui32 slot, Texture t, Sampler s) uses io {
+        unsafe {
+            mut sdl_c.SDL_GPUTextureSamplerBinding binding = sdl_c.SDL_GPUTextureSamplerBinding{
+                texture: device.texture_of_handle(t),
+                sampler: device.sampler_of_handle(s)
+            };
+            sdl_c.SDL_BindGPUFragmentSamplers(pass, slot, &binding, 1);
+        }
+    }
+
+    // `value` copied to the uniform buffer `slot` of the vertex shader: a matrix, a struct laid
+    // out as the shader reads it (std140).
+    pub void vertex_uniform<T>(ui32 slot, T* value) uses io {
+        unsafe {
+            sdl_c.SDL_PushGPUVertexUniformData(commands, slot, value as ui8*, size_of(T) as ui32);
+        }
+    }
+
+    pub void fragment_uniform<T>(ui32 slot, T* value) uses io {
+        unsafe {
+            sdl_c.SDL_PushGPUFragmentUniformData(commands, slot, value as ui8*, size_of(T) as ui32);
+        }
+    }
+
+    pub void draw(ui32 vertices, ui32 instances) uses io {
+        unsafe {
+            sdl_c.SDL_DrawGPUPrimitives(pass, vertices, instances, 0, 0);
+        }
+    }
+
+    pub void draw_indexed(ui32 indices, ui32 instances) uses io {
+        unsafe {
+            sdl_c.SDL_DrawGPUIndexedPrimitives(pass, indices, instances, 0, 0, 0);
+        }
+    }
+
+    // `indices` indices of the bound index buffer from the index `first`: a part of a buffer that
+    // holds the vertices of many things.
+    pub void draw_indexed_range(ui32 indices, ui32 first) uses io {
+        unsafe {
+            sdl_c.SDL_DrawGPUIndexedPrimitives(pass, indices, 1, first, 0, 0);
+        }
+    }
+
+    pub void end() uses io {
+        unsafe {
+            sdl_c.SDL_EndGPURenderPass(pass);
+        }
+    }
+}

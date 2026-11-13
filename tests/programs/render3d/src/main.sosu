@@ -1,0 +1,200 @@
+// render3d without a window (spec §8.2): a cube on a ground, lit by a sun from the upper left,
+// drawn into a target of 128 by 128 pixels and read back. The ground away from the cube is lit,
+// the ground where the cube casts its shadow is darker, the top of the cube is brighter than its
+// front (which the sun does not light), and a cube behind the camera is left out. A skinned cube,
+// all its vertices on one joint, is drawn where the palette of its item puts that joint.
+import std.io;
+import math.linear;
+import image.image;
+import model.model;
+import gpu.gpu;
+import render3d.render3d;
+
+ui32 SIZE = 128;
+
+// The pixel where the point `p` of the world falls, for `camera`.
+i32[2] screen(render3d.Camera camera, linear.Vec3 p) {
+    linear.Vec4 clip = camera.view_projection(1.0).mul_vec(linear.vec4(p.x, p.y, p.z, 1.0));
+    f32 x = (clip.x / clip.w + 1.0) / 2.0 * SIZE as f32;
+    f32 y = (1.0 - clip.y / clip.w) / 2.0 * SIZE as f32;
+    return [x as i32, y as i32];
+}
+
+// How bright the pixel where `p` falls is, from 0 to 255.
+i32 brightness(image.Image img, render3d.Camera camera, linear.Vec3 p) {
+    i32[2] at = screen(camera, p);
+    return image.luma(img.at(at[0], at[1])) as i32;
+}
+
+void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    render3d.Renderer* r = try render3d.create(arena, device, render3d.Options{ shadow_size: 1024 });
+    r.sun = render3d.Sun{ direction: linear.vec3(1.0, -1.0, 0.0), shadow_extent: 8.0 };
+    render3d.Uploaded* box = try r.upload(arena, render3d.cube(arena, [0.8, 0.3, 0.2, 1.0]));
+    render3d.Uploaded* floor = try r.upload(arena, render3d.ground(arena, 20.0, [0.7, 0.7, 0.7, 1.0]));
+    render3d.Camera camera = render3d.Camera{
+        position: linear.vec3(0.0, 6.0, 8.0),
+        target: linear.vec3(0.0, 0.0, 0.0)
+    };
+    mut render3d.Item[3] items = [
+        render3d.item(floor, linear.identity4()),
+        render3d.item(box, linear.translation(linear.vec3(0.0, 1.0, 0.0))),
+        render3d.item(box, linear.translation(linear.vec3(0.0, 1.0, 40.0))),  // behind the camera
+    ];
+    gpu.Texture target = try device.target(SIZE, SIZE);
+    gpu.Frame frame = try device.commands();
+    r.draw_into(frame, target, camera, items[0..3]);
+    try frame.submit_and_wait();
+    image.Image img = try device.read_texture(arena, target);
+
+    // the ground away from the cube, and where the cube casts its shadow (toward +x)
+    i32 lit = brightness(img, camera, linear.vec3(-4.0, 0.0, 3.0));
+    i32 shaded = brightness(img, camera, linear.vec3(2.0, 0.0, 0.0));
+    io.print("lit ground: {}", lit > 60 ? "ok" : "too dark");
+    io.print("shadow: {}", shaded * 10 < lit * 6 ? "ok" : "missing");
+    if (shaded * 10 >= lit * 6) {
+        io.print("shadow: the shaded ground is {}, the lit one {}", shaded, lit);
+    }
+    // the top of the cube, lit; its front, that the sun does not reach
+    i32 top = brightness(img, camera, linear.vec3(0.0, 2.0, 0.0));
+    i32 front = brightness(img, camera, linear.vec3(0.0, 1.0, 1.0));
+    io.print("top brighter than the front: {}", top > front + 30 ? "ok" : "no");
+    if (top <= front + 30) {
+        io.print("top {}, front {}", top, front);
+    }
+    render3d.Stats s = r.stats();
+    io.print("drawn: {}, left out: {}", s.drawn, s.culled);
+
+    // a skinned cube: its vertices on joint 0, which the palette moves 3 to the left
+    model.Model plain = render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]);
+    model.Mesh m0 = plain.meshes[0];
+    mut model.Influence[] influences = arena.alloc_slice(model.Influence, m0.vertices.len);
+    for (usize i in 0..influences.len) {
+        influences[i].weights[0] = 1.0;
+    }
+    mut model.Mesh[] skinned_meshes = arena.alloc_slice(model.Mesh, 1);
+    skinned_meshes[0] = model.Mesh{ name: m0.name, vertices: m0.vertices, indices: m0.indices, material: m0.material,
+            bounds: m0.bounds, influences: some(influences) };
+    mut model.Node[] nodes = arena.alloc_slice(model.Node, 1);
+    nodes[0] = model.Node{ name: "skinned", local: linear.identity4(), meshes: plain.nodes[0].meshes, children: plain.nodes[0].children,
+            skin: some(0) };
+    mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, 1);
+    binds[0] = linear.identity4();
+    mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
+    skins[0] = model.Skin{ name: "one", joints: plain.roots, inverse_binds: binds };
+    model.Model skinned = model.Model{ meshes: skinned_meshes, materials: plain.materials, images: plain.images, nodes: nodes,
+            roots: plain.roots, skins: some(skins) };
+    render3d.Uploaded* moved = try r.upload(arena, skinned);
+    mut linear.Mat4[] palette = arena.alloc_slice(linear.Mat4, 1);
+    palette[0] = linear.translation(linear.vec3(-3.0, 1.0, 0.0));
+    mut render3d.Item[1] dancers = [render3d.Item{ model: moved, transform: linear.identity4(), palette: some(palette) }];
+    gpu.Frame second = try device.commands();
+    r.draw_into(second, target, camera, dancers[0..1]);
+    try second.submit_and_wait();
+    image.Image img2 = try device.read_texture(arena, target);
+    i32[2] there = screen(camera, linear.vec3(-3.0, 2.0, 0.0));
+    i32[2] rest = screen(camera, linear.vec3(0.0, 2.0, 0.0));
+    ui32 green = img2.at(there[0], there[1]) >> 8 & 0xFF;
+    ui32 empty = img2.at(rest[0], rest[1]) >> 8 & 0xFF;
+    io.print("skinned cube where its joint is: {}", green > 80 && empty < 40 ? "ok" : "no");
+    if (green <= 80 || empty >= 40) {
+        io.print("green there {}, at rest {}", green, empty);
+    }
+    r.release(moved);
+
+    // a cube whose vertices are replaced (as a morph target does): moved 3 to the right
+    model.Model plain2 = render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]);
+    render3d.Uploaded* shifted = try r.upload(arena, plain2);
+    mut model.Vertex[] vertices = arena.alloc_slice(model.Vertex, plain2.meshes[0].vertices.len);
+    for (usize i in 0..vertices.len) {
+        mut model.Vertex v = plain2.meshes[0].vertices[i];
+        v.position = [v.position[0] + 3.0, v.position[1] + 1.0, v.position[2]];
+        vertices[i] = v;
+    }
+    r.update_vertices(shifted, 0, vertices);
+    mut render3d.Item[1] morphed = [render3d.item(shifted, linear.identity4())];
+    gpu.Frame third = try device.commands();
+    r.draw_into(third, target, camera, morphed[0..1]);
+    try third.submit_and_wait();
+    image.Image img3 = try device.read_texture(arena, target);
+    i32[2] right_side = screen(camera, linear.vec3(3.0, 2.0, 0.0));
+    ui32 green_there = img3.at(right_side[0], right_side[1]) >> 8 & 0xFF;
+    ui32 green_rest = img3.at(rest[0], rest[1]) >> 8 & 0xFF;
+    io.print("vertices replaced on the GPU: {}", green_there > 80 && green_rest < 40 ? "ok" : "no");
+    if (green_there <= 80 || green_rest >= 40) {
+        io.print("green there {}, at rest {}", green_there, green_rest);
+    }
+    r.release(shifted);
+
+    // a cube moved by a morph target on the GPU: 3 to the right and 1 up at a weight of 1, drawn at
+    // rest at 0; a weight of 0.5 halfway
+    model.Model plain3 = render3d.cube(arena, [0.1, 0.9, 0.1, 1.0]);
+    model.Mesh first = plain3.meshes[0];
+    mut f32[] moves = arena.alloc_slice(f32, first.vertices.len * 3);
+    for (usize i in 0..first.vertices.len) {
+        moves[3 * i] = 3.0;
+        moves[3 * i + 1] = 1.0;
+    }
+    mut model.Morph[] targets = arena.alloc_slice(model.Morph, 2);
+    targets[0] = model.Morph{ name: "nothing", positions: arena.alloc_slice(f32, 0), normals: arena.alloc_slice(f32, 0) };
+    targets[1] = model.Morph{ name: "aside", positions: moves, normals: arena.alloc_slice(f32, 0) };
+    mut model.Mesh[] meshes = arena.alloc_slice(model.Mesh, 1);
+    meshes[0] = model.Mesh{ name: first.name, vertices: first.vertices, indices: first.indices, material: first.material,
+            bounds: first.bounds, morphs: some(targets) };
+    model.Model morphable = model.Model{ meshes: meshes, materials: plain3.materials, images: plain3.images, nodes: plain3.nodes,
+            roots: plain3.roots };
+    render3d.Uploaded* face = try r.upload(arena, morphable);
+    mut ui32[3] green_at = [0, 0, 0];  // at rest, aside, halfway
+    mut f32[3] weight = [0.0, 1.0, 0.5];
+    for (usize k in 0..3) {
+        mut f32[] w = arena.alloc_slice(f32, 2);
+        w[1] = weight[k];
+        mut render3d.Morphed[1] given = [render3d.Morphed{ mesh: 0, weights: w }];
+        mut render3d.Item[1] faces = [render3d.Item{ model: face, transform: linear.identity4(), morphs: some(given[0..1]) }];
+        gpu.Frame f = try device.commands();
+        r.draw_into(f, target, camera, faces[0..1]);
+        try f.submit_and_wait();
+        image.Image img4 = try device.read_texture(arena, target);
+        linear.Vec3 at = k == 0 ? linear.vec3(0.0, 1.0, 0.0) : k == 1 ? linear.vec3(3.0, 2.0, 0.0) : linear.vec3(1.5, 1.5, 0.0);
+        i32[2] px = screen(camera, at);
+        green_at[k] = img4.at(px[0], px[1]) >> 8 & 0xFF;
+        // the place it left: empty once moved aside
+        if (k == 1) {
+            i32[2] left = screen(camera, linear.vec3(-0.8, 0.2, 0.0));
+            green_at[0] = min(green_at[0], 255 - (img4.at(left[0], left[1]) >> 8 & 0xFF));
+        }
+    }
+    bool morphed_ok = green_at[0] > 80 && green_at[1] > 80 && green_at[2] > 80;
+    io.print("morph targets on the GPU: {}", morphed_ok ? "ok" : "no");
+    if (!morphed_ok) {
+        io.print("green at rest {}, aside {}, halfway {}", green_at[0], green_at[1], green_at[2]);
+    }
+    r.release(face);
+
+    device.release_texture(target);
+    r.release(box);
+    r.release(floor);
+    r.close();
+    return ok();
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ debug: true })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("gpu: no device ({}: {})", gpu.message(e), gpu.last_error(&arena));
+            return 77;
+        },
+    };
+    mut i32 status = 0;
+    match (run(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("render3d: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    device.close();
+    return status;
+}

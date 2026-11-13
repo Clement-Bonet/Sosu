@@ -1,0 +1,2 @@
+// physics: rigid bodies in 3D (spec §8.2), on Jolt Physics. Programs import `physics.physics`.
+import physics.physics;

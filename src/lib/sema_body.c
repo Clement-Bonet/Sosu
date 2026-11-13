@@ -11,7 +11,7 @@ static void check_assignable(Body *b, Expr *target);
 static void check_stmt(Body *b, Stmt *stmt);
 
 static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB",
-                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash", "size_of" };
+                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash", "size_of", "offset_of" };
 
 /* ---- Helpers ---- */
 

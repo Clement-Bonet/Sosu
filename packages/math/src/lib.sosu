@@ -1,2 +1,5 @@
-// math: the mathematics beyond `std.math` (spec §8.2). Programs import `math.linear`.
+// math: the mathematics beyond `std.math` (spec §8.2). Programs import `math.linear`, `math.geometry`
+// and `math.curve`.
 import math.linear;
+import math.geometry;
+import math.curve;

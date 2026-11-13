@@ -121,6 +121,44 @@ pub interface Handler<uses E> {
     void on_frame(canvas.Canvas* surface) uses io, E;
 }
 
+// A window whose frames the program draws itself (spec §8.2, 3D), given to a `WindowHandler`:
+// `gpu` opens its device on it. A value: it holds the window of SDL, which lives until `run_window`
+// returns.
+pub struct Window {
+    sdl_c.SDL_Window* handle;
+
+    // The window of SDL, for `gpu` (its functions are called in `unsafe`).
+    pub sdl_c.SDL_Window* native() {
+        return handle;
+    }
+
+    // The size of the window, in the coordinates of its events.
+    pub i32 width() uses io {
+        return sdl.window_size(handle).x;
+    }
+
+    pub i32 height() uses io {
+        return sdl.window_size(handle).y;
+    }
+
+    // Pixels of the screen per unit of the window: 2 on a screen of high density.
+    pub f32 scale() uses io {
+        return sdl.display_scale(handle);
+    }
+}
+
+// What a program that draws its own frames implements (spec §8.2): `run_window` calls it as
+// `run` calls a `Handler`, with the window instead of a canvas.
+pub interface WindowHandler<uses E> {
+    // The window is open, before its first event: the program opens its device here.
+    void on_start(Window window) uses io, E;
+    // Returns false to close the window.
+    bool on_event(Event e) uses io, E;
+    void on_frame(Window window) uses io, E;
+    // Before the window closes: the program releases its device here.
+    void on_stop(Window window) uses io, E;
+}
+
 Button button_of(ui8 index) {
     return index == 1 ? Left : index == 2 ? Middle : index == 3 ? Right : Other;
 }
@@ -412,36 +450,21 @@ Handler* drawer_of<uses E>(keeps Handler<uses E>* handler) {
     }
 }
 
-// Opens the window and runs until `on_event` returns false. Returns the exit code. It has the
-// effects of the handler: `app.run(config, h as app.Handler<uses threads>*)` uses io and threads.
-pub i32 run<uses E>(Config config, Handler<uses E>* handler) uses io, E {
-    mut Arena arena = Arena.new(16 * KB);
-    defer arena.free();
+// The window of `config`, once SDL is started; none if the system cannot open it.
+sdl_c.SDL_Window*? create(Arena* arena, Config config) uses io {
     bool wants_bar = match (config.title_bar) {
         some(bar) => true,
         none => false,
     };
-    if (!sdl.init_video()) {
-        return 1;
-    }
-    defer sdl.quit();
-
     if (config.landscape) {
-        sdl.landscape_only(&arena);
+        sdl.landscape_only(arena);
     }
-    sdl_c.SDL_Window* window = match (sdl.create_window(
-        &arena,
-        config.title,
-        config.width,
-        config.height,
-        !wants_bar
-    )) {
-        some(created) => created,
-        none => {
-            return 1;
-        },
-    };
-    defer sdl.destroy_window(window);
+    return sdl.create_window(arena, config.title, config.width, config.height, !wants_bar);
+}
+
+// The icon of `config`, its title bar and the input of text, on `window`. Returns whether the
+// program draws the title bar (the system accepted the hit test); `arena` lives as the window.
+bool dress(Arena* arena, Config config, sdl_c.SDL_Window* window) uses io {
     match (config.icon) {
         some(icon) => {
             sdl.set_icon(window, icon.pixels, icon.width, icon.height);
@@ -470,6 +493,48 @@ pub i32 run<uses E>(Config config, Handler<uses E>* handler) uses io, E {
     if (!on_screen) {  // a phone: its keyboard would cover the window; `show_keyboard` shows it
         sdl.start_text_input(window);
     }
+    return custom;
+}
+
+// A request of the program (`minimize`, `toggle_maximize`, `set_text_input_area`,
+// `show_keyboard`), which comes as SDL_EVENT_USER: done, and true; false for another event.
+bool request(sdl_c.SDL_Window* window, sdl.Event* event) uses io {
+    if (event.kind != 0x8000) {
+        return false;
+    }
+    if (event.word5 == 1) {
+        sdl.minimize(window);
+    } else if (event.word5 == 2) {
+        sdl.toggle_maximize(window);
+    } else if (event.word5 == 3) {
+        sdl.set_text_input_area(window, event.word6 as i32, event.word7 as i32, sdl.area_w(event), sdl.area_h(event));
+    } else if (event.word5 == 4 || event.word5 == 5) {
+        sdl.text_input(window, event.word5 == 4);
+    }
+    return true;
+}
+
+// Opens the window and runs until `on_event` returns false. Returns the exit code. It has the
+// effects of the handler: `app.run(config, h as app.Handler<uses threads>*)` uses io and threads.
+pub i32 run<uses E>(Config config, Handler<uses E>* handler) uses io, E {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    bool wants_bar = match (config.title_bar) {
+        some(bar) => true,
+        none => false,
+    };
+    if (!sdl.init_video()) {
+        return 1;
+    }
+    defer sdl.quit();
+    sdl_c.SDL_Window* window = match (create(&arena, config)) {
+        some(created) => created,
+        none => {
+            return 1;
+        },
+    };
+    defer sdl.destroy_window(window);
+    bool custom = dress(&arena, config, window);
     sdl_c.SDL_Renderer* renderer = match (sdl.create_renderer(window)) {
         some(created) => created,
         none => {
@@ -536,22 +601,7 @@ pub i32 run<uses E>(Config config, Handler<uses E>* handler) uses io, E {
                 }
                 continue;
             }
-            if (event.kind == 0x8000) {  // SDL_EVENT_USER: a request of `minimize` or `toggle_maximize`
-                if (event.word5 == 1) {
-                    sdl.minimize(window);
-                } else if (event.word5 == 2) {
-                    sdl.toggle_maximize(window);
-                } else if (event.word5 == 3) {
-                    sdl.set_text_input_area(
-                        window,
-                        event.word6 as i32,
-                        event.word7 as i32,
-                        sdl.area_w(event),
-                        sdl.area_h(event)
-                    );
-                } else if (event.word5 == 4 || event.word5 == 5) {
-                    sdl.text_input(window, event.word5 == 4);
-                }
+            if (request(window, event)) {
                 continue;
             }
             Event? device = device_event(window, event, screen.surface.width, screen.surface.height);
@@ -611,4 +661,176 @@ void remove_watch(ExposeTarget* expose) uses io {
     unsafe {
         sdl.remove_event_watch(on_expose, expose as ui8*);
     }
+}
+
+// What `on_window_expose` needs: given to SDL as its data.
+struct WindowExpose {
+    mut WindowHandler*? handler;
+    mut sdl_c.SDL_Window*? window;
+}
+
+// As `on_expose`, for a window drawn by the program: frames while Windows holds the loop of
+// `run_window` during a live resize.
+bool on_window_expose(ui8* data, sdl_c.SDL_Event* raw) uses io {
+    sdl.Event* event = sdl.as_event(raw);
+    if (event.kind != 0x204 || event.word5 != 1) {
+        return true;
+    }
+    mut WindowHandler*? handler = none;
+    mut sdl_c.SDL_Window*? window = none;
+    unsafe {
+        handler = (data as WindowExpose*).handler;
+        window = (data as WindowExpose*).window;
+    }
+    match (handler) {
+        some(h) => {
+            match (window) {
+                some(w) => {
+                    h.on_frame(Window{ handle: w });
+                },
+                none => { },
+            }
+        },
+        none => { },
+    }
+    return true;
+}
+
+// The handler as an `app.WindowHandler`, for `on_window_expose` (see `drawer_of`).
+WindowHandler* window_drawer_of<uses E>(keeps WindowHandler<uses E>* handler) {
+    unsafe {
+        return handler as WindowHandler*;
+    }
+}
+
+void remove_window_watch(WindowExpose* expose) uses io {
+    unsafe {
+        sdl.remove_event_watch(on_window_expose, expose as ui8*);
+    }
+}
+
+// Opens a window whose frames the program draws itself, with `gpu` (spec §8.2), and runs until
+// `on_event` returns false; returns the exit code. The same loop and events as `run`, without
+// the canvas: `on_frame` gets the window. A window has either the canvas of `run` or the
+// device of the program, never both (SDL refuses a renderer and a GPU device on one window).
+pub i32 run_window<uses E>(Config config, WindowHandler<uses E>* handler) uses io, E {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    bool wants_bar = match (config.title_bar) {
+        some(bar) => true,
+        none => false,
+    };
+    if (!sdl.init_video()) {
+        return 1;
+    }
+    defer sdl.quit();
+    sdl_c.SDL_Window* handle = match (create(&arena, config)) {
+        some(created) => created,
+        none => {
+            return 1;
+        },
+    };
+    defer sdl.destroy_window(handle);
+    bool custom = dress(&arena, config, handle);
+    Window window = Window{ handle: handle };
+    handler.on_start(window);
+    defer handler.on_stop(window);
+
+    WindowExpose* expose = arena.alloc(WindowExpose);
+    expose.handler = some(window_drawer_of(handler));
+    expose.window = some(handle);
+    unsafe {
+        sdl.add_event_watch(on_window_expose, expose as ui8*);
+    }
+    defer remove_window_watch(expose);
+
+    sdl_c.SDL_Point given = sdl.window_size(handle);
+    sdl.Event* event = arena.alloc(sdl.Event);
+    mut Arena frame = Arena.new(4 * KB);
+    defer frame.free();
+    mut bool suspended = false;
+    mut bool running = true;
+    if (wants_bar) {
+        running = handler.on_event(CustomTitleBar(custom));
+    }
+    if (running && (given.x != config.width || given.y != config.height)) {
+        running = handler.on_event(Resized(given.x, given.y));
+    }
+    i32[4] area = sdl.safe_area(handle);
+    if (running && (area[0] != 0 || area[1] != 0 || area[2] != given.x || area[3] != given.y)) {
+        running = handler.on_event(SafeAreaChanged(
+            area[0] as f32,
+            area[1] as f32,
+            (given.x - area[0] - area[2]) as f32,
+            (given.y - area[1] - area[3]) as f32
+        ));
+    }
+    f32 density = sdl.display_scale(handle);
+    if (running && density != 1.0 && density > 0.0) {
+        running = handler.on_event(ScaleChanged(density));
+    }
+    mut sdl_c.SDL_Point last = given;
+    while (running) {
+        frame.free();
+        frame = Arena.new(4 * KB);
+        while (sdl.poll(event)) {
+            if (dialogs.is_answer(event)) {
+                if (!handler.on_event(Dialog(dialogs.receive(&frame, event)))) {
+                    running = false;
+                }
+                continue;
+            }
+            if (request(handle, event)) {
+                continue;
+            }
+            sdl_c.SDL_Point size = sdl.window_size(handle);
+            Event? device = device_event(handle, event, size.x, size.y);
+            Event? translated = match (device) {
+                some(d) => some(d),
+                none => translate(event, &frame),
+            };
+            match (translated) {
+                some(e) => {
+                    match (e) {
+                        Resized(width, height) => {
+                            last = sdl_c.SDL_Point{ x: width, y: height };
+                        },
+                        Suspend => {
+                            suspended = true;
+                        },
+                        Resume => {
+                            suspended = false;
+                        },
+                        _ => { },
+                    }
+                    if (!handler.on_event(e)) {
+                        running = false;
+                    }
+                },
+                none => { },
+            }
+        }
+        if (!running) {
+            break;
+        }
+        if (suspended) {
+            sdl.delay(100);
+            continue;
+        }
+        sdl_c.SDL_Point now = sdl.window_size(handle);
+        if (now.x != last.x || now.y != last.y) {
+            last = now;
+            if (!handler.on_event(Resized(now.x, now.y))) {
+                break;
+            }
+        }
+        ui64 start = sdl.ticks();
+        handler.on_frame(window);
+        // A device that waits for the screen (vsync) paces the loop; a frame drawn in less than
+        // 2 ms did not wait, and the loop sleeps rather than spin.
+        if (sdl.ticks() - start < 2) {
+            sdl.delay(14);
+        }
+    }
+    return 0;
 }

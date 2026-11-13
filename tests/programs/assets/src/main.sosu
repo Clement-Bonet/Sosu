@@ -1,0 +1,149 @@
+// The package assets (spec §8.2): a PNG, a WAV, an OBJ and a file that is not an image, written in
+// build/files of the test, loaded by the two threads of a store; the cache by path, `wait`,
+// a failure, `update` within a budget, a release, and a texture loaded again behind the same handle
+// once its file changed (`watch`).
+import std.io;
+import std.fs;
+import std.time;
+import platform.app;
+import image.image;
+import image.png;
+import audio.audio;
+import audio.wav;
+import model.model;
+import gpu.gpu;
+import assets.assets;
+
+str FOLDER = "tests/programs/assets/build/files";
+
+str ready(assets.State s) {
+    return match (s) {
+        Loading => "loading",
+        Ready => "ready",
+        Failed(why) => why,
+    };
+}
+
+void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io, threads, time {
+    match (fs.create_dirs(arena, FOLDER)) {
+        ok => { },
+        err(e) => { },
+    }
+    str picture = fs.join(arena, FOLDER, "red.png");
+    str sound_path = fs.join(arena, FOLDER, "beep.wav");
+    str box_path = fs.join(arena, FOLDER, "box.obj");
+    str broken = fs.join(arena, FOLDER, "broken.png");
+    mut image.Image red = image.create(arena, 4, 4);
+    red.set(0, 0, image.rgba(255, 0, 0, 255));
+    match (png.save(arena, picture, red)) {
+        ok => { },
+        err(e) => { },
+    }
+    audio.Sound beep = audio.tone(arena, 22050, 440.0, 0.25, 0.5);
+    match (wav.save(arena, sound_path, beep)) {
+        ok => { },
+        err(e) => { },
+    }
+    match (io.write_file(arena, box_path, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")) {
+        ok => { },
+        err(e) => { },
+    }
+    match (io.write_file(arena, broken, "not an image")) {
+        ok => { },
+        err(e) => { },
+    }
+
+    assets.Assets* store = assets.open(arena, some(device), 2);
+    assets.Handle texture = store.texture(picture);
+    assets.Handle again = store.texture(picture);
+    assets.Handle sound = store.sound(sound_path);
+    assets.Handle box = store.model_file(box_path);
+    assets.Handle bad = store.texture(broken);
+    assets.Handle missing = store.sound(fs.join(arena, FOLDER, "nowhere.wav"));
+    io.print("the same path, the same handle: {}", texture.index_of() == again.index_of());
+
+    io.print("texture: {}", ready(store.wait(texture)));
+    io.print("its size: {}", match (store.get_texture(texture)) {
+        some(t) => t.width == 4 && t.height == 4,
+        none => false,
+    });
+    io.print("sound: {}", ready(store.wait(sound)));
+    io.print("its samples: {}", match (store.get_sound(sound)) {
+        some(s) => s.rate == 22050 && s.channels == 1 && s.samples.len == beep.samples.len,
+        none => false,
+    });
+    io.print("model: {}", ready(store.wait(box)));
+    io.print("its mesh: {}", match (store.get_model(box)) {
+        some(m) => m.meshes.len == 1,
+        none => false,
+    });
+    io.print("not an image: {}", ready(store.wait(bad)));
+    io.print("missing: {}", ready(store.wait(missing)));
+
+    // `update` within a budget: what comes is taken frame after frame
+    mut image.Image blue = image.create(arena, 2, 2);
+    str other = fs.join(arena, FOLDER, "blue.png");
+    match (png.save(arena, other, blue)) {
+        ok => { },
+        err(e) => { },
+    }
+    assets.Handle late = store.texture(other);
+    mut usize frames = 0;
+    while (frames < 2000 && match (store.state(late)) {
+        Loading => true,
+        _ => false,
+    }) {
+        store.update(2);
+        time.sleep_ms(1);
+        frames += 1;
+    }
+    io.print("by update: {}", ready(store.state(late)));
+
+    // the file changes: loaded again behind the same handle (the dates of files are in seconds)
+    store.watch(true);
+    time.sleep_ms(1100);
+    match (png.save(arena, picture, image.create(arena, 8, 8))) {
+        ok => { },
+        err(e) => { },
+    }
+    mut usize waited = 0;
+    while (waited < 4000 && match (store.get_texture(texture)) {
+        some(t) => t.width != 8,
+        none => true,
+    }) {
+        store.update(2);
+        time.sleep_ms(1);
+        waited += 1;
+    }
+    io.print("loaded again: {}", match (store.get_texture(texture)) {
+        some(t) => t.width == 8,
+        none => false,
+    });
+
+    store.release(sound);
+    io.print("released: {}", ready(store.state(sound)));
+    store.close();
+    return ok();
+}
+
+i32 main() uses io, threads, time {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("gpu: no device ({})", gpu.message(e));
+            return 77;
+        },
+    };
+    mut i32 status = 0;
+    match (run(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("assets: {}", gpu.message(e));
+            status = 1;
+        },
+    }
+    device.close();
+    return status;
+}

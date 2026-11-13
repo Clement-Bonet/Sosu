@@ -1,0 +1,14 @@
+# What is pressed, shown live (spec §8.2): the buttons, sticks and triggers of each gamepad, the
+# buttons of the mouse, the keys of the keyboard, and two actions of platform.actions.
+[package]
+name = "pads"
+version = "0.1.0"
+
+[app]
+id = "org.sosu.pads"
+name = "Sosu pads"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+render = { path = "../../packages/render" }
+math = { path = "../../packages/math" }

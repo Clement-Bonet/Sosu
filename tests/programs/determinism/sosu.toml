@@ -1,0 +1,14 @@
+# physics, the same steps on every machine (spec §8.2): Jolt built with
+# JPH_CROSS_PLATFORM_DETERMINISTIC, which a program asks for in its [link], and a fingerprint of the
+# bits of a world after 300 steps, the same with MSVC, gcc and clang, on x64 and ARM.
+[package]
+name = "determinism"
+version = "0.1.0"
+
+[link]
+defines = ["JPH_CROSS_PLATFORM_DETERMINISTIC"]
+
+[dependencies]
+physics = { path = "../../../packages/physics" }
+math = { path = "../../../packages/math" }
+scene = { path = "../../../packages/scene" }

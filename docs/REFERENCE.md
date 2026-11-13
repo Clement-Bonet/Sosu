@@ -24,10 +24,19 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [std.time](#stdtime) | The clock and waiting (spec §8), with the effect `time` (spec §7.4), and the dates and times of the calendar (spec §8.2) |
 | [std.vec](#stdvec) | A list of values that grows, in the arena given at its creation (spec §5.4) |
 | [audio.audio](#audioaudio) | A sound in memory, its samples as floats of -1 to 1, interleaved by frame (the left sample, then the right one, for stereo), and the errors of the readers |
+| [audio.coded](#audiocoded) | What audio.mp3, audio.flac and audio.stream share: the decoders of dr_libs (native/dr.c) and of stb_vorbis (native/ogg.c) behind one `Decoder`, and the loop that takes all the samples of one into a `Sound` |
 | [audio.device](#audiodevice) | The sound devices of the system, through SDL3 (`SDL_AudioStream`, the C declarations of platform.sdl_c) |
+| [audio.flac](#audioflac) | FLAC files (native FLAC, not in Ogg), read by dr_flac (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c, which checks the CRC of its frames |
+| [audio.hdf5](#audiohdf5) | The parts of HDF5 (the format of netCDF-4) that SOFA files use, read from the bytes of a file, for audio.sofa |
+| [audio.hrtf](#audiohrtf) | How a head hears a sound from each direction (head-related impulse responses), for headphones: the mixer convolves a voice placed by `set_direction` and `set_elevation` with the responses of its direction, ear by ear, rather than panning it (`Mixer.use_hrtf`) |
 | [audio.mixer](#audiomixer) | Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly |
+| [audio.mp3](#audiomp3) | MP3 files (MPEG-1, 2 and 2.5, layer III), read by dr_mp3 (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c |
 | [audio.ogg](#audioogg) | Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1) |
 | [audio.resample](#audioresample) | A sound at another rate (44 100 Hz to 48 000, for the device or the mixer) |
+| [audio.sofa](#audiosofa) | Head-related impulse responses read from a SOFA file (AES69, the convention SimpleFreeFieldHRIR: the responses of the two ears of a listener, measured from many directions), as an `hrtf.Hrtf` that the mixer hears through (`Mixer.use_hrtf`): the measurements of another dummy head, or of a listener, in place of KEMAR |
+| [audio.spatial](#audiospatial) | Sounds placed in 3D (spec §8.2), over `audio.mixer` |
+| [audio.spectrum](#audiospectrum) | What frequencies a sound holds, for a meter or a visualizer (spec §8.2) |
+| [audio.stream](#audiostream) | A long sound (music, ambiance) read as it plays, rather than decoded whole: an Ogg Vorbis, MP3 or FLAC file decoded into a ring of a few seconds, which the mixer plays in a loop, and which `update` fills again behind it |
 | [audio.wav](#audiowav) | WAV files (RIFF), read and written in Sosu |
 | [compress.checksum](#compresschecksum) | The checksums of the containers, Adler-32 (zlib) and CRC-32 (gzip, PNG, zip) |
 | [compress.deflate](#compressdeflate) | The deflate stream (RFC 1951), without container |
@@ -45,6 +54,8 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [image.jpeg](#imagejpeg) | JPEG files (ITU T.81), read and written in Sosu |
 | [image.ops](#imageops) | Images transformed: cropped, resized (bilinear or Lanczos), rotated by quarter turns or by any angle, flipped |
 | [image.png](#imagepng) | PNG files, read and written in Sosu |
+| [math.curve](#mathcurve) | Values that change over time (spec §8.2) |
+| [math.geometry](#mathgeometry) | The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling) |
 | [math.linear](#mathlinear) | Vectors, matrices, quaternions and transforms of f32, for `render` and 3D |
 | [net.http](#nethttp) | An HTTP/1.1 client |
 | [net.ip](#netip) | The addresses of the network, IPv4 and IPv6, the names resolved into them (DNS), and the errors of `net` |
@@ -1805,6 +1816,112 @@ The part of `s` from frame `start` to `end` (cut to the sound), sharing its samp
 pub Sound part(Sound s, usize start, usize end)
 ```
 
+## audio.coded
+
+What audio.mp3, audio.flac and audio.stream share: the decoders of dr_libs (native/dr.c) and of stb_vorbis (native/ogg.c) behind one `Decoder`, and the loop that takes all the samples of one into a `Sound`. Not for programs: they import audio.mp3, audio.flac, audio.ogg or audio.stream.
+
+### enum `Codec`
+
+```sosu
+pub enum Codec {
+    Mp3,
+    Flac,
+    Ogg,
+}
+```
+
+### `codec_of`
+
+The codec of a file by its first bytes (`audio.wav` is not decoded here: its samples are there).
+
+```sosu
+pub Codec? codec_of(ui8[] data)
+```
+
+### struct `Decoder`
+
+A decoder open on the bytes of a file, which must live as long as it.
+
+```sosu
+pub struct Decoder
+```
+
+- `pub Codec codec`
+- `pub i32 channels`
+- `pub i32 rate`
+
+### `vorbis_pages`
+
+The pages of the Vorbis stream of an Ogg file that groups several streams side by side (a video: Theora and its sound; several tracks), in a copy of `arena`: in each group (the pages that begin a stream, one after the other, then the pages of all of them, mixed), the first stream whose first packet is the header of Vorbis; its pages kept whole, their checksums with them. A chained file starts a new group with each link. `data` itself when it holds one stream at a time (no copy: none), or when it is not made of pages from its start (the decoder says what it is).
+
+```sosu
+pub ui8[]? vorbis_pages(Arena* arena, ui8[] data)
+```
+
+### `open`
+
+A decoder of `codec` on `data`, its memory (`MEMORY`) taken from `arena`, which must live as long as it (an Ogg file of several streams side by side is copied there, its Vorbis pages only).
+
+```sosu
+pub Decoder!audio.AudioError open(Arena* arena, Codec codec, keeps ui8[] given)
+```
+
+### `read_into`
+
+Up to `out.len / channels` frames decoded into `out`; the frames given, 0 at the end.
+
+```sosu
+pub usize read_into(Decoder d, f32[] out)
+```
+
+### `rewind`
+
+Back to the start of the file; false when the decoder cannot.
+
+```sosu
+pub bool rewind(Decoder d)
+```
+
+### `length`
+
+The frames of the file, 0 when the decoder cannot say.
+
+```sosu
+pub ui64 length(Decoder d)
+```
+
+### `seek`
+
+To the frame `frame` of the file; false when the decoder cannot (past the end, a damaged file).
+
+```sosu
+pub bool seek(Decoder d, ui64 frame)
+```
+
+### `finish`
+
+The decoder closed (its memory is the arena's).
+
+```sosu
+pub void finish(Decoder d)
+```
+
+### `MEMORY`
+
+The memory a decoder may take: its state, and the buffers of a frame (FLAC: up to 65 535 samples for each of 8 channels).
+
+```sosu
+pub i32 MEMORY = 4194304
+```
+
+### `decode`
+
+The sound of `data`, a file of `codec` already recognized by its first bytes.
+
+```sosu
+pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] given)
+```
+
 ## audio.device
 
 The sound devices of the system, through SDL3 (`SDL_AudioStream`, the C declarations of platform.sdl_c). A `Player` plays the sounds of its mixer, `sounds`: the program calls `update()` often (each frame of a window, or every few milliseconds), which mixes what the device will need next, `ahead_ms` in advance. A `Recorder` gives what a microphone heard since its last `read`. SDL converts the samples to the format, rate and channels of the device; no callback runs on the thread of the sound, so everything stays in the thread of the program.
@@ -1858,7 +1975,7 @@ pub Device[] recording_devices(Arena* arena) uses io
 
 ### struct `Output`
 
-How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner). When the device runs dry between two calls of `update()` close together (a program slower than that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
+How a `Player` opens its device: the mixer runs at `rate` with `channels` (1, 2, 6 for 5.1 or 8 for 7.1: SDL mixes them down to what the device has), and keeps `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner). When the device runs dry between two calls of `update()` close together (a program slower than that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
 
 ```sosu
 pub struct Output
@@ -1904,7 +2021,7 @@ pub class Player
 A player on the device of `output`, or none if it cannot be opened (`last_error` says why).
 
 ```sosu
-pub Player*? open_player(Arena* arena, Output output) uses io requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE && (output.channels == 1 || output.channels == 2) && output.ahead_ms > 0 && output.ahead_ms <= 2000
+pub Player*? open_player(Arena* arena, Output output) uses io requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE && (output.channels == 1 || output.channels == 2 || output.channels == 6 || output.channels == 8) && output.ahead_ms > 0 && output.ahead_ms <= 2000
 ```
 
 ### struct `Input`
@@ -1946,9 +2063,161 @@ A recorder on the device of `input`, or none if it cannot be opened (`last_error
 pub Recorder*? open_recorder(Arena* arena, Input input) uses io requires input.rate >= audio.MIN_RATE && input.rate <= audio.MAX_RATE && input.channels >= 1 && input.channels <= audio.MAX_CHANNELS
 ```
 
+## audio.flac
+
+FLAC files (native FLAC, not in Ogg), read by dr_flac (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c, which checks the CRC of its frames. Every allocation of the decoder comes from `coded.MEMORY` bytes of the arena: a file that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The CI fuzzes it, but it is C: a file from an unknown source is still safer read in a process of its own.
+
+### `is_flac`
+
+Whether `data` starts as a FLAC file: "fLaC".
+
+```sosu
+pub bool is_flac(ui8[] data)
+```
+
+### `decode`
+
+The sound of the FLAC file `data`.
+
+```sosu
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data)
+```
+
+### `load`
+
+The sound of the FLAC file at `path`.
+
+```sosu
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io
+```
+
+## audio.hdf5
+
+The parts of HDF5 (the format of netCDF-4) that SOFA files use, read from the bytes of a file, for audio.sofa. Not a library of HDF5: what a file of variables written by netCDF-4 holds, and only that.  - The superblock of version 2 or 3 (that of netCDF-4 and of HDF5 1.8 and later); versions 0 and 1   give `Unsupported`. - Object headers of version 1 and 2, their continuations. - The links of the root group: compact (link messages), or dense (a fractal heap whose root   block is direct, or indirect over direct blocks, indexed by a B-tree of version 2 of one node). - Variables: their dataspace, a type of floats of 4 or 8 bytes in little-endian order, their   layout of version 3 (compact, contiguous, or in chunks indexed by a B-tree of version 1), the   filters deflate, shuffle and Fletcher-32 (not checked); their attributes when compact, and   the value of those that are fixed strings.  Every read is checked: a read outside of the file, or a structure that does not hold, gives `Damaged`, never a read outside of its bytes; what the file asks for is bounded (`MAX_ELEMENTS` elements, `MAX_DEPTH` levels of a B-tree, `MAX_BLOCKS` blocks of a header).
+
+### `MAX_ELEMENTS`
+
+The elements a variable may hold: as many floats as `audio.MAX_SAMPLES`.
+
+```sosu
+pub usize MAX_ELEMENTS = 67108864
+```
+
+### struct `Link`
+
+```sosu
+pub struct Link
+```
+
+- `pub str name`
+- `pub usize header`  
+  the address of the object header it names
+
+### struct `Attribute`
+
+```sosu
+pub struct Attribute
+```
+
+- `pub str name`
+- `pub str text`  
+  the value of a fixed string, "" for another type
+
+### struct `Variable`
+
+A variable (a dataset): what it holds and where.
+
+```sosu
+pub struct Variable
+```
+
+- `pub usize[] dims`
+- `pub Attribute[] attributes`
+- `pub usize count()`  
+  The number of elements.
+- `pub str? text_of(str name)`  
+  The value of the string attribute `name`.
+
+### class `File`
+
+```sosu
+pub class File
+```
+
+- `pub Link[]!audio.AudioError links()`  
+  The links of the root group.
+- `pub Variable!audio.AudioError variable(usize at)`  
+  The variable whose object header is at `at`.
+- `pub f64[]!audio.AudioError floats_of(Variable v)`  
+  The values of `v`, a variable of floats, in the order of its dimensions (the last the fastest).
+
+### `open`
+
+The file of `data`, which must live as long as it.
+
+```sosu
+pub File*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data)
+```
+
+### `is_hdf5`
+
+Whether `data` starts as an HDF5 file.
+
+```sosu
+pub bool is_hdf5(ui8[] data)
+```
+
+## audio.hrtf
+
+How a head hears a sound from each direction (head-related impulse responses), for headphones: the mixer convolves a voice placed by `set_direction` and `set_elevation` with the responses of its direction, ear by ear, rather than panning it (`Mixer.use_hrtf`). Before and behind, above and below are then told apart, as panning cannot.  The responses are those of KEMAR, a dummy head measured by Bill Gardner and Keith Martin at the MIT Media Lab (1994), their "compact" set: 368 directions on the right, from 40 degrees below to above the head, 128 frames at 44.1 kHz, compiled into the package (native/kemar.c, written by native/kemar.py; Copyright 1994 by the MIT Media Lab, without restrictions on use, the authors cited: THIRD_PARTY_NOTICES.md). The left side is the right one, the ears swapped.  Each response is cut at its onset: what is before it becomes a delay of its ear (the difference between the two is the time the sound takes around the head, up to 0.7 ms), and the responses are mixed between the four directions measured around the one asked, their delays too, without the combing that mixing two responses arriving at other times would give. They are resampled to the rate of the mixer, and scaled so that a sound ahead is as loud as it is panned in the middle. The mixer convolves by blocks, through `spectrum.Plan`: one block late (`Mixer.latency`).
+
+### `KEMAR_RATE`
+
+The rate of the measurements.
+
+```sosu
+pub i32 KEMAR_RATE = 44100
+```
+
+### class `Hrtf`
+
+```sosu
+pub class Hrtf
+```
+
+- `pub i32 rate`
+- `pub usize taps`  
+  of each response, at `rate`
+- `pub usize count`  
+  the directions measured
+- `pub f32 longest`  
+  the longest delay, in frames
+- `pub bool mirrored`  
+  the right side only (azimuths 0 to 180), the left its mirror
+- `pub f32[2] place(usize i)`  
+  Where the direction `i` measured is: its azimuth (degrees, 90 right) and elevation.
+- `pub f32[2] filters(f32 azimuth, f32 elevation, f32[] left, f32[] right) requires left.len >= taps && right.len >= taps`  
+  The responses of the left and right ears for a sound from `azimuth` (radians: 0 ahead, pi/2 right, -pi/2 left) and `elevation` (radians, above positive; held within what was measured), into `left` and `right` (`taps` each), and their delays, in frames.
+
+### `kemar`
+
+The responses of KEMAR at `rate`, in `arena` (about 2 KB a direction at 48 kHz: 800 KB).
+
+```sosu
+pub Hrtf* kemar(keeps Arena* arena, i32 rate) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE
+```
+
+### `measured`
+
+The responses of `elevations.len` directions measured at `measured_rate` (`raw`: for each, the left ear then the right, `measured_taps` frames each, and `extra` frames of delay before each), at `rate`: each cut at its onset, `keep` frames kept after it (the last ones fading out), resampled, and all scaled so that a sound ahead is as loud as one panned in the middle. `mirrored`: the directions are on the right only, by rings of one elevation sorted by azimuth.
+
+```sosu
+pub Hrtf* measured(keeps Arena* arena, i32 measured_rate, i32 rate, usize measured_taps, usize keep, keeps f32[] elevations, keeps f32[] azimuths, f32[] raw, f32[] extra, bool mirrored) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && measured_rate >= audio.MIN_RATE && measured_rate <= audio.MAX_RATE && elevations.len == azimuths.len && elevations.len > 0 && keep > 0 && keep <= measured_taps && raw.len == 2 * elevations.len * measured_taps && extra.len == 2 * elevations.len
+```
+
 ## audio.mixer
 
-Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound.
+Several sounds played together, each with its volume, panning, speed and loop, into a buffer of samples (`mix`), which `audio.device` gives to the sound card, and a test reads directly. A sound of another rate than the mixer is read at its own speed, by linear interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before. A change of volume or panning moves over one buffer, so that it does not click. A mixer of one channel ignores the panning, and averages the two channels of a stereo sound. A voice may go through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for each channel. A mixer of 6 channels gives 5.1, of 8 channels 7.1, in the order of SDL (front left, front right, center, LFE, back left, back right, then side left and side right): a voice given a direction (`set_direction`) is placed between the two speakers around it, with equal power; one without is placed by its panning over the front, a stereo sound to the front left and right. The LFE channel is left silent: the system makes it from the others when it wants it. A stereo mixer given a head (`use_hrtf`, audio.hrtf) plays a voice that has a direction for headphones: through the responses of the two ears for its direction and its elevation (`set_elevation`).
 
 ### struct `Play`
 
@@ -1963,9 +2232,17 @@ pub struct Play
 - `pub f32 speed = 1.0`
 - `pub bool looping = false`
 
+### `speaker_gains`
+
+The gains of the speakers of a mixer of 5.1 or 7.1 for a sound from `angle` (radians, 0 ahead, toward +right): the two speakers around it, with equal power, the others silent.
+
+```sosu
+pub f32[8] speaker_gains(i32 channels, f32 angle)
+```
+
 ### class `Mixer`
 
-The sound of `channels` channels (1 or 2) at `rate` frames per second, from its voices.
+The sound of `channels` channels (1, 2, 6 for 5.1 or 8 for 7.1) at `rate` frames per second, from its voices.
 
 ```sosu
 pub class Mixer
@@ -1975,14 +2252,34 @@ pub class Mixer
 - `pub i32 channels`
 - `pub mut f32 volume`  
   of everything, 1 by default
+- `pub void use_hrtf(keeps hrtf.Hrtf* h) requires channels == 2 && h.rate == rate`  
+  The voices that have a direction heard through `h`, for headphones: a stereo mixer, at the rate of `h`. The others are panned as before. A voice heard through a head is convolved by blocks, through fast Fourier transforms, and heard one block late (256 frames at 48 kHz).
+- `pub usize latency()`  
+  How late a voice heard through a head is, in frames: one block (0 when the mixer pans).
+- `pub void no_hrtf()`  
+  The voices panned again.
+- `pub bool binaural()`  
+  Whether the voices that have a direction are heard through a head.
+- `pub void set_room(f32 size, f32 damp)`  
+  The room of the reverberation: `size` from 0 (small, short) to 1 (a hall), `damping` from 0 (bright) to 1 (dull walls).
+- `pub void set_reverb(ui32 id, f32 send)`  
+  The share of the sound `id` sent to the reverberation, from 0 (none: the default) to 1.
 - `pub ui32 play(keeps audio.Sound sound)`  
   Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
 - `pub ui32 play_with(keeps audio.Sound sound, Play how) requires how.speed > 0.0`
+- `pub f64 position(ui32 id)`  
+  Where the sound `id` is, in frames of its sound (a fraction between two), or -1 when it is not playing: what `audio.stream` follows.
 - `pub bool playing(ui32 id)`  
   Whether the sound `id` is still playing.
 - `pub void set_volume(ui32 id, f32 v)`
 - `pub void set_pan(ui32 id, f32 pan)`
+- `pub void set_direction(ui32 id, f32 angle)`  
+  Where the sound `id` comes from, for a mixer of 5.1 or 7.1: `angle` in radians, 0 ahead, pi/2 right, pi behind; a stereo sound is heard as one. A mixer of 1 or 2 channels uses its panning.
+- `pub void set_elevation(ui32 id, f32 elevation)`  
+  How far above (positive) or below the sound `id` is, in radians, for a mixer that hears through a head (`use_hrtf`); 0 by default.
 - `pub void set_speed(ui32 id, f32 speed) requires speed > 0.0`
+- `pub void set_lowpass(ui32 id, f32 hz)`  
+  The sound `id` through a low-pass filter of one pole at `hz` (what is above it softened, 6 dB an octave); 0 takes the filter away.
 - `pub void set_looping(ui32 id, bool looping)`
 - `pub void stop(ui32 id)`
 - `pub void stop_all()`
@@ -1999,9 +2296,37 @@ A mixer of `channels` channels at `rate`, in `arena`.
 pub Mixer* create(Arena* arena, i32 rate, i32 channels)
 ```
 
+## audio.mp3
+
+MP3 files (MPEG-1, 2 and 2.5, layer III), read by dr_mp3 (dr_libs, public domain or MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by native/dr.c. Every allocation of the decoder comes from `coded.MEMORY` bytes of the arena: a file that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. An ID3v2 tag at the start is skipped; the CI fuzzes it, but it is C: a file from an unknown source is still safer read in a process of its own.
+
+### `is_mp3`
+
+Whether `data` starts as an MP3 file: an ID3v2 tag, or the sync of a frame of layer III.
+
+```sosu
+pub bool is_mp3(ui8[] data)
+```
+
+### `decode`
+
+The sound of the MP3 file `data`.
+
+```sosu
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data)
+```
+
+### `load`
+
+The sound of the MP3 file at `path`.
+
+```sosu
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io
+```
+
 ## audio.ogg
 
-Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md), its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. One logical stream only: chained streams stop after the first.
+Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md), its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. A chained file (logical streams one after the other, as a radio recorded) is read link after link, as long as they keep the channels and the rate of the first; of streams grouped side by side (Theora and its sound, several tracks), the first Vorbis stream of each group is read (`coded.vorbis_pages`).
 
 ### `MEMORY`
 
@@ -2024,7 +2349,7 @@ pub bool is_ogg(ui8[] data)
 The sound of the Ogg Vorbis file `data`.
 
 ```sosu
-pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data)
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] given)
 ```
 
 ### `load`
@@ -2070,6 +2395,336 @@ pub audio.Sound to_rate(Arena* arena, audio.Sound s, i32 rate)
 pub audio.Sound to_rate_with(Arena* arena, audio.Sound s, i32 rate, Quality quality) requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && audio.fits(rate as i64, s.channels as i64, frames_at(s.frames(), s.rate, rate) as i64)
 ```
 
+## audio.sofa
+
+Head-related impulse responses read from a SOFA file (AES69, the convention SimpleFreeFieldHRIR: the responses of the two ears of a listener, measured from many directions), as an `hrtf.Hrtf` that the mixer hears through (`Mixer.use_hrtf`): the measurements of another dummy head, or of a listener, in place of KEMAR.  A SOFA file is a netCDF-4 file, read by audio.hdf5. Its variables `Data.IR` (directions × 2 ears × frames), `Data.SamplingRate` and `SourcePosition` (spherical, in degrees: the azimuth turning left from ahead, as SOFA has it; or cartesian: x ahead, y left, z up) are read, and `Data.Delay` (frames before each response) and `ReceiverPosition` (which ear is first: the left has y > 0) when they are there. Each response is cut `KEEP_MS` after its onset, as KEMAR's compact set is: the tail of a measurement holds the room and the noise more than the head, and it would make the blocks of the mixer longer. The directions may be anywhere on the sphere: `Hrtf.filters` mixes the three nearest.
+
+### `KEEP_MS`
+
+The milliseconds kept of each response after its onset: 2.9, 128 frames at 44.1 kHz, as the compact set of KEMAR.
+
+```sosu
+pub f32 KEEP_MS = 2.9
+```
+
+### `decode`
+
+The responses of the SOFA file `data` at `rate`, in `arena`.
+
+```sosu
+pub hrtf.Hrtf*!audio.AudioError decode(keeps Arena* arena, keeps ui8[] data, i32 rate)
+```
+
+### `load`
+
+The responses of the SOFA file at `path`, at `rate`.
+
+```sosu
+pub hrtf.Hrtf*!audio.AudioError load(keeps Arena* arena, str path, i32 rate) uses io
+```
+
+## audio.spatial
+
+Sounds placed in 3D (spec §8.2), over `audio.mixer`. Each `update` (once a frame, before the device takes the next samples) works out, for each source, its volume from its distance to the listener, its panning from its direction, and its speed from their relative velocity (Doppler), and gives them to the mixer, which moves them over a buffer without a click. The listener faces -z of its rotation, its right is +x, its up +y (as a camera of render3d). A source behind the listener is a little duller, and one the program says hidden (`set_occlusion`, from a ray of `physics` for instance) quieter and duller still. The place rings (`set_reverb`), or the zones of reverberation the listener walks through (`add_zone`): a cave, a hall, a corridor, each a box, which fade into one another over `blend` meters. Through a mixer that hears with a head (`Mixer.use_hrtf`, for headphones), each source gets its direction and its elevation, and the head makes what is behind duller: the space does not.
+
+### enum `Rolloff`
+
+How the volume falls between `near` and `far`.
+
+```sosu
+pub enum Rolloff {
+    Inverse,  // near / distance, as OpenAL: the default
+    Linear,  // a straight line from 1 at near to 0 at far
+    Exponential,  // (near / distance)², as a sound in the open
+}
+```
+
+### struct `Placed`
+
+How a source is placed and heard.
+
+```sosu
+pub struct Placed
+```
+
+- `pub mut linear.Vec3 position`
+- `pub mut linear.Vec3 velocity = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 }`  
+  m/s, for Doppler
+- `pub mut f32 volume = 1.0`
+- `pub f32 speed = 1.0`  
+  of the sound itself, before Doppler
+- `pub bool looping = false`
+- `pub f32 near = 1.0`  
+  meters: full volume within
+- `pub f32 far = 50.0`  
+  meters: silent beyond
+- `pub Rolloff rolloff = Rolloff.Inverse`
+- `pub f32 doppler = 1.0`  
+  0: no change of speed
+- `pub mut f32 occlusion = 0.0`  
+  0: heard directly, 1: behind a wall
+- `pub f32 reverb = 0.0`  
+  its own share sent to the reverberation, over that of the space
+
+### struct `Source`
+
+A source of a space: a handle, dead once its sound ended or was stopped.
+
+```sosu
+pub struct Source
+```
+
+
+### struct `Heard`
+
+What `update` gave the mixer for a source.
+
+```sosu
+pub struct Heard
+```
+
+- `pub f32 volume`
+- `pub f32 pan`
+- `pub f32 speed`
+- `pub f32 cutoff`  
+  Hz of the low-pass filter, 0 for none
+- `pub f32 angle`  
+  radians around the listener: 0 ahead, pi/2 right
+- `pub f32 elevation`  
+  radians above (positive) or below the listener
+
+### struct `Zone`
+
+A zone of reverberation: a box of the world, from its corner `low` to `high`, and its room. The listener inside hears it fully; outside, it fades over `blend` meters.
+
+```sosu
+pub struct Zone
+```
+
+- `pub linear.Vec3 low`
+- `pub linear.Vec3 high`
+- `pub f32 blend = 2.0`
+- `pub f32 amount = 0.6`  
+  how much it rings, from 0 to 1
+- `pub f32 size = 0.5`  
+  the room of the mixer: 0 small, 1 a hall
+- `pub f32 damping = 0.5`  
+  0 bright, 1 dull walls
+
+### struct `Reverb`
+
+The reverberation heard where the listener is.
+
+```sosu
+pub struct Reverb
+```
+
+- `pub f32 amount`
+- `pub f32 size`
+- `pub f32 damping`
+
+### `inside`
+
+How much the listener at `at` is in `z`: 1 inside, down to 0 at `blend` meters out.
+
+```sosu
+pub f32 inside(Zone z, linear.Vec3 at)
+```
+
+### `SOUND`
+
+The speed of sound, m/s.
+
+```sosu
+pub f32 SOUND = 343.0
+```
+
+### `attenuation`
+
+The share of `volume` heard at `distance`.
+
+```sosu
+pub f32 attenuation(Placed p, f32 distance)
+```
+
+### class `Space`
+
+```sosu
+pub class Space
+```
+
+- `pub void set_reverb(f32 amount, f32 size, f32 damping)`  
+  How much the place rings, from 0 (outside: the default) to 1 (a cave), and the room of the reverberation of the mixer: far sources are heard more through it than near ones. With zones, it is what is heard out of all of them.
+- `pub usize add_zone(Zone z)`  
+  A zone of reverberation, from the next `update`; its index.
+- `pub void set_zone(usize index, Zone z)`  
+  The zone `index` changed (a door closed: its amount lowered).
+- `pub void clear_zones()`
+- `pub Reverb reverb()`  
+  The reverberation of the last `update`: that of the zones around the listener, by how much it is in each (zones that overlap share), and that of `set_reverb` for the rest.
+- `pub void listener(linear.Transform t, linear.Vec3 moving)`  
+  Where the listener is (a camera, the head of the player) and how fast it moves.
+- `pub Source play(keeps audio.Sound sound, Placed p)`  
+  `sound` placed by `p`, heard from the next `update` (silent until then).
+- `pub Source attach(keeps stream.Stream* s, Placed p)`  
+  A stream of `audio.stream` (music, an ambiance read as it plays), placed by `p` from the next `update`, which also calls its own `update`: it must play through the mixer of the space. Its volume becomes that of `p` (`set_volume` of the space changes it); `p.speed` and `p.looping` are those of the stream. It is forgotten once it ended or was stopped.
+- `pub bool playing(Source s)`
+- `pub void move(Source s, linear.Vec3 position_now, linear.Vec3 velocity_now)`  
+  The source moved, and its velocity.
+- `pub void set_volume(Source s, f32 volume)`
+- `pub void set_occlusion(Source s, f32 amount)`  
+  How hidden the source is, from 0 (heard directly) to 1 (behind a wall): its volume lowered by up to a half, and its sound softened down to a low-pass of 600 Hz. A program finds it with a ray of `physics` between the listener and the source.
+- `pub void stop(Source s)`
+- `pub Heard heard(Source s)`  
+  What the last `update` gave the mixer for `s`.
+- `pub void update()`  
+  The volume, panning and speed of every source, given to the mixer; the sources whose sound ended are forgotten.
+- `pub usize count()`
+
+### `space`
+
+A space that plays its sources through `m`.
+
+```sosu
+pub Space* space(keeps Arena* arena, keeps mixer.Mixer* m)
+```
+
+## audio.spectrum
+
+What frequencies a sound holds, for a meter or a visualizer (spec §8.2). `fft` is the fast Fourier transform (radix 2, in place); an `Analyzer` takes a window of samples (a Hann window against the leaks between bins), and gives `bands` on a scale of octaves, from 0 (silence, -72 dB) to 1 (a sine at full scale, 0 dB), which rise at once and fall slowly, and `peaks`, which hold a moment before they fall: what the bars of a player show.
+
+### `fft`
+
+`re` and `im` (as many, a power of 2) replaced by their discrete Fourier transform: X[k] = Σ x[n] e^(-2πi kn/N).
+
+```sosu
+pub void fft(f32[] re, f32[] im) requires re.len == im.len && (re.len & (re.len - 1)) == 0
+```
+
+### class `Plan`
+
+A transform of one size made again and again (the convolutions of `audio.mixer` through a head): its turns and the order of its bits kept, rather than worked out each time.
+
+```sosu
+pub class Plan
+```
+
+- `pub usize size`
+- `pub void forward(f32[] re, f32[] im) requires re.len == size && im.len == size`  
+  As `fft`: `re` and `im` (`size` each) replaced by their transform.
+- `pub void inverse(f32[] re, f32[] im) requires re.len == size && im.len == size`  
+  The inverse: `re` and `im` replaced by x[n] = Σ X[k] e^(2πi kn/N) / N.
+
+### `plan`
+
+A transform of `size` (a power of 2) prepared in `arena`.
+
+```sosu
+pub Plan* plan(keeps Arena* arena, usize size) requires size >= 2 && (size & (size - 1)) == 0
+```
+
+### `FLOOR_DB`
+
+The level below which a band shows nothing, in dB below full scale.
+
+```sosu
+pub f32 FLOOR_DB = 72.0
+```
+
+### class `Analyzer`
+
+```sosu
+pub class Analyzer
+```
+
+- `pub usize size`  
+  the samples of a window, a power of 2
+- `pub i32 rate`
+- `pub f32[] bands`  
+  0 to 1, each frame
+- `pub f32[] peaks`
+- `pub mut f32 fall`  
+  what a band loses per second, of the whole height: 1.6
+- `pub mut f32 hold`  
+  seconds a peak stays before it falls: 0.6
+- `pub f32 edge(usize i)`  
+  The frequency (Hz) between the bands `i - 1` and `i`.
+- `pub void analyze(f32[] mono, f32 dt)`  
+  `mono` (its last `size` samples; fewer: the rest silent) analyzed, `dt` seconds after the last call: the bands and the peaks moved.
+- `pub void clear()`  
+  Everything back to silence.
+
+### `analyzer`
+
+An analyzer of windows of `size` samples (a power of 2: 2048 at 44.1 kHz gives bins of 21.5 Hz) at `rate`, in `count` bands from `low` to `high` Hz on a scale of octaves.
+
+```sosu
+pub Analyzer* analyzer(keeps Arena* arena, usize size, i32 rate, usize count, f32 low, f32 high) requires size >= 2 && (size & (size - 1)) == 0 && count > 0 && low > 0.0 && high > low
+```
+
+## audio.stream
+
+A long sound (music, ambiance) read as it plays, rather than decoded whole: an Ogg Vorbis, MP3 or FLAC file decoded into a ring of a few seconds, which the mixer plays in a loop, and which `update` fills again behind it. A song of four minutes takes a ring of 2 seconds (about 700 KB at 44.1 kHz in stereo) and its decoder (4 MB), rather than 80 MB of samples. At its end the stream stops, or starts again, without a gap, when it loops. A WAV file plays the same way, from its samples decoded whole (they are what the file holds).  The ring keeps the last `Options.history` seconds played: `peek` reads what the device plays now (it plays a little behind the mixer), for a meter or a spectrum.  The program calls `update` often: each frame, or with `device.Player.update`. Between two calls, the mixer must not play more than the ring holds beyond its history, else it plays again what it played. The bytes of the file must live as long as the stream.
+
+### struct `Options`
+
+```sosu
+pub struct Options
+```
+
+- `pub f32 volume = 1.0`
+- `pub f32 pan = 0.0`
+- `pub bool looping = false`
+- `pub f32 seconds = 2.0`  
+  the length of the ring
+- `pub f32 history = 0.25`  
+  of it, what stays behind the voice for `peek`
+
+### class `Stream`
+
+```sosu
+pub class Stream
+```
+
+- `pub void update()`  
+  What the mixer played since the last call, and the ring filled again behind it; the voice stopped once the sound has ended. Call it often (each frame).
+- `pub bool playing()`  
+  Whether it still plays (its end not reached, not stopped).
+- `pub ui64 played_frames()`  
+  The frames it has played since the start (around again when it loops).
+- `pub ui64 position()`  
+  Where it is in the file, in frames (its start again after a loop, when its length is known).
+- `pub ui64 frames()`  
+  The frames of the file, 0 when its decoder cannot say; `rate` of them a second.
+- `pub i32 rate()`
+- `pub i32 channels()`
+- `pub bool seek(ui64 frame)`  
+  To the frame `frame` of the file, the ring decoded again from there: false (and nothing changed) past its end, or when the decoder cannot.
+- `pub ui32 voice_id()`  
+  The voice of the mixer that plays it now (another after `seek`), for its panning, filter and reverberation; `audio.spatial` places it with `Space.attach`.
+- `pub void set_volume(f32 v)`
+- `pub usize peek(f32[] out, i64 offset)`  
+  `out.len` frames mixed down to one channel, from `offset` frames after where the voice is (a negative offset: what it played, as far back as `Options.history`); what the ring does not hold (yet, or any more) is silent. The frames given.
+- `pub void stop()`
+- `pub void close()`  
+  Stopped, and its decoder closed.
+
+### `open`
+
+The file `data` (Ogg Vorbis, MP3, FLAC or WAV) played as it is read, through `m`. `arena` keeps its ring and its decoder; `data` must live as long as the stream.
+
+```sosu
+pub Stream*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data, keeps mixer.Mixer* m, Options options)
+```
+
+### `load`
+
+The file at `path`, read whole into `arena`, played as it is decoded.
+
+```sosu
+pub Stream*!audio.AudioError load(keeps Arena* arena, str path, keeps mixer.Mixer* m, Options options) uses io
+```
+
 ## audio.wav
 
 WAV files (RIFF), read and written in Sosu. Read: integers of 8 (unsigned), 16, 24 and 32 bits and floats of 32 and 64 bits, in the plain header or the extensible one (WAVE_FORMAT_EXTENSIBLE), 1 to `audio.MAX_CHANNELS` channels; the chunks it does not know are skipped. Every read is checked: a damaged file gives `Damaged`, never a read outside of its bytes; a data chunk longer than the file is cut to it (as a recording stopped before its header was finished), and a sound beyond `audio.fits` is refused before its samples are allocated. Written: the 44 bytes of the plain header, then the samples, integers rounded and cut to their range.
@@ -2093,6 +2748,20 @@ Whether `data` starts as a WAV file.
 
 ```sosu
 pub bool is_wav(ui8[] data)
+```
+
+### `f32_of`
+
+The float of the bits `bits` (IEEE 754), and back: computed, exactly, rather than read through a pointer of another type, which the C compiler may reorder (strict aliasing).
+
+```sosu
+pub f32 f32_of(ui32 bits)
+```
+
+### `f64_of`
+
+```sosu
+pub f64 f64_of(ui64 bits)
 ```
 
 ### `decode`
@@ -3179,6 +3848,333 @@ Writes `img` as a PNG file at `path`.
 pub void!io.IoError save(Arena* arena, str path, image.Image img) uses io
 ```
 
+## math.curve
+
+Values that change over time (spec §8.2). A `Curve` is keys of time and value, read between them by steps, by straight lines, or by the cubic splines of Hermite that glTF gives with their tangents; `Curve3` is the same for a `Vec3`, and a `Gradient` is colors over 0..1. `anim` samples the channels of clips with them, `particles` the sizes and colors over the life of a particle. Before the first key a curve holds the first value, after the last the last value.
+
+### enum `Interpolation`
+
+```sosu
+pub enum Interpolation {
+    Step,  // the value of the key before, until the next
+    Linear,  // a straight line between two keys
+    Hermite,  // a cubic spline through the keys, with the tangents given (glTF's CUBICSPLINE)
+}
+```
+
+### struct `Key`
+
+A key: a value at a time, and its tangents (for `Hermite` only), in value per second.
+
+```sosu
+pub struct Key
+```
+
+- `pub f32 time`
+- `pub f32 value`
+- `pub f32 in_tangent = 0.0`
+- `pub f32 out_tangent = 0.0`
+
+### `key`
+
+```sosu
+pub Key key(f32 time, f32 value)
+```
+
+### `hermite`
+
+The cubic of Hermite at `s` (0..1), from `v0` with the tangent `m0` to `v1` with `m1`, both already multiplied by the width of the span.
+
+```sosu
+pub f32 hermite(f32 v0, f32 m0, f32 v1, f32 m1, f32 s)
+```
+
+### struct `Curve`
+
+```sosu
+pub struct Curve
+```
+
+- `pub Key[] keys`  
+  by time, increasing
+- `pub Interpolation mode = Interpolation.Linear`
+- `pub f32 sample(f32 t)`  
+  The value at `t`; 0 for a curve without keys.
+- `pub f32 duration()`  
+  The time of the last key: the length of a clip.
+- `pub bool valid()`  
+  True when the times increase, or stay, from key to key, and none is NaN.
+
+### `constant`
+
+A curve that holds `value` at every time.
+
+```sosu
+pub Curve constant(Arena* arena, f32 value)
+```
+
+### `line`
+
+A straight line from `from` at 0 to `to` at 1: a size over the life of a particle.
+
+```sosu
+pub Curve line(Arena* arena, f32 from, f32 to)
+```
+
+### `of`
+
+A curve of the keys, copied; none when their times decrease or a number is NaN.
+
+```sosu
+pub Curve? of(Arena* arena, Key[] keys, Interpolation mode)
+```
+
+### struct `Key3`
+
+```sosu
+pub struct Key3
+```
+
+- `pub f32 time`
+- `pub linear.Vec3 value`
+- `pub linear.Vec3 in_tangent = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 }`
+- `pub linear.Vec3 out_tangent = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 }`
+
+### `key3`
+
+```sosu
+pub Key3 key3(f32 time, linear.Vec3 value)
+```
+
+### struct `Curve3`
+
+The same as a `Curve`, for a `Vec3`: a position, a scale, a velocity.
+
+```sosu
+pub struct Curve3
+```
+
+- `pub Key3[] keys`
+- `pub Interpolation mode = Interpolation.Linear`
+- `pub linear.Vec3 sample(f32 t)`
+- `pub f32 duration()`
+- `pub bool valid()`
+
+### struct `Stop`
+
+A color of a gradient, at `at` in 0..1: linear RGBA.
+
+```sosu
+pub struct Stop
+```
+
+- `pub f32 at`
+- `pub linear.Vec4 color`
+
+### `stop`
+
+```sosu
+pub Stop stop(f32 at, linear.Vec4 color)
+```
+
+### struct `Gradient`
+
+Colors over 0..1, mixed in straight lines between their stops.
+
+```sosu
+pub struct Gradient
+```
+
+- `pub Stop[] stops`  
+  by `at`, increasing
+- `pub linear.Vec4 sample(f32 t)`
+
+### `gradient`
+
+From `from` at 0 to `to` at 1.
+
+```sosu
+pub Gradient gradient(Arena* arena, linear.Vec4 from, linear.Vec4 to)
+```
+
+### `solid`
+
+One color at every time.
+
+```sosu
+pub Gradient solid(Arena* arena, linear.Vec4 color)
+```
+
+## math.geometry
+
+The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling). Right-handed axes, the matrices of math.linear (columns, a depth of 0 to 1 after projection).
+
+### struct `Aabb`
+
+A box aligned on the axes, from `min` to `max`.
+
+```sosu
+pub struct Aabb
+```
+
+- `pub linear.Vec3 min`
+- `pub linear.Vec3 max`
+- `pub linear.Vec3 center()`
+- `pub linear.Vec3 size()`
+- `pub bool contains(linear.Vec3 p)`
+- `pub bool overlaps(Aabb o)`  
+  Whether the two boxes share a point.
+- `pub Aabb union(Aabb o)`  
+  The smallest box that holds both.
+- `pub Aabb grown(linear.Vec3 p)`  
+  The smallest box that holds it and `p`.
+- `pub Aabb transformed(linear.Mat4 m)`  
+  The box that holds this one moved by `m` (its 8 corners transformed): the bounds of a mesh in the world, from its bounds in its own space.
+
+### `aabb`
+
+```sosu
+pub Aabb aabb(linear.Vec3 min, linear.Vec3 max)
+```
+
+### `around`
+
+The smallest box that holds `points`, none if there are none.
+
+```sosu
+pub Aabb? around(linear.Vec3[] points)
+```
+
+### struct `Sphere`
+
+```sosu
+pub struct Sphere
+```
+
+- `pub linear.Vec3 center`
+- `pub f32 radius`
+- `pub bool contains(linear.Vec3 p)`
+- `pub bool overlaps(Sphere o)`
+
+### `sphere`
+
+```sosu
+pub Sphere sphere(linear.Vec3 center, f32 radius)
+```
+
+### struct `Plane`
+
+A plane: the points p where normal.dot(p) + d == 0; the normal points to its front.
+
+```sosu
+pub struct Plane
+```
+
+- `pub linear.Vec3 normal`
+- `pub f32 d`
+- `pub f32 distance(linear.Vec3 p)`  
+  The distance of `p` to the plane, positive in front, negative behind (normal of length 1).
+
+### `plane`
+
+The plane through `point`, facing `normal` (normalized here).
+
+```sosu
+pub Plane plane(linear.Vec3 point, linear.Vec3 normal)
+```
+
+### struct `Ray`
+
+A ray: from `origin`, toward `direction`, normalized by `ray`, so that a distance along it is a distance in the world.
+
+```sosu
+pub struct Ray
+```
+
+- `pub linear.Vec3 origin`
+- `pub linear.Vec3 direction`
+- `pub linear.Vec3 at(f32 distance)`
+
+### `ray`
+
+```sosu
+pub Ray ray(linear.Vec3 origin, linear.Vec3 direction)
+```
+
+### `ray_from_screen`
+
+The ray under the point (x, y) of a window `width` by `height` pixels (from the top left), for a camera whose matrix is `view_projection` (projection times view): picking with the mouse. None when the matrix cannot be inverted.
+
+```sosu
+pub Ray? ray_from_screen(linear.Mat4 view_projection, f32 x, f32 y, f32 width, f32 height)
+```
+
+### `ray_box`
+
+Where the ray enters the box, as a distance along it (0 when it starts inside); none if it misses it, or the box is behind.
+
+```sosu
+pub f32? ray_box(Ray r, Aabb b)
+```
+
+### `ray_sphere`
+
+Where the ray first meets the sphere (0 when it starts inside); none if it misses it.
+
+```sosu
+pub f32? ray_sphere(Ray r, Sphere s)
+```
+
+### `ray_plane`
+
+Where the ray meets the plane, from its front or its back; none if it is parallel to it or meets it behind its origin.
+
+```sosu
+pub f32? ray_plane(Ray r, Plane p)
+```
+
+### struct `TriangleHit`
+
+Where a ray meets a triangle: the distance along the ray, and the coordinates (u, v) of the point in the triangle (the point is a * (1 - u - v) + b * u + c * v), to interpolate what the vertices hold.
+
+```sosu
+pub struct TriangleHit
+```
+
+- `pub f32 distance`
+- `pub f32 u`
+- `pub f32 v`
+
+### `ray_triangle`
+
+The ray against the triangle (a, b, c), seen from either side (Möller and Trumbore).
+
+```sosu
+pub TriangleHit? ray_triangle(Ray r, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c)
+```
+
+### struct `Frustum`
+
+What a camera sees: six planes facing inward (left, right, bottom, top, near, far).
+
+```sosu
+pub struct Frustum
+```
+
+- `pub Plane[6] planes`
+- `pub bool sees_box(Aabb b)`  
+  Whether some of the box may be seen: false only when it is wholly behind a plane (a box near a corner may be kept although unseen, which costs a draw, never a missing object).
+- `pub bool sees_sphere(Sphere s)`
+- `pub bool sees_point(linear.Vec3 point)`
+
+### `frustum`
+
+The frustum of a camera from its matrix, projection times view (a depth of 0 to 1 after projection, as `linear.perspective` gives it): the planes of Gribb and Hartmann.
+
+```sosu
+pub Frustum frustum(linear.Mat4 view_projection)
+```
+
 ## math.linear
 
 Vectors, matrices, quaternions and transforms of f32, for `render` and 3D. Conventions: column vectors (a matrix applies on the left: `m.mul_vec(v)`), matrices stored by columns (as the GPU APIs read them), right-handed axes, angles in radians, and a depth of 0 to 1 after projection (Vulkan, Metal, Direct3D, SDL_GPU).
@@ -3483,6 +4479,14 @@ A transform that changes nothing.
 
 ```sosu
 pub Transform transform()
+```
+
+### `decompose`
+
+The transform that `m` applies: its translation, rotation and scale, `to_mat4` giving `m` back (a matrix with a shear gives the nearest; a mirror makes the scale on x negative).
+
+```sosu
+pub Transform decompose(Mat4 m)
 ```
 
 ## net.http

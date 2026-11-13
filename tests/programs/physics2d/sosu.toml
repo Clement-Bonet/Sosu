@@ -1,0 +1,11 @@
+# The package physics2d (spec §8.2): a ball falling on a floor, a stack that sleeps, rays and
+# layers, contacts and sensors, joints, the transforms of scene, and the same steps twice.
+[package]
+name = "physics2dtest"
+version = "0.1.0"
+
+[dependencies]
+physics2d = { path = "../../../packages/physics2d" }
+math = { path = "../../../packages/math" }
+scene = { path = "../../../packages/scene" }
+render = { path = "../../../packages/render" }

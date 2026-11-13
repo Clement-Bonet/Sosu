@@ -358,6 +358,21 @@ pub struct Canvas {
         }
         ui32 below = pixels[i];
         ui32 a = color.a as ui32;
+        ui32 below_a = below >> 24;
+        if (below_a != 255) {
+            // over a pixel that is not opaque (a canvas cleared transparent, drawn over 3D by
+            // gpu.overlay): the colors weighed by their alphas, alpha not premultiplied
+            ui32 out_a = a + (below_a * (255 - a) + 127) / 255;
+            if (out_a == 0) {
+                return;
+            }
+            ui32 rest = below_a * (255 - a);  // the weight of the pixel below, times 255
+            ui32 ro = (color.r as ui32 * a * 255 + (below >> 16 & 0xFF) * rest + out_a * 127) / (out_a * 255);
+            ui32 go = (color.g as ui32 * a * 255 + (below >> 8 & 0xFF) * rest + out_a * 127) / (out_a * 255);
+            ui32 bo = (color.b as ui32 * a * 255 + (below & 0xFF) * rest + out_a * 127) / (out_a * 255);
+            pixels[i] = out_a << 24 | min(ro, 255) << 16 | min(go, 255) << 8 | min(bo, 255);
+            return;
+        }
         ui32 r = mix(color.r as ui32, below >> 16 & 0xFF, a);
         ui32 g = mix(color.g as ui32, below >> 8 & 0xFF, a);
         ui32 b = mix(color.b as ui32, below & 0xFF, a);
@@ -465,6 +480,19 @@ test "blending" {
     assert(c.at(0, 0) == 0xFF808064);
 }
 
+test "blending over a transparent canvas" {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Canvas c = create(&arena, 1, 1);
+    c.clear(Color{ r: 0, g: 0, b: 0, a: 0 });
+    // half red over nothing: half red, not half dark red
+    c.fill(Rect{ x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, Color{ r: 255, g: 0, b: 0, a: 128 });
+    assert(c.at(0, 0) == 0x80FF0000);
+    // half blue over it: alpha 3/4, the colors weighed by their alphas
+    c.fill(Rect{ x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, Color{ r: 0, g: 0, b: 255, a: 128 });
+    assert(c.at(0, 0) == 0xC05500AA);
+}
+
 test "lines and strokes" {
     mut Arena arena = Arena.new(4 * KB);
     defer arena.free();
@@ -540,8 +568,8 @@ test "discs" {
     c.fill_circle(10.0, 10.0, 5.0, Color{ r: 255, g: 255, b: 255 });
     assert(c.at(10, 10) == 0xFFFFFFFF && c.at(7, 10) == 0xFFFFFFFF);  // inside
     assert(c.at(2, 2) == 0 && c.at(16, 10) == 0);  // outside
-    ui32 edge = c.at(13, 13) & 0xFF;  // across the circle: partly covered
-    assert(edge > 0 && edge < 255);
+    ui32 edge = c.at(13, 13) >> 24;  // across the circle: partly covered, white over nothing
+    assert(edge > 0 && edge < 255 && c.at(13, 13) & 0xFF == 255);
 }
 
 test "images are drawn scaled, with their alpha" {

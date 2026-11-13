@@ -1,0 +1,23 @@
+a mesh is built: ok
+the path starts and ends at the two points: ok
+it goes around the block: ok
+two rooms that are not connected have no path: ok
+a path in the open is a straight line: ok
+the nearest point is on the floor: ok
+a point far above has no nearest point: ok
+the edge keeps the radius of the agent away from the walls: ok
+a mesh loaded again finds the same paths: ok
+bytes that are not a mesh are refused: ok
+a steep slope alone has nothing to walk on: ok
+an index out of the vertices is refused: ok
+agents head for their targets: ok
+they reach them, around the block: ok
+and stop there: ok
+a path of four ways goes through the gap: ok
+a path of eight ways is cheaper: ok
+a path to the same cell is that cell: ok
+a path to a wall is none: ok
+a path outside the grid is none: ok
+a closed wall leaves no path: ok
+a path goes around the mud: ok
+a diagonal does not cut between two walls: ok

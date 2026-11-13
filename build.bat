@@ -47,11 +47,23 @@ build\lsp_tests.exe || exit /b 1
 build\i18n_tests.exe || exit /b 1
 build\program_tests.exe build\sosuc.exe || exit /b 1
 for %%f in (tests\fuzz\*) do build\fuzz_replay.exe "%%f" >nul || exit /b 1
+for %%t in (gltf obj fbx sofa) do build\sosuc.exe fuzz --replay tests\fuzz_sosu\%%t -- tests\fuzz_sosu\%%t\corpus >nul || exit /b 1
 build\sosuc.exe check tests\packages\app || exit /b 1
 build\sosuc.exe check packages\platform || exit /b 1
 build\sosuc.exe test packages\platform || exit /b 1
 build\sosuc.exe check examples\window || exit /b 1
+build\sosuc.exe check packages\gpu || exit /b 1
+build\sosuc.exe build examples\cube || exit /b 1
+build\sosuc.exe build examples\pads || exit /b 1
+build\sosuc.exe check packages\render3d || exit /b 1
+build\sosuc.exe build examples\viewer || exit /b 1
 build\sosuc.exe check tests\window || exit /b 1
+build\sosuc.exe test packages\math || exit /b 1
+build\sosuc.exe test packages\model || exit /b 1
+build\sosuc.exe test packages\scene || exit /b 1
+build\sosuc.exe test packages\anim || exit /b 1
+build\sosuc.exe test packages\particles || exit /b 1
+build\sosuc.exe check packages\assets || exit /b 1
 build\sosuc.exe test packages\image || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1
 build\sosuc.exe test packages\ui || exit /b 1
@@ -62,6 +74,7 @@ build\sosuc.exe check examples\workspace || exit /b 1
 build\sosuc.exe check examples\themes || exit /b 1
 build\sosuc.exe check examples\containers || exit /b 1
 build\sosuc.exe check packages\audio || exit /b 1
+build\sosuc.exe test packages\audio || exit /b 1
 build\sosuc.exe check examples\sound || exit /b 1
 build\sosuc.exe check examples\dialogs || exit /b 1
 rem its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)
@@ -75,6 +88,8 @@ build\sosuc.exe test showcase\queens || exit /b 1
 build\sosuc.exe test showcase\sheets || exit /b 1
 build\sosuc.exe test showcase\vault || exit /b 1
 build\sosuc.exe test showcase\courier || exit /b 1
+build\sosuc.exe test showcase\audioplayer || exit /b 1
+build\sosuc.exe test showcase\soundstage || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

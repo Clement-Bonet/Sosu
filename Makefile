@@ -29,11 +29,22 @@ test: all
 	./build/i18n_tests
 	./build/program_tests ./build/sosuc
 	./build/fuzz_replay tests/fuzz/* > /dev/null
+	@# the readers of models, fuzzed by `sosuc fuzz`: their seeds and the inputs that once failed
+	./build/sosuc fuzz --replay tests/fuzz_sosu/gltf -- tests/fuzz_sosu/gltf/corpus > /dev/null
+	./build/sosuc fuzz --replay tests/fuzz_sosu/obj -- tests/fuzz_sosu/obj/corpus > /dev/null
+	./build/sosuc fuzz --replay tests/fuzz_sosu/fbx -- tests/fuzz_sosu/fbx/corpus > /dev/null
+	./build/sosuc fuzz --replay tests/fuzz_sosu/sofa -- tests/fuzz_sosu/sofa/corpus > /dev/null
 	./build/sosuc check tests/packages/app
 	./build/sosuc check packages/platform
 	./build/sosuc test packages/platform
 	./build/sosuc check examples/window
 	./build/sosuc check tests/window
+	./build/sosuc test packages/math
+	./build/sosuc test packages/model
+	./build/sosuc test packages/scene
+	./build/sosuc test packages/anim
+	./build/sosuc test packages/particles
+	./build/sosuc check packages/assets
 	./build/sosuc test packages/image
 	./build/sosuc test packages/render
 	./build/sosuc test packages/ui
@@ -44,8 +55,15 @@ test: all
 	./build/sosuc check examples/themes
 	./build/sosuc check examples/containers
 	./build/sosuc check packages/audio
+	./build/sosuc test packages/audio
 	./build/sosuc check examples/sound
 	./build/sosuc check examples/dialogs
+	@# 3D (spec 8.2): built to the end, through the C compiler, without opening its window
+	./build/sosuc check packages/gpu
+	./build/sosuc build examples/cube
+	./build/sosuc build examples/pads
+	./build/sosuc check packages/render3d
+	./build/sosuc build examples/viewer
 	@# its tests open a player: SDL's dummy driver, for the machines without a sound card (the CI)
 	SDL_AUDIO_DRIVER=dummy ./build/sosuc test showcase/beatbox
 	./build/sosuc test showcase/disktiles
@@ -55,6 +73,8 @@ test: all
 	./build/sosuc test showcase/sheets
 	./build/sosuc test showcase/vault
 	./build/sosuc test showcase/courier
+	./build/sosuc test showcase/audioplayer
+	./build/sosuc test showcase/soundstage
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
@@ -102,6 +122,29 @@ fuzz-ogg: build/fuzz_ogg
 build/fuzz_ogg: packages/audio/native/ogg.c packages/audio/native/vendor/stb_vorbis.c tests/fuzz_ogg.c | build
 	$(FUZZ_CC) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -o $@ tests/fuzz_ogg.c -lm
 
+# The MP3 and FLAC decoders of the package audio (tests/fuzz_coded.c, dr_mp3 and dr_flac), from the
+# files of tests/programs/sounds. dr_libs is taken at the commit of packages/audio/sosu.toml, without
+# its history, into build/dr_libs. dr_flac adds and multiplies samples of a hostile file in int
+# without checks: -fwrapv makes that wrap (wrong samples, nothing else), and the check of signed
+# overflow is left out; the other checks of UBSan, and ASan, stay.
+DR_LIBS_REV := $(shell sed -n 's/^rev = "\(.*\)"/\1/p' packages/audio/sosu.toml)
+
+fuzz-coded: build/fuzz_coded
+	mkdir -p build/fuzz_coded_corpus build/fuzz_crashes
+	./build/fuzz_coded -max_total_time=$(FUZZ_TIME) -max_len=65536 -timeout=10 -rss_limit_mb=2048 -detect_leaks=0 \
+		-print_final_stats=1 -artifact_prefix=build/fuzz_crashes/coded- build/fuzz_coded_corpus tests/programs/sounds/tests/data
+
+build/dr_libs/$(DR_LIBS_REV): | build
+	rm -rf build/dr_libs
+	mkdir -p build/dr_libs/src
+	cd build/dr_libs/src && git init -q && git fetch -q --depth 1 https://github.com/mackron/dr_libs $(DR_LIBS_REV) \
+		&& git checkout -q FETCH_HEAD
+	touch $@
+
+build/fuzz_coded: packages/audio/native/dr.c tests/fuzz_coded.c build/dr_libs/$(DR_LIBS_REV) | build
+	$(FUZZ_CC) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -fwrapv \
+		-fno-sanitize=signed-integer-overflow -Ibuild/dr_libs/src -o $@ tests/fuzz_coded.c -lm
+
 # sosu.toml (tests/fuzz_manifest.c), from every sosu.toml of the repository.
 fuzz-manifest: build/fuzz_manifest
 	mkdir -p build/fuzz_manifest_corpus build/fuzz_manifest_seeds build/fuzz_crashes
@@ -146,6 +189,17 @@ build/fuzz_lsp: $(LIB_SRC) $(LIB_HDR) tests/fuzz_lsp.c | build
 	$(FUZZ_CC) $(CPPFLAGS) -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
 		-o $@ $(LIB_SRC) tests/fuzz_lsp.c
 
+# The readers of models of the package model, code of Sosu fuzzed by `sosuc fuzz` (spec 13.1,
+# work 5): glTF, OBJ, FBX and SOFA (package audio), FUZZ_TIME seconds each, from the seeds of tests/fuzz_sosu/<name>/corpus;
+# their inputs kept in build/fuzz_<name>_corpus, a crash in build/fuzz_crashes/<name>-.
+fuzz-models: build/sosuc
+	mkdir -p build/fuzz_gltf_corpus build/fuzz_obj_corpus build/fuzz_fbx_corpus build/fuzz_sofa_corpus build/fuzz_crashes
+	for t in gltf obj fbx sofa; do \
+		SOSU_CC=$(FUZZ_CC) ./build/sosuc fuzz tests/fuzz_sosu/$$t -- -max_total_time=$(FUZZ_TIME) -max_len=8192 -timeout=10 \
+			-rss_limit_mb=2048 -detect_leaks=0 -print_final_stats=1 -artifact_prefix=build/fuzz_crashes/$$t- \
+			build/fuzz_$${t}_corpus tests/fuzz_sosu/$$t/corpus || exit 1; \
+	done
+
 build/fuzz_replay: $(LIB_SRC) $(LIB_HDR) tests/fuzz.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DSOSU_FUZZ_MAIN -o $@ $(LIB_SRC) tests/fuzz.c
 
@@ -179,4 +233,4 @@ build/docgen: src/docgen/docgen.c src/lib/docgen.c src/lib/docgen.h src/lib/comm
 clean:
 	rm -rf build
 
-.PHONY: all test clean playground doc fuzz-ogg fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp
+.PHONY: all test clean playground doc fuzz-ogg fuzz-coded fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp fuzz-models

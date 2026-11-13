@@ -1,0 +1,5 @@
+// gpu: drawing on the GPU with SDL_GPU (spec §8.2). Programs import `gpu.gpu` (the device, its
+// resources, frames and passes) and `gpu.shaders` (the shaders written by `sosuc shaders`).
+import gpu.gpu;
+import gpu.shaders;
+import gpu.overlay;

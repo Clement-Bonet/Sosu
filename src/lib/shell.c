@@ -458,6 +458,73 @@ char **shell_files_ending(const char *dir, const char *suffix, size_t *count) {
     return names;
 }
 
+/* The subfolders of `dir` (not starting with `.`), into `names`. */
+static void subfolders(const char *dir, char ***names, size_t *n, size_t *cap) {
+#ifdef _WIN32
+    char *pattern = sosu_format("%s\\*", dir);
+    WIN32_FIND_DATAA found;
+    HANDLE handle = FindFirstFileA(pattern, &found);
+    free(pattern);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    do {
+        const char *name = found.cFileName;
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || name[0] == '.') continue;
+        if (*n == *cap) *names = sosu_realloc(*names, (*cap = *cap ? *cap * 2 : 16) * sizeof **names);
+        (*names)[(*n)++] = sosu_strdup(name);
+    } while (FindNextFileA(handle, &found));
+    FindClose(handle);
+#else
+    DIR *folder = opendir(dir);
+    if (!folder) return;
+    struct dirent *entry;
+    while ((entry = readdir(folder))) {
+        const char *name = entry->d_name;
+        if (name[0] == '.') continue;
+        char *full = sosu_format("%s/%s", dir, name);
+        bool is_dir = shell_dir_exists(full);
+        free(full);
+        if (!is_dir) continue;
+        if (*n == *cap) *names = sosu_realloc(*names, (*cap = *cap ? *cap * 2 : 16) * sizeof **names);
+        (*names)[(*n)++] = sosu_strdup(name);
+    }
+    closedir(folder);
+#endif
+}
+
+static void files_below(const char *dir, const char *prefix, const char *suffix, char ***out, size_t *n, size_t *cap,
+                        int depth) {
+    if (depth > 64) return;
+    size_t count = 0;
+    char **files = shell_files_ending(dir, suffix, &count);
+    for (size_t i = 0; i < count; i++) {
+        if (*n == *cap) *out = sosu_realloc(*out, (*cap = *cap ? *cap * 2 : 64) * sizeof **out);
+        (*out)[(*n)++] = prefix[0] ? sosu_format("%s/%s", prefix, files[i]) : sosu_strdup(files[i]);
+        free(files[i]);
+    }
+    free(files);
+    char **dirs = NULL;
+    size_t dn = 0, dcap = 0;
+    subfolders(dir, &dirs, &dn, &dcap);
+    for (size_t i = 0; i < dn; i++) {
+        char *child = sosu_format("%s/%s", dir, dirs[i]);
+        char *child_prefix = prefix[0] ? sosu_format("%s/%s", prefix, dirs[i]) : sosu_strdup(dirs[i]);
+        files_below(child, child_prefix, suffix, out, n, cap, depth + 1);
+        free(child);
+        free(child_prefix);
+        free(dirs[i]);
+    }
+    free(dirs);
+}
+
+char **shell_files_below(const char *dir, const char *suffix, size_t *count) {
+    char **out = NULL;
+    size_t n = 0, cap = 0;
+    files_below(dir, "", suffix, &out, &n, &cap, 0);
+    if (n > 1) qsort(out, n, sizeof *out, compare_names);
+    *count = n;
+    return out;
+}
+
 bool shell_file_stamp(const char *path, long long *time, long long *size) {
 #ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA data;

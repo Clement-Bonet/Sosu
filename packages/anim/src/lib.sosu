@@ -1,0 +1,2 @@
+// anim: skeletal animation (spec §8.2). Programs import `anim.anim`.
+import anim.anim;

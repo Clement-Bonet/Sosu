@@ -1,0 +1,139 @@
+// soundstage.stage: the scene seen from above, drawn into a canvas that the interface shows as an
+// image: the head of the listener in the middle (ahead is up), its ears lit by how loud each hears
+// the sound, rings every 2 meters, the sound and the trail it leaves as it turns, how high it is on
+// a gauge at the right, and a meter for each ear.
+import std.math;
+import std.text;
+import math.linear;
+import render.canvas;
+
+pub i32 WIDTH = 560;
+pub i32 HEIGHT = 520;
+
+f32 CX = 260.0;
+f32 CY = 262.0;
+f32 PER_METER = 22.0;  // pixels: 10 meters reach the last ring
+
+canvas.Color ground_color() {
+    return canvas.Color{ r: 22, g: 22, b: 34 };
+}
+
+canvas.Color grid_color() {
+    return canvas.Color{ r: 48, g: 50, b: 70 };
+}
+
+canvas.Color label_color() {
+    return canvas.Color{ r: 128, g: 132, b: 160 };
+}
+
+canvas.Color accent_color() {
+    return canvas.Color{ r: 250, g: 176, b: 70 };
+}
+
+canvas.Color head_color() {
+    return canvas.Color{ r: 214, g: 200, b: 178 };
+}
+
+
+canvas.Color mixed(canvas.Color a, canvas.Color b, f32 t) {
+    f32 u = max(0.0, min(1.0, t));
+    return canvas.Color{
+        r: (a.r as f32 + (b.r as f32 - a.r as f32) * u) as ui8,
+        g: (a.g as f32 + (b.g as f32 - a.g as f32) * u) as ui8,
+        b: (a.b as f32 + (b.b as f32 - a.b as f32) * u) as ui8
+    };
+}
+
+// A circle drawn as a line of 96 pieces.
+void ring(canvas.Canvas* c, f32 cx, f32 cy, f32 radius, canvas.Color color) {
+    mut f32 x0 = cx + radius;
+    mut f32 y0 = cy;
+    for (i32 i in 1..97) {
+        f64 a = i as f64 * 2.0 * math.PI / 96.0;
+        f32 x1 = cx + radius * math.cos(a) as f32;
+        f32 y1 = cy + radius * math.sin(a) as f32;
+        c.line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, color);
+        x0 = x1;
+        y0 = y1;
+    }
+}
+
+// From 0 (-48 dB or less) to 1 (0 dB).
+f32 meter_of(f32 level) {
+    if (level <= 0.0) {
+        return 0.0;
+    }
+    f32 db = 20.0 * math.log10(level as f64) as f32;
+    return max(0.0, min(1.0, (db + 48.0) / 48.0));
+}
+
+void meter(canvas.Canvas* c, f32 x, str name, f32 level) {
+    f32 top = 330.0;
+    f32 h = 150.0;
+    f32 t = meter_of(level);
+    c.fill_rounded(canvas.Rect{ x: x, y: top, w: 18.0, h: h }, 4.0, canvas.Color{ r: 34, g: 35, b: 52 });
+    c.fill_rounded(canvas.Rect{ x: x, y: top + h * (1.0 - t), w: 18.0, h: h * t }, 4.0, mixed(canvas.Color{ r: 64, g: 210, b: 190 }, accent_color(), t));
+    c.text(x + 5.0, top + h + 10.0, name, label_color(), 1);
+}
+
+// The scene: the sound at `at` (meters: +x right, -z ahead), `elevation` degrees high, the
+// `count` last places of `trail` (x, z pairs, the newest before `newest`), how loud `ears` hear it
+// (0 to 1), and whether a head hears it.
+pub void draw(canvas.Canvas* c, linear.Vec3 at, f32 elevation, f32[] trail, usize newest, usize count, f32[2] ears, bool head) {
+    c.clear(ground_color());
+    // rings every 2 meters, the axes, and where ahead is
+    for (i32 m in 1..6) {
+        ring(c, CX, CY, (2 * m) as f32 * PER_METER, grid_color());
+        mut Arena line = Arena.new(64);
+        text.TextBuilder* t = text.builder(&line);
+        t.push_i64((2 * m) as i64);
+        t.push(" m");
+        c.text(CX + 4.0, CY - (2 * m) as f32 * PER_METER + 3.0, t.text(), label_color(), 1);
+        line.free();
+    }
+    f32 reach = 10.0 * PER_METER;
+    c.line(CX as i32, (CY - reach) as i32, CX as i32, (CY + reach) as i32, grid_color());
+    c.line((CX - reach) as i32, CY as i32, (CX + reach) as i32, CY as i32, grid_color());
+    c.text(CX - 20.0, 8.0, "ahead", label_color(), 2);
+    c.text(CX - 24.0, CY + reach + 12.0, "behind", label_color(), 2);
+    c.text(4.0, CY - 22.0, "left", label_color(), 2);
+    c.text(CX + reach - 70.0, CY - 22.0, "right", label_color(), 2);
+    // the trail: older, dimmer and smaller
+    usize n = trail.len / 2;
+    for (usize i in 0..count) {
+        usize k = (newest + n - count + i) % n;
+        f32 age = (count - i) as f32 / count as f32;
+        c.fill_circle(CX + trail[2 * k] * PER_METER, CY + trail[2 * k + 1] * PER_METER, 2.0 + 3.0 * (1.0 - age),
+                mixed(accent_color(), ground_color(), 0.35 + 0.6 * age));
+    }
+    // the head: its nose ahead, its ears lit by what they hear
+    f32 sx = CX + at.x * PER_METER;
+    f32 sy = CY + at.z * PER_METER;
+    c.line(CX as i32, CY as i32, sx as i32, sy as i32, mixed(accent_color(), ground_color(), 0.6));
+    c.fill_circle(CX, CY - 22.0, 7.0, head_color());
+    c.fill_circle(CX - 22.0, CY, 8.0, mixed(grid_color(), canvas.Color{ r: 64, g: 210, b: 190 }, meter_of(ears[0])));
+    c.fill_circle(CX + 22.0, CY, 8.0, mixed(grid_color(), canvas.Color{ r: 64, g: 210, b: 190 }, meter_of(ears[1])));
+    c.fill_circle(CX, CY, 20.0, head_color());
+    c.text(CX - 26.0, CY + 14.0, "L", label_color(), 1);
+    c.text(CX + 22.0, CY + 14.0, "R", label_color(), 1);
+    // the sound: above, larger and lighter; below, smaller and darker
+    f32 up = max(-1.0, min(1.0, elevation / 90.0));
+    f32 size = 11.0 + 5.0 * up;
+    c.fill_circle(sx, sy, size + 4.0, mixed(accent_color(), ground_color(), 0.7));
+    c.fill_circle(sx, sy, size, up >= 0.0 ? mixed(accent_color(), canvas.Color{ r: 255, g: 240, b: 210 }, up) : mixed(accent_color(), ground_color(), -up * 0.5));
+    // how high: a gauge from -40 to 90 degrees
+    f32 gx = (WIDTH - 52) as f32;
+    f32 top = 40.0;
+    f32 h = 230.0;
+    c.fill_rounded(canvas.Rect{ x: gx, y: top, w: 10.0, h: h }, 4.0, canvas.Color{ r: 34, g: 35, b: 52 });
+    f32 level_y = top + h * (90.0 - max(-40.0, min(90.0, elevation))) / 130.0;
+    f32 zero_y = top + h * 90.0 / 130.0;
+    c.fill(canvas.Rect{ x: gx - 4.0, y: zero_y, w: 18.0, h: 1.0 }, label_color());
+    c.fill_circle(gx + 5.0, level_y, 8.0, accent_color());
+    c.text(gx - 18.0, top - 22.0, "above", label_color(), 1);
+    c.text(gx - 18.0, top + h + 10.0, "below", label_color(), 1);
+    // the ears, as meters
+    meter(c, (WIDTH - 66) as f32, "L", ears[0]);
+    meter(c, (WIDTH - 36) as f32, "R", ears[1]);
+    c.text(8.0, (HEIGHT - 18) as f32, head ? "through a head (HRTF)" : "panned", head ? accent_color() : label_color(), 1);
+}

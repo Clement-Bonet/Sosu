@@ -1,0 +1,217 @@
+// nav.grid: A* on a grid of cells (spec §8.2), for 2D games and games on tiles, in Sosu. Each cell
+// has a cost of entering it (1 by default); a cost of 0 or less is a wall. A path goes from cell to
+// cell, four ways or eight (`diagonal`, a diagonal step costing √2 times its cell, and never
+// cutting the corner of a wall). The path found is one of the cheapest.
+import std.vec;
+
+pub struct Cell {
+    pub i32 x;
+    pub i32 y;
+
+    pub bool same(Cell o) {
+        return x == o.x && y == o.y;
+    }
+}
+
+pub Cell cell(i32 x, i32 y) {
+    return Cell{ x: x, y: y };
+}
+
+f32 FAR = 3.0e38;
+f32 SQRT2 = 1.4142135;
+
+struct Open {
+    f32 score;  // the cost so far and the estimate of what is left
+    f32 cost;   // so far
+    usize place;
+}
+
+pub class Grid {
+    pub i32 width;
+    pub i32 height;
+    f32[] costs;
+
+    void init(keeps Arena* arena, i32 width, i32 height) {
+        self.width = max(width, 0);
+        self.height = max(height, 0);
+        costs = arena.alloc_slice(f32, (self.width * self.height) as usize);
+        for (usize i in 0..costs.len) {
+            costs[i] = 1.0;
+        }
+    }
+
+    pub bool inside(Cell c) {
+        return c.x >= 0 && c.y >= 0 && c.x < width && c.y < height;
+    }
+
+    // The cost of entering `c`: 0 or less is a wall. Outside the grid: a wall.
+    pub f32 cost(Cell c) {
+        if (!inside(c)) {
+            return 0.0;
+        }
+        return costs[(c.y * width + c.x) as usize];
+    }
+
+    pub void set(Cell c, f32 cost) {
+        if (inside(c)) {
+            costs[(c.y * width + c.x) as usize] = cost;
+        }
+    }
+
+    pub void wall(Cell c) {
+        set(c, 0.0);
+    }
+
+    pub bool walkable(Cell c) {
+        return cost(c) > 0.0;
+    }
+
+    // The cells of a cheapest path from `from` to `to`, both included; none when either is a wall
+    // or outside, or when no path joins them.
+    pub Cell[]? path(Arena* into, Cell from, Cell to, bool diagonal) {
+        if (!walkable(from) || !walkable(to)) {
+            return none;
+        }
+        usize n = costs.len;
+        mut f32 cheapest = FAR;
+        for (f32 c in costs) {
+            if (c > 0.0 && c < cheapest) {
+                cheapest = c;
+            }
+        }
+        mut Arena scratch = Arena.new(n * 17 + 1024);
+        defer scratch.free();
+        mut f32[] best = scratch.alloc_slice(f32, n);
+        mut i64[] came = scratch.alloc_slice(i64, n);
+        mut bool[] done = scratch.alloc_slice(bool, n);
+        for (usize i in 0..n) {
+            best[i] = FAR;
+            came[i] = -1;
+        }
+        vec.Vec<Open>* open = vec.new<Open>(&scratch);
+        usize start = (from.y * width + from.x) as usize;
+        usize goal = (to.y * width + to.x) as usize;
+        best[start] = 0.0;
+        push(open, Open{ score: estimate(from, to, diagonal, cheapest), cost: 0.0, place: start });
+        mut i32[8] dx = [1, -1, 0, 0, 1, 1, -1, -1];
+        mut i32[8] dy = [0, 0, 1, -1, 1, -1, 1, -1];
+        i32 ways = diagonal ? 8 : 4;
+        while (open.len() > 0) {
+            Open o = pop(open);
+            if (done[o.place] || o.cost > best[o.place]) {
+                continue;
+            }
+            done[o.place] = true;
+            if (o.place == goal) {
+                break;
+            }
+            Cell here = Cell{ x: (o.place % width as usize) as i32, y: (o.place / width as usize) as i32 };
+            for (i32 k in 0..ways) {
+                Cell next = Cell{ x: here.x + dx[k as usize], y: here.y + dy[k as usize] };
+                if (!walkable(next)) {
+                    continue;
+                }
+                if (k >= 4 && (!walkable(Cell{ x: here.x + dx[k as usize], y: here.y }) || !walkable(Cell{ x: here.x, y: here.y + dy[k as usize] }))) {
+                    continue;  // a diagonal step does not cut the corner of a wall
+                }
+                usize place = (next.y * width + next.x) as usize;
+                f32 step = cost(next) * (k >= 4 ? SQRT2 : 1.0);
+                f32 total = o.cost + step;
+                if (!done[place] && total < best[place]) {
+                    best[place] = total;
+                    came[place] = o.place as i64;
+                    push(open, Open{ score: total + estimate(next, to, diagonal, cheapest), cost: total, place: place });
+                }
+            }
+        }
+        if (!done[goal]) {
+            return none;
+        }
+        mut usize length = 1;
+        mut usize at = goal;
+        while (at != start) {
+            at = came[at] as usize;
+            length += 1;
+        }
+        mut Cell[] cells = into.alloc_slice(Cell, length);
+        at = goal;
+        mut usize k = length;
+        while (k > 0) {
+            k -= 1;
+            cells[k] = Cell{ x: (at % width as usize) as i32, y: (at / width as usize) as i32 };
+            if (at != start) {
+                at = came[at] as usize;
+            }
+        }
+        return some(cells);
+    }
+}
+
+// What is left from `a` to `b` at the cheapest cost of a cell: never more than the true cost.
+f32 estimate(Cell a, Cell b, bool diagonal, f32 cheapest) {
+    f32 dx = abs(a.x - b.x) as f32;
+    f32 dy = abs(a.y - b.y) as f32;
+    if (!diagonal) {
+        return (dx + dy) * cheapest;
+    }
+    return (max(dx, dy) + (SQRT2 - 1.0) * min(dx, dy)) * cheapest;
+}
+
+// The heap of open cells, the lowest score first (then the lowest place, so that a path does not
+// depend on anything but the grid).
+bool before(Open a, Open b) {
+    return a.score < b.score || (a.score == b.score && a.place < b.place);
+}
+
+void push(vec.Vec<Open>* heap, Open o) {
+    heap.push(o);
+    mut usize i = heap.len() - 1;
+    while (i > 0) {
+        usize parent = (i - 1) / 2;
+        Open p = heap.items()[parent];
+        Open c = heap.items()[i];
+        if (!before(c, p)) {
+            break;
+        }
+        heap.set(parent, c);
+        heap.set(i, p);
+        i = parent;
+    }
+}
+
+Open pop(vec.Vec<Open>* heap) {
+    Open top = heap.items()[0];
+    Open last = match (heap.pop()) {
+        some(o) => o,
+        none => top,
+    };
+    if (heap.len() == 0) {
+        return top;
+    }
+    heap.set(0, last);
+    mut usize i = 0;
+    while (true) {
+        usize l = 2 * i + 1;
+        usize r = l + 1;
+        mut usize least = i;
+        if (l < heap.len() && before(heap.items()[l], heap.items()[least])) {
+            least = l;
+        }
+        if (r < heap.len() && before(heap.items()[r], heap.items()[least])) {
+            least = r;
+        }
+        if (least == i) {
+            break;
+        }
+        Open a = heap.items()[i];
+        heap.set(i, heap.items()[least]);
+        heap.set(least, a);
+        i = least;
+    }
+    return top;
+}
+
+// A grid of `width` by `height` cells of cost 1.
+pub Grid* grid(keeps Arena* arena, i32 width, i32 height) {
+    return arena.new(Grid, arena, width, height);
+}

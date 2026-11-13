@@ -1,0 +1,43 @@
+// The window of the audio player (spec §10.2, §10.5): the transport in its title bar, the track
+// that plays with its position and volume, the playlist, and the spectrum. Its state is model.sosu.
+import audioplayer.look;
+import audioplayer.model;
+
+window AudioPlayer(keeps model.Model* m) uses io {
+    title: "Audio player"
+    width: 1260
+    height: 640
+
+    TitleBar(height: 48, gap: 8, padding: 6) {
+        Text("Audio player")
+        Button(model.ICON_OPEN, on_click: m.open_dialog)
+        Button(model.ICON_PREVIOUS, on_click: m.previous, enabled: m.has_tracks())
+        Button(m.play_icon(), on_click: m.toggle, enabled: m.has_tracks(), style: look.Big)
+        Button(model.ICON_STOP, on_click: m.stop, enabled: m.has_tracks())
+        Button(model.ICON_NEXT, on_click: m.next, enabled: m.has_tracks())
+    }
+    Row(gap: 18, padding: 18) {
+        Column(gap: 10) {
+            Text("Playlist", style: look.Muted)
+            List(width: 300, height: Fill, selected: m.chosen) {
+                for (i32 i in 0..m.rows()) {
+                    Text(m.name_at(i))
+                }
+            }
+        }
+        Column(gap: 12) {
+            Text(m.title(), style: look.Track)
+            Text(m.details(), style: look.Muted)
+            Row(gap: 12) {
+                Slider(bind: m.place, min: 0, max: 1000, step: 1, width: 760)
+                Text(m.time_text())
+            }
+            Image(m.picture(), size: 340)
+            Row(gap: 10) {
+                Text(model.ICON_VOLUME)
+                Slider(bind: m.volume, min: 0, max: 100, step: 1, width: 200)
+                Text("Space: play or pause. Drop files on the window to add them.", style: look.Muted)
+            }
+        }
+    }
+}

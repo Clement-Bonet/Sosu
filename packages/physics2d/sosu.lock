@@ -1,0 +1,2 @@
+# sosu.lock: the commit of each git dependency, written by sosuc. Keep it in version control.
+native.box2d https://github.com/erincatto/box2d tag v3.2.0 178495ba35695aefe9c321e569d2277f06db3b90

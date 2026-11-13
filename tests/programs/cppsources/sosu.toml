@@ -1,0 +1,11 @@
+# C++ files of a package, compiled with the program by the C++ compiler ([link] cpp, spec §9.1),
+# beside a C file ([link] c): a class, a template, a static object built before main, the library
+# of C++ linked.
+[package]
+name = "cppsources"
+version = "0.1.0"
+
+[link]
+c = ["native/twice.c"]
+cpp = ["native/shapes.cpp"]
+defines = ["SHAPES_SCALE=10"]

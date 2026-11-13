@@ -1,0 +1,98 @@
+// The tests of the audio player, without a window nor a sound card: `Model.pump` mixes as the
+// device would take the samples.
+import std.math;
+import audio.audio;
+import audio.mixer;
+import audio.wav;
+import audioplayer.model;
+import audioplayer.bars;
+
+// A WAV file in memory: a sine of `hz`, `seconds` long.
+ui8[] tone_file(Arena* arena, f64 hz, f64 seconds) {
+    audio.Sound s = audio.tone(arena, 44100, hz, seconds, 0.5);
+    return wav.encode(arena, s);
+}
+
+test "a playlist: the first plays, the next at its end, then the player stops" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 44100, 2);
+    model.Model* p = arena.new(model.Model, &arena, m, none);
+    defer p.close();
+    p.add_bytes("low.wav", tone_file(&arena, 220.0, 0.5));
+    p.add_bytes("high.wav", tone_file(&arena, 3000.0, 0.5));
+    assert(p.rows() == 2 && p.title() == "low.wav" && p.is_playing());
+    for (i32 i in 0..20) {
+        p.pump(1470, 1.0 / 30.0);  // 0.67 s: past the end of the first
+    }
+    assert(p.title() == "high.wav");
+    for (i32 i in 0..30) {
+        p.pump(1470, 1.0 / 30.0);
+    }
+    assert(p.title() == "Stopped" && !p.is_playing());
+}
+
+test "the spectrum follows the track: a low tone, then a high one" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 44100, 2);
+    model.Model* p = arena.new(model.Model, &arena, m, none);
+    defer p.close();
+    p.add_bytes("low.wav", tone_file(&arena, 220.0, 2.0));
+    p.add_bytes("high.wav", tone_file(&arena, 3000.0, 2.0));
+    for (i32 i in 0..10) {
+        p.pump(1470, 1.0 / 30.0);
+    }
+    // the loudest band holds 220 Hz
+    assert(abs(p.loudest_hz() - 220.0) < 40.0);
+    p.next();
+    for (i32 i in 0..10) {
+        p.pump(1470, 1.0 / 30.0);
+    }
+    assert(abs(p.loudest_hz() - 3000.0) < 400.0);
+    // the image of the spectrum: teal bars somewhere on the dark ground
+    assert(p.picture().width == bars.WIDTH && p.picture().height == bars.HEIGHT);
+}
+
+test "pause, a seek by the slider, the volume, previous and next" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    mixer.Mixer* m = mixer.create(&arena, 44100, 2);
+    model.Model* p = arena.new(model.Model, &arena, m, none);
+    defer p.close();
+    p.add_bytes("a.wav", tone_file(&arena, 440.0, 4.0));
+    p.add_bytes("b.wav", tone_file(&arena, 660.0, 4.0));
+    p.pump(4410, 0.1);
+    assert(p.time_text() == "0:00 / 0:04");
+    // the slider at the middle: 2 seconds in
+    p.place = 500;
+    p.pump(441, 0.01);
+    assert(p.time_text() == "0:02 / 0:04" && p.place >= 500 && p.place < 510);
+    p.toggle();
+    assert(!p.is_playing() && p.play_icon() == model.ICON_PLAY);
+    p.toggle();
+    assert(p.is_playing());
+    p.volume = 30;
+    p.pump(441, 0.01);
+    // previous, well into a track (3.6 s): its start again; at its start: the one before (around)
+    p.place = 900;
+    p.pump(441, 0.01);
+    p.previous();
+    assert(p.title() == "a.wav" && p.time_text() == "0:00 / 0:04");
+    p.previous();
+    assert(p.title() == "b.wav");
+    p.next();
+    assert(p.title() == "a.wav");
+    p.stop();
+    assert(p.title() == "Stopped" && p.time_text() == "0:00 / 0:00");
+    // a file that is not a sound: said, nothing plays
+    mut ui8[8] junk = [1, 2, 3, 4, 5, 6, 7, 8];
+    p.add_bytes("junk.bin", junk[0..8]);
+    assert(p.title() == "Stopped" && p.details() == "junk.bin: not a file of this format");
+}
+
+test "the name of a file, without its folders" {
+    assert(model.file_name("C:\\Music\\song.flac") == "song.flac");
+    assert(model.file_name("/home/me/a.mp3") == "a.mp3");
+    assert(model.file_name("b.ogg") == "b.ogg");
+}

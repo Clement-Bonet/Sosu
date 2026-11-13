@@ -3,10 +3,22 @@
 // directly. A sound of another rate than the mixer is read at its own speed, by linear
 // interpolation; `audio.resample` makes a better copy of it at the rate of the mixer, before.
 // A change of volume or panning moves over one buffer, so that it does not click. A mixer of one
-// channel ignores the panning, and averages the two channels of a stereo sound.
+// channel ignores the panning, and averages the two channels of a stereo sound. A voice may go
+// through a low-pass filter (`set_lowpass`): a sound behind a wall, far, or under water. A voice may
+// send a share of itself to the reverberation of the mixer (`set_reverb`): a room, a cave, a hall
+// (`set_room`), as Freeverb makes it: four damped combs side by side, then two all-pass filters, for
+// each channel. A mixer of 6 channels gives 5.1, of 8 channels 7.1, in the order of SDL (front left,
+// front right, center, LFE, back left, back right, then side left and side right): a voice given a
+// direction (`set_direction`) is placed between the two speakers around it, with equal power; one
+// without is placed by its panning over the front, a stereo sound to the front left and right. The
+// LFE channel is left silent: the system makes it from the others when it wants it. A stereo mixer
+// given a head (`use_hrtf`, audio.hrtf) plays a voice that has a direction for headphones: through
+// the responses of the two ears for its direction and its elevation (`set_elevation`).
 import std.math;
 import std.vec;
 import audio.audio;
+import audio.hrtf;
+import audio.spectrum;
 
 // How a sound is played: `volume` 0 (silent) to 1 (as it is) and above; `pan` -1 (left) to 1
 // (right); `speed` 1 at its rate (2: an octave higher, and twice as short); `looping` from its
@@ -27,9 +39,56 @@ struct Voice {
     mut f32 volume;
     mut f32 pan;
     mut bool looping;
-    mut f32 left;  // the gains of the last frame mixed
-    mut f32 right;
+    mut f32[8] last_l;  // the gains of the last frame mixed, from the left and the right of the sound,
+    mut f32[8] last_r;  // to each channel of the mixer
     mut bool started;
+    mut bool directed;  // placed by `angle` rather than by `pan`
+    mut f32 angle;
+    mut f32 cutoff;  // Hz of the low-pass filter, 0 for none
+    mut f32 low_l;   // what the filter holds, by channel
+    mut f32 low_r;
+    mut f32 send;    // the share sent to the reverberation
+    mut f32 elevation;  // radians, above positive: heard through a head (`use_hrtf`)
+    mut i32 ears;       // its state in `Mixer.ears`, -1 for none
+}
+
+// What a voice heard through a head keeps, to convolve it by blocks (overlap-add): the block of
+// its input being filled, the output of the block before, read out meanwhile (the voice is heard
+// one block late: 5.3 ms at 48 kHz), what that block adds to the next, and the spectra of the
+// responses of its two ears for its direction (each with its delay), then those of a new
+// direction, while the output fades to them over a block (a convolution is linear: the output
+// fades as the responses would).
+struct Ears {
+    f32[] input;     // `block` frames
+    mut usize filled;
+    f32[] ready_l;   // `block` frames each
+    f32[] ready_r;
+    f32[] tail_l;
+    f32[] tail_r;
+    mut f32[] now;   // 4 × size: the left ear (real, imaginary), then the right
+    mut f32[] next;
+    mut f32 azimuth;   // of `now`
+    mut f32 elevation;
+    mut bool ready;    // `now` made
+    mut usize flushed; // the silent frames given since its sound ended
+    mut bool used;
+}
+
+// A filter of the reverberation: a line of delay, where it is, and what its comb keeps of the
+// high frequencies.
+struct Line {
+    f32[] buffer;
+    mut usize at;
+    mut f32 store;
+}
+
+// The delays of Freeverb at 44.1 kHz: those of the combs, then of the all-pass filters; the right
+// channel is 23 samples longer, so that the two are not the same.
+usize SPREAD = 23;
+
+usize delay_of(usize i) {
+    mut usize[6] delays = [1116, 1188, 1277, 1356, 556, 441];
+    return delays[i];
 }
 
 // The gains of the left and right channels for `pan` and `volume`. A mono sound is placed with
@@ -47,22 +106,170 @@ f32[2] gains(i32 channels, f32 volume, f32 pan) {
     return [volume * min(1.0, 1.0 - p), volume * min(1.0, 1.0 + p)];
 }
 
-// The sound of `channels` channels (1 or 2) at `rate` frames per second, from its voices.
+// The direction of the speaker `c` of a mixer of 5.1 (6 channels) or 7.1 (8), in degrees: 0 ahead,
+// 90 right, as ITU-R BS.775 places them; 999 for the LFE channel, which is not placed.
+f32 speaker_at(i32 channels, usize c) {
+    mut f32[8] five = [-30.0, 30.0, 0.0, 999.0, -110.0, 110.0, 999.0, 999.0];
+    mut f32[8] seven = [-30.0, 30.0, 0.0, 999.0, -150.0, 150.0, -90.0, 90.0];
+    return channels == 8 ? seven[c] : five[c];
+}
+
+// The gains of the speakers of a mixer of 5.1 or 7.1 for a sound from `angle` (radians, 0 ahead,
+// toward +right): the two speakers around it, with equal power, the others silent.
+pub f32[8] speaker_gains(i32 channels, f32 angle) {
+    mut f32[8] g = [0.0; 8];
+    f32 degrees = math.fmod((angle * 57.29578) as f64 + 540.0, 360.0) as f32 - 180.0;  // -180..180
+    usize n = min(channels as usize, 8);
+    for (usize i in 0..n) {
+        f32 a = speaker_at(channels, i);
+        if (a > 900.0) {
+            continue;
+        }
+        // the next speaker turning right from `i`
+        mut usize next = i;
+        mut f32 gap = 1000.0;
+        for (usize j in 0..n) {
+            f32 b = speaker_at(channels, j);
+            if (j == i || b > 900.0) {
+                continue;
+            }
+            f32 d = math.fmod((b - a) as f64 + 360.0, 360.0) as f32;
+            if (d > 0.0 && d < gap) {
+                gap = d;
+                next = j;
+            }
+        }
+        f32 from = math.fmod((degrees - a) as f64 + 360.0, 360.0) as f32;
+        if (from < gap) {
+            f32 t = from / gap;
+            if (t <= 0.0) {
+                g[i] = 1.0;
+            } else {
+                g[i] = math.cos((t * 1.5707964) as f64) as f32;
+                g[next] = math.sin((t * 1.5707964) as f64) as f32;
+            }
+            return g;
+        }
+    }
+    return g;
+}
+
+// The sound of `channels` channels (1, 2, 6 for 5.1 or 8 for 7.1) at `rate` frames per second, from
+// its voices.
 pub class Mixer {
     pub i32 rate;
     pub i32 channels;
     pub mut f32 volume;  // of everything, 1 by default
     vec.Vec<Voice>* voices;
     mut ui32 next_id;
+    vec.Vec<f32>* wet;  // what the voices send to the reverberation, by frame
+    vec.Vec<Line>* lines;  // 4 combs then 2 all-pass filters, for the left, then for the right
+    mut f32 room;  // the feedback of the combs: how long the room rings
+    mut f32 damping;
+    Arena* arena;
+    mut hrtf.Hrtf*? head;
+    vec.Vec<Ears>* ears;
+    mut usize block;               // frames convolved at a time through a head
+    mut spectrum.Plan*? plan;      // of 2 × block
+    mut f32[] work_re;             // 2 × block each: what a block is transformed in
+    mut f32[] work_im;
+    mut f32[] other_re;            // the output through the responses of a new direction
+    mut f32[] other_im;
+    mut f32[] left_response;       // `taps` each: what `hrtf.filters` gives
+    mut f32[] right_response;
 
     void init(keeps Arena* arena, i32 rate, i32 channels)
-        requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2)
+        requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && (channels == 1 || channels == 2 || channels == 6 || channels == 8)
     {
         self.rate = rate;
         self.channels = channels;
         volume = 1.0;
         voices = vec.new(arena);
         next_id = 1;
+        wet = vec.new<f32>(arena);
+        lines = vec.new<Line>(arena);
+        for (usize side in 0..2) {
+            for (usize i in 0..6) {
+                usize at_441 = delay_of(i) + side * SPREAD;
+                usize length = max(at_441 * rate as usize / 44100, 1);
+                lines.push(Line{ buffer: arena.alloc_slice(f32, length), at: 0, store: 0.0 });
+            }
+        }
+        room = 0.84;
+        damping = 0.2;
+        self.arena = arena;
+        head = none;
+        ears = vec.new<Ears>(arena);
+        block = 0;
+        plan = none;
+        work_re = arena.alloc_slice(f32, 0);
+        work_im = arena.alloc_slice(f32, 0);
+        other_re = arena.alloc_slice(f32, 0);
+        other_im = arena.alloc_slice(f32, 0);
+        left_response = arena.alloc_slice(f32, 0);
+        right_response = arena.alloc_slice(f32, 0);
+    }
+
+    // The voices that have a direction heard through `h`, for headphones: a stereo mixer, at the
+    // rate of `h`. The others are panned as before. A voice heard through a head is convolved by
+    // blocks, through fast Fourier transforms, and heard one block late (256 frames at 48 kHz).
+    pub void use_hrtf(keeps hrtf.Hrtf* h)
+        requires channels == 2 && h.rate == rate
+    {
+        head = some(h);
+        // a block holds a response and its delay: what a block gives reaches the next one only
+        mut usize b = 64;
+        while (b < h.taps + h.longest as usize + 2) {
+            b = b * 2;
+        }
+        block = b;
+        plan = some(spectrum.plan(arena, 2 * b));
+        work_re = arena.alloc_slice(f32, 2 * b);
+        work_im = arena.alloc_slice(f32, 2 * b);
+        other_re = arena.alloc_slice(f32, 2 * b);
+        other_im = arena.alloc_slice(f32, 2 * b);
+        left_response = arena.alloc_slice(f32, h.taps);
+        right_response = arena.alloc_slice(f32, h.taps);
+        // the ears made for another head are of other sizes: made again
+        for (usize i in 0..voices.len()) {
+            voices.at(i).ears = -1;
+        }
+        ears.clear();
+    }
+
+    // How late a voice heard through a head is, in frames: one block (0 when the mixer pans).
+    pub usize latency() {
+        return binaural() ? block : 0;
+    }
+
+    // The voices panned again.
+    pub void no_hrtf() {
+        head = none;
+    }
+
+    // Whether the voices that have a direction are heard through a head.
+    pub bool binaural() {
+        return match (head) {
+            some(h) => true,
+            none => false,
+        };
+    }
+
+    // The room of the reverberation: `size` from 0 (small, short) to 1 (a hall), `damping` from 0
+    // (bright) to 1 (dull walls).
+    pub void set_room(f32 size, f32 damp) {
+        room = 0.7 + 0.28 * max(0.0, min(1.0, size));
+        damping = 0.4 * max(0.0, min(1.0, damp));
+    }
+
+    // The share of the sound `id` sent to the reverberation, from 0 (none: the default) to 1.
+    pub void set_reverb(ui32 id, f32 send) {
+        match (find(id)) {
+            some(voice) => {
+                voice.send = max(0.0, min(1.0, send));
+            },
+            none => { },
+        }
     }
 
     // Plays `sound` once, at its volume, in the middle; gives its id, for `stop`, `set_volume`...
@@ -84,9 +291,17 @@ pub class Mixer {
             volume: how.volume,
             pan: how.pan,
             looping: how.looping,
-            left: 0.0,
-            right: 0.0,
-            started: false
+            last_l: [0.0; 8],
+            last_r: [0.0; 8],
+            started: false,
+            directed: false,
+            angle: 0.0,
+            cutoff: 0.0,
+            low_l: 0.0,
+            low_r: 0.0,
+            send: 0.0,
+            elevation: 0.0,
+            ears: -1
         });
         return id;
     }
@@ -99,6 +314,15 @@ pub class Mixer {
             }
         }
         return none;
+    }
+
+    // Where the sound `id` is, in frames of its sound (a fraction between two), or -1 when it is not
+    // playing: what `audio.stream` follows.
+    pub f64 position(ui32 id) {
+        return match (find(id)) {
+            some(v) => v.position,
+            none => -1.0,
+        };
     }
 
     // Whether the sound `id` is still playing.
@@ -127,12 +351,46 @@ pub class Mixer {
         }
     }
 
+    // Where the sound `id` comes from, for a mixer of 5.1 or 7.1: `angle` in radians, 0 ahead, pi/2
+    // right, pi behind; a stereo sound is heard as one. A mixer of 1 or 2 channels uses its panning.
+    pub void set_direction(ui32 id, f32 angle) {
+        match (find(id)) {
+            some(voice) => {
+                voice.directed = true;
+                voice.angle = angle;
+            },
+            none => { },
+        }
+    }
+
+    // How far above (positive) or below the sound `id` is, in radians, for a mixer that hears
+    // through a head (`use_hrtf`); 0 by default.
+    pub void set_elevation(ui32 id, f32 elevation) {
+        match (find(id)) {
+            some(voice) => {
+                voice.elevation = elevation;
+            },
+            none => { },
+        }
+    }
+
     pub void set_speed(ui32 id, f32 speed)
         requires speed > 0.0
     {
         match (find(id)) {
             some(voice) => {
                 voice.step = speed as f64 * voice.sound.rate as f64 / rate as f64;
+            },
+            none => { },
+        }
+    }
+
+    // The sound `id` through a low-pass filter of one pole at `hz` (what is above it softened, 6 dB
+    // an octave); 0 takes the filter away.
+    pub void set_lowpass(ui32 id, f32 hz) {
+        match (find(id)) {
+            some(voice) => {
+                voice.cutoff = max(hz, 0.0);
             },
             none => { },
         }
@@ -150,6 +408,7 @@ pub class Mixer {
     pub void stop(ui32 id) {
         for (usize i in 0..voices.len()) {
             if (voices.at(i).id == id) {
+                release(voices.at(i));
                 voices.remove(i);
                 return;
             }
@@ -157,7 +416,163 @@ pub class Mixer {
     }
 
     pub void stop_all() {
+        for (usize i in 0..voices.len()) {
+            release(voices.at(i));
+        }
         voices.clear();
+    }
+
+    // The ears of `v` given back, for another voice.
+    void release(Voice* v) {
+        if (v.ears >= 0 && (v.ears as usize) < ears.len()) {
+            ears.at(v.ears as usize).used = false;
+        }
+        v.ears = -1;
+    }
+
+    // The ears of `v`, taken from those not used, or made for it.
+    Ears* ears_of(Voice* v) {
+        if (v.ears < 0) {
+            mut usize found = ears.len();
+            for (usize i in 0..ears.len()) {
+                if (!ears.at(i).used) {
+                    found = i;
+                    break;
+                }
+            }
+            if (found == ears.len()) {
+                ears.push(Ears{ input: arena.alloc_slice(f32, block), filled: 0,
+                        ready_l: arena.alloc_slice(f32, block), ready_r: arena.alloc_slice(f32, block),
+                        tail_l: arena.alloc_slice(f32, block), tail_r: arena.alloc_slice(f32, block),
+                        now: arena.alloc_slice(f32, 8 * block), next: arena.alloc_slice(f32, 8 * block),
+                        azimuth: 0.0, elevation: 0.0, ready: false, flushed: 0, used: false });
+            }
+            Ears* e = ears.at(found);
+            mut f32[] input = e.input;
+            mut f32[] ready_l = e.ready_l;
+            mut f32[] ready_r = e.ready_r;
+            mut f32[] tail_l = e.tail_l;
+            mut f32[] tail_r = e.tail_r;
+            for (usize k in 0..block) {
+                input[k] = 0.0;
+                ready_l[k] = 0.0;
+                ready_r[k] = 0.0;
+                tail_l[k] = 0.0;
+                tail_r[k] = 0.0;
+            }
+            e.filled = 0;
+            e.ready = false;
+            e.flushed = 0;
+            e.used = true;
+            v.ears = found as i32;
+        }
+        return ears.at(v.ears as usize);
+    }
+
+    // The spectra of the responses of the two ears for `azimuth` and `elevation`, each placed after
+    // its delay, into `out` (4 × size): one transform of both, the left ear as the real part and
+    // the right as the imaginary, told apart after by their symmetry.
+    void spectra(hrtf.Hrtf* h, spectrum.Plan* p, f32 azimuth, f32 elevation, f32[] out) {
+        usize n = 2 * block;
+        mut f32[] re = work_re;
+        mut f32[] im = work_im;
+        mut f32[] o = out;
+        f32[2] delay = h.filters(azimuth, elevation, left_response, right_response);
+        usize dl = (delay[0] + 0.5) as usize;
+        usize dr = (delay[1] + 0.5) as usize;
+        for (usize k in 0..n) {
+            re[k] = 0.0;
+            im[k] = 0.0;
+        }
+        for (usize k in 0..h.taps) {
+            if (dl + k < n) {
+                re[dl + k] = left_response[k];
+            }
+            if (dr + k < n) {
+                im[dr + k] = right_response[k];
+            }
+        }
+        p.forward(re, im);
+        for (usize k in 0..n) {
+            usize m = (n - k) % n;
+            f32 a = re[k];
+            f32 b = im[k];
+            f32 c = re[m];
+            f32 d = im[m];
+            o[k] = (a + c) * 0.5;          // the left: (Z[k] + conj Z[n - k]) / 2
+            o[n + k] = (b - d) * 0.5;
+            o[2 * n + k] = (b + d) * 0.5;  // the right: (Z[k] - conj Z[n - k]) / 2i
+            o[3 * n + k] = (c - a) * 0.5;
+        }
+    }
+
+    // The block of input of `e` through the spectra `h` (4 × size), into `re` and `im`: the left
+    // ear as the real part of the output, the right as the imaginary (one inverse transform for
+    // both: their spectra are those of real signals). `x_re` and `x_im` hold the spectrum of the
+    // block.
+    void through(f32[] h, f32[] x_re, f32[] x_im, f32[] re, f32[] im) {
+        usize n = 2 * block;
+        mut f32[] r = re;
+        mut f32[] m = im;
+        for (usize k in 0..n) {
+            f32 xr = x_re[k];
+            f32 xi = x_im[k];
+            f32 lr = xr * h[k] - xi * h[n + k];
+            f32 li = xr * h[n + k] + xi * h[k];
+            f32 rr = xr * h[2 * n + k] - xi * h[3 * n + k];
+            f32 ri = xr * h[3 * n + k] + xi * h[2 * n + k];
+            r[k] = lr - ri;
+            m[k] = li + rr;
+        }
+    }
+
+    // The block of `e` filled: convolved, its output ready to be read during the next block, what
+    // it adds to the one after kept; to a new direction (that of `v`) by a fade over the block.
+    void convolve_block(Ears* e, Voice* v, hrtf.Hrtf* h, spectrum.Plan* p) {
+        usize n = 2 * block;
+        bool turning = e.azimuth != v.angle || e.elevation != v.elevation;
+        if (turning) {
+            spectra(h, p, v.angle, v.elevation, e.next);
+        }
+        // the spectrum of the block, its second half silent
+        mut f32[] re = work_re;
+        mut f32[] im = work_im;
+        for (usize k in 0..n) {
+            re[k] = k < block ? e.input[k] : 0.0;
+            im[k] = 0.0;
+        }
+        p.forward(re, im);
+        // through the responses of now, and of the new direction (in place of the spectrum)
+        through(e.now, re, im, other_re, other_im);
+        if (turning) {
+            through(e.next, re, im, re, im);
+            p.inverse(re, im);
+        }
+        p.inverse(other_re, other_im);
+        mut f32[] ready_l = e.ready_l;
+        mut f32[] ready_r = e.ready_r;
+        mut f32[] tail_l = e.tail_l;
+        mut f32[] tail_r = e.tail_r;
+        for (usize k in 0..block) {
+            mut f32 l = other_re[k];
+            mut f32 r = other_im[k];
+            if (turning) {
+                f32 t = (k + 1) as f32 / block as f32;
+                l += (re[k] - l) * t;
+                r += (im[k] - r) * t;
+            }
+            ready_l[k] = l + tail_l[k];
+            ready_r[k] = r + tail_r[k];
+            tail_l[k] = turning ? re[block + k] : other_re[block + k];
+            tail_r[k] = turning ? im[block + k] : other_im[block + k];
+        }
+        if (turning) {
+            f32[] was = e.now;
+            e.now = e.next;
+            e.next = was;
+            e.azimuth = v.angle;
+            e.elevation = v.elevation;
+        }
     }
 
     // The number of sounds playing.
@@ -174,16 +589,121 @@ pub class Mixer {
             out[i] = 0.0;
         }
         usize frames = out.len / channels as usize;
+        while (wet.len() < frames) {
+            wet.push(0.0);
+        }
+        for (usize f in 0..frames) {
+            wet.set(f, 0.0);
+        }
         mut usize i = 0;
         while (i < voices.len()) {
             if (add(voices.at(i), out, frames)) {
                 i += 1;
             } else {
+                release(voices.at(i));
                 voices.remove(i);
             }
         }
+        reverberate(out, frames);
         for (usize j in 0..out.len) {
             out[j] = max(-1.0, min(1.0, out[j] * volume));
+        }
+    }
+
+    // One sample through a damped comb of feedback `room`.
+    f32 comb(Line* l, f32 input) {
+        mut f32[] b = l.buffer;
+        f32 output = b[l.at];
+        l.store = output * (1.0 - damping) + l.store * damping;
+        b[l.at] = input + l.store * room;
+        l.at = l.at + 1 == b.len ? 0 : l.at + 1;
+        return output;
+    }
+
+    f32 pass(Line* l, f32 input) {
+        mut f32[] b = l.buffer;
+        f32 delayed = b[l.at];
+        b[l.at] = input + delayed * 0.5;
+        l.at = l.at + 1 == b.len ? 0 : l.at + 1;
+        return delayed - input;
+    }
+
+    // What the voices sent, through the reverberation, added to `out`.
+    void reverberate(f32[] out, usize frames) {
+        mut bool any = false;
+        for (usize f in 0..frames) {
+            any = any || wet.items()[f] != 0.0;
+        }
+        // nothing sent, and the tail rung out: nothing to do (the lines keep their silence)
+        mut bool ringing = any;
+        if (!ringing) {
+            for (Line l in lines.items()) {
+                if (l.store > 0.00001 || l.store < -0.00001) {
+                    ringing = true;
+                    break;
+                }
+            }
+        }
+        if (!ringing) {
+            return;
+        }
+        for (usize f in 0..frames) {
+            f32 input = wet.items()[f] * 0.015;  // the combs add up: Freeverb's fixed gain
+            mut f32[2] side = [0.0, 0.0];
+            for (usize c in 0..2) {
+                mut f32 sum = 0.0;
+                for (usize k in 0..4) {
+                    sum += comb(lines.at(c * 6 + k), input);
+                }
+                for (usize k in 4..6) {
+                    sum = pass(lines.at(c * 6 + k), sum);
+                }
+                side[c] = sum;
+            }
+            usize n = channels as usize;
+            if (channels == 1) {
+                out[f] += (side[0] + side[1]) * 0.5;
+            } else {
+                out[n * f] += side[0];
+                out[n * f + 1] += side[1];
+            }
+            // around the listener: the back (and the sides) ring too, a little less
+            if (channels >= 6) {
+                out[n * f + 4] += side[0] * 0.7;
+                out[n * f + 5] += side[1] * 0.7;
+            }
+            if (channels == 8) {
+                out[n * f + 6] += side[0] * 0.7;
+                out[n * f + 7] += side[1] * 0.7;
+            }
+        }
+    }
+
+    // The gains of `v` now, from the left and from the right of its sound, to each channel.
+    void targets(Voice* v, audio.Sound s, f32[] to_l, f32[] to_r) {
+        mut f32[] tl = to_l;
+        mut f32[] tr = to_r;
+        for (usize c in 0..8) {
+            tl[c] = 0.0;
+            tr[c] = 0.0;
+        }
+        if (channels == 1) {
+            tl[0] = v.volume * 0.5;
+            tr[0] = v.volume * 0.5;
+            return;
+        }
+        if (channels == 2 || (!v.directed && s.channels != 1)) {
+            f32[2] g = gains(s.channels, v.volume, v.pan);
+            tl[0] = g[0];
+            tr[1] = g[1];
+            return;
+        }
+        f32 a = v.directed ? v.angle : max(-1.0, min(1.0, v.pan)) * 0.5235988;  // the front, 30 degrees each side
+        f32[8] g = speaker_gains(channels, a);
+        for (usize c in 0..8) {
+            // a mono sound reads its left twice: take it once
+            tl[c] = s.channels == 1 ? v.volume * g[c] : v.volume * g[c] * 0.5;
+            tr[c] = s.channels == 1 ? 0.0 : v.volume * g[c] * 0.5;
         }
     }
 
@@ -194,9 +714,27 @@ pub class Mixer {
         if (length == 0) {
             return false;
         }
-        f32[2] target = channels == 1 ? [v.volume, v.volume] : gains(s.channels, v.volume, v.pan);
-        f32 left0 = v.started ? v.left : target[0];
-        f32 right0 = v.started ? v.right : target[1];
+        if (v.directed) {
+            match (head) {
+                some(h) => {
+                    match (plan) {
+                        some(p) => {
+                            return add_heard(v, h, p, out, frames);
+                        },
+                        none => { },
+                    }
+                },
+                none => { },
+            }
+        }
+        usize n = channels as usize;
+        mut f32[8] target_l = [0.0; 8];
+        mut f32[8] target_r = [0.0; 8];
+        targets(v, s, target_l[0..8], target_r[0..8]);
+        // the share of the input the filter takes at each sample: 1 - e^(-2π fc / rate)
+        f32 k = v.cutoff > 0.0 ? 1.0 - math.exp(-6.283185307 * v.cutoff as f64 / rate as f64) as f32 : 1.0;
+        f32[8] start_l = v.started ? v.last_l : target_l;
+        f32[8] start_r = v.started ? v.last_r : target_r;
         v.started = true;
         for (usize f in 0..frames) {
             if (v.position >= length as f64) {
@@ -206,24 +744,90 @@ pub class Mixer {
                 v.position = math.fmod(v.position, length as f64);
             }
             f32 t = (f + 1) as f32 / frames as f32;
-            f32 gl = left0 + (target[0] - left0) * t;
-            f32 gr = right0 + (target[1] - right0) * t;
             usize at = v.position as usize;
             f32 frac = (v.position - at as f64) as f32;
             usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
-            f32 l = sample(s, at, next, frac, 0);
-            f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
-            if (channels == 1) {
-                out[f] += (gl * l + gr * r) * 0.5;
-            } else {
-                out[2 * f] += gl * l;
-                out[2 * f + 1] += gr * r;
+            mut f32 l = sample(s, at, next, frac, 0);
+            mut f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
+            if (k < 1.0) {
+                v.low_l += (l - v.low_l) * k;
+                v.low_r += (r - v.low_r) * k;
+                l = v.low_l;
+                r = v.low_r;
+            }
+            for (usize c in 0..n) {
+                f32 gl = start_l[c] + (target_l[c] - start_l[c]) * t;
+                f32 gr = start_r[c] + (target_r[c] - start_r[c]) * t;
+                out[n * f + c] += gl * l + gr * r;
+            }
+            if (v.send > 0.0) {
+                wet.set(f, wet.items()[f] + v.volume * (l + r) * 0.5 * v.send);
             }
             v.position += v.step;
         }
-        v.left = target[0];
-        v.right = target[1];
+        v.last_l = target_l;
+        v.last_r = target_r;
         return v.looping || v.position < length as f64;
+    }
+
+    // Adds `v` to the stereo `out` as a head hears it from its direction: its sound mixed to one
+    // channel, filtered, and convolved by blocks with the responses of the two ears, one block
+    // late. Once its sound has ended, silence still goes through until its last block and what it
+    // adds to the next are heard. False then.
+    bool add_heard(Voice* v, hrtf.Hrtf* h, spectrum.Plan* p, f32[] out, usize frames) {
+        audio.Sound s = v.sound;
+        usize length = s.frames();
+        Ears* e = ears_of(v);
+        if (!e.ready) {
+            spectra(h, p, v.angle, v.elevation, e.now);
+            e.azimuth = v.angle;
+            e.elevation = v.elevation;
+            e.ready = true;
+        }
+        f32 k = v.cutoff > 0.0 ? 1.0 - math.exp(-6.283185307 * v.cutoff as f64 / rate as f64) as f32 : 1.0;
+        f32 from = v.started ? v.last_l[0] : v.volume;
+        v.started = true;
+        mut f32[] input = e.input;
+        for (usize f in 0..frames) {
+            mut f32 x = 0.0;
+            if (v.position >= length as f64 && v.looping) {
+                v.position = math.fmod(v.position, length as f64);
+            }
+            if (v.position < length as f64) {
+                f32 t = (f + 1) as f32 / frames as f32;
+                usize at = v.position as usize;
+                f32 frac = (v.position - at as f64) as f32;
+                usize next = at + 1 < length ? at + 1 : v.looping ? 0 : at;
+                mut f32 l = sample(s, at, next, frac, 0);
+                mut f32 r = s.channels == 1 ? l : sample(s, at, next, frac, 1);
+                if (k < 1.0) {
+                    v.low_l += (l - v.low_l) * k;
+                    v.low_r += (r - v.low_r) * k;
+                    l = v.low_l;
+                    r = v.low_r;
+                }
+                x = (l + r) * 0.5 * (from + (v.volume - from) * t);
+                if (v.send > 0.0) {
+                    wet.set(f, wet.items()[f] + v.volume * (l + r) * 0.5 * v.send);
+                }
+                v.position += v.step;
+            } else {
+                if (e.flushed >= 2 * block) {
+                    return false;  // its last block, and what it added to the next, heard
+                }
+                e.flushed += 1;
+            }
+            out[2 * f] += e.ready_l[e.filled];
+            out[2 * f + 1] += e.ready_r[e.filled];
+            input[e.filled] = x;
+            e.filled += 1;
+            if (e.filled == block) {
+                convolve_block(e, v, h, p);
+                e.filled = 0;
+            }
+        }
+        v.last_l[0] = v.volume;
+        return v.looping || v.position < length as f64 || e.flushed < 2 * block;
     }
 }
 

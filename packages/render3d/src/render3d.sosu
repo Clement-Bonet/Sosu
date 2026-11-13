@@ -1,0 +1,934 @@
+// render3d.render3d: 3D scenes on `gpu` (spec §8.2). `upload` sends a model of `model` to the
+// GPU (its meshes, textures and materials); each frame, `draw` takes a camera and the models to
+// show, each placed by a matrix, leaves out the meshes that the camera cannot see, draws the map
+// of the shadows of the sun, then the scene, lit as glTF describes its materials (metal and
+// roughness) by the sun, up to four point lights and an ambient light. A mesh moved by a skin is
+// drawn by the joints of the palette its item gives (`anim.palette`), up to 128 joints. A mesh with
+// morph targets is moved by them on the GPU: the weights its item gives (`Item.morphs`), or its
+// own, the 8 largest of them.
+import std.vec;
+import std.math;
+import math.linear;
+import math.geometry;
+import image.image;
+import model.model;
+import gpu.gpu;
+
+extern "C" {
+    ui8* sosu_shader_lit_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_lit_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_lit_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_lit_frag_spv(usize* size) uses io;
+    ui8* sosu_shader_lit_frag_dxil(usize* size) uses io;
+    ui8* sosu_shader_lit_frag_msl(usize* size) uses io;
+    ui8* sosu_shader_shadow_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_shadow_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_shadow_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_shadow_frag_spv(usize* size) uses io;
+    ui8* sosu_shader_shadow_frag_dxil(usize* size) uses io;
+    ui8* sosu_shader_shadow_frag_msl(usize* size) uses io;
+    ui8* sosu_shader_skinned_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_skinned_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_skinned_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_skinned_shadow_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_skinned_shadow_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_skinned_shadow_vert_msl(usize* size) uses io;
+}
+
+// The joints of a skinned mesh, at most: the size of the uniform buffer of its vertex shader.
+pub usize MAX_JOINTS = 128;
+
+usize MAX_POINT_LIGHTS = 4;
+
+// Where the camera is and what it looks at.
+pub struct Camera {
+    pub linear.Vec3 position;
+    pub linear.Vec3 target;
+    pub linear.Vec3 up = linear.vec3(0.0, 1.0, 0.0);
+    pub f32 fov_y = 1.0;  // in radians, from the bottom to the top of the view
+    pub f32 near = 0.1;
+    pub f32 far = 200.0;
+
+    pub linear.Mat4 view() {
+        return linear.look_at(position, target, up);
+    }
+
+    pub linear.Mat4 view_projection(f32 aspect) {
+        return linear.perspective(fov_y, aspect, near, far).mul(view());
+    }
+}
+
+// The light of the sun: parallel, from far away.
+pub struct Sun {
+    pub mut linear.Vec3 direction = linear.vec3(-0.4, -1.0, -0.3);  // where its light goes
+    pub mut linear.Vec3 color = linear.vec3(1.0, 0.97, 0.9);
+    pub mut f32 intensity = 3.0;
+    pub mut bool shadows = true;
+    // The half side of the square around the target of the camera where it casts shadows.
+    pub mut f32 shadow_extent = 20.0;
+}
+
+// A light at a point, that fades to nothing at `range`.
+pub struct PointLight {
+    pub linear.Vec3 position;
+    pub linear.Vec3 color = linear.vec3(1.0, 1.0, 1.0);
+    pub f32 intensity = 10.0;
+    pub f32 range = 10.0;
+}
+
+pub struct Options {
+    pub ui32 shadow_size = 2048;  // the side of the map of shadows, in pixels
+}
+
+// A model on the GPU, placed by a matrix in a scene. `palette`: the matrices of the joints of its
+// skin (`anim.palette`), for its skinned meshes, which are drawn at rest without it; these meshes
+// are placed by `transform` alone, as glTF has it (not by their node), and never left out.
+pub struct Item {
+    pub Uploaded* model;
+    pub linear.Mat4 transform;
+    pub linear.Mat4[]? palette = none;
+    pub Morphed[]? morphs = none;  // the weights of the morph targets of its meshes
+}
+
+// The weights of the morph targets of the mesh `mesh` of a model (one per target, the missing ones
+// 0), for an item: those of `anim` (`machine.morph_weights`, `clip.weights_at`). A mesh without
+// is drawn with its own weights (`model.Mesh.weights`), or none.
+pub struct Morphed {
+    pub usize mesh;
+    pub f32[] weights;
+}
+
+// The morph targets drawn at most for a mesh: those of the largest weights.
+pub usize MAX_MORPHS = 8;
+
+pub Item item(Uploaded* m, linear.Mat4 transform) {
+    return Item{ model: m, transform: transform };
+}
+
+// What the last frame drew.
+pub struct Stats {
+    pub usize drawn;  // meshes drawn
+    pub usize culled;  // meshes left out: the camera could not see them
+}
+
+struct GpuMesh {
+    gpu.Buffer vertices;
+    gpu.Buffer indices;
+    ui32 count;
+    usize? material;
+    geometry.Aabb bounds;
+    bool skinned;  // its vertices are `SkinnedVertex`
+    gpu.Buffer morphs;  // for each target, what it moves the positions then the normals by (4 floats each)
+    ui32 targets;       // 0: none, `morphs` the buffer of nothing of the renderer
+}
+
+// The morph targets of a draw, as the vertex shaders read them (cbuffer Morph).
+struct MorphUniform {
+    mut f32[8] weights;
+    mut ui32[8] targets;
+    mut ui32[4] info;  // the targets given, the vertices of the mesh
+}
+
+// A vertex of a skinned mesh, as skinned.vert reads it: that of the model, its four joints (as
+// floats) and their weights.
+struct SkinnedVertex {
+    f32[3] position;
+    f32[3] normal;
+    f32[2] uv;
+    f32[4] joints;
+    f32[4] weights;
+}
+
+struct SkinUniform {
+    mut linear.Mat4[128] joints;
+}
+
+// A model sent to the GPU by `Renderer.upload`.
+pub class Uploaded {
+    pub model.Model data;
+    vec.Vec<GpuMesh>* meshes;  // one per mesh of `data`, in its order
+    vec.Vec<gpu.Texture>* textures;  // one per image of `data`
+    mut bool released;
+
+    void init(keeps Arena* arena, keeps model.Model data) {
+        self.data = data;
+        meshes = vec.new(arena);
+        textures = vec.new(arena);
+        released = false;
+    }
+}
+
+struct ObjectUniform {
+    linear.Mat4 model;
+    linear.Mat4 view_projection;
+    linear.Mat4 light_view_projection;
+}
+
+struct ShadowUniform {
+    linear.Mat4 model;
+    linear.Mat4 light_view_projection;
+}
+
+struct LightsUniform {
+    mut f32[4] camera_position;
+    mut f32[4] sun_direction;
+    mut f32[4] sun_color;
+    mut f32[4] ambient;
+    mut f32[16] point_position;
+    mut f32[16] point_color;
+    mut f32[4] counts;
+}
+
+struct MaterialUniform {
+    f32[4] base_color;
+    f32[4] factors;
+}
+
+// A mesh to draw in this frame, and where.
+struct Draw {
+    GpuMesh mesh;
+    Uploaded* owner;
+    linear.Mat4 world;
+    linear.Mat4[]? palette;
+    MorphUniform morph;
+}
+
+ui8[] copied(Arena* arena, ui8* bytes, usize size) {
+    mut ui8[] out = arena.alloc_slice(ui8, size);
+    unsafe {
+        for (usize i in 0..size) {
+            out[i] = *(bytes + i);
+        }
+    }
+    return out;
+}
+
+// The code of a shader of the package: `which` is 0 for lit.vert, 1 lit.frag, 2 shadow.vert,
+// 3 shadow.frag, 4 skinned.vert, 5 skinned_shadow.vert.
+ui8[] code_of(Arena* arena, gpu.ShaderFormat format, usize which) uses io {
+    mut usize size = 0;
+    mut ui8* bytes = "".to_cstr(arena);
+    unsafe {
+        bytes = match (format) {
+            Spirv => which == 0 ? sosu_shader_lit_vert_spv(&size)
+                    : which == 1 ? sosu_shader_lit_frag_spv(&size)
+                    : which == 2 ? sosu_shader_shadow_vert_spv(&size)
+                    : which == 3 ? sosu_shader_shadow_frag_spv(&size)
+                    : which == 4 ? sosu_shader_skinned_vert_spv(&size)
+                    : sosu_shader_skinned_shadow_vert_spv(&size),
+            Dxil => which == 0 ? sosu_shader_lit_vert_dxil(&size)
+                    : which == 1 ? sosu_shader_lit_frag_dxil(&size)
+                    : which == 2 ? sosu_shader_shadow_vert_dxil(&size)
+                    : which == 3 ? sosu_shader_shadow_frag_dxil(&size)
+                    : which == 4 ? sosu_shader_skinned_vert_dxil(&size)
+                    : sosu_shader_skinned_shadow_vert_dxil(&size),
+            Msl => which == 0 ? sosu_shader_lit_vert_msl(&size)
+                    : which == 1 ? sosu_shader_lit_frag_msl(&size)
+                    : which == 2 ? sosu_shader_shadow_vert_msl(&size)
+                    : which == 3 ? sosu_shader_shadow_frag_msl(&size)
+                    : which == 4 ? sosu_shader_skinned_vert_msl(&size)
+                    : sosu_shader_skinned_shadow_vert_msl(&size),
+        };
+    }
+    return copied(arena, bytes, size);
+}
+
+pub class Renderer {
+    Arena* arena;
+    gpu.Device* device;
+    gpu.Pipeline lit;
+    gpu.Pipeline shadow;
+    gpu.Pipeline lit_skinned;
+    gpu.Pipeline shadow_skinned;
+    gpu.Texture shadow_map;
+    gpu.Sampler shadow_sampler;
+    gpu.Sampler albedo_sampler;
+    gpu.Texture white;
+    gpu.Buffer no_morphs;  // bound for a mesh without morph targets
+    pub mut Sun sun;
+    pub mut linear.Vec3 ambient;
+    pub mut gpu.Color background;
+    vec.Vec<PointLight>* points;
+    mut Stats last;
+
+    void init(
+        keeps Arena* arena,
+        keeps gpu.Device* device,
+        gpu.Pipeline lit,
+        gpu.Pipeline shadow,
+        gpu.Pipeline lit_skinned,
+        gpu.Pipeline shadow_skinned,
+        gpu.Texture shadow_map,
+        gpu.Sampler shadow_sampler,
+        gpu.Sampler albedo_sampler,
+        gpu.Texture white,
+        gpu.Buffer no_morphs
+    ) {
+        self.arena = arena;
+        self.device = device;
+        self.lit = lit;
+        self.shadow = shadow;
+        self.lit_skinned = lit_skinned;
+        self.shadow_skinned = shadow_skinned;
+        self.shadow_map = shadow_map;
+        self.shadow_sampler = shadow_sampler;
+        self.albedo_sampler = albedo_sampler;
+        self.white = white;
+        self.no_morphs = no_morphs;
+        sun = Sun{ };
+        ambient = linear.vec3(0.08, 0.09, 0.11);
+        background = gpu.rgba(0.05, 0.06, 0.08, 1.0);
+        points = vec.new(arena);
+        last = Stats{ drawn: 0, culled: 0 };
+    }
+
+    // The point lights from now on (the first four).
+    pub void set_lights(PointLight[] lights) {
+        points.clear();
+        for (PointLight l in lights) {
+            if (points.len() < MAX_POINT_LIGHTS) {
+                points.push(l);
+            }
+        }
+    }
+
+    // What the last `draw` drew and left out.
+    pub Stats stats() {
+        return last;
+    }
+
+    // Sends `m` to the GPU: a vertex and an index buffer per mesh, a texture per image (with its
+    // mipmaps). `arena` holds what it keeps; `release` frees what is on the GPU.
+    pub Uploaded*!gpu.GpuError upload(keeps Arena* into, keeps model.Model m) uses io {
+        Uploaded* up = into.new(Uploaded, into, m);
+        for (image.Image img in m.images) {
+            up.textures.push(try device.texture_of(img, true));
+        }
+        for (model.Mesh mesh in m.meshes) {
+            if (mesh.indices.len == 0 || mesh.vertices.len == 0) {
+                // nothing to draw: a buffer of nothing still keeps its place
+                up.meshes.push(GpuMesh{
+                    vertices: try device.buffer(gpu.Usage.Vertex, 4),
+                    indices: try device.buffer(gpu.Usage.Index, 4),
+                    count: 0,
+                    material: none,
+                    bounds: mesh.bounds,
+                    skinned: false,
+                    morphs: no_morphs,
+                    targets: 0
+                });
+                continue;
+            }
+            gpu.Buffer morphs = try morphs_of(mesh);
+            ui32 targets = match (mesh.morphs) {
+                some(l) => l.len > 0 && mesh.vertices.len > 0 ? l.len as ui32 : 0,
+                none => 0,
+            };
+            geometry.Aabb bounds = reach_of(mesh);
+            match (mesh.influences) {
+                some(influences) => {
+                    if (influences.len == mesh.vertices.len) {
+                        mut Arena scratch = Arena.new(mesh.vertices.len * 64 + 64);
+                        defer scratch.free();
+                        mut SkinnedVertex[] skinned = scratch.alloc_slice(SkinnedVertex, mesh.vertices.len);
+                        for (usize i in 0..mesh.vertices.len) {
+                            model.Vertex v = mesh.vertices[i];
+                            model.Influence f = influences[i];
+                            skinned[i] = SkinnedVertex{
+                                position: v.position,
+                                normal: v.normal,
+                                uv: v.uv,
+                                joints: [f.joints[0] as f32, f.joints[1] as f32, f.joints[2] as f32, f.joints[3] as f32],
+                                weights: f.weights
+                            };
+                        }
+                        up.meshes.push(GpuMesh{
+                            vertices: try device.buffer_of(gpu.Usage.Vertex, skinned),
+                            indices: try device.buffer_of(gpu.Usage.Index, mesh.indices),
+                            count: mesh.indices.len as ui32,
+                            material: mesh.material,
+                            bounds: bounds,
+                            skinned: true,
+                            morphs: morphs,
+                            targets: targets
+                        });
+                        continue;
+                    }
+                },
+                none => { },
+            }
+            up.meshes.push(GpuMesh{
+                vertices: try device.buffer_of(gpu.Usage.Vertex, mesh.vertices),
+                indices: try device.buffer_of(gpu.Usage.Index, mesh.indices),
+                count: mesh.indices.len as ui32,
+                material: mesh.material,
+                bounds: bounds,
+                skinned: false,
+                morphs: morphs,
+                targets: targets
+            });
+        }
+        return ok(up);
+    }
+
+    // The buffer of the morph targets of `mesh`: for each target, its moves of the positions then of
+    // the normals, one float4 per vertex; the buffer of nothing for a mesh without.
+    gpu.Buffer!gpu.GpuError morphs_of(model.Mesh mesh) uses io {
+        model.Morph[] list = match (mesh.morphs) {
+            some(l) => l,
+            none => {
+                return ok(no_morphs);
+            },
+        };
+        usize n = mesh.vertices.len;
+        if (list.len == 0 || n == 0) {
+            return ok(no_morphs);
+        }
+        mut Arena scratch = Arena.new(list.len * n * 32 + 64);
+        defer scratch.free();
+        mut f32[] data = scratch.alloc_slice(f32, list.len * n * 8);
+        for (usize t in 0..list.len) {
+            model.Morph m = list[t];
+            for (usize i in 0..n) {
+                for (usize c in 0..3) {
+                    data[(t * 2 * n + i) * 4 + c] = m.positions.len >= (i + 1) * 3 ? m.positions[3 * i + c] : 0.0;
+                    data[(t * 2 * n + n + i) * 4 + c] = m.normals.len >= (i + 1) * 3 ? m.normals[3 * i + c] : 0.0;
+                }
+            }
+        }
+        return device.buffer_of(gpu.Usage.Storage, data);
+    }
+
+    // Its bounds, and what its morph targets can move it by (each at a weight of 1 at most).
+    geometry.Aabb reach_of(model.Mesh mesh) {
+        match (mesh.morphs) {
+            some(list) => {
+                mut f32 reach = 0.0;
+                for (model.Morph m in list) {
+                    mut f32 most = 0.0;
+                    for (usize i in 0..m.positions.len / 3) {
+                        f32 x = m.positions[3 * i];
+                        f32 y = m.positions[3 * i + 1];
+                        f32 z = m.positions[3 * i + 2];
+                        most = max(most, x * x + y * y + z * z);
+                    }
+                    reach += math.sqrt(most as f64) as f32;
+                }
+                linear.Vec3 r = linear.vec3(reach, reach, reach);
+                return geometry.Aabb{ min: mesh.bounds.min.sub(r), max: mesh.bounds.max.add(r) };
+            },
+            none => {
+                return mesh.bounds;
+            },
+        }
+    }
+
+    // The vertices of the mesh `mesh` of `up` replaced by `vertices` (as many as it has): a mesh
+    // moved by its morph targets (`model.morph`), a ground that changes. Nothing for another count.
+    pub void update_vertices(Uploaded* up, usize mesh, model.Vertex[] vertices) uses io {
+        if (up.released || mesh >= up.meshes.len() || mesh >= up.data.meshes.len) {
+            return;
+        }
+        model.Mesh m = up.data.meshes[mesh];
+        GpuMesh g = up.meshes.items()[mesh];
+        if (vertices.len != m.vertices.len || g.count == 0) {
+            return;
+        }
+        // its bounds follow its vertices: the camera leaves out what it cannot see
+        up.meshes.set(mesh, GpuMesh{ vertices: g.vertices, indices: g.indices, count: g.count, material: g.material,
+                bounds: model.bounds_of(vertices), skinned: g.skinned, morphs: g.morphs, targets: g.targets });
+        if (!g.skinned) {
+            device.upload(g.vertices, vertices);
+            return;
+        }
+        match (m.influences) {
+            some(influences) => {
+                mut Arena scratch = Arena.new(vertices.len * 64 + 64);
+                defer scratch.free();
+                mut SkinnedVertex[] skinned = scratch.alloc_slice(SkinnedVertex, vertices.len);
+                for (usize i in 0..vertices.len) {
+                    model.Influence f = influences[i];
+                    skinned[i] = SkinnedVertex{
+                        position: vertices[i].position,
+                        normal: vertices[i].normal,
+                        uv: vertices[i].uv,
+                        joints: [f.joints[0] as f32, f.joints[1] as f32, f.joints[2] as f32, f.joints[3] as f32],
+                        weights: f.weights
+                    };
+                }
+                device.upload(g.vertices, skinned);
+            },
+            none => { },
+        }
+    }
+
+    // Frees what `upload` sent to the GPU.
+    pub void release(Uploaded* up) uses io {
+        if (up.released) {
+            return;
+        }
+        for (GpuMesh mesh in up.meshes.items()) {
+            device.release_buffer(mesh.vertices);
+            device.release_buffer(mesh.indices);
+            if (mesh.targets > 0) {
+                device.release_buffer(mesh.morphs);
+            }
+        }
+        for (gpu.Texture t in up.textures.items()) {
+            device.release_texture(t);
+        }
+        up.released = true;
+    }
+
+    // The scene drawn into the window of `frame`, seen by `camera`.
+    pub void draw(gpu.Frame frame, Camera camera, Item[] items) uses io {
+        render(frame, none, frame.width, frame.height, camera, items);
+    }
+
+    // The scene drawn into `target`, a texture of `device.target`, in a frame of `commands()`.
+    pub void draw_into(gpu.Frame frame, gpu.Texture target, Camera camera, Item[] items) uses io {
+        render(frame, some(target), target.width, target.height, camera, items);
+    }
+
+    // The view and projection of the sun: a square of `shadow_extent` around what the camera looks at.
+    linear.Mat4 sun_view_projection(Camera camera) {
+        linear.Vec3 dir = sun.direction.normalized();
+        f32 e = sun.shadow_extent;
+        linear.Vec3 up = abs(dir.y) > 0.99 ? linear.vec3(0.0, 0.0, 1.0) : linear.vec3(0.0, 1.0, 0.0);
+        linear.Vec3 eye = camera.target.sub(dir.scale(e * 2.0));
+        return linear.orthographic(-e, e, -e, e, 0.01, e * 4.0).mul(linear.look_at(eye, camera.target, up));
+    }
+
+    void render(gpu.Frame frame, gpu.Texture? target, ui32 width, ui32 height, Camera camera, Item[] items) uses io {
+        mut Arena scratch = Arena.new(16 * KB);
+        defer scratch.free();
+        f32 aspect = width as f32 / max(height, 1) as f32;
+        linear.Mat4 view_projection = camera.view_projection(aspect);
+        geometry.Frustum frustum = geometry.frustum(view_projection);
+        linear.Mat4 light = sun_view_projection(camera);
+
+        // what to draw: every mesh of every node, those the camera cannot see left out
+        vec.Vec<Draw>* seen = vec.new(&scratch);
+        vec.Vec<Draw>* casters = vec.new(&scratch);
+        mut usize culled = 0;
+        for (Item it in items) {
+            Uploaded* up = it.model;
+            if (up.released) {
+                continue;
+            }
+            linear.Mat4[] worlds = model.world_matrices(&scratch, up.data, it.transform);
+            for (usize n in 0..up.data.nodes.len) {
+                for (usize m in up.data.nodes[n].meshes) {
+                    if (m >= up.meshes.len()) {
+                        continue;
+                    }
+                    GpuMesh mesh = up.meshes.items()[m];
+                    if (mesh.count == 0) {
+                        continue;
+                    }
+                    // a skinned mesh: placed by the item alone, its joints carry the rest; it may be
+                    // anywhere its joints take it, so it is not left out
+                    Draw d = Draw{ mesh: mesh, owner: up, world: mesh.skinned ? it.transform : worlds[n], palette: it.palette,
+                            morph: morph_of(mesh, up.data.meshes[m], m, it.morphs) };
+                    casters.push(d);
+                    if (mesh.skinned || frustum.sees_box(mesh.bounds.transformed(worlds[n]))) {
+                        seen.push(d);
+                    } else {
+                        culled += 1;
+                    }
+                }
+            }
+        }
+
+        // the map of the shadows of the sun
+        if (sun.shadows) {
+            gpu.Pass pass = frame.depth_pass(shadow_map);
+            for (bool skinned in [false, true]) {
+                pass.bind(skinned ? shadow_skinned : shadow);
+                for (Draw d in casters.items()) {
+                    if (d.mesh.skinned != skinned) {
+                        continue;
+                    }
+                    mut ShadowUniform u = ShadowUniform{ model: d.world, light_view_projection: light };
+                    pass.vertex_uniform(0, &u);
+                    if (skinned) {
+                        mut SkinUniform joints = skin_of(d.palette);
+                        pass.vertex_uniform(1, &joints);
+                    }
+                    mut MorphUniform morph = d.morph;
+                    pass.vertex_uniform(skinned ? 2 : 1, &morph);
+                    pass.vertex_storage(0, d.mesh.morphs);
+                    pass.vertices(d.mesh.vertices);
+                    pass.indices(d.mesh.indices, gpu.IndexSize.U32);
+                    pass.draw_indexed(d.mesh.count, 1);
+                }
+            }
+            pass.end();
+        }
+
+        // the scene
+        gpu.Clear clear = gpu.Clear{ color: background };
+        gpu.Pass pass = match (target) {
+            some(t) => frame.pass_into(t, clear),
+            none => frame.pass(clear),
+        };
+        pass.bind(lit);
+        mut LightsUniform lights = LightsUniform{
+            camera_position: [camera.position.x, camera.position.y, camera.position.z, 1.0],
+            sun_direction: [sun.direction.x, sun.direction.y, sun.direction.z, sun.intensity],
+            sun_color: [sun.color.x, sun.color.y, sun.color.z, sun.shadows ? 1.0 : 0.0],
+            ambient: [ambient.x, ambient.y, ambient.z, 0.0],
+            point_position: [0.0; 16],
+            point_color: [0.0; 16],
+            counts: [points.len() as f32, 1.0 / max(shadow_map.width, 1) as f32, 0.0, 0.0]
+        };
+        for (usize i in 0..points.len()) {
+            PointLight p = points.items()[i];
+            lights.point_position[i * 4] = p.position.x;
+            lights.point_position[i * 4 + 1] = p.position.y;
+            lights.point_position[i * 4 + 2] = p.position.z;
+            lights.point_position[i * 4 + 3] = p.range;
+            lights.point_color[i * 4] = p.color.x;
+            lights.point_color[i * 4 + 1] = p.color.y;
+            lights.point_color[i * 4 + 2] = p.color.z;
+            lights.point_color[i * 4 + 3] = p.intensity;
+        }
+        pass.fragment_uniform(0, &lights);
+        mut bool skinned_bound = false;
+        for (Draw d in seen.items()) {
+            if (d.mesh.skinned != skinned_bound) {
+                pass.bind(d.mesh.skinned ? lit_skinned : lit);
+                skinned_bound = d.mesh.skinned;
+            }
+            mut ObjectUniform object = ObjectUniform{
+                model: d.world,
+                view_projection: view_projection,
+                light_view_projection: light
+            };
+            pass.vertex_uniform(0, &object);
+            if (d.mesh.skinned) {
+                mut SkinUniform joints = skin_of(d.palette);
+                pass.vertex_uniform(1, &joints);
+            }
+            mut MorphUniform morph = d.morph;
+            pass.vertex_uniform(d.mesh.skinned ? 2 : 1, &morph);
+            pass.vertex_storage(0, d.mesh.morphs);
+            mut gpu.Texture albedo = white;
+            mut MaterialUniform material = MaterialUniform{
+                base_color: [1.0, 1.0, 1.0, 1.0],
+                factors: [0.0, 0.8, 0.0, 0.0]
+            };
+            match (d.mesh.material) {
+                some(i) => {
+                    if (i < d.owner.data.materials.len) {
+                        model.Material mat = d.owner.data.materials[i];
+                        mut f32 textured = 0.0;
+                        match (mat.texture) {
+                            some(t) => {
+                                if (t < d.owner.textures.len()) {
+                                    albedo = d.owner.textures.items()[t];
+                                    textured = 1.0;
+                                }
+                            },
+                            none => { },
+                        }
+                        material = MaterialUniform{
+                            base_color: mat.base_color,
+                            factors: [mat.metallic, mat.roughness, textured, 0.0]
+                        };
+                    }
+                },
+                none => { },
+            }
+            pass.fragment_uniform(1, &material);
+            pass.texture(0, albedo, albedo_sampler);
+            pass.texture(1, shadow_map, shadow_sampler);
+            pass.vertices(d.mesh.vertices);
+            pass.indices(d.mesh.indices, gpu.IndexSize.U32);
+            pass.draw_indexed(d.mesh.count, 1);
+        }
+        pass.end();
+        last = Stats{ drawn: seen.len(), culled: culled };
+    }
+
+    // The morph targets of a draw of `mesh` (`data` on the processor, the mesh `index` of its model):
+    // the weights of the item for it, else its own; the 8 largest that are not 0.
+    MorphUniform morph_of(GpuMesh mesh, model.Mesh data, usize index, Morphed[]? given) {
+        mut MorphUniform u = MorphUniform{ weights: [0.0; 8], targets: [0; 8], info: [0, data.vertices.len as ui32, 0, 0] };
+        if (mesh.targets == 0) {
+            return u;
+        }
+        mut f32[]? weights = data.weights;
+        match (given) {
+            some(list) => {
+                for (Morphed m in list) {
+                    if (m.mesh == index) {
+                        weights = some(m.weights);
+                    }
+                }
+            },
+            none => { },
+        }
+        f32[] w = match (weights) {
+            some(x) => x,
+            none => {
+                return u;
+            },
+        };
+        mut ui32 count = 0;
+        for (usize t in 0..min(w.len, mesh.targets as usize)) {
+            if (w[t] == 0.0) {
+                continue;
+            }
+            // kept in order of weight, the largest first; the smallest goes out when 8 are kept
+            mut usize at = count as usize;
+            while (at > 0 && abs(u.weights[at - 1]) < abs(w[t])) {
+                if (at < MAX_MORPHS) {
+                    u.weights[at] = u.weights[at - 1];
+                    u.targets[at] = u.targets[at - 1];
+                }
+                at -= 1;
+            }
+            if (at < MAX_MORPHS) {
+                u.weights[at] = w[t];
+                u.targets[at] = t as ui32;
+                count = min(count + 1, MAX_MORPHS as ui32);
+            }
+        }
+        u.info[0] = count;
+        return u;
+    }
+
+    // Its pipelines, samplers and textures released (not the models it uploaded: `release` them).
+    pub void close() uses io {
+        device.release_pipeline(lit);
+        device.release_pipeline(shadow);
+        device.release_pipeline(lit_skinned);
+        device.release_pipeline(shadow_skinned);
+        device.release_texture(shadow_map);
+        device.release_texture(white);
+        device.release_buffer(no_morphs);
+        device.release_sampler(shadow_sampler);
+        device.release_sampler(albedo_sampler);
+    }
+}
+
+// The joints of a palette for the vertex shader: the identity (the rest) without one, or beyond
+// `MAX_JOINTS`.
+SkinUniform skin_of(linear.Mat4[]? palette) {
+    mut SkinUniform u = SkinUniform{ joints: [linear.identity4(); 128] };
+    match (palette) {
+        some(p) => {
+            if (p.len <= MAX_JOINTS) {
+                for (usize j in 0..p.len) {
+                    u.joints[j] = p[j];
+                }
+            }
+        },
+        none => { },
+    }
+    return u;
+}
+
+// The renderer of `device`, its pipelines and its map of shadows made.
+pub Renderer*!gpu.GpuError create(keeps Arena* arena, keeps gpu.Device* device, Options options) uses io {
+    mut Arena scratch = Arena.new(64 * KB);
+    defer scratch.free();
+    gpu.ShaderFormat format = device.format();
+    str entry = match (format) {
+        Msl => "main0",
+        _ => "main",
+    };
+    gpu.Shader lit_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 0),
+        entry: entry,
+        storage_buffers: 1,
+        uniform_buffers: 2
+    });
+    gpu.Shader lit_fs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Fragment,
+        format: format,
+        code: code_of(&scratch, format, 1),
+        entry: entry,
+        samplers: 2,
+        uniform_buffers: 2
+    });
+    gpu.Shader shadow_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 2),
+        entry: entry,
+        storage_buffers: 1,
+        uniform_buffers: 2
+    });
+    gpu.Shader shadow_fs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Fragment,
+        format: format,
+        code: code_of(&scratch, format, 3),
+        entry: entry
+    });
+    mut gpu.Attribute[3] attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(model.Vertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float3, offset: offset_of(model.Vertex, normal) as ui32 },
+        gpu.Attribute{ location: 2, format: gpu.Format.Float2, offset: offset_of(model.Vertex, uv) as ui32 },
+    ];
+    gpu.Layout layout = gpu.Layout{ stride: size_of(model.Vertex) as ui32, attributes: attributes[0..3] };
+    gpu.Pipeline lit = try device.pipeline(gpu.PipelineDesc{ vertex: lit_vs, fragment: lit_fs, layout: layout });
+    gpu.Pipeline shadow = try device.pipeline(gpu.PipelineDesc{
+        vertex: shadow_vs,
+        fragment: shadow_fs,
+        layout: gpu.Layout{ stride: size_of(model.Vertex) as ui32, attributes: attributes[0..1] },
+        cull: gpu.Cull.Off,
+        color: false
+    });  // the back faces cast shadows too: thin walls, leaves
+    gpu.Shader skinned_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 4),
+        entry: entry,
+        storage_buffers: 1,
+        uniform_buffers: 3
+    });
+    gpu.Shader skinned_shadow_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 5),
+        entry: entry,
+        storage_buffers: 1,
+        uniform_buffers: 3
+    });
+    mut gpu.Attribute[5] skinned_attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(SkinnedVertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float3, offset: offset_of(SkinnedVertex, normal) as ui32 },
+        gpu.Attribute{ location: 2, format: gpu.Format.Float2, offset: offset_of(SkinnedVertex, uv) as ui32 },
+        gpu.Attribute{ location: 3, format: gpu.Format.Float4, offset: offset_of(SkinnedVertex, joints) as ui32 },
+        gpu.Attribute{ location: 4, format: gpu.Format.Float4, offset: offset_of(SkinnedVertex, weights) as ui32 },
+    ];
+    gpu.Layout skinned_layout = gpu.Layout{ stride: size_of(SkinnedVertex) as ui32, attributes: skinned_attributes[0..5] };
+    gpu.Pipeline lit_skinned = try device.pipeline(gpu.PipelineDesc{ vertex: skinned_vs, fragment: lit_fs, layout: skinned_layout });
+    gpu.Pipeline shadow_skinned = try device.pipeline(gpu.PipelineDesc{
+        vertex: skinned_shadow_vs,
+        fragment: shadow_fs,
+        layout: skinned_layout,
+        cull: gpu.Cull.Off,
+        color: false
+    });
+    device.release_shader(lit_vs);
+    device.release_shader(lit_fs);
+    device.release_shader(shadow_vs);
+    device.release_shader(shadow_fs);
+    device.release_shader(skinned_vs);
+    device.release_shader(skinned_shadow_vs);
+    gpu.Texture shadow_map = try device.depth_target(options.shadow_size, options.shadow_size);
+    gpu.Sampler shadow_sampler = try device.sampler(gpu.SamplerDesc{
+        filter: gpu.Filter.Linear,
+        wrap: gpu.Wrap.Clamp,
+        mipmaps: false,
+        compare: true
+    });
+    gpu.Sampler albedo_sampler = try device.sampler(gpu.SamplerDesc{ anisotropy: 4.0 });
+    mut image.Image one = image.create(&scratch, 1, 1);
+    one.set(0, 0, 0xFFFFFFFF);
+    gpu.Texture white = try device.texture_of(one, false);
+    mut f32[4] nothing = [0.0; 4];
+    gpu.Buffer no_morphs = try device.buffer_of(gpu.Usage.Storage, nothing[0..4]);
+    return ok(arena.new(Renderer, arena, device, lit, shadow, lit_skinned, shadow_skinned, shadow_map, shadow_sampler,
+            albedo_sampler, white, no_morphs));
+}
+
+// A cube of side 2 around the origin, its faces with their normals and texture coordinates: a
+// model to try a scene with.
+pub model.Model cube(Arena* arena, f32[4] color) {
+    mut model.Vertex[] v = arena.alloc_slice(model.Vertex, 24);
+    mut ui32[] indices = arena.alloc_slice(ui32, 36);
+    // each face: its normal, and two axes of its plane (u to the right, v up, seen from outside)
+    f32[18] normals = [0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0];
+    f32[18] rights = [1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    for (usize face in 0..6) {
+        linear.Vec3 n = linear.vec3(normals[face * 3], normals[face * 3 + 1], normals[face * 3 + 2]);
+        linear.Vec3 r = linear.vec3(rights[face * 3], rights[face * 3 + 1], rights[face * 3 + 2]);
+        linear.Vec3 u = n.cross(r);  // up on the face
+        f32[8] corners = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+        for (usize c in 0..4) {
+            f32 a = corners[c * 2];
+            f32 b = corners[c * 2 + 1];
+            linear.Vec3 p = n.add(r.scale(a)).add(u.scale(b));
+            v[face * 4 + c] = model.Vertex{
+                position: [p.x, p.y, p.z],
+                normal: [n.x, n.y, n.z],
+                uv: [(a + 1.0) / 2.0, (1.0 - b) / 2.0]
+            };
+        }
+        ui32 first = (face * 4) as ui32;
+        usize at = face * 6;
+        indices[at] = first;
+        indices[at + 1] = first + 1;
+        indices[at + 2] = first + 2;
+        indices[at + 3] = first;
+        indices[at + 4] = first + 2;
+        indices[at + 5] = first + 3;
+    }
+    return single(arena, "cube", v, indices, color);
+}
+
+// A square of side `size` on the plane y = 0, facing up: a ground.
+pub model.Model ground(Arena* arena, f32 size, f32[4] color) {
+    f32 h = size / 2.0;
+    mut model.Vertex[] v = arena.alloc_slice(model.Vertex, 4);
+    v[0] = model.Vertex{ position: [-h, 0.0, h], normal: [0.0, 1.0, 0.0], uv: [0.0, 1.0] };
+    v[1] = model.Vertex{ position: [h, 0.0, h], normal: [0.0, 1.0, 0.0], uv: [1.0, 1.0] };
+    v[2] = model.Vertex{ position: [h, 0.0, -h], normal: [0.0, 1.0, 0.0], uv: [1.0, 0.0] };
+    v[3] = model.Vertex{ position: [-h, 0.0, -h], normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] };
+    mut ui32[] indices = arena.alloc_slice(ui32, 6);
+    indices[0] = 0;
+    indices[1] = 1;
+    indices[2] = 2;
+    indices[3] = 0;
+    indices[4] = 2;
+    indices[5] = 3;
+    return single(arena, "ground", v, indices, color);
+}
+
+// A model of one mesh and one material of `color`, at the origin.
+model.Model single(
+    keeps Arena* arena,
+    keeps str name,
+    keeps model.Vertex[] vertices,
+    keeps ui32[] indices,
+    f32[4] color
+) {
+    vec.Vec<model.Mesh>* meshes = vec.new(arena);
+    meshes.push(model.Mesh{
+        name: name,
+        vertices: vertices,
+        indices: indices,
+        material: some(0),
+        bounds: model.bounds_of(vertices)
+    });
+    vec.Vec<model.Material>* materials = vec.new(arena);
+    mut model.Material m = model.default_material(name);
+    m.base_color = color;
+    m.roughness = 0.6;
+    materials.push(m);
+    mut usize[] on_node = arena.alloc_slice(usize, 1);
+    on_node[0] = 0;
+    vec.Vec<model.Node>* nodes = vec.new(arena);
+    nodes.push(model.Node{
+        name: name,
+        local: linear.identity4(),
+        meshes: on_node,
+        children: arena.alloc_slice(usize, 0)
+    });
+    mut usize[] roots = arena.alloc_slice(usize, 1);
+    roots[0] = 0;
+    vec.Vec<image.Image>* images = vec.new(arena);
+    return model.Model{
+        meshes: meshes.items(),
+        materials: materials.items(),
+        images: images.items(),
+        nodes: nodes.items(),
+        roots: roots
+    };
+}

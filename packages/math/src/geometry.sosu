@@ -1,0 +1,468 @@
+// math.geometry: the shapes of 3D and their tests (spec §8.2): boxes aligned on the axes,
+// spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a
+// triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling).
+// Right-handed axes, the matrices of math.linear (columns, a depth of 0 to 1 after projection).
+import std.math;
+import math.linear;
+
+// A box aligned on the axes, from `min` to `max`.
+pub struct Aabb {
+    pub linear.Vec3 min;
+    pub linear.Vec3 max;
+
+    pub linear.Vec3 center() {
+        return min.add(max).scale(0.5);
+    }
+
+    pub linear.Vec3 size() {
+        return max.sub(min);
+    }
+
+    pub bool contains(linear.Vec3 p) {
+        return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y && p.z >= min.z && p.z <= max.z;
+    }
+
+    // Whether the two boxes share a point.
+    pub bool overlaps(Aabb o) {
+        return min.x <= o.max.x && max.x >= o.min.x && min.y <= o.max.y && max.y >= o.min.y && min.z <= o.max.z
+                && max.z >= o.min.z;
+    }
+
+    // The smallest box that holds both.
+    pub Aabb union(Aabb o) {
+        return Aabb{
+            min: linear.vec3(lesser(min.x, o.min.x), lesser(min.y, o.min.y), lesser(min.z, o.min.z)),
+            max: linear.vec3(greater(max.x, o.max.x), greater(max.y, o.max.y), greater(max.z, o.max.z))
+        };
+    }
+
+    // The smallest box that holds it and `p`.
+    pub Aabb grown(linear.Vec3 p) {
+        return union(Aabb{ min: p, max: p });
+    }
+
+    // The box that holds this one moved by `m` (its 8 corners transformed): the bounds of a
+    // mesh in the world, from its bounds in its own space.
+    pub Aabb transformed(linear.Mat4 m) {
+        mut Aabb out = Aabb{ min: m.transform_point(min), max: m.transform_point(min) };
+        for (usize i in 0..8) {
+            linear.Vec3 corner = linear.vec3(
+                i & 1 == 0 ? min.x : max.x,
+                i & 2 == 0 ? min.y : max.y,
+                i & 4 == 0 ? min.z : max.z
+            );
+            out = out.grown(m.transform_point(corner));
+        }
+        return out;
+    }
+}
+
+// `min` and `max` of two numbers: inside `Aabb`, its fields hide the built-in functions.
+f32 lesser(f32 a, f32 b) {
+    return a < b ? a : b;
+}
+
+f32 greater(f32 a, f32 b) {
+    return a > b ? a : b;
+}
+
+pub Aabb aabb(linear.Vec3 min, linear.Vec3 max) {
+    return Aabb{ min: min, max: max };
+}
+
+// The smallest box that holds `points`, none if there are none.
+pub Aabb? around(linear.Vec3[] points) {
+    if (points.len == 0) {
+        return none;
+    }
+    mut Aabb box = Aabb{ min: points[0], max: points[0] };
+    for (linear.Vec3 p in points) {
+        box = box.grown(p);
+    }
+    return some(box);
+}
+
+pub struct Sphere {
+    pub linear.Vec3 center;
+    pub f32 radius;
+
+    pub bool contains(linear.Vec3 p) {
+        return p.distance(center) <= radius;
+    }
+
+    pub bool overlaps(Sphere o) {
+        return center.distance(o.center) <= radius + o.radius;
+    }
+}
+
+pub Sphere sphere(linear.Vec3 center, f32 radius) {
+    return Sphere{ center: center, radius: radius };
+}
+
+// A plane: the points p where normal.dot(p) + d == 0; the normal points to its front.
+pub struct Plane {
+    pub linear.Vec3 normal;
+    pub f32 d;
+
+    // The distance of `p` to the plane, positive in front, negative behind (normal of length 1).
+    pub f32 distance(linear.Vec3 p) {
+        return normal.dot(p) + d;
+    }
+}
+
+// The plane through `point`, facing `normal` (normalized here).
+pub Plane plane(linear.Vec3 point, linear.Vec3 normal) {
+    linear.Vec3 n = normal.normalized();
+    return Plane{ normal: n, d: -n.dot(point) };
+}
+
+// A ray: from `origin`, toward `direction`, normalized by `ray`, so that a distance along it is
+// a distance in the world.
+pub struct Ray {
+    pub linear.Vec3 origin;
+    pub linear.Vec3 direction;
+
+    pub linear.Vec3 at(f32 distance) {
+        return origin.add(direction.scale(distance));
+    }
+}
+
+pub Ray ray(linear.Vec3 origin, linear.Vec3 direction) {
+    return Ray{ origin: origin, direction: direction.normalized() };
+}
+
+// The ray under the point (x, y) of a window `width` by `height` pixels (from the top left),
+// for a camera whose matrix is `view_projection` (projection times view): picking with the mouse.
+// None when the matrix cannot be inverted.
+pub Ray? ray_from_screen(linear.Mat4 view_projection, f32 x, f32 y, f32 width, f32 height) {
+    linear.Mat4 inverse = match (view_projection.inverse()) {
+        some(m) => m,
+        none => {
+            return none;
+        },
+    };
+    f32 nx = x / width * 2.0 - 1.0;
+    f32 ny = 1.0 - y / height * 2.0;
+    linear.Vec3 near = inverse.transform_point(linear.vec3(nx, ny, 0.0));
+    linear.Vec3 far = inverse.transform_point(linear.vec3(nx, ny, 1.0));
+    return some(ray(near, far.sub(near)));
+}
+
+// Where the ray enters the box, as a distance along it (0 when it starts inside); none if it
+// misses it, or the box is behind.
+pub f32? ray_box(Ray r, Aabb b) {
+    mut f32 enter = 0.0;
+    mut f32 leave = 3.4e38;
+    f32[3] o = [r.origin.x, r.origin.y, r.origin.z];
+    f32[3] d = [r.direction.x, r.direction.y, r.direction.z];
+    f32[3] lo = [b.min.x, b.min.y, b.min.z];
+    f32[3] hi = [b.max.x, b.max.y, b.max.z];
+    for (usize axis in 0..3) {
+        if (abs(d[axis]) < 1.0e-12) {
+            if (o[axis] < lo[axis] || o[axis] > hi[axis]) {
+                return none;  // parallel to this slab, outside of it
+            }
+        } else {
+            f32 a = (lo[axis] - o[axis]) / d[axis];
+            f32 c = (hi[axis] - o[axis]) / d[axis];
+            enter = max(enter, min(a, c));
+            leave = min(leave, max(a, c));
+            if (enter > leave) {
+                return none;
+            }
+        }
+    }
+    return some(enter);
+}
+
+// Where the ray first meets the sphere (0 when it starts inside); none if it misses it.
+pub f32? ray_sphere(Ray r, Sphere s) {
+    linear.Vec3 to = r.origin.sub(s.center);
+    f32 b = to.dot(r.direction);
+    f32 c = to.dot(to) - s.radius * s.radius;
+    if (c <= 0.0) {
+        return some(0.0);  // inside
+    }
+    f32 delta = b * b - c;
+    if (b > 0.0 || delta < 0.0) {
+        return none;  // going away, or passing beside it
+    }
+    return some(-b - std_sqrt(delta));
+}
+
+// Where the ray meets the plane, from its front or its back; none if it is parallel to it or
+// meets it behind its origin.
+pub f32? ray_plane(Ray r, Plane p) {
+    f32 facing = p.normal.dot(r.direction);
+    if (abs(facing) < 1.0e-12) {
+        return none;
+    }
+    f32 t = -p.distance(r.origin) / facing;
+    return t >= 0.0 ? some(t) : none;
+}
+
+// Where a ray meets a triangle: the distance along the ray, and the coordinates (u, v) of the
+// point in the triangle (the point is a * (1 - u - v) + b * u + c * v), to interpolate what the
+// vertices hold.
+pub struct TriangleHit {
+    pub f32 distance;
+    pub f32 u;
+    pub f32 v;
+}
+
+// The ray against the triangle (a, b, c), seen from either side (Möller and Trumbore).
+pub TriangleHit? ray_triangle(Ray r, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c) {
+    linear.Vec3 ab = b.sub(a);
+    linear.Vec3 ac = c.sub(a);
+    linear.Vec3 p = r.direction.cross(ac);
+    f32 det = ab.dot(p);
+    if (abs(det) < 1.0e-12) {
+        return none;  // parallel to the triangle
+    }
+    f32 inv = 1.0 / det;
+    linear.Vec3 t = r.origin.sub(a);
+    f32 u = t.dot(p) * inv;
+    if (u < 0.0 || u > 1.0) {
+        return none;
+    }
+    linear.Vec3 q = t.cross(ab);
+    f32 v = r.direction.dot(q) * inv;
+    if (v < 0.0 || u + v > 1.0) {
+        return none;
+    }
+    f32 distance = ac.dot(q) * inv;
+    return distance >= 0.0 ? some(TriangleHit{ distance: distance, u: u, v: v }) : none;
+}
+
+// What a camera sees: six planes facing inward (left, right, bottom, top, near, far).
+pub struct Frustum {
+    pub Plane[6] planes;
+
+    // Whether some of the box may be seen: false only when it is wholly behind a plane (a box
+    // near a corner may be kept although unseen, which costs a draw, never a missing object).
+    pub bool sees_box(Aabb b) {
+        for (Plane p in planes) {
+            // the corner of the box farthest in front of the plane
+            linear.Vec3 far = linear.vec3(
+                p.normal.x >= 0.0 ? b.max.x : b.min.x,
+                p.normal.y >= 0.0 ? b.max.y : b.min.y,
+                p.normal.z >= 0.0 ? b.max.z : b.min.z
+            );
+            if (p.distance(far) < 0.0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub bool sees_sphere(Sphere s) {
+        for (Plane p in planes) {
+            if (p.distance(s.center) < -s.radius) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub bool sees_point(linear.Vec3 point) {
+        for (Plane p in planes) {
+            if (p.distance(point) < 0.0) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+Plane plane_of(f32 a, f32 b, f32 c, f32 d) {
+    f32 length = linear.vec3(a, b, c).length();
+    if (length == 0.0) {
+        return Plane{ normal: linear.vec3(0.0, 0.0, 0.0), d: 0.0 };
+    }
+    return Plane{ normal: linear.vec3(a / length, b / length, c / length), d: d / length };
+}
+
+// The frustum of a camera from its matrix, projection times view (a depth of 0 to 1 after
+// projection, as `linear.perspective` gives it): the planes of Gribb and Hartmann.
+pub Frustum frustum(linear.Mat4 view_projection) {
+    linear.Mat4 m = view_projection;
+    Plane left = plane_of(
+        m.at(3, 0) + m.at(0, 0),
+        m.at(3, 1) + m.at(0, 1),
+        m.at(3, 2) + m.at(0, 2),
+        m.at(3, 3) + m.at(0, 3)
+    );
+    Plane right = plane_of(
+        m.at(3, 0) - m.at(0, 0),
+        m.at(3, 1) - m.at(0, 1),
+        m.at(3, 2) - m.at(0, 2),
+        m.at(3, 3) - m.at(0, 3)
+    );
+    Plane bottom = plane_of(
+        m.at(3, 0) + m.at(1, 0),
+        m.at(3, 1) + m.at(1, 1),
+        m.at(3, 2) + m.at(1, 2),
+        m.at(3, 3) + m.at(1, 3)
+    );
+    Plane top = plane_of(
+        m.at(3, 0) - m.at(1, 0),
+        m.at(3, 1) - m.at(1, 1),
+        m.at(3, 2) - m.at(1, 2),
+        m.at(3, 3) - m.at(1, 3)
+    );
+    Plane near = plane_of(m.at(2, 0), m.at(2, 1), m.at(2, 2), m.at(2, 3));  // z >= 0
+    Plane far = plane_of(
+        m.at(3, 0) - m.at(2, 0),
+        m.at(3, 1) - m.at(2, 1),
+        m.at(3, 2) - m.at(2, 2),
+        m.at(3, 3) - m.at(2, 3)
+    );
+    return Frustum{ planes: [left, right, bottom, top, near, far] };
+}
+
+f32 std_sqrt(f32 x) {
+    return x <= 0.0 ? 0.0 : math.sqrt(x as f64) as f32;
+}
+
+test "boxes" {
+    Aabb b = aabb(linear.vec3(-1.0, -1.0, -1.0), linear.vec3(1.0, 2.0, 3.0));
+    assert(b.contains(linear.vec3(0.0, 0.0, 0.0)) && !b.contains(linear.vec3(0.0, 2.5, 0.0)));
+    assert(b.center().near(linear.vec3(0.0, 0.5, 1.0), 0.0001));
+    assert(b.size().near(linear.vec3(2.0, 3.0, 4.0), 0.0001));
+    Aabb other = aabb(linear.vec3(0.5, 0.5, 0.5), linear.vec3(5.0, 5.0, 5.0));
+    assert(b.overlaps(other) && !b.overlaps(aabb(linear.vec3(2.0, 0.0, 0.0), linear.vec3(3.0, 1.0, 1.0))));
+    assert(b.union(other).max.near(linear.vec3(5.0, 5.0, 5.0), 0.0001));
+    // turned a quarter around y: x and z swap
+    Aabb turned = aabb(
+        linear.vec3(0.0, 0.0, 0.0),
+        linear.vec3(2.0, 1.0, 1.0)
+    ).transformed(linear.rotation_y(1.5707963));
+    assert(turned.size().near(linear.vec3(1.0, 1.0, 2.0), 0.001));
+    mut linear.Vec3[3] points = [linear.vec3(1.0, 0.0, 0.0), linear.vec3(-2.0, 3.0, 0.0), linear.vec3(0.0, 0.0, 4.0)];
+    Aabb held = match (around(points[0..3])) {
+        some(a) => a,
+        none => aabb(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0)),
+    };
+    assert(held.min.near(linear.vec3(-2.0, 0.0, 0.0), 0.0001) && held.max.near(linear.vec3(1.0, 3.0, 4.0), 0.0001));
+}
+
+test "rays against boxes, spheres and planes" {
+    Aabb b = aabb(linear.vec3(-1.0, -1.0, -1.0), linear.vec3(1.0, 1.0, 1.0));
+    Ray toward = ray(linear.vec3(-5.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0));
+    assert(match (ray_box(toward, b)) {
+        some(t) => abs(t - 4.0) < 0.0001,
+        none => false,
+    });
+    Ray beside = ray(linear.vec3(-5.0, 2.0, 0.0), linear.vec3(1.0, 0.0, 0.0));
+    assert(match (ray_box(beside, b)) {
+        some(t) => false,
+        none => true,
+    });
+    Ray away = ray(linear.vec3(-5.0, 0.0, 0.0), linear.vec3(-1.0, 0.0, 0.0));
+    assert(match (ray_box(away, b)) {
+        some(t) => false,
+        none => true,
+    });
+    Ray inside = ray(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 1.0, 0.0));
+    assert(match (ray_box(inside, b)) {
+        some(t) => t == 0.0,
+        none => false,
+    });
+
+    Sphere s = sphere(linear.vec3(0.0, 0.0, -10.0), 2.0);
+    Ray forward = ray(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 0.0, -1.0));
+    assert(match (ray_sphere(forward, s)) {
+        some(t) => abs(t - 8.0) < 0.001,
+        none => false,
+    });
+    assert(match (ray_sphere(ray(linear.vec3(3.0, 0.0, 0.0), linear.vec3(0.0, 0.0, -1.0)), s)) {
+        some(t) => false,
+        none => true,
+    });
+
+    Plane ground = plane(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 1.0, 0.0));
+    assert(abs(ground.distance(linear.vec3(3.0, 2.0, 1.0)) - 2.0) < 0.0001);
+    Ray down = ray(linear.vec3(1.0, 5.0, 1.0), linear.vec3(0.0, -1.0, 0.0));
+    assert(match (ray_plane(down, ground)) {
+        some(t) => abs(t - 5.0) < 0.0001,
+        none => false,
+    });
+    assert(down.at(5.0).near(linear.vec3(1.0, 0.0, 1.0), 0.0001));
+}
+
+test "rays against triangles" {
+    linear.Vec3 a = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 b = linear.vec3(1.0, 0.0, 0.0);
+    linear.Vec3 c = linear.vec3(0.0, 1.0, 0.0);
+    Ray through = ray(linear.vec3(0.25, 0.25, 1.0), linear.vec3(0.0, 0.0, -1.0));
+    match (ray_triangle(through, a, b, c)) {
+        some(hit) => {
+            assert(abs(hit.distance - 1.0) < 0.0001 && abs(hit.u - 0.25) < 0.0001 && abs(hit.v - 0.25) < 0.0001);
+        },
+        none => {
+            assert(false);
+        },
+    }
+    // from behind too
+    Ray back = ray(linear.vec3(0.25, 0.25, -1.0), linear.vec3(0.0, 0.0, 1.0));
+    assert(match (ray_triangle(back, a, b, c)) {
+        some(hit) => true,
+        none => false,
+    });
+    Ray outside = ray(linear.vec3(0.8, 0.8, 1.0), linear.vec3(0.0, 0.0, -1.0));
+    assert(match (ray_triangle(outside, a, b, c)) {
+        some(hit) => false,
+        none => true,
+    });
+    Ray parallel = ray(linear.vec3(0.0, 0.0, 1.0), linear.vec3(1.0, 0.0, 0.0));
+    assert(match (ray_triangle(parallel, a, b, c)) {
+        some(hit) => false,
+        none => true,
+    });
+}
+
+test "frustums" {
+    // a camera at (0, 0, 5) looking at the origin, 90 degrees of field
+    linear.Mat4 view = linear.look_at(
+        linear.vec3(0.0, 0.0, 5.0),
+        linear.vec3(0.0, 0.0, 0.0),
+        linear.vec3(0.0, 1.0, 0.0)
+    );
+    linear.Mat4 camera = linear.perspective(1.5707963, 1.0, 0.1, 100.0).mul(view);
+    Frustum f = frustum(camera);
+    assert(f.sees_point(linear.vec3(0.0, 0.0, 0.0)));
+    assert(!f.sees_point(linear.vec3(0.0, 0.0, 10.0)));  // behind the camera
+    assert(!f.sees_point(linear.vec3(20.0, 0.0, 0.0)));  // beyond the side
+    assert(!f.sees_point(linear.vec3(0.0, 0.0, -200.0)));  // beyond the far plane
+    assert(f.sees_box(aabb(linear.vec3(-1.0, -1.0, -1.0), linear.vec3(1.0, 1.0, 1.0))));
+    assert(!f.sees_box(aabb(linear.vec3(30.0, -1.0, -1.0), linear.vec3(32.0, 1.0, 1.0))));
+    assert(f.sees_box(aabb(linear.vec3(4.0, -1.0, -1.0), linear.vec3(30.0, 1.0, 1.0))));  // partly in view
+    assert(f.sees_sphere(sphere(linear.vec3(6.0, 0.0, 0.0), 2.0)));  // its edge in view at the distance 5
+    assert(!f.sees_sphere(sphere(linear.vec3(0.0, 0.0, 10.0), 1.0)));
+}
+
+test "the ray under the mouse" {
+    linear.Mat4 view = linear.look_at(
+        linear.vec3(0.0, 0.0, 5.0),
+        linear.vec3(0.0, 0.0, 0.0),
+        linear.vec3(0.0, 1.0, 0.0)
+    );
+    linear.Mat4 camera = linear.perspective(1.0, 1.5, 0.1, 100.0).mul(view);
+    // the middle of the window: straight ahead
+    Ray center = match (ray_from_screen(camera, 300.0, 200.0, 600.0, 400.0)) {
+        some(r) => r,
+        none => ray(linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0)),
+    };
+    assert(center.direction.near(linear.vec3(0.0, 0.0, -1.0), 0.001));
+    // a point of the scene projected, then the ray back under it passes through it
+    linear.Vec3 target = linear.vec3(1.0, 0.5, 0.0);
+    linear.Vec4 clip = camera.mul_vec(linear.vec4(target.x, target.y, target.z, 1.0));
+    f32 x = (clip.x / clip.w + 1.0) / 2.0 * 600.0;
+    f32 y = (1.0 - clip.y / clip.w) / 2.0 * 400.0;
+    Ray under = match (ray_from_screen(camera, x, y, 600.0, 400.0)) {
+        some(r) => r,
+        none => ray(linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0)),
+    };
+    f32 along = under.origin.distance(target);
+    assert(under.at(along).near(target, 0.01));
+}

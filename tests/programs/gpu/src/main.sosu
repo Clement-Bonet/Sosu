@@ -1,0 +1,264 @@
+// The package gpu without a window (spec §8.2): a device of `open_headless` draws scenes into a
+// target of 64 by 64 pixels, reads them back and checks pixels; a compute shader changes a
+// buffer, read back. The shaders are in shaders/, compiled by `sosuc shaders tests/programs/gpu`.
+import std.io;
+import gpu.gpu;
+import gpu.shaders;
+import gpu.overlay;
+import render.canvas;
+import image.image;
+
+struct Vertex {
+    f32[3] position;  // in clip space: x and y from -1 to 1, z the depth from 0 to 1
+    f32[2] uv;
+    ui32 color;  // 0xAABBGGRR: the bytes R, G, B, A
+}
+
+ui32 color(ui32 r, ui32 g, ui32 b) {
+    return r | g << 8 | b << 16 | 0xFF000000;
+}
+
+Vertex at(f32 x, f32 y, f32 z, f32 u, f32 v, ui32 c) {
+    return Vertex{ position: [x, y, z], uv: [u, v], color: c };
+}
+
+// Two triangles that cover the target at the depth `z`, with the texture coordinates of an
+// image (0, 0 at the top left).
+Vertex[] square(Arena* arena, f32 z, ui32 c) {
+    mut Vertex[] v = arena.alloc_slice(Vertex, 6);
+    v[0] = at(-1.0, -1.0, z, 0.0, 1.0, c);
+    v[1] = at(1.0, -1.0, z, 1.0, 1.0, c);
+    v[2] = at(1.0, 1.0, z, 1.0, 0.0, c);
+    v[3] = at(-1.0, -1.0, z, 0.0, 1.0, c);
+    v[4] = at(1.0, 1.0, z, 1.0, 0.0, c);
+    v[5] = at(-1.0, 1.0, z, 0.0, 0.0, c);
+    return v;
+}
+
+ui32 RED = 0xFFFF0000;
+ui32 GREEN = 0xFF00FF00;
+ui32 BLUE = 0xFF0000FF;
+ui32 WHITE = 0xFFFFFFFF;
+
+// Whether the pixel (x, y) is `expected`, within 2 of each channel; says which one is not.
+bool pixel(str scene, image.Image img, i32 x, i32 y, ui32 expected) uses io {
+    ui32 got = img.at(x, y);
+    mut bool near = true;
+    for (ui32 shift in [0 as ui32, 8, 16, 24]) {
+        i32 a = (got >> shift & 0xFF) as i32;
+        i32 b = (expected >> shift & 0xFF) as i32;
+        if (abs(a - b) > 2) {
+            near = false;
+        }
+    }
+    if (!near) {
+        io.print("{}: the pixel ({}, {}) is {}, not {}", scene, x, y, got, expected);
+    }
+    return near;
+}
+
+struct Kit {
+    gpu.Device* device;
+    gpu.Pipeline pipeline;
+    gpu.Texture target;
+    gpu.Texture white;
+    gpu.Sampler nearest;
+}
+
+// `vertices` drawn into the target, cleared to blue, with `texture`; the pixels read back.
+image.Image!gpu.GpuError draw(
+    Arena* arena,
+    Kit kit,
+    Vertex[] vertices,
+    gpu.Texture texture,
+    gpu.Sampler sampler
+) uses io {
+    gpu.Buffer buffer = try kit.device.buffer_of(gpu.Usage.Vertex, vertices);
+    gpu.Frame frame = try kit.device.commands();
+    gpu.Pass pass = frame.pass_into(kit.target, gpu.Clear{ color: gpu.rgba(0.0, 0.0, 1.0, 1.0) });
+    pass.bind(kit.pipeline);
+    pass.vertices(buffer);
+    pass.texture(0, texture, sampler);
+    pass.draw(vertices.len as ui32, 1);
+    pass.end();
+    try frame.submit_and_wait();
+    kit.device.release_buffer(buffer);
+    return kit.device.read_texture(arena, kit.target);
+}
+
+void!gpu.GpuError scenes(Arena* arena, keeps gpu.Device* device) uses io {
+    gpu.Shader vs = try shaders.load(arena, device, "tests/programs/gpu/shaders/scene.vert");
+    gpu.Shader fs = try shaders.load(arena, device, "tests/programs/gpu/shaders/scene.frag");
+    mut gpu.Attribute[3] attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(Vertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float2, offset: offset_of(Vertex, uv) as ui32 },
+        gpu.Attribute{ location: 2, format: gpu.Format.UByte4Norm, offset: offset_of(Vertex, color) as ui32 },
+    ];
+    gpu.Pipeline pipeline = try device.pipeline(gpu.PipelineDesc{
+        vertex: vs,
+        fragment: fs,
+        layout: gpu.Layout{ stride: size_of(Vertex) as ui32, attributes: attributes[0..3] },
+        cull: gpu.Cull.Off
+    });
+    device.release_shader(vs);
+    device.release_shader(fs);
+    mut image.Image one = image.create(arena, 1, 1);
+    one.set(0, 0, WHITE);
+    mut image.Image four = image.create(arena, 2, 2);
+    four.set(0, 0, RED);
+    four.set(1, 0, GREEN);
+    four.set(0, 1, BLUE);
+    four.set(1, 1, WHITE);
+    gpu.Texture picture = try device.texture_of(four, false);
+    // an image made by hand that holds fewer pixels than its size says: refused, never read beyond
+    image.Image short = image.Image{ width: 64, height: 64, pixels: four.pixels };
+    bool refused = match (device.texture_of(short, false)) {
+        ok(t) => false,
+        err(e) => true,
+    };
+    io.print("short image: {}", refused ? "refused" : "taken");
+    Kit kit = Kit{
+        device: device,
+        pipeline: pipeline,
+        target: try device.target(64, 64),
+        white: try device.texture_of(one, false),
+        nearest: try device.sampler(gpu.SamplerDesc{ filter: gpu.Filter.Nearest, wrap: gpu.Wrap.Clamp, mipmaps: false })
+    };
+
+    // a triangle on the lower left half: the top of an image is y = 1 in clip space
+    mut Vertex[] triangle = arena.alloc_slice(Vertex, 3);
+    triangle[0] = at(-1.0, -1.0, 0.5, 0.0, 0.0, color(255, 0, 0));
+    triangle[1] = at(1.0, -1.0, 0.5, 0.0, 0.0, color(255, 0, 0));
+    triangle[2] = at(-1.0, 1.0, 0.5, 0.0, 0.0, color(255, 0, 0));
+    mut image.Image drawn = try draw(arena, kit, triangle, kit.white, kit.nearest);
+    bool corners = pixel("triangle", drawn, 4, 59, RED) && pixel("triangle", drawn, 59, 4, BLUE);
+    io.print("triangle: {}", corners ? "ok" : "wrong");
+
+    // depth: the near green square drawn first hides the far red one drawn after it
+    mut Vertex[] both = arena.alloc_slice(Vertex, 12);
+    Vertex[] near = square(arena, 0.2, color(0, 255, 0));
+    Vertex[] far = square(arena, 0.8, color(255, 0, 0));
+    for (usize i in 0..6) {
+        both[i] = near[i];
+        both[i + 6] = far[i];
+    }
+    drawn = try draw(arena, kit, both, kit.white, kit.nearest);
+    io.print("depth: {}", pixel("depth", drawn, 32, 32, GREEN) ? "ok" : "wrong");
+
+    // a texture of 2 by 2 pixels on the whole target, sampled without filtering
+    drawn = try draw(arena, kit, square(arena, 0.5, WHITE), picture, kit.nearest);
+    bool quarters = pixel("texture", drawn, 16, 16, RED) && pixel("texture", drawn, 48, 16, GREEN)
+            && pixel("texture", drawn, 16, 48, BLUE) && pixel("texture", drawn, 48, 48, WHITE);
+    io.print("texture: {}", quarters ? "ok" : "wrong");
+
+    // mipmaps: a checkerboard of single pixels, 256 a side, drawn on 64 pixels, reads from a level
+    // made by the GPU, where black and white average to gray (without them, it would alias)
+    mut image.Image fine = image.create(arena, 256, 256);
+    for (i32 y in 0..256) {
+        for (i32 x in 0..256) {
+            fine.set(x, y, (x + y) % 2 == 0 ? WHITE : 0xFF000000);
+        }
+    }
+    gpu.Texture checkers = try device.texture_of(fine, true);
+    gpu.Sampler smooth = try device.sampler(gpu.SamplerDesc{ filter: gpu.Filter.Nearest, wrap: gpu.Wrap.Clamp });  // a texel of a level: gray only if the level averaged it
+    drawn = try draw(arena, kit, square(arena, 0.5, WHITE), checkers, smooth);
+    mut bool gray = true;
+    for (i32 at in [8, 32, 56]) {
+        ui32 p = drawn.at(at, at);
+        i32 level = (p >> 8 & 0xFF) as i32;
+        if (level < 100 || level > 155) {
+            io.print("mipmaps: the pixel ({}, {}) is {}, not gray", at, at, p);
+            gray = false;
+        }
+    }
+    io.print("mipmaps: {}", gray ? "ok" : "wrong");
+    device.release_texture(checkers);
+    device.release_sampler(smooth);
+
+    // the overlay: a canvas cleared transparent, an opaque red square at the top left and a half
+    // transparent green one at the bottom right, drawn over the blue of the target
+    overlay.Overlay* hud = try overlay.create(arena, device);
+    mut canvas.Canvas surface = canvas.create(arena, 64, 64);
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });
+    surface.fill(canvas.Rect{ x: 0.0, y: 0.0, w: 32.0, h: 32.0 }, canvas.Color{ r: 255, g: 0, b: 0 });
+    surface.fill(canvas.Rect{ x: 32.0, y: 32.0, w: 32.0, h: 32.0 }, canvas.Color{ r: 0, g: 255, b: 0, a: 128 });
+    gpu.Frame frame = try device.commands();
+    gpu.Pass blue = frame.pass_into(kit.target, gpu.Clear{ color: gpu.rgba(0.0, 0.0, 1.0, 1.0) });
+    blue.end();
+    try hud.draw_into(frame, kit.target, &surface);
+    try frame.submit_and_wait();
+    drawn = try device.read_texture(arena, kit.target);
+    bool layered = pixel("overlay", drawn, 16, 16, RED) && pixel("overlay", drawn, 48, 16, BLUE)
+            && pixel("overlay", drawn, 48, 48, 0xFF00807F);
+    io.print("overlay: {}", layered ? "ok" : "wrong");
+    hud.release();
+
+    device.release_texture(picture);
+    device.release_texture(kit.target);
+    device.release_texture(kit.white);
+    device.release_sampler(kit.nearest);
+    device.release_pipeline(pipeline);
+    return ok();
+}
+
+void!gpu.GpuError computation(Arena* arena, gpu.Device* device) uses io {
+    gpu.ComputePipeline doubling = try shaders.load_compute(arena, device, "tests/programs/gpu/shaders/double.comp");
+    mut ui32[] numbers = arena.alloc_slice(ui32, 256);
+    for (usize i in 0..256) {
+        numbers[i] = i as ui32;
+    }
+    gpu.Buffer buffer = try device.buffer_of(gpu.Usage.Storage, numbers);
+    gpu.Frame frame = try device.commands();
+    mut gpu.Buffer[1] written = [buffer];
+    gpu.ComputePass pass = frame.compute(written[0..1]);
+    pass.bind(doubling);
+    mut ui32[4] extra = [3, 0, 0, 0];  // a uniform buffer is 16 bytes at least
+    pass.uniform(0, &extra);
+    pass.dispatch(4, 1, 1);  // 4 groups of 64 threads
+    pass.end();
+    try frame.submit_and_wait();
+    mut ui32[] back = arena.alloc_slice(ui32, 256);
+    try device.read_buffer(buffer, back);
+    mut usize wrong = 0;
+    for (usize i in 0..256) {
+        if (back[i] != (i * 2 + 3) as ui32) {
+            wrong += 1;
+        }
+    }
+    io.print("compute: {}", wrong == 0 ? "ok" : "wrong");
+    if (wrong != 0) {
+        io.print("compute: {} numbers wrong, the first ones {} {} {}", wrong, back[0], back[1], back[2]);
+    }
+    device.release_buffer(buffer);
+    device.release_compute_pipeline(doubling);
+    return ok();
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ debug: true })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("gpu: no device ({}: {})", gpu.message(e), gpu.last_error(&arena));
+            return 77;
+        },
+    };
+    mut i32 status = 0;
+    match (scenes(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("scenes: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    match (computation(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("compute: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    device.close();
+    return status;
+}

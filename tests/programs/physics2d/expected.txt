@@ -1,0 +1,32 @@
+mass of a disc of 0.5 m: ok
+advance runs one step per frame: ok
+free fall for one second: ok
+advance(0.05) runs 3 steps: ok
+the rest waits for the next frame: ok
+a long pause runs max_steps: ok
+a contact began with the floor: ok
+the ball rests on the floor: ok
+the stack stands: ok
+the stack sleeps: ok
+an impulse wakes it: ok
+a ray hits the floor: ok
+a ray hits the pole: ok
+a ray on layer 1 misses the pole: ok
+a ray into the void hits nothing: ok
+overlap finds the pole alone on layer 2: ok
+the ball enters the sensor, then leaves it: ok
+a body is alive: ok
+a removed body is dead: ok
+a chain of 4 points: ok
+a loop of 2 points is refused: ok
+a polygon: ok
+points on a line make no polygon: ok
+they land on the chain: ok
+a fixed rotation stays: ok
+the pendulum keeps its length: ok
+the pendulum swings below its anchor: ok
+the slider stops at its limit: ok
+the welded boxes fall together: ok
+sync writes x, y and the turn, and keeps z: ok
+the debug view draws the outlines of the shapes: ok
+the same steps twice give the same world: ok

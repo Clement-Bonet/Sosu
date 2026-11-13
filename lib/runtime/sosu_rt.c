@@ -1524,3 +1524,43 @@ __attribute__((constructor)) static void log_output(void) {
     if (pthread_create(&reader, NULL, log_lines, NULL) == 0) pthread_detach(reader);
 }
 #endif
+
+/* ---- The replay of a target of `sosuc fuzz` (spec 13.1, work 5) ---- */
+
+#ifdef SOSU_FUZZ_REPLAY
+/* The target that the generated C defines for libFuzzer. */
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+
+/* Each file of the arguments given to the target once: the inputs kept by the runs of libFuzzer,
+   replayed by `make test` with any C compiler. */
+int main(int argc, char *argv[]) {
+    for (int i = 1; i < argc; i++) {
+        FILE *f = fopen(argv[i], "rb");
+        if (!f) {
+            fprintf(stderr, "cannot read %s\n", argv[i]);
+            return 2;
+        }
+        size_t cap = 4096, n = 0, got;
+        uint8_t *buf = malloc(cap);
+        while (buf && (got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                uint8_t *bigger = realloc(buf, cap * 2);
+                if (!bigger) {
+                    free(buf);
+                    buf = NULL;
+                    break;
+                }
+                buf = bigger;
+                cap *= 2;
+            }
+        }
+        fclose(f);
+        if (!buf) return 3;
+        LLVMFuzzerTestOneInput(buf, n);
+        free(buf);
+    }
+    printf("%d inputs replayed\n", argc - 1);
+    return 0;
+}
+#endif

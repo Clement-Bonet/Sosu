@@ -1,0 +1,8 @@
+# The gamepads of platform (spec §8.2), without hardware: SDL's virtual joysticks stand for them.
+[package]
+name = "controls"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../../packages/platform" }
+math = { path = "../../../packages/math" }

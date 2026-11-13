@@ -1,8 +1,18 @@
 test WAV files of Python's wave module, read and written byte for byte the same ... ok
 test an Ogg Vorbis file, as the specification decodes it ... ok
+test a chained Ogg Vorbis file: its two streams one after the other ... ok
+test a SOFA file: KEMAR measured whole, read by audio.hdf5, as the compact set hears it ... ok
+test Ogg streams side by side: the Vorbis one beside a video, the first of two, then a link ... ok
+test Ogg files of streams side by side, damaged at random: a sound or an error, never a stop ... ok
+test small SOFA files: their six directions as written; cartesian, the right ear first, delays ... ok
+test SOFA files damaged at random: responses or an error, never a stop ... ok
+test a FLAC file, sample for sample ... ok
+test MP3 frames: their length and their tone ... ok
+test a stream: the samples of the whole sound, its end, its loop ... ok
+test a stream: its length, a seek, what it plays now, a WAV file ... ok
 test damaged and hostile files ... ok
 test the mixer: volume, panning, loops, rates and clipping ... ok
 test resampling, by sinc and by lines ... ok
 test sounds: channels, parts, fades and tones ... ok
 
-6 tests, 6 passed, 0 failed
+16 tests, 16 passed, 0 failed

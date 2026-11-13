@@ -1,0 +1,160 @@
+// gpu.shaders: the shaders that `sosuc shaders` compiled (spec §8.2). `shaders/cube.vert.hlsl`
+// gives, in `shaders/compiled/`, `cube.vert.spv` (Vulkan), `cube.vert.dxil` (Direct3D 12),
+// `cube.vert.msl` (Metal) and `cube.vert.json` (what the shader uses); `load` reads the format
+// the device takes, with `app.read_asset`, so that `shaders/compiled/` goes in the `assets` of
+// [app] and travels in the packages of phones.
+import std.json;
+import std.text;
+import platform.app;
+import gpu.gpu;
+
+// The shader `path`, as `shaders/cube.vert` (the source without `.hlsl`): its stage is in its
+// name (`.vert`, `.frag`). `NoShader(path)` when its file for the format of the device is missing.
+pub gpu.Shader!gpu.GpuError load(Arena* arena, gpu.Device* device, str path) uses io {
+    gpu.Stage stage = match (stage_of(path)) {
+        some(s) => s,
+        none => {
+            return err(gpu.GpuError.NoShader(path));
+        },
+    };
+    gpu.ShaderFormat format = device.format();
+    str extension = match (format) {
+        Spirv => ".spv",
+        Dxil => ".dxil",
+        Msl => ".msl",
+    };
+    str stem = built(arena, path);
+    ui8[] code = match (app.read_asset(arena, joined(arena, stem, extension, ""))) {
+        some(bytes) => bytes,
+        none => {
+            return err(gpu.GpuError.NoShader(path));
+        },
+    };
+    mut gpu.ShaderDesc desc = gpu.ShaderDesc{ stage: stage, format: format, code: code, entry: match (format) {
+        // SPIRV-Cross renames `main`, which Metal reserves
+        Msl => "main0",
+        _ => "main",
+    } };
+    // what the shader uses, from the reflection of shadercross; none when it has no such file
+    match (app.read_asset(arena, joined(arena, stem, ".json", ""))) {
+        some(bytes) => {
+            str source = match (str.from_bytes(bytes)) {
+                ok(s) => s,
+                err(e) => "{}",
+            };
+            match (json.parse(arena, source)) {
+                ok(v) => {
+                    desc.samplers = count(v, "samplers");
+                    desc.storage_textures = count(v, "storage_textures");
+                    desc.storage_buffers = count(v, "storage_buffers");
+                    desc.uniform_buffers = count(v, "uniform_buffers");
+                },
+                err(e) => {
+                    return err(gpu.GpuError.NoShader(path));
+                },
+            }
+        },
+        none => { },
+    }
+    return device.shader(desc);
+}
+
+// The compute shader `path`, as `shaders/double.comp`, as a compute pipeline: its resources and
+// its threads ([numthreads]) from its .json, which it needs.
+pub gpu.ComputePipeline!gpu.GpuError load_compute(Arena* arena, gpu.Device* device, str path) uses io {
+    if (!text.ends_with(path, ".comp")) {
+        return err(gpu.GpuError.NoShader(path));
+    }
+    gpu.ShaderFormat format = device.format();
+    str extension = match (format) {
+        Spirv => ".spv",
+        Dxil => ".dxil",
+        Msl => ".msl",
+    };
+    str stem = built(arena, path);
+    ui8[] code = match (app.read_asset(arena, joined(arena, stem, extension, ""))) {
+        some(bytes) => bytes,
+        none => {
+            return err(gpu.GpuError.NoShader(path));
+        },
+    };
+    ui8[] reflection = match (app.read_asset(arena, joined(arena, stem, ".json", ""))) {
+        some(bytes) => bytes,
+        none => {
+            return err(gpu.GpuError.NoShader(path));
+        },
+    };
+    str source = match (str.from_bytes(reflection)) {
+        ok(s) => s,
+        err(e) => {
+            return err(gpu.GpuError.NoShader(path));
+        },
+    };
+    json.Value v = match (json.parse(arena, source)) {
+        ok(parsed) => parsed,
+        err(e) => {
+            return err(gpu.GpuError.NoShader(path));
+        },
+    };
+    mut gpu.ComputeDesc desc = gpu.ComputeDesc{ format: format, code: code, entry: match (format) {
+        Msl => "main0",
+        _ => "main",
+    } };
+    desc.samplers = count(v, "samplers");
+    desc.readonly_storage_textures = count(v, "readonly_storage_textures");
+    desc.readonly_storage_buffers = count(v, "readonly_storage_buffers");
+    desc.readwrite_storage_textures = count(v, "readwrite_storage_textures");
+    desc.readwrite_storage_buffers = count(v, "readwrite_storage_buffers");
+    desc.uniform_buffers = count(v, "uniform_buffers");
+    desc.threads_x = threads(v, "threadcount_x");
+    desc.threads_y = threads(v, "threadcount_y");
+    desc.threads_z = threads(v, "threadcount_z");
+    return device.compute_pipeline(desc);
+}
+
+ui32 threads(json.Value v, str key) {
+    return match (json.get(v, key)) {
+        some(n) => match (json.as_i64(n)) {
+            some(i) => i >= 1 && i <= 1024 ? i as ui32 : 1,
+            none => 1,
+        },
+        none => 1,
+    };
+}
+
+// `shaders/cube.vert` -> `shaders/compiled/cube.vert`.
+str built(Arena* arena, str path) {
+    usize cut = match (text.find_last(path, "/")) {
+        some(i) => i + 1,
+        none => 0,
+    };
+    return joined(arena, text.slice(path, 0, cut), "compiled/", text.slice(path, cut, path.len));
+}
+
+str joined(Arena* arena, str a, str b, str c) {
+    text.TextBuilder* t = text.builder(arena);
+    t.push(a);
+    t.push(b);
+    t.push(c);
+    return t.text();
+}
+
+gpu.Stage? stage_of(str path) {
+    if (text.ends_with(path, ".vert")) {
+        return some(gpu.Stage.Vertex);
+    }
+    if (text.ends_with(path, ".frag")) {
+        return some(gpu.Stage.Fragment);
+    }
+    return none;
+}
+
+ui32 count(json.Value v, str key) {
+    return match (json.get(v, key)) {
+        some(n) => match (json.as_i64(n)) {
+            some(i) => i >= 0 && i < 64 ? i as ui32 : 0,
+            none => 0,
+        },
+        none => 0,
+    };
+}

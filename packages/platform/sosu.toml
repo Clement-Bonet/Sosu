@@ -24,3 +24,4 @@ paths = ["vendor/SDL3-apple/SDL3.xcframework/{abi}"]
 [dependencies]
 render = { path = "../render" }
 image = { path = "../image" }
+math = { path = "../math" }  # the sticks of platform.gamepad, as linear.Vec2

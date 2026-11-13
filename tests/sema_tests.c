@@ -480,6 +480,11 @@ static void test_generics(void) {
     /* size_of, and functions converted to other effects in `unsafe` */
     expect_codes("struct P { i32 x; }\nusize f() { return size_of(P) + size_of(i64); }", "");
     expect_codes("usize f() { return size_of(3); }", "E0336");
+    /* offset_of(T, field), for the layouts of vertices given to the GPU (spec §8.2) */
+    expect_codes("struct V { f32 x; f32 y; }\nusize f() { return offset_of(V, y); }", "");
+    expect_codes("struct V { f32 x; }\nusize f() { return offset_of(V, z); }", "E0336");
+    expect_codes("usize f() { return offset_of(i32, x); }", "E0336");
+    expect_codes("struct V { f32 x; }\nusize f() { return offset_of(V); }", "E0336");
     expect_codes("import std.io;\nvoid show(i32 x) uses io { }\nvoid f() { unsafe { fn(i32) -> void g = show as fn(i32) -> void; } }",
                  "");
     expect_codes("import std.io;\nvoid show(i32 x) uses io { }\nvoid f() { fn(i32) -> void g = show as fn(i32) -> void; }",

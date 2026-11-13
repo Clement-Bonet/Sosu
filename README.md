@@ -188,7 +188,7 @@ src/playground/  the entry points of the compiler in WebAssembly, for playground
 src/docgen/   the generator of docs/REFERENCE.md (`make doc`), on src/lib/docgen
 lib/          the `core` and `std` packages, written in Sosu (std.io, std.time, std.random), and the C runtime
 packages/     platform (window and events, on SDL3), render (pixels, shapes, text, PNG images), ui (widgets),
-              i18n (catalogs of translations), crypto, compress, math, image, audio, db, sqlite, net, testing
+              i18n (catalogs of translations), gpu (3D on SDL_GPU), crypto, compress, math, image, audio, db, sqlite, net, testing
 examples/     window (shapes, keyboard and mouse), form (widgets), editor and workspace (title bars, a text
               area, tables, translations), themes (themes and styles), containers (grids, groups, tabs,
               trees, inputs), poster (the poster of the project and the image of its shared links,
@@ -288,7 +288,11 @@ folder (`../../build/sosuc run .`):
 - `showcase/sheets`: a spreadsheet with about 120 functions, reading and writing `.ods` and `.csv`;
 - `showcase/vault`: a password manager, encrypted in an SQLite file (a showcase, not audited software);
 - `showcase/courier`: a download manager, on the package `net`: downloads that pause, start again after an error from where
-  they stopped, and keep to a limit of bandwidth.
+  they stopped, and keep to a limit of bandwidth;
+- `showcase/audioplayer`: an audio player for WAV, Ogg Vorbis, MP3 and FLAC, played as they are read, with the spectrum of
+  what plays (a Fourier transform written in Sosu);
+- `showcase/soundstage`: a sound placed around the listener (ahead, behind, left, right, above) or turning around the
+  head, heard panned or through a head (`audio.hrtf`, for headphones), and drawn from above.
 
 On Windows:
 

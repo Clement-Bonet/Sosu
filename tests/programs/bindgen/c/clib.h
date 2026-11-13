@@ -19,6 +19,9 @@
 #define CLIB_SIZE ((uint8_t)300)
 #define CLIB_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define CLIB_HERE __LINE__
+#define CLIB_FILE_ __FILE__
+#define CLIB_WHERE CLIB_FILE_
+#define CLIB_AT CLIB_HERE
 #ifdef CLIB_NOT_DEFINED
 #define CLIB_BRANCH 1
 #else

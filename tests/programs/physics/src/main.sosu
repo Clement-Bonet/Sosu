@@ -1,0 +1,431 @@
+// The package physics (spec §8.2), on Jolt: each check prints its name and whether it holds,
+// against expected.txt; the numbers are compared within tolerances, not printed.
+import std.io;
+import std.math;
+import math.linear;
+import scene.scene;
+import physics.physics;
+
+void say(str name, bool holds) uses io {
+    io.print("{}: {}", name, holds ? "ok" : "FAILED");
+}
+
+bool near(f32 a, f32 b, f32 tolerance) {
+    return abs(a - b) <= tolerance;
+}
+
+linear.Quat upright() {
+    return linear.identity_quat();
+}
+
+// A floor whose top is at y = 0, on layer 1.
+physics.Body floor(physics.World* w, physics.Shape slab) {
+    return w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: slab, position: linear.vec3(0.0, -0.5, 0.0) });
+}
+
+physics.Body dynamic(physics.World* w, physics.Shape shape, linear.Vec3 at) {
+    return w.body(physics.BodyDesc{ shape: shape, position: at });
+}
+
+// A ball dropped and a box thrown: where they are after `steps` steps, the world stepped by
+// `threads` threads of Jolt (0: the thread of the program).
+linear.Vec3[] scenario(Arena* arena, i32 steps, i32 threads) uses threads {
+    physics.World* w = physics.world(arena, physics.options());
+    defer w.close();
+    w.use_threads(threads);
+    physics.Shape slab = physics.box(linear.vec3(50.0, 0.5, 50.0));
+    physics.Shape ball_shape = physics.sphere(0.5);
+    physics.Shape crate_shape = physics.box(linear.vec3(0.5, 0.25, 0.4));
+    defer slab.release();
+    defer ball_shape.release();
+    defer crate_shape.release();
+    floor(w, slab);
+    physics.Body ball = dynamic(w, ball_shape, linear.vec3(0.0, 10.0, 0.0));
+    physics.Body crate = dynamic(w, crate_shape, linear.vec3(-3.0, 4.0, 1.0));
+    crate.set_velocity(linear.vec3(2.0, 3.0, -1.0), linear.vec3(1.0, 2.0, 0.5));
+    for (i32 i in 0..steps) {
+        w.step();
+    }
+    mut linear.Vec3[] out = arena.alloc_slice(linear.Vec3, 3);
+    out[0] = ball.position();
+    out[1] = crate.position();
+    physics.State s = crate.state();
+    out[2] = linear.vec3(s.rotation.x, s.rotation.y, s.rotation.z);
+    return out;
+}
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    physics.Shape slab = physics.box(linear.vec3(50.0, 0.5, 50.0));
+    physics.Shape ball_shape = physics.sphere(0.5);
+    physics.Shape cube = physics.box(linear.vec3(0.5, 0.5, 0.5));
+    defer slab.release();
+    defer ball_shape.release();
+    defer cube.release();
+
+    // shapes that cannot be
+    {
+        say("a sphere of radius 0 is not a shape", !physics.sphere(0.0).valid());
+        physics.World* w = physics.world(&arena, physics.options());
+        say("a body of no shape is dead", !w.body(physics.BodyDesc{ shape: physics.sphere(0.0) }).alive());
+        w.close();
+        mut linear.Vec3[3] three = [linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0), linear.vec3(0.0, 1.0, 0.0)];
+        say("a hull of 3 points is not a shape", !physics.convex(&arena, three[0..3]).valid());
+    }
+
+    // a fall without a floor: y = 10 - g t² / 2 after one second, a sphere's mass from its density
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        physics.Body ball = w.body(physics.BodyDesc{ shape: ball_shape, position: linear.vec3(0.0, 10.0, 0.0), damping: 0.0 });
+        say("mass of a ball of water of 0.5 m", near(ball.mass(), 4.0 / 3.0 * 3.14159 * 0.125 * 1000.0, 1.0));
+        mut i32 steps = 0;
+        for (i32 i in 0..60) {
+            steps += w.advance(1.0 / 60.0);
+        }
+        physics.State s = ball.state();
+        say("advance runs one step per frame", steps == 60 && w.step_count() == 60);
+        say("free fall for one second", near(s.position.y, 10.0 - 9.81 / 2.0, 0.1) && near(s.velocity.y, -9.81, 0.05));
+        say("advance(0.05) runs 3 steps", w.advance(0.05) == 3 && near(w.alpha(), 0.0, 0.01));
+        w.close();
+    }
+
+    // a ball on a floor: a contact begins, then it rests
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        physics.Body ground = floor(w, slab);
+        physics.Body ball = dynamic(w, ball_shape, linear.vec3(0.0, 2.0, 0.0));
+        mut bool touched = false;
+        for (i32 i in 0..180) {
+            w.advance(1.0 / 60.0);
+            for (physics.Contact c in w.contacts()) {
+                bool pair = (c.a.same(ground) && c.b.same(ball)) || (c.a.same(ball) && c.b.same(ground));
+                if (c.began && pair && near(c.point.y, 0.0, 0.05) && near(abs(c.normal.y), 1.0, 0.01)) {
+                    touched = true;
+                }
+            }
+        }
+        say("a contact began with the floor", touched);
+        say("the ball rests on the floor", near(ball.position().y, 0.5, 0.03) && near(ball.state().velocity.y, 0.0, 0.05));
+        w.close();
+    }
+
+    // a stack of boxes stands, and sleeps
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        floor(w, slab);
+        mut physics.Body top = floor(w, slab);
+        for (i32 i in 0..6) {
+            top = dynamic(w, cube, linear.vec3(0.0, 0.5 + i as f32 * 1.0, 0.0));
+        }
+        for (i32 i in 0..600) {
+            w.step();
+        }
+        say("the stack stands", near(top.position().y, 5.5, 0.05) && near(top.position().x, 0.0, 0.05));
+        say("the stack sleeps", w.awake() == 0 && !top.awake());
+        top.add_impulse(linear.vec3(100.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
+        say("an impulse wakes it", top.awake() && w.awake() > 0);
+        w.close();
+    }
+
+    // rays, casts, overlaps and layers
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        physics.Body ground = floor(w, slab);
+        physics.Shape pole_shape = physics.box(linear.vec3(0.25, 1.0, 0.25));
+        defer pole_shape.release();
+        physics.Body pole = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: pole_shape,
+                position: linear.vec3(3.0, 1.0, 0.0), layers: 2 });
+        physics.Body far_pole = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: pole_shape,
+                position: linear.vec3(6.0, 1.0, 0.0), layers: 2 });
+        match (w.ray(linear.vec3(0.0, 5.0, 0.0), linear.vec3(0.0, -5.0, 0.0), physics.ALL)) {
+            some(h) => say("a ray hits the floor", h.body.same(ground) && near(h.point.y, 0.0, 0.001)
+                    && near(h.normal.y, 1.0, 0.001) && near(h.distance, 5.0, 0.001)),
+            none => say("a ray hits the floor", false),
+        }
+        match (w.ray(linear.vec3(0.0, 1.0, 0.0), linear.vec3(10.0, 1.0, 0.0), physics.ALL)) {
+            some(h) => say("a ray hits the pole", h.body.same(pole) && near(h.point.x, 2.75, 0.001) && near(h.normal.x, -1.0, 0.001)),
+            none => say("a ray hits the pole", false),
+        }
+        say("a ray on layer 1 misses the poles", match (w.ray(linear.vec3(0.0, 1.0, 0.0), linear.vec3(10.0, 1.0, 0.0), 1)) {
+            some(h) => false,
+            none => true,
+        });
+        physics.Hit[] all = w.ray_all(&arena, linear.vec3(0.0, 1.0, 0.0), linear.vec3(10.0, 1.0, 0.0), 2);
+        say("ray_all finds both poles, the nearest first", all.len == 2 && all[0].body.same(pole) && all[1].body.same(far_pole)
+                && near(all[0].distance, 2.75, 0.001) && near(all[1].distance, 5.75, 0.001));
+        match (w.sphere_cast(0.5, linear.vec3(0.0, 5.0, 0.0), linear.vec3(0.0, -5.0, 0.0), physics.ALL)) {
+            some(h) => say("a sphere cast stops on the floor", h.body.same(ground) && near(h.distance, 4.5, 0.01)
+                    && near(h.point.y, 0.0, 0.01) && near(h.normal.y, 1.0, 0.01)),
+            none => say("a sphere cast stops on the floor", false),
+        }
+        physics.Shape probe = physics.sphere(0.5);
+        defer probe.release();
+        physics.Body[] touching = w.overlap(&arena, probe, linear.vec3(3.0, 1.0, 0.6), upright(), physics.ALL);
+        say("overlap finds the pole", touching.len == 1 && touching[0].same(pole));
+        physics.Body[] nothing = w.overlap(&arena, probe, linear.vec3(3.0, 1.0, 0.6), upright(), 1);
+        say("overlap on layer 1 finds nothing", nothing.len == 0);
+        w.close();
+    }
+
+    // layers between bodies: a box on layer 2 that collides with layer 2 only falls through the floor
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        floor(w, slab);
+        physics.Body ghost = w.body(physics.BodyDesc{ shape: cube, position: linear.vec3(0.0, 2.0, 0.0), layers: 2, mask: 2 });
+        physics.Body solid = dynamic(w, cube, linear.vec3(3.0, 2.0, 0.0));
+        for (i32 i in 0..120) {
+            w.step();
+        }
+        say("a body whose mask leaves out the floor falls through it", ghost.position().y < -2.0);
+        say("the other one stands on it", near(solid.position().y, 0.5, 0.03));
+        w.close();
+    }
+
+    // a sensor sees the ball go through it; a dead body
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        physics.Shape zone_shape = physics.box(linear.vec3(2.0, 0.5, 2.0));
+        defer zone_shape.release();
+        physics.Body zone = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: zone_shape,
+                position: linear.vec3(0.0, 3.0, 0.0), sensor: true });
+        physics.Shape pebble = physics.sphere(0.25);
+        defer pebble.release();
+        physics.Body ball = dynamic(w, pebble, linear.vec3(0.0, 6.0, 0.0));
+        mut bool entered = false;
+        mut bool left = false;
+        for (i32 i in 0..120) {
+            w.advance(1.0 / 60.0);
+            for (physics.Contact c in w.contacts()) {
+                if ((c.a.same(zone) && c.b.same(ball)) || (c.a.same(ball) && c.b.same(zone))) {
+                    if (c.began) {
+                        entered = true;
+                    } else {
+                        left = true;
+                    }
+                }
+            }
+        }
+        say("the ball enters the sensor, then leaves it", entered && left && ball.position().y < 2.0);
+        say("a body is alive", ball.alive());
+        w.remove(ball);
+        say("a removed body is dead", !ball.alive());
+        w.close();
+    }
+
+    // a mesh, a heightfield, a compound; a dynamic mesh is refused
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        mut linear.Vec3[4] corners = [linear.vec3(-10.0, 0.0, -10.0), linear.vec3(-10.0, 0.0, 10.0), linear.vec3(10.0, 0.0, 10.0),
+                linear.vec3(10.0, 0.0, -10.0)];
+        mut ui32[6] quad = [0, 1, 2, 0, 2, 3];
+        physics.Shape ground_mesh = physics.mesh(&arena, corners[0..4], quad[0..6]);
+        defer ground_mesh.release();
+        say("a mesh", ground_mesh.valid());
+        say("a dynamic body of a mesh is refused", !w.body(physics.BodyDesc{ shape: ground_mesh }).alive());
+        say("a static mesh", w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: ground_mesh }).alive());
+        mut f32[16] heights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        physics.Shape hills = physics.heightfield(&arena, heights[0..16], 4, 2.0, linear.vec3(20.0, 1.0, -3.0));
+        defer hills.release();
+        say("a heightfield", hills.valid());
+        say("a static heightfield", w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: hills }).alive());
+        mut physics.Part[2] parts = [
+            physics.Part{ shape: ball_shape, position: linear.vec3(-1.0, 0.0, 0.0), rotation: upright() },
+            physics.Part{ shape: ball_shape, position: linear.vec3(1.0, 0.0, 0.0), rotation: upright() }
+        ];
+        physics.Shape dumbbell = physics.compound(parts[0..2]);
+        defer dumbbell.release();
+        physics.Body bell = dynamic(w, dumbbell, linear.vec3(0.0, 3.0, 0.0));
+        physics.Body on_hills = dynamic(w, ball_shape, linear.vec3(23.0, 4.0, 0.0));
+        for (i32 i in 0..180) {
+            w.step();
+        }
+        say("a compound weighs its parts", near(bell.mass(), 2.0 * 4.0 / 3.0 * 3.14159 * 0.125 * 1000.0, 2.0));
+        say("it lands on the mesh", near(bell.position().y, 0.5, 0.03));
+        say("a ball lands on the heightfield", near(on_hills.position().y, 1.5, 0.03));
+        w.close();
+    }
+
+    // a kinematic body pushes a box
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        floor(w, slab);
+        physics.Body pusher = w.body(physics.BodyDesc{ kind: physics.Kind.Kinematic, shape: cube, position: linear.vec3(-2.0, 0.5, 0.0) });
+        physics.Body box = dynamic(w, cube, linear.vec3(0.0, 0.5, 0.0));
+        for (i32 i in 0..120) {
+            f32 x = -2.0 + 3.0 * (i + 1) as f32 / 120.0;
+            pusher.move_to(linear.vec3(x, 0.5, 0.0), upright(), 1.0 / 60.0);
+            w.step();
+        }
+        say("the kinematic body reaches its place", near(pusher.position().x, 1.0, 0.01));
+        say("it pushed the box ahead of it", box.position().x > 1.9);
+        w.close();
+    }
+
+    // the character walks onto a step, and stops at a wall
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        floor(w, slab);
+        physics.Shape step_shape = physics.box(linear.vec3(2.0, 0.15, 2.0));
+        physics.Shape wall_shape = physics.box(linear.vec3(0.25, 1.5, 2.0));
+        defer step_shape.release();
+        defer wall_shape.release();
+        w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: step_shape, position: linear.vec3(3.0, 0.15, 0.0) });
+        w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: wall_shape, position: linear.vec3(-3.0, 1.5, 0.0) });
+        physics.Character* hero = match (w.character(physics.CharacterDesc{ position: linear.vec3(0.0, 0.0, 0.0) })) {
+            some(c) => c,
+            none => {
+                say("a character", false);
+                return 1;
+            },
+        };
+        for (i32 i in 0..60) {
+            hero.update(1.0 / 60.0, linear.vec3(0.0, 0.0, 0.0));
+            w.step();
+        }
+        say("the character stands on the floor", hero.on_ground() && near(hero.position().y, 0.0, 0.05));
+        for (i32 i in 0..90) {
+            hero.update(1.0 / 60.0, linear.vec3(2.0, 0.0, 0.0));
+            w.step();
+        }
+        say("it climbs the step", hero.on_ground() && near(hero.position().y, 0.3, 0.05) && hero.position().x > 2.0);
+        for (i32 i in 0..240) {
+            hero.update(1.0 / 60.0, linear.vec3(-2.0, 0.0, 0.0));
+            w.step();
+        }
+        say("it stops at the wall", near(hero.position().x, -2.75 + 0.3, 0.05) && near(hero.position().y, 0.0, 0.05));
+        hero.update(1.0 / 60.0, linear.vec3(0.0, 5.0, 0.0));
+        w.step();
+        for (i32 i in 0..10) {
+            hero.update(1.0 / 60.0, linear.vec3(0.0, 0.0, 0.0));
+            w.step();
+        }
+        say("it jumps", !hero.on_ground() && hero.position().y > 0.5);
+        say("none for a character shorter than its width", match (w.character(physics.CharacterDesc{ height: 0.5, radius: 0.3 })) {
+            some(c) => false,
+            none => true,
+        });
+        hero.close();
+        w.close();
+    }
+
+    // the transforms of the entities follow their bodies
+    {
+        scene.World* world = scene.world(&arena);
+        scene.Table<physics.Body>* bodies = world.table<physics.Body>();
+        physics.World* w = physics.world(&arena, physics.options());
+        linear.Quat turned = linear.from_axis_angle(linear.vec3(0.0, 1.0, 0.0), 0.5);
+        physics.Body box = w.body(physics.BodyDesc{ shape: cube, position: linear.vec3(1.0, 2.0, 3.0), rotation: turned, gravity_scale: 0.0 });
+        scene.Entity e = world.spawn();
+        mut linear.Transform t = linear.transform();
+        t.scale = linear.vec3(2.0, 2.0, 2.0);
+        world.transforms.set(e, t);
+        bodies.set(e, box);
+        physics.sync(world, bodies);
+        bool synced = match (world.transforms.get(e)) {
+            some(got) => got.position.near(linear.vec3(1.0, 2.0, 3.0), 0.0001) && got.rotation.near(turned, 0.0001)
+                    && near(got.scale.x, 2.0, 0.0001),
+            none => false,
+        };
+        say("sync writes the position and the rotation, and keeps the scale", synced);
+        w.close();
+    }
+
+    // joints
+    {
+        physics.World* w = physics.world(&arena, physics.options());
+        physics.Shape post_shape = physics.box(linear.vec3(0.1, 0.1, 0.1));
+        physics.Shape small = physics.box(linear.vec3(0.2, 0.2, 0.2));
+        defer post_shape.release();
+        defer small.release();
+        physics.Body post = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(0.0, 10.0, 0.0) });
+        // a pendulum about z
+        physics.Body bob = dynamic(w, ball_shape, linear.vec3(2.0, 10.0, 0.0));
+        physics.Joint swing = w.hinge(post, bob, linear.vec3(0.0, 10.0, 0.0), linear.vec3(0.0, 0.0, 1.0), physics.joint_options());
+        // a hinge held within half a radian either way
+        physics.Body flap = dynamic(w, small, linear.vec3(10.0, 10.0, 0.0));
+        physics.Body post2 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(9.0, 10.0, 0.0) });
+        physics.Joint held = w.hinge(post2, flap, linear.vec3(9.0, 10.0, 0.0), linear.vec3(0.0, 0.0, 1.0),
+                physics.JointOptions{ limit: true, lower: -0.5, upper: 0.5 });
+        // a turntable about y, driven at 2 rad/s
+        physics.Body table = dynamic(w, small, linear.vec3(20.0, 10.0, 0.0));
+        physics.Body post3 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(20.0, 9.0, 0.0) });
+        physics.Joint driven = w.hinge(post3, table, linear.vec3(20.0, 10.0, 0.0), linear.vec3(0.0, 1.0, 0.0),
+                physics.JointOptions{ motor: true, speed: 2.0, strength: 10000.0 });
+        // a slider along y that stops 1 m down; another along x driven at 1 m/s
+        physics.Body lift = dynamic(w, small, linear.vec3(30.0, 10.0, 0.0));
+        physics.Body post4 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(31.0, 10.0, 0.0) });
+        w.slider(post4, lift, linear.vec3(30.0, 10.0, 0.0), linear.vec3(0.0, 1.0, 0.0), physics.JointOptions{ limit: true, lower: -1.0, upper: 0.0 });
+        physics.Body drawer = dynamic(w, small, linear.vec3(40.0, 10.0, 0.0));
+        physics.Body post5 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(40.0, 12.0, 0.0) });
+        physics.Joint pushed = w.slider(post5, drawer, linear.vec3(40.0, 10.0, 0.0), linear.vec3(1.0, 0.0, 0.0),
+                physics.JointOptions{ motor: true, speed: 1.0, strength: 100000.0 });
+        // two boxes welded, falling together
+        physics.Body left = dynamic(w, small, linear.vec3(50.0, 10.0, 0.0));
+        physics.Body right = dynamic(w, small, linear.vec3(50.4, 10.0, 0.0));
+        w.fixed(left, right);
+        // a rope of at most 3 m
+        physics.Body hung = dynamic(w, small, linear.vec3(60.0, 9.0, 0.0));
+        physics.Body post6 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(60.0, 10.0, 0.0) });
+        w.distance(post6, hung, linear.vec3(60.0, 10.0, 0.0), linear.vec3(60.0, 9.0, 0.0), physics.JointOptions{ limit: true, lower: 0.0, upper: 3.0 });
+        // a lamp in a cone of 0.3 rad about down, hanging, then pushed hard sideways
+        physics.Body post7 = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: post_shape, position: linear.vec3(70.0, 10.0, 0.0) });
+        physics.Body lamp = dynamic(w, small, linear.vec3(70.0, 8.0, 0.0));
+        w.cone(post7, lamp, linear.vec3(70.0, 10.0, 0.0), linear.vec3(0.0, -1.0, 0.0), 0.3);
+        lamp.add_impulse(linear.vec3(lamp.mass() * 2.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));  // would rise 0.45 rad free
+        mut f32 cone_widest = 0.0;
+        mut f32 longest = 0.0;
+        mut f32 shortest = 10.0;
+        mut f32 widest = 0.0;
+        for (i32 i in 0..120) {
+            w.step();
+            f32 d = bob.position().distance(linear.vec3(0.0, 10.0, 0.0));
+            longest = max(longest, d);
+            shortest = min(shortest, d);
+            widest = max(widest, abs(held.position()));
+            linear.Vec3 hang = lamp.position().sub(linear.vec3(70.0, 10.0, 0.0)).normalized();
+            cone_widest = max(cone_widest, math.acos(min(1.0, hang.dot(linear.vec3(0.0, -1.0, 0.0))) as f64) as f32);
+        }
+        say("a pendulum keeps its length", near(longest, 2.0, 0.02) && near(shortest, 2.0, 0.02) && bob.position().y < 10.0);
+        say("a hinge stays within its limits", widest <= 0.55 && widest > 0.4);
+        say("a motor turns a hinge at its speed", near(driven.position(), 2.0 * 2.0 - 6.2831853, 0.1) || near(driven.position(), 4.0, 0.1));
+        say("a slider stops at its limit", near(lift.position().y, 9.0, 0.02) && near(lift.position().x, 30.0, 0.01));
+        say("a motor drives a slider", near(pushed.position(), 2.0, 0.1) && near(drawer.position().y, 10.0, 0.01));
+        say("welded boxes fall together", near(right.position().x - left.position().x, 0.4, 0.01) && left.position().y < 5.0);
+        say("a rope stops the fall at its length", near(hung.position().distance(linear.vec3(60.0, 10.0, 0.0)), 3.0, 0.05));
+        say("a cone keeps a lamp within its angle", cone_widest <= 0.36 && cone_widest > 0.25);
+        for (i32 i in 0..240) {
+            w.step();
+        }
+        w.remove_joint(swing);
+        say("a removed joint is dead", !swing.alive() && held.alive());
+        f32 before = bob.position().y;
+        for (i32 i in 0..60) {
+            w.step();
+        }
+        say("and its body falls freely", bob.position().y < before && bob.state().velocity.y < -4.0);
+        w.close();
+    }
+
+    // the same steps from the same inputs give the same world, with Jolt's threads too
+    linear.Vec3[] first = scenario(&arena, 300, 0);
+    linear.Vec3[] second = scenario(&arena, 300, 0);
+    linear.Vec3[] threaded = scenario(&arena, 300, 3);
+    mut bool same = true;
+    mut bool same_threaded = true;
+    for (usize i in 0..first.len) {
+        same = same && first[i].x == second[i].x && first[i].y == second[i].y && first[i].z == second[i].z;
+        same_threaded = same_threaded && first[i].x == threaded[i].x && first[i].y == threaded[i].y && first[i].z == threaded[i].z;
+    }
+    say("the same steps twice give the same world", same);
+    say("three threads of Jolt give the same steps", same_threaded);
+    return 0;
+}
+
+f32 linear_sin(f32 x) {
+    return math.sin(x as f64) as f32;
+}
+
+f32 linear_cos(f32 x) {
+    return math.cos(x as f64) as f32;
+}

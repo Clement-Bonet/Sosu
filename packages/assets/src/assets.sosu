@@ -1,0 +1,690 @@
+// assets.assets: the files of a game loaded in the background (spec §8.2). `texture`, `sound`,
+// `model` and `shader` give a handle at once, the same for the same path; the threads of the store
+// read and decode textures (PNG, JPEG) and sounds (WAV, Ogg Vorbis, MP3, FLAC), and send their pixels and
+// samples back in pieces of 4 KB, since threads share no memory (§5.6). Each frame, `update` takes
+// what came, within a budget of milliseconds, sends the textures to the GPU, and reads one model or
+// shader if there is time. `state` says where an asset is; `wait` blocks until it is there. With
+// `watch(true)`, the files loaded are looked at every half second, and one that changed is loaded
+// again behind the same handle (not on phones, where files do not change).
+import std.io;
+import std.fs;
+import std.text;
+import std.vec;
+import std.thread;
+import std.channel;
+import platform.app;
+import image.image;
+import image.png;
+import image.jpeg;
+import audio.audio;
+import audio.wav;
+import audio.ogg;
+import audio.mp3;
+import audio.flac;
+import model.model;
+import model.gltf;
+import model.obj;
+import model.fbx;
+import gpu.gpu;
+import gpu.shaders;
+
+usize PATH_SIZE = 512;
+usize WORDS = 1024;  // the words of a piece: 4 KB
+usize WHY_SIZE = 160;
+ui64 WATCH_EVERY_MS = 500;
+
+ui8 TEXTURE = 1;
+ui8 SOUND = 2;
+ui8 MODEL = 3;
+ui8 SHADER = 4;
+
+// Where an asset is.
+pub enum State {
+    Loading,
+    Ready,
+    Failed(str message),
+}
+
+// An asset of the store: a texture, a sound, a model or a shader, by the method that gave it.
+pub struct Handle {
+    ui32 index;
+    ui32 generation;
+    ui8 kind;
+
+    // Its place in the store: two handles of one place are the same asset.
+    pub ui32 index_of() {
+        return index;
+    }
+}
+
+// What a thread is asked: to read and decode the file at `path`.
+struct Job {
+    ui32 slot;
+    ui32 version;
+    ui8 kind;
+    ui32 length;
+    ui8[512] path;
+}
+
+// What a thread sends back: the size of what follows, its pieces, its end, or why it failed.
+enum Message {
+    Image(ui32 slot, ui32 version, i32 width, i32 height),
+    Samples(ui32 slot, ui32 version, i32 rate, i32 channels, ui32 count),
+    Words(ui32 slot, ui32 version, ui32 offset, ui32 count, ui32[1024] words),
+    Done(ui32 slot, ui32 version),
+    Failed(ui32 slot, ui32 version, ui32 length, ui8[160] why),
+}
+
+struct Worker {
+    channel.Channel<Job> jobs;
+    channel.Channel<Message> results;
+}
+
+// A text of at most `size` bytes copied into a fixed array, for a message.
+ui32 put_text(ui8[] into, str s) {
+    usize n = min(s.len, into.len);
+    for (usize i in 0..n) {
+        into[i] = s.bytes[i];
+    }
+    return n as ui32;
+}
+
+str text_of(Arena* arena, ui8[] bytes, ui32 length) {
+    mut ui8[] out = arena.alloc_slice(ui8, min(length as usize, bytes.len));
+    for (usize i in 0..out.len) {
+        out[i] = bytes[i];
+    }
+    return match (str.from_bytes(out)) {
+        ok(s) => s,
+        err(e) => "",
+    };
+}
+
+void fail(Worker w, Job j, str why) uses threads {
+    mut ui8[160] text = [0; 160];
+    ui32 n = put_text(text[0..160], why);
+    w.results.send(Message.Failed(j.slot, j.version, n, text));
+}
+
+// `words` sent in pieces.
+void send_words(Worker w, Job j, ui32[] words) uses threads {
+    mut usize at = 0;
+    while (at < words.len) {
+        usize n = min(WORDS, words.len - at);
+        mut ui32[1024] piece = [0; 1024];
+        for (usize k in 0..n) {
+            piece[k] = words[at + k];
+        }
+        w.results.send(Message.Words(j.slot, j.version, at as ui32, n as ui32, piece));
+        at += n;
+    }
+}
+
+ui32 bits_of(f32 x) {
+    mut f32 v = x;
+    unsafe {
+        return *(&v as ui32*);
+    }
+}
+
+f32 float_of(ui32 bits) {
+    mut ui32 b = bits;
+    unsafe {
+        return *(&b as f32*);
+    }
+}
+
+// A thread of the store: reads and decodes the files it is given until its channel closes.
+i32 work(Arena* arena, Worker w) uses io, threads {
+    while (true) {
+        Job j = match (w.jobs.receive()) {
+            some(x) => x,
+            none => {
+                return 0;
+            },
+        };
+        mut Arena scratch = Arena.new(64 * KB);
+        mut ui8[512] given = j.path;
+        str path = text_of(&scratch, given[0..512], j.length);
+        match (app.read_asset(&scratch, path)) {
+            some(bytes) => {
+                if (j.kind == TEXTURE) {
+                    image.Image? decoded = png.is_png(bytes) ? match (png.decode(&scratch, bytes)) {
+                        ok(i) => some(i),
+                        err(e) => none,
+                    } : jpeg.is_jpeg(bytes) ? match (jpeg.decode(&scratch, bytes)) {
+                        ok(i) => some(i),
+                        err(e) => none,
+                    } : none;
+                    match (decoded) {
+                        some(img) => {
+                            w.results.send(Message.Image(j.slot, j.version, img.width, img.height));
+                            send_words(w, j, img.pixels);
+                            w.results.send(Message.Done(j.slot, j.version));
+                        },
+                        none => {
+                            fail(w, j, "not an image of PNG or JPEG that decodes");
+                        },
+                    }
+                } else {
+                    audio.Sound? decoded = wav.is_wav(bytes) ? match (wav.decode(&scratch, bytes)) {
+                        ok(s) => some(s),
+                        err(e) => none,
+                    } : ogg.is_ogg(bytes) ? match (ogg.decode(&scratch, bytes)) {
+                        ok(s) => some(s),
+                        err(e) => none,
+                    } : flac.is_flac(bytes) ? match (flac.decode(&scratch, bytes)) {
+                        ok(s) => some(s),
+                        err(e) => none,
+                    } : mp3.is_mp3(bytes) ? match (mp3.decode(&scratch, bytes)) {
+                        ok(s) => some(s),
+                        err(e) => none,
+                    } : none;
+                    match (decoded) {
+                        some(sound) => {
+                            w.results.send(Message.Samples(
+                                j.slot,
+                                j.version,
+                                sound.rate,
+                                sound.channels,
+                                sound.samples.len as ui32
+                            ));
+                            mut ui32[] words = scratch.alloc_slice(ui32, sound.samples.len);
+                            for (usize i in 0..words.len) {
+                                words[i] = bits_of(sound.samples[i]);
+                            }
+                            send_words(w, j, words);
+                            w.results.send(Message.Done(j.slot, j.version));
+                        },
+                        none => {
+                            fail(w, j, "not a sound of WAV, Ogg Vorbis, MP3 or FLAC that decodes");
+                        },
+                    }
+                }
+            },
+            none => {
+                fail(w, j, "the file is not there");
+            },
+        }
+        scratch.free();
+    }
+    return 0;
+}
+
+// What the store knows of one asset.
+struct Slot {
+    mut ui8 kind;
+    mut str path;
+    mut ui32 generation;
+    mut bool alive;
+    mut ui32 version;  // of the last load asked; an older answer is dropped
+    mut State state;
+    mut i64 modified;  // of the file when it was loaded, for `watch`
+    mut bool pending;  // a model or a shader waiting for `update`
+    mut gpu.Texture? texture;
+    mut audio.Sound? sound;
+    mut model.Model? model;
+    mut gpu.Shader? shader;
+    // what comes in pieces
+    mut i32 width;
+    mut i32 height;
+    mut i32 rate;
+    mut i32 channels;
+    mut ui32[] words;
+}
+
+pub class Assets {
+    Arena* arena;
+    gpu.Device*? device;
+    vec.Vec<Slot>* slots;
+    vec.Vec<thread.Thread<Worker, i32>*>* threads;
+    channel.Channel<Job> jobs;
+    channel.Channel<Message> results;
+    mut bool watching;
+    mut ui64 last_watch;
+    mut bool closed;
+    pub mut bool mipmaps;  // the textures with their mipmaps (true by default)
+
+    void init(keeps Arena* arena, keeps gpu.Device*? device, usize count) keeps self uses io, threads {
+        self.arena = arena;
+        self.device = device;
+        slots = vec.new(arena);
+        threads = vec.new(arena);
+        jobs = channel.new<Job>(1024);
+        results = channel.new<Message>(64);
+        watching = false;
+        last_watch = 0;
+        closed = false;
+        mipmaps = true;
+        for (usize i in 0..max(count, 1)) {
+            threads.push(thread.spawn(arena, work, Worker{ jobs: jobs, results: results }));
+        }
+    }
+
+    // The handle of `path` of `kind`: the one given before, or a new one, its load asked.
+    Handle ask(keeps str path, ui8 kind) uses io, threads {
+        assert(!closed);
+        for (usize i in 0..slots.len()) {
+            Slot s = slots.items()[i];
+            if (s.alive && s.kind == kind && s.path == path) {
+                return Handle{ index: i as ui32, generation: s.generation, kind: kind };
+            }
+        }
+        mut usize index = slots.len();
+        for (usize i in 0..slots.len()) {
+            if (!slots.items()[i].alive) {
+                index = i;
+                break;
+            }
+        }
+        Slot fresh = Slot{
+            kind: kind,
+            path: path,
+            generation: index < slots.len() ? slots.items()[index].generation + 1 : 1,
+            alive: true,
+            version: 0,
+            state: Loading,
+            modified: modified_of(path),
+            pending: false,
+            texture: none,
+            sound: none,
+            model: none,
+            shader: none,
+            width: 0,
+            height: 0,
+            rate: 0,
+            channels: 0,
+            words: arena.alloc_slice(ui32, 0)
+        };
+        if (index < slots.len()) {
+            slots.set(index, fresh);
+        } else {
+            slots.push(fresh);
+        }
+        start(index);
+        return Handle{ index: index as ui32, generation: fresh.generation, kind: kind };
+    }
+
+    // The load of the slot `index`, asked again (a new version).
+    void start(usize index) uses io, threads {
+        Slot* s = slots.at(index);
+        s.version += 1;
+        s.state = Loading;
+        if (s.kind == TEXTURE || s.kind == SOUND) {
+            if (s.path.len > PATH_SIZE) {
+                s.state = Failed("the path is longer than 512 bytes");
+                return;
+            }
+            mut ui8[512] path = [0; 512];
+            ui32 n = put_text(path[0..512], s.path);
+            jobs.send(Job{ slot: index as ui32, version: s.version, kind: s.kind, length: n, path: path });
+        } else {
+            s.pending = true;
+        }
+    }
+
+    i64 modified_of(str path) uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        return match (fs.info(&scratch, path)) {
+            ok(info) => info.modified,
+            err(e) => 0,
+        };
+    }
+
+    // A texture (PNG, JPEG), sent to the GPU with its mipmaps once decoded.
+    pub Handle texture(keeps str path) uses io, threads {
+        return ask(path, TEXTURE);
+    }
+
+    // A sound (WAV, Ogg Vorbis, MP3, FLAC).
+    pub Handle sound(keeps str path) uses io, threads {
+        return ask(path, SOUND);
+    }
+
+    // A model (glTF, OBJ, FBX, by the extension of `path`), with the textures it names. (Not
+    // `model`: the name of the package of models.)
+    pub Handle model_file(keeps str path) uses io, threads {
+        return ask(path, MODEL);
+    }
+
+    // A shader of `sosuc shaders`: `path` is its source without `.hlsl`.
+    pub Handle shader(keeps str path) uses io, threads {
+        return ask(path, SHADER);
+    }
+
+    Slot*? slot_of(Handle h) {
+        if (h.index as usize >= slots.len()) {
+            return none;
+        }
+        Slot* s = slots.at(h.index as usize);
+        return s.alive && s.generation == h.generation && s.kind == h.kind ? some(s) : none;
+    }
+
+    pub State state(Handle h) {
+        return match (slot_of(h)) {
+            some(s) => s.state,
+            none => Failed("released"),
+        };
+    }
+
+    pub gpu.Texture? get_texture(Handle h) {
+        return match (slot_of(h)) {
+            some(s) => s.texture,
+            none => none,
+        };
+    }
+
+    pub audio.Sound? get_sound(Handle h) {
+        return match (slot_of(h)) {
+            some(s) => s.sound,
+            none => none,
+        };
+    }
+
+    pub model.Model? get_model(Handle h) {
+        return match (slot_of(h)) {
+            some(s) => s.model,
+            none => none,
+        };
+    }
+
+    pub gpu.Shader? get_shader(Handle h) {
+        return match (slot_of(h)) {
+            some(s) => s.shader,
+            none => none,
+        };
+    }
+
+    // One message of a thread, taken.
+    void take(Message m) keeps self uses io {
+        match (m) {
+            Image(slot, version, width, height) => {
+                match (current(slot, version)) {
+                    some(s) => {
+                        s.width = width;
+                        s.height = height;
+                        s.words = arena.alloc_slice(ui32, max(width, 0) as usize * max(height, 0) as usize);
+                    },
+                    none => { },
+                }
+            },
+            Samples(slot, version, rate, channels, count) => {
+                match (current(slot, version)) {
+                    some(s) => {
+                        s.rate = rate;
+                        s.channels = channels;
+                        s.words = arena.alloc_slice(ui32, count as usize);
+                    },
+                    none => { },
+                }
+            },
+            Words(slot, version, offset, count, words) => {
+                match (current(slot, version)) {
+                    some(s) => {
+                        for (usize k in 0..count as usize) {
+                            if (offset as usize + k < s.words.len) {
+                                s.words[offset as usize + k] = words[k];
+                            }
+                        }
+                    },
+                    none => { },
+                }
+            },
+            Done(slot, version) => {
+                match (current(slot, version)) {
+                    some(s) => {
+                        finish(s);
+                    },
+                    none => { },
+                }
+            },
+            Failed(slot, version, length, why) => {
+                match (current(slot, version)) {
+                    some(s) => {
+                        mut ui8[160] said = why;
+                        s.state = State.Failed(text_of(arena, said[0..160], length));
+                    },
+                    none => { },
+                }
+            },
+        }
+    }
+
+    // The slot an answer is for, none when it was released or asked again since.
+    Slot*? current(ui32 slot, ui32 version) {
+        if (slot as usize >= slots.len()) {
+            return none;
+        }
+        Slot* s = slots.at(slot as usize);
+        return s.alive && s.version == version ? some(s) : none;
+    }
+
+    // A texture or a sound whose pieces all came: made ready (a texture sent to the GPU, the one it
+    // replaces released).
+    void finish(Slot* s) keeps self uses io {
+        if (s.kind == TEXTURE) {
+            gpu.Device* d = match (device) {
+                some(x) => x,
+                none => {
+                    s.state = Failed("a texture without a device of the GPU");
+                    return;
+                },
+            };
+            image.Image img = image.Image{ width: s.width, height: s.height, pixels: s.words };
+            match (d.texture_of(img, mipmaps)) {
+                ok(t) => {
+                    match (s.texture) {
+                        some(old) => {
+                            d.release_texture(old);
+                        },
+                        none => { },
+                    }
+                    s.texture = some(t);
+                    s.state = Ready;
+                },
+                err(e) => {
+                    s.state = Failed(gpu.message(e));
+                },
+            }
+        } else {
+            mut f32[] samples = arena.alloc_slice(f32, s.words.len);
+            for (usize i in 0..samples.len) {
+                samples[i] = float_of(s.words[i]);
+            }
+            s.sound = some(audio.Sound{ rate: s.rate, channels: s.channels, samples: samples });
+            s.state = Ready;
+        }
+        s.words = arena.alloc_slice(ui32, 0);
+    }
+
+    // A model or a shader read now.
+    void read_now(Slot* s) keeps self uses io {
+        s.pending = false;
+        if (s.kind == MODEL) {
+            str lower = text.to_lower(arena, s.path);
+            model.Model!model.ModelError read = text.ends_with(lower, ".obj") ? obj.load(arena, s.path)
+                    : text.ends_with(lower, ".fbx") ? fbx.load(arena, s.path)
+                    : gltf.load(arena, s.path);
+            match (read) {
+                ok(m) => {
+                    s.model = some(m);
+                    s.state = Ready;
+                },
+                err(e) => {
+                    s.state = Failed(model.message(e));
+                },
+            }
+            return;
+        }
+        gpu.Device* d = match (device) {
+            some(x) => x,
+            none => {
+                s.state = Failed("a shader without a device of the GPU");
+                return;
+            },
+        };
+        match (shaders.load(arena, d, s.path)) {
+            ok(sh) => {
+                match (s.shader) {
+                    some(old) => {
+                        d.release_shader(old);
+                    },
+                    none => { },
+                }
+                s.shader = some(sh);
+                s.state = Ready;
+            },
+            err(e) => {
+                s.state = Failed(gpu.message(e));
+            },
+        }
+    }
+
+    // What the threads sent, taken for `budget_ms` milliseconds at most, then one model or shader
+    // read if there is time left; the files that changed loaded again when watching. Each frame,
+    // in the thread of the device.
+    pub void update(ui64 budget_ms) keeps self uses io, threads {
+        if (closed) {
+            return;
+        }
+        ui64 start_ms = app.now_ms();
+        while (app.now_ms() - start_ms <= budget_ms) {
+            match (results.try_receive()) {
+                some(m) => {
+                    take(m);
+                },
+                none => {
+                    break;
+                },
+            }
+        }
+        if (app.now_ms() - start_ms <= budget_ms) {
+            for (usize i in 0..slots.len()) {
+                Slot* s = slots.at(i);
+                if (s.alive && s.pending) {
+                    read_now(s);
+                    break;  // one a frame
+                }
+            }
+        }
+        if (watching && app.now_ms() - last_watch >= WATCH_EVERY_MS) {
+            last_watch = app.now_ms();
+            for (usize i in 0..slots.len()) {
+                Slot* s = slots.at(i);
+                if (s.alive && !s.pending) {
+                    i64 now = modified_of(s.path);
+                    if (now != 0 && now != s.modified) {
+                        s.modified = now;
+                        start(i);
+                    }
+                }
+            }
+        }
+    }
+
+    // Waits until `h` is ready or failed: for a loading screen, or a test.
+    pub State wait(Handle h) keeps self uses io, threads {
+        while (true) {
+            Slot* s = match (slot_of(h)) {
+                some(x) => x,
+                none => {
+                    return Failed("released");
+                },
+            };
+            match (s.state) {
+                Loading => { },
+                _ => {
+                    return s.state;
+                },
+            }
+            if (s.pending) {
+                read_now(s);
+            } else {
+                match (results.receive()) {
+                    some(m) => {
+                        take(m);
+                    },
+                    none => {
+                        return Failed("the store is closed");
+                    },
+                }
+            }
+        }
+        return Loading;
+    }
+
+    // Looks at the files loaded every half second, and loads again those that changed (on the
+    // desktop: on a phone, the files of an application do not change).
+    pub void watch(bool on) uses io {
+        str system = app.system(arena);
+        watching = on && system != "Android" && system != "iOS";
+    }
+
+    // `h` released: its texture or shader freed on the GPU, its handle dead.
+    pub void release(Handle h) uses io {
+        match (slot_of(h)) {
+            some(s) => {
+                free_gpu(s);
+                s.alive = false;
+                s.generation += 1;
+            },
+            none => { },
+        }
+    }
+
+    void free_gpu(Slot* s) uses io {
+        match (device) {
+            some(d) => {
+                match (s.texture) {
+                    some(t) => {
+                        d.release_texture(t);
+                    },
+                    none => { },
+                }
+                match (s.shader) {
+                    some(sh) => {
+                        d.release_shader(sh);
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+        s.texture = none;
+        s.shader = none;
+    }
+
+    // The threads stopped, and every asset released.
+    pub void close() uses io, threads {
+        if (closed) {
+            return;
+        }
+        jobs.close();
+        // what the threads still send is read until they end
+        for (thread.Thread<Worker, i32>* t in threads.items()) {
+            while (match (results.try_receive()) {
+                some(m) => true,
+                none => false,
+            }) { }
+            t.join();
+        }
+        results.close();
+        for (usize i in 0..slots.len()) {
+            Slot* s = slots.at(i);
+            if (s.alive) {
+                free_gpu(s);
+                s.alive = false;
+            }
+        }
+        jobs.free();
+        results.free();
+        closed = true;
+    }
+}
+
+// A store of `threads` threads of loading; `device` for textures and shaders, none for a program
+// that loads only sounds and models.
+pub Assets* open(keeps Arena* arena, keeps gpu.Device*? device, usize threads) uses io, threads {
+    return arena.new(Assets, arena, device, threads);
+}

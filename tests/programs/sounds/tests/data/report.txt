@@ -16,8 +16,37 @@ bad_huge_codebook.ogg: sound too large
 bad_crc.ogg: 8000 Hz, 2 channels, 4942 frames
 bad_not_vorbis.ogg: damaged sound
 bad_long.ogg: 8000 Hz, 2 channels, 4992 frames
+chained.ogg: 8000 Hz, 2 channels, 9884 frames
+bad_chained.ogg: 8000 Hz, 2 channels, 6094 frames
+bad_seek.ogg: 8000 Hz, 2 channels, 1152 frames
+bad_seek_shift.ogg: 8000 Hz, 2 channels, 4942 frames
+small.sofa: 6 directions, 32 frames
+cartesian.sofa: 6 directions, 32 frames
+bad_truncated.sofa: damaged sound
+bad_superblock0.sofa: a kind of sound not supported
+bad_huge.sofa: sound too large
+bad_layout4.sofa: a kind of sound not supported
+bad_tree.sofa: damaged sound
+bad_filter.sofa: a kind of sound not supported
+bad_link.sofa: damaged sound
+not_sofa.sofa: a kind of sound not supported
+bad_receivers.sofa: 6 directions, 32 frames
+grouped.ogg: 8000 Hz, 2 channels, 4942 frames
+grouped_two.ogg: 8000 Hz, 2 channels, 4942 frames
+grouped_chained.ogg: 8000 Hz, 2 channels, 9884 frames
+bad_grouped.ogg: damaged sound
 tone_decoded.wav: 8000 Hz, 2 channels, 4942 frames
 pcm8.wav: 8000 Hz, 2 channels, 2000 frames
 pcm24.wav: 8000 Hz, 2 channels, 2000 frames
 extensible24.wav: 8000 Hz, 2 channels, 2000 frames
 float64.wav: 8000 Hz, 1 channels, 2000 frames
+tone.flac: 44100 Hz, 2 channels, 13288 frames
+bad_truncated.flac: 44100 Hz, 2 channels, 4096 frames
+bad_crc.flac: 44100 Hz, 2 channels, 9192 frames
+bad_header.flac: damaged sound
+bad_huge_block.flac: damaged sound
+bad_rate.flac: a kind of sound not supported
+tone.mp3: 48000 Hz, 1 channels, 23040 frames
+tone_id3.mp3: 48000 Hz, 1 channels, 23040 frames
+bad_truncated.mp3: 48000 Hz, 1 channels, 2304 frames
+bad_garbage.mp3: damaged sound

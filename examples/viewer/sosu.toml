@@ -1,0 +1,18 @@
+# A viewer of 3D models (spec §8.2): a glTF (.gltf, .glb), FBX or OBJ file given on the command
+# line, shown by render3d with its light and shadows, the camera turned with the mouse.
+[package]
+name = "viewer"
+version = "0.1.0"
+
+[app]
+id = "org.sosu.viewer"
+name = "Sosu viewer"
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+gpu = { path = "../../packages/gpu" }
+render3d = { path = "../../packages/render3d" }
+model = { path = "../../packages/model" }
+math = { path = "../../packages/math" }
+render = { path = "../../packages/render" }
+image = { path = "../../packages/image" }
