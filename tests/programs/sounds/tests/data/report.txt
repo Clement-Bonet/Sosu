@@ -31,6 +31,10 @@ bad_filter.sofa: a kind of sound not supported
 bad_link.sofa: damaged sound
 not_sofa.sofa: a kind of sound not supported
 bad_receivers.sofa: 6 directions, 32 frames
+grouped.ogg: 8000 Hz, 2 channels, 4942 frames
+grouped_two.ogg: 8000 Hz, 2 channels, 4942 frames
+grouped_chained.ogg: 8000 Hz, 2 channels, 9884 frames
+bad_grouped.ogg: damaged sound
 tone_decoded.wav: 8000 Hz, 2 channels, 4942 frames
 pcm8.wav: 8000 Hz, 2 channels, 2000 frames
 pcm24.wav: 8000 Hz, 2 channels, 2000 frames

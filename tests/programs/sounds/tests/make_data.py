@@ -8,7 +8,8 @@ Run from the repository root: python -I tests/programs/sounds/tests/make_data.py
   classes, one of values, floor 1 flat at 0 dB, residue 1, blocks of 256 samples), and
   tone_decoded.wav, what a decoder must give from it, computed here from the Vorbis I
   specification (inverse MDCT, window, overlap-add, the last granule position), not by stb_vorbis.
-- Ogg files with hostile headers.
+- Ogg files with hostile headers; chained (two streams one after the other) and grouped (a
+  Vorbis stream beside pages of a video, two side by side, a group then a link).
 - tone.flac: a FLAC file written by the minimal encoder below (verbatim, constant and fixed
   subframes, left/side stereo, Rice codes, the CRCs), and tone_flac.wav, the same samples: FLAC is
   lossless, so a decoder must give them exactly.
@@ -315,6 +316,10 @@ TRIM = 50  # the last granule position cuts the last block
 
 
 def ogg(comment_packet=None, setup_packet=None, last_granule=None, serial=0x536F7375):
+    return b"".join(ogg_pages(comment_packet, setup_packet, last_granule, serial))
+
+
+def ogg_pages(comment_packet=None, setup_packet=None, last_granule=None, serial=0x536F7375):
     pages = [page([identification()], 0, 0, 0x02, serial),
              page([comment_packet or comment(), setup_packet or setup()], 0, 1, 0, serial)]
     for start in range(0, PACKETS, PER_PAGE):
@@ -324,7 +329,7 @@ def ogg(comment_packet=None, setup_packet=None, last_granule=None, serial=0x536F
             granule = last_granule
         packets = [audio_packet(p) for p in range(start, end)]
         pages.append(page(packets, granule, len(pages), 0x04 if end == PACKETS else 0, serial))
-    return b"".join(pages)
+    return pages
 
 
 # ---- What a decoder gives (Vorbis I, section 1.3.2: inverse MDCT, window, overlap-add) ----
@@ -367,6 +372,29 @@ def ogg_files():
     # chained: two logical streams one after the other (as a radio recorded, or tracks joined)
     write("chained.ogg", tone + ogg(serial=0x536F7376))
     write("bad_chained.ogg", tone + tone[:len(tone) // 2] + b"OggS\x00\x02")  # its second link cut, then a page cut
+    # grouped: a video's pages (Theora, written here as headers and frames of nothing) beside the
+    # Vorbis stream, their pages mixed; the first stream of the group is the video
+    video = 0x56494445
+    theora = [page([b"\x80theora" + bytes(35)], 0, 0, 0x02, video)]
+    theora += [page([b"\x00" + bytes(60 + 7 * n)], n, n + 1, 0x04 if n == 5 else 0, video) for n in range(6)]
+    vorbis = ogg_pages()
+    mixed = [theora[0], vorbis[0]]
+    rest_v, rest_t = vorbis[1:], theora[1:]
+    while rest_v or rest_t:
+        if rest_t:
+            mixed.append(rest_t.pop(0))
+        if rest_v:
+            mixed.append(rest_v.pop(0))
+    write("grouped.ogg", b"".join(mixed))
+    # two Vorbis streams side by side: the first is read (the second ends 2000 frames earlier)
+    other = ogg_pages(last_granule=(PACKETS - 1) * HALF - TRIM - 2000, serial=0x536F7377)
+    two = [vorbis[0], other[0]]
+    for a, b in zip(vorbis[1:], other[1:]):
+        two += [a, b]
+    write("grouped_two.ogg", b"".join(two))
+    # a group, then a link of one stream: both heard
+    write("grouped_chained.ogg", b"".join(mixed) + ogg(serial=0x536F7378))
+    write("bad_grouped.ogg", b"".join(theora))  # a video alone: no sound
 
 
 class BigBits:

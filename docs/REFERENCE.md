@@ -1850,12 +1850,20 @@ pub struct Decoder
 - `pub i32 channels`
 - `pub i32 rate`
 
-### `open`
+### `vorbis_pages`
 
-A decoder of `codec` on `data`, its memory (`MEMORY`) taken from `arena`.
+The pages of the Vorbis stream of an Ogg file that groups several streams side by side (a video: Theora and its sound; several tracks), in a copy of `arena`: in each group (the pages that begin a stream, one after the other, then the pages of all of them, mixed), the first stream whose first packet is the header of Vorbis; its pages kept whole, their checksums with them. A chained file starts a new group with each link. `data` itself when it holds one stream at a time (no copy: none), or when it is not made of pages from its start (the decoder says what it is).
 
 ```sosu
-pub Decoder!audio.AudioError open(Arena* arena, Codec codec, keeps ui8[] data)
+pub ui8[]? vorbis_pages(Arena* arena, ui8[] data)
+```
+
+### `open`
+
+A decoder of `codec` on `data`, its memory (`MEMORY`) taken from `arena`, which must live as long as it (an Ogg file of several streams side by side is copied there, its Vorbis pages only).
+
+```sosu
+pub Decoder!audio.AudioError open(Arena* arena, Codec codec, keeps ui8[] given)
 ```
 
 ### `read_into`
@@ -1911,7 +1919,7 @@ pub i32 MEMORY = 4194304
 The sound of `data`, a file of `codec` already recognized by its first bytes.
 
 ```sosu
-pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] data)
+pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] given)
 ```
 
 ## audio.device
@@ -2318,7 +2326,7 @@ pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io
 
 ## audio.ogg
 
-Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md), its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. A chained file (logical streams one after the other, as a radio recorded) is read link after link, as long as they keep the channels and the rate of the first; streams grouped side by side (Vorbis beside Theora) are not read.
+Ogg Vorbis files, read by stb_vorbis 1.22 with the fixes of SDL (public domain), a C file of the package (native/ogg.c, spec §9.1). Every allocation of the decoder comes from `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md), its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. A chained file (logical streams one after the other, as a radio recorded) is read link after link, as long as they keep the channels and the rate of the first; of streams grouped side by side (Theora and its sound, several tracks), the first Vorbis stream of each group is read (`coded.vorbis_pages`).
 
 ### `MEMORY`
 
@@ -2341,7 +2349,7 @@ pub bool is_ogg(ui8[] data)
 The sound of the Ogg Vorbis file `data`.
 
 ```sosu
-pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data)
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] given)
 ```
 
 ### `load`

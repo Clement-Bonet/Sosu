@@ -220,6 +220,9 @@ pub class File {
                 if (kind == 0x10) {
                     usize next = address(p);
                     usize n = length(p + offsets);
+                    if (!within(next, n)) {
+                        break;  // beyond the file: marked bad
+                    }
                     if (two) {
                         if (!is(next, "OCHK") || n < 8) {
                             bad = true;
@@ -260,6 +263,9 @@ pub class File {
         usize width = 1 << (flags & 3) as usize;
         usize n = u(p, width) as usize;
         p += width;
+        if (!within(p, n)) {
+            return none;  // a name beyond the file: marked bad
+        }
         str name = text(p, n);
         p += n;
         if (kind != 0) {
@@ -348,7 +354,7 @@ pub class File {
         if (bad || filtered != 0) {
             return err(bad ? audio.AudioError.Damaged : audio.AudioError.Unsupported);
         }
-        if (width == 0 || width > 1024 || start == 0 || max_direct < start || max_bits == 0 || max_bits > 64
+        if (width == 0 || width > 1024 || start == 0 || max_direct < start || max_direct > 0xFFFFFFFF || max_bits == 0 || max_bits > 64
                 || id_length < 2 || id_length > 64) {
             return err(audio.AudioError.Damaged);
         }
@@ -409,6 +415,9 @@ pub class File {
         usize n = u(id + 1 + heap.offset_bytes, heap.length_bytes) as usize;
         for (Block b in heap.blocks) {
             if (offset >= b.offset && offset - b.offset < b.size && n <= b.size - (offset - b.offset)) {
+                if (!within(b.at, offset - b.offset)) {
+                    return err(audio.AudioError.Damaged);
+                }
                 usize at = b.at + (offset - b.offset);
                 if (!within(at, n)) {
                     return err(audio.AudioError.Damaged);
@@ -681,6 +690,11 @@ pub class File {
         }
         if (bytes.len != expected) {
             return err(audio.AudioError.Damaged);
+        }
+        for (usize k in 0..v.dims.len) {
+            if (origin[k] > v.dims[k]) {
+                return err(audio.AudioError.Damaged);  // beyond the variable
+            }
         }
         // each element of the chunk, by its index in it, counted as an odometer
         usize rank = v.dims.len;

@@ -319,6 +319,83 @@ hrtf.Hrtf* sofa_of(Arena* arena, str name) uses io {
     };
 }
 
+test "Ogg streams side by side: the Vorbis one beside a video, the first of two, then a link" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    audio.Sound tone = read_ogg(&arena, "tests/data/tone.ogg");
+    // beside a video (its pages first in the group, then mixed with those of the sound)
+    audio.Sound beside = read_ogg(&arena, "tests/data/grouped.ogg");
+    assert(beside.rate == 8000 && beside.channels == 2 && largest_difference(beside.samples, tone.samples) == 0.0);
+    // two sounds side by side: the first (the second is 2000 frames shorter)
+    audio.Sound first = read_ogg(&arena, "tests/data/grouped_two.ogg");
+    assert(first.frames() == 4942 && largest_difference(first.samples, tone.samples) == 0.0);
+    // a group, then a link of one stream: both, one after the other
+    audio.Sound both = read_ogg(&arena, "tests/data/grouped_chained.ogg");
+    assert(both.frames() == 2 * 4942);
+    assert(largest_difference(both.samples[0..2 * 4942], tone.samples) == 0.0);
+    assert(largest_difference(both.samples[2 * 4942..4 * 4942], tone.samples) == 0.0);
+    // played as it is read: its length, its samples, a seek
+    mixer.Mixer* a = mixer.create(&arena, 8000, 2);
+    a.play(tone);
+    f32[] expected = mixed(&arena, a, none, 4942);
+    mixer.Mixer* b = mixer.create(&arena, 8000, 2);
+    stream.Stream* s = match (stream.open(&arena, fixture.read_bytes(&arena, "tests/data/grouped.ogg"), b,
+            stream.Options{ seconds: 0.1 })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(s.frames() == 4942);
+    f32[] played = mixed(&arena, b, some(s), 4942);
+    assert(largest_difference(played, expected) == 0.0);
+    assert(s.seek(3000) && s.position() == 3000);
+    s.close();
+    // a video alone: no sound
+    match (ogg.decode(&arena, fixture.read_bytes(&arena, "tests/data/bad_grouped.ogg"))) {
+        ok(x) => assert(false),
+        err(e) => assert(e == audio.AudioError.Damaged),
+    }
+}
+
+test "Ogg files of streams side by side, damaged at random: a sound or an error, never a stop" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    ui8[] grouped = fixture.read_bytes(&arena, "tests/data/grouped_chained.ogg");
+    mut ui64 state = 5;
+    for (i32 round in 0..1500) {
+        mut Arena scratch = Arena.new(64 * KB);
+        mut ui8[] copy = scratch.alloc_slice(ui8, grouped.len);
+        for (usize i in 0..grouped.len) {
+            copy[i] = grouped[i];
+        }
+        mut usize n = grouped.len;
+        state = (state * 1103515245 + 12345) % 4294967296;
+        usize edits = 1 + (state >> 20) as usize % 4;
+        for (usize e in 0..edits) {
+            state = (state * 1103515245 + 12345) % 4294967296;
+            // mostly the headers of the pages: their flags, serials, sizes
+            usize at = (state >> 3) as usize % 4 == 0 ? (state >> 8) as usize % n : ((state >> 8) as usize % (n / 64 + 1)) * 64 % n;
+            usize how = (state >> 2) as usize % 4;
+            if (how == 0) {
+                copy[at] = copy[at] ^ (1 << (state % 8) as ui8);
+            } else if (how == 1) {
+                copy[at] = (state >> 16) as ui8;
+            } else if (how == 2) {
+                copy[at] = 0xFF;
+            } else {
+                n = max(at, 1);
+            }
+        }
+        match (ogg.decode(&scratch, copy[0..n])) {
+            ok(x) => { },
+            err(e) => { },
+        }
+        scratch.free();
+    }
+}
+
 test "small SOFA files: their six directions as written; cartesian, the right ear first, delays" {
     mut Arena arena = Arena.new(16 * MB);
     defer arena.free();
@@ -647,7 +724,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[48] names = [
+    str[52] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -681,6 +758,10 @@ test "damaged and hostile files" {
         "bad_link.sofa",
         "not_sofa.sofa",
         "bad_receivers.sofa",
+        "grouped.ogg",
+        "grouped_two.ogg",
+        "grouped_chained.ogg",
+        "bad_grouped.ogg",
         "tone_decoded.wav",
         "pcm8.wav",
         "pcm24.wav",
