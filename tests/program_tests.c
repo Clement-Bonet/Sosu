@@ -85,6 +85,7 @@ static const Case cases[] = {
     { "run", "examples/greetings", NULL, 0, NULL },  /* i18n */
     /* the libraries of 3D together, played for five seconds by a script, without a window */
     { "run", "examples/brawl", NULL, 0, "--check" },
+    { "run", "examples/scene", NULL, 0, "--check" },
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */

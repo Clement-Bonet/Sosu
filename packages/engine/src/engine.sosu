@@ -1,0 +1,985 @@
+// engine.engine: what makes the common components run. An `Engine` gives each entity of a world
+// what its components ask of the packages: a body of `physics` for a `Body`, a system of
+// `particles` for an `Emitter`, a source of `audio.spatial` for a `Sound`, a model loaded by
+// `assets` (and on the GPU, by `render3d`) for a `Mesh`, a skeleton and a clip of `anim` for an
+// `Animator`. Each frame, `update(dt)`:
+//
+// - loads what is asked (the store of assets), uploads the models that are ready;
+// - moves the kinematic bodies to their entities, steps the physics, and moves the entities of the
+//   dynamic bodies to them;
+// - computes the world matrices (`scene.World.propagate`);
+// - moves the emitters, the sounds and the listener (the active `View`), and runs the animators.
+//
+// `render(frame)` draws the meshes with the lights, seen through the active view, then the
+// particles. Drawing and sound are optional: without a GPU or a mixer, the rest runs the same (the
+// tests, a server). What an entity is given is made when it is first seen with its component, and
+// made again after `refresh(e)` (an editor changed the component). `adopt_model` and `adopt_sound`
+// give a model or a sound made in code for a path, without a file.
+import std.vec;
+import std.text;
+import math.linear;
+import math.curve;
+import image.image;
+import model.model;
+import scene.scene;
+import gpu.gpu;
+import render3d.render3d;
+import physics.physics;
+import audio.audio;
+import audio.mixer;
+import audio.spatial;
+import particles.particles;
+import particles.draw;
+import anim.anim;
+import assets.assets;
+import engine.components;
+
+bool present<T>(T? x) {
+    return match (x) {
+        some(v) => true,
+        none => false,
+    };
+}
+
+// A model of the project: loaded once for every mesh that names it.
+struct ModelSlot {
+    str path;
+    mut assets.Handle? handle;          // none: adopted (made in code)
+    mut model.Model? loaded;
+    mut render3d.Uploaded*? uploaded;
+    mut bool failed;
+}
+
+struct SoundSlot {
+    str path;
+    mut assets.Handle? handle;
+    mut audio.Sound? loaded;
+    mut bool failed;
+}
+
+// What an animator plays.
+struct Playing {
+    anim.Skeleton skeleton;
+    anim.Clip* clip;
+    anim.Pose pose;
+    linear.Mat4[] palette;
+    mut f32 time;
+}
+
+// What an entity was given.
+struct Live {
+    mut physics.Body? body;
+    mut bool kinematic;
+    mut bool dynamic;
+    mut spatial.Source? source;
+    mut bool played;
+    mut particles.System*? system;
+    mut Playing? playing;
+    mut bool animation_tried;  // its model was ready and gave no clip: not tried again
+}
+
+pub class Engine {
+    Arena* arena;
+    pub components.Components* c;
+    pub scene.World* world;
+    pub physics.World* physics_world;
+    assets.Assets*? store;
+    render3d.Renderer*? renderer;
+    draw.Drawer*? drawer;
+    pub spatial.Space*? space;
+    scene.Table<Live>* live;
+    vec.Vec<ModelSlot>* models;
+    vec.Vec<SoundSlot>* sounds;
+
+    void init(keeps Arena* arena, keeps components.Components* c, keeps assets.Assets*? store,
+            keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer, keeps mixer.Mixer*? mix) {
+        self.arena = arena;
+        self.c = c;
+        world = c.world;
+        physics_world = physics.world(arena, physics.options());
+        self.store = store;
+        self.renderer = renderer;
+        self.drawer = drawer;
+        space = match (mix) {
+            some(m) => some(spatial.space(arena, m)),
+            none => none,
+        };
+        live = world.table<Live>();
+        models = vec.new<ModelSlot>(arena);
+        sounds = vec.new<SoundSlot>(arena);
+    }
+
+    // ---- Assets ----
+
+    // The model of `path`, made in code: what a mesh that names it draws.
+    pub void adopt_model(keeps str path, keeps model.Model m) {
+        for (usize i in 0..models.len()) {
+            ModelSlot* s = models.at(i);
+            if (s.path == path) {
+                s.loaded = some(m);
+                s.handle = none;
+                s.uploaded = none;
+                return;
+            }
+        }
+        models.push(ModelSlot{ path: path, handle: none, loaded: some(m), uploaded: none, failed: false });
+    }
+
+    // The sound of `path`, made in code.
+    pub void adopt_sound(keeps str path, keeps audio.Sound s) {
+        for (usize i in 0..sounds.len()) {
+            SoundSlot* slot = sounds.at(i);
+            if (slot.path == path) {
+                slot.loaded = some(s);
+                slot.handle = none;
+                return;
+            }
+        }
+        sounds.push(SoundSlot{ path: path, handle: none, loaded: some(s), failed: false });
+    }
+
+    ModelSlot*? model_slot(keeps str path) uses io, threads {
+        if (path.len == 0) {
+            return none;
+        }
+        for (usize i in 0..models.len()) {
+            if (models.at(i).path == path) {
+                return some(models.at(i));
+            }
+        }
+        match (store) {
+            some(s) => {
+                models.push(ModelSlot{ path: path, handle: some(s.model_file(path)), loaded: none, uploaded: none, failed: false });
+                return some(models.at(models.len() - 1));
+            },
+            none => {
+                return none;
+            },
+        }
+    }
+
+    SoundSlot*? sound_slot(keeps str path) uses io, threads {
+        if (path.len == 0) {
+            return none;
+        }
+        for (usize i in 0..sounds.len()) {
+            if (sounds.at(i).path == path) {
+                return some(sounds.at(i));
+            }
+        }
+        match (store) {
+            some(s) => {
+                sounds.push(SoundSlot{ path: path, handle: some(s.sound(path)), loaded: none, failed: false });
+                return some(sounds.at(sounds.len() - 1));
+            },
+            none => {
+                return none;
+            },
+        }
+    }
+
+    // What the store has finished: the models and sounds ready, the models uploaded.
+    void collect() uses io {
+        match (store) {
+            some(s) => {
+                for (usize i in 0..models.len()) {
+                    ModelSlot* m = models.at(i);
+                    match (m.handle) {
+                        some(h) => {
+                            if (!present(m.loaded) && !m.failed) {
+                                match (s.state(h)) {
+                                    Ready => {
+                                        m.loaded = s.get_model(h);
+                                    },
+                                    Failed(why) => {
+                                        m.failed = true;
+                                    },
+                                    Loading => { },
+                                }
+                            }
+                        },
+                        none => { },
+                    }
+                }
+                for (usize i in 0..sounds.len()) {
+                    SoundSlot* d = sounds.at(i);
+                    match (d.handle) {
+                        some(h) => {
+                            if (!present(d.loaded) && !d.failed) {
+                                match (s.state(h)) {
+                                    Ready => {
+                                        d.loaded = s.get_sound(h);
+                                    },
+                                    Failed(why) => {
+                                        d.failed = true;
+                                    },
+                                    Loading => { },
+                                }
+                            }
+                        },
+                        none => { },
+                    }
+                }
+            },
+            none => { },
+        }
+        match (renderer) {
+            some(r) => {
+                for (usize i in 0..models.len()) {
+                    ModelSlot* m = models.at(i);
+                    if (!present(m.uploaded) && !m.failed) {
+                        match (m.loaded) {
+                            some(loaded) => {
+                                match (r.upload(arena, loaded)) {
+                                    ok(up) => {
+                                        m.uploaded = some(up);
+                                    },
+                                    err(e) => {
+                                        m.failed = true;
+                                    },
+                                }
+                            },
+                            none => { },
+                        }
+                    }
+                }
+            },
+            none => { },
+        }
+    }
+
+    // ---- What each entity is given ----
+
+    Live* live_of(scene.Entity e) {
+        match (live.get(e)) {
+            some(l) => {
+                return l;
+            },
+            none => { },
+        }
+        live.set(e, Live{ body: none, kinematic: false, dynamic: false, source: none, played: false, system: none,
+                playing: none, animation_tried: false });
+        return match (live.get(e)) {
+            some(l) => l,
+            none => live_of(e),  // set just above
+        };
+    }
+
+    // What `e` was given dropped (its body removed, its sound stopped): made again at the next
+    // `update`, from its components as they are then. An editor calls it when it changes one.
+    pub void refresh(scene.Entity e) {
+        match (live.get(e)) {
+            some(l) => {
+                match (l.body) {
+                    some(b) => {
+                        physics_world.remove(b);
+                    },
+                    none => { },
+                }
+                match (l.source) {
+                    some(s) => {
+                        match (space) {
+                            some(sp) => {
+                                sp.stop(s);
+                            },
+                            none => { },
+                        }
+                    },
+                    none => { },
+                }
+                live.remove(e);
+            },
+            none => { },
+        }
+    }
+
+    linear.Mat4 matrix_of(scene.Entity e) {
+        return match (world.world_matrices.get(e)) {
+            some(m) => *m,
+            none => match (world.transforms.get(e)) {
+                some(t) => t.to_mat4(),
+                none => linear.identity4(),
+            },
+        };
+    }
+
+    // The bodies of the entities that have a `Body` and none yet.
+    void make_bodies() {
+        for (scene.Entity e in c.bodies.entities_now()) {
+            Live* l = live_of(e);
+            if (present(l.body)) {
+                continue;
+            }
+            components.Body b = match (c.bodies.get(e)) {
+                some(x) => *x,
+                none => components.Body{ },
+            };
+            linear.Transform at = linear.decompose(matrix_of(e));
+            linear.Vec3 s = b.size;
+            physics.Shape shape = match (b.shape) {
+                Box => physics.box(linear.vec3(max(s.x, 0.001), max(s.y, 0.001), max(s.z, 0.001))),
+                Sphere => physics.sphere(max(s.x, 0.001)),
+                Capsule => physics.capsule(max(s.y, 0.001), max(s.x, 0.001)),
+                Cylinder => physics.cylinder(max(s.y, 0.001), max(s.x, 0.001)),
+            };
+            physics.Kind kind = match (b.kind) {
+                Static => physics.Kind.Static,
+                Dynamic => physics.Kind.Dynamic,
+                Kinematic => physics.Kind.Kinematic,
+            };
+            l.body = some(physics_world.body(physics.BodyDesc{ kind: kind, shape: shape, position: at.position,
+                    rotation: at.rotation, mass: b.mass, friction: b.friction, restitution: b.restitution, damping: b.damping,
+                    angular_damping: b.damping, gravity_scale: b.gravity_scale, layers: b.layers as ui32,
+                    mask: b.mask as ui32, sensor: b.sensor }));
+            shape.release();
+            l.kinematic = match (b.kind) {
+                Kinematic => true,
+                _ => false,
+            };
+            l.dynamic = match (b.kind) {
+                Dynamic => true,
+                _ => false,
+            };
+        }
+    }
+
+    // The systems of the entities that have an `Emitter` and none yet.
+    void make_emitters() {
+        for (scene.Entity e in c.emitters.entities_now()) {
+            Live* l = live_of(e);
+            if (present(l.system)) {
+                continue;
+            }
+            components.Emitter x = match (c.emitters.get(e)) {
+                some(v) => *v,
+                none => components.Emitter{ },
+            };
+            f32 spread = max(0.0, min(1.0, x.spread));
+            particles.Shape shape = match (x.shape) {
+                Point => particles.Shape.Point,
+                Sphere => particles.Shape.Sphere(max(x.extent.x, 0.0)),
+                Box => particles.Shape.Box(x.extent),
+            };
+            particles.Emitter p = particles.Emitter{ rate: x.rate, looping: x.looping, shape: shape,
+                    life: particles.range(x.life * (1.0 - spread), x.life * (1.0 + spread)),
+                    speed: particles.range(x.speed * (1.0 - spread), x.speed * (1.0 + spread)), size: particles.exactly(x.size),
+                    gravity: x.gravity, drag: x.drag, color: linear.Vec4{ x: x.color.x, y: x.color.y, z: x.color.z, w: x.alpha },
+                    blending: x.additive ? particles.Blending.Additive : particles.Blending.Alpha };
+            particles.System* system = particles.system(arena, p);
+            system.move_to(matrix_of(e));
+            l.system = some(system);
+        }
+    }
+
+    // The sounds that start: those of `autoplay`, once their file is loaded.
+    void start_sounds() uses io, threads {
+        spatial.Space* sp = match (space) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        for (scene.Entity e in c.sounds.entities_now()) {
+            Live* l = live_of(e);
+            if (l.played) {
+                continue;
+            }
+            components.Sound s = match (c.sounds.get(e)) {
+                some(v) => *v,
+                none => components.Sound{ },
+            };
+            if (!s.autoplay) {
+                l.played = true;
+                continue;
+            }
+            match (sound_slot(s.sound)) {
+                some(slot) => {
+                    match (slot.loaded) {
+                        some(sound) => {
+                            linear.Vec3 at = matrix_of(e).transform_point(linear.vec3(0.0, 0.0, 0.0));
+                            l.source = some(sp.play(sound, spatial.Placed{ position: at, volume: s.volume, looping: s.looping,
+                                    near: s.near, far: s.far, reverb: s.reverb }));
+                            l.played = true;
+                        },
+                        none => {
+                            if (slot.failed) {
+                                l.played = true;  // its file is not there: never
+                            }
+                        },
+                    }
+                },
+                none => {
+                    l.played = true;
+                },
+            }
+        }
+    }
+
+    // The clips of the animators whose model is ready.
+    void make_animators() uses io, threads {
+        for (scene.Entity e in c.animators.entities_now()) {
+            Live* l = live_of(e);
+            if (present(l.playing) || l.animation_tried) {
+                continue;
+            }
+            components.Animator a = match (c.animators.get(e)) {
+                some(v) => *v,
+                none => components.Animator{ },
+            };
+            str path = match (c.meshes.get(e)) {
+                some(m) => m.model,
+                none => "",
+            };
+            mut model.Model? ready = none;
+            match (model_slot(path)) {
+                some(slot) => {
+                    ready = slot.loaded;
+                    if (slot.failed) {
+                        l.animation_tried = true;
+                    }
+                },
+                none => {
+                    l.animation_tried = true;
+                },
+            }
+            match (ready) {
+                some(m) => {
+                    l.animation_tried = true;  // its model is there: tried once
+                    match (anim.skeleton(arena, m, 0)) {
+                        some(s) => {
+                            match (m.animation(a.clip)) {
+                                some(found) => {
+                                    l.playing = some(Playing{ skeleton: s, clip: anim.clip(arena, s, found),
+                                            pose: anim.rest_pose(arena, s), palette: arena.alloc_slice(linear.Mat4, s.count()), time: 0.0 });
+                                },
+                                none => { },  // no clip of that name
+                            }
+                        },
+                        none => { },  // no skin: nothing to play
+                    }
+                },
+                none => { },
+            }
+        }
+    }
+
+    // ---- Each frame ----
+
+    // The world `dt` seconds later.
+    pub void update(f32 dt) uses io, threads {
+        match (store) {
+            some(s) => {
+                s.update(4);
+            },
+            none => { },
+        }
+        collect();
+        world.propagate();
+        make_bodies();
+        make_emitters();
+        make_animators();
+        // the kinematic bodies go where their entities are, then the physics steps
+        for (scene.Entity e in live.entities_now()) {
+            Live* l = live_of(e);
+            if (l.kinematic) {
+                match (l.body) {
+                    some(b) => {
+                        linear.Transform at = linear.decompose(matrix_of(e));
+                        b.move_to(at.position, at.rotation, max(dt, 0.0001));
+                    },
+                    none => { },
+                }
+            }
+        }
+        physics_world.advance(dt);
+        // the entities of the dynamic bodies go where their bodies are (in the space of their parent)
+        for (scene.Entity e in live.entities_now()) {
+            Live* l = live_of(e);
+            if (!l.dynamic) {
+                continue;
+            }
+            match (l.body) {
+                some(b) => {
+                    physics.State s = b.state();
+                    linear.Mat4 placed = linear.translation(s.position).mul(s.rotation.to_mat4());
+                    linear.Mat4 local = match (world.parent_of(e)) {
+                        some(p) => match (matrix_of(p).inverse()) {
+                            some(inv) => inv.mul(placed),
+                            none => placed,
+                        },
+                        none => placed,
+                    };
+                    linear.Transform t = linear.decompose(local);
+                    mut linear.Transform kept = match (world.transforms.get(e)) {
+                        some(x) => *x,
+                        none => linear.transform(),
+                    };
+                    kept.position = t.position;
+                    kept.rotation = t.rotation;
+                    world.transforms.set(e, kept);
+                },
+                none => { },
+            }
+        }
+        world.propagate();
+        // the emitters where their entities are
+        for (scene.Entity e in c.emitters.entities_now()) {
+            Live* l = live_of(e);
+            match (l.system) {
+                some(s) => {
+                    s.move_to(matrix_of(e));
+                    s.advance(dt);
+                },
+                none => { },
+            }
+        }
+        // the animators
+        for (scene.Entity e in c.animators.entities_now()) {
+            Live* l = live_of(e);
+            components.Animator a = match (c.animators.get(e)) {
+                some(v) => *v,
+                none => components.Animator{ },
+            };
+            match (l.playing) {
+                some(p) => {
+                    mut Playing now = p;
+                    if (a.playing) {
+                        now.time += dt * a.speed;
+                    }
+                    f32 length = now.clip.duration;
+                    f32 t = a.looping && length > 0.0 ? now.time - length * (now.time / length) as i64 as f32 : min(now.time, length);
+                    now.clip.sample(now.pose, max(t, 0.0));
+                    anim.palette(now.skeleton, now.pose, now.palette);
+                    l.playing = some(now);
+                },
+                none => { },
+            }
+        }
+        // the sounds, and the listener at the active view
+        start_sounds();
+        match (space) {
+            some(sp) => {
+                match (active_view()) {
+                    some(v) => {
+                        sp.listener(linear.decompose(matrix_of(v)), linear.vec3(0.0, 0.0, 0.0));
+                    },
+                    none => { },
+                }
+                for (scene.Entity e in c.sounds.entities_now()) {
+                    Live* l = live_of(e);
+                    match (l.source) {
+                        some(s) => {
+                            sp.move(s, matrix_of(e).transform_point(linear.vec3(0.0, 0.0, 0.0)), linear.vec3(0.0, 0.0, 0.0));
+                        },
+                        none => { },
+                    }
+                }
+                sp.update();
+            },
+            none => { },
+        }
+    }
+
+    // The first active view, none when the scene has none.
+    pub scene.Entity? active_view() {
+        for (scene.Entity e in c.views.entities_now()) {
+            match (c.views.get(e)) {
+                some(v) => {
+                    if (v.active) {
+                        return some(e);
+                    }
+                },
+                none => { },
+            }
+        }
+        return none;
+    }
+
+    // The camera of the active view (its forward: -z of its entity), or one that looks at the
+    // origin from above and behind when there is none.
+    pub render3d.Camera camera() {
+        match (active_view()) {
+            some(e) => {
+                linear.Mat4 m = matrix_of(e);
+                components.View v = match (c.views.get(e)) {
+                    some(x) => *x,
+                    none => components.View{ },
+                };
+                linear.Vec3 at = m.transform_point(linear.vec3(0.0, 0.0, 0.0));
+                linear.Vec3 forward = m.transform_vector(linear.vec3(0.0, 0.0, -1.0)).normalized();
+                linear.Vec3 up = m.transform_vector(linear.vec3(0.0, 1.0, 0.0)).normalized();
+                return render3d.Camera{ position: at, target: at.add(forward), up: up, fov_y: v.fov * 0.017453292,
+                        near: v.near, far: v.far };
+            },
+            none => {
+                return render3d.Camera{ position: linear.vec3(0.0, 6.0, 12.0), target: linear.vec3(0.0, 0.0, 0.0) };
+            },
+        }
+    }
+
+    // The items the meshes ready give: where their entities are, with the palettes of their
+    // animators.
+    pub render3d.Item[] items(Arena* into) uses io, threads {
+        vec.Vec<render3d.Item>* out = vec.new<render3d.Item>(into);
+        for (scene.Entity e in c.meshes.entities_now()) {
+            components.Mesh m = match (c.meshes.get(e)) {
+                some(x) => *x,
+                none => components.Mesh{ },
+            };
+            if (!m.visible) {
+                continue;
+            }
+            match (model_slot(m.model)) {
+                some(slot) => {
+                    match (slot.uploaded) {
+                        some(up) => {
+                            linear.Mat4[]? palette = match (live.get(e)) {
+                                some(l) => match (l.playing) {
+                                    some(p) => some(p.palette),
+                                    none => none,
+                                },
+                                none => none,
+                            };
+                            out.push(render3d.Item{ model: up, transform: matrix_of(e), palette: palette });
+                        },
+                        none => { },
+                    }
+                },
+                none => { },
+            }
+        }
+        return out.items();
+    }
+
+    // The lights of the scene given to the renderer: the first sun, and the first point lights
+    // (as many as it draws).
+    pub void light(render3d.Renderer* r) {
+        vec.Vec<render3d.PointLight>* points = vec.new<render3d.PointLight>(arena);
+        mut bool sun = false;
+        for (scene.Entity e in c.lights.entities_now()) {
+            components.Light l = match (c.lights.get(e)) {
+                some(x) => *x,
+                none => components.Light{ },
+            };
+            linear.Mat4 m = matrix_of(e);
+            match (l.kind) {
+                Sun => {
+                    if (!sun) {
+                        r.sun.direction = m.transform_vector(linear.vec3(0.0, 0.0, -1.0)).normalized();
+                        r.sun.color = l.color;
+                        r.sun.intensity = l.intensity;
+                        r.sun.shadows = l.shadows;
+                        sun = true;
+                    }
+                },
+                Point => {
+                    points.push(render3d.PointLight{ position: m.transform_point(linear.vec3(0.0, 0.0, 0.0)), color: l.color,
+                            intensity: l.intensity, range: l.range });
+                },
+            }
+        }
+        if (!sun) {
+            r.sun.intensity = 0.0;
+        }
+        r.set_lights(points.items());
+    }
+
+    // The scene drawn into `frame`: the meshes, then the particles, seen through the active view.
+    pub void render(gpu.Frame frame) uses io, threads {
+        drawn(frame, none);
+    }
+
+    // The same into `target` (a texture of `gpu.Device.target`), for a picture or a view of an
+    // editor.
+    pub void render_into(gpu.Frame frame, gpu.Texture target) uses io, threads {
+        drawn(frame, some(target));
+    }
+
+    void drawn(gpu.Frame frame, gpu.Texture? target) uses io, threads {
+        render3d.Renderer* r = match (renderer) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        mut Arena scratch = Arena.new(16 * KB);
+        defer scratch.free();
+        render3d.Camera cam = camera();
+        light(r);
+        match (target) {
+            some(t) => {
+                r.draw_into(frame, t, cam, items(&scratch));
+            },
+            none => {
+                r.draw(frame, cam, items(&scratch));
+            },
+        }
+        match (drawer) {
+            some(d) => {
+                vec.Vec<draw.Sprite>* sprites = vec.new<draw.Sprite>(&scratch);
+                for (scene.Entity e in c.emitters.entities_now()) {
+                    match (live.get(e)) {
+                        some(l) => {
+                            match (l.system) {
+                                some(s) => {
+                                    sprites.push(draw.sprite(s, none));
+                                },
+                                none => { },
+                            }
+                        },
+                        none => { },
+                    }
+                }
+                match (target) {
+                    some(t) => {
+                        match (d.draw_into(frame, t, cam, sprites.items())) {
+                            ok => { },
+                            err(e) => { },
+                        }
+                    },
+                    none => {
+                        match (d.draw(frame, cam, sprites.items())) {
+                            ok => { },
+                            err(e) => { },
+                        }
+                    },
+                }
+            },
+            none => { },
+        }
+    }
+
+    // What an entity was given: its body (for a program that pushes it), its system of particles.
+    pub physics.Body? body_of(scene.Entity e) {
+        return match (live.get(e)) {
+            some(l) => l.body,
+            none => none,
+        };
+    }
+
+    pub particles.System*? system_of(scene.Entity e) {
+        return match (live.get(e)) {
+            some(l) => l.system,
+            none => none,
+        };
+    }
+
+    pub spatial.Source? source_of(scene.Entity e) {
+        return match (live.get(e)) {
+            some(l) => l.source,
+            none => none,
+        };
+    }
+
+    pub linear.Mat4[]? palette_of(scene.Entity e) {
+        return match (live.get(e)) {
+            some(l) => match (l.playing) {
+                some(p) => some(p.palette),
+                none => none,
+            },
+            none => none,
+        };
+    }
+
+    pub void close() {
+        physics_world.close();
+    }
+}
+
+// An engine for the components `c`: `store` loads the files of the project (none: only what is
+// adopted), `renderer` and `drawer` draw (none: nothing is drawn), `mix` plays the sounds (none:
+// silent).
+pub Engine* engine(keeps Arena* arena, keeps components.Components* c, keeps assets.Assets*? store,
+        keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer, keeps mixer.Mixer*? mix) {
+    return arena.new(Engine, arena, c, store, renderer, drawer, mix);
+}
+
+// ---- Tests: without a window nor a sound card ----
+
+scene.Entity placed(scene.World* w, keeps str name, linear.Vec3 at) {
+    mut linear.Transform t = linear.transform();
+    t.position = at;
+    return w.spawn_at(name, t, none);
+}
+
+test "bodies: a crate falls on a floor, a kinematic one follows its entity, a child keeps its parent" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, none, none, none, none);
+    defer g.close();
+    scene.Entity floor = placed(w, "floor", linear.vec3(0.0, 0.0, 0.0));
+    c.bodies.set(floor, components.Body{ kind: components.BodyKind.Static, size: linear.vec3(10.0, 0.5, 10.0) });
+    scene.Entity crate = placed(w, "crate", linear.vec3(0.0, 5.0, 0.0));
+    c.bodies.set(crate, components.Body{ size: linear.vec3(0.5, 0.5, 0.5) });
+    scene.Entity pusher = placed(w, "pusher", linear.vec3(6.0, 1.0, 0.0));
+    c.bodies.set(pusher, components.Body{ kind: components.BodyKind.Kinematic, shape: components.ShapeKind.Sphere });
+    // a ball under a frame moved 20 m away: it falls in the world, and its entity stays a child
+    scene.Entity frame = placed(w, "frame", linear.vec3(20.0, 0.0, 0.0));
+    scene.Entity ball = w.spawn_at("ball", linear.Transform{ position: linear.vec3(0.0, 3.0, 0.0), rotation: linear.identity_quat(),
+            scale: linear.vec3(1.0, 1.0, 1.0) }, some(frame));
+    c.bodies.set(ball, components.Body{ shape: components.ShapeKind.Sphere, size: linear.vec3(0.25, 0.25, 0.25) });
+    for (i32 i in 0..120) {
+        g.update(1.0 / 60.0);
+    }
+    // the crate rests on the floor: its center half a meter above the top of the floor
+    f32 y = match (w.transforms.get(crate)) {
+        some(t) => t.position.y,
+        none => 99.0,
+    };
+    assert(abs(y - 1.0) < 0.05);
+    // the kinematic body goes where its entity is moved
+    mut linear.Transform moved = linear.transform();
+    moved.position = linear.vec3(6.0, 1.0, 2.0);
+    w.transforms.set(pusher, moved);
+    for (i32 i in 0..3) {
+        g.update(1.0 / 60.0);
+    }
+    linear.Vec3 there = match (g.body_of(pusher)) {
+        some(b) => b.position(),
+        none => linear.vec3(0.0, 0.0, 0.0),
+    };
+    assert(there.near(linear.vec3(6.0, 1.0, 2.0), 0.01));
+    // the ball fell in two seconds, in the world at x = 20, and its entity is still a child
+    linear.Vec3 b = match (g.body_of(ball)) {
+        some(x) => x.position(),
+        none => linear.vec3(0.0, 0.0, 0.0),
+    };
+    assert(abs(b.x - 20.0) < 0.01 && b.y < -10.0);
+    assert(match (w.parent_of(ball)) {
+        some(p) => p.same(frame),
+        none => false,
+    });
+    linear.Vec3 drawn = g.matrix_of(ball).transform_point(linear.vec3(0.0, 0.0, 0.0));
+    assert(drawn.near(b, 0.01) && match (w.transforms.get(ball)) {
+        some(t) => abs(t.position.x) < 0.01,
+        none => false,
+    });
+}
+
+test "an emitter at its entity; a sound placed, heard on the right of the active view" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    mixer.Mixer* m = mixer.create(&arena, 48000, 2);
+    Engine* g = engine(&arena, c, none, none, none, some(m));
+    defer g.close();
+    g.adopt_sound("sounds/hum", audio.tone(&arena, 48000, 220.0, 1.0, 0.5));
+    scene.Entity fire = placed(w, "fire", linear.vec3(0.0, 2.0, 0.0));
+    c.emitters.set(fire, components.Emitter{ rate: 200.0, speed: 0.5, life: 2.0 });
+    scene.Entity eye = placed(w, "eye", linear.vec3(0.0, 0.0, 0.0));
+    c.views.set(eye, components.View{ });
+    scene.Entity radio = placed(w, "radio", linear.vec3(5.0, 0.0, 0.0));
+    c.sounds.set(radio, components.Sound{ sound: "sounds/hum", looping: true, near: 1.0 });
+    for (i32 i in 0..30) {
+        g.update(1.0 / 60.0);
+    }
+    // particles born around the fire
+    particles.System* s = match (g.system_of(fire)) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(s.count() > 50);
+    for (particles.Particle p in s.particles()) {
+        assert(p.position.sub(linear.vec3(0.0, 2.0, 0.0)).length() < 1.0);
+    }
+    // the radio, on the right of the view (which faces -z)
+    spatial.Source source = match (g.source_of(radio)) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    match (g.space) {
+        some(sp) => {
+            assert(sp.playing(source) && sp.heard(source).pan > 0.99);
+            // the view turned to face +x: the radio is ahead
+            mut linear.Transform turned = linear.transform();
+            turned.rotation = linear.from_axis_angle(linear.vec3(0.0, 1.0, 0.0), -1.5707964);
+            w.transforms.set(eye, turned);
+            g.update(1.0 / 60.0);
+            assert(abs(sp.heard(source).pan) < 0.01);
+            // refreshed: stopped, then played again
+            g.refresh(radio);
+            assert(!sp.playing(source));
+            g.update(1.0 / 60.0);
+            assert(match (g.source_of(radio)) {
+                some(again) => sp.playing(again),
+                none => false,
+            });
+        },
+        none => assert(false),
+    }
+}
+
+test "an animator plays a clip of the model of its mesh" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    // a skin of one joint, the hip under an armature, and a clip that slides it 2 m along x in 1 s
+    mut model.Node[] nodes = arena.alloc_slice(model.Node, 2);
+    mut usize[] under = arena.alloc_slice(usize, 1);
+    under[0] = 1;
+    nodes[0] = model.Node{ name: "armature", local: linear.identity4(), meshes: arena.alloc_slice(usize, 0), children: under,
+            transform: some(linear.transform()) };
+    nodes[1] = model.Node{ name: "hip", local: linear.identity4(), meshes: arena.alloc_slice(usize, 0),
+            children: arena.alloc_slice(usize, 0), transform: some(linear.transform()) };
+    mut usize[] joints = arena.alloc_slice(usize, 1);
+    joints[0] = 1;
+    mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, 1);
+    binds[0] = linear.identity4();
+    mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
+    skins[0] = model.Skin{ name: "rig", joints: joints, inverse_binds: binds };
+    mut f32[] times = arena.alloc_slice(f32, 2);
+    times[1] = 1.0;
+    mut f32[] values = arena.alloc_slice(f32, 6);
+    values[3] = 2.0;
+    mut model.Channel[] channels = arena.alloc_slice(model.Channel, 1);
+    channels[0] = model.Channel{ node: 1, target: model.Target.Translation, mode: curve.Interpolation.Linear, times: times, values: values };
+    mut model.Animation[] animations = arena.alloc_slice(model.Animation, 1);
+    animations[0] = model.Animation{ name: "slide", channels: channels, duration: 1.0 };
+    mut usize[] roots = arena.alloc_slice(usize, 1);
+    roots[0] = 0;
+    model.Model rig = model.Model{ meshes: arena.alloc_slice(model.Mesh, 0), materials: arena.alloc_slice(model.Material, 0),
+            images: arena.alloc_slice(image.Image, 0), nodes: nodes, roots: roots, skins: some(skins), animations: some(animations) };
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, none, none, none, none);
+    defer g.close();
+    g.adopt_model("models/rig", rig);
+    scene.Entity hero = placed(w, "hero", linear.vec3(0.0, 0.0, 0.0));
+    c.meshes.set(hero, components.Mesh{ model: "models/rig" });
+    c.animators.set(hero, components.Animator{ clip: "slide" });
+    for (i32 i in 0..30) {
+        g.update(1.0 / 60.0);
+    }
+    linear.Mat4[] palette = match (g.palette_of(hero)) {
+        some(p) => p,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    // half a second: the hip 1 m along
+    assert(palette[0].transform_point(linear.vec3(0.0, 0.0, 0.0)).near(linear.vec3(1.0, 0.0, 0.0), 0.05));
+    // looping: after its end it starts again (1.5 s: half a second into its second turn)
+    for (i32 i in 0..60) {
+        g.update(1.0 / 60.0);
+    }
+    f32 x = palette[0].transform_point(linear.vec3(0.0, 0.0, 0.0)).x;
+    assert(x > 0.8 && x < 1.2);
+    // a clip the model does not have: nothing played, no stop
+    scene.Entity other = placed(w, "other", linear.vec3(0.0, 0.0, 0.0));
+    c.meshes.set(other, components.Mesh{ model: "models/rig" });
+    c.animators.set(other, components.Animator{ clip: "dance" });
+    g.update(1.0 / 60.0);
+    assert(match (g.palette_of(other)) {
+        some(p) => false,
+        none => true,
+    });
+}

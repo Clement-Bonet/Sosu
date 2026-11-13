@@ -1,0 +1,5 @@
+// engine: the common components of a game (spec §8.2). Programs import `engine.describe` (the
+// fields of a component, for an inspector and for saving).
+import engine.describe;
+import engine.components;
+import engine.engine;
