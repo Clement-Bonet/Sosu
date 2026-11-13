@@ -2,6 +2,7 @@
 // (native/dr.c) and of stb_vorbis (native/ogg.c) behind one `Decoder`, and the loop that takes all
 // the samples of one into a `Sound`. Not for programs: they import audio.mp3, audio.flac,
 // audio.ogg or audio.stream.
+import std.vec;
 import audio.audio;
 
 extern "C" {
@@ -62,83 +63,134 @@ pub struct Decoder {
     pub i32 rate;
 }
 
-// The pages of the Vorbis stream of an Ogg file that groups several streams side by side (a video:
-// Theora and its sound; several tracks), in a copy of `arena`: in each group (the pages that begin
-// a stream, one after the other, then the pages of all of them, mixed), the first stream whose
-// first packet is the header of Vorbis; its pages kept whole, their checksums with them. A chained
-// file starts a new group with each link. `data` itself when it holds one stream at a time (no
-// copy: none), or when it is not made of pages from its start (the decoder says what it is).
-pub ui8[]? vorbis_pages(Arena* arena, ui8[] data) {
+// What `vorbis_pages` reads of each group of an Ogg file: the stream chosen, or none.
+struct Choice {
+    ui32 serial;
+    bool found;
+}
+
+// The stream read in each group (the pages that begin streams, one after the other, then the
+// pages of all of them, mixed; a chained file starts a new group with each link): the Vorbis stream
+// `track` (from 0), or the first one when the group holds fewer.
+Choice[] choices(Arena* arena, ui8[] data, usize track) {
+    vec.Vec<Choice>* out = vec.new<Choice>(arena);
     mut usize at = 0;
-    mut bool grouping = false;   // the last page began a stream
-    mut bool chosen = false;     // a Vorbis stream chosen in this group
-    mut ui32 serial = 0;
-    mut bool other = false;      // a page of another stream was met
-    mut usize kept = 0;
-    // first, the bytes kept, and whether any page is left out
+    mut bool grouping = false;
+    mut usize count = 0;    // the Vorbis streams of this group
+    mut ui32 first = 0;
+    mut ui32 picked = 0;
+    mut bool open = false;  // a group has started
     while (data.len - at >= 27 && data[at] == 0x4F && data[at + 1] == 0x67 && data[at + 2] == 0x67 && data[at + 3] == 0x53) {
         usize length = page_length(data, at);
         if (length == 0) {
             break;
         }
-        bool begins = data[at + 5] & 2 != 0;
-        ui32 s = le32(data, at + 14);
-        if (begins) {
+        if (data[at + 5] & 2 != 0) {
             if (!grouping) {
-                chosen = false;  // a new group: a new link
+                if (open) {
+                    out.push(Choice{ serial: count > track ? picked : first, found: count > 0 });
+                }
+                open = true;
+                count = 0;
             }
             grouping = true;
-            if (!chosen && begins_vorbis(data, at, length)) {
-                chosen = true;
-                serial = s;
+            if (begins_vorbis(data, at, length)) {
+                ui32 s = le32(data, at + 14);
+                if (count == 0) {
+                    first = s;
+                }
+                if (count == track) {
+                    picked = s;
+                }
+                count += 1;
             }
         } else {
             grouping = false;
         }
-        if (chosen && s == serial) {
+        at += length;
+    }
+    if (open) {
+        out.push(Choice{ serial: count > track ? picked : first, found: count > 0 });
+    }
+    return out.items();
+}
+
+// The pages of `data` that `chosen` keeps, copied into `out` when it is long enough to hold them
+// (else only counted); the bytes they take, and whether every page is kept.
+usize kept_pages(ui8[] data, Choice[] chosen, ui8[] out, bool* all) {
+    mut ui8[] o = out;
+    mut usize at = 0;
+    mut usize kept = 0;
+    mut bool grouping = false;
+    mut usize group = 0;
+    mut bool started = false;
+    mut bool every = true;
+    while (data.len - at >= 27 && data[at] == 0x4F && data[at + 1] == 0x67 && data[at + 2] == 0x67 && data[at + 3] == 0x53) {
+        usize length = page_length(data, at);
+        if (length == 0) {
+            break;
+        }
+        if (data[at + 5] & 2 != 0) {
+            if (!grouping) {
+                if (started) {
+                    group += 1;
+                }
+                started = true;
+            }
+            grouping = true;
+        } else {
+            grouping = false;
+        }
+        bool keep = started && group < chosen.len && chosen[group].found && le32(data, at + 14) == chosen[group].serial;
+        if (keep) {
+            if (o.len >= kept + length) {
+                for (usize i in 0..length) {
+                    o[kept + i] = data[at + i];
+                }
+            }
             kept += length;
         } else {
-            other = true;
+            every = false;
         }
         at += length;
     }
-    if (!other) {
+    *all = every;
+    return kept;
+}
+
+// The pages of the Vorbis stream read of an Ogg file that groups several streams side by side (a
+// video: Theora and its sound; several tracks), in a copy of `arena`: of each group, the Vorbis
+// stream `track` (from 0; the first when a group holds fewer), its pages kept whole, their
+// checksums with them. None when every page is kept (one stream at a time: no copy), or when the
+// file is not made of pages from its start (the decoder says what it is).
+pub ui8[]? vorbis_pages(Arena* arena, ui8[] data, usize track) {
+    Choice[] chosen = choices(arena, data, track);
+    mut bool all = true;
+    usize kept = kept_pages(data, chosen, data[0..0], &all);
+    if (all) {
         return none;
     }
-    // then the copy
     mut ui8[] out = arena.alloc_slice(ui8, kept);
-    mut usize to = 0;
-    at = 0;
-    grouping = false;
-    chosen = false;
+    kept_pages(data, chosen, out, &all);
+    return some(out);
+}
+
+// The Vorbis streams side by side in the first group of an Ogg file: its tracks (1 for a file of
+// one stream, 0 for one without Vorbis).
+pub usize tracks(ui8[] data) {
+    mut usize at = 0;
+    mut usize count = 0;
     while (data.len - at >= 27 && data[at] == 0x4F && data[at + 1] == 0x67 && data[at + 2] == 0x67 && data[at + 3] == 0x53) {
         usize length = page_length(data, at);
-        if (length == 0) {
-            break;
+        if (length == 0 || data[at + 5] & 2 == 0) {
+            break;  // the end of the first group
         }
-        bool begins = data[at + 5] & 2 != 0;
-        ui32 s = le32(data, at + 14);
-        if (begins) {
-            if (!grouping) {
-                chosen = false;
-            }
-            grouping = true;
-            if (!chosen && begins_vorbis(data, at, length)) {
-                chosen = true;
-                serial = s;
-            }
-        } else {
-            grouping = false;
-        }
-        if (chosen && s == serial && to + length <= out.len) {
-            for (usize i in 0..length) {
-                out[to + i] = data[at + i];
-            }
-            to += length;
+        if (begins_vorbis(data, at, length)) {
+            count += 1;
         }
         at += length;
     }
-    return some(out[0..to]);
+    return count;
 }
 
 // The bytes of the Ogg page at `at` (its header, its table of segments, its body), 0 when the page
@@ -175,10 +227,19 @@ ui32 le32(ui8[] data, usize at) {
 // A decoder of `codec` on `data`, its memory (`MEMORY`) taken from `arena`, which must live as long
 // as it (an Ogg file of several streams side by side is copied there, its Vorbis pages only).
 pub Decoder!audio.AudioError open(Arena* arena, Codec codec, keeps ui8[] given) {
+    return open_track(arena, codec, given, 0);
+}
+
+// As `open`, of an Ogg file of several Vorbis streams side by side, the stream `track` (from 0):
+// `Unsupported` when its first group holds fewer.
+pub Decoder!audio.AudioError open_track(Arena* arena, Codec codec, keeps ui8[] given, usize track) {
     mut ui8[] data = given;
     match (codec) {
         Ogg => {
-            match (vorbis_pages(arena, given)) {
+            if (track > 0 && track >= tracks(given)) {
+                return err(audio.AudioError.Unsupported);
+            }
+            match (vorbis_pages(arena, given, track)) {
                 some(pages) => {
                     data = pages;
                 },
@@ -313,7 +374,7 @@ pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] given) 
     mut ui8[] data = given;
     match (codec) {
         Ogg => {
-            match (vorbis_pages(arena, given)) {
+            match (vorbis_pages(arena, given, 0)) {
                 some(pages) => {
                     data = pages;
                 },

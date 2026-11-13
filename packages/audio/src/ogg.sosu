@@ -3,7 +3,7 @@
 // `MEMORY` bytes of the arena: a header that asks for more gives `TooLarge`, and the samples
 // decoded stop at `audio.MAX_SAMPLES`. The faults reported by GitHub Security Lab against 1.22 on
 // hostile files (2023, CVE-2023-45675 to 45682) are fixed in that copy (THIRD_PARTY_NOTICES.md),
-// its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. A chained file (logical streams one after the other, as a radio recorded) is read link after link, as long as they keep the channels and the rate of the first; of streams grouped side by side (Theora and its sound, several tracks), the first Vorbis stream of each group is read (`coded.vorbis_pages`).
+// its comment header is skipped unread, and the CI fuzzes it; it is C, though, so a file from an unknown source is still safer read in a process of its own. The CRC of the pages is not checked. A chained file (logical streams one after the other, as a radio recorded) is read link after link, as long as they keep the channels and the rate of the first; of streams grouped side by side (Theora and its sound, several tracks), the first Vorbis stream of each group is read (`coded.vorbis_pages`), or another (`decode_track`, `tracks`, `stream.Options.track`).
 import std.io;
 import audio.audio;
 import audio.coded;
@@ -25,13 +25,28 @@ pub bool is_ogg(ui8[] data) {
     return data.len >= 27 && data[0] == 0x4F && data[1] == 0x67 && data[2] == 0x67 && data[3] == 0x53;
 }
 
-// The sound of the Ogg Vorbis file `data`.
+// The sound of the Ogg Vorbis file `data` (of streams side by side, the first Vorbis one).
 pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] given) {
+    return decode_track(arena, given, 0);
+}
+
+// The Vorbis streams side by side in an Ogg file (several tracks, as the languages of a video), as
+// `coded.tracks` counts them in its first group.
+pub usize tracks(ui8[] data) {
+    return coded.tracks(data);
+}
+
+// The sound of the Vorbis stream `track` (from 0) of an Ogg file of several side by side:
+// `Unsupported` when it holds fewer; a later link of a chained file that holds fewer gives its first.
+pub audio.Sound!audio.AudioError decode_track(Arena* arena, ui8[] given, usize track) {
     if (!is_ogg(given)) {
         return err(audio.AudioError.UnknownFormat);
     }
+    if (track > 0 && track >= coded.tracks(given)) {
+        return err(audio.AudioError.Unsupported);
+    }
     // its Vorbis stream, when it has others beside it
-    ui8[] data = match (coded.vorbis_pages(arena, given)) {
+    ui8[] data = match (coded.vorbis_pages(arena, given, track)) {
         some(pages) => pages,
         none => given,
     };

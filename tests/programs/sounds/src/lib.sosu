@@ -357,6 +357,33 @@ test "Ogg streams side by side: the Vorbis one beside a video, the first of two,
         ok(x) => assert(false),
         err(e) => assert(e == audio.AudioError.Damaged),
     }
+    // the tracks: of two side by side, the second (2000 frames shorter: the start of the same tone)
+    ui8[] two = fixture.read_bytes(&arena, "tests/data/grouped_two.ogg");
+    assert(ogg.tracks(two) == 2 && ogg.tracks(fixture.read_bytes(&arena, "tests/data/grouped.ogg")) == 1);
+    assert(ogg.tracks(fixture.read_bytes(&arena, "tests/data/tone.ogg")) == 1);
+    assert(ogg.tracks(fixture.read_bytes(&arena, "tests/data/bad_grouped.ogg")) == 0);
+    audio.Sound second = match (ogg.decode_track(&arena, two, 1)) {
+        ok(x) => x,
+        err(e) => empty(&arena),
+    };
+    assert(second.frames() == 2942 && largest_difference(second.samples, tone.samples[0..2 * 2942]) == 0.0);
+    match (ogg.decode_track(&arena, two, 2)) {
+        ok(x) => assert(false),
+        err(e) => assert(e == audio.AudioError.Unsupported),
+    }
+    // played as it is read
+    mixer.Mixer* c = mixer.create(&arena, 8000, 2);
+    stream.Stream* t = match (stream.open(&arena, two, c, stream.Options{ seconds: 0.1, track: 1 })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(t.frames() == 2942);
+    f32[] heard = mixed(&arena, c, some(t), 2942);
+    assert(largest_difference(heard, expected[0..2 * 2942]) == 0.0);
+    t.close();
 }
 
 test "Ogg files of streams side by side, damaged at random: a sound or an error, never a stop" {
@@ -394,6 +421,34 @@ test "Ogg files of streams side by side, damaged at random: a sound or an error,
         }
         scratch.free();
     }
+}
+
+test "a SOFA file of an older superblock: a head of the Viking set (superblock 0, netCDF-4)" {
+    mut Arena arena = Arena.new(64 * MB);
+    defer arena.free();
+    // subject A of the Viking HRTF dataset v2 (Spagnol, Miccini, Unnthorsson, 2020, CC BY 4.0), as
+    // sofacoustics.org gives it: the superblock of version 0 that netCDF-4 writes, then objects of
+    // the new kind
+    ui8[] file = fixture.read_bytes(&arena, "tests/data/viking_subj_a.sofa");
+    hrtf.Hrtf* h = match (sofa.decode(&arena, file, 48000)) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(h.count > 100 && h.taps > 100 && !h.mirrored);
+    mut f32[] l = arena.alloc_slice(f32, h.taps);
+    mut f32[] r = arena.alloc_slice(f32, h.taps);
+    // on the right: the right ear louder and first; on the left the other way; ahead, about alike
+    f32[2] right = h.filters(1.5707964, 0.0, l, r);
+    assert(power(r) > 2.0 * power(l));
+    f32 lag = (right[0] - right[1]) / 48.0;
+    assert(lag > 0.4 && lag < 1.0);
+    f32[2] left = h.filters(-1.5707964, 0.0, l, r);
+    assert(power(l) > 2.0 * power(r) && left[1] > left[0]);
+    h.filters(0.0, 0.0, l, r);
+    assert(abs(power(l) + power(r) - 1.0) < 0.001 && power(l) < 2.0 * power(r) && power(r) < 2.0 * power(l));
 }
 
 test "small SOFA files: their six directions as written; cartesian, the right ear first, delays" {
@@ -434,15 +489,25 @@ test "small SOFA files: their six directions as written; cartesian, the right ea
     for (usize k in 0..h.taps) {
         assert(abs(cl[k] - l[k]) < 0.00001 && abs(cr[k] - r[k]) < 0.00001);
     }
+    // after a superblock of version 0 (netCDF-4's): the same
+    hrtf.Hrtf* v0 = sofa_of(&arena, "tests/data/small_v0.sofa");
+    assert(v0.count == 6);
+    f32[2] vd = v0.filters(-1.5707964, 0.0, cl, cr);
+    assert(vd[0] == 2.0 && vd[1] == 10.0);
+    for (usize k in 0..h.taps) {
+        assert(cl[k] == l[k] && cr[k] == r[k]);
+    }
 }
 
 test "SOFA files damaged at random: responses or an error, never a stop" {
     mut Arena arena = Arena.new(4 * MB);
     defer arena.free();
-    ui8[] small = fixture.read_bytes(&arena, "tests/data/small.sofa");
+    ui8[] small_v2 = fixture.read_bytes(&arena, "tests/data/small.sofa");
+    ui8[] small_v0 = fixture.read_bytes(&arena, "tests/data/small_v0.sofa");
     mut ui64 state = 7;
     mut usize readable = 0;
     for (i32 round in 0..3000) {
+        ui8[] small = round % 2 == 0 ? small_v2 : small_v0;  // both superblocks
         mut Arena scratch = Arena.new(64 * KB);
         mut ui8[] copy = scratch.alloc_slice(ui8, small.len);
         for (usize i in 0..small.len) {
@@ -724,7 +789,7 @@ test "damaged and hostile files" {
     mut Arena arena = Arena.new(1 * MB);
     defer arena.free();
     text.TextBuilder* report = text.builder(&arena);
-    str[52] names = [
+    str[53] names = [
         "pcm16.wav",
         "float32.wav",
         "bad_huge_data.wav",
@@ -748,6 +813,7 @@ test "damaged and hostile files" {
         "bad_seek.ogg",
         "bad_seek_shift.ogg",
         "small.sofa",
+        "small_v0.sofa",
         "cartesian.sofa",
         "bad_truncated.sofa",
         "bad_superblock0.sofa",

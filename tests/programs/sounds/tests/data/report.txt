@@ -21,6 +21,7 @@ bad_chained.ogg: 8000 Hz, 2 channels, 6094 frames
 bad_seek.ogg: 8000 Hz, 2 channels, 1152 frames
 bad_seek_shift.ogg: 8000 Hz, 2 channels, 4942 frames
 small.sofa: 6 directions, 32 frames
+small_v0.sofa: 6 directions, 32 frames
 cartesian.sofa: 6 directions, 32 frames
 bad_truncated.sofa: damaged sound
 bad_superblock0.sofa: a kind of sound not supported

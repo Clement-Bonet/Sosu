@@ -2,8 +2,8 @@
 // of a file, for audio.sofa. Not a library of HDF5: what a file of variables written by netCDF-4
 // holds, and only that.
 //
-// - The superblock of version 2 or 3 (that of netCDF-4 and of HDF5 1.8 and later); versions 0 and 1
-//   give `Unsupported`.
+// - The superblock of any version, 0 to 3 (netCDF-4 writes 0, then objects of the new kind); a root
+//   group of the old kind (a symbol table, of files of HDF5 before 1.8) gives `Unsupported`.
 // - Object headers of version 1 and 2, their continuations.
 // - The links of the root group: compact (link messages), or dense (a fractal heap whose root
 //   block is direct, or indirect over direct blocks, indexed by a B-tree of version 2 of one node).
@@ -285,6 +285,9 @@ pub class File {
                     },
                     none => { },
                 }
+            }
+            if (m.kind == 0x11) {
+                return err(audio.AudioError.Unsupported);  // a group of the old kind, a symbol table
             }
             if (m.kind == 2) {
                 ui8 flags = byte(m.at + 1);
@@ -775,17 +778,22 @@ pub File*!audio.AudioError open(keeps Arena* arena, keeps ui8[] data) {
         return err(audio.AudioError.UnknownFormat);
     }
     ui8 version = data[8];
-    if (version != 2 && version != 3) {
+    if (version > 3) {
         return err(audio.AudioError.Unsupported);
     }
-    usize offsets = data[9] as usize;
-    usize lengths = data[10] as usize;
+    // versions 0 and 1 (netCDF-4 writes 0 by default): their sizes later, and the root group as a
+    // symbol table entry; 1 adds 4 bytes (the K of indexed storage) after the flags
+    bool old = version < 2;
+    usize offsets = old ? data[13] as usize : data[9] as usize;
+    usize lengths = old ? data[14] as usize : data[10] as usize;
     if ((offsets != 4 && offsets != 8) || (lengths != 4 && lengths != 8)) {
         return err(audio.AudioError.Unsupported);
     }
     File* f = arena.new(File, arena, data, offsets, lengths, 0);
-    usize base_address = f.address(12);
-    usize root = f.address(12 + 3 * offsets);
+    usize first = version == 0 ? 24 : 28;  // the base address, in versions 0 and 1
+    usize base_address = old ? f.address(first) : f.address(12);
+    // versions 0 and 1: base, free space, end, driver, then the entry of the root (its name, its header)
+    usize root = old ? f.address(first + 5 * offsets) : f.address(12 + 3 * offsets);
     if (f.bad || base_address != 0) {
         return err(f.bad ? audio.AudioError.Damaged : audio.AudioError.Unsupported);
     }
