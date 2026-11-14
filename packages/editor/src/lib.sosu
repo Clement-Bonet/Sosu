@@ -1,0 +1,8 @@
+// editor: the pieces of an editor of scenes. Programs import `editor.camera` (the camera of an
+// editor), `editor.pick` (the entity under the mouse), `editor.gizmo` (the arrows that move it) and
+// `editor.marks` (what is drawn over the view: the grid, the box of what is chosen).
+import editor.camera;
+import editor.pick;
+import editor.gizmo;
+import editor.marks;
+import editor.inspect;

@@ -90,6 +90,11 @@ pub class Engine {
     scene.Table<Live>* live;
     vec.Vec<ModelSlot>* models;
     vec.Vec<SoundSlot>* sounds;
+    // The camera the scene is seen through in place of its active view: that of an editor.
+    pub mut render3d.Camera? looking;
+    // Paused (an editor that edits): the files still load and the world matrices follow the
+    // transforms, but nothing moves, burns, plays or is given a body until it is not.
+    pub mut bool paused;
 
     void init(keeps Arena* arena, keeps components.Components* c, keeps assets.Assets*? store,
             keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer, keeps mixer.Mixer*? mix) {
@@ -107,6 +112,16 @@ pub class Engine {
         live = world.table<Live>();
         models = vec.new<ModelSlot>(arena);
         sounds = vec.new<SoundSlot>(arena);
+        looking = none;
+        paused = false;
+    }
+
+    // The model of `path` once it is loaded (or adopted), none before.
+    pub model.Model? model_of(keeps str path) uses io, threads {
+        return match (model_slot(path)) {
+            some(slot) => slot.loaded,
+            none => none,
+        };
     }
 
     // ---- Assets ----
@@ -293,7 +308,8 @@ pub class Engine {
         }
     }
 
-    linear.Mat4 matrix_of(scene.Entity e) {
+    // Where `e` is in the world: its world matrix (its transform before the first `update`).
+    pub linear.Mat4 matrix_of(scene.Entity e) {
         return match (world.world_matrices.get(e)) {
             some(m) => *m,
             none => match (world.transforms.get(e)) {
@@ -475,6 +491,9 @@ pub class Engine {
         }
         collect();
         world.propagate();
+        if (paused) {
+            return;
+        }
         make_bodies();
         make_emitters();
         make_animators();
@@ -598,6 +617,12 @@ pub class Engine {
     // The camera of the active view (its forward: -z of its entity), or one that looks at the
     // origin from above and behind when there is none.
     pub render3d.Camera camera() {
+        match (looking) {
+            some(c) => {
+                return c;
+            },
+            none => { },
+        }
         match (active_view()) {
             some(e) => {
                 linear.Mat4 m = matrix_of(e);

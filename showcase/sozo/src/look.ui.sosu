@@ -1,0 +1,39 @@
+// The look of Sozo (spec §10.7): dark, as the editors of games are, amber for what is chosen.
+
+theme Night {
+    accent: #F2A33C
+    surface: #262833
+    color: #D6D9E6
+    field: #15161D
+    font_size: 14
+
+    Window { background: #1C1D25 }
+    Title { color: accent, font_size: 18 }
+    Button {
+        background: surface
+        radius: 6
+        padding: 8
+        hover { background: #353846 }
+        pressed { background: field }
+    }
+    List {
+        background: field
+    }
+}
+
+style Play {
+    background: #F2A33C
+    color: #15161D
+    radius: 6
+    padding: 8
+    hover { background: #FFB95E }
+    pressed { background: #CF8424 }
+}
+
+style Muted {
+    color: #8B8FA6
+}
+
+style Chosen {
+    color: #F2A33C
+}

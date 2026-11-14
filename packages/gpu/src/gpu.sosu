@@ -267,6 +267,7 @@ pub class Device {
     sdl_c.SDL_GPUDevice* device;
     sdl_c.SDL_Window* window;  // 0 without a window
     bool windowed;
+    vec.Vec<ui64>* others;  // the windows of `claim`, beside the first
     vec.Vec<Slot>* slots;
     i32 color_format;  // of the window, and of the targets of `target`
     i32 depth_format;
@@ -288,6 +289,7 @@ pub class Device {
         self.windowed = windowed;
         self.debug = debug;
         slots = vec.new(arena);
+        others = vec.new<ui64>(arena);
         unsafe {
             color_format = windowed ? sdl_c.SDL_GetGPUSwapchainTextureFormat(device, window)
                     : sdl_c.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
@@ -769,6 +771,61 @@ pub class Device {
         }
     }
 
+    // Another window drawn by this device (`app.open_window`, spec §10.13): its frames are those
+    // of `begin_on`, with the pipelines of the device. False when the system refuses it, or when
+    // its pixels would not be in the format of the first window.
+    pub bool claim(app.Window w) uses io {
+        assert(!closed && windowed);
+        unsafe {
+            sdl_c.SDL_Window* handle = w.native();
+            if (!sdl_c.SDL_ClaimWindowForGPUDevice(device, handle)) {
+                return false;
+            }
+            if (sdl_c.SDL_GetGPUSwapchainTextureFormat(device, handle) != color_format) {
+                sdl_c.SDL_ReleaseWindowFromGPUDevice(device, handle);
+                return false;
+            }
+            others.push(handle as ui64);
+        }
+        return true;
+    }
+
+    // A window of `claim` let go, before it closes: once the GPU is done with it.
+    pub void release_window(app.Window w) uses io {
+        unsafe {
+            ui64 handle = w.native() as ui64;
+            for (usize i in 0..others.len()) {
+                if (others.items()[i] == handle) {
+                    sdl_c.SDL_WaitForGPUIdle(device);
+                    sdl_c.SDL_ReleaseWindowFromGPUDevice(device, w.native());
+                    others.remove(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    // The next frame of a window of `claim`, or none when it cannot be drawn now. It does not wait
+    // for the screen: the frames of the first window pace the loop.
+    pub Frame? begin_on(app.Window w) uses io {
+        assert(!closed && windowed);
+        unsafe {
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                return none;
+            }
+            mut sdl_c.SDL_GPUTexture* target = 0 as sdl_c.SDL_GPUTexture*;
+            mut ui32 width = 0;
+            mut ui32 height = 0;
+            if (!sdl_c.SDL_AcquireGPUSwapchainTexture(commands, w.native(), &target, &width, &height)
+                    || target as ui64 == 0) {
+                sdl_c.SDL_SubmitGPUCommandBuffer(commands);
+                return none;
+            }
+            return some(Frame{ device: self, commands: commands, target: target, width: width, height: height });
+        }
+    }
+
     // A frame that does not draw into the window: its passes draw into targets (`pass_into`),
     // compute (`compute`), and `submit_and_wait` sends them. What a device without a window
     // records its work in, and a window's device too, for work beside its frames.
@@ -1070,6 +1127,9 @@ pub class Device {
                 sdl_c.SDL_ReleaseGPUTexture(device, depth as sdl_c.SDL_GPUTexture*);
             }
             if (windowed) {
+                for (ui64 other in others.items()) {
+                    sdl_c.SDL_ReleaseWindowFromGPUDevice(device, other as sdl_c.SDL_Window*);
+                }
                 sdl_c.SDL_ReleaseWindowFromGPUDevice(device, window);
             }
             sdl_c.SDL_DestroyGPUDevice(device);
@@ -1234,6 +1294,53 @@ pub struct Frame {
             sdl_c.SDL_UploadToGPUTexture(pass, source, region, true);
             sdl_c.SDL_EndGPUCopyPass(pass);
             sdl_c.SDL_ReleaseGPUTransferBuffer(device.device, transfer);
+        }
+    }
+
+    // `t` (a texture of `device.target`) copied into the rectangle of `x`, `y`, `w`, `h` pixels of
+    // the window, stretched to it: a scene drawn apart (`render3d.Renderer.draw_into`) shown in a
+    // part of a window, as the view of an editor. A pass must not be open; what is around is kept.
+    pub void blit(Texture t, ui32 x, ui32 y, ui32 w, ui32 h) uses io {
+        unsafe {
+            assert(target as ui64 != 0);  // a frame of `commands()` has no window: `blit_into`
+            blit_to(t, target, width, height, x, y, w, h);
+        }
+    }
+
+    // The same into `into`, a texture of `device.target`: a window composed without one (a
+    // picture, a test).
+    pub void blit_into(Texture t, Texture into, ui32 x, ui32 y, ui32 w, ui32 h) uses io {
+        blit_to(t, device.texture_of_handle(into), into.width, into.height, x, y, w, h);
+    }
+
+    void blit_to(
+        Texture t,
+        sdl_c.SDL_GPUTexture* to,
+        ui32 to_width,
+        ui32 to_height,
+        ui32 x,
+        ui32 y,
+        ui32 w,
+        ui32 h
+    ) uses io {
+        if (w == 0 || h == 0 || x >= to_width || y >= to_height) {
+            return;
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUBlitInfo* info = scratch.alloc(sdl_c.SDL_GPUBlitInfo);
+            info.source.texture = device.texture_of_handle(t);
+            info.source.w = t.width;
+            info.source.h = t.height;
+            info.destination.texture = to;
+            info.destination.x = x;
+            info.destination.y = y;
+            info.destination.w = min(w, to_width - x);
+            info.destination.h = min(h, to_height - y);
+            info.load_op = sdl_c.SDL_GPU_LOADOP_LOAD;
+            info.filter = sdl_c.SDL_GPU_FILTER_LINEAR;
+            sdl_c.SDL_BlitGPUTexture(commands, info);
         }
     }
 

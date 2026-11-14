@@ -67,6 +67,20 @@ pub struct Canvas {
         }
     }
 
+    // A rectangle made transparent, whatever was there and whatever the clip: a hole through which
+    // what is drawn below the canvas shows (a view of a scene, under `gpu.overlay`).
+    pub void erase(Rect rect) {
+        i32 x0 = clamp(rect.x, width);
+        i32 y0 = clamp(rect.y, height);
+        i32 x1 = clamp(rect.x + rect.w, width);
+        i32 y1 = clamp(rect.y + rect.h, height);
+        for (mut i32 y = y0; y < y1; y += 1) {
+            for (mut i32 x = x0; x < x1; x += 1) {
+                pixels[(y * width + x) as usize] = 0;
+            }
+        }
+    }
+
     // Fills a rectangle, blended with what is below when the color is not opaque.
     pub void fill(Rect rect, Color color) {
         i32 x0 = max(clamp(rect.x, width), clip.x0);

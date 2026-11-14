@@ -46,7 +46,7 @@ pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
             return describe.asset("model", "Model");
         }
         if (i == 1) {
-            return describe.flag("shadows", "Casts shadows");
+            return describe.flag("shadows", "Shadows");
         }
         return describe.flag("visible", "Visible");
     }
@@ -334,7 +334,7 @@ pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
             return describe.whole("layers", "Layers", 0.0, 4294967295.0);
         }
         if (i == 9) {
-            return describe.whole("mask", "Collides with", 0.0, 4294967295.0);
+            return describe.whole("mask", "Mask", 0.0, 4294967295.0);
         }
         return describe.flag("sensor", "Sensor");
     }
@@ -457,7 +457,7 @@ pub class SoundFields : describe.Describe<Sound>, save.Codec<Sound> {
             return describe.flag("looping", "Loops");
         }
         if (i == 3) {
-            return describe.flag("autoplay", "Plays at the start");
+            return describe.flag("autoplay", "Autoplay");
         }
         if (i == 4) {
             return describe.number("near", "Near", 0.0, 10000.0);
@@ -465,7 +465,7 @@ pub class SoundFields : describe.Describe<Sound>, save.Codec<Sound> {
         if (i == 5) {
             return describe.number("far", "Far", 0.0, 10000.0);
         }
-        return describe.number("reverb", "Reverberation", 0.0, 1.0);
+        return describe.number("reverb", "Reverb", 0.0, 1.0);
     }
 
     override describe.Value get(Sound* s, usize i) {

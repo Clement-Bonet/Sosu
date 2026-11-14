@@ -1,0 +1,242 @@
+// editor.inspect: the fields of a component shown and changed, from its description
+// (`engine.describe`): a line for each, its label and a widget of its kind (a number, a whole, a
+// box, a text, three numbers for a vector or a color, a list of its choices). Each widget is bound
+// to a value read from the component at each frame; what the user changes is given back to it at
+// once, through `Describe.set`, held within its bounds. `transform` does the same for where an
+// entity is, turned and scaled (its turn in degrees, as editors show it).
+import std.math;
+import std.text;
+import math.linear;
+import ui.widgets;
+import engine.describe;
+
+// The decimals of the numbers shown: thousandths.
+i64 SCALE = 1000;
+
+f32 LABEL = 92.0;   // the width of the labels
+f32 FIELD = 196.0;  // that of a field of one number or a text
+f32 PART = 62.0;    // that of each of the three numbers of a vector
+
+i64 scaled(f32 x) {
+    f64 v = x as f64 * SCALE as f64;
+    return v > 9.0e15 ? 9000000000000000 : v < -9.0e15 ? -9000000000000000 : math.round(v) as i64;
+}
+
+f32 unscaled(i64 x) {
+    return (x as f64 / SCALE as f64) as f32;
+}
+
+widgets.Number format_of(describe.Field field, bool whole) {
+    bool bounded = field.low < field.high;
+    i64 factor = whole ? 1 : SCALE;
+    return widgets.Number{
+        min: bounded ? some((field.low as f64 * factor as f64) as i64) : none,
+        max: bounded ? some((field.high as f64 * factor as f64) as i64) : none,
+        step: whole ? 1 : SCALE / 10,
+        decimals: whole ? 0 : 3
+    };
+}
+
+// One number, bound to `x`: true when the user changed it.
+bool number(widgets.Frame* f, f32* x, f32 width, widgets.Number format) {
+    mut i64 v = scaled(*x);
+    if (f.number_field(&v, width, format)) {
+        *x = unscaled(v);
+        return true;
+    }
+    return false;
+}
+
+// Three numbers side by side, bound to `v`.
+bool three(widgets.Frame* f, linear.Vec3* v, widgets.Number format) {
+    mut f32 vx = v.x;
+    mut f32 vy = v.y;
+    mut f32 vz = v.z;
+    f.row();
+    f.push_id(1);
+    bool a = number(f, &vx, PART, format);
+    f.pop_id();
+    f.push_id(2);
+    bool b = number(f, &vy, PART, format);
+    f.pop_id();
+    f.push_id(3);
+    bool c = number(f, &vz, PART, format);
+    f.pop_id();
+    f.end_row();
+    if (a || b || c) {
+        *v = linear.vec3(vx, vy, vz);
+        return true;
+    }
+    return false;
+}
+
+void start_grid(widgets.Frame* f) {
+    f.grid(6.0, 0.0);
+    f.grid_column(widgets.Size.Pixels(LABEL));
+    f.grid_column(widgets.Size.Fill(1.0));
+}
+
+// The fields of `component`, described by `d`, under `title`: true when one changed (it is then
+// written in the component). Texts typed are copied into `texts`, which must live as long as the
+// component. `key` tells the widgets of this component from those of the others.
+pub bool fields<T>(widgets.Frame* f, str title, describe.Describe<T>* d, T* component, ui64 key, keeps Arena* texts) {
+    f.push_id(key);
+    f.title(title);
+    start_grid(f);
+    mut bool changed = false;
+    for (usize i in 0..d.count()) {
+        describe.Field field = d.field(i);
+        describe.Value now = d.get(component, i);
+        f.push_id(i as ui64 + 1);
+        f.cell(-1, 0, 1, 1, widgets.Align.Start);
+        f.label(field.label);
+        f.cell(-1, 1, 1, 1, widgets.Align.Start);
+        mut describe.Value? given = none;
+        match (field.kind) {
+            Number => {
+                mut f32 x = describe.number_of(now, 0.0);
+                if (number(f, &x, FIELD, format_of(field, false))) {
+                    given = some(describe.Value.Number(x));
+                }
+            },
+            Whole => {
+                mut i64 n = describe.whole_of(now, 0);
+                if (f.number_field(&n, FIELD, format_of(field, true))) {
+                    given = some(describe.Value.Whole(n));
+                }
+            },
+            Flag => {
+                mut bool on = describe.flag_of(now, false);
+                if (f.checkbox("", &on)) {
+                    given = some(describe.Value.Flag(on));
+                }
+            },
+            Text => {
+                given = text_of(f, now, texts);
+            },
+            Asset => {
+                given = text_of(f, now, texts);
+            },
+            Vector => {
+                mut linear.Vec3 v = describe.vector_of(now, linear.vec3(0.0, 0.0, 0.0));
+                if (three(f, &v, format_of(field, false))) {
+                    given = some(describe.Value.Vector(v));
+                }
+            },
+            Color => {
+                mut linear.Vec3 v = describe.vector_of(now, linear.vec3(0.0, 0.0, 0.0));
+                if (three(f, &v, format_of(field, false))) {
+                    given = some(describe.Value.Vector(v));
+                }
+            },
+            Choice => {
+                usize chosen = describe.choice_of(now, 0);
+                f.dropdown(FIELD);
+                match (field.choices) {
+                    some(names) => {
+                        for (usize k in 0..names.len) {
+                            if (f.option(names[k], k == chosen) && k != chosen) {
+                                given = some(describe.Value.Choice(k));
+                            }
+                        }
+                    },
+                    none => { },
+                }
+                f.end_dropdown();
+            },
+        }
+        match (given) {
+            some(v) => {
+                d.set(component, i, describe.bounded(field, v));
+                changed = true;
+            },
+            none => { },
+        }
+        f.pop_id();
+    }
+    f.end_grid();
+    f.pop_id();
+    return changed;
+}
+
+describe.Value? text_of(widgets.Frame* f, describe.Value now, keeps Arena* texts) {
+    mut widgets.TextBuffer buffer = widgets.TextBuffer{ };
+    buffer.set(describe.text_of(now, ""));
+    if (f.text_field(&buffer, FIELD)) {
+        return some(describe.Value.Text(text.repeat(texts, buffer.text(), 1)));
+    }
+    return none;
+}
+
+// ---- Where an entity is ----
+
+// The turn of `q` as three angles in degrees: about x (pitch), y (yaw) and z (roll), applied z,
+// then x, then y (as Unity shows them).
+pub linear.Vec3 degrees_of(linear.Quat q) {
+    linear.Mat4 m = q.normalized().to_mat4();
+    f64 pitch = math.asin(max(-1.0, min(1.0, -m.at(1, 2))) as f64);
+    f64 yaw = math.atan2(m.at(0, 2) as f64, m.at(2, 2) as f64);
+    f64 roll = math.atan2(m.at(1, 0) as f64, m.at(1, 1) as f64);
+    f64 d = 57.29577951308232;
+    return linear.vec3((pitch * d) as f32, (yaw * d) as f32, (roll * d) as f32);
+}
+
+// The turn of three angles in degrees, as `degrees_of` gives them.
+pub linear.Quat quat_of(linear.Vec3 degrees) {
+    f32 r = 0.017453292;
+    linear.Quat qx = linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), degrees.x * r);
+    linear.Quat qy = linear.from_axis_angle(linear.vec3(0.0, 1.0, 0.0), degrees.y * r);
+    linear.Quat qz = linear.from_axis_angle(linear.vec3(0.0, 0.0, 1.0), degrees.z * r);
+    return qy.mul(qx).mul(qz).normalized();
+}
+
+// The place, the turn (in degrees) and the scale of `t`: true when one changed.
+pub bool transform(widgets.Frame* f, linear.Transform* t) {
+    f.push_id(0x7472616E73);
+    f.title("Transform");
+    start_grid(f);
+    widgets.Number meters = widgets.Number{ step: SCALE / 10, decimals: 3 };
+    widgets.Number angles = widgets.Number{ step: SCALE * 5, decimals: 3 };
+    mut linear.Transform x = *t;
+    mut bool changed = false;
+    f.push_id(1);
+    f.cell(-1, 0, 1, 1, widgets.Align.Start);
+    f.label("Position");
+    f.cell(-1, 1, 1, 1, widgets.Align.Start);
+    changed = three(f, &x.position, meters) || changed;
+    f.pop_id();
+    f.push_id(2);
+    f.cell(-1, 0, 1, 1, widgets.Align.Start);
+    f.label("Rotation");
+    f.cell(-1, 1, 1, 1, widgets.Align.Start);
+    mut linear.Vec3 turn = degrees_of(x.rotation);
+    if (three(f, &turn, angles)) {
+        x.rotation = quat_of(turn);
+        changed = true;
+    }
+    f.pop_id();
+    f.push_id(3);
+    f.cell(-1, 0, 1, 1, widgets.Align.Start);
+    f.label("Scale");
+    f.cell(-1, 1, 1, 1, widgets.Align.Start);
+    changed = three(f, &x.scale, meters) || changed;
+    f.pop_id();
+    f.end_grid();
+    f.pop_id();
+    if (changed) {
+        *t = x;
+    }
+    return changed;
+}
+
+test "turns in degrees, and back" {
+    mut f32[12] cases = [0.0, 0.0, 0.0, 30.0, 0.0, 0.0, 0.0, 45.0, 0.0, -20.0, 120.0, 15.0];
+    for (usize i in 0..4) {
+        linear.Vec3 d = linear.vec3(cases[3 * i], cases[3 * i + 1], cases[3 * i + 2]);
+        linear.Vec3 back = degrees_of(quat_of(d));
+        assert(back.near(d, 0.01));
+    }
+    // a quarter turn about y: the forward (-z) goes to -x, as `from_axis_angle` turns it
+    linear.Quat q = quat_of(linear.vec3(0.0, 90.0, 0.0));
+    assert(q.rotate(linear.vec3(0.0, 0.0, -1.0)).near(linear.vec3(-1.0, 0.0, 0.0), 0.0001));
+}

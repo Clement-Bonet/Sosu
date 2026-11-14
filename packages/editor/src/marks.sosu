@@ -1,0 +1,223 @@
+// editor.marks: what an editor draws over its view of the scene, in the canvas of its interface:
+// the grid of the ground, the box of the entity chosen, the arrows of the gizmo, the places of
+// what has no mesh (a light, a camera...). Points of the world are projected to the pixels of the
+// view; a line that goes behind the camera is cut at its near plane, so that it never wraps
+// around. Drawn last, they are always seen over the scene, as in the editors.
+import std.math;
+import math.linear;
+import math.geometry;
+import render.canvas;
+import render3d.render3d;
+
+// The view of the scene in the canvas: its camera, and the rectangle of pixels it is drawn in.
+pub struct View {
+    pub linear.Mat4 view_projection;
+    pub f32 x;
+    pub f32 y;
+    pub f32 w;
+    pub f32 h;
+}
+
+pub View view(render3d.Camera camera, f32 x, f32 y, f32 w, f32 h) {
+    return View{ view_projection: camera.view_projection(max(w, 1.0) / max(h, 1.0)), x: x, y: y, w: w, h: h };
+}
+
+// The ray under the pixel (px, py) of the canvas, none outside of the view.
+pub geometry.Ray? ray_at(View v, f32 px, f32 py) {
+    if (px < v.x || py < v.y || px >= v.x + v.w || py >= v.y + v.h) {
+        return none;
+    }
+    return geometry.ray_from_screen(v.view_projection, px - v.x, py - v.y, v.w, v.h);
+}
+
+// The pixel of the canvas where `p` is seen, none when it is behind the camera.
+pub f32[2]? project(View v, linear.Vec3 p) {
+    linear.Vec4 c = v.view_projection.mul_vec(linear.Vec4{ x: p.x, y: p.y, z: p.z, w: 1.0 });
+    if (c.w <= 0.0001) {
+        return none;
+    }
+    return some(screen(v, c));
+}
+
+f32[2] screen(View v, linear.Vec4 c) {
+    f32 nx = c.x / c.w;
+    f32 ny = c.y / c.w;
+    return [v.x + (nx + 1.0) * 0.5 * v.w, v.y + (1.0 - ny) * 0.5 * v.h];
+}
+
+// The line from `a` to `b` of the world, cut to what the camera sees: before it is projected, in
+// the coordinates of the clip (where a line stays a line), by the sides of the view, a little
+// beyond them, and by a plane just in front of the eye. Cut after the projection instead, a line
+// that goes behind the camera would end too far away to be drawn as it is, and turn.
+pub void line(canvas.Canvas* c, View v, linear.Vec3 a, linear.Vec3 b, canvas.Color color) {
+    linear.Vec4 ca = v.view_projection.mul_vec(linear.Vec4{ x: a.x, y: a.y, z: a.z, w: 1.0 });
+    linear.Vec4 cb = v.view_projection.mul_vec(linear.Vec4{ x: b.x, y: b.y, z: b.z, w: 1.0 });
+    mut f32 enter = 0.0;  // the part of the line kept, from 0 (at a) to 1 (at b)
+    mut f32 leave = 1.0;
+    f32 m = 1.02;  // a little beyond the sides: the ends of the line are drawn whole
+    f32 near = 0.001;
+    // each side: a distance positive inside, at a and at b
+    mut f32[10] d = [
+        ca.w * m - ca.x, cb.w * m - cb.x, ca.w * m + ca.x, cb.w * m + cb.x, ca.w * m - ca.y, cb.w * m - cb.y,
+        ca.w * m + ca.y, cb.w * m + cb.y, ca.w - near, cb.w - near,
+    ];
+    for (usize i in 0..5) {
+        f32 da = d[2 * i];
+        f32 db = d[2 * i + 1];
+        if (da < 0.0 && db < 0.0) {
+            return;  // all of it outside this side
+        }
+        if (da < 0.0) {
+            enter = max(enter, da / (da - db));
+        } else if (db < 0.0) {
+            leave = min(leave, da / (da - db));
+        }
+    }
+    if (enter >= leave) {
+        return;
+    }
+    f32[2] s = screen(v, ca.lerp(cb, enter));
+    f32[2] t = screen(v, ca.lerp(cb, leave));
+    c.push_clip(canvas.Rect{ x: v.x, y: v.y, w: v.w, h: v.h });
+    c.line(s[0] as i32, s[1] as i32, t[0] as i32, t[1] as i32, color);
+    c.pop_clip();
+}
+
+// The grid of the ground (y = 0): a line every `step` meters out to `half` meters, the axes x
+// (red) and z (blue) brighter.
+pub void grid(canvas.Canvas* c, View v, f32 half, f32 step) {
+    canvas.Color faint = canvas.Color{ r: 90, g: 94, b: 110, a: 120 };
+    i32 n = (half / step) as i32;
+    for (i32 i in -n..n + 1) {
+        f32 d = i as f32 * step;
+        if (i == 0) {
+            continue;
+        }
+        line(c, v, linear.vec3(d, 0.0, -half), linear.vec3(d, 0.0, half), faint);
+        line(c, v, linear.vec3(-half, 0.0, d), linear.vec3(half, 0.0, d), faint);
+    }
+    line(c, v, linear.vec3(-half, 0.0, 0.0), linear.vec3(half, 0.0, 0.0), canvas.Color{ r: 200, g: 80, b: 80, a: 200 });
+    line(
+        c,
+        v,
+        linear.vec3(0.0, 0.0, -half),
+        linear.vec3(0.0, 0.0, half),
+        canvas.Color{ r: 80, g: 120, b: 210, a: 200 }
+    );
+}
+
+// The edges of `box`, placed by `m`.
+pub void box(canvas.Canvas* c, View v, geometry.Aabb b, linear.Mat4 m, canvas.Color color) {
+    linear.Vec3 lo = b.min;
+    linear.Vec3 hi = b.max;
+    mut linear.Vec3[8] k = [linear.vec3(0.0, 0.0, 0.0); 8];
+    for (usize i in 0..8) {
+        k[i] = m.transform_point(linear.vec3(
+            i & 1 != 0 ? hi.x : lo.x,
+            i & 2 != 0 ? hi.y : lo.y,
+            i & 4 != 0 ? hi.z : lo.z
+        ));
+    }
+    mut usize[24] edges = [0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7];
+    for (usize e in 0..12) {
+        line(c, v, k[edges[2 * e]], k[edges[2 * e + 1]], color);
+    }
+}
+
+// A small cross where something without a size of its own is (a light, a camera, a sound).
+pub void marker(canvas.Canvas* c, View v, linear.Vec3 at, canvas.Color color) {
+    match (project(v, at)) {
+        some(p) => {
+            c.fill_circle(p[0], p[1], 5.0, color);
+            c.fill_circle(p[0], p[1], 2.5, canvas.Color{ r: 20, g: 20, b: 26 });
+        },
+        none => { },
+    }
+}
+
+test "marks: a point projected to the middle of its view, a line cut behind the camera" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    render3d.Camera cam = render3d.Camera{ position: linear.vec3(0.0, 0.0, 10.0), target: linear.vec3(0.0, 0.0, 0.0) };
+    View v = view(cam, 100.0, 50.0, 400.0, 300.0);
+    f32[2] mid = match (project(v, linear.vec3(0.0, 0.0, 0.0))) {
+        some(p) => p,
+        none => [0.0, 0.0],
+    };
+    assert(abs(mid[0] - 300.0) < 0.01 && abs(mid[1] - 200.0) < 0.01);
+    assert(match (project(v, linear.vec3(0.0, 0.0, 20.0))) {
+        some(p) => false,
+        none => true,
+    });
+    // the ray under the middle goes to the target
+    match (ray_at(v, 300.0, 200.0)) {
+        some(r) => {
+            assert(r.direction.near(linear.vec3(0.0, 0.0, -1.0), 0.001));
+        },
+        none => assert(false),
+    }
+    assert(match (ray_at(v, 10.0, 10.0)) {
+        some(r) => false,
+        none => true,
+    });
+    // a line from in front to far behind: drawn in the view, not wrapped
+    mut canvas.Canvas surface = canvas.create(&arena, 600, 400);
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });
+    line(
+        &surface,
+        v,
+        linear.vec3(0.0, -1.0, 0.0),
+        linear.vec3(0.0, -1.0, 50.0),
+        canvas.Color{ r: 255, g: 255, b: 255 }
+    );
+    mut usize lit = 0;
+    for (i32 y in 0..400) {
+        for (i32 x in 0..600) {
+            if (surface.at(x, y) != 0) {
+                lit += 1;
+                assert(x >= 100 && x < 500 && y >= 50 && y < 350);  // inside the view only
+            }
+        }
+    }
+    assert(lit > 50);
+}
+
+test "marks: a line of the ground that goes behind a low camera keeps its direction" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    render3d.Camera cam = render3d.Camera{ position: linear.vec3(0.0, 1.0, 5.0), target: linear.vec3(0.0, 0.0, 0.0) };
+    View v = view(cam, 0.0, 0.0, 600.0, 400.0);
+    mut canvas.Canvas surface = canvas.create(&arena, 600, 400);
+    surface.clear(canvas.Color{ r: 0, g: 0, b: 0, a: 0 });
+    // x = 2, from far in front to far behind the eye (at z = 5)
+    line(
+        &surface,
+        v,
+        linear.vec3(2.0, 0.0, -10.0),
+        linear.vec3(2.0, 0.0, 10.0),
+        canvas.Color{ r: 255, g: 255, b: 255 }
+    );
+    // where it is seen: through two of its points in front of the camera
+    f32[2] p = match (project(v, linear.vec3(2.0, 0.0, 0.0))) {
+        some(x) => x,
+        none => [0.0, 0.0],
+    };
+    f32[2] q = match (project(v, linear.vec3(2.0, 0.0, 4.0))) {
+        some(x) => x,
+        none => [0.0, 0.0],
+    };
+    f32 dx = q[0] - p[0];
+    f32 dy = q[1] - p[1];
+    f32 len = math.sqrt((dx * dx + dy * dy) as f64) as f32;
+    mut usize lit = 0;
+    for (i32 y in 0..400) {
+        for (i32 x in 0..600) {
+            if (surface.at(x, y) != 0) {
+                lit += 1;
+                f32 off = abs((x as f32 - p[0]) * dy - (y as f32 - p[1]) * dx) / len;
+                assert(off < 2.0);  // on the line, not turned
+            }
+        }
+    }
+    assert(lit > 100);
+}

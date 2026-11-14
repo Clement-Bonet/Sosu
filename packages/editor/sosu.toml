@@ -1,0 +1,15 @@
+# The pieces of an editor of scenes (spec §8.2), for Sozo, the editor of games of Sosu: the camera
+# of an editor, choosing an entity under the mouse, the gizmo that moves it, and the marks drawn
+# over the view (the grid, the box of what is chosen).
+[package]
+name = "editor"
+version = "0.1.0"
+
+[dependencies]
+engine = { path = "../engine" }
+scene = { path = "../scene" }
+math = { path = "../math" }
+model = { path = "../model" }
+render = { path = "../render" }
+render3d = { path = "../render3d" }
+ui = { path = "../ui" }

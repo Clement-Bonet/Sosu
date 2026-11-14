@@ -1,0 +1,26 @@
+# Sozo: the first draft of the editor of games of Sosu (it becomes an application of its own once
+# its pieces are stable): a scene of the common components of `engine`, seen through the camera of
+# the editor, its entities chosen in the view or in a list, moved by the arrows of a gizmo, played
+# as the game would and stopped, saved. The pieces are those of the package `editor`.
+[package]
+name = "sozo"
+version = "0.1.0"
+
+[app]
+id = "org.sosu.sozo"
+name = "Sozo"
+assets = ["assets"]
+
+[dependencies]
+editor = { path = "../../packages/editor" }
+engine = { path = "../../packages/engine" }
+scene = { path = "../../packages/scene" }
+platform = { path = "../../packages/platform" }
+gpu = { path = "../../packages/gpu" }
+render = { path = "../../packages/render" }
+render3d = { path = "../../packages/render3d" }
+particles = { path = "../../packages/particles" }
+math = { path = "../../packages/math" }
+image = { path = "../../packages/image" }
+ui = { path = "../../packages/ui" }
+testing = { path = "../../packages/testing" }

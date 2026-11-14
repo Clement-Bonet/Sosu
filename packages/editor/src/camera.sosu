@@ -1,0 +1,94 @@
+// editor.camera: the camera of an editor, apart from those of the scene: it turns around a point
+// (`orbit`), slides with it (`pan`) and comes nearer or goes farther (`zoom`), as Blender, Unity and
+// Godot move theirs; `frame` looks at a box from where it is.
+import std.math;
+import math.linear;
+import math.geometry;
+import render3d.render3d;
+
+pub class Orbit {
+    pub mut linear.Vec3 target;  // what it turns around
+    pub mut f32 yaw;      // radians around the vertical, 0 looking along -z
+    pub mut f32 pitch;    // radians above the horizon (looking down when positive)
+    pub mut f32 distance;
+    pub mut f32 fov;      // radians, from the bottom to the top of the view
+
+    void init() {
+        target = linear.vec3(0.0, 0.0, 0.0);
+        yaw = 0.0;
+        pitch = 0.45;
+        distance = 12.0;
+        fov = 0.96;
+    }
+
+    // Where it is: behind and above `target`, as `yaw` and `pitch` say.
+    pub linear.Vec3 position() {
+        f32 cp = math.cos(pitch as f64) as f32;
+        linear.Vec3 back = linear.vec3(math.sin(yaw as f64) as f32 * cp, math.sin(pitch as f64) as f32,
+                math.cos(yaw as f64) as f32 * cp);
+        return target.add(back.scale(distance));
+    }
+
+    pub render3d.Camera camera() {
+        f32 far = max(200.0, distance * 20.0);
+        return render3d.Camera{ position: position(), target: target, fov_y: fov, near: max(0.01, distance * 0.005), far: far };
+    }
+
+    // Turned by the mouse moved `dx`, `dy` pixels: right turns it to the right, up looks from
+    // below; never upside down.
+    pub void orbit(f32 dx, f32 dy) {
+        yaw -= dx * 0.008;
+        pitch = max(-1.5, min(1.5, pitch + dy * 0.008));
+    }
+
+    // Slid with its target, by the mouse moved `dx`, `dy` pixels in a view `height` pixels high: what
+    // is under the mouse stays under it (at the distance of the target).
+    pub void pan(f32 dx, f32 dy, f32 height) {
+        f32 per_pixel = 2.0 * distance * math.tan((fov * 0.5) as f64) as f32 / max(height, 1.0);
+        linear.Vec3 forward = target.sub(position()).normalized();
+        linear.Vec3 right = forward.cross(linear.vec3(0.0, 1.0, 0.0)).normalized();
+        linear.Vec3 up = right.cross(forward);
+        target = target.add(right.scale(-dx * per_pixel)).add(up.scale(dy * per_pixel));
+    }
+
+    // Nearer by the wheel turned `steps` notches forward, farther backward.
+    pub void zoom(f32 steps) {
+        distance = max(0.2, min(5000.0, distance * math.pow(0.88, steps as f64) as f32));
+    }
+
+    // Looking at `box` from the same direction, near enough to see it whole.
+    pub void frame(geometry.Aabb box) {
+        target = box.center();
+        f32 radius = max(box.size().length() * 0.5, 0.1);
+        distance = radius / math.sin((fov * 0.5) as f64) as f32 * 1.1;
+    }
+}
+
+pub Orbit* orbit(Arena* arena) {
+    return arena.new(Orbit);
+}
+
+test "the camera of an editor: it turns, slides and comes nearer around its target" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    Orbit* o = orbit(&arena);
+    o.pitch = 0.0;
+    assert(o.position().near(linear.vec3(0.0, 0.0, 12.0), 0.0001));
+    // the mouse moved left by a quarter turn: the camera goes round to +x, looking along -x
+    o.orbit(-1.5707964 / 0.008, 0.0);
+    assert(o.position().near(linear.vec3(12.0, 0.0, 0.0), 0.001));
+    // never upside down
+    o.orbit(0.0, 10000.0);
+    assert(o.pitch == 1.5);
+    o.pitch = 0.0;
+    o.yaw = 0.0;
+    // slid right by a quarter of a view of 400 pixels: the target moves right, the view the same
+    o.pan(-100.0, 0.0, 400.0);
+    assert(o.target.x > 0.5 && abs(o.target.y) < 0.0001 && abs(o.target.z) < 0.0001);
+    o.target = linear.vec3(0.0, 0.0, 0.0);
+    o.zoom(1.0);
+    assert(abs(o.distance - 12.0 * 0.88) < 0.001);
+    // framing a box of 2 m: the whole box in view
+    o.frame(geometry.aabb(linear.vec3(4.0, 0.0, 4.0), linear.vec3(6.0, 2.0, 6.0)));
+    assert(o.target.near(linear.vec3(5.0, 1.0, 5.0), 0.0001) && o.distance > 1.7 && o.distance < 5.0);
+}
