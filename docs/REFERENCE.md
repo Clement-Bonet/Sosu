@@ -5716,7 +5716,7 @@ pub struct Running
 
 ## net.http
 
-An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
+An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default); one to another origin (another scheme, host or port: a download that the server sends to its storage) drops the headers that prove who asks, `Authorization`, `Proxy-Authorization` and `Cookie`, as browsers do. Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
 
 ### enum `HttpError`
 
