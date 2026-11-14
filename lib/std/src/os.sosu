@@ -9,7 +9,7 @@ extern "C" {
     i64 sosu_os_arg(usize index) uses io;
     i64 sosu_os_env(ui8* name) uses io;
     bool sosu_os_set_env(ui8* name, ui8* value) uses io;
-    i64 sosu_os_run(ui8** args, usize count, i32* code) uses io;
+    i64 sosu_os_run(ui8** args, usize count, i32* code, bool errors) uses io;
     void sosu_os_take(ui8* out) uses io;
     void sosu_os_exit(i32 code) uses io;
 }
@@ -118,6 +118,20 @@ pub void exit(i32 code) uses io {
 pub Output!io.IoError run(Arena* arena, str[] command) uses io
     requires command.len > 0
 {
+    return started(arena, command, false);
+}
+
+// `run`, its errors in its output too, in the order written: what a compiler says of a program
+// (`sosuc --format=json` writes its diagnostics there) read with what it prints.
+pub Output!io.IoError run_with_errors(Arena* arena, str[] command) uses io
+    requires command.len > 0
+{
+    return started(arena, command, true);
+}
+
+Output!io.IoError started(Arena* arena, str[] command, bool errors) uses io
+    requires command.len > 0
+{
     mut i32 code = 0;
     mut i64 length = 0;
     unsafe {
@@ -125,7 +139,7 @@ pub Output!io.IoError run(Arena* arena, str[] command) uses io
         for (usize i in 0..command.len) {
             c_args[i] = CText{ text: command[i].to_cstr(arena) };
         }
-        length = sosu_os_run(&c_args[0] as ui8**, c_args.len, &code);
+        length = sosu_os_run(&c_args[0] as ui8**, c_args.len, &code, errors);
     }
     if (length == -1) {
         return err(io.IoError.NotFound);
