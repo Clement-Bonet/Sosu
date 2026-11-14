@@ -901,8 +901,9 @@ static void quote_wide(wchar_t **line, size_t *size, size_t *cap, const wchar_t 
 }
 
 /* Runs the program `args[0]` (looked for in PATH) with the others, and keeps what it writes
-   to its output; its errors go to those of this program. -1: not found, -2: other failure. */
-int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code) {
+   to its output; its errors go to those of this program, or with `errors` into the same text,
+   in the order written. -1: not found, -2: other failure. */
+int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code, bool errors) {
     wchar_t *line = NULL;
     size_t size = 0, cap = 0;
     for (size_t i = 0; i < count; i++) {
@@ -924,7 +925,7 @@ int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code) {
     start.dwFlags = STARTF_USESTDHANDLES;
     start.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     start.hStdOutput = write_end;
-    start.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    start.hStdError = errors ? write_end : GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION process;
     BOOL started = CreateProcessW(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &start, &process);
     DWORD failure = GetLastError();
@@ -1098,11 +1099,12 @@ bool sosu_os_set_env(const uint8_t *name, const uint8_t *value) {
     return (value ? setenv((const char *)name, (const char *)value, 1) : unsetenv((const char *)name)) == 0;
 }
 
-int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code) {
+int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code, bool errors) {
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     (void)args;
     (void)count;
     (void)code;
+    (void)errors;
     return -2; /* iOS runs no other program */
 #else
     char **argv = malloc((count + 1) * sizeof *argv);
@@ -1129,6 +1131,7 @@ int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code) {
         close(out[0]);
         close(report[0]);
         dup2(out[1], 1);
+        if (errors) dup2(out[1], 2);
         close(out[1]);
         execvp(argv[0], argv);
         int failure = errno;

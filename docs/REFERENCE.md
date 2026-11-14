@@ -1057,6 +1057,14 @@ Runs the program `command[0]` (looked for in the folders of PATH) with the other
 pub Output!io.IoError run(Arena* arena, str[] command) uses io requires command.len > 0
 ```
 
+### `run_with_errors`
+
+`run`, its errors in its output too, in the order written: what a compiler says of a program (`sosuc --format=json` writes its diagnostics there) read with what it prints.
+
+```sosu
+pub Output!io.IoError run_with_errors(Arena* arena, str[] command) uses io requires command.len > 0
+```
+
 ## std.random
 
 Pseudo-random numbers (spec §8). A generator is a value holding its state: the same seed gives the same numbers, without any effect. Only `from_system` takes a seed that changes from one run to the next, with the effect `random` (spec §7.4). Not for cryptography.
