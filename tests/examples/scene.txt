@@ -1,0 +1,5 @@
+scene: 12 entities
+scene: crates: 5, at rest on the ground: yes
+scene: the fire burns: yes
+scene: the camera looks at the crates: yes
+scene: saved and read again the same: yes

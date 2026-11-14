@@ -33,6 +33,22 @@ extern "C" {
     ui8* sosu_shader_skinned_shadow_vert_spv(usize* size) uses io;
     ui8* sosu_shader_skinned_shadow_vert_dxil(usize* size) uses io;
     ui8* sosu_shader_skinned_shadow_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_lines_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_lines_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_lines_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_lines_frag_spv(usize* size) uses io;
+    ui8* sosu_shader_lines_frag_dxil(usize* size) uses io;
+    ui8* sosu_shader_lines_frag_msl(usize* size) uses io;
+}
+
+// A vertex of a line (`Renderer.line`): where it is, and its color (linear RGBA, alpha blended).
+struct LineVertex {
+    f32[3] position;
+    f32[4] color;
+}
+
+struct LinesUniform {
+    linear.Mat4 view_projection;
 }
 
 // The joints of a skinned mesh, at most: the size of the uniform buffer of its vertex shader.
@@ -119,7 +135,7 @@ struct GpuMesh {
     geometry.Aabb bounds;
     bool skinned;  // its vertices are `SkinnedVertex`
     gpu.Buffer morphs;  // for each target, what it moves the positions then the normals by (4 floats each)
-    ui32 targets;       // 0: none, `morphs` the buffer of nothing of the renderer
+    ui32 targets;  // 0: none, `morphs` the buffer of nothing of the renderer
 }
 
 // The morph targets of a draw, as the vertex shaders read them (cbuffer Morph).
@@ -204,7 +220,7 @@ ui8[] copied(Arena* arena, ui8* bytes, usize size) {
 }
 
 // The code of a shader of the package: `which` is 0 for lit.vert, 1 lit.frag, 2 shadow.vert,
-// 3 shadow.frag, 4 skinned.vert, 5 skinned_shadow.vert.
+// 3 shadow.frag, 4 skinned.vert, 5 skinned_shadow.vert, 6 lines.vert, 7 lines.frag.
 ui8[] code_of(Arena* arena, gpu.ShaderFormat format, usize which) uses io {
     mut usize size = 0;
     mut ui8* bytes = "".to_cstr(arena);
@@ -215,19 +231,25 @@ ui8[] code_of(Arena* arena, gpu.ShaderFormat format, usize which) uses io {
                     : which == 2 ? sosu_shader_shadow_vert_spv(&size)
                     : which == 3 ? sosu_shader_shadow_frag_spv(&size)
                     : which == 4 ? sosu_shader_skinned_vert_spv(&size)
-                    : sosu_shader_skinned_shadow_vert_spv(&size),
+                    : which == 5 ? sosu_shader_skinned_shadow_vert_spv(&size)
+                    : which == 6 ? sosu_shader_lines_vert_spv(&size)
+                    : sosu_shader_lines_frag_spv(&size),
             Dxil => which == 0 ? sosu_shader_lit_vert_dxil(&size)
                     : which == 1 ? sosu_shader_lit_frag_dxil(&size)
                     : which == 2 ? sosu_shader_shadow_vert_dxil(&size)
                     : which == 3 ? sosu_shader_shadow_frag_dxil(&size)
                     : which == 4 ? sosu_shader_skinned_vert_dxil(&size)
-                    : sosu_shader_skinned_shadow_vert_dxil(&size),
+                    : which == 5 ? sosu_shader_skinned_shadow_vert_dxil(&size)
+                    : which == 6 ? sosu_shader_lines_vert_dxil(&size)
+                    : sosu_shader_lines_frag_dxil(&size),
             Msl => which == 0 ? sosu_shader_lit_vert_msl(&size)
                     : which == 1 ? sosu_shader_lit_frag_msl(&size)
                     : which == 2 ? sosu_shader_shadow_vert_msl(&size)
                     : which == 3 ? sosu_shader_shadow_frag_msl(&size)
                     : which == 4 ? sosu_shader_skinned_vert_msl(&size)
-                    : sosu_shader_skinned_shadow_vert_msl(&size),
+                    : which == 5 ? sosu_shader_skinned_shadow_vert_msl(&size)
+                    : which == 6 ? sosu_shader_lines_vert_msl(&size)
+                    : sosu_shader_lines_frag_msl(&size),
         };
     }
     return copied(arena, bytes, size);
@@ -245,6 +267,10 @@ pub class Renderer {
     gpu.Sampler albedo_sampler;
     gpu.Texture white;
     gpu.Buffer no_morphs;  // bound for a mesh without morph targets
+    gpu.Pipeline lines;
+    vec.Vec<LineVertex>* line_vertices;  // the lines of the next frame (`line`)
+    mut gpu.Buffer? line_buffer;  // their vertices on the GPU, made larger when they outgrow it
+    mut ui32 line_capacity;  // the vertices it holds
     pub mut Sun sun;
     pub mut linear.Vec3 ambient;
     pub mut gpu.Color background;
@@ -262,7 +288,8 @@ pub class Renderer {
         gpu.Sampler shadow_sampler,
         gpu.Sampler albedo_sampler,
         gpu.Texture white,
-        gpu.Buffer no_morphs
+        gpu.Buffer no_morphs,
+        gpu.Pipeline lines
     ) {
         self.arena = arena;
         self.device = device;
@@ -275,11 +302,29 @@ pub class Renderer {
         self.albedo_sampler = albedo_sampler;
         self.white = white;
         self.no_morphs = no_morphs;
+        self.lines = lines;
+        line_vertices = vec.new<LineVertex>(arena);
+        line_buffer = none;
+        line_capacity = 0;
         sun = Sun{ };
         ambient = linear.vec3(0.08, 0.09, 0.11);
         background = gpu.rgba(0.05, 0.06, 0.08, 1.0);
         points = vec.new(arena);
         last = Stats{ drawn: 0, culled: 0 };
+    }
+
+    // A line from `a` to `b` in the next frame drawn (then forgotten): one pixel wide, hidden behind
+    // what stands in front of it, a little in front of the surface it lies on; `color` is linear
+    // RGBA, its alpha blended over the scene. The grid of an editor, the shapes of colliders, the
+    // lines a game draws to debug.
+    pub void line(linear.Vec3 a, linear.Vec3 b, f32[4] color) {
+        line_vertices.push(LineVertex{ position: [a.x, a.y, a.z], color: color });
+        line_vertices.push(LineVertex{ position: [b.x, b.y, b.z], color: color });
+    }
+
+    // The lines of the next frame, so far.
+    pub usize line_count() {
+        return line_vertices.len() / 2;
     }
 
     // The point lights from now on (the first four).
@@ -338,7 +383,9 @@ pub class Renderer {
                                 position: v.position,
                                 normal: v.normal,
                                 uv: v.uv,
-                                joints: [f.joints[0] as f32, f.joints[1] as f32, f.joints[2] as f32, f.joints[3] as f32],
+                                joints: [
+                                    f.joints[0] as f32, f.joints[1] as f32, f.joints[2] as f32, f.joints[3] as f32,
+                                ],
                                 weights: f.weights
                             };
                         }
@@ -435,8 +482,19 @@ pub class Renderer {
             return;
         }
         // its bounds follow its vertices: the camera leaves out what it cannot see
-        up.meshes.set(mesh, GpuMesh{ vertices: g.vertices, indices: g.indices, count: g.count, material: g.material,
-                bounds: model.bounds_of(vertices), skinned: g.skinned, morphs: g.morphs, targets: g.targets });
+        up.meshes.set(
+            mesh,
+            GpuMesh{
+                vertices: g.vertices,
+                indices: g.indices,
+                count: g.count,
+                material: g.material,
+                bounds: model.bounds_of(vertices),
+                skinned: g.skinned,
+                morphs: g.morphs,
+                targets: g.targets
+            }
+        );
         if (!g.skinned) {
             device.upload(g.vertices, vertices);
             return;
@@ -528,8 +586,13 @@ pub class Renderer {
                     }
                     // a skinned mesh: placed by the item alone, its joints carry the rest; it may be
                     // anywhere its joints take it, so it is not left out
-                    Draw d = Draw{ mesh: mesh, owner: up, world: mesh.skinned ? it.transform : worlds[n], palette: it.palette,
-                            morph: morph_of(mesh, up.data.meshes[m], m, it.morphs) };
+                    Draw d = Draw{
+                        mesh: mesh,
+                        owner: up,
+                        world: mesh.skinned ? it.transform : worlds[n],
+                        palette: it.palette,
+                        morph: morph_of(mesh, up.data.meshes[m], m, it.morphs)
+                    };
                     casters.push(d);
                     if (mesh.skinned || frustum.sees_box(mesh.bounds.transformed(worlds[n]))) {
                         seen.push(d);
@@ -564,6 +627,34 @@ pub class Renderer {
                 }
             }
             pass.end();
+        }
+
+        // the vertices of the lines, before the pass (an upload cannot happen inside one)
+        ui32 line_count = line_vertices.len() as ui32;
+        if (line_count > 0) {
+            if (line_count > line_capacity) {
+                match (line_buffer) {
+                    some(b) => {
+                        device.release_buffer(b);
+                    },
+                    none => { },
+                }
+                ui32 room = max(line_count, line_capacity * 2);
+                line_buffer = match (device.buffer(gpu.Usage.Vertex, room * size_of(LineVertex) as ui32)) {
+                    ok(b) => some(b),
+                    err(e) => none,
+                };
+                line_capacity = match (line_buffer) {
+                    some(b) => room,
+                    none => 0,
+                };
+            }
+            match (line_buffer) {
+                some(b) => {
+                    frame.upload(b, line_vertices.items());
+                },
+                none => { },
+            }
         }
 
         // the scene
@@ -647,6 +738,20 @@ pub class Renderer {
             pass.indices(d.mesh.indices, gpu.IndexSize.U32);
             pass.draw_indexed(d.mesh.count, 1);
         }
+        // the lines, over what is drawn but behind what stands in front of them
+        match (line_buffer) {
+            some(b) => {
+                if (line_count > 0 && line_count <= line_capacity) {
+                    pass.bind(lines);
+                    mut LinesUniform u = LinesUniform{ view_projection: view_projection };
+                    pass.vertex_uniform(0, &u);
+                    pass.vertices(b);
+                    pass.draw(line_count, 1);
+                }
+            },
+            none => { },
+        }
+        line_vertices.clear();
         pass.end();
         last = Stats{ drawn: seen.len(), culled: culled };
     }
@@ -654,7 +759,11 @@ pub class Renderer {
     // The morph targets of a draw of `mesh` (`data` on the processor, the mesh `index` of its model):
     // the weights of the item for it, else its own; the 8 largest that are not 0.
     MorphUniform morph_of(GpuMesh mesh, model.Mesh data, usize index, Morphed[]? given) {
-        mut MorphUniform u = MorphUniform{ weights: [0.0; 8], targets: [0; 8], info: [0, data.vertices.len as ui32, 0, 0] };
+        mut MorphUniform u = MorphUniform{
+            weights: [0.0; 8],
+            targets: [0; 8],
+            info: [0, data.vertices.len as ui32, 0, 0]
+        };
         if (mesh.targets == 0) {
             return u;
         }
@@ -710,6 +819,14 @@ pub class Renderer {
         device.release_buffer(no_morphs);
         device.release_sampler(shadow_sampler);
         device.release_sampler(albedo_sampler);
+        device.release_pipeline(lines);
+        match (line_buffer) {
+            some(b) => {
+                device.release_buffer(b);
+            },
+            none => { },
+        }
+        line_buffer = none;
     }
 }
 
@@ -806,8 +923,15 @@ pub Renderer*!gpu.GpuError create(keeps Arena* arena, keeps gpu.Device* device, 
         gpu.Attribute{ location: 3, format: gpu.Format.Float4, offset: offset_of(SkinnedVertex, joints) as ui32 },
         gpu.Attribute{ location: 4, format: gpu.Format.Float4, offset: offset_of(SkinnedVertex, weights) as ui32 },
     ];
-    gpu.Layout skinned_layout = gpu.Layout{ stride: size_of(SkinnedVertex) as ui32, attributes: skinned_attributes[0..5] };
-    gpu.Pipeline lit_skinned = try device.pipeline(gpu.PipelineDesc{ vertex: skinned_vs, fragment: lit_fs, layout: skinned_layout });
+    gpu.Layout skinned_layout = gpu.Layout{
+        stride: size_of(SkinnedVertex) as ui32,
+        attributes: skinned_attributes[0..5]
+    };
+    gpu.Pipeline lit_skinned = try device.pipeline(gpu.PipelineDesc{
+        vertex: skinned_vs,
+        fragment: lit_fs,
+        layout: skinned_layout
+    });
     gpu.Pipeline shadow_skinned = try device.pipeline(gpu.PipelineDesc{
         vertex: skinned_shadow_vs,
         fragment: shadow_fs,
@@ -821,6 +945,34 @@ pub Renderer*!gpu.GpuError create(keeps Arena* arena, keeps gpu.Device* device, 
     device.release_shader(shadow_fs);
     device.release_shader(skinned_vs);
     device.release_shader(skinned_shadow_vs);
+    gpu.Shader lines_vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 6),
+        entry: entry,
+        uniform_buffers: 1
+    });
+    gpu.Shader lines_fs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Fragment,
+        format: format,
+        code: code_of(&scratch, format, 7),
+        entry: entry
+    });
+    mut gpu.Attribute[2] line_attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(LineVertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float4, offset: offset_of(LineVertex, color) as ui32 },
+    ];
+    gpu.Pipeline lines = try device.pipeline(gpu.PipelineDesc{
+        vertex: lines_vs,
+        fragment: lines_fs,
+        layout: gpu.Layout{ stride: size_of(LineVertex) as ui32, attributes: line_attributes[0..2] },
+        depth_write: false,
+        cull: gpu.Cull.Off,
+        blend: gpu.Blend.Alpha,
+        primitive: gpu.Primitive.Lines
+    });
+    device.release_shader(lines_vs);
+    device.release_shader(lines_fs);
     gpu.Texture shadow_map = try device.depth_target(options.shadow_size, options.shadow_size);
     gpu.Sampler shadow_sampler = try device.sampler(gpu.SamplerDesc{
         filter: gpu.Filter.Linear,
@@ -834,8 +986,44 @@ pub Renderer*!gpu.GpuError create(keeps Arena* arena, keeps gpu.Device* device, 
     gpu.Texture white = try device.texture_of(one, false);
     mut f32[4] nothing = [0.0; 4];
     gpu.Buffer no_morphs = try device.buffer_of(gpu.Usage.Storage, nothing[0..4]);
-    return ok(arena.new(Renderer, arena, device, lit, shadow, lit_skinned, shadow_skinned, shadow_map, shadow_sampler,
-            albedo_sampler, white, no_morphs));
+    return ok(arena.new(
+        Renderer,
+        arena,
+        device,
+        lit,
+        shadow,
+        lit_skinned,
+        shadow_skinned,
+        shadow_map,
+        shadow_sampler,
+        albedo_sampler,
+        white,
+        no_morphs,
+        lines
+    ));
+}
+
+// The grid of the ground (y = 0) for an editor, as lines of `r` in the next frame: a line every
+// `step` meters out to `half` meters around (`cx`, `cz`) snapped to the grid, fading with the
+// distance; the axes x (red) and z (blue) brighter. Hidden by what stands on it.
+pub void grid(Renderer* r, f32 cx, f32 cz, f32 half, f32 step) {
+    i32 n = (half / step) as i32;
+    f32 ox = math.floor((cx / step) as f64) as f32 * step;
+    f32 oz = math.floor((cz / step) as f64) as f32 * step;
+    for (i32 i in -n..n + 1) {
+        f32 x = ox + i as f32 * step;
+        f32 z = oz + i as f32 * step;
+        f32 fade = 1.0 - abs(i as f32) / (n as f32 + 1.0);
+        f32[4] faint = [0.55, 0.57, 0.62, 0.45 * fade];
+        if (abs(x) > step * 0.001) {
+            r.line(linear.vec3(x, 0.0, oz - half), linear.vec3(x, 0.0, oz + half), faint);
+        }
+        if (abs(z) > step * 0.001) {
+            r.line(linear.vec3(ox - half, 0.0, z), linear.vec3(ox + half, 0.0, z), faint);
+        }
+    }
+    r.line(linear.vec3(ox - half, 0.0, 0.0), linear.vec3(ox + half, 0.0, 0.0), [0.85, 0.25, 0.25, 0.9]);
+    r.line(linear.vec3(0.0, 0.0, oz - half), linear.vec3(0.0, 0.0, oz + half), [0.25, 0.45, 0.9, 0.9]);
 }
 
 // A cube of side 2 around the origin, its faces with their normals and texture coordinates: a

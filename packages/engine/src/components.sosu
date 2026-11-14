@@ -1,0 +1,931 @@
+// engine.components: the common components of a game, plain values in the tables of a
+// `scene.World`, each described field by field (`engine.describe`) by a class that is also its
+// `scene.Codec`: what an inspector shows and changes, and what a scene file holds.
+//
+// - `Mesh`: a model of the project drawn where its entity is.
+// - `Light`: the sun (its direction, the forward of its entity: -z) or a point light.
+// - `View`: a camera, looking along the forward of its entity.
+// - `Body`: a rigid body of `physics` and its shape.
+// - `Sound`: a sound of the project played where its entity is (`audio.spatial`).
+// - `Emitter`: particles born where its entity is (`particles`).
+// - `Animator`: a clip of the model of its `Mesh`, played (`anim`).
+//
+// `Components` holds the tables of a world and their descriptions, and saves and reads them all.
+import std.json;
+import std.text;
+import math.linear;
+import scene.scene;
+import scene.save;
+import engine.describe;
+
+// ---- Mesh ----
+
+pub struct Mesh {
+    pub mut str model = "";  // its file: glTF, OBJ or FBX
+    pub mut bool shadows = true;
+    pub mut bool visible = true;
+}
+
+pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
+    void init() { }
+
+    override str name() {
+        return "mesh";
+    }
+
+    override Mesh fresh() {
+        return Mesh{ };
+    }
+
+    override usize count() {
+        return 3;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.asset("model", "Model");
+        }
+        if (i == 1) {
+            return describe.flag("shadows", "Shadows");
+        }
+        return describe.flag("visible", "Visible");
+    }
+
+    override describe.Value get(Mesh* m, usize i) {
+        if (i == 0) {
+            return describe.Value.Text(m.model);
+        }
+        if (i == 1) {
+            return describe.Value.Flag(m.shadows);
+        }
+        return describe.Value.Flag(m.visible);
+    }
+
+    override void set(Mesh* m, usize i, describe.Value v) {
+        if (i == 0) {
+            m.model = describe.text_of(v, m.model);
+        } else if (i == 1) {
+            m.shadows = describe.flag_of(v, m.shadows);
+        } else {
+            m.visible = describe.flag_of(v, m.visible);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Mesh* value) {
+        describe.write_object(out, self as describe.Describe<Mesh>*, value);
+    }
+
+    override Mesh? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Mesh>*, v);
+    }
+}
+
+// ---- Light ----
+
+pub enum LightKind {
+    Sun,    // parallel, from far away: along the forward of its entity
+    Point,  // from where its entity is, fading to nothing at `range`
+}
+
+pub struct Light {
+    pub mut LightKind kind = LightKind.Point;
+    pub mut linear.Vec3 color = linear.Vec3{ x: 1.0, y: 1.0, z: 1.0 };
+    pub mut f32 intensity = 10.0;
+    pub mut f32 range = 10.0;  // a point light: meters
+    pub mut bool shadows = true;  // the sun: whether it casts them
+}
+
+pub class LightFields : describe.Describe<Light>, save.Codec<Light> {
+    str[] kinds;
+
+    void init(keeps Arena* arena) {
+        mut str[] k = arena.alloc_slice(str, 2);
+        k[0] = "sun";
+        k[1] = "point";
+        kinds = k;
+    }
+
+    override str name() {
+        return "light";
+    }
+
+    override Light fresh() {
+        return Light{ };
+    }
+
+    override usize count() {
+        return 5;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.choice("kind", "Kind", kinds);
+        }
+        if (i == 1) {
+            return describe.color("color", "Color");
+        }
+        if (i == 2) {
+            return describe.number("intensity", "Intensity", 0.0, 1000.0);
+        }
+        if (i == 3) {
+            return describe.number("range", "Range", 0.0, 10000.0);
+        }
+        return describe.flag("shadows", "Shadows");
+    }
+
+    override describe.Value get(Light* l, usize i) {
+        if (i == 0) {
+            return describe.Value.Choice(match (l.kind) {
+                Sun => 0,
+                Point => 1,
+            });
+        }
+        if (i == 1) {
+            return describe.Value.Vector(l.color);
+        }
+        if (i == 2) {
+            return describe.Value.Number(l.intensity);
+        }
+        if (i == 3) {
+            return describe.Value.Number(l.range);
+        }
+        return describe.Value.Flag(l.shadows);
+    }
+
+    override void set(Light* l, usize i, describe.Value v) {
+        if (i == 0) {
+            l.kind = describe.choice_of(v, 1) == 0 ? LightKind.Sun : LightKind.Point;
+        } else if (i == 1) {
+            l.color = describe.vector_of(v, l.color);
+        } else if (i == 2) {
+            l.intensity = describe.number_of(v, l.intensity);
+        } else if (i == 3) {
+            l.range = describe.number_of(v, l.range);
+        } else {
+            l.shadows = describe.flag_of(v, l.shadows);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Light* value) {
+        describe.write_object(out, self as describe.Describe<Light>*, value);
+    }
+
+    override Light? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Light>*, v);
+    }
+}
+
+// ---- View ----
+
+pub struct View {
+    pub mut f32 fov = 60.0;  // degrees, from the bottom to the top of the view
+    pub mut f32 near = 0.1;
+    pub mut f32 far = 200.0;
+    pub mut bool active = true;  // the view the scene is seen through: the first active one
+}
+
+pub class ViewFields : describe.Describe<View>, save.Codec<View> {
+    void init() { }
+
+    override str name() {
+        return "view";
+    }
+
+    override View fresh() {
+        return View{ };
+    }
+
+    override usize count() {
+        return 4;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.number("fov", "Field of view", 1.0, 179.0);
+        }
+        if (i == 1) {
+            return describe.number("near", "Near", 0.001, 100.0);
+        }
+        if (i == 2) {
+            return describe.number("far", "Far", 0.01, 100000.0);
+        }
+        return describe.flag("active", "Active");
+    }
+
+    override describe.Value get(View* c, usize i) {
+        if (i == 0) {
+            return describe.Value.Number(c.fov);
+        }
+        if (i == 1) {
+            return describe.Value.Number(c.near);
+        }
+        if (i == 2) {
+            return describe.Value.Number(c.far);
+        }
+        return describe.Value.Flag(c.active);
+    }
+
+    override void set(View* c, usize i, describe.Value v) {
+        if (i == 0) {
+            c.fov = describe.number_of(v, c.fov);
+        } else if (i == 1) {
+            c.near = describe.number_of(v, c.near);
+        } else if (i == 2) {
+            c.far = describe.number_of(v, c.far);
+        } else {
+            c.active = describe.flag_of(v, c.active);
+        }
+    }
+
+    override void write(text.TextBuilder* out, View* value) {
+        describe.write_object(out, self as describe.Describe<View>*, value);
+    }
+
+    override View? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<View>*, v);
+    }
+}
+
+// ---- Body ----
+
+pub enum BodyKind {
+    Static,     // never moves: floors, walls
+    Dynamic,    // moved by forces and contacts: its entity follows it
+    Kinematic,  // moved by its entity: it pushes the dynamic bodies
+}
+
+pub enum ShapeKind {
+    Box,       // `size`: its half extents
+    Sphere,    // `size.x`: its radius
+    Capsule,   // `size.x`: its radius, `size.y`: the half height of its cylinder
+    Cylinder,  // `size.x`: its radius, `size.y`: its half height
+}
+
+pub struct Body {
+    pub mut BodyKind kind = BodyKind.Dynamic;
+    pub mut ShapeKind shape = ShapeKind.Box;
+    pub mut linear.Vec3 size = linear.Vec3{ x: 0.5, y: 0.5, z: 0.5 };
+    pub mut f32 mass = 0.0;  // kg; 0: from the shape
+    pub mut f32 friction = 0.2;
+    pub mut f32 restitution = 0.0;
+    pub mut f32 damping = 0.05;
+    pub mut f32 gravity_scale = 1.0;
+    pub mut i64 layers = 1;
+    pub mut i64 mask = 4294967295;
+    pub mut bool sensor = false;
+}
+
+pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
+    str[] kinds;
+    str[] shapes;
+
+    void init(keeps Arena* arena) {
+        mut str[] k = arena.alloc_slice(str, 3);
+        k[0] = "static";
+        k[1] = "dynamic";
+        k[2] = "kinematic";
+        kinds = k;
+        mut str[] s = arena.alloc_slice(str, 4);
+        s[0] = "box";
+        s[1] = "sphere";
+        s[2] = "capsule";
+        s[3] = "cylinder";
+        shapes = s;
+    }
+
+    override str name() {
+        return "body";
+    }
+
+    override Body fresh() {
+        return Body{ };
+    }
+
+    override usize count() {
+        return 11;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.choice("kind", "Kind", kinds);
+        }
+        if (i == 1) {
+            return describe.choice("shape", "Shape", shapes);
+        }
+        if (i == 2) {
+            return describe.vector("size", "Size");
+        }
+        if (i == 3) {
+            return describe.number("mass", "Mass", 0.0, 1000000.0);
+        }
+        if (i == 4) {
+            return describe.number("friction", "Friction", 0.0, 10.0);
+        }
+        if (i == 5) {
+            return describe.number("restitution", "Bounce", 0.0, 1.0);
+        }
+        if (i == 6) {
+            return describe.number("damping", "Damping", 0.0, 100.0);
+        }
+        if (i == 7) {
+            return describe.number("gravity_scale", "Gravity", -100.0, 100.0);
+        }
+        if (i == 8) {
+            return describe.whole("layers", "Layers", 0.0, 4294967295.0);
+        }
+        if (i == 9) {
+            return describe.whole("mask", "Mask", 0.0, 4294967295.0);
+        }
+        return describe.flag("sensor", "Sensor");
+    }
+
+    override describe.Value get(Body* b, usize i) {
+        if (i == 0) {
+            return describe.Value.Choice(match (b.kind) {
+                Static => 0,
+                Dynamic => 1,
+                Kinematic => 2,
+            });
+        }
+        if (i == 1) {
+            return describe.Value.Choice(match (b.shape) {
+                Box => 0,
+                Sphere => 1,
+                Capsule => 2,
+                Cylinder => 3,
+            });
+        }
+        if (i == 2) {
+            return describe.Value.Vector(b.size);
+        }
+        if (i == 3) {
+            return describe.Value.Number(b.mass);
+        }
+        if (i == 4) {
+            return describe.Value.Number(b.friction);
+        }
+        if (i == 5) {
+            return describe.Value.Number(b.restitution);
+        }
+        if (i == 6) {
+            return describe.Value.Number(b.damping);
+        }
+        if (i == 7) {
+            return describe.Value.Number(b.gravity_scale);
+        }
+        if (i == 8) {
+            return describe.Value.Whole(b.layers);
+        }
+        if (i == 9) {
+            return describe.Value.Whole(b.mask);
+        }
+        return describe.Value.Flag(b.sensor);
+    }
+
+    override void set(Body* b, usize i, describe.Value v) {
+        if (i == 0) {
+            usize k = describe.choice_of(v, 1);
+            b.kind = k == 0 ? BodyKind.Static : k == 2 ? BodyKind.Kinematic : BodyKind.Dynamic;
+        } else if (i == 1) {
+            usize s = describe.choice_of(v, 0);
+            b.shape = s == 1 ? ShapeKind.Sphere : s == 2 ? ShapeKind.Capsule : s == 3 ? ShapeKind.Cylinder : ShapeKind.Box;
+        } else if (i == 2) {
+            b.size = describe.vector_of(v, b.size);
+        } else if (i == 3) {
+            b.mass = describe.number_of(v, b.mass);
+        } else if (i == 4) {
+            b.friction = describe.number_of(v, b.friction);
+        } else if (i == 5) {
+            b.restitution = describe.number_of(v, b.restitution);
+        } else if (i == 6) {
+            b.damping = describe.number_of(v, b.damping);
+        } else if (i == 7) {
+            b.gravity_scale = describe.number_of(v, b.gravity_scale);
+        } else if (i == 8) {
+            b.layers = describe.whole_of(v, b.layers);
+        } else if (i == 9) {
+            b.mask = describe.whole_of(v, b.mask);
+        } else {
+            b.sensor = describe.flag_of(v, b.sensor);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Body* value) {
+        describe.write_object(out, self as describe.Describe<Body>*, value);
+    }
+
+    override Body? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Body>*, v);
+    }
+}
+
+// ---- Sound ----
+
+pub struct Sound {
+    pub mut str sound = "";  // its file: WAV, Ogg Vorbis, MP3 or FLAC
+    pub mut f32 volume = 1.0;
+    pub mut bool looping = false;
+    pub mut bool autoplay = true;  // plays when the scene starts
+    pub mut f32 near = 1.0;  // meters: full volume within
+    pub mut f32 far = 50.0;  // meters: silent beyond
+    pub mut f32 reverb = 0.0;  // its own share sent to the reverberation
+}
+
+pub class SoundFields : describe.Describe<Sound>, save.Codec<Sound> {
+    void init() { }
+
+    override str name() {
+        return "sound";
+    }
+
+    override Sound fresh() {
+        return Sound{ };
+    }
+
+    override usize count() {
+        return 7;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.asset("sound", "Sound");
+        }
+        if (i == 1) {
+            return describe.number("volume", "Volume", 0.0, 4.0);
+        }
+        if (i == 2) {
+            return describe.flag("looping", "Loops");
+        }
+        if (i == 3) {
+            return describe.flag("autoplay", "Autoplay");
+        }
+        if (i == 4) {
+            return describe.number("near", "Near", 0.0, 10000.0);
+        }
+        if (i == 5) {
+            return describe.number("far", "Far", 0.0, 10000.0);
+        }
+        return describe.number("reverb", "Reverb", 0.0, 1.0);
+    }
+
+    override describe.Value get(Sound* s, usize i) {
+        if (i == 0) {
+            return describe.Value.Text(s.sound);
+        }
+        if (i == 1) {
+            return describe.Value.Number(s.volume);
+        }
+        if (i == 2) {
+            return describe.Value.Flag(s.looping);
+        }
+        if (i == 3) {
+            return describe.Value.Flag(s.autoplay);
+        }
+        if (i == 4) {
+            return describe.Value.Number(s.near);
+        }
+        if (i == 5) {
+            return describe.Value.Number(s.far);
+        }
+        return describe.Value.Number(s.reverb);
+    }
+
+    override void set(Sound* s, usize i, describe.Value v) {
+        if (i == 0) {
+            s.sound = describe.text_of(v, s.sound);
+        } else if (i == 1) {
+            s.volume = describe.number_of(v, s.volume);
+        } else if (i == 2) {
+            s.looping = describe.flag_of(v, s.looping);
+        } else if (i == 3) {
+            s.autoplay = describe.flag_of(v, s.autoplay);
+        } else if (i == 4) {
+            s.near = describe.number_of(v, s.near);
+        } else if (i == 5) {
+            s.far = describe.number_of(v, s.far);
+        } else {
+            s.reverb = describe.number_of(v, s.reverb);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Sound* value) {
+        describe.write_object(out, self as describe.Describe<Sound>*, value);
+    }
+
+    override Sound? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Sound>*, v);
+    }
+}
+
+// ---- Emitter ----
+
+pub enum EmitShape {
+    Point,
+    Sphere,  // `extent.x`: its radius
+    Box,     // `extent`: its half sides
+}
+
+pub struct Emitter {
+    pub mut f32 rate = 10.0;  // particles per second
+    pub mut bool looping = true;
+    pub mut EmitShape shape = EmitShape.Point;
+    pub mut linear.Vec3 extent = linear.Vec3{ x: 0.5, y: 0.5, z: 0.5 };
+    pub mut f32 life = 1.0;    // seconds
+    pub mut f32 speed = 1.0;   // meters per second, at birth
+    pub mut f32 spread = 0.0;  // of the speed and the life: 0.2, each from 80 % to 120 %
+    pub mut f32 size = 0.1;    // meters
+    pub mut f32 gravity = 0.0;  // times 9.81 m/s², down
+    pub mut f32 drag = 0.0;
+    pub mut linear.Vec3 color = linear.Vec3{ x: 1.0, y: 1.0, z: 1.0 };
+    pub mut f32 alpha = 1.0;
+    pub mut bool additive = false;  // light: fire, sparks
+}
+
+pub class EmitterFields : describe.Describe<Emitter>, save.Codec<Emitter> {
+    str[] shapes;
+
+    void init(keeps Arena* arena) {
+        mut str[] s = arena.alloc_slice(str, 3);
+        s[0] = "point";
+        s[1] = "sphere";
+        s[2] = "box";
+        shapes = s;
+    }
+
+    override str name() {
+        return "emitter";
+    }
+
+    override Emitter fresh() {
+        return Emitter{ };
+    }
+
+    override usize count() {
+        return 13;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.number("rate", "Rate", 0.0, 100000.0);
+        }
+        if (i == 1) {
+            return describe.flag("looping", "Loops");
+        }
+        if (i == 2) {
+            return describe.choice("shape", "Shape", shapes);
+        }
+        if (i == 3) {
+            return describe.vector("extent", "Extent");
+        }
+        if (i == 4) {
+            return describe.number("life", "Life", 0.0, 3600.0);
+        }
+        if (i == 5) {
+            return describe.number("speed", "Speed", 0.0, 10000.0);
+        }
+        if (i == 6) {
+            return describe.number("spread", "Spread", 0.0, 1.0);
+        }
+        if (i == 7) {
+            return describe.number("size", "Size", 0.0, 1000.0);
+        }
+        if (i == 8) {
+            return describe.number("gravity", "Gravity", -100.0, 100.0);
+        }
+        if (i == 9) {
+            return describe.number("drag", "Drag", 0.0, 100.0);
+        }
+        if (i == 10) {
+            return describe.color("color", "Color");
+        }
+        if (i == 11) {
+            return describe.number("alpha", "Opacity", 0.0, 1.0);
+        }
+        return describe.flag("additive", "Additive");
+    }
+
+    override describe.Value get(Emitter* e, usize i) {
+        if (i == 0) {
+            return describe.Value.Number(e.rate);
+        }
+        if (i == 1) {
+            return describe.Value.Flag(e.looping);
+        }
+        if (i == 2) {
+            return describe.Value.Choice(match (e.shape) {
+                Point => 0,
+                Sphere => 1,
+                Box => 2,
+            });
+        }
+        if (i == 3) {
+            return describe.Value.Vector(e.extent);
+        }
+        if (i == 4) {
+            return describe.Value.Number(e.life);
+        }
+        if (i == 5) {
+            return describe.Value.Number(e.speed);
+        }
+        if (i == 6) {
+            return describe.Value.Number(e.spread);
+        }
+        if (i == 7) {
+            return describe.Value.Number(e.size);
+        }
+        if (i == 8) {
+            return describe.Value.Number(e.gravity);
+        }
+        if (i == 9) {
+            return describe.Value.Number(e.drag);
+        }
+        if (i == 10) {
+            return describe.Value.Vector(e.color);
+        }
+        if (i == 11) {
+            return describe.Value.Number(e.alpha);
+        }
+        return describe.Value.Flag(e.additive);
+    }
+
+    override void set(Emitter* e, usize i, describe.Value v) {
+        if (i == 0) {
+            e.rate = describe.number_of(v, e.rate);
+        } else if (i == 1) {
+            e.looping = describe.flag_of(v, e.looping);
+        } else if (i == 2) {
+            usize s = describe.choice_of(v, 0);
+            e.shape = s == 1 ? EmitShape.Sphere : s == 2 ? EmitShape.Box : EmitShape.Point;
+        } else if (i == 3) {
+            e.extent = describe.vector_of(v, e.extent);
+        } else if (i == 4) {
+            e.life = describe.number_of(v, e.life);
+        } else if (i == 5) {
+            e.speed = describe.number_of(v, e.speed);
+        } else if (i == 6) {
+            e.spread = describe.number_of(v, e.spread);
+        } else if (i == 7) {
+            e.size = describe.number_of(v, e.size);
+        } else if (i == 8) {
+            e.gravity = describe.number_of(v, e.gravity);
+        } else if (i == 9) {
+            e.drag = describe.number_of(v, e.drag);
+        } else if (i == 10) {
+            e.color = describe.vector_of(v, e.color);
+        } else if (i == 11) {
+            e.alpha = describe.number_of(v, e.alpha);
+        } else {
+            e.additive = describe.flag_of(v, e.additive);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Emitter* value) {
+        describe.write_object(out, self as describe.Describe<Emitter>*, value);
+    }
+
+    override Emitter? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Emitter>*, v);
+    }
+}
+
+// ---- Animator ----
+
+pub struct Animator {
+    pub mut str clip = "";  // the name of an animation of the model of the `Mesh` of its entity
+    pub mut f32 speed = 1.0;
+    pub mut bool looping = true;
+    pub mut bool playing = true;
+}
+
+pub class AnimatorFields : describe.Describe<Animator>, save.Codec<Animator> {
+    void init() { }
+
+    override str name() {
+        return "animator";
+    }
+
+    override Animator fresh() {
+        return Animator{ };
+    }
+
+    override usize count() {
+        return 4;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.text_field("clip", "Clip");
+        }
+        if (i == 1) {
+            return describe.number("speed", "Speed", -10.0, 10.0);
+        }
+        if (i == 2) {
+            return describe.flag("looping", "Loops");
+        }
+        return describe.flag("playing", "Playing");
+    }
+
+    override describe.Value get(Animator* a, usize i) {
+        if (i == 0) {
+            return describe.Value.Text(a.clip);
+        }
+        if (i == 1) {
+            return describe.Value.Number(a.speed);
+        }
+        if (i == 2) {
+            return describe.Value.Flag(a.looping);
+        }
+        return describe.Value.Flag(a.playing);
+    }
+
+    override void set(Animator* a, usize i, describe.Value v) {
+        if (i == 0) {
+            a.clip = describe.text_of(v, a.clip);
+        } else if (i == 1) {
+            a.speed = describe.number_of(v, a.speed);
+        } else if (i == 2) {
+            a.looping = describe.flag_of(v, a.looping);
+        } else {
+            a.playing = describe.flag_of(v, a.playing);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Animator* value) {
+        describe.write_object(out, self as describe.Describe<Animator>*, value);
+    }
+
+    override Animator? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Animator>*, v);
+    }
+}
+
+// ---- All of them ----
+
+// The tables of the common components of a world, and their descriptions.
+pub class Components {
+    pub scene.World* world;
+    pub scene.Table<Mesh>* meshes;
+    pub scene.Table<Light>* lights;
+    pub scene.Table<View>* views;
+    pub scene.Table<Body>* bodies;
+    pub scene.Table<Sound>* sounds;
+    pub scene.Table<Emitter>* emitters;
+    pub scene.Table<Animator>* animators;
+    pub MeshFields* mesh_fields;
+    pub LightFields* light_fields;
+    pub ViewFields* view_fields;
+    pub BodyFields* body_fields;
+    pub SoundFields* sound_fields;
+    pub EmitterFields* emitter_fields;
+    pub AnimatorFields* animator_fields;
+
+    void init(keeps Arena* arena, keeps scene.World* world) {
+        self.world = world;
+        meshes = world.table<Mesh>();
+        lights = world.table<Light>();
+        views = world.table<View>();
+        bodies = world.table<Body>();
+        sounds = world.table<Sound>();
+        emitters = world.table<Emitter>();
+        animators = world.table<Animator>();
+        mesh_fields = arena.new(MeshFields);
+        light_fields = arena.new(LightFields, arena);
+        view_fields = arena.new(ViewFields);
+        body_fields = arena.new(BodyFields, arena);
+        sound_fields = arena.new(SoundFields);
+        emitter_fields = arena.new(EmitterFields, arena);
+        animator_fields = arena.new(AnimatorFields);
+    }
+
+    // Each table of components added to a writer of the world.
+    pub void add_to(save.Writer* out) {
+        out.add(meshes, mesh_fields as save.Codec<Mesh>*);
+        out.add(lights, light_fields as save.Codec<Light>*);
+        out.add(views, view_fields as save.Codec<View>*);
+        out.add(bodies, body_fields as save.Codec<Body>*);
+        out.add(sounds, sound_fields as save.Codec<Sound>*);
+        out.add(emitters, emitter_fields as save.Codec<Emitter>*);
+        out.add(animators, animator_fields as save.Codec<Animator>*);
+    }
+
+    // Each table of components read from a reader of the world; false when one is damaged.
+    pub bool read_from(save.Reader* r) {
+        mut bool good = true;
+        good = r.add(meshes, mesh_fields as save.Codec<Mesh>*) && good;
+        good = r.add(lights, light_fields as save.Codec<Light>*) && good;
+        good = r.add(views, view_fields as save.Codec<View>*) && good;
+        good = r.add(bodies, body_fields as save.Codec<Body>*) && good;
+        good = r.add(sounds, sound_fields as save.Codec<Sound>*) && good;
+        good = r.add(emitters, emitter_fields as save.Codec<Emitter>*) && good;
+        good = r.add(animators, animator_fields as save.Codec<Animator>*) && good;
+        return good;
+    }
+}
+
+// The common components of `world`, their tables made in it.
+pub Components* components(keeps Arena* arena, keeps scene.World* world) {
+    return arena.new(Components, arena, world);
+}
+
+// The whole world as a scene file, with its common components.
+pub str save_scene(keeps Arena* arena, keeps Components* c) {
+    save.Writer* out = save.writer(arena, c.world);
+    c.add_to(out);
+    return out.written();
+}
+
+// The entities of the scene file `source` spawned into the world of `c`, with their common
+// components.
+pub save.Reader*!save.SceneError load_scene(keeps Arena* arena, keeps Components* c, str source) {
+    save.Reader* r = try save.read(arena, c.world, source, none);
+    if (!c.read_from(r)) {
+        return err(save.SceneError.Damaged("a component of the scene is damaged"));
+    }
+    return ok(r);
+}
+
+test "a scene of every common component: saved, read back the same" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    Components* c = components(&arena, w);
+    mut linear.Transform up = linear.transform();
+    up.position = linear.vec3(0.0, 5.0, 0.0);
+    scene.Entity crate = w.spawn_at("crate", up, none);
+    c.meshes.set(crate, Mesh{ model: "models/crate.glb" });
+    c.bodies.set(crate, Body{ mass: 12.5, restitution: 0.4, shape: ShapeKind.Box, size: linear.vec3(0.4, 0.4, 0.4) });
+    c.sounds.set(crate, Sound{ sound: "sounds/creak.ogg", looping: true, far: 30.0 });
+    scene.Entity sun = w.spawn_at("sun", linear.transform(), none);
+    c.lights.set(sun, Light{ kind: LightKind.Sun, intensity: 3.0, color: linear.vec3(1.0, 0.95, 0.9) });
+    scene.Entity eye = w.spawn_at("camera", linear.transform(), none);
+    c.views.set(eye, View{ fov: 70.0 });
+    scene.Entity fire = w.spawn_at("fire", linear.transform(), some(crate));
+    c.emitters.set(fire, Emitter{ rate: 40.0, shape: EmitShape.Sphere, additive: true, color: linear.vec3(1.0, 0.5, 0.1) });
+    scene.Entity hero = w.spawn_at("hero", linear.transform(), none);
+    c.meshes.set(hero, Mesh{ model: "models/hero.glb" });
+    c.animators.set(hero, Animator{ clip: "walk", speed: 1.5 });
+    c.bodies.set(hero, Body{ kind: BodyKind.Kinematic, shape: ShapeKind.Capsule, size: linear.vec3(0.3, 0.6, 0.0), layers: 2 });
+    str saved = save_scene(&arena, c);
+
+    scene.World* again = scene.world(&arena);
+    Components* d = components(&arena, again);
+    save.Reader* r = match (load_scene(&arena, d, saved)) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(again.count() == 5);
+    scene.Entity[] e = r.entities();
+    Body b = match (d.bodies.get(e[0])) {
+        some(x) => *x,
+        none => Body{ },
+    };
+    assert(b.mass == 12.5 && b.restitution == 0.4 && b.size.near(linear.vec3(0.4, 0.4, 0.4), 0.0001));
+    assert(match (d.meshes.get(e[0])) {
+        some(m) => m.model == "models/crate.glb" && m.shadows,
+        none => false,
+    });
+    assert(match (d.sounds.get(e[0])) {
+        some(s) => s.sound == "sounds/creak.ogg" && s.looping && s.far == 30.0 && s.autoplay,
+        none => false,
+    });
+    assert(match (d.lights.get(e[1])) {
+        some(l) => match (l.kind) {
+            Sun => l.intensity == 3.0,
+            Point => false,
+        },
+        none => false,
+    });
+    assert(match (d.views.get(e[2])) {
+        some(v) => v.fov == 70.0 && v.active,
+        none => false,
+    });
+    assert(match (d.emitters.get(e[3])) {
+        some(x) => x.rate == 40.0 && x.additive && match (x.shape) {
+            Sphere => true,
+            _ => false,
+        },
+        none => false,
+    });
+    assert(match (d.animators.get(e[4])) {
+        some(a) => a.clip == "walk" && a.speed == 1.5 && a.looping,
+        none => false,
+    });
+    assert(match (d.bodies.get(e[4])) {
+        some(h) => h.layers == 2 && match (h.kind) {
+            Kinematic => true,
+            _ => false,
+        } && match (h.shape) {
+            Capsule => true,
+            _ => false,
+        },
+        none => false,
+    });
+    // the fire under the crate
+    assert(match (again.parent_of(e[3])) {
+        some(p) => p.same(e[0]),
+        none => false,
+    });
+}

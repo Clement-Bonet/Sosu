@@ -2355,6 +2355,9 @@ pub struct Frame {
     mut bool next_reorder = false;
     mut i32 drag_target = -1;
     mut f32 drag_line_y = 0.0;
+    mut i32 drag_place = 0;  // in a tree: 0 before the row under the mouse, 1 into it, 2 after it
+    mut canvas.Rect drag_row = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    mut i32 dropped_place = 0;
     mut bool drop_done = false;
     mut i32 dropped_from = 0;
     mut i32 dropped_to = 0;
@@ -2447,6 +2450,112 @@ pub struct Frame {
             layouts[depth].painted = painted;
             layouts[depth].look = l;
         }
+    }
+
+    // ---- For widgets written outside of this module (ui.dock, those of a program) ----
+
+    // The canvas the frame draws into.
+    pub canvas.Canvas* drawing() {
+        return surface;
+    }
+
+    // Pixels of the canvas per pixel of `ui` (the scale of the interface).
+    pub f32 ui_scale() {
+        return ui.scale > 0.0 ? ui.scale : 1.0;
+    }
+
+    pub f32 mouse_x() {
+        return ui.mouse_x;
+    }
+
+    pub f32 mouse_y() {
+        return ui.mouse_y;
+    }
+
+    // The left button: held, gone down since the last frame, gone up since.
+    pub bool mouse_down() {
+        return ui.down;
+    }
+
+    pub bool mouse_pressed() {
+        return ui.pressed;
+    }
+
+    pub bool mouse_released() {
+        return ui.released;
+    }
+
+    // Whether the mouse is over `r` and over nothing drawn above it (an open dropdown, a menu, a
+    // dialog that holds the window): what a widget answers.
+    pub bool hovering(canvas.Rect r) {
+        return over(r);
+    }
+
+    // The size of `text` in pixels at `size` pixels per em of `ui` (0: that of a label).
+    pub canvas.Rect text_size(str text, f32 size) {
+        f32 px = size > 0.0 ? size * ui_scale() : look(Text, 0).font_size;
+        return measure_px(text, px);
+    }
+
+    // `text` written from (x, y), centered in a line `box` pixels high, at the size of `text_size`.
+    pub void text_at(f32 x, f32 y, f32 box, str text, canvas.Color color, f32 size) {
+        f32 px = size > 0.0 ? size * ui_scale() : look(Text, 0).font_size;
+        write_px(x, y, box, text, color, px);
+    }
+
+    // The colors of the theme: of text, of what is chosen (its accent), of the fields (a list, a
+    // field), of buttons, of the window, of the borders.
+    pub canvas.Color text_color() {
+        return look(Text, 0).color;
+    }
+
+    pub canvas.Color accent_color() {
+        return look(Text, 0).accent;
+    }
+
+    pub canvas.Color field_color() {
+        return look(List, 0).background;
+    }
+
+    pub canvas.Color button_color() {
+        return look(Button, 0).background;
+    }
+
+    pub canvas.Color window_color() {
+        return look(Window, 0).background;
+    }
+
+    pub canvas.Color border_color() {
+        return look(List, 0).border;
+    }
+
+    // A column placed at `r` of the canvas, apart from the layout that holds it (it takes no room
+    // there), its widgets cut to `r`: a panel of a dock, a part of a window laid out by the program.
+    // `end_region()` closes it.
+    pub void region(canvas.Rect r) {
+        if (depth == 15) {
+            return;
+        }
+        depth += 1;
+        layouts[depth] = Layout{
+            x: r.x,
+            y: r.y,
+            left: r.x,
+            top: r.y,
+            right: r.x,
+            bottom: r.y,
+            room_w: r.w,
+            room_h: r.h
+        };
+        surface.push_clip(r);
+    }
+
+    pub void end_region() {
+        if (depth == 0) {
+            return;
+        }
+        surface.pop_clip();
+        depth -= 1;
     }
 
     // ---- Responsive windows (spec §10.2) ----
@@ -5959,9 +6068,19 @@ pub struct Frame {
                 ui.item_dragged = false;
             }
             if (ui.item_dragged && ui.drag_list == l.area_id && ui.mouse_y >= row.y && ui.mouse_y < row.y + row.h) {
-                bool after = ui.mouse_y >= row.y + row.h / 2.0;
-                drag_target = after ? index + 1 : index;
-                drag_line_y = after ? row.y + row.h : row.y;
+                if (l.tree) {
+                    // a tree: the upper quarter of a row drops before it, the lower quarter after
+                    // it, the middle into it (a child of it)
+                    f32 t = (ui.mouse_y - row.y) / max(row.h, 1.0);
+                    drag_place = t < 0.25 ? 0 : t >= 0.75 ? 2 : 1;
+                    drag_target = index;
+                    drag_row = row;
+                    drag_line_y = drag_place == 2 ? row.y + row.h : row.y;
+                } else {
+                    bool after = ui.mouse_y >= row.y + row.h / 2.0;
+                    drag_target = after ? index + 1 : index;
+                    drag_line_y = after ? row.y + row.h : row.y;
+                }
             }
         }
         match (l.multi) {  // several choices: Ctrl adds or removes, Shift extends from the anchor
@@ -6111,7 +6230,10 @@ pub struct Frame {
 
     // The items of the next list can be dragged to another place (spec §10.10): after `end_list()`,
     // `dropped()` says whether one was dropped, `drop_from()` where it was and `drop_to()` where it
-    // goes; the program moves it.
+    // goes; the program moves it. Before a tree (`tree`, `tree_of`), its rows: after `end_tree()`,
+    // `drop_from()` is the row dragged, `drop_to()` the row it was dropped on, and `drop_place()`
+    // where: before it, into it (a child of it), or after it; the program moves it, and refuses a
+    // row dropped into one of its own children.
     pub void reorderable() {
         next_reorder = true;
     }
@@ -6128,6 +6250,11 @@ pub struct Frame {
 
     pub i32 drop_to() {
         return dropped_to;
+    }
+
+    // In a tree: where the row was dropped, from the row `drop_to()`.
+    pub DropPlace drop_place() {
+        return dropped_place == 1 ? Into : dropped_place == 2 ? After : Before;
     }
 
     // ---- Tables (spec §10.9) ----
@@ -6881,23 +7008,35 @@ pub struct Frame {
                 ui.item_dragged = true;
             }
             if (ui.item_dragged && drag_target >= 0) {
-                surface.fill(
-                    canvas.Rect{
-                        x: done.frame.x + 4.0,
-                        y: drag_line_y - 1.0,
-                        w: done.frame.w - done.bar_w - 8.0,
-                        h: 2.0
-                    },
-                    done.look.accent
-                );
+                if (done.tree && drag_place == 1) {
+                    surface.stroke(drag_row, done.look.accent, 2.0);  // into this row
+                } else {
+                    surface.fill(
+                        canvas.Rect{
+                            x: done.frame.x + 4.0,
+                            y: drag_line_y - 1.0,
+                            w: done.frame.w - done.bar_w - 8.0,
+                            h: 2.0
+                        },
+                        done.look.accent
+                    );
+                }
             }
             if (ui.released) {
-                if (ui.item_dragged && drag_target >= 0) {
+                if (ui.item_dragged && drag_target >= 0 && done.tree) {
+                    if (drag_target != ui.drag_from) {
+                        drop_done = true;
+                        dropped_from = ui.drag_from;
+                        dropped_to = drag_target;
+                        dropped_place = drag_place;
+                    }
+                } else if (ui.item_dragged && drag_target >= 0) {
                     i32 to = drag_target > ui.drag_from ? drag_target - 1 : drag_target;
                     if (to != ui.drag_from) {
                         drop_done = true;
                         dropped_from = ui.drag_from;
                         dropped_to = to;
+                        dropped_place = 0;
                     }
                 }
                 ui.drag_list = 0;
@@ -9462,6 +9601,85 @@ test "the scale of a dense screen: the sizes of the theme and the fonts are larg
 }
 
 // A list of 5 items that can be reordered, for the test below: the move dropped, or -1.
+// Where a row of a tree was dropped, from the row it was dropped on (`Frame.drop_place`).
+pub enum DropPlace {
+    Before,
+    Into,  // a child of it
+    After,
+}
+
+// A tree of five rows (a branch "a" open with two leaves, then two leaves), its rows draggable:
+// what was dropped, as from * 100 + to * 10 + place (0 before, 1 into, 2 after), or -1.
+i32 tree_drop_frame(Ui* ui, canvas.Canvas* surface) {
+    mut i32 moved = -1;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.reorderable();
+    f.tree(200.0, 200.0, none);
+    mut bool open = true;
+    if (f.branch("a", some(&open))) {
+        f.leaf("a1");
+        f.leaf("a2");
+        f.end_branch();
+    }
+    f.leaf("b");
+    f.leaf("c");
+    f.end_tree();
+    if (f.dropped()) {
+        i32 place = match (f.drop_place()) {
+            Before => 0,
+            Into => 1,
+            After => 2,
+        };
+        moved = f.drop_from() * 100 + f.drop_to() * 10 + place;
+    }
+    f.finish();
+    return moved;
+}
+
+test "drag and drop in a tree: before a row, into it, after it" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 220, 220);
+    mut Ui ui = Ui{ };
+    // the row 4 ("c") dragged into the middle of the row 0 ("a")
+    ui.mouse_move(40.0, 4.0 * 32.0 + 16.0);
+    ui.mouse_button(true);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_move(40.0, 16.0);
+    assert(tree_drop_frame(&ui, &surface) == -1);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(tree_drop_frame(&ui, &surface) == 401);  // from 4, onto 0, into it
+    // the row 1 ("a1") dragged to the upper quarter of the row 3 ("b"): before it
+    ui.mouse_move(40.0, 1.0 * 32.0 + 16.0);
+    ui.mouse_button(true);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_move(40.0, 3.0 * 32.0 + 3.0);
+    tree_drop_frame(&ui, &surface);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(tree_drop_frame(&ui, &surface) == 130);
+    // to the lower quarter of the row 4 ("c"): after it
+    ui.mouse_move(40.0, 1.0 * 32.0 + 16.0);
+    ui.mouse_button(true);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_move(40.0, 4.0 * 32.0 + 29.0);
+    tree_drop_frame(&ui, &surface);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(tree_drop_frame(&ui, &surface) == 142);
+    // dropped on itself: nothing
+    ui.mouse_move(40.0, 3.0 * 32.0 + 16.0);
+    ui.mouse_button(true);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_move(40.0, 3.0 * 32.0 + 20.0);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_move(40.0, 3.0 * 32.0 + 12.0);
+    tree_drop_frame(&ui, &surface);
+    ui.mouse_button(false);
+    assert(tree_drop_frame(&ui, &surface) == -1);
+}
+
 i32 reorder_frame(Ui* ui, canvas.Canvas* surface) {
     mut i32 moved = -1;
     mut Frame f = begin(ui, surface, 0.0, 0.0);

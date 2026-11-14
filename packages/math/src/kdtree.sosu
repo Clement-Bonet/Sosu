@@ -1,0 +1,271 @@
+// math.kdtree: a k-d tree over points in 3D that do not move: the nearest point to a place (the
+// nearest town, cover, waypoint, light probe), the k nearest (the neighbors of a boid, the lights
+// that touch a mesh), and those within a radius. Built once, balanced: each node splits its
+// points at the median along their longest spread. For things that move, `math.octree`.
+//
+//   kdtree.KdTree* towns = kdtree.build(arena, places);
+//   usize? nearest = towns.nearest(player);
+import std.vec;
+import math.linear;
+import math.geometry;
+
+// The best found so far by a search for the nearest.
+struct Best {
+    mut usize item;
+    mut f32 d2;
+    mut bool found;
+}
+
+pub class KdTree {
+    mut linear.Vec3[] points;
+    mut usize[] order;  // the points; the node of `order[lo..hi]` holds its splitting point at the middle
+    mut ui8[] axes;     // the axis of the split at each place of `order`
+
+    void init(keeps Arena* arena, linear.Vec3[] given) {
+        points = arena.alloc_slice(linear.Vec3, given.len);
+        order = arena.alloc_slice(usize, given.len);
+        axes = arena.alloc_slice(ui8, given.len);
+        for (usize i in 0..given.len) {
+            points[i] = given[i];
+            order[i] = i;
+        }
+        make(0, given.len);
+    }
+
+    void make(usize lo, usize hi) {
+        if (hi <= lo) {
+            return;
+        }
+        mut geometry.Aabb spread = geometry.aabb(points[order[lo]], points[order[lo]]);
+        for (usize i in lo + 1..hi) {
+            spread = spread.grown(points[order[i]]);
+        }
+        linear.Vec3 size = spread.size();
+        usize axis = size.x >= size.y && size.x >= size.z ? 0 : size.y >= size.z ? 1 : 2;
+        usize middle = (lo + hi) / 2;
+        select(lo, hi, middle, axis);
+        axes[middle] = axis as ui8;
+        make(lo, middle);
+        make(middle + 1, hi);
+    }
+
+    f32 key(usize place, usize axis) {
+        return part(points[order[place]], axis);
+    }
+
+    // As `Bvh.select`: the point at `k` where a sort along `axis` would put it (Hoare, Wirth).
+    void select(usize lo, usize hi, usize k, usize axis) {
+        mut i64 l = lo as i64;
+        mut i64 r = hi as i64 - 1;
+        i64 kk = k as i64;
+        while (l < r) {
+            f32 x = key(k, axis);
+            mut i64 i = l;
+            mut i64 j = r;
+            while (i <= j) {
+                while (key(i as usize, axis) < x) {
+                    i += 1;
+                }
+                while (x < key(j as usize, axis)) {
+                    j -= 1;
+                }
+                if (i <= j) {
+                    usize kept = order[i as usize];
+                    order[i as usize] = order[j as usize];
+                    order[j as usize] = kept;
+                    i += 1;
+                    j -= 1;
+                }
+            }
+            if (j < kk) {
+                l = i;
+            }
+            if (kk < i) {
+                r = j;
+            }
+        }
+    }
+
+    pub usize count() {
+        return points.len;
+    }
+
+    // The point nearest to `p` (its index in the points given), none when there are none.
+    pub usize? nearest(linear.Vec3 p) {
+        mut Best b = Best{ item: 0, d2: 3.4e38, found: false };
+        search(0, points.len, p, &b);
+        return b.found ? some(b.item) : none;
+    }
+
+    void search(usize lo, usize hi, linear.Vec3 p, Best* b) {
+        if (hi <= lo) {
+            return;
+        }
+        usize middle = (lo + hi) / 2;
+        usize item = order[middle];
+        linear.Vec3 d = points[item].sub(p);
+        f32 d2 = d.dot(d);
+        if (d2 < b.d2) {
+            b.d2 = d2;
+            b.item = item;
+            b.found = true;
+        }
+        f32 across = part(p, axes[middle] as usize) - part(points[item], axes[middle] as usize);
+        // the side of `p` first; the other only if the best sphere crosses the split
+        if (across < 0.0) {
+            search(lo, middle, p, b);
+            if (across * across < b.d2) {
+                search(middle + 1, hi, p, b);
+            }
+        } else {
+            search(middle + 1, hi, p, b);
+            if (across * across < b.d2) {
+                search(lo, middle, p, b);
+            }
+        }
+    }
+
+    // The `k` points nearest to `p`, added to `out` from the nearest (fewer when there are fewer).
+    pub void nearest_k(linear.Vec3 p, usize k, vec.Vec<usize>* out) {
+        if (k == 0) {
+            return;
+        }
+        usize start = out.len();
+        search_k(0, points.len, p, k, start, out);
+    }
+
+    f32 d2_of(usize item, linear.Vec3 p) {
+        linear.Vec3 d = points[item].sub(p);
+        return d.dot(d);
+    }
+
+    void search_k(usize lo, usize hi, linear.Vec3 p, usize k, usize start, vec.Vec<usize>* out) {
+        if (hi <= lo) {
+            return;
+        }
+        usize middle = (lo + hi) / 2;
+        usize item = order[middle];
+        f32 d2 = d2_of(item, p);
+        usize have = out.len() - start;
+        if (have < k || d2 < d2_of(out.items()[out.len() - 1], p)) {
+            // put in its place among those found, the farthest dropped when there are k
+            mut usize at = out.len();
+            while (at > start && d2_of(out.items()[at - 1], p) > d2) {
+                at -= 1;
+            }
+            out.insert(at, item);
+            if (out.len() - start > k) {
+                out.pop();
+            }
+        }
+        f32 across = part(p, axes[middle] as usize) - part(points[item], axes[middle] as usize);
+        usize first_lo = across < 0.0 ? lo : middle + 1;
+        usize first_hi = across < 0.0 ? middle : hi;
+        usize other_lo = across < 0.0 ? middle + 1 : lo;
+        usize other_hi = across < 0.0 ? hi : middle;
+        search_k(first_lo, first_hi, p, k, start, out);
+        if (out.len() - start < k || across * across < d2_of(out.items()[out.len() - 1], p)) {
+            search_k(other_lo, other_hi, p, k, start, out);
+        }
+    }
+
+    // The points within `radius` of `p`, added to `out` in no order.
+    pub void within(linear.Vec3 p, f32 radius, vec.Vec<usize>* out) {
+        search_within(0, points.len, p, radius * radius, out);
+    }
+
+    void search_within(usize lo, usize hi, linear.Vec3 p, f32 r2, vec.Vec<usize>* out) {
+        if (hi <= lo) {
+            return;
+        }
+        usize middle = (lo + hi) / 2;
+        usize item = order[middle];
+        if (d2_of(item, p) <= r2) {
+            out.push(item);
+        }
+        f32 across = part(p, axes[middle] as usize) - part(points[item], axes[middle] as usize);
+        if (across <= 0.0 || across * across <= r2) {
+            search_within(lo, middle, p, r2, out);
+        }
+        if (across >= 0.0 || across * across <= r2) {
+            search_within(middle + 1, hi, p, r2, out);
+        }
+    }
+}
+
+f32 part(linear.Vec3 v, usize axis) {
+    return axis == 0 ? v.x : axis == 1 ? v.y : v.z;
+}
+
+// The tree over the points, the point `i` being `points[i]`.
+pub KdTree* build(keeps Arena* arena, linear.Vec3[] points) {
+    return arena.new(KdTree, arena, points);
+}
+
+test "a k-d tree: the nearest, the k nearest and those within a radius, as testing them all says" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    usize n = 700;
+    mut linear.Vec3[] pts = arena.alloc_slice(linear.Vec3, n);
+    mut ui32 h = 99;
+    for (usize i in 0..n) {
+        mut f32[3] c = [0.0, 0.0, 0.0];
+        for (usize k in 0..3) {
+            h = wrapping_add(wrapping_mul(h, 1664525), 1013904223);
+            c[k] = (h >> 8) as f32 / 16777216.0 * 100.0 - 50.0;
+        }
+        pts[i] = linear.vec3(c[0], c[1], c[2] * 0.2);  // flat along z: the longest spread varies
+    }
+    KdTree* tree = build(&arena, pts);
+    assert(tree.count() == n);
+    for (i32 q in 0..150) {
+        linear.Vec3 p = linear.vec3((q * 7 % 120) as f32 - 60.0, (q * 13 % 110) as f32 - 55.0, (q % 9) as f32 - 4.0);
+        mut usize brute = 0;
+        for (usize i in 1..n) {
+            if (pts[i].distance(p) < pts[brute].distance(p)) {
+                brute = i;
+            }
+        }
+        usize found = match (tree.nearest(p)) {
+            some(i) => i,
+            none => {
+                assert(false);
+                return;
+            },
+        };
+        assert(pts[found].distance(p) == pts[brute].distance(p));
+        // the 5 nearest: in order, and none outside nearer than the last
+        vec.Vec<usize>* five = vec.new<usize>(&arena);
+        tree.nearest_k(p, 5, five);
+        assert(five.len() == 5 && five.items()[0] == found);
+        for (usize i in 1..5) {
+            assert(pts[five.items()[i - 1]].distance(p) <= pts[five.items()[i]].distance(p));
+        }
+        f32 fifth = pts[five.items()[4]].distance(p);
+        mut usize nearer = 0;
+        for (usize i in 0..n) {
+            if (pts[i].distance(p) < fifth) {
+                nearer += 1;
+            }
+        }
+        assert(nearer <= 4);
+        // within 12: the same count as all of them
+        vec.Vec<usize>* around = vec.new<usize>(&arena);
+        tree.within(p, 12.0, around);
+        mut usize inside = 0;
+        for (usize i in 0..n) {
+            if (pts[i].distance(p) <= 12.0) {
+                inside += 1;
+            }
+        }
+        assert(around.len() == inside);
+    }
+    // more asked than there are; none at all
+    vec.Vec<usize>* all = vec.new<usize>(&arena);
+    build(&arena, pts[0..3]).nearest_k(linear.vec3(0.0, 0.0, 0.0), 10, all);
+    assert(all.len() == 3);
+    assert(match (build(&arena, pts[0..0]).nearest(linear.vec3(0.0, 0.0, 0.0))) {
+        some(_) => false,
+        none => true,
+    });
+}

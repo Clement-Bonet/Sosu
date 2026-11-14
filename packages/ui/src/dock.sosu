@@ -1,0 +1,2387 @@
+// ui.dock: panels that the user arranges, as in Visual Studio. A `Dock` holds panels, named once
+// (`add`) and placed (`place`), and the tree of their arrangement: a node is a split (two nodes
+// side by side or one above the other, a splitter between them that the mouse moves) or a group
+// of tabs (one panel shown, a tab for each).
+//
+// - A tab dragged shows the guides: a cross of five squares on the group under the mouse (into its
+//   tabs, or beside it on one of its sides) and one square on each side of the dock; released over
+//   a guide, the panel goes there, a preview showing where before.
+// - The pin of a group hides its panels on the side of the dock nearest to it: a tab each on a bar
+//   along that side; the mouse over a tab slides its panel out over the others, the mouse away
+//   slides it back; the pin of that panel docks it again where it was.
+//
+// Each frame, between the widgets of a frame of `ui.widgets`:
+//
+//   dock.begin(f, d, area)                  the tabs, the splitters, the bars; the mouse on them
+//   while (dock.next(f, d)) {               each panel shown, its widgets placed in its rectangle
+//       str id = d.current();               (the one that slides out last: above the others)
+//       ...
+//   }
+//   dock.end(f, d)                          the guides of a drag, and the drop
+//
+// Floating windows (when the program opens them: `can_float`): a tab dropped over no guide goes
+// into a window of its own, which holds a tree of its own, as the dock does. `windows` lists them;
+// each is drawn in its window as the dock is (`begin_window`, `next`, `end_window`). A tab or a
+// whole window dragged shows the guides of the window under the mouse, the dock's or a floating
+// one's: panels go from one window to another. The pin of a floating window docks its panels back
+// where they were. See spec §10.13.
+//
+// What changes the arrangement (a click on a pin, a drop) is applied at the next `begin`: a
+// frame of `ui` describes what it shows, the arrangement under it does not move meanwhile.
+import std.vec;
+import std.text;
+import std.json;
+import render.canvas;
+import ui.widgets;
+
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,  // into the tabs of a group
+}
+
+struct Panel {
+    str id;
+    str title;
+    mut i32 node;  // its group (in the dock or in a floating window), -1: hidden on a side, or not placed
+    mut bool hidden;  // on the bar of `side`
+    mut Edge side;
+    mut f32 size;  // hidden: the share of the dock it slides out on (0 to 1)
+    mut canvas.Rect content;  // where its widgets go this frame
+    mut canvas.Rect tab;  // its tab this frame (on its group, or on its bar)
+    // Where it was in the dock before it was hidden or floated, to go back there: beside the node
+    // `home` (if it is still the node it was: `home_serial`) on `home_edge`, at `home_share`, or
+    // into its tabs.
+    mut i32 home;
+    mut i32 home_serial;
+    mut Edge home_edge;
+    mut f32 home_share;
+}
+
+struct Node {
+    mut bool used;
+    mut bool split;
+    mut bool horizontal;  // a split: `a` on the left of `b` (else above it)
+    mut f32 ratio;  // a split: the share of `a`
+    mut i32 a;
+    mut i32 b;
+    mut i32 parent;
+    mut i32 active;  // a group: the panel shown
+    mut canvas.Rect rect;  // in the coordinates of its window
+    mut canvas.Rect pin;  // a group: its pin this frame
+    mut i32 serial;  // which node it is, while it lives (`new_node`): an index is used again
+}
+
+// A floating window: the root of its tree, and where it is.
+struct Win {
+    mut bool used;
+    mut i32 root;
+    mut canvas.Rect rect;  // in the coordinates of the dock (those of the window of the dock)
+}
+
+// What changes the arrangement, applied at the next `begin`.
+enum Change {
+    Nothing,
+    Hide(i32 node),
+    Pin(i32 panel),
+    Move(i32 panel, i32 node, Edge edge),  // node -1: the side of the dock
+    MoveWindow(i32 window, i32 node, Edge edge),  // all the panels of a floating window
+    Float(i32 panel, canvas.Rect rect),  // into a window of its own, there
+    DockBack(i32 window),  // the panels of a floating window back where they were
+}
+
+pub class Dock {
+    Arena* arena;
+    vec.Vec<Panel>* panels;
+    vec.Vec<Node>* nodes;
+    vec.Vec<i32>* tabs;  // the panels of each group: (node, panel) pairs, in the order of the tabs
+    vec.Vec<Win>* wins;  // the floating windows
+    mut i32 root;  // that of the dock
+    mut canvas.Rect area;
+    mut canvas.Rect inner;  // the area less the bars of the hidden panels
+    vec.Vec<i32>* order;  // the panels shown this frame, in the order `next` gives them
+    mut usize cursor;
+    mut bool in_panel;
+    mut i32 shown;  // the panel `next` gave
+    mut i32 drawing;  // the window drawn: -1 the dock, else a floating one
+    mut i32 flyout;  // the hidden panel slid out, -1: none
+    mut i32 away;  // frames the mouse has been away from it
+    mut i32 dragging;  // the panel whose tab is held, -1: none
+    mut i32 drag_win;  // the floating window held whole, -1: none
+    mut bool moving;  // it has moved far enough to be a drag
+    mut f32 press_x;  // in the coordinates of the dock
+    mut f32 press_y;
+    mut i32 sizing;  // the split whose splitter is held, -1: none
+    mut i32 sizing_win;  // the window of that split
+    mut Change pending;
+    pub mut bool can_float;
+    mut bool remote;  // the drag started in a floating window: the mouse is that of `follow`
+    mut i32 source;  // that window
+    mut f32 remote_x;
+    mut f32 remote_y;
+    mut bool remote_down;
+    mut f32 grab_x;  // where the window held was taken, from its top left corner
+    mut f32 grab_y;
+    mut f32 drag_w;  // the size of a window made for the panel dragged
+    mut f32 drag_h;
+    mut f32 drag_x;  // the mouse of the drag, in the coordinates of the dock
+    mut f32 drag_y;
+    mut i32 target;  // the window under it: -1 the dock, -2 none, else a floating one
+    mut i32 serials;  // the serial of the next node
+
+    void init(keeps Arena* arena) {
+        self.arena = arena;
+        panels = vec.new<Panel>(arena);
+        nodes = vec.new<Node>(arena);
+        tabs = vec.new<i32>(arena);
+        wins = vec.new<Win>(arena);
+        root = -1;
+        area = canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        inner = area;
+        order = vec.new<i32>(arena);
+        cursor = 0;
+        in_panel = false;
+        shown = -1;
+        drawing = -1;
+        flyout = -1;
+        away = 0;
+        dragging = -1;
+        drag_win = -1;
+        moving = false;
+        press_x = 0.0;
+        press_y = 0.0;
+        sizing = -1;
+        sizing_win = -1;
+        pending = Change.Nothing;
+        can_float = false;
+        remote = false;
+        source = -1;
+        remote_x = 0.0;
+        remote_y = 0.0;
+        remote_down = false;
+        grab_x = 0.0;
+        grab_y = 0.0;
+        drag_w = 0.0;
+        drag_h = 0.0;
+        drag_x = 0.0;
+        drag_y = 0.0;
+        target = -2;
+        serials = 0;
+    }
+
+    // ---- Floating windows ----
+
+    // The floating windows: the program opens a window for each, and closes those no longer listed.
+    pub i32[] windows(Arena* into) {
+        vec.Vec<i32>* out = vec.new<i32>(into);
+        for (usize k in 0..wins.len()) {
+            if (wins.items()[k].used) {
+                out.push(k as i32);
+            }
+        }
+        return out.items();
+    }
+
+    bool live(i32 k) {
+        return k >= 0 && k as usize < wins.len() && wins.items()[k as usize].used;
+    }
+
+    // Where the floating window `k` is, in the coordinates of the dock: where it opens.
+    pub canvas.Rect window_rect(i32 k) {
+        return live(k) ? wins.items()[k as usize].rect : zero();
+    }
+
+    // The title of the floating window `k`: that of the panel shown in its first group.
+    pub str window_title(i32 k) {
+        if (!live(k)) {
+            return "";
+        }
+        mut i32 n = wins.items()[k as usize].root;
+        while (nodes.items()[n as usize].split) {
+            n = nodes.items()[n as usize].a;
+        }
+        i32 a = nodes.items()[n as usize].active;
+        return a >= 0 ? panels.items()[a as usize].title : "";
+    }
+
+    // The floating window of the node `n`, -1: the dock.
+    i32 win_of_node(i32 n) {
+        if (n < 0) {
+            return -1;
+        }
+        mut i32 t = n;
+        while (nodes.items()[t as usize].parent >= 0) {
+            t = nodes.items()[t as usize].parent;
+        }
+        for (usize k in 0..wins.len()) {
+            Win w = wins.items()[k];
+            if (w.used && w.root == t) {
+                return k as i32;
+            }
+        }
+        return -1;
+    }
+
+    // The floating window `id` is in, -1: the dock (or hidden, or not placed).
+    pub i32 window_of(str id) {
+        i32 p = index_of(id);
+        return p < 0 ? -1 : win_of_node(panels.items()[p as usize].node);
+    }
+
+    pub bool is_floating(str id) {
+        return window_of(id) >= 0;
+    }
+
+    // `id` into a floating window of its own at `rect` (in the coordinates of the dock), at once:
+    // the window's key, -1 if there is no such panel.
+    pub i32 float(str id, canvas.Rect rect) {
+        i32 p = index_of(id);
+        if (p < 0) {
+            return -1;
+        }
+        leave_dock(p);
+        detach(p);
+        return new_win(p, rect);
+    }
+
+    // The panels of the floating window `k` back where they were in the dock (its window was
+    // closed).
+    pub void dock_back(i32 k) {
+        if (live(k)) {
+            pending = Change.DockBack(k);
+        }
+    }
+
+    // The floating window whose mouse the dock needs (a tab or the window itself held there), -1:
+    // none. Meanwhile the program gives the dock the mouse (`follow`), and moves the window with it
+    // when it is held whole (`moves_window`, `grab`): the guides show in the window under it.
+    pub i32 held_window() {
+        return remote && (dragging >= 0 || drag_win >= 0) ? source : -1;
+    }
+
+    pub bool moves_window() {
+        return drag_win >= 0;
+    }
+
+    // Where the window held was taken, from its top left corner.
+    pub f32[2] grab() {
+        return [grab_x, grab_y];
+    }
+
+    // The mouse while a floating window holds it, in the coordinates of the dock (those of its
+    // window, from those of the screen), and its button.
+    pub void follow(f32 x, f32 y, bool down) {
+        remote_x = x;
+        remote_y = y;
+        remote_down = down;
+    }
+
+    // The panels of the tree under `n`, in order.
+    void collect(vec.Vec<usize>* out, i32 n) {
+        if (n < 0) {
+            return;
+        }
+        Node node = nodes.items()[n as usize];
+        if (node.split) {
+            collect(out, node.a);
+            collect(out, node.b);
+            return;
+        }
+        mut usize i = 0;
+        while (i + 1 < tabs.len()) {
+            if (tabs.items()[i] == n) {
+                out.push(tabs.items()[i + 1] as usize);
+            }
+            i += 2;
+        }
+    }
+
+    usize[] window_panels(Arena* into, i32 k) {
+        vec.Vec<usize>* out = vec.new<usize>(into);
+        if (live(k)) {
+            collect(out, wins.items()[k as usize].root);
+        }
+        return out.items();
+    }
+
+    i32 new_win(i32 p, canvas.Rect r) {
+        i32 g = group_of(p, -1);
+        Win w = Win{ used: true, root: g, rect: r };
+        for (usize k in 0..wins.len()) {
+            if (!wins.items()[k].used) {
+                wins.set(k, w);
+                return k as i32;
+            }
+        }
+        wins.push(w);
+        return (wins.len() - 1) as i32;
+    }
+
+    // ---- The panels ----
+
+    // A panel `id` titled `title`, not shown until it is placed.
+    pub void add(keeps str id, keeps str title) {
+        panels.push(Panel{
+            id: id,
+            title: title,
+            node: -1,
+            hidden: false,
+            side: Edge.Left,
+            size: 0.25,
+            content: zero(),
+            tab: zero(),
+            home: -1,
+            home_serial: -1,
+            home_edge: Edge.Left,
+            home_share: 0.25
+        });
+    }
+
+    i32 index_of(str id) {
+        for (usize i in 0..panels.len()) {
+            if (panels.items()[i].id == id) {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    // `id` placed beside the group of `beside` (none: the whole dock) on its `edge`, taking
+    // `share` of it (0 to 1), or into its tabs (`Center`). The first placed fills the dock.
+    pub void place(str id, str? beside, Edge edge, f32 share) {
+        i32 p = index_of(id);
+        if (p < 0) {
+            return;
+        }
+        detach(p);
+        mut i32 target = -1;
+        match (beside) {
+            some(b) => {
+                i32 q = index_of(b);
+                if (q >= 0) {
+                    target = panels.items()[q as usize].node;
+                }
+            },
+            none => { },
+        }
+        put(p, target, edge, share);
+    }
+
+    // The panels of the group `node`.
+    usize[] members(Arena* into, i32 node) {
+        vec.Vec<usize>* out = vec.new<usize>(into);
+        mut usize i = 0;
+        while (i + 1 < tabs.len()) {
+            if (tabs.items()[i] == node) {
+                out.push(tabs.items()[i + 1] as usize);
+            }
+            i += 2;
+        }
+        return out.items();
+    }
+
+    i32 new_node(Node made) {
+        mut Node n = made;
+        n.serial = serials;
+        serials += 1;
+        for (usize i in 0..nodes.len()) {
+            if (!nodes.items()[i].used) {
+                nodes.set(i, n);
+                return i as i32;
+            }
+        }
+        nodes.push(n);
+        return (nodes.len() - 1) as i32;
+    }
+
+    // Where `p` is now, kept to go back there (`remember`, then `go_home`): the node beside its
+    // group (the other side of its split), or its group itself when it has other panels.
+    void remember(i32 p, bool whole_group) {
+        mut Panel q = panels.items()[p as usize];
+        i32 g = q.node;
+        q.home = -1;
+        q.home_serial = -1;
+        if (g >= 0) {
+            mut Arena scratch = Arena.new(1 * KB);
+            defer scratch.free();
+            Node group = nodes.items()[g as usize];
+            if (!whole_group && members(&scratch, g).len > 1) {
+                q.home = g;
+                q.home_serial = group.serial;
+                q.home_edge = Edge.Center;
+            } else if (group.parent >= 0) {
+                Node split = nodes.items()[group.parent as usize];
+                bool first = split.a == g;
+                i32 other = first ? split.b : split.a;
+                q.home = other;
+                q.home_serial = nodes.items()[other as usize].serial;
+                q.home_edge = split.horizontal ? first ? Edge.Left : Edge.Right : first ? Edge.Top : Edge.Bottom;
+                q.home_share = first ? split.ratio : 1.0 - split.ratio;
+            }
+        }
+        panels.set(p as usize, q);
+    }
+
+    // `p`, about to leave the dock for a floating window: where it was, and the side of the dock
+    // nearest to it, kept to go back (a hidden one keeps where it was before it was hidden).
+    void leave_dock(i32 p) {
+        Panel q = panels.items()[p as usize];
+        if (q.hidden || q.node < 0 || win_of_node(q.node) >= 0) {
+            return;
+        }
+        canvas.Rect was = nodes.items()[q.node as usize].rect;
+        Edge side = nearest(was);
+        bool across = match (side) {
+            Left => true,
+            Right => true,
+            _ => false,
+        };
+        f32 share = across ? was.w / max(inner.w, 1.0) : was.h / max(inner.h, 1.0);
+        remember(p, false);
+        mut Panel f = panels.items()[p as usize];
+        f.side = side;
+        f.size = max(0.15, min(0.6, share));
+        panels.set(p as usize, f);
+    }
+
+    // `p` (detached) back where it was (`remember`), else on the side of the dock it went to. The
+    // other panels hidden or floating from the same place follow it into its tabs.
+    void go_home(i32 p) {
+        Panel q = panels.items()[p as usize];
+        i32 h = q.home;
+        bool there = h >= 0 && h as usize < nodes.len() && nodes.items()[h as usize].used
+                && nodes.items()[h as usize].serial == q.home_serial && win_of_node(h) < 0;
+        if (there) {
+            put(p, h, q.home_edge, q.home_share);
+        } else {
+            put(p, -1, q.side, q.size);
+        }
+        i32 g = panels.items()[p as usize].node;
+        if (g < 0) {
+            return;
+        }
+        for (usize i in 0..panels.len()) {
+            Panel o = panels.items()[i];
+            bool away_too = o.hidden || o.node >= 0 && win_of_node(o.node) >= 0;
+            if (i as i32 != p && away_too && o.home == q.home && o.home_serial == q.home_serial) {
+                mut Panel moved = o;
+                moved.home = g;
+                moved.home_serial = nodes.items()[g as usize].serial;
+                moved.home_edge = Edge.Center;
+                panels.set(i, moved);
+            }
+        }
+    }
+
+    i32 group_of(i32 p, i32 parent) {
+        i32 n = new_node(Node{
+            used: true,
+            split: false,
+            horizontal: false,
+            ratio: 0.5,
+            a: -1,
+            b: -1,
+            parent: parent,
+            active: p,
+            rect: zero(),
+            pin: zero(),
+            serial: 0
+        });
+        tabs.push(n);
+        tabs.push(p);
+        mut Panel q = panels.items()[p as usize];
+        q.node = n;
+        q.hidden = false;
+        panels.set(p as usize, q);
+        return n;
+    }
+
+    // `p` (detached) put by `target` (a node of the dock or of a floating window; -1: the dock) on
+    // `edge`, taking `share`.
+    void put(i32 p, i32 target, Edge edge, f32 share) {
+        mut i32 t = target;
+        if (t < 0 || t as usize >= nodes.len() || !nodes.items()[t as usize].used) {
+            if (root < 0) {
+                root = group_of(p, -1);
+                return;
+            }
+            t = root;
+        }
+        match (edge) {
+            Center => {
+                if (nodes.items()[t as usize].split) {
+                    put(p, t, Edge.Right, share);  // tabs need a group: beside the split instead
+                    return;
+                }
+                tabs.push(t);
+                tabs.push(p);
+                mut Panel q = panels.items()[p as usize];
+                q.node = t;
+                q.hidden = false;
+                panels.set(p as usize, q);
+                mut Node g = nodes.items()[t as usize];
+                g.active = p;
+                nodes.set(t as usize, g);
+                return;
+            },
+            _ => { },
+        }
+        f32 s = max(0.05, min(0.95, share));
+        i32 above = nodes.items()[t as usize].parent;
+        bool first = match (edge) {
+            Left => true,
+            Top => true,
+            _ => false,
+        };
+        bool horizontal = match (edge) {
+            Left => true,
+            Right => true,
+            _ => false,
+        };
+        i32 split = new_node(Node{
+            used: true,
+            split: true,
+            horizontal: horizontal,
+            ratio: first ? s : 1.0 - s,
+            a: -1,
+            b: -1,
+            parent: above,
+            active: -1,
+            rect: zero(),
+            pin: zero(),
+            serial: 0
+        });
+        i32 g = group_of(p, split);
+        mut Node sp = nodes.items()[split as usize];
+        sp.a = first ? g : t;
+        sp.b = first ? t : g;
+        nodes.set(split as usize, sp);
+        mut Node tn = nodes.items()[t as usize];
+        tn.parent = split;
+        nodes.set(t as usize, tn);
+        replace_child(above, t, split);
+    }
+
+    // In `parent` (-1: the top of a tree: the dock's or a floating window's), `old` replaced by
+    // `now` (-1: nothing; a floating window left empty goes).
+    void replace_child(i32 parent, i32 old, i32 now) {
+        if (parent < 0) {
+            if (root == old) {
+                root = now;
+            } else {
+                for (usize k in 0..wins.len()) {
+                    mut Win w = wins.items()[k];
+                    if (w.used && w.root == old) {
+                        w.root = now;
+                        w.used = now >= 0;
+                        wins.set(k, w);
+                    }
+                }
+            }
+        } else {
+            mut Node n = nodes.items()[parent as usize];
+            if (n.a == old) {
+                n.a = now;
+            } else if (n.b == old) {
+                n.b = now;
+            }
+            nodes.set(parent as usize, n);
+        }
+        if (now >= 0) {
+            mut Node c = nodes.items()[now as usize];
+            c.parent = parent;
+            nodes.set(now as usize, c);
+        }
+    }
+
+    // `p` taken out of its group (an empty group goes, its split given to the other side).
+    void detach(i32 p) {
+        mut Panel q = panels.items()[p as usize];
+        i32 g = q.node;
+        q.node = -1;
+        q.hidden = false;
+        panels.set(p as usize, q);
+        if (g < 0) {
+            return;
+        }
+        mut usize i = 0;
+        while (i + 1 < tabs.len()) {
+            if (tabs.items()[i] == g && tabs.items()[i + 1] == p) {
+                tabs.remove(i + 1);
+                tabs.remove(i);
+                break;
+            }
+            i += 2;
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        usize[] left = members(&scratch, g);
+        if (left.len > 0) {
+            mut Node n = nodes.items()[g as usize];
+            if (n.active == p) {
+                n.active = left[0] as i32;
+            }
+            nodes.set(g as usize, n);
+            return;
+        }
+        // the group is empty: it goes, and so does its split
+        Node empty = nodes.items()[g as usize];
+        mut Node gone = empty;
+        gone.used = false;
+        nodes.set(g as usize, gone);
+        i32 split = empty.parent;
+        if (split < 0) {
+            replace_child(-1, g, -1);
+            return;
+        }
+        Node s = nodes.items()[split as usize];
+        i32 other = s.a == g ? s.b : s.a;
+        mut Node sgone = s;
+        sgone.used = false;
+        nodes.set(split as usize, sgone);
+        replace_child(s.parent, split, other);
+    }
+
+    // ---- Where things are ----
+
+    void layout(i32 n, canvas.Rect r, f32 splitter) {
+        if (n < 0) {
+            return;
+        }
+        mut Node node = nodes.items()[n as usize];
+        node.rect = r;
+        nodes.set(n as usize, node);
+        if (!node.split) {
+            return;
+        }
+        if (node.horizontal) {
+            f32 wa = max(0.0, (r.w - splitter) * node.ratio);
+            layout(node.a, canvas.Rect{ x: r.x, y: r.y, w: wa, h: r.h }, splitter);
+            layout(
+                node.b,
+                canvas.Rect{ x: r.x + wa + splitter, y: r.y, w: max(0.0, r.w - wa - splitter), h: r.h },
+                splitter
+            );
+        } else {
+            f32 ha = max(0.0, (r.h - splitter) * node.ratio);
+            layout(node.a, canvas.Rect{ x: r.x, y: r.y, w: r.w, h: ha }, splitter);
+            layout(
+                node.b,
+                canvas.Rect{ x: r.x, y: r.y + ha + splitter, w: r.w, h: max(0.0, r.h - ha - splitter) },
+                splitter
+            );
+        }
+    }
+
+    // The splitter of the split `n`.
+    canvas.Rect splitter_of(i32 n, f32 width) {
+        Node s = nodes.items()[n as usize];
+        Node a = nodes.items()[s.a as usize];
+        return s.horizontal ? canvas.Rect{ x: a.rect.x + a.rect.w, y: s.rect.y, w: width, h: s.rect.h }
+                : canvas.Rect{ x: s.rect.x, y: a.rect.y + a.rect.h, w: s.rect.w, h: width };
+    }
+
+    // Where the widgets of `id` are this frame, in the coordinates of its window (a rectangle of no
+    // size when it is not shown).
+    pub canvas.Rect rect_of(str id) {
+        i32 p = index_of(id);
+        if (p < 0) {
+            return zero();
+        }
+        Panel q = panels.items()[p as usize];
+        if (q.node >= 0 && win_of_node(q.node) >= 0) {
+            Node g = nodes.items()[q.node as usize];
+            return g.active == p ? q.content : zero();
+        }
+        for (i32 o in order.items()) {
+            if (o == p) {
+                return q.content;
+            }
+        }
+        return zero();
+    }
+
+    // Its tab this frame.
+    pub canvas.Rect tab_of(str id) {
+        i32 p = index_of(id);
+        return p < 0 ? zero() : panels.items()[p as usize].tab;
+    }
+
+    // The pin of the group of `id` this frame.
+    pub canvas.Rect pin_of(str id) {
+        i32 p = index_of(id);
+        if (p < 0) {
+            return zero();
+        }
+        i32 g = panels.items()[p as usize].node;
+        return g >= 0 ? nodes.items()[g as usize].pin : zero();
+    }
+
+    pub bool is_hidden(str id) {
+        i32 p = index_of(id);
+        return p >= 0 && panels.items()[p as usize].hidden;
+    }
+
+    // The panel shown in place of the others of its group.
+    pub bool is_active(str id) {
+        i32 p = index_of(id);
+        if (p < 0) {
+            return false;
+        }
+        i32 g = panels.items()[p as usize].node;
+        return g >= 0 && nodes.items()[g as usize].active == p;
+    }
+
+    // The title of `id`, as `add` named it.
+    pub str title_of(str id) {
+        i32 p = index_of(id);
+        return p < 0 ? "" : panels.items()[p as usize].title;
+    }
+
+    // The panel `next` gave.
+    pub str current() {
+        return shown >= 0 ? panels.items()[shown as usize].id : "";
+    }
+
+    // Whether the mouse is held by the dock (a tab, a window or a splitter dragged), or over what it
+    // draws above the panels (a panel slid out, the guides): a program that reads the mouse itself
+    // (a view of a scene) leaves it alone then.
+    pub bool busy() {
+        return dragging >= 0 && moving || drag_win >= 0 || sizing >= 0;
+    }
+
+    pub bool covers(f32 x, f32 y) {
+        if (busy()) {
+            return true;
+        }
+        if (flyout >= 0) {
+            Panel f = panels.items()[flyout as usize];
+            return inside(f.content, x, y) || inside(f.tab, x, y);
+        }
+        return false;
+    }
+
+    // The side of the dock nearest to `r`.
+    Edge nearest(canvas.Rect r) {
+        f32 cx = r.x + r.w / 2.0 - inner.x;
+        f32 cy = r.y + r.h / 2.0 - inner.y;
+        f32 left = cx / max(inner.w, 1.0);
+        f32 right = 1.0 - left;
+        f32 top = cy / max(inner.h, 1.0);
+        f32 bottom = 1.0 - top;
+        f32 least = min(min(left, right), min(top, bottom));
+        return least == left ? Edge.Left : least == right ? Edge.Right : least == top ? Edge.Top : Edge.Bottom;
+    }
+
+    bool any_hidden(Edge e) {
+        for (Panel p in panels.items()) {
+            if (p.hidden && same_edge(p.side, e)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ---- The arrangement saved and read back ----
+
+    // The arrangement, as JSON (into `into`): the tree of the dock, the floating windows (where
+    // they are, their trees), the hidden panels, and the side and share of each panel. A program
+    // writes it when it closes and gives it to `restore` when it opens again.
+    pub str save(Arena* into) {
+        text.TextBuilder* b = text.builder(into);
+        b.push("{\"version\":1,\"dock\":");
+        write_tree(b, root);
+        b.push(",\"windows\":[");
+        mut bool first = true;
+        for (Win w in wins.items()) {
+            if (!w.used) {
+                continue;
+            }
+            b.push(first ? "{\"x\":" : ",{\"x\":");
+            first = false;
+            b.push_f64(w.rect.x as f64, 0);
+            b.push(",\"y\":");
+            b.push_f64(w.rect.y as f64, 0);
+            b.push(",\"w\":");
+            b.push_f64(w.rect.w as f64, 0);
+            b.push(",\"h\":");
+            b.push_f64(w.rect.h as f64, 0);
+            b.push(",\"tree\":");
+            write_tree(b, w.root);
+            b.push("}");
+        }
+        b.push("],\"panels\":[");
+        for (usize i in 0..panels.len()) {
+            Panel q = panels.items()[i];
+            b.push(i == 0 ? "{\"id\":" : ",{\"id\":");
+            write_text(b, q.id);
+            b.push(",\"hidden\":");
+            b.push(q.hidden ? "true" : "false");
+            b.push(",\"side\":\"");
+            b.push(edge_name(q.side));
+            b.push("\",\"size\":");
+            b.push_f64(q.size as f64, 4);
+            b.push("}");
+        }
+        b.push("]}");
+        return b.text();
+    }
+
+    void write_tree(text.TextBuilder* b, i32 n) {
+        if (n < 0) {
+            b.push("null");
+            return;
+        }
+        Node node = nodes.items()[n as usize];
+        if (node.split) {
+            b.push(node.horizontal ? "{\"split\":\"h\",\"ratio\":" : "{\"split\":\"v\",\"ratio\":");
+            b.push_f64(node.ratio as f64, 4);
+            b.push(",\"a\":");
+            write_tree(b, node.a);
+            b.push(",\"b\":");
+            write_tree(b, node.b);
+            b.push("}");
+            return;
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        b.push("{\"tabs\":[");
+        usize[] mine = members(&scratch, n);
+        for (usize i in 0..mine.len) {
+            if (i > 0) {
+                b.push(",");
+            }
+            write_text(b, panels.items()[mine[i]].id);
+        }
+        b.push("],\"active\":");
+        write_text(b, node.active >= 0 ? panels.items()[node.active as usize].id : "");
+        b.push("}");
+    }
+
+    // The arrangement `saved` (by `save`) made again: true when it was read; false (and nothing
+    // changed) when it is not one, or names panels this dock does not have, or one twice. The
+    // panels it does not name (added since) go on the right of the dock.
+    pub bool restore(str saved) {
+        mut Arena scratch = Arena.new(16 * KB);
+        defer scratch.free();
+        json.Value v = match (json.parse(&scratch, saved)) {
+            ok(x) => x,
+            err(e) => {
+                return false;
+            },
+        };
+        if (number_of(json.get(v, "version"), 0.0) != 1.0) {
+            return false;
+        }
+        // all of it checked before anything changes
+        bool[] seen = scratch.alloc_slice(bool, panels.len());
+        for (usize i in 0..seen.len) {
+            seen[i] = false;
+        }
+        json.Value dock_tree = or_null(json.get(v, "dock"));
+        if (!json.is_null(dock_tree) && !valid_tree(dock_tree, seen, 0)) {
+            return false;
+        }
+        json.Value windows_v = or_null(json.get(v, "windows"));
+        for (usize i in 0..json.len(windows_v)) {
+            json.Value w = or_null(json.at(windows_v, i));
+            if (!valid_tree(or_null(json.get(w, "tree")), seen, 0)) {
+                return false;
+            }
+        }
+        json.Value panels_v = or_null(json.get(v, "panels"));
+        for (usize i in 0..json.len(panels_v)) {
+            json.Value q = or_null(json.at(panels_v, i));
+            i32 p = index_of(text_of(json.get(q, "id")));
+            if (p >= 0 && flag_of(json.get(q, "hidden")) && seen[p as usize]) {
+                return false;  // hidden, and in a tree too
+            }
+        }
+        // the arrangement made again
+        nodes.clear();
+        tabs.clear();
+        wins.clear();
+        root = -1;
+        flyout = -1;
+        dragging = -1;
+        drag_win = -1;
+        moving = false;
+        remote = false;
+        sizing = -1;
+        target = -2;
+        pending = Change.Nothing;
+        for (usize i in 0..panels.len()) {
+            mut Panel q = panels.items()[i];
+            q.node = -1;
+            q.hidden = false;
+            q.home = -1;
+            q.home_serial = -1;
+            panels.set(i, q);
+        }
+        if (!json.is_null(dock_tree)) {
+            root = build(dock_tree, -1);
+        }
+        for (usize i in 0..json.len(windows_v)) {
+            json.Value w = or_null(json.at(windows_v, i));
+            canvas.Rect r = canvas.Rect{
+                x: number_of(json.get(w, "x"), 0.0) as f32,
+                y: number_of(json.get(w, "y"), 0.0) as f32,
+                w: max(number_of(json.get(w, "w"), 300.0) as f32, 120.0),
+                h: max(number_of(json.get(w, "h"), 200.0) as f32, 80.0)
+            };
+            wins.push(Win{ used: true, root: build(or_null(json.get(w, "tree")), -1), rect: r });
+        }
+        for (usize i in 0..json.len(panels_v)) {
+            json.Value item = or_null(json.at(panels_v, i));
+            i32 p = index_of(text_of(json.get(item, "id")));
+            if (p < 0) {
+                continue;
+            }
+            mut Panel q = panels.items()[p as usize];
+            q.side = edge_of(text_of(json.get(item, "side")));
+            q.size = max(0.05, min(0.95, number_of(json.get(item, "size"), 0.25) as f32));
+            q.hidden = q.node < 0 && flag_of(json.get(item, "hidden"));
+            panels.set(p as usize, q);
+        }
+        for (usize i in 0..panels.len()) {
+            Panel q = panels.items()[i];
+            if (q.node < 0 && !q.hidden) {
+                put(i as i32, -1, Edge.Right, 0.25);
+            }
+        }
+        return true;
+    }
+
+    // A tree as `save` writes it: groups of panels of this dock, each named once (`seen`).
+    bool valid_tree(json.Value t, bool[] seen, usize depth) {
+        if (depth > 64) {
+            return false;
+        }
+        match (json.get(t, "tabs")) {
+            some(list) => {
+                if (json.len(list) == 0) {
+                    return false;
+                }
+                for (usize i in 0..json.len(list)) {
+                    i32 p = index_of(text_of(json.at(list, i)));
+                    if (p < 0 || seen[p as usize]) {
+                        return false;
+                    }
+                    seen[p as usize] = true;
+                }
+                return true;
+            },
+            none => {
+                return text_of(json.get(t, "split")).len > 0 && valid_tree(or_null(json.get(t, "a")), seen, depth + 1)
+                        && valid_tree(or_null(json.get(t, "b")), seen, depth + 1);
+            },
+        }
+    }
+
+    // The nodes of a tree checked by `valid_tree`, under `parent`.
+    i32 build(json.Value t, i32 parent) {
+        match (json.get(t, "tabs")) {
+            some(list) => {
+                i32 n = group_of(index_of(text_of(json.at(list, 0))), parent);
+                for (usize i in 1..json.len(list)) {
+                    i32 p = index_of(text_of(json.at(list, i)));
+                    tabs.push(n);
+                    tabs.push(p);
+                    mut Panel q = panels.items()[p as usize];
+                    q.node = n;
+                    panels.set(p as usize, q);
+                }
+                i32 active = index_of(text_of(json.get(t, "active")));
+                if (active >= 0 && panels.items()[active as usize].node == n) {
+                    mut Node g = nodes.items()[n as usize];
+                    g.active = active;
+                    nodes.set(n as usize, g);
+                }
+                return n;
+            },
+            none => { },
+        }
+        i32 n = new_node(Node{
+            used: true,
+            split: true,
+            horizontal: text_of(json.get(t, "split")) == "h",
+            ratio: max(0.05, min(0.95, number_of(json.get(t, "ratio"), 0.5) as f32)),
+            a: -1,
+            b: -1,
+            parent: parent,
+            active: -1,
+            rect: zero(),
+            pin: zero(),
+            serial: 0
+        });
+        i32 a = build(or_null(json.get(t, "a")), n);
+        i32 b = build(or_null(json.get(t, "b")), n);
+        mut Node sp = nodes.items()[n as usize];
+        sp.a = a;
+        sp.b = b;
+        nodes.set(n as usize, sp);
+        return n;
+    }
+
+    // ---- What changes the arrangement ----
+
+    void apply() {
+        Change c = pending;
+        pending = Change.Nothing;
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        match (c) {
+            Nothing => { },
+            Hide(n) => {
+                if (n < 0 || n as usize >= nodes.len() || !nodes.items()[n as usize].used) {
+                    return;
+                }
+                Node g = nodes.items()[n as usize];
+                Edge side = nearest(g.rect);
+                bool across = match (side) {
+                    Left => true,
+                    Right => true,
+                    _ => false,
+                };
+                f32 share = across ? g.rect.w / max(inner.w, 1.0) : g.rect.h / max(inner.h, 1.0);
+                for (usize p in members(&scratch, n)) {
+                    remember(p as i32, true);
+                    detach(p as i32);
+                    mut Panel q = panels.items()[p];
+                    q.hidden = true;
+                    q.side = side;
+                    q.size = max(0.15, min(0.6, share));
+                    panels.set(p, q);
+                }
+                flyout = -1;
+            },
+            Pin(p) => {
+                Panel q = panels.items()[p as usize];
+                mut Panel back = q;
+                back.hidden = false;
+                panels.set(p as usize, back);
+                go_home(p);
+                flyout = -1;
+            },
+            Float(p, r) => {
+                leave_dock(p);
+                detach(p);
+                new_win(p, r);
+                if (flyout == p) {
+                    flyout = -1;
+                }
+            },
+            DockBack(k) => {
+                for (usize p in window_panels(&scratch, k)) {
+                    detach(p as i32);
+                    go_home(p as i32);
+                }
+            },
+            Move(p, n, e) => {
+                bool was_hidden = panels.items()[p as usize].hidden;
+                if (n >= 0 && win_of_node(n) >= 0) {
+                    leave_dock(p);  // into a floating window: where it was in the dock, kept
+                }
+                detach(p);
+                put(p, n, e, match (e) {
+                    Center => 0.5,
+                    _ => n < 0 ? 0.25 : 0.5,
+                });
+                if (was_hidden) {
+                    flyout = -1;
+                }
+            },
+            MoveWindow(k, n, e) => {
+                // the first panel where the guide says, the others into its tabs
+                mut i32 first = -1;
+                for (usize p in window_panels(&scratch, k)) {
+                    detach(p as i32);
+                    if (first < 0) {
+                        put(p as i32, n, e, match (e) {
+                            Center => 0.5,
+                            _ => n < 0 ? 0.25 : 0.5,
+                        });
+                        first = panels.items()[p].node;
+                    } else {
+                        put(p as i32, first, Edge.Center, 0.5);
+                    }
+                }
+            },
+        }
+    }
+}
+
+canvas.Rect zero() {
+    return canvas.Rect{ x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+}
+
+bool inside(canvas.Rect r, f32 x, f32 y) {
+    return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+}
+
+// What `save` and `restore` read and write.
+json.Value or_null(json.Value? v) {
+    return match (v) {
+        some(x) => x,
+        none => json.Value.Null,
+    };
+}
+
+f64 number_of(json.Value? v, f64 otherwise) {
+    return match (v) {
+        some(x) => match (json.as_f64(x)) {
+            some(n) => n,
+            none => otherwise,
+        },
+        none => otherwise,
+    };
+}
+
+str text_of(json.Value? v) {
+    return match (v) {
+        some(x) => match (json.as_str(x)) {
+            some(t) => t,
+            none => "",
+        },
+        none => "",
+    };
+}
+
+bool flag_of(json.Value? v) {
+    return match (v) {
+        some(x) => match (json.as_bool(x)) {
+            some(f) => f,
+            none => false,
+        },
+        none => false,
+    };
+}
+
+str edge_name(Edge e) {
+    return match (e) {
+        Left => "left",
+        Right => "right",
+        Top => "top",
+        Bottom => "bottom",
+        Center => "center",
+    };
+}
+
+Edge edge_of(str name) {
+    return name == "right" ? Edge.Right : name == "top" ? Edge.Top : name == "bottom" ? Edge.Bottom : Edge.Left;
+}
+
+// `t` as a JSON text, quoted.
+void write_text(text.TextBuilder* b, str t) {
+    b.push("\"");
+    for (usize i in 0..t.len) {
+        ui8 c = t.bytes[i];
+        if (c == 34 || c == 92) {
+            b.push("\\");
+            b.push(text.slice(t, i, i + 1));
+        } else if (c < 32) {
+            b.push(" ");
+        } else {
+            b.push(text.slice(t, i, i + 1));
+        }
+    }
+    b.push("\"");
+}
+
+canvas.Rect moved(canvas.Rect r, f32 dx, f32 dy) {
+    return canvas.Rect{ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h };
+}
+
+bool same_edge(Edge a, Edge b) {
+    return match (a) {
+        Left => match (b) {
+            Left => true,
+            _ => false,
+        },
+        Right => match (b) {
+            Right => true,
+            _ => false,
+        },
+        Top => match (b) {
+            Top => true,
+            _ => false,
+        },
+        Bottom => match (b) {
+            Bottom => true,
+            _ => false,
+        },
+        Center => match (b) {
+            Center => true,
+            _ => false,
+        },
+    };
+}
+
+canvas.Color faded(canvas.Color c, ui8 alpha) {
+    return canvas.Color{ r: c.r, g: c.g, b: c.b, a: alpha };
+}
+
+canvas.Color mixed(canvas.Color a, canvas.Color b, f32 t) {
+    return canvas.Color{
+        r: (a.r as f32 + (b.r as f32 - a.r as f32) * t) as ui8,
+        g: (a.g as f32 + (b.g as f32 - a.g as f32) * t) as ui8,
+        b: (a.b as f32 + (b.b as f32 - a.b as f32) * t) as ui8
+    };
+}
+
+// A dock of panels, in `arena`.
+pub Dock* dock(keeps Arena* arena) {
+    return arena.new(Dock, arena);
+}
+
+// ---- Each frame ----
+
+f32 STRIP = 26.0;
+f32 SPLITTER = 6.0;
+f32 BAR = 24.0;
+f32 GUIDE = 30.0;
+
+// The mouse of a drag, in the coordinates of the dock, and its button: that of the frame of the
+// dock, or that of `follow` when the drag started in a floating window.
+f32[2] pointer(widgets.Frame* f, Dock* d) {
+    return d.remote ? [d.remote_x, d.remote_y] : [f.mouse_x(), f.mouse_y()];
+}
+
+bool held_down(widgets.Frame* f, Dock* d) {
+    return d.remote ? d.remote_down : f.mouse_down();
+}
+
+// The dock laid out in `area` of the frame: its tabs, splitters and bars drawn, the mouse on them
+// answered. Then `next`, then `end`.
+pub void begin(widgets.Frame* f, Dock* d, canvas.Rect area) {
+    d.apply();
+    f32 s = f.ui_scale();
+    canvas.Canvas* c = f.drawing();
+    d.area = area;
+    d.drawing = -1;
+    // the bars of the hidden panels take their sides
+    f32 bar = BAR * s;
+    f32 l = d.any_hidden(Edge.Left) ? bar : 0.0;
+    f32 r = d.any_hidden(Edge.Right) ? bar : 0.0;
+    f32 t = d.any_hidden(Edge.Top) ? bar : 0.0;
+    f32 b = d.any_hidden(Edge.Bottom) ? bar : 0.0;
+    d.inner = canvas.Rect{ x: area.x + l, y: area.y + t, w: max(0.0, area.w - l - r), h: max(0.0, area.h - t - b) };
+    d.layout(d.root, d.inner, SPLITTER * s);
+    d.order.clear();
+    d.cursor = 0;
+    d.in_panel = false;
+    d.shown = -1;
+    c.fill(area, f.window_color());
+    // a tab held: far enough, it is a drag
+    if (d.dragging >= 0 && !d.moving && held_down(f, d)) {
+        f32[2] m = pointer(f, d);
+        f32 dx = m[0] - d.press_x;
+        f32 dy = m[1] - d.press_y;
+        if (dx * dx + dy * dy > 36.0 * s * s) {
+            d.moving = true;
+            d.flyout = -1;
+        }
+    }
+    tree(f, d, -1, 0.0, 0.0, s);
+    bars(f, d, area, s);
+}
+
+// The floating window `k` laid out in `place` (where it is, in the coordinates of the dock; its
+// frame draws it from (0, 0)): its tabs and splitters, the mouse on them. Then `next`, then
+// `end_window`.
+pub void begin_window(widgets.Frame* f, Dock* d, i32 k, canvas.Rect place) {
+    d.drawing = k;
+    d.order.clear();
+    d.cursor = 0;
+    d.in_panel = false;
+    d.shown = -1;
+    if (!d.live(k)) {
+        return;
+    }
+    mut Win w = d.wins.items()[k as usize];
+    w.rect = place;
+    d.wins.set(k as usize, w);
+    f32 s = f.ui_scale();
+    canvas.Rect all = canvas.Rect{ x: 0.0, y: 0.0, w: place.w, h: place.h };
+    f.drawing().fill(all, f.window_color());
+    d.layout(w.root, all, SPLITTER * s);
+    tree(f, d, k, place.x, place.y, s);
+}
+
+// The splitters and the groups of the window `win` (-1: the dock, at (ox, oy) in the coordinates of
+// the dock), the mouse of its frame on them.
+void tree(widgets.Frame* f, Dock* d, i32 win, f32 ox, f32 oy, f32 s) {
+    canvas.Canvas* c = f.drawing();
+    canvas.Color window = f.window_color();
+    canvas.Color strip = f.field_color();
+    canvas.Color text = f.text_color();
+    canvas.Color accent = f.accent_color();
+    canvas.Color line = f.border_color();
+    i32 top = win < 0 ? d.root : d.wins.items()[win as usize].root;
+    // a splitter held: its ratio follows the mouse
+    if (d.sizing >= 0 && d.sizing_win == win) {
+        if (!f.mouse_down()) {
+            d.sizing = -1;
+        } else {
+            Node sp = d.nodes.items()[d.sizing as usize];
+            f32 ratio = sp.horizontal ? (f.mouse_x() - sp.rect.x) / max(sp.rect.w, 1.0)
+                    : (f.mouse_y() - sp.rect.y) / max(sp.rect.h, 1.0);
+            mut Node changed = sp;
+            changed.ratio = max(0.05, min(0.95, ratio));
+            d.nodes.set(d.sizing as usize, changed);
+            Node t = d.nodes.items()[top as usize];
+            d.layout(top, t.rect, SPLITTER * s);
+        }
+    }
+    bool idle = d.dragging < 0 && d.drag_win < 0 && d.sizing < 0;
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    usize[] in_window = d.window_panels(&scratch, win);  // none for the dock
+    for (usize n in 0..d.nodes.len()) {
+        Node node = d.nodes.items()[n];
+        if (!node.used || d.win_of_node(n as i32) != win) {
+            continue;
+        }
+        if (node.split) {
+            canvas.Rect sr = d.splitter_of(n as i32, SPLITTER * s);
+            bool hot = d.sizing == n as i32 || f.hovering(sr) && idle;
+            c.fill(sr, hot ? faded(accent, 160) : window);
+            if (hot && f.mouse_pressed() && d.sizing < 0) {
+                d.sizing = n as i32;
+                d.sizing_win = win;
+            }
+            continue;
+        }
+        // a group: its tabs, its pin, the background of its panel
+        f32 h = STRIP * s;
+        canvas.Rect bar_r = canvas.Rect{ x: node.rect.x, y: node.rect.y, w: node.rect.w, h: h };
+        c.fill(bar_r, strip);
+        c.fill(canvas.Rect{ x: node.rect.x, y: node.rect.y + h, w: node.rect.w, h: max(0.0, node.rect.h - h) }, window);
+        c.stroke(node.rect, line, 1.0);
+        // the pin first: the tabs stop before it
+        canvas.Rect pin = canvas.Rect{ x: node.rect.x + node.rect.w - h, y: node.rect.y, w: h, h: h };
+        bool over_pin = f.hovering(pin);
+        canvas.Rect tabs_r = canvas.Rect{ x: node.rect.x, y: node.rect.y, w: max(0.0, node.rect.w - h), h: h };
+        mut f32 x = node.rect.x + 2.0 * s;
+        mut bool on_tab = false;
+        for (usize p in d.members(&scratch, n as i32)) {
+            Panel q = d.panels.items()[p];
+            canvas.Rect size = f.text_size(q.title, 0.0);
+            canvas.Rect tab = canvas.Rect{ x: x, y: node.rect.y, w: size.w + 18.0 * s, h: h };
+            bool chosen = node.active == p as i32;
+            c.push_clip(tabs_r);
+            if (chosen) {
+                c.fill(tab, window);
+                c.fill(canvas.Rect{ x: tab.x, y: tab.y, w: tab.w, h: 2.0 * s }, accent);
+            } else if (f.hovering(tab) && !over_pin) {
+                c.fill(tab, mixed(strip, window, 0.5));
+            }
+            f.text_at(tab.x + 9.0 * s, tab.y, h, q.title, chosen ? text : mixed(text, strip, 0.35), 0.0);
+            c.pop_clip();
+            mut Panel kept = q;
+            kept.tab = tab;
+            d.panels.set(p, kept);
+            bool over_tab = f.hovering(tab) && !over_pin;
+            on_tab = on_tab || over_tab;
+            if (over_tab && f.mouse_pressed() && idle) {
+                mut Node g = d.nodes.items()[n];
+                g.active = p as i32;
+                d.nodes.set(n, g);
+                if (win >= 0 && in_window.len == 1) {
+                    hold_window(f, d, win, ox, oy);  // its only tab: the window itself
+                } else {
+                    d.dragging = p as i32;
+                    d.moving = false;
+                    d.remote = win >= 0;
+                    d.source = win;
+                    d.press_x = f.mouse_x() + ox;
+                    d.press_y = f.mouse_y() + oy;
+                    d.remote_x = d.press_x;
+                    d.remote_y = d.press_y;
+                    d.remote_down = true;
+                    d.grab_x = f.mouse_x() - tab.x + 2.0 * s;
+                    d.grab_y = f.mouse_y() - tab.y;
+                    d.drag_w = node.rect.w;
+                    d.drag_h = node.rect.h;
+                }
+            }
+            x += tab.w + 2.0 * s;
+        }
+        // in a floating window, the rest of the strip holds the window
+        if (win >= 0 && !on_tab && !over_pin && f.hovering(bar_r) && f.mouse_pressed() && idle) {
+            hold_window(f, d, win, ox, oy);
+        }
+        // the pin: in the dock, hides the group on the side nearest to it; in a floating window,
+        // docks its panels back where they were
+        if (over_pin) {
+            c.fill(pin, mixed(strip, window, 0.5));
+        }
+        draw_pin(c, pin, over_pin ? accent : mixed(text, strip, 0.35), win >= 0, s);
+        mut Node g = d.nodes.items()[n];
+        g.pin = pin;
+        d.nodes.set(n, g);
+        if (over_pin && f.mouse_pressed() && idle) {
+            d.pending = win < 0 ? Change.Hide(n as i32) : Change.DockBack(win);
+        }
+        // its panel shown
+        i32 active = d.nodes.items()[n].active;
+        if (active >= 0) {
+            mut Panel q = d.panels.items()[active as usize];
+            q.content = canvas.Rect{
+                x: node.rect.x + 1.0,
+                y: node.rect.y + h,
+                w: max(0.0, node.rect.w - 2.0),
+                h: max(0.0, node.rect.h - h - 1.0)
+            };
+            d.panels.set(active as usize, q);
+            d.order.push(active);
+        }
+    }
+}
+
+// The floating window `k` held whole, by the mouse of its frame.
+void hold_window(widgets.Frame* f, Dock* d, i32 k, f32 ox, f32 oy) {
+    d.drag_win = k;
+    d.moving = true;
+    d.remote = true;
+    d.source = k;
+    d.remote_x = f.mouse_x() + ox;
+    d.remote_y = f.mouse_y() + oy;
+    d.remote_down = true;
+    d.grab_x = f.mouse_x();
+    d.grab_y = f.mouse_y();
+}
+
+// The bars of the hidden panels, and the one slid out.
+void bars(widgets.Frame* f, Dock* d, canvas.Rect area, f32 s) {
+    canvas.Canvas* c = f.drawing();
+    canvas.Color strip = f.field_color();
+    canvas.Color text = f.text_color();
+    canvas.Color accent = f.accent_color();
+    f32 bar = BAR * s;
+    mut f32[4] at = [d.inner.y, d.inner.y, d.inner.x, d.inner.x];  // the next tab of each side
+    mut bool over_any = false;
+    bool idle = d.dragging < 0 && d.drag_win < 0 && d.sizing < 0;
+    for (usize p in 0..d.panels.len()) {
+        Panel q = d.panels.items()[p];
+        if (!q.hidden) {
+            continue;
+        }
+        canvas.Rect size = f.text_size(q.title, 0.0);
+        f32 long = size.w + 16.0 * s;
+        canvas.Rect tab = match (q.side) {
+            Left => canvas.Rect{ x: area.x, y: at[0], w: bar, h: vertical_height(f, q.title, s) },
+            Right => canvas.Rect{ x: area.x + area.w - bar, y: at[1], w: bar, h: vertical_height(f, q.title, s) },
+            Top => canvas.Rect{ x: at[2], y: area.y, w: long, h: bar },
+            Bottom => canvas.Rect{ x: at[3], y: area.y + area.h - bar, w: long, h: bar },
+            Center => zero(),
+        };
+        match (q.side) {
+            Left => {
+                at[0] += tab.h + 4.0 * s;
+            },
+            Right => {
+                at[1] += tab.h + 4.0 * s;
+            },
+            Top => {
+                at[2] += tab.w + 4.0 * s;
+            },
+            Bottom => {
+                at[3] += tab.w + 4.0 * s;
+            },
+            Center => { },
+        }
+        bool open = d.flyout == p as i32;
+        c.fill(tab, open ? mixed(strip, accent, 0.25) : strip);
+        match (q.side) {
+            Left => {
+                vertical_text(f, tab, q.title, text, s);
+            },
+            Right => {
+                vertical_text(f, tab, q.title, text, s);
+            },
+            _ => {
+                f.text_at(tab.x + 8.0 * s, tab.y, tab.h, q.title, text, 0.0);
+            },
+        }
+        mut Panel kept = q;
+        kept.tab = tab;
+        d.panels.set(p, kept);
+        if (f.hovering(tab) && idle) {
+            d.flyout = p as i32;
+            d.away = 0;
+            over_any = true;
+        }
+    }
+    // the panel slid out: over the others, from its side
+    if (d.flyout >= 0) {
+        mut Panel q = d.panels.items()[d.flyout as usize];
+        f32 h = STRIP * s;
+        canvas.Rect r = match (q.side) {
+            Left => canvas.Rect{ x: d.inner.x, y: d.inner.y, w: d.inner.w * q.size, h: d.inner.h },
+            Right => canvas.Rect{
+                x: d.inner.x + d.inner.w * (1.0 - q.size),
+                y: d.inner.y,
+                w: d.inner.w * q.size,
+                h: d.inner.h
+            },
+            Top => canvas.Rect{ x: d.inner.x, y: d.inner.y, w: d.inner.w, h: d.inner.h * q.size },
+            Bottom => canvas.Rect{
+                x: d.inner.x,
+                y: d.inner.y + d.inner.h * (1.0 - q.size),
+                w: d.inner.w,
+                h: d.inner.h * q.size
+            },
+            Center => zero(),
+        };
+        bool near = inside(r, f.mouse_x(), f.mouse_y()) || inside(q.tab, f.mouse_x(), f.mouse_y()) || over_any;
+        d.away = near ? 0 : d.away + 1;
+        if (d.away > 18 || f.mouse_pressed() && !near) {
+            d.flyout = -1;
+        } else {
+            // drawn by `next`, last: its frame here is drawn when it is given
+            q.content = canvas.Rect{ x: r.x + 1.0, y: r.y + h, w: max(0.0, r.w - 2.0), h: max(0.0, r.h - h - 1.0) };
+            d.panels.set(d.flyout as usize, q);
+            d.order.push(d.flyout);
+        }
+    }
+}
+
+f32 vertical_height(widgets.Frame* f, str title, f32 s) {
+    return count_chars(title) as f32 * f.text_size("M", 0.0).h * 0.8 + 12.0 * s;
+}
+
+usize count_chars(str t) {
+    mut usize n = 0;
+    for (usize i in 0..t.len) {
+        if (t.bytes[i] & 0xC0 != 0x80) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// `title` written down `tab`, a letter under the other (a bar on a side of the dock).
+void vertical_text(widgets.Frame* f, canvas.Rect tab, str title, canvas.Color color, f32 s) {
+    f32 line = f.text_size("M", 0.0).h * 0.8;
+    mut f32 y = tab.y + 6.0 * s;
+    mut usize i = 0;
+    while (i < title.len) {
+        mut usize j = i + 1;
+        while (j < title.len && title.bytes[j] & 0xC0 == 0x80) {
+            j += 1;
+        }
+        str letter = text.slice(title, i, j);
+        canvas.Rect w = f.text_size(letter, 0.0);
+        f.text_at(tab.x + (tab.w - w.w) / 2.0, y, line, letter, color, 0.0);
+        y += line;
+        i = j;
+    }
+}
+
+// A pin: upright (docked) or lying (hidden), drawn with lines.
+void draw_pin(canvas.Canvas* c, canvas.Rect r, canvas.Color color, bool lying, f32 s) {
+    f32 cx = r.x + r.w / 2.0;
+    f32 cy = r.y + r.h / 2.0;
+    f32 k = 4.0 * s;
+    if (lying) {
+        c.fill(canvas.Rect{ x: cx - k, y: cy - k * 0.6, w: k * 1.4, h: k * 1.2 }, color);
+        c.fill(canvas.Rect{ x: cx + k * 0.4, y: cy - k, w: 1.5 * s, h: k * 2.0 }, color);
+        c.fill(canvas.Rect{ x: cx + k * 0.4, y: cy - 0.5 * s, w: k * 1.2, h: 1.5 * s }, color);
+    } else {
+        c.fill(canvas.Rect{ x: cx - k * 0.6, y: cy - k, w: k * 1.2, h: k * 1.4 }, color);
+        c.fill(canvas.Rect{ x: cx - k, y: cy + k * 0.4, w: k * 2.0, h: 1.5 * s }, color);
+        c.fill(canvas.Rect{ x: cx - 0.5 * s, y: cy + k * 0.4, w: 1.5 * s, h: k * 1.2 }, color);
+    }
+}
+
+// The next panel shown: its widgets go in its rectangle until the next call. False when every
+// panel has been given (its region closed).
+pub bool next(widgets.Frame* f, Dock* d) {
+    if (d.in_panel) {
+        f.end_region();
+        d.in_panel = false;
+    }
+    if (d.cursor >= d.order.len()) {
+        d.shown = -1;
+        return false;
+    }
+    i32 p = d.order.items()[d.cursor];
+    d.cursor += 1;
+    d.shown = p;
+    Panel q = d.panels.items()[p as usize];
+    if (p == d.flyout && d.drawing < 0) {
+        // its frame, over what is under it: a title, its pin, a border
+        canvas.Canvas* c = f.drawing();
+        f32 s = f.ui_scale();
+        f32 h = STRIP * s;
+        canvas.Rect whole = canvas.Rect{
+            x: q.content.x - 1.0,
+            y: q.content.y - h,
+            w: q.content.w + 2.0,
+            h: q.content.h + h + 1.0
+        };
+        c.fill(whole, f.window_color());
+        canvas.Rect top = canvas.Rect{ x: whole.x, y: whole.y, w: whole.w, h: h };
+        c.fill(top, f.field_color());
+        c.fill(canvas.Rect{ x: top.x, y: top.y, w: top.w, h: 2.0 * s }, f.accent_color());
+        f.text_at(top.x + 9.0 * s, top.y, h, q.title, f.text_color(), 0.0);
+        c.stroke(whole, f.accent_color(), 1.0);
+        canvas.Rect pin = canvas.Rect{ x: top.x + top.w - h, y: top.y, w: h, h: h };
+        bool over_pin = f.hovering(pin);
+        draw_pin(c, pin, over_pin ? f.accent_color() : f.text_color(), true, s);
+        if (over_pin && f.mouse_pressed()) {
+            d.pending = Change.Pin(p);
+        }
+    }
+    f.region(q.content);
+    d.in_panel = true;
+    return true;
+}
+
+// A guide of a drag: where it is, and where the panel would go (in the coordinates of the dock).
+struct Guide {
+    canvas.Rect square;
+    canvas.Rect preview;
+    i32 node;  // -1: a side of the dock
+    Edge edge;
+}
+
+// The window under (x, y) for a drag: a floating one (not the one held), else the dock, else -2.
+i32 window_at(Dock* d, f32 x, f32 y) {
+    mut i32 found = -2;
+    for (usize k in 0..d.wins.len()) {
+        Win w = d.wins.items()[k];
+        if (w.used && k as i32 != d.drag_win && inside(w.rect, x, y)) {
+            found = k as i32;
+        }
+    }
+    if (found == -2 && inside(d.area, x, y)) {
+        found = -1;
+    }
+    return found;
+}
+
+// The group of the window `win` under (x, y) of that window, -1: none.
+i32 group_at(Dock* d, i32 win, f32 x, f32 y) {
+    for (usize n in 0..d.nodes.len()) {
+        Node node = d.nodes.items()[n];
+        if (node.used && !node.split && inside(node.rect, x, y) && d.win_of_node(n as i32) == win) {
+            return n as i32;
+        }
+    }
+    return -1;
+}
+
+// The guides of a drag at (x, y) over the window `win` (-1: the dock, -2: none): the cross of the
+// group under it (none when the panel dragged is alone in it), and the sides of the dock.
+Guide[] guides(Arena* into, Dock* d, i32 win, f32 x, f32 y, f32 s) {
+    vec.Vec<Guide>* out = vec.new<Guide>(into);
+    if (win == -2) {
+        return out.items();
+    }
+    f32 ox = win >= 0 ? d.wins.items()[win as usize].rect.x : 0.0;
+    f32 oy = win >= 0 ? d.wins.items()[win as usize].rect.y : 0.0;
+    f32 g = GUIDE * s;
+    f32 gap = 6.0 * s;
+    i32 under = group_at(d, win, x - ox, y - oy);
+    if (under >= 0) {
+        canvas.Rect r = moved(d.nodes.items()[under as usize].rect, ox, oy);
+        f32 cx = r.x + r.w / 2.0;
+        f32 cy = r.y + r.h / 2.0;
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        usize[] mine = d.members(&scratch, under);
+        bool alone = mine.len == 1 && mine[0] as i32 == d.dragging;
+        if (!alone) {
+            out.push(Guide{
+                square: canvas.Rect{ x: cx - g / 2.0, y: cy - g / 2.0, w: g, h: g },
+                preview: r,
+                node: under,
+                edge: Edge.Center
+            });
+            out.push(Guide{
+                square: canvas.Rect{ x: cx - g * 1.5 - gap, y: cy - g / 2.0, w: g, h: g },
+                preview: canvas.Rect{ x: r.x, y: r.y, w: r.w / 2.0, h: r.h },
+                node: under,
+                edge: Edge.Left
+            });
+            out.push(Guide{
+                square: canvas.Rect{ x: cx + g / 2.0 + gap, y: cy - g / 2.0, w: g, h: g },
+                preview: canvas.Rect{ x: r.x + r.w / 2.0, y: r.y, w: r.w / 2.0, h: r.h },
+                node: under,
+                edge: Edge.Right
+            });
+            out.push(Guide{
+                square: canvas.Rect{ x: cx - g / 2.0, y: cy - g * 1.5 - gap, w: g, h: g },
+                preview: canvas.Rect{ x: r.x, y: r.y, w: r.w, h: r.h / 2.0 },
+                node: under,
+                edge: Edge.Top
+            });
+            out.push(Guide{
+                square: canvas.Rect{ x: cx - g / 2.0, y: cy + g / 2.0 + gap, w: g, h: g },
+                preview: canvas.Rect{ x: r.x, y: r.y + r.h / 2.0, w: r.w, h: r.h / 2.0 },
+                node: under,
+                edge: Edge.Bottom
+            });
+        }
+    }
+    if (win >= 0) {
+        return out.items();
+    }
+    canvas.Rect a = d.inner;
+    f32 m = 10.0 * s;
+    out.push(Guide{
+        square: canvas.Rect{ x: a.x + m, y: a.y + a.h / 2.0 - g / 2.0, w: g, h: g },
+        preview: canvas.Rect{ x: a.x, y: a.y, w: a.w * 0.25, h: a.h },
+        node: -1,
+        edge: Edge.Left
+    });
+    out.push(Guide{
+        square: canvas.Rect{ x: a.x + a.w - m - g, y: a.y + a.h / 2.0 - g / 2.0, w: g, h: g },
+        preview: canvas.Rect{ x: a.x + a.w * 0.75, y: a.y, w: a.w * 0.25, h: a.h },
+        node: -1,
+        edge: Edge.Right
+    });
+    out.push(Guide{
+        square: canvas.Rect{ x: a.x + a.w / 2.0 - g / 2.0, y: a.y + m, w: g, h: g },
+        preview: canvas.Rect{ x: a.x, y: a.y, w: a.w, h: a.h * 0.25 },
+        node: -1,
+        edge: Edge.Top
+    });
+    out.push(Guide{
+        square: canvas.Rect{ x: a.x + a.w / 2.0 - g / 2.0, y: a.y + a.h - m - g, w: g, h: g },
+        preview: canvas.Rect{ x: a.x, y: a.y + a.h * 0.75, w: a.w, h: a.h * 0.25 },
+        node: -1,
+        edge: Edge.Bottom
+    });
+    return out.items();
+}
+
+// The guide square of `edge` on the group of `id` (Center, Left...), in the dock or in a floating
+// window, or on the side of the dock (`id` ""), in the coordinates of the dock, while a panel is
+// dragged: where a test, or a tour, moves the mouse. `scale`: that of the frame
+// (`Frame.ui_scale`).
+pub canvas.Rect guide_of(Dock* d, str id, Edge edge, f32 scale) {
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    i32 p = d.index_of(id);
+    i32 under = p >= 0 ? d.panels.items()[p as usize].node : -1;
+    i32 win = d.win_of_node(under);
+    f32 ox = win >= 0 ? d.wins.items()[win as usize].rect.x : 0.0;
+    f32 oy = win >= 0 ? d.wins.items()[win as usize].rect.y : 0.0;
+    canvas.Rect r = under >= 0 ? moved(d.nodes.items()[under as usize].rect, ox, oy) : d.inner;
+    for (Guide g in guides(&scratch, d, win, r.x + r.w / 2.0, r.y + r.h / 2.0, scale)) {
+        if (g.node == (id.len == 0 ? -1 : under) && same_edge(g.edge, edge)) {
+            return g.square;
+        }
+    }
+    return zero();
+}
+
+// The guides drawn into a frame whose top left corner is at (ox, oy) of the dock.
+void draw_guides(widgets.Frame* f, Guide[] all, f32 ox, f32 oy, f32 mx, f32 my, f32 s) {
+    canvas.Canvas* c = f.drawing();
+    canvas.Color accent = f.accent_color();
+    canvas.Color strip = f.field_color();
+    for (Guide g in all) {
+        if (inside(g.square, mx, my)) {
+            canvas.Rect p = moved(g.preview, -ox, -oy);
+            c.fill(p, faded(accent, 70));
+            c.stroke(p, accent, 2.0);
+        }
+    }
+    for (Guide g in all) {
+        bool on = inside(g.square, mx, my);
+        canvas.Rect sq = moved(g.square, -ox, -oy);
+        c.fill_rounded(sq, 4.0 * s, on ? accent : strip);
+        c.stroke_rounded(sq, 4.0 * s, accent, 1.0);
+        // where the panel goes, drawn in the square
+        f32 k = sq.w * 0.28;
+        canvas.Rect mark = match (g.edge) {
+            Center => canvas.Rect{ x: sq.x + k, y: sq.y + k, w: sq.w - 2.0 * k, h: sq.h - 2.0 * k },
+            Left => canvas.Rect{ x: sq.x + k * 0.6, y: sq.y + k, w: k, h: sq.h - 2.0 * k },
+            Right => canvas.Rect{ x: sq.x + sq.w - k * 1.6, y: sq.y + k, w: k, h: sq.h - 2.0 * k },
+            Top => canvas.Rect{ x: sq.x + k, y: sq.y + k * 0.6, w: sq.w - 2.0 * k, h: k },
+            Bottom => canvas.Rect{ x: sq.x + k, y: sq.y + sq.h - k * 1.6, w: sq.w - 2.0 * k, h: k },
+        };
+        c.fill(mark, on ? strip : accent);
+    }
+}
+
+// The guides of a drag drawn (when it is over the dock), and the drop: the panel, or the floating
+// window held, where the guide under the mouse says; a panel over no guide into a window of its
+// own (`can_float`).
+pub void end(widgets.Frame* f, Dock* d) {
+    if (d.in_panel) {
+        f.end_region();
+        d.in_panel = false;
+    }
+    if (d.dragging < 0 && d.drag_win < 0) {
+        return;
+    }
+    bool down = held_down(f, d);
+    if (!d.moving) {
+        if (!down) {
+            d.dragging = -1;  // a click on a tab: it was chosen
+            d.remote = false;
+        }
+        return;
+    }
+    f32 s = f.ui_scale();
+    f32[2] m = pointer(f, d);
+    f32 mx = m[0];
+    f32 my = m[1];
+    d.drag_x = mx;
+    d.drag_y = my;
+    d.target = window_at(d, mx, my);
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    Guide[] all = guides(&scratch, d, d.target, mx, my, s);
+    mut Guide? chosen = none;
+    for (Guide g in all) {
+        if (inside(g.square, mx, my)) {
+            chosen = some(g);
+        }
+    }
+    if (d.target == -1) {
+        draw_guides(f, all, 0.0, 0.0, mx, my, s);
+    }
+    // the title of the panel, under the mouse (from a floating window: that window follows it)
+    if (!d.remote && d.dragging >= 0) {
+        canvas.Canvas* c = f.drawing();
+        Panel q = d.panels.items()[d.dragging as usize];
+        canvas.Rect size = f.text_size(q.title, 0.0);
+        canvas.Rect ghost = canvas.Rect{ x: mx + 12.0 * s, y: my + 8.0 * s, w: size.w + 18.0 * s, h: STRIP * s };
+        c.fill(ghost, faded(f.field_color(), 220));
+        c.stroke(ghost, f.accent_color(), 1.0);
+        f.text_at(ghost.x + 9.0 * s, ghost.y, ghost.h, q.title, f.text_color(), 0.0);
+    }
+    if (down) {
+        return;
+    }
+    match (chosen) {
+        some(g) => {
+            d.pending = d.drag_win >= 0 ? Change.MoveWindow(d.drag_win, g.node, g.edge)
+                    : Change.Move(d.dragging, g.node, g.edge);
+        },
+        none => {
+            // over no guide: a panel goes into a window of its own where it was dropped, when the
+            // program opens them (else it stays where it was); a window stays where it was moved
+            if (d.dragging >= 0 && d.can_float) {
+                d.pending = Change.Float(
+                    d.dragging,
+                    canvas.Rect{
+                        x: mx - d.grab_x,
+                        y: my - d.grab_y,
+                        w: max(d.drag_w, 160.0 * s),
+                        h: max(d.drag_h, 120.0 * s)
+                    }
+                );
+            }
+        },
+    }
+    d.dragging = -1;
+    d.drag_win = -1;
+    d.moving = false;
+    d.remote = false;
+    d.target = -2;
+}
+
+// The end of the frame of a floating window: the guides of a drag over it.
+pub void end_window(widgets.Frame* f, Dock* d) {
+    if (d.in_panel) {
+        f.end_region();
+        d.in_panel = false;
+    }
+    i32 k = d.drawing;
+    if (k < 0 || !d.live(k) || !d.moving || d.target != k) {
+        return;
+    }
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    f32 s = f.ui_scale();
+    canvas.Rect r = d.wins.items()[k as usize].rect;
+    draw_guides(f, guides(&scratch, d, k, d.drag_x, d.drag_y, s), r.x, r.y, d.drag_x, d.drag_y, s);
+}
+
+// ---- Tests: the mouse moved by hand, a frame at a time ----
+
+canvas.Rect area_of_tests() {
+    return canvas.Rect{ x: 0.0, y: 0.0, w: 400.0, h: 300.0 };
+}
+
+// A frame: the panels `next` gave, in order, joined by spaces.
+str frame(keeps Arena* a, widgets.Ui* ui, canvas.Canvas* surface, Dock* d) {
+    text.TextBuilder* seen = text.builder(a);
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    begin(&f, d, area_of_tests());
+    while (next(&f, d)) {
+        if (seen.len() > 0) {
+            seen.push(" ");
+        }
+        seen.push(d.current());
+    }
+    end(&f, d);
+    f.finish();
+    return seen.text();
+}
+
+void at(widgets.Ui* ui, canvas.Rect r) {
+    ui.mouse_move(r.x + r.w / 2.0, r.y + r.h / 2.0);
+}
+
+Dock* three(keeps Arena* arena) {
+    Dock* d = dock(arena);
+    d.add("a", "Alpha");
+    d.add("b", "Beta");
+    d.add("c", "Gamma");
+    d.place("a", none, Edge.Center, 1.0);
+    d.place("b", some("a"), Edge.Right, 0.3);
+    d.place("c", some("b"), Edge.Center, 0.5);
+    return d;
+}
+
+test "panels side by side, and tabs" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    assert(frame(&arena, &ui, &surface, d) == "a c");
+    canvas.Rect a = d.rect_of("a");
+    canvas.Rect c = d.rect_of("c");
+    assert(a.x < 5.0 && a.w > 250.0 && a.w < 290.0);
+    assert(c.x > a.x + a.w && c.x + c.w > 390.0);
+    assert(d.rect_of("b").w == 0.0 && d.is_active("c") && !d.is_active("b"));
+    // a click on the tab of b shows it
+    at(&ui, d.tab_of("b"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    assert(frame(&arena, &ui, &surface, d) == "a b");
+    assert(d.is_active("b") && !d.busy());
+}
+
+test "the splitter moves" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    frame(&arena, &ui, &surface, d);
+    canvas.Rect a = d.rect_of("a");
+    ui.mouse_move(a.x + a.w + 3.0, 150.0);
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    assert(d.busy());
+    ui.mouse_move(200.0, 150.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    canvas.Rect now = d.rect_of("a");
+    assert(now.w > 190.0 && now.w < 205.0 && !d.busy());
+}
+
+test "a tab dragged onto a guide" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    frame(&arena, &ui, &surface, d);
+    // c dragged to the bottom of the dock
+    at(&ui, d.tab_of("c"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_move(200.0, 150.0);
+    frame(&arena, &ui, &surface, d);
+    assert(d.busy());
+    at(&ui, guide_of(d, "", Edge.Bottom, 1.0));
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "a b c");
+    canvas.Rect c = d.rect_of("c");
+    assert(c.y > 200.0 && c.w > 390.0);
+    assert(d.rect_of("b").y < 50.0);
+    // then into the tabs of a
+    at(&ui, d.tab_of("c"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    canvas.Rect a = d.rect_of("a");
+    ui.mouse_move(a.x + 20.0, a.y + 20.0);
+    frame(&arena, &ui, &surface, d);
+    at(&ui, guide_of(d, "a", Edge.Center, 1.0));
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "c b");
+    assert(d.rect_of("c").h > 250.0);
+    // released over no guide: nothing moves
+    at(&ui, d.tab_of("b"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_move(100.0, 60.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "c b" && !d.busy());
+}
+
+test "a group pinned to its side, slid out, docked again" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    frame(&arena, &ui, &surface, d);
+    // the pin of b and c: they go to the right side
+    canvas.Rect pr = d.pin_of("c");
+    assert(pr.w > 0.0 && pr.x > 370.0);
+    at(&ui, pr);
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    bool hid = match (d.pending) {
+        Hide(n) => true,
+        _ => false,
+    };
+    assert(hid);
+    ui.mouse_button(false);
+    ui.mouse_move(100.0, 150.0);
+    str got = frame(&arena, &ui, &surface, d);
+    assert(d.is_hidden("c"));
+    assert(got == "a");
+    assert(d.is_hidden("b") && d.is_hidden("c"));
+    canvas.Rect a = d.rect_of("a");
+    assert(a.w > 360.0 && a.x + a.w < 380.0);  // the bar on the right
+    canvas.Rect tab = d.tab_of("c");
+    assert(tab.x > 370.0);
+    // the mouse over its tab: it slides out, over a
+    at(&ui, tab);
+    assert(frame(&arena, &ui, &surface, d) == "a c");
+    mut canvas.Rect c = d.rect_of("c");
+    assert(c.w > 50.0 && c.x + c.w > 360.0);
+    assert(d.covers(c.x + 5.0, c.y + 5.0));
+    // the mouse away: it goes back
+    ui.mouse_move(20.0, 150.0);
+    for (usize i in 0..25) {
+        frame(&arena, &ui, &surface, d);
+    }
+    assert(frame(&arena, &ui, &surface, d) == "a");
+    // out again, and its pin: docked on the right
+    at(&ui, tab);
+    frame(&arena, &ui, &surface, d);
+    c = d.rect_of("c");
+    f32 h = STRIP;
+    ui.mouse_move(c.x + c.w - h / 2.0, c.y - h / 2.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    ui.mouse_move(20.0, 150.0);
+    assert(frame(&arena, &ui, &surface, d) == "a c");
+    assert(!d.is_hidden("c") && d.is_hidden("b"));
+    assert(d.rect_of("c").x > 200.0);
+}
+
+// A frame of the floating window `k`, 300 by 200 at `x`, `y` of the dock: the panels it shows.
+str float_frame(keeps Arena* a, widgets.Ui* ui, canvas.Canvas* surface, Dock* d, i32 k, f32 x, f32 y) {
+    text.TextBuilder* seen = text.builder(a);
+    mut widgets.Frame f = widgets.begin(ui, surface, 0.0, 0.0);
+    begin_window(&f, d, k, canvas.Rect{ x: x, y: y, w: 300.0, h: 200.0 });
+    while (next(&f, d)) {
+        if (seen.len() > 0) {
+            seen.push(" ");
+        }
+        seen.push(d.current());
+        f.label("inside");
+    }
+    end_window(&f, d);
+    f.finish();
+    return seen.text();
+}
+
+// `id` dragged by its tab in the dock and dropped at (x, y), over no guide.
+void float_out(keeps Arena* arena, widgets.Ui* ui, canvas.Canvas* surface, Dock* d, str id, f32 x, f32 y) {
+    at(ui, d.tab_of(id));
+    ui.mouse_button(true);
+    frame(arena, ui, surface, d);
+    ui.mouse_move(x, y);
+    frame(arena, ui, surface, d);
+    ui.mouse_button(false);
+    frame(arena, ui, surface, d);
+    frame(arena, ui, surface, d);
+}
+
+test "a panel floated into a window of its own, held back onto a guide, and docked by its pin" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut canvas.Canvas other = canvas.create(&arena, 300, 200);
+    mut widgets.Ui ui = widgets.Ui{ };
+    mut widgets.Ui window = widgets.Ui{ };
+    Dock* d = three(&arena);
+    d.can_float = true;
+    frame(&arena, &ui, &surface, d);
+    // c dropped over no guide: it floats there
+    float_out(&arena, &ui, &surface, d, "c", 100.0, 60.0);
+    assert(frame(&arena, &ui, &surface, d) == "a b");
+    i32[] wins = d.windows(&arena);
+    assert(wins.len == 1 && d.window_of("c") == wins[0] && d.is_floating("c"));
+    mut i32 k = wins[0];
+    canvas.Rect r = d.window_rect(k);
+    f32[2] held_at = d.grab();
+    assert(r.x + held_at[0] == 100.0 && r.y + held_at[1] == 60.0 && r.w >= 160.0);
+    assert(d.window_title(k) == "Gamma");
+    // in its window: its widgets under its tab
+    assert(float_frame(&arena, &window, &other, d, k, r.x, r.y) == "c");
+    assert(d.rect_of("c").y > 20.0 && d.rect_of("c").h < 180.0);
+    // held by its only tab: the window itself, the mouse given to the dock; onto the guide of the right
+    window.mouse_move(40.0, 12.0);
+    window.mouse_button(true);
+    float_frame(&arena, &window, &other, d, k, r.x, r.y);
+    assert(d.held_window() == k && d.moves_window() && d.busy());
+    canvas.Rect g = guide_of(d, "", Edge.Right, 1.0);
+    d.follow(g.x + g.w / 2.0, g.y + g.h / 2.0, true);
+    frame(&arena, &ui, &surface, d);
+    d.follow(g.x + g.w / 2.0, g.y + g.h / 2.0, false);
+    window.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "a b c");
+    assert(!d.is_floating("c") && d.rect_of("c").x > 250.0 && d.held_window() == -1);
+    assert(d.windows(&arena).len == 0);
+    // floated again, then the pin of its window: back where it was
+    float_out(&arena, &ui, &surface, d, "c", 100.0, 60.0);
+    k = d.window_of("c");
+    assert(k >= 0);
+    float_frame(&arena, &window, &other, d, k, 100.0, 60.0);
+    window.mouse_move(300.0 - STRIP / 2.0, STRIP / 2.0);
+    window.mouse_button(true);
+    float_frame(&arena, &window, &other, d, k, 100.0, 60.0);
+    window.mouse_button(false);
+    assert(frame(&arena, &ui, &surface, d) == "a b c");
+    assert(!d.is_floating("c") && d.rect_of("c").x > 250.0);
+    // its window closed: back too
+    float_out(&arena, &ui, &surface, d, "c", 100.0, 60.0);
+    assert(frame(&arena, &ui, &surface, d) == "a b" && d.is_floating("c"));
+    d.dock_back(d.window_of("c"));
+    assert(frame(&arena, &ui, &surface, d) == "a b c" && d.windows(&arena).len == 0);
+}
+
+test "floating windows: one dropped into another, a tab of the dock into one, all docked back" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut canvas.Canvas other = canvas.create(&arena, 300, 200);
+    mut widgets.Ui ui = widgets.Ui{ };
+    // in the arena: a `Ui` is large, three on the stack overflow it
+    widgets.Ui* first = arena.alloc(widgets.Ui);
+    *first = widgets.Ui{ };
+    widgets.Ui* second = arena.alloc(widgets.Ui);
+    *second = widgets.Ui{ };
+    Dock* d = three(&arena);
+    d.can_float = true;
+    frame(&arena, &ui, &surface, d);
+    // c, then b, each into a window of its own
+    float_out(&arena, &ui, &surface, d, "c", 100.0, 60.0);
+    float_out(&arena, &ui, &surface, d, "b", 100.0, 60.0);
+    assert(frame(&arena, &ui, &surface, d) == "a" && d.windows(&arena).len == 2);
+    i32 kc = d.window_of("c");
+    i32 kb = d.window_of("b");
+    assert(kc >= 0 && kb >= 0 && kc != kb);
+    // where their windows are: c's over the dock, b's beside it
+    assert(float_frame(&arena, first, &other, d, kc, 50.0, 50.0) == "c");
+    assert(float_frame(&arena, second, &other, d, kb, 500.0, 300.0) == "b");
+    // b's window held by its tab, brought over c's window: the guides show there
+    second.mouse_move(40.0, 12.0);
+    second.mouse_button(true);
+    float_frame(&arena, second, &other, d, kb, 500.0, 300.0);
+    assert(d.held_window() == kb && d.moves_window());
+    canvas.Rect g = guide_of(d, "c", Edge.Center, 1.0);
+    assert(g.x > 50.0 && g.x < 350.0 && g.y > 50.0 && g.y < 250.0);
+    d.follow(g.x + g.w / 2.0, g.y + g.h / 2.0, true);
+    frame(&arena, &ui, &surface, d);
+    assert(d.target == kc);
+    float_frame(&arena, first, &other, d, kc, 50.0, 50.0);
+    // released over its center: b into the tabs of c, b's window gone
+    d.follow(g.x + g.w / 2.0, g.y + g.h / 2.0, false);
+    second.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "a");
+    i32[] wins = d.windows(&arena);
+    assert(wins.len == 1 && wins[0] == kc && d.window_of("b") == kc && d.window_of("c") == kc);
+    assert(float_frame(&arena, first, &other, d, kc, 50.0, 50.0) == "b");
+    assert(d.pin_of("b").x == d.pin_of("c").x);
+    // a, from the dock, dropped on the right of that group: the dock is empty, the window holds all
+    canvas.Rect right = guide_of(d, "b", Edge.Right, 1.0);
+    at(&ui, d.tab_of("a"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_move(right.x + right.w / 2.0, right.y + right.h / 2.0 + 20.0);
+    frame(&arena, &ui, &surface, d);
+    at(&ui, right);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "" && d.window_of("a") == kc);
+    str both = float_frame(&arena, first, &other, d, kc, 50.0, 50.0);
+    assert(both == "b a" || both == "a b");
+    assert(d.rect_of("a").x > d.rect_of("b").x);
+    // the pin of the window: all back in the dock
+    first.mouse_move(300.0 - STRIP / 2.0, STRIP / 2.0);
+    first.mouse_button(true);
+    float_frame(&arena, first, &other, d, kc, 50.0, 50.0);
+    first.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(d.windows(&arena).len == 0);
+    assert(!d.is_floating("a") && !d.is_floating("b") && !d.is_floating("c"));
+    assert(frame(&arena, &ui, &surface, d).len > 0);
+}
+
+test "pinned again, or docked back, a panel goes back where it was" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut canvas.Canvas other = canvas.create(&arena, 300, 200);
+    mut widgets.Ui ui = widgets.Ui{ };
+    mut widgets.Ui window = widgets.Ui{ };
+    // a scene, a list under it, an inspector on the right of both
+    Dock* d = dock(&arena);
+    d.add("scene", "Scene");
+    d.add("list", "Entities");
+    d.add("info", "Inspector");
+    d.add("more", "More");
+    d.place("scene", none, Edge.Center, 1.0);
+    d.place("info", some("scene"), Edge.Right, 0.3);
+    d.place("list", some("scene"), Edge.Bottom, 0.3);
+    d.can_float = true;
+    frame(&arena, &ui, &surface, d);
+    canvas.Rect was = d.rect_of("list");
+    canvas.Rect info = d.rect_of("info");
+    assert(was.x + was.w < info.x && was.y > 150.0);
+    // its pin, then its own pin again
+    at(&ui, d.pin_of("list"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    ui.mouse_move(100.0, 100.0);
+    frame(&arena, &ui, &surface, d);
+    assert(d.is_hidden("list"));
+    at(&ui, d.tab_of("list"));
+    frame(&arena, &ui, &surface, d);
+    canvas.Rect out = d.rect_of("list");
+    f32 h = STRIP;
+    ui.mouse_move(out.x + out.w - h / 2.0, out.y - h / 2.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    ui.mouse_move(100.0, 100.0);
+    frame(&arena, &ui, &surface, d);
+    frame(&arena, &ui, &surface, d);
+    mut canvas.Rect back = d.rect_of("list");
+    assert(!d.is_hidden("list"));
+    assert(abs(back.x - was.x) < 1.0 && abs(back.y - was.y) < 1.0 && abs(back.w - was.w) < 1.0
+            && abs(back.h - was.h) < 1.0);
+    // floated, then docked back by the pin of its window: the same
+    at(&ui, d.tab_of("list"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_move(100.0, 60.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    frame(&arena, &ui, &surface, d);
+    assert(d.is_floating("list"));
+    i32 k = d.window_of("list");
+    float_frame(&arena, &window, &other, d, k, 100.0, 60.0);
+    window.mouse_move(300.0 - STRIP / 2.0, STRIP / 2.0);
+    window.mouse_button(true);
+    float_frame(&arena, &window, &other, d, k, 100.0, 60.0);
+    window.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    back = d.rect_of("list");
+    assert(!d.is_floating("list"));
+    assert(abs(back.x - was.x) < 1.0 && abs(back.y - was.y) < 1.0 && abs(back.w - was.w) < 1.0
+            && abs(back.h - was.h) < 1.0);
+    // two tabs hidden together come back together, as tabs
+    d.place("more", some("list"), Edge.Center, 0.5);
+    frame(&arena, &ui, &surface, d);
+    at(&ui, d.pin_of("more"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    ui.mouse_move(100.0, 100.0);
+    frame(&arena, &ui, &surface, d);
+    assert(d.is_hidden("list") && d.is_hidden("more"));
+    d.pending = Change.Pin(d.index_of("more"));
+    frame(&arena, &ui, &surface, d);
+    d.pending = Change.Pin(d.index_of("list"));
+    frame(&arena, &ui, &surface, d);
+    frame(&arena, &ui, &surface, d);
+    assert(d.pin_of("list").x == d.pin_of("more").x && d.pin_of("list").y == d.pin_of("more").y);
+    canvas.Rect group = d.rect_of(d.is_active("list") ? "list" : "more");
+    assert(abs(group.x - was.x) < 1.0 && abs(group.y - was.y) < 1.0 && abs(group.w - was.w) < 1.0);
+}
+
+test "the arrangement saved and read back: splits, tabs, a floating window, a hidden panel" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    d.add("d", "Delta");
+    d.place("d", some("a"), Edge.Bottom, 0.3);
+    d.can_float = true;
+    frame(&arena, &ui, &surface, d);
+    // c into a window of its own, d hidden on its side, b shown in its group
+    float_out(&arena, &ui, &surface, d, "c", 100.0, 60.0);
+    at(&ui, d.pin_of("d"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    ui.mouse_move(100.0, 100.0);
+    str shown = frame(&arena, &ui, &surface, d);
+    assert(d.is_hidden("d") && d.is_floating("c"));
+    str saved = d.save(&arena);
+    // another dock, as the program makes it when it opens: the same panels, placed otherwise
+    Dock* e = three(&arena);
+    e.add("d", "Delta");
+    e.place("d", some("a"), Edge.Top, 0.5);
+    assert(e.restore(saved));
+    mut widgets.Ui other = widgets.Ui{ };
+    assert(frame(&arena, &other, &surface, e) == shown);
+    for (str id in ["a", "b"]) {
+        canvas.Rect x = d.rect_of(id);
+        canvas.Rect y = e.rect_of(id);
+        assert(abs(x.x - y.x) < 1.0 && abs(x.y - y.y) < 1.0 && abs(x.w - y.w) < 1.0 && abs(x.h - y.h) < 1.0);
+    }
+    assert(e.is_hidden("d") && e.is_floating("c") && e.windows(&arena).len == 1);
+    canvas.Rect wd = d.window_rect(d.window_of("c"));
+    canvas.Rect we = e.window_rect(e.window_of("c"));
+    assert(wd.x == we.x && wd.y == we.y && wd.w == we.w && wd.h == we.h);
+    assert(e.save(&arena) == saved);
+}
+
+test "an arrangement that does not fit the panels is not read; a panel added since goes on the right" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    str before = d.save(&arena);
+    assert(!d.restore("{"));
+    assert(!d.restore("{\"version\":2}"));
+    assert(!d.restore(text.replace(&arena, before, "\"a\"", "\"zz\"")));  // a panel it does not have
+    assert(!d.restore(text.replace(&arena, before, "\"c\"", "\"b\"")));  // one twice
+    assert(d.save(&arena) == before);
+    // read by a dock with one more panel: that one on the right
+    Dock* e = three(&arena);
+    e.add("e", "Epsilon");
+    assert(e.restore(before));
+    frame(&arena, &ui, &surface, e);
+    assert(e.rect_of("e").x > 250.0 && e.rect_of("a").x < 10.0);
+}

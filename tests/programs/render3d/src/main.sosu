@@ -72,21 +72,40 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
         influences[i].weights[0] = 1.0;
     }
     mut model.Mesh[] skinned_meshes = arena.alloc_slice(model.Mesh, 1);
-    skinned_meshes[0] = model.Mesh{ name: m0.name, vertices: m0.vertices, indices: m0.indices, material: m0.material,
-            bounds: m0.bounds, influences: some(influences) };
+    skinned_meshes[0] = model.Mesh{
+        name: m0.name,
+        vertices: m0.vertices,
+        indices: m0.indices,
+        material: m0.material,
+        bounds: m0.bounds,
+        influences: some(influences)
+    };
     mut model.Node[] nodes = arena.alloc_slice(model.Node, 1);
-    nodes[0] = model.Node{ name: "skinned", local: linear.identity4(), meshes: plain.nodes[0].meshes, children: plain.nodes[0].children,
-            skin: some(0) };
+    nodes[0] = model.Node{
+        name: "skinned",
+        local: linear.identity4(),
+        meshes: plain.nodes[0].meshes,
+        children: plain.nodes[0].children,
+        skin: some(0)
+    };
     mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, 1);
     binds[0] = linear.identity4();
     mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
     skins[0] = model.Skin{ name: "one", joints: plain.roots, inverse_binds: binds };
-    model.Model skinned = model.Model{ meshes: skinned_meshes, materials: plain.materials, images: plain.images, nodes: nodes,
-            roots: plain.roots, skins: some(skins) };
+    model.Model skinned = model.Model{
+        meshes: skinned_meshes,
+        materials: plain.materials,
+        images: plain.images,
+        nodes: nodes,
+        roots: plain.roots,
+        skins: some(skins)
+    };
     render3d.Uploaded* moved = try r.upload(arena, skinned);
     mut linear.Mat4[] palette = arena.alloc_slice(linear.Mat4, 1);
     palette[0] = linear.translation(linear.vec3(-3.0, 1.0, 0.0));
-    mut render3d.Item[1] dancers = [render3d.Item{ model: moved, transform: linear.identity4(), palette: some(palette) }];
+    mut render3d.Item[1] dancers = [
+        render3d.Item{ model: moved, transform: linear.identity4(), palette: some(palette) },
+    ];
     gpu.Frame second = try device.commands();
     r.draw_into(second, target, camera, dancers[0..1]);
     try second.submit_and_wait();
@@ -135,13 +154,28 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
         moves[3 * i + 1] = 1.0;
     }
     mut model.Morph[] targets = arena.alloc_slice(model.Morph, 2);
-    targets[0] = model.Morph{ name: "nothing", positions: arena.alloc_slice(f32, 0), normals: arena.alloc_slice(f32, 0) };
+    targets[0] = model.Morph{
+        name: "nothing",
+        positions: arena.alloc_slice(f32, 0),
+        normals: arena.alloc_slice(f32, 0)
+    };
     targets[1] = model.Morph{ name: "aside", positions: moves, normals: arena.alloc_slice(f32, 0) };
     mut model.Mesh[] meshes = arena.alloc_slice(model.Mesh, 1);
-    meshes[0] = model.Mesh{ name: first.name, vertices: first.vertices, indices: first.indices, material: first.material,
-            bounds: first.bounds, morphs: some(targets) };
-    model.Model morphable = model.Model{ meshes: meshes, materials: plain3.materials, images: plain3.images, nodes: plain3.nodes,
-            roots: plain3.roots };
+    meshes[0] = model.Mesh{
+        name: first.name,
+        vertices: first.vertices,
+        indices: first.indices,
+        material: first.material,
+        bounds: first.bounds,
+        morphs: some(targets)
+    };
+    model.Model morphable = model.Model{
+        meshes: meshes,
+        materials: plain3.materials,
+        images: plain3.images,
+        nodes: plain3.nodes,
+        roots: plain3.roots
+    };
     render3d.Uploaded* face = try r.upload(arena, morphable);
     mut ui32[3] green_at = [0, 0, 0];  // at rest, aside, halfway
     mut f32[3] weight = [0.0, 1.0, 0.5];
@@ -149,12 +183,16 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
         mut f32[] w = arena.alloc_slice(f32, 2);
         w[1] = weight[k];
         mut render3d.Morphed[1] given = [render3d.Morphed{ mesh: 0, weights: w }];
-        mut render3d.Item[1] faces = [render3d.Item{ model: face, transform: linear.identity4(), morphs: some(given[0..1]) }];
+        mut render3d.Item[1] faces = [
+            render3d.Item{ model: face, transform: linear.identity4(), morphs: some(given[0..1]) },
+        ];
         gpu.Frame f = try device.commands();
         r.draw_into(f, target, camera, faces[0..1]);
         try f.submit_and_wait();
         image.Image img4 = try device.read_texture(arena, target);
-        linear.Vec3 at = k == 0 ? linear.vec3(0.0, 1.0, 0.0) : k == 1 ? linear.vec3(3.0, 2.0, 0.0) : linear.vec3(1.5, 1.5, 0.0);
+        linear.Vec3 at = k == 0 ? linear.vec3(0.0, 1.0, 0.0)
+                : k == 1 ? linear.vec3(3.0, 2.0, 0.0)
+                : linear.vec3(1.5, 1.5, 0.0);
         i32[2] px = screen(camera, at);
         green_at[k] = img4.at(px[0], px[1]) >> 8 & 0xFF;
         // the place it left: empty once moved aside
@@ -177,6 +215,93 @@ void!gpu.GpuError run(keeps Arena* arena, keeps gpu.Device* device) uses io {
     return ok();
 }
 
+// Whether a pixel near (x, y) is mostly of the channel `c` (0 red, 1 green, 2 blue): a line one
+// pixel wide falls within a pixel or two of where it is computed.
+bool near_line(image.Image img, i32[2] at, ui32 c) {
+    for (i32 dy in -2..3) {
+        for (i32 dx in -2..3) {
+            i32 x = at[0] + dx;
+            i32 y = at[1] + dy;
+            if (x < 0 || y < 0 || x >= SIZE as i32 || y >= SIZE as i32) {
+                continue;
+            }
+            ui32 p = img.at(x, y);
+            ui32[3] rgb = [p >> 16 & 0xFF, p >> 8 & 0xFF, p & 0xFF];
+            if (rgb[c] > 150 && rgb[(c + 1) % 3] < 100 && rgb[(c + 2) % 3] < 100) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Lines drawn with the scene (Renderer.line): hidden behind what stands in front of them, seen
+// over it otherwise.
+void!gpu.GpuError lines(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    render3d.Renderer* r = try render3d.create(arena, device, render3d.Options{ shadow_size: 512 });
+    r.sun.shadows = false;
+    render3d.Uploaded* box = try r.upload(arena, render3d.cube(arena, [0.8, 0.1, 0.1, 1.0]));
+    render3d.Camera camera = render3d.Camera{
+        position: linear.vec3(0.0, 1.0, 6.0),
+        target: linear.vec3(0.0, 0.0, 0.0)
+    };
+    mut render3d.Item[1] items = [render3d.item(box, linear.identity4())];
+    r.line(linear.vec3(-3.0, 0.0, -2.0), linear.vec3(3.0, 0.0, -2.0), [0.0, 1.0, 0.0, 1.0]);  // behind the cube
+    r.line(linear.vec3(-0.5, 0.0, 1.5), linear.vec3(0.5, 0.0, 1.5), [0.0, 0.0, 1.0, 1.0]);  // in front of it
+    render3d.grid(r, 0.0, 0.0, 10.0, 1.0);
+    bool counted = r.line_count() > 40;
+    gpu.Texture target = try device.target(SIZE, SIZE);
+    gpu.Frame frame = try device.commands();
+    r.draw_into(frame, target, camera, items[0..1]);
+    try frame.submit_and_wait();
+    image.Image img = try device.read_texture(arena, target);
+    bool hidden = !near_line(img, screen(camera, linear.vec3(0.0, 0.0, -2.0)), 1);
+    bool beside = near_line(img, screen(camera, linear.vec3(-2.6, 0.0, -2.0)), 1);
+    bool over = near_line(img, screen(camera, linear.vec3(0.0, 0.0, 1.5)), 2);
+    io.print(
+        "lines: hidden behind the cube {}, seen beside it {}, seen in front of it {}, a grid {}",
+        hidden ? "ok" : "no",
+        beside ? "ok" : "no",
+        over ? "ok" : "no",
+        counted && r.line_count() == 0 ? "ok" : "no"
+    );
+    device.release_texture(target);
+    r.release(box);
+    r.close();
+    return ok();
+}
+
+// The device shared with another part of the program (gpu.adopt): a game loaded as a library
+// draws with the device of its editor, into a texture of the editor. The other part makes its own
+// renderer on the adopted device, draws a cube into the adopted texture, and closes, which leaves
+// the device and the texture to the first; the first reads the cube back, and still works.
+void!gpu.GpuError adopted(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    gpu.Texture target = try device.target(SIZE, SIZE);
+    gpu.Device* other = gpu.adopt(arena, device.native(), device.target_format());
+    gpu.Texture into = other.adopt_texture(device.native_texture(target), SIZE, SIZE);
+    render3d.Renderer* r = try render3d.create(arena, other, render3d.Options{ shadow_size: 512 });
+    render3d.Uploaded* box = try r.upload(arena, render3d.cube(arena, [0.8, 0.1, 0.1, 1.0]));
+    render3d.Camera camera = render3d.Camera{
+        position: linear.vec3(0.0, 2.0, 4.0),
+        target: linear.vec3(0.0, 0.0, 0.0)
+    };
+    mut render3d.Item[1] items = [render3d.item(box, linear.identity4())];
+    gpu.Frame frame = try other.commands();
+    r.draw_into(frame, into, camera, items[0..1]);
+    try frame.submit_and_wait();
+    r.release(box);
+    r.close();
+    other.release_texture(into);  // forgotten, not released: it is the first one's
+    other.close();  // the device stays
+    image.Image img = try device.read_texture(arena, target);
+    ui32 middle = img.at((SIZE / 2) as i32, (SIZE / 2) as i32);
+    i32 red = (middle >> 16 & 0xFF) as i32;
+    i32 green = (middle >> 8 & 0xFF) as i32;
+    io.print("drawn by an adopted device: {}", red > green + 40 ? "ok" : "no");
+    device.release_texture(target);
+    return ok();
+}
+
 i32 main() uses io {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
@@ -192,6 +317,20 @@ i32 main() uses io {
         ok() => { },
         err(e) => {
             io.print("render3d: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    match (lines(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("lines: {} ({})", gpu.message(e), gpu.last_error(&arena));
+            status = 1;
+        },
+    }
+    match (adopted(&arena, device)) {
+        ok() => { },
+        err(e) => {
+            io.print("adopted: {} ({})", gpu.message(e), gpu.last_error(&arena));
             status = 1;
         },
     }

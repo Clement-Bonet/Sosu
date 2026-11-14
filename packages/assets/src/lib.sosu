@@ -1,2 +1,3 @@
 // assets: the files of a game loaded in the background (spec §8.2). Programs import `assets.assets`.
 import assets.assets;
+import assets.ids;

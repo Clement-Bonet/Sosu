@@ -2,6 +2,7 @@
 // numbers; the clock and the system seed are only checked for plausible values.
 import std.io;
 import std.random;
+import std.math;
 import std.time;
 
 i32 main() uses io, time, random {
@@ -25,6 +26,44 @@ i32 main() uses io, time, random {
     }
     io.print("values outside their range: {}", outside);
     io.print("wrapping: {} {}", wrapping_add(250 as ui8, 10 as ui8), wrapping_mul(-128 as i8, -1 as i8));
+
+    // ranges, chances, the normal law, weights, a shuffle
+    mut random.Rng r = random.seeded(5);
+    mut i32 heads = 0;
+    mut f64 sum = 0.0;
+    mut f64 squares = 0.0;
+    mut i32[3] picked = [0; 3];
+    mut f64[3] weights = [1.0, 0.0, 3.0];
+    mut i32 wrong = 0;
+    for (i32 i in 0..10000) {
+        f64 x = r.range(-2.0, 3.0);
+        f32 y = r.range_f32(10.0, 11.0);
+        if (x < -2.0 || x >= 3.0 || y < 10.0 || y > 11.0) {
+            wrong += 1;
+        }
+        if (r.chance(0.25)) {
+            heads += 1;
+        }
+        f64 n = r.normal(5.0, 2.0);
+        sum += n;
+        squares += (n - 5.0) * (n - 5.0);
+        picked[r.weighted(weights[0..3])] += 1;
+    }
+    io.print("ranges kept: {}", wrong == 0);
+    io.print("a quarter of chances: {}", heads > 2300 && heads < 2700);
+    f64 mean = sum / 10000.0;
+    f64 spread = math.sqrt(squares / 10000.0);
+    io.print("the normal law, its mean and deviation: {}", mean > 4.9 && mean < 5.1 && spread > 1.9 && spread < 2.1);
+    io.print("weights 1, 0, 3: {}", picked[1] == 0 && picked[0] > 2200 && picked[0] < 2800 && picked[2] > 7200);
+    mut i32[8] items = [0, 1, 2, 3, 4, 5, 6, 7];
+    r.shuffle(items[0..8]);
+    mut i32 total = 0;
+    mut bool moved = false;
+    for (usize i in 0..8) {
+        total += items[i];
+        moved = moved || items[i] != i as i32;
+    }
+    io.print("shuffled, the same items: {}", total == 28 && moved);
 
     mut random.Rng system = random.from_system();
     io.print("system seed: {}", system.below(10) < 10);

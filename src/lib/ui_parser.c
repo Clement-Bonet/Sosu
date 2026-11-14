@@ -2179,7 +2179,8 @@ static Decl *ui_parse_theme(Parser *p, UiThemes *themes) {
         Stmt *var = new_stmt(p, STMT_VAR, entry.name.offset);
         var->length = entry.name.length;
         var->as.var.is_mut = false;
-        var->as.var.type = NULL;  /* `auto` */
+        /* a number is an `f32`, as the properties it is given to (`font_size: 14`); a color is `auto` */
+        var->as.var.type = entry.value->kind == EXPR_FLOAT ? ui_type(p, entry.name.offset, NULL, "f32") : NULL;
         var->as.var.name = entry.name;
         var->as.var.init = entry.value;
         SOSU_VEC_PUSH(&items, var);

@@ -36,6 +36,15 @@ pub struct Aabb {
         };
     }
 
+    // The point of the box nearest to `p` (`p` itself when it is inside).
+    pub linear.Vec3 closest(linear.Vec3 p) {
+        return linear.vec3(
+            greater(min.x, lesser(p.x, max.x)),
+            greater(min.y, lesser(p.y, max.y)),
+            greater(min.z, lesser(p.z, max.z))
+        );
+    }
+
     // The smallest box that holds it and `p`.
     pub Aabb grown(linear.Vec3 p) {
         return union(Aabb{ min: p, max: p });
@@ -107,6 +116,11 @@ pub struct Plane {
     // The distance of `p` to the plane, positive in front, negative behind (normal of length 1).
     pub f32 distance(linear.Vec3 p) {
         return normal.dot(p) + d;
+    }
+
+    // The point of the plane nearest to `p`.
+    pub linear.Vec3 closest(linear.Vec3 p) {
+        return p.sub(normal.scale(distance(p)));
     }
 }
 
@@ -232,6 +246,186 @@ pub TriangleHit? ray_triangle(Ray r, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c
     }
     f32 distance = ac.dot(q) * inv;
     return distance >= 0.0 ? some(TriangleHit{ distance: distance, u: u, v: v }) : none;
+}
+
+// ---- Closest points ----
+
+// The point of the segment from `a` to `b` nearest to `p`.
+pub linear.Vec3 closest_on_segment(linear.Vec3 p, linear.Vec3 a, linear.Vec3 b) {
+    linear.Vec3 ab = b.sub(a);
+    f32 l = ab.dot(ab);
+    if (l == 0.0) {
+        return a;
+    }
+    return a.add(ab.scale(clamp01(p.sub(a).dot(ab) / l)));
+}
+
+f32 clamp01(f32 t) {
+    return t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+}
+
+// The two points nearest to each other of two segments: `on_first` at `s` from the start of the
+// first (0) to its end (1), `on_second` at `t` along the second.
+pub struct Closest {
+    pub linear.Vec3 on_first;
+    pub linear.Vec3 on_second;
+    pub f32 s;
+    pub f32 t;
+
+    pub f32 distance() {
+        return on_first.distance(on_second);
+    }
+}
+
+// The nearest points of the segments (a1, b1) and (a2, b2) (Ericson, Real-Time Collision
+// Detection, 5.1.9): the distance of two capsules, of a bone to a ray.
+pub Closest closest_between(linear.Vec3 a1, linear.Vec3 b1, linear.Vec3 a2, linear.Vec3 b2) {
+    linear.Vec3 d1 = b1.sub(a1);
+    linear.Vec3 d2 = b2.sub(a2);
+    linear.Vec3 r = a1.sub(a2);
+    f32 a = d1.dot(d1);
+    f32 e = d2.dot(d2);
+    f32 f = d2.dot(r);
+    mut f32 s = 0.0;
+    mut f32 t = 0.0;
+    if (a <= 1.0e-12 && e <= 1.0e-12) {
+        return Closest{ on_first: a1, on_second: a2, s: 0.0, t: 0.0 };  // two points
+    }
+    if (a <= 1.0e-12) {
+        t = clamp01(f / e);  // the first is a point
+    } else {
+        f32 c = d1.dot(r);
+        if (e <= 1.0e-12) {
+            s = clamp01(-c / a);  // the second is a point
+        } else {
+            f32 b = d1.dot(d2);
+            f32 denom = a * e - b * b;
+            s = denom > 1.0e-12 ? clamp01((b * f - c * e) / denom) : 0.0;  // parallel: any s
+            t = (b * s + f) / e;
+            if (t < 0.0) {
+                t = 0.0;
+                s = clamp01(-c / a);
+            } else if (t > 1.0) {
+                t = 1.0;
+                s = clamp01((b - c) / a);
+            }
+        }
+    }
+    return Closest{ on_first: a1.add(d1.scale(s)), on_second: a2.add(d2.scale(t)), s: s, t: t };
+}
+
+// The point of the triangle (a, b, c) nearest to `p` (Ericson, 5.1.5): by the region of the
+// triangle where `p` falls, a corner, an edge or the inside.
+pub linear.Vec3 closest_on_triangle(linear.Vec3 p, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c) {
+    linear.Vec3 ab = b.sub(a);
+    linear.Vec3 ac = c.sub(a);
+    linear.Vec3 ap = p.sub(a);
+    f32 d1 = ab.dot(ap);
+    f32 d2 = ac.dot(ap);
+    if (d1 <= 0.0 && d2 <= 0.0) {
+        return a;
+    }
+    linear.Vec3 bp = p.sub(b);
+    f32 d3 = ab.dot(bp);
+    f32 d4 = ac.dot(bp);
+    if (d3 >= 0.0 && d4 <= d3) {
+        return b;
+    }
+    f32 vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        return a.add(ab.scale(d1 / (d1 - d3)));
+    }
+    linear.Vec3 cp = p.sub(c);
+    f32 d5 = ab.dot(cp);
+    f32 d6 = ac.dot(cp);
+    if (d6 >= 0.0 && d5 <= d6) {
+        return c;
+    }
+    f32 vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        return a.add(ac.scale(d2 / (d2 - d6)));
+    }
+    f32 va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) {
+        return b.add(c.sub(b).scale((d4 - d3) / (d4 - d3 + (d5 - d6))));
+    }
+    f32 inv = 1.0 / (va + vb + vc);
+    return a.add(ab.scale(vb * inv)).add(ac.scale(vc * inv));
+}
+
+// ---- Rays against round shapes ----
+
+// Where the ray meets the disc of `radius` around `center`, facing `normal`, from either side;
+// none if it misses it.
+pub f32? ray_disc(Ray r, linear.Vec3 center, linear.Vec3 normal, f32 radius) {
+    f32 t = match (ray_plane(r, plane(center, normal))) {
+        some(d) => d,
+        none => {
+            return none;
+        },
+    };
+    return r.at(t).distance(center) <= radius ? some(t) : none;
+}
+
+// Where the ray first meets the capsule around the segment (a, b) (0 when it starts inside);
+// none if it misses it. The capsule is the side of a cylinder and the two spheres at its ends:
+// the first of the three met.
+pub f32? ray_capsule(Ray r, linear.Vec3 a, linear.Vec3 b, f32 radius) {
+    if (closest_on_segment(r.origin, a, b).distance(r.origin) <= radius) {
+        return some(0.0);
+    }
+    mut f32? best = side_of_cylinder(r, a, b, radius);
+    best = nearer(best, ray_sphere(r, sphere(a, radius)));
+    best = nearer(best, ray_sphere(r, sphere(b, radius)));
+    return best;
+}
+
+// Where the ray first meets the closed cylinder from `a` to `b` (0 when it starts inside); none
+// if it misses it: its side, or one of its two ends.
+pub f32? ray_cylinder(Ray r, linear.Vec3 a, linear.Vec3 b, f32 radius) {
+    linear.Vec3 axis = b.sub(a);
+    f32 l = axis.dot(axis);
+    f32 along = r.origin.sub(a).dot(axis);
+    linear.Vec3 off = r.origin.sub(a).sub(axis.scale(l == 0.0 ? 0.0 : along / l));
+    if (along >= 0.0 && along <= l && off.length() <= radius) {
+        return some(0.0);
+    }
+    mut f32? best = side_of_cylinder(r, a, b, radius);
+    best = nearer(best, ray_disc(r, a, axis, radius));
+    best = nearer(best, ray_disc(r, b, axis, radius));
+    return best;
+}
+
+// Where the ray, from outside, enters the side of the cylinder from `a` to `b`, between its ends.
+f32? side_of_cylinder(Ray r, linear.Vec3 a, linear.Vec3 b, f32 radius) {
+    linear.Vec3 ba = b.sub(a);
+    linear.Vec3 oa = r.origin.sub(a);
+    f32 baba = ba.dot(ba);
+    f32 bard = ba.dot(r.direction);
+    f32 baoa = ba.dot(oa);
+    f32 qa = baba - bard * bard;
+    if (qa < 1.0e-9 * baba || baba == 0.0) {
+        return none;  // along the axis: it meets only the ends
+    }
+    f32 qb = baba * r.direction.dot(oa) - baoa * bard;
+    f32 qc = baba * oa.dot(oa) - baoa * baoa - radius * radius * baba;
+    f32 h = qb * qb - qa * qc;
+    if (h < 0.0) {
+        return none;
+    }
+    f32 t = (-qb - std_sqrt(h)) / qa;
+    f32 y = baoa + t * bard;
+    return t >= 0.0 && y >= 0.0 && y <= baba ? some(t) : none;
+}
+
+f32? nearer(f32? a, f32? b) {
+    return match (a) {
+        some(x) => match (b) {
+            some(y) => some(x < y ? x : y),
+            none => a,
+        },
+        none => b,
+    };
 }
 
 // What a camera sees: six planes facing inward (left, right, bottom, top, near, far).
@@ -465,4 +659,76 @@ test "the ray under the mouse" {
     };
     f32 along = under.origin.distance(target);
     assert(under.at(along).near(target, 0.01));
+}
+
+test "closest points: on a box, a plane, segments and triangles" {
+    Aabb box = aabb(linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 2.0, 3.0));
+    assert(box.closest(linear.vec3(5.0, -1.0, 1.5)).near(linear.vec3(1.0, 0.0, 1.5), 0.0));
+    assert(box.closest(linear.vec3(0.5, 0.5, 0.5)).near(linear.vec3(0.5, 0.5, 0.5), 0.0));
+    Plane ground = plane(linear.vec3(0.0, 1.0, 0.0), linear.vec3(0.0, 2.0, 0.0));
+    assert(ground.closest(linear.vec3(3.0, 5.0, -2.0)).near(linear.vec3(3.0, 1.0, -2.0), 0.0001));
+    linear.Vec3 a = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 b = linear.vec3(2.0, 0.0, 0.0);
+    assert(closest_on_segment(linear.vec3(1.0, 3.0, 0.0), a, b).near(linear.vec3(1.0, 0.0, 0.0), 0.0001));
+    assert(closest_on_segment(linear.vec3(-4.0, 1.0, 0.0), a, b).near(a, 0.0));
+    assert(closest_on_segment(linear.vec3(9.0, 0.0, 0.0), a, b).near(b, 0.0));
+    // crossing at a right angle, one above the other
+    Closest c = closest_between(a, b, linear.vec3(1.0, 1.0, -1.0), linear.vec3(1.0, 1.0, 1.0));
+    assert(c.on_first.near(linear.vec3(1.0, 0.0, 0.0), 0.0001) && c.on_second.near(linear.vec3(1.0, 1.0, 0.0), 0.0001));
+    assert(abs(c.distance() - 1.0) < 0.0001 && abs(c.s - 0.5) < 0.0001 && abs(c.t - 0.5) < 0.0001);
+    // parallel, overlapping: a distance of 2 whatever the points
+    Closest p = closest_between(a, b, linear.vec3(1.0, 2.0, 0.0), linear.vec3(3.0, 2.0, 0.0));
+    assert(abs(p.distance() - 2.0) < 0.0001);
+    // end to end, apart
+    Closest e = closest_between(a, b, linear.vec3(3.0, 0.0, 0.0), linear.vec3(5.0, 0.0, 0.0));
+    assert(e.on_first.near(b, 0.0001) && abs(e.t) < 0.0001);
+    // a segment that is a point
+    Closest dot = closest_between(a, b, linear.vec3(1.5, 4.0, 0.0), linear.vec3(1.5, 4.0, 0.0));
+    assert(dot.on_first.near(linear.vec3(1.5, 0.0, 0.0), 0.0001));
+    linear.Vec3 t0 = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 t1 = linear.vec3(4.0, 0.0, 0.0);
+    linear.Vec3 t2 = linear.vec3(0.0, 0.0, 4.0);
+    assert(closest_on_triangle(linear.vec3(1.0, 5.0, 1.0), t0, t1, t2).near(linear.vec3(1.0, 0.0, 1.0), 0.0001));  // inside
+    assert(closest_on_triangle(linear.vec3(-1.0, 0.0, -1.0), t0, t1, t2).near(t0, 0.0001));  // a corner
+    assert(closest_on_triangle(linear.vec3(9.0, 1.0, -1.0), t0, t1, t2).near(t1, 0.0001));
+    assert(closest_on_triangle(linear.vec3(2.0, 0.0, -3.0), t0, t1, t2).near(linear.vec3(2.0, 0.0, 0.0), 0.0001));  // an edge
+    assert(closest_on_triangle(linear.vec3(3.0, 0.0, 3.0), t0, t1, t2).near(linear.vec3(2.0, 0.0, 2.0), 0.0001));  // the long edge
+}
+
+test "rays against discs, capsules and cylinders" {
+    linear.Vec3 a = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 b = linear.vec3(0.0, 2.0, 0.0);
+    linear.Vec3 up = linear.vec3(0.0, 1.0, 0.0);
+    Ray down = ray(linear.vec3(0.3, 5.0, 0.0), linear.vec3(0.0, -1.0, 0.0));
+    assert(close_to(ray_disc(down, a, up, 0.5), 5.0));
+    assert(missed(ray_disc(down, a, up, 0.2)));
+    // from the side, at mid height: the side of both
+    Ray side = ray(linear.vec3(-5.0, 1.0, 0.0), linear.vec3(1.0, 0.0, 0.0));
+    assert(close_to(ray_capsule(side, a, b, 0.5), 4.5) && close_to(ray_cylinder(side, a, b, 0.5), 4.5));
+    // from above, along the axis: the sphere of the capsule, the end of the cylinder
+    Ray top = ray(linear.vec3(0.0, 5.0, 0.0), linear.vec3(0.0, -1.0, 0.0));
+    assert(close_to(ray_capsule(top, a, b, 0.5), 2.5) && close_to(ray_cylinder(top, a, b, 0.5), 3.0));
+    // above the top, slanted: misses the cylinder, meets the sphere of the capsule
+    Ray over = ray(linear.vec3(-5.0, 2.3, 0.0), linear.vec3(1.0, 0.0, 0.0));
+    assert(missed(ray_cylinder(over, a, b, 0.5)));
+    assert(close_to(ray_capsule(over, a, b, 0.5), 5.0 - 0.4));
+    // beside, inside, behind
+    assert(missed(ray_capsule(ray(linear.vec3(-5.0, 1.0, 2.0), linear.vec3(1.0, 0.0, 0.0)), a, b, 0.5)));
+    assert(close_to(ray_capsule(ray(linear.vec3(0.1, 1.0, 0.0), up), a, b, 0.5), 0.0));
+    assert(close_to(ray_cylinder(ray(linear.vec3(0.1, 1.0, 0.0), up), a, b, 0.5), 0.0));
+    assert(missed(ray_cylinder(ray(linear.vec3(-5.0, 1.0, 0.0), linear.vec3(-1.0, 0.0, 0.0)), a, b, 0.5)));
+}
+
+bool close_to(f32? d, f32 want) {
+    return match (d) {
+        some(x) => abs(x - want) < 0.0001,
+        none => false,
+    };
+}
+
+bool missed(f32? d) {
+    return match (d) {
+        some(_) => false,
+        none => true,
+    };
 }

@@ -1,0 +1,576 @@
+// math.noise: gradient noise for what must look natural without being drawn by hand: grounds and
+// their heights, clouds, the sway of grass, the wander of a creature, the flicker of a fire.
+// Perlin's improved noise (2002) in 2D and 3D: smooth, about -1 to 1, 0 on the points of the
+// lattice (whole coordinates), the same for the same seed on every machine. Sums of octaves on top
+// of it: `fbm` (detail added at each octave), `ridged` (sharp crests, for mountains), `turbulence`
+// (folds, for marble and smoke), `warp` (a noise moved by itself). Simplex noise in 2D, 3D and
+// 4D; cellular noise (Worley) for stones and cracks; hashes of whole coordinates.
+//
+//   noise.Noise n = noise.seeded(42);
+//   f32 h = n.fbm2(x * 0.01, z * 0.01, noise.Octaves{ count: 5 });   // a height, about -1 to 1
+import std.math;
+import std.random;
+
+// How octaves are summed: `count` of them, each `lacunarity` times finer than the one before and
+// weighing `gain` times as much.
+pub struct Octaves {
+    pub i32 count = 4;
+    pub f32 lacunarity = 2.0;
+    pub f32 gain = 0.5;
+}
+
+// A noise: a table of 256 numbers shuffled by its seed.
+pub struct Noise {
+    mut ui8[512] perm;  // the table twice, so that an index plus one never runs out
+    mut ui32 seed;      // for the cells of `worley2` and `worley3`
+
+    // At (x, y): smooth, about -1 to 1, 0 where both are whole.
+    pub f32 perlin2(f32 x, f32 y) {
+        f64 fx = math.floor(x as f64);
+        f64 fy = math.floor(y as f64);
+        usize xi = (fx as i64 & 255) as usize;
+        usize yi = (fy as i64 & 255) as usize;
+        f32 xf = x - fx as f32;
+        f32 yf = y - fy as f32;
+        f32 u = fade(xf);
+        f32 v = fade(yf);
+        usize aa = perm[perm[xi] as usize + yi] as usize;
+        usize ab = perm[perm[xi] as usize + yi + 1] as usize;
+        usize ba = perm[perm[xi + 1] as usize + yi] as usize;
+        usize bb = perm[perm[xi + 1] as usize + yi + 1] as usize;
+        f32 x1 = lerp(grad2(aa, xf, yf), grad2(ba, xf - 1.0, yf), u);
+        f32 x2 = lerp(grad2(ab, xf, yf - 1.0), grad2(bb, xf - 1.0, yf - 1.0), u);
+        return clamp1(lerp(x1, x2, v) * 1.4142135);  // the 2D noise reaches 0.707: scaled to 1
+    }
+
+    // At (x, y, z): smooth, about -1 to 1, 0 where all three are whole.
+    pub f32 perlin3(f32 x, f32 y, f32 z) {
+        f64 fx = math.floor(x as f64);
+        f64 fy = math.floor(y as f64);
+        f64 fz = math.floor(z as f64);
+        usize xi = (fx as i64 & 255) as usize;
+        usize yi = (fy as i64 & 255) as usize;
+        usize zi = (fz as i64 & 255) as usize;
+        f32 xf = x - fx as f32;
+        f32 yf = y - fy as f32;
+        f32 zf = z - fz as f32;
+        f32 u = fade(xf);
+        f32 v = fade(yf);
+        f32 w = fade(zf);
+        usize a = perm[xi] as usize + yi;
+        usize aa = perm[a] as usize + zi;
+        usize ab = perm[a + 1] as usize + zi;
+        usize b = perm[xi + 1] as usize + yi;
+        usize ba = perm[b] as usize + zi;
+        usize bb = perm[b + 1] as usize + zi;
+        f32 l1 = lerp(grad3(perm[aa] as usize, xf, yf, zf), grad3(perm[ba] as usize, xf - 1.0, yf, zf), u);
+        f32 l2 = lerp(grad3(perm[ab] as usize, xf, yf - 1.0, zf), grad3(perm[bb] as usize, xf - 1.0, yf - 1.0, zf), u);
+        f32 l3 = lerp(
+            grad3(perm[aa + 1] as usize, xf, yf, zf - 1.0),
+            grad3(perm[ba + 1] as usize, xf - 1.0, yf, zf - 1.0),
+            u
+        );
+        f32 l4 = lerp(
+            grad3(perm[ab + 1] as usize, xf, yf - 1.0, zf - 1.0),
+            grad3(perm[bb + 1] as usize, xf - 1.0, yf - 1.0, zf - 1.0),
+            u
+        );
+        return clamp1(lerp(lerp(l1, l2, v), lerp(l3, l4, v), w));
+    }
+
+    // Octaves of `perlin2` summed: detail at every scale, about -1 to 1.
+    pub f32 fbm2(f32 x, f32 y, Octaves o) {
+        mut f32 sum = 0.0;
+        mut f32 amplitude = 1.0;
+        mut f32 frequency = 1.0;
+        mut f32 total = 0.0;
+        for (i32 i in 0..max(o.count, 1)) {
+            sum += amplitude * perlin2(x * frequency, y * frequency);
+            total += amplitude;
+            amplitude *= o.gain;
+            frequency *= o.lacunarity;
+        }
+        return sum / total;
+    }
+
+    pub f32 fbm3(f32 x, f32 y, f32 z, Octaves o) {
+        mut f32 sum = 0.0;
+        mut f32 amplitude = 1.0;
+        mut f32 frequency = 1.0;
+        mut f32 total = 0.0;
+        for (i32 i in 0..max(o.count, 1)) {
+            sum += amplitude * perlin3(x * frequency, y * frequency, z * frequency);
+            total += amplitude;
+            amplitude *= o.gain;
+            frequency *= o.lacunarity;
+        }
+        return sum / total;
+    }
+
+    // Sharp crests where the noise crosses 0 (mountains, veins): 0 to 1.
+    pub f32 ridged2(f32 x, f32 y, Octaves o) {
+        mut f32 sum = 0.0;
+        mut f32 amplitude = 1.0;
+        mut f32 frequency = 1.0;
+        mut f32 total = 0.0;
+        for (i32 i in 0..max(o.count, 1)) {
+            f32 r = 1.0 - abs(perlin2(x * frequency, y * frequency));
+            sum += amplitude * r * r;
+            total += amplitude;
+            amplitude *= o.gain;
+            frequency *= o.lacunarity;
+        }
+        return sum / total;
+    }
+
+    pub f32 ridged3(f32 x, f32 y, f32 z, Octaves o) {
+        mut f32 sum = 0.0;
+        mut f32 amplitude = 1.0;
+        mut f32 frequency = 1.0;
+        mut f32 total = 0.0;
+        for (i32 i in 0..max(o.count, 1)) {
+            f32 r = 1.0 - abs(perlin3(x * frequency, y * frequency, z * frequency));
+            sum += amplitude * r * r;
+            total += amplitude;
+            amplitude *= o.gain;
+            frequency *= o.lacunarity;
+        }
+        return sum / total;
+    }
+
+    // Folds (marble, smoke): the octaves of the size of the noise, 0 to 1.
+    pub f32 turbulence3(f32 x, f32 y, f32 z, Octaves o) {
+        mut f32 sum = 0.0;
+        mut f32 amplitude = 1.0;
+        mut f32 frequency = 1.0;
+        mut f32 total = 0.0;
+        for (i32 i in 0..max(o.count, 1)) {
+            sum += amplitude * abs(perlin3(x * frequency, y * frequency, z * frequency));
+            total += amplitude;
+            amplitude *= o.gain;
+            frequency *= o.lacunarity;
+        }
+        return sum / total;
+    }
+
+    // Simplex noise (Perlin 2001, as Gustavson writes it) at (x, y): as `perlin2`, smooth and about
+    // -1 to 1, without the lines along the axes that Perlin's noise shows, and cheaper as the
+    // dimension grows: triangles in place of squares.
+    pub f32 simplex2(f32 x, f32 y) {
+        f32 f2 = 0.36602540378;  // (sqrt(3) - 1) / 2
+        f32 g2 = 0.21132486540;  // (3 - sqrt(3)) / 6
+        f32 s = (x + y) * f2;
+        f64 fi = math.floor((x + s) as f64);
+        f64 fj = math.floor((y + s) as f64);
+        f32 t = (fi + fj) as f32 * g2;
+        f32 x0 = x - (fi as f32 - t);
+        f32 y0 = y - (fj as f32 - t);
+        usize i1 = x0 > y0 ? 1 : 0;
+        usize j1 = x0 > y0 ? 0 : 1;
+        f32 x1 = x0 - i1 as f32 + g2;
+        f32 y1 = y0 - j1 as f32 + g2;
+        f32 x2 = x0 - 1.0 + 2.0 * g2;
+        f32 y2 = y0 - 1.0 + 2.0 * g2;
+        usize ii = (fi as i64 & 255) as usize;
+        usize jj = (fj as i64 & 255) as usize;
+        f32 n0 = corner2(perm[ii + perm[jj] as usize] as usize, x0, y0);
+        f32 n1 = corner2(perm[ii + i1 + perm[jj + j1] as usize] as usize, x1, y1);
+        f32 n2 = corner2(perm[ii + 1 + perm[jj + 1] as usize] as usize, x2, y2);
+        return clamp1(70.0 * (n0 + n1 + n2));
+    }
+
+    // Simplex noise at (x, y, z): tetrahedra in place of cubes.
+    pub f32 simplex3(f32 x, f32 y, f32 z) {
+        f32 f3 = 1.0 / 3.0;
+        f32 g3 = 1.0 / 6.0;
+        f32 s = (x + y + z) * f3;
+        f64 fi = math.floor((x + s) as f64);
+        f64 fj = math.floor((y + s) as f64);
+        f64 fk = math.floor((z + s) as f64);
+        f32 t = (fi + fj + fk) as f32 * g3;
+        f32 x0 = x - (fi as f32 - t);
+        f32 y0 = y - (fj as f32 - t);
+        f32 z0 = z - (fk as f32 - t);
+        // which of the six tetrahedra of the cube: by the order of x0, y0, z0
+        mut usize[6] o = [0, 0, 1, 1, 0, 1];
+        if (x0 >= y0) {
+            if (y0 >= z0) {
+                o = [1, 0, 0, 1, 1, 0];
+            } else if (x0 >= z0) {
+                o = [1, 0, 0, 1, 0, 1];
+            }
+        } else {
+            if (y0 < z0) {
+                o = [0, 0, 1, 0, 1, 1];
+            } else if (x0 < z0) {
+                o = [0, 1, 0, 0, 1, 1];
+            } else {
+                o = [0, 1, 0, 1, 1, 0];
+            }
+        }
+        usize ii = (fi as i64 & 255) as usize;
+        usize jj = (fj as i64 & 255) as usize;
+        usize kk = (fk as i64 & 255) as usize;
+        f32 n0 = corner3(perm[ii + perm[jj + perm[kk] as usize] as usize] as usize, x0, y0, z0);
+        f32 n1 = corner3(
+            perm[ii + o[0] + perm[jj + o[1] + perm[kk + o[2]] as usize] as usize] as usize,
+            x0 - o[0] as f32 + g3, y0 - o[1] as f32 + g3, z0 - o[2] as f32 + g3
+        );
+        f32 n2 = corner3(
+            perm[ii + o[3] + perm[jj + o[4] + perm[kk + o[5]] as usize] as usize] as usize,
+            x0 - o[3] as f32 + 2.0 * g3, y0 - o[4] as f32 + 2.0 * g3, z0 - o[5] as f32 + 2.0 * g3
+        );
+        f32 n3 = corner3(
+            perm[ii + 1 + perm[jj + 1 + perm[kk + 1] as usize] as usize] as usize,
+            x0 - 1.0 + 3.0 * g3, y0 - 1.0 + 3.0 * g3, z0 - 1.0 + 3.0 * g3
+        );
+        return clamp1(32.0 * (n0 + n1 + n2 + n3));
+    }
+
+    // Simplex noise at (x, y, z, w): a 3D noise that changes smoothly with `w` (a time: clouds that
+    // move without sliding), or a 2D noise that loops in both directions, from a torus in 4D.
+    pub f32 simplex4(f32 x, f32 y, f32 z, f32 w) {
+        f32 f4 = 0.30901699437;  // (sqrt(5) - 1) / 4
+        f32 g4 = 0.13819660113;  // (5 - sqrt(5)) / 20
+        f32 s = (x + y + z + w) * f4;
+        f64 fi = math.floor((x + s) as f64);
+        f64 fj = math.floor((y + s) as f64);
+        f64 fk = math.floor((z + s) as f64);
+        f64 fl = math.floor((w + s) as f64);
+        f32 t = (fi + fj + fk + fl) as f32 * g4;
+        mut f32[4] p0 = [x - (fi as f32 - t), y - (fj as f32 - t), z - (fk as f32 - t), w - (fl as f32 - t)];
+        // the rank of each coordinate: how many of the others it exceeds
+        mut usize[4] rank = [0, 0, 0, 0];
+        for (usize a in 0..4) {
+            for (usize b in a + 1..4) {
+                if (p0[a] > p0[b]) {
+                    rank[a] += 1;
+                } else {
+                    rank[b] += 1;
+                }
+            }
+        }
+        usize[4] cell = [(fi as i64 & 255) as usize, (fj as i64 & 255) as usize, (fk as i64 & 255) as usize, (fl as i64 & 255) as usize];
+        mut f32 sum = 0.0;
+        // the five corners: steps of one on the coordinates of rank 3, then 2, then 1, then all
+        for (usize c in 0..5) {
+            mut usize[4] step = [0, 0, 0, 0];
+            mut f32[4] q = [0.0, 0.0, 0.0, 0.0];
+            for (usize a in 0..4) {
+                step[a] = c == 0 ? 0 : rank[a] >= 4 - c ? 1 : 0;
+                q[a] = p0[a] - step[a] as f32 + c as f32 * g4;
+            }
+            usize h = perm[cell[0] + step[0] + perm[cell[1] + step[1] + perm[cell[2] + step[2] + perm[cell[3] + step[3]] as usize] as usize] as usize] as usize;
+            f32 fall = 0.6 - q[0] * q[0] - q[1] * q[1] - q[2] * q[2] - q[3] * q[3];
+            if (fall > 0.0) {
+                sum += fall * fall * fall * fall * grad4(h, q[0], q[1], q[2], q[3]);
+            }
+        }
+        return clamp1(27.0 * sum);
+    }
+
+    // `fbm2` seen through itself (Quílez's domain warping): a noise whose coordinates are moved by
+    // another, folds and swirls for grounds, marble, smoke; `strength` how far they are moved
+    // (4 is much). About -1 to 1.
+    pub f32 warp2(f32 x, f32 y, Octaves o, f32 strength) {
+        f32 qx = fbm2(x, y, o);
+        f32 qy = fbm2(x + 5.2, y + 1.3, o);
+        return fbm2(x + strength * qx, y + strength * qy, o);
+    }
+
+    pub f32 warp3(f32 x, f32 y, f32 z, Octaves o, f32 strength) {
+        f32 qx = fbm3(x, y, z, o);
+        f32 qy = fbm3(x + 5.2, y + 1.3, z - 2.8, o);
+        f32 qz = fbm3(x - 3.7, y + 8.1, z + 4.4, o);
+        return fbm3(x + strength * qx, y + strength * qy, z + strength * qz, o);
+    }
+
+    // Cellular noise (Worley, 1996) at (x, y): a point at random in each square of side 1, and
+    // the distances to the nearest of them and to the second; their difference draws the edges
+    // between cells (cracks, scales, stones, a dry ground), the first alone round spots.
+    pub Cells worley2(f32 x, f32 y) {
+        i32 cx = math.floor(x as f64) as i32;
+        i32 cy = math.floor(y as f64) as i32;
+        mut Cells out = Cells{ nearest: 1.0e30, second: 1.0e30, id: 0 };
+        for (i32 j in -1..2) {
+            for (i32 i in -1..2) {
+                ui32 h = hash3(cx + i, cy + j, 0, seed);
+                f32 px = (cx + i) as f32 + unit(h);
+                f32 py = (cy + j) as f32 + unit(hash(h));
+                f32 d = math.sqrt(((px - x) * (px - x) + (py - y) * (py - y)) as f64) as f32;
+                out = out.with(d, h);
+            }
+        }
+        return out;
+    }
+
+    // Cellular noise at (x, y, z): a point in each cube of side 1.
+    pub Cells worley3(f32 x, f32 y, f32 z) {
+        i32 cx = math.floor(x as f64) as i32;
+        i32 cy = math.floor(y as f64) as i32;
+        i32 cz = math.floor(z as f64) as i32;
+        mut Cells out = Cells{ nearest: 1.0e30, second: 1.0e30, id: 0 };
+        for (i32 k in -1..2) {
+            for (i32 j in -1..2) {
+                for (i32 i in -1..2) {
+                    ui32 h = hash3(cx + i, cy + j, cz + k, seed);
+                    ui32 h2 = hash(h);
+                    f32 px = (cx + i) as f32 + unit(h) - x;
+                    f32 py = (cy + j) as f32 + unit(h2) - y;
+                    f32 pz = (cz + k) as f32 + unit(hash(h2)) - z;
+                    out = out.with(math.sqrt((px * px + py * py + pz * pz) as f64) as f32, h);
+                }
+            }
+        }
+        return out;
+    }
+}
+
+// What cellular noise gives at a point: the distance to the nearest point of the cells and to
+// the second (0 to about 1.5), and a number of the nearest cell, the same over all of it (to give
+// each stone its color).
+pub struct Cells {
+    pub mut f32 nearest;
+    pub mut f32 second;
+    pub mut ui32 id;
+
+    Cells with(f32 d, ui32 h) {
+        if (d < nearest) {
+            return Cells{ nearest: d, second: nearest, id: h };
+        }
+        if (d < second) {
+            return Cells{ nearest: nearest, second: d, id: id };
+        }
+        return Cells{ nearest: nearest, second: second, id: id };
+    }
+
+    // The edges between cells: 0 on them, growing toward the points.
+    pub f32 edge() {
+        return second - nearest;
+    }
+}
+
+// ---- Hashes ----
+
+// A number of 32 bits mixed from `x`: each bit of `x` changes half of them (Wellons' lowbias32).
+// A number at random that is the same for the same input, without a state: the variation of a
+// tile, of a tree, of a cell, by its coordinates.
+pub ui32 hash(ui32 x) {
+    mut ui32 h = x;
+    h = h ^ h >> 16;
+    h = wrapping_mul(h, 0x7FEB352D as ui32);
+    h = h ^ h >> 15;
+    h = wrapping_mul(h, 0x846CA68B as ui32);
+    return h ^ h >> 16;
+}
+
+// The hash of two whole coordinates and a seed.
+pub ui32 hash2(i32 x, i32 y, ui32 seed) {
+    return hash(wrapping_add(hash(wrapping_add(hash(seed), x as ui32)), y as ui32));
+}
+
+// The hash of three whole coordinates and a seed.
+pub ui32 hash3(i32 x, i32 y, i32 z, ui32 seed) {
+    return hash(wrapping_add(hash2(x, y, seed), z as ui32));
+}
+
+// A hash as a number from 0 to 1 (1 excluded).
+pub f32 unit(ui32 h) {
+    return (h >> 8) as f32 / 16777216.0;
+}
+
+// The noise of `seed`: its table shuffled by a generator of that seed.
+pub Noise seeded(ui64 seed) {
+    mut Noise n = Noise{ perm: [0; 512], seed: hash((seed ^ seed >> 32) as ui32) };
+    mut ui8[256] p = [0; 256];
+    for (usize i in 0..256) {
+        p[i] = i as ui8;
+    }
+    mut random.Rng rng = random.seeded(seed);
+    mut usize i = 255;
+    while (i > 0) {
+        usize j = rng.below((i + 1) as ui64) as usize;
+        ui8 t = p[i];
+        p[i] = p[j];
+        p[j] = t;
+        i -= 1;
+    }
+    for (usize k in 0..512) {
+        n.perm[k] = p[k & 255];
+    }
+    return n;
+}
+
+f32 fade(f32 t) {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+f32 lerp(f32 a, f32 b, f32 t) {
+    return a + t * (b - a);
+}
+
+f32 clamp1(f32 x) {
+    return max(-1.0, min(1.0, x));
+}
+
+// One of eight directions, by the hash `h`.
+f32 grad2(usize h, f32 x, f32 y) {
+    usize k = h & 7;
+    f32 u = k < 4 ? x : y;
+    f32 v = k < 4 ? y : x;
+    return (k & 1 == 0 ? u : -u) + (k & 2 == 0 ? v : -v) * 0.5;
+}
+
+// The share of a corner of a simplex in 2D: its gradient (one of the twelve of `grad3`, z left
+// out) falling to 0 at a distance of sqrt(0.5).
+f32 corner2(usize h, f32 x, f32 y) {
+    f32 fall = 0.5 - x * x - y * y;
+    if (fall <= 0.0) {
+        return 0.0;
+    }
+    return fall * fall * fall * fall * grad3(h % 12, x, y, 0.0);
+}
+
+f32 corner3(usize h, f32 x, f32 y, f32 z) {
+    f32 fall = 0.6 - x * x - y * y - z * z;
+    if (fall <= 0.0) {
+        return 0.0;
+    }
+    return fall * fall * fall * fall * grad3(h % 12, x, y, z);
+}
+
+// One of the 32 directions of a hypercube in 4D, (0, ±1, ±1, ±1) and its turns, by the hash `h`.
+f32 grad4(usize h, f32 x, f32 y, f32 z, f32 w) {
+    usize k = h & 31;
+    f32 a = k & 4 == 0 ? 1.0 : -1.0;
+    f32 b = k & 2 == 0 ? 1.0 : -1.0;
+    f32 c = k & 1 == 0 ? 1.0 : -1.0;
+    usize zero = k >> 3;
+    if (zero == 0) {
+        return a * y + b * z + c * w;
+    }
+    if (zero == 1) {
+        return a * x + b * z + c * w;
+    }
+    if (zero == 2) {
+        return a * x + b * y + c * w;
+    }
+    return a * x + b * y + c * z;
+}
+
+// One of the twelve edges of a cube, by the hash `h` (Perlin's).
+f32 grad3(usize h, f32 x, f32 y, f32 z) {
+    usize k = h & 15;
+    f32 u = k < 8 ? x : y;
+    f32 v = k < 4 ? y : k == 12 || k == 14 ? x : z;
+    return (k & 1 == 0 ? u : -u) + (k & 2 == 0 ? v : -v);
+}
+
+test "noise: the same for a seed, smooth, within -1 and 1, 0 on the lattice" {
+    Noise a = seeded(7);
+    Noise b = seeded(7);
+    Noise c = seeded(8);
+    mut bool differs = false;
+    mut f32 lowest = 0.0;
+    mut f32 highest = 0.0;
+    for (i32 i in 0..400) {
+        f32 x = i as f32 * 0.137 - 20.0;
+        f32 y = i as f32 * 0.071 + 3.0;
+        f32 z = i as f32 * 0.053 - 7.0;
+        f32 n2 = a.perlin2(x, y);
+        f32 n3 = a.perlin3(x, y, z);
+        assert(n2 == b.perlin2(x, y) && n3 == b.perlin3(x, y, z));  // the same seed: the same noise
+        differs = differs || c.perlin3(x, y, z) != n3;
+        assert(n2 >= -1.0 && n2 <= 1.0 && n3 >= -1.0 && n3 <= 1.0);
+        lowest = min(lowest, n3);
+        highest = max(highest, n3);
+        // smooth: a step of a thousandth moves it little
+        assert(abs(a.perlin3(x + 0.001, y, z) - n3) < 0.01 && abs(a.perlin2(x, y + 0.001) - n2) < 0.01);
+        // the octaves stay within their ranges
+        f32 f = a.fbm3(x, y, z, Octaves{ count: 5 });
+        f32 r = a.ridged2(x, y, Octaves{ });
+        f32 t = a.turbulence3(x, y, z, Octaves{ });
+        assert(f >= -1.0 && f <= 1.0 && r >= 0.0 && r <= 1.0 && t >= 0.0 && t <= 1.0);
+    }
+    assert(differs && lowest < -0.3 && highest > 0.3);  // another seed, another noise; it uses its range
+    assert(a.perlin2(3.0, -5.0) == 0.0 && a.perlin3(2.0, 0.0, -9.0) == 0.0);  // 0 on the lattice
+}
+
+test "cells of Worley and hashes: the same for a seed, spread evenly" {
+    Noise a = seeded(3);
+    Noise b = seeded(3);
+    Noise c = seeded(4);
+    mut bool differs = false;
+    mut f32 highest = 0.0;
+    for (i32 i in 0..300) {
+        f32 x = i as f32 * 0.173 - 25.0;
+        f32 y = i as f32 * 0.091 + 2.0;
+        f32 z = i as f32 * 0.067 - 9.0;
+        Cells w = a.worley2(x, y);
+        Cells v = a.worley3(x, y, z);
+        assert(w.nearest == b.worley2(x, y).nearest && v.id == b.worley3(x, y, z).id);
+        differs = differs || c.worley2(x, y).nearest != w.nearest;
+        assert(w.nearest >= 0.0 && w.nearest <= w.second && w.second < 2.0 && w.edge() >= 0.0);
+        assert(v.nearest >= 0.0 && v.nearest <= v.second && v.second < 2.5);
+        highest = max(highest, w.nearest);
+        // continuous: a small step moves the distance little
+        assert(abs(a.worley2(x + 0.001, y).nearest - w.nearest) < 0.002);
+    }
+    assert(differs && highest > 0.4);
+    // a cell's point is where its distance is 0: near enough on a fine walk of one square
+    mut f32 lowest = 1.0;
+    for (i32 j in 0..50) {
+        for (i32 i in 0..50) {
+            lowest = min(lowest, a.worley2(i as f32 / 50.0, j as f32 / 50.0).nearest);
+        }
+    }
+    assert(lowest < 0.03);
+    // hashes: the same input the same number, a step of one changes it, the units spread over 0..1
+    assert(hash(12345) == hash(12345) && hash(0) != hash(1) && hash2(1, 2, 0) != hash2(2, 1, 0));
+    assert(hash3(-1, 0, 0, 7) != hash3(1, 0, 0, 7) && hash2(5, 5, 1) != hash2(5, 5, 2));
+    mut i32[4] quarters = [0, 0, 0, 0];
+    for (i32 i in 0..4000) {
+        f32 u = unit(hash2(i, -i, 99));
+        assert(u >= 0.0 && u < 1.0);
+        quarters[(u * 4.0) as usize] += 1;
+    }
+    for (i32 q in quarters) {
+        assert(q > 900 && q < 1100);
+    }
+}
+
+test "simplex noise and warped noise: the same for a seed, smooth, within -1 and 1" {
+    Noise a = seeded(21);
+    Noise b = seeded(21);
+    Noise c = seeded(22);
+    mut bool differs = false;
+    mut f32[3] lowest = [0.0, 0.0, 0.0];
+    mut f32[3] highest = [0.0, 0.0, 0.0];
+    for (i32 i in 0..500) {
+        f32 x = i as f32 * 0.131 - 30.0;
+        f32 y = i as f32 * 0.077 + 4.0;
+        f32 z = i as f32 * 0.049 - 6.0;
+        f32 w = i as f32 * 0.023 + 1.0;
+        f32[3] n = [a.simplex2(x, y), a.simplex3(x, y, z), a.simplex4(x, y, z, w)];
+        assert(n[0] == b.simplex2(x, y) && n[1] == b.simplex3(x, y, z) && n[2] == b.simplex4(x, y, z, w));
+        differs = differs || c.simplex3(x, y, z) != n[1];
+        for (usize k in 0..3) {
+            assert(n[k] >= -1.0 && n[k] <= 1.0);
+            lowest[k] = min(lowest[k], n[k]);
+            highest[k] = max(highest[k], n[k]);
+        }
+        // smooth: a step of a thousandth moves each little
+        assert(abs(a.simplex2(x + 0.001, y) - n[0]) < 0.02);
+        assert(abs(a.simplex3(x, y + 0.001, z) - n[1]) < 0.02);
+        assert(abs(a.simplex4(x, y, z, w + 0.001) - n[2]) < 0.02);
+        f32 warped = a.warp2(x * 0.1, y * 0.1, Octaves{ count: 3 }, 4.0);
+        f32 warped3 = a.warp3(x * 0.1, y * 0.1, z * 0.1, Octaves{ count: 2 }, 2.0);
+        assert(warped >= -1.0 && warped <= 1.0 && warped3 >= -1.0 && warped3 <= 1.0);
+    }
+    assert(differs);
+    for (usize k in 0..3) {
+        assert(lowest[k] < -0.4 && highest[k] > 0.4);  // each uses its range
+    }
+    // the warp moves the noise: not the plain fbm
+    assert(a.warp2(1.3, 2.7, Octaves{ }, 4.0) != a.fbm2(1.3, 2.7, Octaves{ }));
+}

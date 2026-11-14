@@ -5,3 +5,5 @@ drawn: 2, left out: 1
 skinned cube where its joint is: ok
 vertices replaced on the GPU: ok
 morph targets on the GPU: ok
+lines: hidden behind the cube ok, seen beside it ok, seen in front of it ok, a grid ok
+drawn by an adopted device: ok

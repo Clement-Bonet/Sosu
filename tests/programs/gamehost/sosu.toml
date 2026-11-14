@@ -1,0 +1,10 @@
+# A game of Sosu as Sozo loads it (spec §9.2, engine.host): a shared library offering the
+# contract of the editor (`sozo_...`), called by host/host.c as Sozo calls it.
+[package]
+name = "crates"
+version = "0.1.0"
+
+[dependencies]
+engine = { path = "../../../packages/engine" }
+scene = { path = "../../../packages/scene" }
+math = { path = "../../../packages/math" }

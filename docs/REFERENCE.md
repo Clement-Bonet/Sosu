@@ -54,9 +54,22 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [image.jpeg](#imagejpeg) | JPEG files (ITU T.81), read and written in Sosu |
 | [image.ops](#imageops) | Images transformed: cropped, resized (bilinear or Lanczos), rotated by quarter turns or by any angle, flipped |
 | [image.png](#imagepng) | PNG files, read and written in Sosu |
+| [math.ballistic](#mathballistic) | What flies under gravity, without the drag of the air |
+| [math.bvh](#mathbvh) | A tree of boxes over many things of a scene, to find quickly those a ray meets (the click of the editor, a shot, a line of sight) or those in a region (the meshes near a light, the bodies near an explosion), without testing them all |
+| [math.color](#mathcolor) | The conversions of colors |
 | [math.curve](#mathcurve) | Values that change over time (spec §8.2) |
+| [math.delaunay](#mathdelaunay) | The Delaunay triangulation of points of the plane (the triangles whose circles hold no other point: the fewest thin triangles, for a mesh of a ground from scattered heights, a graph of neighbors between rooms or towns) and the Voronoi cells of points (the region nearer to each point than to any other: territories, the cells of a map, cracks, the stones of a wall), clipped to a rectangle |
+| [math.ease](#mathease) | The curves of easing, for what moves on a time (a menu that slides in, a door that opens, a number that counts up, a camera that changes place): `t` from 0 to 1 gives 0 to 1, the way changed |
 | [math.geometry](#mathgeometry) | The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling) |
+| [math.kdtree](#mathkdtree) | A k-d tree over points in 3D that do not move: the nearest point to a place (the nearest town, cover, waypoint, light probe), the k nearest (the neighbors of a boid, the lights that touch a mesh), and those within a radius |
 | [math.linear](#mathlinear) | Vectors, matrices, quaternions and transforms of f32, for `render` and 3D |
+| [math.noise](#mathnoise) | Gradient noise for what must look natural without being drawn by hand: grounds and their heights, clouds, the sway of grass, the wander of a creature, the flicker of a fire |
+| [math.octree](#mathoctree) | An octree over points in 3D that come, go and move: the units of a game, the sounds playing, the pickups lying around |
+| [math.polygon](#mathpolygon) | Polygons of the plane, as their corners in order (`Vec2`, the last joined to the first): their area and the way they turn, whether a point is inside, their center, cut into triangles (to fill or to mesh a shape drawn by hand: a zone, a floor, a navigation area), the convex hull of points (what a lasso of selection holds, the outline of a group), and a polygon cut by a line or a rectangle (`math.delaunay` builds its Voronoi cells so) |
+| [math.sample](#mathsample) | Points and turns drawn at random, each as likely as the others (uniform), from a generator of `std.random`: where a particle is born, a rock thrown across a field, a spread of shots, a creature facing anywhere |
+| [math.scalar](#mathscalar) | What is done to single numbers in a game, beyond `std.math`: smooth steps, ranges mapped onto others, values that repeat or go back and forth, angles that wrap, values that follow a target smoothly whatever the frame rate, and the roots of quadratics and cubics (for `math.ballistic`, and where a time must be found) |
+| [math.spline](#mathspline) | Smooth curves in space |
+| [math.stats](#mathstats) | Statistics of series of numbers, in f64: the mean, the spread, the median and the percentiles (the time of a frame at the 99th: what a load test reads, beyond the mean), a line fitted through points, and `Running`, which keeps them as values arrive, without keeping the values (the frame times of a whole session) |
 | [net.http](#nethttp) | An HTTP/1.1 client |
 | [net.ip](#netip) | The addresses of the network, IPv4 and IPv6, the names resolved into them (DNS), and the errors of `net` |
 | [net.tcp](#nettcp) | TCP connections, a stream of bytes both ways |
@@ -1062,6 +1075,18 @@ pub struct Rng
   An integer from `low` to `high`, both included.
 - `pub f64 unit()`  
   A float from 0.0 (included) to 1.0 (excluded).
+- `pub f64 range(f64 low, f64 high)`  
+  A float from `low` (included) to `high` (excluded).
+- `pub f32 range_f32(f32 low, f32 high)`  
+  The same in f32, as games use them.
+- `pub bool chance(f64 p)`  
+  True with the probability `p` (0: never, 1: always).
+- `pub f64 normal(f64 mean, f64 deviation)`  
+  A number of the normal law (a bell curve): around `mean`, two in three within `deviation` of it (Box-Muller).
+- `pub usize weighted(f64[] weights) requires weights.len > 0`  
+  An index of `weights`, each as likely as its weight (none negative): a loot table, a choice of what to spawn. 0 when they are all 0.
+- `pub void shuffle<T>(T[] items)`  
+  `items` in a random order, each order as likely (Fisher-Yates).
 
 ### `seeded`
 
@@ -3882,6 +3907,203 @@ Writes `img` as a PNG file at `path`.
 pub void!io.IoError save(Arena* arena, str path, image.Image img) uses io
 ```
 
+## math.ballistic
+
+What flies under gravity, without the drag of the air. The speed to throw a thing so that it lands at a point (a grenade, an arrow: the low arc or the high one), the speed to land there in a given time (a jump that must take a second), where it is after a time and how high it goes, and where to aim to meet a thing that moves (a turret). Axes of `math.linear`: y up; `gravity` is the downward pull, about 9.81 m/s^2 on Earth.    match (ballistic.launch_velocity(hand, target, 20.0, 9.81, false)) {       some(v) => throw(v),           // the low arc, at 20 m/s       none => {},                    // too far for that speed   }
+
+### `position_at`
+
+Where a thing thrown from `from` at `velocity` is after `time` seconds.
+
+```sosu
+pub linear.Vec3 position_at(linear.Vec3 from, linear.Vec3 velocity, f32 gravity, f32 time)
+```
+
+### `apex`
+
+The highest point of the flight (`from` itself when thrown downward or flat).
+
+```sosu
+pub linear.Vec3 apex(linear.Vec3 from, linear.Vec3 velocity, f32 gravity)
+```
+
+### `velocity_for_time`
+
+The velocity that takes a thing from `from` to `to` in exactly `time` seconds.
+
+```sosu
+pub linear.Vec3 velocity_for_time(linear.Vec3 from, linear.Vec3 to, f32 gravity, f32 time)
+```
+
+### `launch_velocity`
+
+The velocity of `speed` that takes a thing from `from` to `to`: the low arc, or the high one (`high`, which falls more steeply and takes longer); none when `to` is out of reach at that speed.
+
+```sosu
+pub linear.Vec3? launch_velocity(linear.Vec3 from, linear.Vec3 to, f32 speed, f32 gravity, bool high)
+```
+
+### `intercept_time`
+
+The time when a shot of `speed` from `shooter`, flying straight (a bullet, a laser), meets a thing at `target` moving at `velocity`; none if it never can (the thing flees faster).
+
+```sosu
+pub f32? intercept_time(linear.Vec3 shooter, linear.Vec3 target, linear.Vec3 velocity, f32 speed)
+```
+
+### `aim`
+
+The direction to shoot at `speed` to meet the moving thing (of length 1), none if it cannot be met: where the thing will be at `intercept_time`.
+
+```sosu
+pub linear.Vec3? aim(linear.Vec3 shooter, linear.Vec3 target, linear.Vec3 velocity, f32 speed)
+```
+
+## math.bvh
+
+A tree of boxes over many things of a scene, to find quickly those a ray meets (the click of the editor, a shot, a line of sight) or those in a region (the meshes near a light, the bodies near an explosion), without testing them all. Each thing is given by its box; the tree splits them in halves along their longest spread, so that it stays balanced whatever their places. When things move without changing much, `refit` makes the boxes follow without building again.    bvh.Bvh* tree = bvh.build(arena, boxes);            // a box per mesh, in the world   match (tree.first(ray, 1000.0, meshes as bvh.Hits*)) {       some(hit) => select(hit.item),                    // the nearest mesh under the mouse       none => {},   }
+
+### interface `Hits`
+
+What a ray meets exactly, for `Bvh.first`: the boxes of the tree only say what it may meet.
+
+```sosu
+pub interface Hits
+```
+
+- `f32? hit(usize item, geometry.Ray r)`  
+  Where the ray `r` meets the thing `item` (a distance along it), none if it misses it.
+
+### struct `Hit`
+
+The thing a ray meets first, and where.
+
+```sosu
+pub struct Hit
+```
+
+- `pub usize item`
+- `pub f32 distance`
+
+### class `Bvh`
+
+```sosu
+pub class Bvh
+```
+
+- `pub usize count()`  
+  How many things the tree holds.
+- `pub geometry.Aabb? bounds()`  
+  The box around them all, none if there are none.
+- `pub bool refit(geometry.Aabb[] moved)`  
+  The boxes of the things, moved (one per thing, in the same order): the tree keeps its shape, its boxes follow. False, and nothing changed, if there are not as many. A tree whose things moved far gets slower to search: build it again then.
+- `pub void overlapping(geometry.Aabb region, vec.Vec<usize>* out)`  
+  The things whose boxes overlap `region`, added to `out`.
+- `pub void along(geometry.Ray r, f32 max_distance, vec.Vec<usize>* out)`  
+  The things whose boxes the ray crosses within `max_distance`, added to `out`, in no order.
+- `pub Hit? first(geometry.Ray r, f32 max_distance, Hits* hits)`  
+  The thing the ray meets first within `max_distance`, as `hits` says where it meets each; none if it meets none. The nearer half of each node is searched first, and what lies beyond the best hit found is not searched.
+
+### `build`
+
+The tree over the things of these boxes, the thing `i` being that of `boxes[i]`.
+
+```sosu
+pub Bvh* build(keeps Arena* arena, geometry.Aabb[] boxes)
+```
+
+## math.color
+
+The conversions of colors. RGB to HSV and HSL and back, for a color picker and for hues that turn (all of them 0 to 1, the hue a fraction of the circle); sRGB to linear and back, since the light is summed in linear and the screen and the images are in sRGB; Oklab, where colors mix as the eye expects.    linear.Vec3 red = color.hsv_to_rgb(linear.vec3(0.0, 1.0, 1.0));   linear.Vec4 lit = color.to_linear(picked);   // what a shader adds up
+
+### `rgb_to_hsv`
+
+The hue, the saturation and the value of `rgb`; a grey has a hue of 0.
+
+```sosu
+pub linear.Vec3 rgb_to_hsv(linear.Vec3 rgb)
+```
+
+### `hsv_to_rgb`
+
+The color of a hue, a saturation and a value.
+
+```sosu
+pub linear.Vec3 hsv_to_rgb(linear.Vec3 hsv)
+```
+
+### `rgb_to_hsl`
+
+The hue, the saturation and the lightness of `rgb`.
+
+```sosu
+pub linear.Vec3 rgb_to_hsl(linear.Vec3 rgb)
+```
+
+### `hsl_to_rgb`
+
+The color of a hue, a saturation and a lightness.
+
+```sosu
+pub linear.Vec3 hsl_to_rgb(linear.Vec3 hsl)
+```
+
+### `srgb_to_linear`
+
+A part of a color in sRGB (0 to 1), in linear light (the curve of the standard, exactly).
+
+```sosu
+pub f32 srgb_to_linear(f32 v)
+```
+
+### `linear_to_srgb`
+
+A part of a color in linear light, in sRGB.
+
+```sosu
+pub f32 linear_to_srgb(f32 v)
+```
+
+### `to_linear`
+
+A color of sRGB (a picker, a texture, a page) in linear light, its alpha unchanged.
+
+```sosu
+pub linear.Vec4 to_linear(linear.Vec4 c)
+```
+
+### `to_srgb`
+
+A color in linear light in sRGB, its alpha unchanged.
+
+```sosu
+pub linear.Vec4 to_srgb(linear.Vec4 c)
+```
+
+### `linear_to_oklab`
+
+A color in linear light in Oklab (Björn Ottosson, 2020): `x` its lightness (0 black, 1 white), `y` and `z` how green-red and blue-yellow it is. Steps of the same size in it look the same size to the eye, which RGB and HSV do not: gradients without a grey or too bright middle, a lightness that a hue does not change.
+
+```sosu
+pub linear.Vec3 linear_to_oklab(linear.Vec3 c)
+```
+
+### `oklab_to_linear`
+
+A color of Oklab in linear light.
+
+```sosu
+pub linear.Vec3 oklab_to_linear(linear.Vec3 lab)
+```
+
+### `mix_oklab`
+
+The color at `t` from `a` (0) to `b` (1), two colors in linear light mixed in Oklab, their alphas in a straight line: a gradient as the eye expects it.
+
+```sosu
+pub linear.Vec4 mix_oklab(linear.Vec4 a, linear.Vec4 b, f32 t)
+```
+
 ## math.curve
 
 Values that change over time (spec §8.2). A `Curve` is keys of time and value, read between them by steps, by straight lines, or by the cubic splines of Hermite that glTF gives with their tangents; `Curve3` is the same for a `Vec3`, and a `Gradient` is colors over 0..1. `anim` samples the channels of clips with them, `particles` the sizes and colors over the life of a particle. Before the first key a curve holds the first value, after the last the last value.
@@ -4039,6 +4261,84 @@ One color at every time.
 pub Gradient solid(Arena* arena, linear.Vec4 color)
 ```
 
+## math.delaunay
+
+The Delaunay triangulation of points of the plane (the triangles whose circles hold no other point: the fewest thin triangles, for a mesh of a ground from scattered heights, a graph of neighbors between rooms or towns) and the Voronoi cells of points (the region nearer to each point than to any other: territories, the cells of a map, cracks, the stones of a wall), clipped to a rectangle.    usize[] t = delaunay.triangulate(arena, points);              // three points per triangle   linear.Vec2[][] cells = delaunay.voronoi(arena, points, low, high);
+
+### `triangulate`
+
+The Delaunay triangles of the points: three indices per triangle, each turning counterclockwise (Bowyer and Watson, O(n^2) at worst: for thousands of points, not millions). A point at the same place as one before it is left out; points all in a line give no triangle. In `arena`.
+
+```sosu
+pub usize[] triangulate(Arena* arena, linear.Vec2[] points)
+```
+
+### `voronoi`
+
+The Voronoi cell of each point, clipped to the rectangle from `low` to `high`: the corners of a convex polygon, counterclockwise, of the region nearer to that point than to any other (the cell of a point at the same place as one before it is empty). Each cell is the rectangle cut by the lines halfway to the neighbors of its point in the Delaunay triangulation. In `arena`.
+
+```sosu
+pub linear.Vec2[][] voronoi(Arena* arena, linear.Vec2[] points, linear.Vec2 low, linear.Vec2 high)
+```
+
+## math.ease
+
+The curves of easing, for what moves on a time (a menu that slides in, a door that opens, a number that counts up, a camera that changes place): `t` from 0 to 1 gives 0 to 1, the way changed. `In` starts slowly, `Out` ends slowly, `InOut` both. Robert Penner's equations, as easings.net shows them; `Back` goes a little beyond its ends, `Elastic` and `Bounce` around them.    f32 x = scalar.remap(ease.apply(ease.Ease.OutBack, elapsed / 0.4), 0.0, 1.0, -300.0, 0.0);
+
+### enum `Ease`
+
+```sosu
+pub enum Ease {
+    Linear,
+    InSine,
+    OutSine,
+    InOutSine,
+    InQuad,
+    OutQuad,
+    InOutQuad,
+    InCubic,
+    OutCubic,
+    InOutCubic,
+    InQuart,
+    OutQuart,
+    InOutQuart,
+    InQuint,
+    OutQuint,
+    InOutQuint,
+    InExpo,
+    OutExpo,
+    InOutExpo,
+    InCirc,
+    OutCirc,
+    InOutCirc,
+    InBack,
+    OutBack,
+    InOutBack,
+    InElastic,
+    OutElastic,
+    InOutElastic,
+    InBounce,
+    OutBounce,
+    InOutBounce,
+}
+```
+
+### `apply`
+
+`t` (held within 0..1) eased by `e`: 0 at 0 and 1 at 1, for every easing.
+
+```sosu
+pub f32 apply(Ease e, f32 t)
+```
+
+### `between`
+
+The value at `t` from `from` (0) to `to` (1), eased by `e`.
+
+```sosu
+pub f32 between(Ease e, f32 from, f32 to, f32 t)
+```
+
 ## math.geometry
 
 The shapes of 3D and their tests (spec §8.2): boxes aligned on the axes, spheres, rays, planes and the frustum of a camera; a ray against a box, a sphere, a plane or a triangle (picking with the mouse), a box or a sphere in a frustum (what a camera sees, culling). Right-handed axes, the matrices of math.linear (columns, a depth of 0 to 1 after projection).
@@ -4060,6 +4360,8 @@ pub struct Aabb
   Whether the two boxes share a point.
 - `pub Aabb union(Aabb o)`  
   The smallest box that holds both.
+- `pub linear.Vec3 closest(linear.Vec3 p)`  
+  The point of the box nearest to `p` (`p` itself when it is inside).
 - `pub Aabb grown(linear.Vec3 p)`  
   The smallest box that holds it and `p`.
 - `pub Aabb transformed(linear.Mat4 m)`  
@@ -4108,6 +4410,8 @@ pub struct Plane
 - `pub f32 d`
 - `pub f32 distance(linear.Vec3 p)`  
   The distance of `p` to the plane, positive in front, negative behind (normal of length 1).
+- `pub linear.Vec3 closest(linear.Vec3 p)`  
+  The point of the plane nearest to `p`.
 
 ### `plane`
 
@@ -4187,6 +4491,68 @@ The ray against the triangle (a, b, c), seen from either side (Möller and Trumb
 pub TriangleHit? ray_triangle(Ray r, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c)
 ```
 
+### `closest_on_segment`
+
+The point of the segment from `a` to `b` nearest to `p`.
+
+```sosu
+pub linear.Vec3 closest_on_segment(linear.Vec3 p, linear.Vec3 a, linear.Vec3 b)
+```
+
+### struct `Closest`
+
+The two points nearest to each other of two segments: `on_first` at `s` from the start of the first (0) to its end (1), `on_second` at `t` along the second.
+
+```sosu
+pub struct Closest
+```
+
+- `pub linear.Vec3 on_first`
+- `pub linear.Vec3 on_second`
+- `pub f32 s`
+- `pub f32 t`
+- `pub f32 distance()`
+
+### `closest_between`
+
+The nearest points of the segments (a1, b1) and (a2, b2) (Ericson, Real-Time Collision Detection, 5.1.9): the distance of two capsules, of a bone to a ray.
+
+```sosu
+pub Closest closest_between(linear.Vec3 a1, linear.Vec3 b1, linear.Vec3 a2, linear.Vec3 b2)
+```
+
+### `closest_on_triangle`
+
+The point of the triangle (a, b, c) nearest to `p` (Ericson, 5.1.5): by the region of the triangle where `p` falls, a corner, an edge or the inside.
+
+```sosu
+pub linear.Vec3 closest_on_triangle(linear.Vec3 p, linear.Vec3 a, linear.Vec3 b, linear.Vec3 c)
+```
+
+### `ray_disc`
+
+Where the ray meets the disc of `radius` around `center`, facing `normal`, from either side; none if it misses it.
+
+```sosu
+pub f32? ray_disc(Ray r, linear.Vec3 center, linear.Vec3 normal, f32 radius)
+```
+
+### `ray_capsule`
+
+Where the ray first meets the capsule around the segment (a, b) (0 when it starts inside); none if it misses it. The capsule is the side of a cylinder and the two spheres at its ends: the first of the three met.
+
+```sosu
+pub f32? ray_capsule(Ray r, linear.Vec3 a, linear.Vec3 b, f32 radius)
+```
+
+### `ray_cylinder`
+
+Where the ray first meets the closed cylinder from `a` to `b` (0 when it starts inside); none if it misses it: its side, or one of its two ends.
+
+```sosu
+pub f32? ray_cylinder(Ray r, linear.Vec3 a, linear.Vec3 b, f32 radius)
+```
+
 ### struct `Frustum`
 
 What a camera sees: six planes facing inward (left, right, bottom, top, near, far).
@@ -4209,9 +4575,43 @@ The frustum of a camera from its matrix, projection times view (a depth of 0 to 
 pub Frustum frustum(linear.Mat4 view_projection)
 ```
 
+## math.kdtree
+
+A k-d tree over points in 3D that do not move: the nearest point to a place (the nearest town, cover, waypoint, light probe), the k nearest (the neighbors of a boid, the lights that touch a mesh), and those within a radius. Built once, balanced: each node splits its points at the median along their longest spread. For things that move, `math.octree`.    kdtree.KdTree* towns = kdtree.build(arena, places);   usize? nearest = towns.nearest(player);
+
+### class `KdTree`
+
+```sosu
+pub class KdTree
+```
+
+- `pub usize count()`
+- `pub usize? nearest(linear.Vec3 p)`  
+  The point nearest to `p` (its index in the points given), none when there are none.
+- `pub void nearest_k(linear.Vec3 p, usize k, vec.Vec<usize>* out)`  
+  The `k` points nearest to `p`, added to `out` from the nearest (fewer when there are fewer).
+- `pub void within(linear.Vec3 p, f32 radius, vec.Vec<usize>* out)`  
+  The points within `radius` of `p`, added to `out` in no order.
+
+### `build`
+
+The tree over the points, the point `i` being `points[i]`.
+
+```sosu
+pub KdTree* build(keeps Arena* arena, linear.Vec3[] points)
+```
+
 ## math.linear
 
 Vectors, matrices, quaternions and transforms of f32, for `render` and 3D. Conventions: column vectors (a matrix applies on the left: `m.mul_vec(v)`), matrices stored by columns (as the GPU APIs read them), right-handed axes, angles in radians, and a depth of 0 to 1 after projection (Vulkan, Metal, Direct3D, SDL_GPU).
+
+### `snap`
+
+`value` on the nearest multiple of `step`: a grid of the editor, angles by 15 degrees (`step` in radians). A step of 0 or less leaves it.
+
+```sosu
+pub f32 snap(f32 value, f32 step)
+```
 
 ### struct `Vec2`
 
@@ -4239,6 +4639,18 @@ pub struct Vec2
 - `pub Vec2 lerp(Vec2 o, f32 t)`  
   The point at `t` from here (0) to `o` (1).
 - `pub bool near(Vec2 o, f32 eps)`
+- `pub f32 angle(Vec2 o)`  
+  The angle between the two directions, 0 to pi (0 if one is zero).
+- `pub f32 signed_angle(Vec2 o)`  
+  The turn from this direction to `o`, -pi to pi: positive counterclockwise.
+- `pub Vec2 reflect(Vec2 normal)`  
+  The vector bounced on a surface of this `normal` (of length 1).
+- `pub Vec2 move_towards(Vec2 target, f32 step)`  
+  A step of `step` at most toward `target`, stopping on it.
+- `pub Vec2 clamp_length(f32 limit)`  
+  The vector, shortened to `limit` if it is longer.
+- `pub Vec2 snapped(f32 step)`  
+  Each component on the nearest multiple of `step`.
 
 ### struct `Vec3`
 
@@ -4261,6 +4673,22 @@ pub struct Vec3
 - `pub Vec3 normalized()`
 - `pub Vec3 lerp(Vec3 o, f32 t)`
 - `pub bool near(Vec3 o, f32 eps)`
+- `pub f32 angle(Vec3 o)`  
+  The angle between the two directions, 0 to pi (0 if one is zero).
+- `pub f32 signed_angle(Vec3 o, Vec3 axis)`  
+  The turn from this direction to `o` around `axis`, -pi to pi: positive when it turns counterclockwise seen from the tip of `axis` (the right-hand rule).
+- `pub Vec3 project(Vec3 onto)`  
+  The part of the vector along `onto` (zero if `onto` is zero).
+- `pub Vec3 on_plane(Vec3 normal)`  
+  The vector flattened on the plane of `normal` (its part across `normal`).
+- `pub Vec3 reflect(Vec3 normal)`  
+  The vector bounced on a surface of this `normal` (of length 1).
+- `pub Vec3 move_towards(Vec3 target, f32 step)`  
+  A step of `step` at most toward `target`, stopping on it.
+- `pub Vec3 clamp_length(f32 limit)`  
+  The vector, shortened to `limit` if it is longer.
+- `pub Vec3 snapped(f32 step)`  
+  Each component on the nearest multiple of `step`: a point on the grid of the editor.
 
 ### struct `Vec4`
 
@@ -4476,6 +4904,14 @@ pub struct Quat
   The rotation at `t` from this one (0) to `o` (1), at a steady speed, the short way.
 - `pub bool near(Quat o, f32 eps)`  
   Whether the two give the same rotation (q and -q do).
+- `pub Quat inverse()`  
+  The rotation back, for a quaternion of any length but 0.
+- `pub f32 angle(Quat o)`  
+  The angle of the turn from this rotation to `o`, 0 to pi.
+- `pub Quat rotate_towards(Quat o, f32 step)`  
+  A turn of `step` radians at most from this rotation toward `o`, stopping on it.
+- `pub Vec3 euler()`  
+  The rotation as three angles in radians, `from_euler` giving it back: about x (pitch), y (yaw) and z (roll), applied z, then x, then y (as Unity shows them). At a pitch of a quarter of a turn, where yaw and roll turn about the same axis, the roll is 0.
 
 ### `identity_quat`
 
@@ -4489,6 +4925,30 @@ A turn of `angle` around `axis` (of any length but 0).
 
 ```sosu
 pub Quat from_axis_angle(Vec3 axis, f32 angle)
+```
+
+### `from_euler`
+
+The rotation of three angles in radians, as `Quat.euler` gives them: z first, then x, then y.
+
+```sosu
+pub Quat from_euler(Vec3 angles)
+```
+
+### `from_to`
+
+The shortest rotation that turns the direction `from` onto `to` (of any length but 0); half a turn about some axis across them when they are opposite.
+
+```sosu
+pub Quat from_to(Vec3 from, Vec3 to)
+```
+
+### `look_rotation`
+
+The rotation that turns the forward of an entity (-z, where its camera looks) toward `forward`, its top (+y) as near `up` as it can be: an entity facing a point, a camera that follows. When `forward` is along `up`, another up is taken.
+
+```sosu
+pub Quat look_rotation(Vec3 forward, Vec3 up)
 ```
 
 ### struct `Transform`
@@ -4522,6 +4982,591 @@ The transform that `m` applies: its translation, rotation and scale, `to_mat4` g
 ```sosu
 pub Transform decompose(Mat4 m)
 ```
+
+## math.noise
+
+Gradient noise for what must look natural without being drawn by hand: grounds and their heights, clouds, the sway of grass, the wander of a creature, the flicker of a fire. Perlin's improved noise (2002) in 2D and 3D: smooth, about -1 to 1, 0 on the points of the lattice (whole coordinates), the same for the same seed on every machine. Sums of octaves on top of it: `fbm` (detail added at each octave), `ridged` (sharp crests, for mountains), `turbulence` (folds, for marble and smoke), `warp` (a noise moved by itself). Simplex noise in 2D, 3D and 4D; cellular noise (Worley) for stones and cracks; hashes of whole coordinates.    noise.Noise n = noise.seeded(42);   f32 h = n.fbm2(x * 0.01, z * 0.01, noise.Octaves{ count: 5 });   // a height, about -1 to 1
+
+### struct `Octaves`
+
+How octaves are summed: `count` of them, each `lacunarity` times finer than the one before and weighing `gain` times as much.
+
+```sosu
+pub struct Octaves
+```
+
+- `pub i32 count = 4`
+- `pub f32 lacunarity = 2.0`
+- `pub f32 gain = 0.5`
+
+### struct `Noise`
+
+A noise: a table of 256 numbers shuffled by its seed.
+
+```sosu
+pub struct Noise
+```
+
+- `pub f32 perlin2(f32 x, f32 y)`  
+  At (x, y): smooth, about -1 to 1, 0 where both are whole.
+- `pub f32 perlin3(f32 x, f32 y, f32 z)`  
+  At (x, y, z): smooth, about -1 to 1, 0 where all three are whole.
+- `pub f32 fbm2(f32 x, f32 y, Octaves o)`  
+  Octaves of `perlin2` summed: detail at every scale, about -1 to 1.
+- `pub f32 fbm3(f32 x, f32 y, f32 z, Octaves o)`
+- `pub f32 ridged2(f32 x, f32 y, Octaves o)`  
+  Sharp crests where the noise crosses 0 (mountains, veins): 0 to 1.
+- `pub f32 ridged3(f32 x, f32 y, f32 z, Octaves o)`
+- `pub f32 turbulence3(f32 x, f32 y, f32 z, Octaves o)`  
+  Folds (marble, smoke): the octaves of the size of the noise, 0 to 1.
+- `pub f32 simplex2(f32 x, f32 y)`  
+  Simplex noise (Perlin 2001, as Gustavson writes it) at (x, y): as `perlin2`, smooth and about -1 to 1, without the lines along the axes that Perlin's noise shows, and cheaper as the dimension grows: triangles in place of squares.
+- `pub f32 simplex3(f32 x, f32 y, f32 z)`  
+  Simplex noise at (x, y, z): tetrahedra in place of cubes.
+- `pub f32 simplex4(f32 x, f32 y, f32 z, f32 w)`  
+  Simplex noise at (x, y, z, w): a 3D noise that changes smoothly with `w` (a time: clouds that move without sliding), or a 2D noise that loops in both directions, from a torus in 4D.
+- `pub f32 warp2(f32 x, f32 y, Octaves o, f32 strength)`  
+  `fbm2` seen through itself (Quílez's domain warping): a noise whose coordinates are moved by another, folds and swirls for grounds, marble, smoke; `strength` how far they are moved (4 is much). About -1 to 1.
+- `pub f32 warp3(f32 x, f32 y, f32 z, Octaves o, f32 strength)`
+- `pub Cells worley2(f32 x, f32 y)`  
+  Cellular noise (Worley, 1996) at (x, y): a point at random in each square of side 1, and the distances to the nearest of them and to the second; their difference draws the edges between cells (cracks, scales, stones, a dry ground), the first alone round spots.
+- `pub Cells worley3(f32 x, f32 y, f32 z)`  
+  Cellular noise at (x, y, z): a point in each cube of side 1.
+
+### struct `Cells`
+
+What cellular noise gives at a point: the distance to the nearest point of the cells and to the second (0 to about 1.5), and a number of the nearest cell, the same over all of it (to give each stone its color).
+
+```sosu
+pub struct Cells
+```
+
+- `pub mut f32 nearest`
+- `pub mut f32 second`
+- `pub mut ui32 id`
+- `pub f32 edge()`  
+  The edges between cells: 0 on them, growing toward the points.
+
+### `hash`
+
+A number of 32 bits mixed from `x`: each bit of `x` changes half of them (Wellons' lowbias32). A number at random that is the same for the same input, without a state: the variation of a tile, of a tree, of a cell, by its coordinates.
+
+```sosu
+pub ui32 hash(ui32 x)
+```
+
+### `hash2`
+
+The hash of two whole coordinates and a seed.
+
+```sosu
+pub ui32 hash2(i32 x, i32 y, ui32 seed)
+```
+
+### `hash3`
+
+The hash of three whole coordinates and a seed.
+
+```sosu
+pub ui32 hash3(i32 x, i32 y, i32 z, ui32 seed)
+```
+
+### `unit`
+
+A hash as a number from 0 to 1 (1 excluded).
+
+```sosu
+pub f32 unit(ui32 h)
+```
+
+### `seeded`
+
+The noise of `seed`: its table shuffled by a generator of that seed.
+
+```sosu
+pub Noise seeded(ui64 seed)
+```
+
+## math.octree
+
+An octree over points in 3D that come, go and move: the units of a game, the sounds playing, the pickups lying around. A cube split in eight when it holds too many, so that a search for a region or for what is near a point looks only at the cubes it touches. Each thing is a number of the program and its point; `move` follows it. For points that never move, `math.kdtree` is smaller and faster; for things with a size, `math.bvh`.    octree.Octree* units = octree.octree(arena, world_bounds);   units.insert(id, position);   units.within(explosion, 8.0, hit);                   // the units in the blast
+
+### class `Octree`
+
+```sosu
+pub class Octree
+```
+
+- `pub usize count()`  
+  How many things it holds.
+- `pub bool insert(usize item, linear.Vec3 p)`  
+  The thing `item` at `p`; false, and not added, when `p` is outside the bounds.
+- `pub bool remove(usize item, linear.Vec3 p)`  
+  The thing `item` taken away from `p`, where it was put (or last moved to); false when it is not there. Cubes stay split.
+- `pub bool move(usize item, linear.Vec3 from, linear.Vec3 to)`  
+  The thing `item` moved from `from` to `to`; false when it is not at `from`, or `to` is outside the bounds (it is then taken away).
+- `pub void overlapping(geometry.Aabb region, vec.Vec<usize>* out)`  
+  The things whose points are in `region`, added to `out`.
+- `pub void within(linear.Vec3 p, f32 radius, vec.Vec<usize>* out)`  
+  The things within `radius` of `p`, added to `out`.
+
+### `octree`
+
+An empty octree over `bounds`: things outside of it are refused.
+
+```sosu
+pub Octree* octree(keeps Arena* arena, geometry.Aabb bounds)
+```
+
+## math.polygon
+
+Polygons of the plane, as their corners in order (`Vec2`, the last joined to the first): their area and the way they turn, whether a point is inside, their center, cut into triangles (to fill or to mesh a shape drawn by hand: a zone, a floor, a navigation area), the convex hull of points (what a lasso of selection holds, the outline of a group), and a polygon cut by a line or a rectangle (`math.delaunay` builds its Voronoi cells so).    usize[] triangles = polygon.triangulate(arena, outline);   // three corners per triangle
+
+### `signed_area`
+
+The area, positive when the corners turn counterclockwise (y up), negative when they turn clockwise (the shoelace formula).
+
+```sosu
+pub f32 signed_area(linear.Vec2[] p)
+```
+
+### `area`
+
+The area, whichever way the corners turn.
+
+```sosu
+pub f32 area(linear.Vec2[] p)
+```
+
+### `counterclockwise`
+
+Whether the corners turn counterclockwise (y up).
+
+```sosu
+pub bool counterclockwise(linear.Vec2[] p)
+```
+
+### `contains`
+
+Whether `q` is inside the polygon (the rule of even and odd: for a polygon that crosses itself, the parts covered an odd number of times). A point on an edge may fall either way.
+
+```sosu
+pub bool contains(linear.Vec2[] p, linear.Vec2 q)
+```
+
+### `centroid`
+
+The center of the surface of the polygon (its centroid); the mean of its corners when it has no area.
+
+```sosu
+pub linear.Vec2 centroid(linear.Vec2[] p)
+```
+
+### `triangulate`
+
+The polygon cut into triangles: three indices of its corners per triangle, each turning counterclockwise, `p.len - 2` triangles for a simple polygon (one that does not cross itself), convex or not, whichever way its corners turn (ear clipping, O(n^2)); no triangle is flat (a corner in a straight line is left out when it cannot be part of one). A polygon that crosses itself gives the triangles found until no ear is left. In `arena`.
+
+```sosu
+pub usize[] triangulate(Arena* arena, linear.Vec2[] p)
+```
+
+### `convex_hull`
+
+The smallest convex polygon that holds the points, its corners counterclockwise from the lowest leftmost, without corners in a straight line (Andrew's monotone chain, O(n log n)). In `arena`.
+
+```sosu
+pub linear.Vec2[] convex_hull(Arena* arena, linear.Vec2[] points)
+```
+
+### `clip_half`
+
+The part of the polygon on the side of the line through `point` that `normal` points away from (where (q - point) . normal <= 0), its corners in the same order (Sutherland and Hodgman). In `arena`; empty when nothing is left.
+
+```sosu
+pub linear.Vec2[] clip_half(Arena* arena, linear.Vec2[] p, linear.Vec2 point, linear.Vec2 normal)
+```
+
+### `clip_rect`
+
+The part of the polygon inside the rectangle from `low` to `high`. In `arena`.
+
+```sosu
+pub linear.Vec2[] clip_rect(Arena* arena, linear.Vec2[] p, linear.Vec2 low, linear.Vec2 high)
+```
+
+## math.sample
+
+Points and turns drawn at random, each as likely as the others (uniform), from a generator of `std.random`: where a particle is born, a rock thrown across a field, a spread of shots, a creature facing anywhere. The same seed gives the same draws.
+
+### `poisson2`
+
+Points over the rectangle from (0, 0) to (`width`, `height`), none nearer than `radius` to another, and no room left for one more but by chance (Bridson's Poisson disk sampling, 2007, `tries` candidates around each point, 30 being usual): trees of a forest, rocks of a field, spread as by nature, without the clumps and holes of points drawn one by one. In `arena`.
+
+```sosu
+pub linear.Vec2[] poisson2(Arena* arena, random.Rng* r, f32 width, f32 height, f32 radius, i32 tries)
+```
+
+### `in_circle`
+
+A point in the disk of radius 1 (the square root of the radius keeps it uniform).
+
+```sosu
+pub linear.Vec2 in_circle(random.Rng* r)
+```
+
+### `on_circle`
+
+A point on the circle of radius 1.
+
+```sosu
+pub linear.Vec2 on_circle(random.Rng* r)
+```
+
+### `on_sphere`
+
+A direction: a point on the sphere of radius 1 (its height uniform, Archimedes).
+
+```sosu
+pub linear.Vec3 on_sphere(random.Rng* r)
+```
+
+### `in_sphere`
+
+A point in the ball of radius 1 (a direction, at the cube root of a uniform radius).
+
+```sosu
+pub linear.Vec3 in_sphere(random.Rng* r)
+```
+
+### `in_box`
+
+A point in the box from `low` to `high`.
+
+```sosu
+pub linear.Vec3 in_box(random.Rng* r, linear.Vec3 low, linear.Vec3 high)
+```
+
+### `rotation`
+
+A turn, every one as likely (Shoemake's method): of length 1.
+
+```sosu
+pub linear.Quat rotation(random.Rng* r)
+```
+
+## math.scalar
+
+What is done to single numbers in a game, beyond `std.math`: smooth steps, ranges mapped onto others, values that repeat or go back and forth, angles that wrap, values that follow a target smoothly whatever the frame rate, and the roots of quadratics and cubics (for `math.ballistic`, and where a time must be found).    f32 x = scalar.damp(x, target, 8.0, dt);                       // follows, the same at 30 or 144 Hz   f32 y = scalar.smooth_damp(y, goal, &speed, 0.3, dt);          // arrives in about 0.3 s, no overshoot
+
+### `smoothstep`
+
+0 below `edge0`, 1 above `edge1`, and an S between them (3t^2 - 2t^3).
+
+```sosu
+pub f32 smoothstep(f32 edge0, f32 edge1, f32 x)
+```
+
+### `smootherstep`
+
+As `smoothstep`, its slope and its curvature 0 at both ends (Perlin's 6t^5 - 15t^4 + 10t^3).
+
+```sosu
+pub f32 smootherstep(f32 edge0, f32 edge1, f32 x)
+```
+
+### `inverse_lerp`
+
+Where `x` lies from `a` (0) to `b` (1), beyond them too; 0 when they are the same.
+
+```sosu
+pub f32 inverse_lerp(f32 a, f32 b, f32 x)
+```
+
+### `remap`
+
+`x` of the range `from_low`..`from_high` brought to the range `to_low`..`to_high`, beyond them too (a health of 0..100 to a bar of 0..200 pixels).
+
+```sosu
+pub f32 remap(f32 x, f32 from_low, f32 from_high, f32 to_low, f32 to_high)
+```
+
+### `repeat`
+
+`t` brought back within 0..`length`, as a time that loops; negative times too.
+
+```sosu
+pub f32 repeat(f32 t, f32 length)
+```
+
+### `ping_pong`
+
+`t` going from 0 to `length` and back, again and again.
+
+```sosu
+pub f32 ping_pong(f32 t, f32 length)
+```
+
+### `wrap_angle`
+
+An angle in radians brought within -pi..pi.
+
+```sosu
+pub f32 wrap_angle(f32 a)
+```
+
+### `delta_angle`
+
+The shortest turn from the angle `from` to `to`, -pi..pi.
+
+```sosu
+pub f32 delta_angle(f32 from, f32 to)
+```
+
+### `lerp_angle`
+
+The angle at `t` from `a` (0) to `b` (1), the short way round.
+
+```sosu
+pub f32 lerp_angle(f32 a, f32 b, f32 t)
+```
+
+### `damp`
+
+`current` brought toward `target` for a frame of `dt` seconds, at the `rate` given (per second): the same path whatever the frame rate, unlike `lerp(current, target, k)` each frame. A rate of 10 covers about 63% of the way in a tenth of a second.
+
+```sosu
+pub f32 damp(f32 current, f32 target, f32 rate, f32 dt)
+```
+
+### `damp3`
+
+```sosu
+pub linear.Vec3 damp3(linear.Vec3 current, linear.Vec3 target, f32 rate, f32 dt)
+```
+
+### `smooth_damp`
+
+`current` brought toward `target` as by a spring that does not bounce, arriving in about `smooth_time` seconds and never beyond (Game Programming Gems 4, 1.10, as Unity's SmoothDamp): `velocity` is kept by the caller from frame to frame, 0 at first. A camera that follows.
+
+```sosu
+pub f32 smooth_damp(f32 current, f32 target, f32* velocity, f32 smooth_time, f32 dt)
+```
+
+### `smooth_damp3`
+
+`smooth_damp` on the three axes, each with its part of `velocity`.
+
+```sosu
+pub linear.Vec3 smooth_damp3(linear.Vec3 current, linear.Vec3 target, linear.Vec3* velocity, f32 smooth_time, f32 dt)
+```
+
+### struct `Roots`
+
+The real roots of an equation, from the lowest: `count` of them in `values`.
+
+```sosu
+pub struct Roots
+```
+
+- `pub mut usize count`
+- `pub mut f32[3] values`
+- `pub f32? first_from(f32 low)`  
+  The lowest root that is not below `low`, none if there is none (the first time ahead).
+
+### `solve_quadratic`
+
+The real x where a x^2 + b x + c = 0 (a line when a is 0; none for 0 = c, or 0 = 0).
+
+```sosu
+pub Roots solve_quadratic(f32 a, f32 b, f32 c)
+```
+
+### `solve_cubic`
+
+The real x where a x^3 + b x^2 + c x + d = 0 (a quadratic when a is 0).
+
+```sosu
+pub Roots solve_cubic(f32 a, f32 b, f32 c, f32 d)
+```
+
+## math.spline
+
+Smooth curves in space. Bézier curves of 3 and 4 points (a curve drawn by its handles: a path of the editor, a cable, the arc of a jump), Catmull-Rom curves that pass through their points, and `Path`, a curve through many points that can be walked at a steady speed by its length (a rail of a camera, a patrol, a road, a river), open or closed in a loop.    spline.Path* rail = spline.path(arena, points, false);   linear.Vec3 here = rail.at_distance(speed * time);          // the same speed on every segment   linear.Quat facing = linear.look_rotation(rail.tangent_at_distance(speed * time), up);
+
+### `bezier2`
+
+The quadratic Bézier curve at `t` (0..1): from `p0` to `p2`, drawn toward `p1`.
+
+```sosu
+pub linear.Vec3 bezier2(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, f32 t)
+```
+
+### `bezier3`
+
+The cubic Bézier curve at `t` (0..1): from `p0` to `p3`, leaving toward `p1`, arriving from `p2`.
+
+```sosu
+pub linear.Vec3 bezier3(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t)
+```
+
+### `bezier3_tangent`
+
+The derivative of `bezier3` at `t`: its direction, and its speed for a `t` that goes at 1.
+
+```sosu
+pub linear.Vec3 bezier3_tangent(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t)
+```
+
+### `catmull_rom`
+
+The uniform Catmull-Rom curve at `t` (0..1), from `p1` to `p2`, `p0` and `p3` the points around them that give its tangents.
+
+```sosu
+pub linear.Vec3 catmull_rom(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t)
+```
+
+### `centripetal`
+
+The centripetal Catmull-Rom curve at `t` (0..1), from `p1` to `p2`: as `catmull_rom`, but without the loops and cusps that points far apart give (Barry and Goldman's form, an alpha of 0.5).
+
+```sosu
+pub linear.Vec3 centripetal(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t)
+```
+
+### class `Path`
+
+A centripetal Catmull-Rom curve through `points`, open (from the first to the last) or closed (back to the first), with the table of its lengths, to walk it by distance.
+
+```sosu
+pub class Path
+```
+
+- `pub usize segments()`  
+  How many pieces from point to point: one less than the points, as many when closed.
+- `pub linear.Vec3 point(f32 t)`  
+  The point at `t` from the start (0) to the end (1), each segment an equal part of `t` whatever its length (`at_distance` walks at a steady speed).
+- `pub f32 length()`  
+  The length of the curve (by its samples: within a fraction of a percent).
+- `pub f32 t_at_distance(f32 distance)`  
+  The `t` of `point` at `distance` along the curve; a closed one loops, an open one stops at its ends.
+- `pub linear.Vec3 at_distance(f32 distance)`  
+  The point at `distance` along the curve.
+- `pub linear.Vec3 tangent_at_distance(f32 distance)`  
+  The direction of the curve at `distance` along it (of length 1).
+
+### `path`
+
+The path through `points` (two at least for a curve; one gives a point), open or closed.
+
+```sosu
+pub Path* path(keeps Arena* arena, linear.Vec3[] points, bool closed)
+```
+
+## math.stats
+
+Statistics of series of numbers, in f64: the mean, the spread, the median and the percentiles (the time of a frame at the 99th: what a load test reads, beyond the mean), a line fitted through points, and `Running`, which keeps them as values arrive, without keeping the values (the frame times of a whole session).    stats.Running frames = stats.Running{ };   frames.add(dt * 1000.0);                                    // each frame, in milliseconds   f64 slow = stats.percentile(arena, times, 99.0);            // 1 frame in 100 is slower
+
+### `mean`
+
+The mean of the values, 0 for none.
+
+```sosu
+pub f64 mean(f64[] values)
+```
+
+### `variance`
+
+The variance of the values as a whole population (divided by n), 0 for none.
+
+```sosu
+pub f64 variance(f64[] values)
+```
+
+### `sample_variance`
+
+The variance of the values as a sample of a larger population (divided by n - 1: Bessel's correction), 0 for fewer than two.
+
+```sosu
+pub f64 sample_variance(f64[] values)
+```
+
+### `deviation`
+
+The standard deviation (the square root of `variance`).
+
+```sosu
+pub f64 deviation(f64[] values)
+```
+
+### `sample_deviation`
+
+```sosu
+pub f64 sample_deviation(f64[] values)
+```
+
+### `percentile`
+
+The value below which `p` percent of the values lie (0 the lowest, 50 the median, 100 the highest), between two values by a straight line (as numpy's default); the values are not changed (a sorted copy is made in `arena`). 0 for none.
+
+```sosu
+pub f64 percentile(Arena* arena, f64[] values, f64 p)
+```
+
+### `sorted_percentile`
+
+`percentile` of values already sorted, from the lowest: no copy.
+
+```sosu
+pub f64 sorted_percentile(f64[] sorted, f64 p)
+```
+
+### `median`
+
+The median: the value in the middle, or the mean of the two in the middle.
+
+```sosu
+pub f64 median(Arena* arena, f64[] values)
+```
+
+### struct `Fit`
+
+A straight line y = slope x + intercept, and how well it fits (`r2`, 1 for all on it, 0 for no more than the mean).
+
+```sosu
+pub struct Fit
+```
+
+- `pub f64 slope`
+- `pub f64 intercept`
+- `pub f64 r2`
+- `pub f64 at(f64 x)`
+
+### `fit_line`
+
+The line nearest to the points (xs[i], ys[i]) by least squares: a trend, how the time of a frame grows with the number of entities. A flat line at the mean when all the x are the same.
+
+```sosu
+pub Fit fit_line(f64[] xs, f64[] ys)
+```
+
+### struct `Running`
+
+Statistics kept as values arrive, without keeping them: their count, mean, spread (Welford's way, exact without the loss of a sum of squares), lowest and highest.
+
+```sosu
+pub struct Running
+```
+
+- `pub mut usize count = 0`
+- `pub mut f64 lowest = 0.0`
+- `pub mut f64 highest = 0.0`
+- `pub void add(f64 v)`
+- `pub f64 mean()`
+- `pub f64 variance()`
+- `pub f64 sample_variance()`
+- `pub f64 deviation()`
+- `pub void clear()`  
+  Back to no values.
 
 ## net.http
 
