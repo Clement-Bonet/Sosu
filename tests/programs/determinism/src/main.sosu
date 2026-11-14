@@ -1,0 +1,76 @@
+// physics, the same steps on every machine: a stack of boxes knocked by a ball, crates thrown, a
+// pendulum; after 300 steps, a fingerprint (FNV-1a) of the bits of every position, rotation and
+// velocity. The expected one is the same for every compiler and processor.
+import std.io;
+import math.linear;
+import physics.physics;
+
+class Print {
+    mut ui64 hash;
+
+    void init() {
+        hash = 0xcbf29ce484222325;
+    }
+
+    void mix_f32(f32 x) {
+        mut f32 v = x;
+        mut ui32 bits = 0;
+        unsafe {
+            bits = *(&v as ui32*);
+        }
+        for (ui32 k in 0..4) {
+            hash = wrapping_mul(hash ^ (bits >> (k * 8) & 0xFF) as ui64, 0x100000001b3);
+        }
+    }
+
+    void mix_vec(linear.Vec3 v) {
+        mix_f32(v.x);
+        mix_f32(v.y);
+        mix_f32(v.z);
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    physics.World* w = physics.world(&arena, physics.options());
+    physics.Shape slab = physics.box(linear.vec3(30.0, 0.5, 30.0));
+    physics.Shape cube = physics.box(linear.vec3(0.5, 0.5, 0.5));
+    physics.Shape ball = physics.sphere(0.4);
+    defer slab.release();
+    defer cube.release();
+    defer ball.release();
+    w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: slab, position: linear.vec3(0.0, -0.5, 0.0) });
+    mut physics.Body[16] bodies = [w.body(physics.BodyDesc{ shape: cube, position: linear.vec3(0.0, 0.5, 0.0) }); 16];
+    for (usize i in 1..8) {
+        bodies[i] = w.body(physics.BodyDesc{ shape: cube, position: linear.vec3(0.03 * i as f32, 0.5 + i as f32 * 1.01, 0.0) });
+    }
+    bodies[8] = w.body(physics.BodyDesc{ shape: ball, position: linear.vec3(-6.0, 2.5, 0.0), mass: 3000.0 });  // three boxes of water
+    bodies[8].set_velocity(linear.vec3(16.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
+    for (usize i in 9..15) {
+        bodies[i] = w.body(physics.BodyDesc{ shape: cube, position: linear.vec3(5.0, 1.0 + i as f32, -4.0),
+                rotation: linear.from_axis_angle(linear.vec3(0.3, 1.0, 0.5), i as f32 * 0.37) });
+        bodies[i].set_velocity(linear.vec3(-2.0, 0.0, 1.5), linear.vec3(1.0, 2.0, 3.0));
+    }
+    physics.Body post = w.body(physics.BodyDesc{ kind: physics.Kind.Static, shape: ball, position: linear.vec3(10.0, 8.0, 5.0) });
+    bodies[15] = w.body(physics.BodyDesc{ shape: cube, position: linear.vec3(12.0, 8.0, 5.0) });
+    w.hinge(post, bodies[15], linear.vec3(10.0, 8.0, 5.0), linear.vec3(0.0, 0.0, 1.0), physics.joint_options());
+    for (i32 i in 0..300) {
+        w.step();
+    }
+    Print* print = arena.new(Print);
+    for (physics.Body b in bodies) {
+        physics.State s = b.state();
+        print.mix_vec(s.position);
+        print.mix_f32(s.rotation.x);
+        print.mix_f32(s.rotation.y);
+        print.mix_f32(s.rotation.z);
+        print.mix_f32(s.rotation.w);
+        print.mix_vec(s.velocity);
+        print.mix_vec(s.spin);
+    }
+    io.print("the stack fell: {}", bodies[7].position().y < 6.0 ? "yes" : "no");
+    io.print("fingerprint: {}", print.hash);
+    w.close();
+    return 0;
+}

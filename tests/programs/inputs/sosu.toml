@@ -1,0 +1,9 @@
+# The actions of platform (spec §8.2), without hardware: a keyboard, a mouse and a clock of the
+# test, and SDL's virtual pads.
+[package]
+name = "inputs"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../../packages/platform" }
+math = { path = "../../../packages/math" }

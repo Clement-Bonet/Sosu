@@ -37,49 +37,56 @@ static Package *find_package(const Program *program, const char *root) {
 
 static Package *load_package(Program *program, const char *root, bool builtin, bool *missing);
 
-/* The folder of a git dependency, cloned at the commit of sosu.lock if it has one; NULL
-   after reporting a failure. */
-static char *fetch_git(Program *program, Package *package, const Dependency *dep) {
+/* The folder of a git repository of `package`, cloned at the commit of sosu.lock if it has one;
+   NULL after reporting a failure. `name` names it in the lock and in build/deps (`native.x` for a
+   native dependency), `package` says whether it must hold a sosu.toml. */
+static char *fetch_repository(Program *program, Package *package, const char *name, const char *label, const char *git,
+                              const char *tag, const char *rev, size_t offset, size_t length, bool holds_package) {
     const SourceFile *file = &package->manifest_file;
-    const char *kind = dep->tag ? "tag" : "rev";
-    const char *ref = dep->tag ? dep->tag : dep->rev;
-    if (!ref) return NULL; /* invalid, already reported */
-    const char *problem = git_check_source(dep->git, ref);
+    const char *kind = tag ? "tag" : "rev";
+    const char *ref = tag ? tag : rev;
+    if (!ref || !git) return NULL; /* invalid, already reported */
+    const char *problem = git_check_source(git, ref);
     if (problem) {
-        Diagnostic *d = report(program, "E0404", file, dep->offset, dep->length, "dependency `%s`: %s", dep->name, problem);
+        Diagnostic *d = report(program, "E0404", file, offset, length, "%s `%s`: %s", label, name, problem);
         diag_help(d, "URLs, tags and revs may use letters, digits and `-._~:/@+=,`");
         return NULL;
     }
     if (!program->deps_dir) {
-        report(program, "E0405", file, dep->offset, dep->length, "git dependencies need a package folder");
+        report(program, "E0405", file, offset, length, "git dependencies need a package folder");
         return NULL;
     }
     /* A local URL is relative to the package, like a `path`. */
-    char *url = git_is_local(dep->git) ? normalized_join(package->root, dep->git) : sosu_strdup(dep->git);
-    const LockEntry *locked = lock_find(&program->lock, dep->name, dep->git, kind, ref);
+    char *url = git_is_local(git) ? normalized_join(package->root, git) : sosu_strdup(git);
+    const LockEntry *locked = lock_find(&program->lock, name, git, kind, ref);
     if (program->cached) {
-        char *cached = locked ? git_cached(program->deps_dir, dep->name, locked->commit) : NULL;
+        char *cached = locked ? git_cached(program->deps_dir, name, locked->commit, holds_package) : NULL;
         free(url);
         if (!cached) {
-            Diagnostic *d = report(program, "E0405", file, dep->offset, dep->length, "the dependency `%s` is not fetched yet", dep->name);
+            Diagnostic *d = report(program, "E0405", file, offset, length, "the %s `%s` is not fetched yet", label, name);
             diag_help(d, "run `sosuc check` in a terminal: the language server does not fetch anything");
         }
         return cached;
     }
     char *commit;
     char *error;
-    char *root = git_fetch(program->deps_dir, dep->name, url, kind, ref, locked ? locked->commit : NULL, &commit, &error);
+    char *root = git_fetch(program->deps_dir, name, url, kind, ref, locked ? locked->commit : NULL, holds_package, &commit,
+                           &error);
     if (root) {
-        lock_set(&program->used, dep->name, dep->git, kind, ref, commit);
+        lock_set(&program->used, name, git, kind, ref, commit);
     } else {
-        Diagnostic *d = report(program, "E0405", file, dep->offset, dep->length, "cannot fetch the dependency `%s`",
-                               dep->name);
+        Diagnostic *d = report(program, "E0405", file, offset, length, "cannot fetch the %s `%s`", label, name);
         diag_help(d, "%s", error);
     }
     free(url);
     free(commit);
     free(error);
     return root;
+}
+
+static char *fetch_git(Program *program, Package *package, const Dependency *dep) {
+    return fetch_repository(program, package, dep->name, "dependency", dep->git, dep->tag, dep->rev, dep->offset,
+                            dep->length, true);
 }
 
 /* Loads the package a dependency points to, and checks it. */
@@ -165,6 +172,16 @@ static Package *load_package(Program *program, const char *root, bool builtin, b
     package->state = PACKAGE_LOADING;
     for (size_t i = 0; i < count; i++) {
         package->deps[i] = load_dependency(program, package, &package->manifest.deps.items[i]);
+    }
+    /* the native dependencies: C or C++ sources of git repositories (spec §9.1) */
+    size_t natives = package->manifest.natives.count;
+    package->native_roots = sosu_alloc((natives ? natives : 1) * sizeof *package->native_roots);
+    for (size_t i = 0; i < natives; i++) {
+        const NativeDep *dep = &package->manifest.natives.items[i];
+        char *lock_name = sosu_format("native.%s", dep->name);
+        package->native_roots[i] = fetch_repository(program, package, lock_name, "native dependency", dep->git, dep->tag,
+                                                    dep->rev, dep->offset, dep->length, false);
+        free(lock_name);
     }
     package->state = PACKAGE_LOADED;
     return package;
@@ -416,6 +433,8 @@ void program_free(Program *program) {
         free(package->name);
         free(package->root);
         free(package->deps);
+        for (size_t j = 0; package->native_roots && j < package->manifest.natives.count; j++) free(package->native_roots[j]);
+        free(package->native_roots);
         manifest_free(&package->manifest);
         source_free(&package->manifest_file);
         free(package);

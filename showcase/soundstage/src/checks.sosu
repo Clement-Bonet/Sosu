@@ -1,0 +1,121 @@
+// The tests of the soundstage, without a window nor a sound card: `Model.pump` mixes as the device
+// would take the samples, and keeps the power of each ear.
+import std.math;
+import audio.mixer;
+import soundstage.model;
+import soundstage.stage;
+
+model.Model* stage_of(Arena* arena, bool head) {
+    mixer.Mixer* m = mixer.create(arena, 48000, 2);
+    model.Model* s = arena.new(model.Model, arena, m, none);
+    s.headphones = head;
+    return s;
+}
+
+// Half a second at the place set (two clicks), the power of each ear added up over it; the first
+// buffer, where the sound moves from where it was, left out.
+f32[4] settle(model.Model* s) {
+    s.pump(1200, 0.025);
+    mut f32[4] total = [0.0, 0.0, 0.0, 0.0];
+    for (i32 i in 0..10) {
+        s.pump(2400, 0.05);
+        for (usize k in 0..4) {
+            total[k] += s.measured[k];
+        }
+    }
+    return total;
+}
+
+test "the buttons put the sound where they say, and the ears hear it so" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    for (usize mode in 0..2) {
+        model.Model* s = stage_of(&arena, mode == 1);
+        defer s.close();
+        s.right();
+        f32[4] r = settle(s);
+        assert(s.azimuth == 90 && model.direction_name(s.azimuth, s.elevation) == "on the right");
+        assert(r[1] > 4.0 * r[0]);
+        f32[2] ears = s.ear_levels();
+        assert(ears[1] > ears[0]);
+        s.left();
+        f32[4] l = settle(s);
+        assert(s.azimuth == -90 && l[0] > 4.0 * l[1]);
+        s.behind();
+        settle(s);
+        assert(s.azimuth == 180 && model.direction_name(180, 0) == "behind");
+        s.above();
+        settle(s);
+        assert(s.elevation == 70 && model.direction_name(0, 70) == "above" && s.where().y > 1.8);
+        assert(s.binaural() == (mode == 1));
+    }
+}
+
+test "through a head, ahead and behind differ; panned, the ears hear them alike" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    model.Model* head = stage_of(&arena, true);
+    defer head.close();
+    head.ahead();
+    settle(head);
+    f32[4] ahead = settle(head);
+    head.behind();
+    settle(head);
+    f32[4] behind = settle(head);
+    // ahead: both ears alike; behind: less of what is high (the outer ear shades it)
+    assert(abs(ahead[0] - ahead[1]) < 0.2 * ahead[0]);
+    assert(behind[2] / behind[0] < 0.8 * ahead[2] / ahead[0]);
+    model.Model* panned = stage_of(&arena, false);
+    defer panned.close();
+    panned.ahead();
+    f32[4] pa = settle(panned);
+    assert(pa[0] > 0.0 && abs(pa[0] - pa[1]) < 0.01 * pa[0]);
+    panned.behind();
+    f32[4] pb = settle(panned);
+    assert(pb[0] > 0.0 && abs(pb[0] - pb[1]) < 0.01 * pb[0]);
+}
+
+test "the sound turns around the head, and the slider follows it" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    model.Model* s = stage_of(&arena, true);
+    defer s.close();
+    s.speed = 90;
+    s.toggle_orbit();
+    assert(s.orbiting && s.orbit_label() == "Stop turning");
+    for (i32 i in 0..20) {
+        s.pump(2400, 0.05);  // 1 s: a quarter of a turn
+    }
+    assert(s.azimuth == 90);
+    for (i32 i in 0..40) {
+        s.pump(2400, 0.05);  // 2 s more: past behind, on the left
+    }
+    assert(s.azimuth == -90);
+    s.toggle_orbit();
+    f32[4] there = settle(s);
+    assert(s.azimuth == -90 && there[0] > 4.0 * there[1]);
+    // the slider moved by hand: the sound goes there
+    s.azimuth = 45;
+    s.pump(2400, 0.05);
+    assert(s.azimuth == 45 && model.direction_name(45, 0) == "ahead on the right");
+}
+
+test "farther is quieter; another sound; the picture" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    model.Model* s = stage_of(&arena, false);
+    defer s.close();
+    s.distance = 10;
+    f32 near = settle(s)[0];
+    s.distance = 80;
+    settle(s);
+    f32 far = settle(s)[0];
+    assert(near > 0.0 && far < near * 0.1);
+    s.distance = 20;
+    s.kind = model.Kind.Engine;
+    settle(s);
+    s.kind = model.Kind.Chime;
+    assert(settle(s)[0] > 0.0001);
+    assert(s.picture().width == stage.WIDTH && s.picture().height == stage.HEIGHT);
+    assert(s.heard_text().len > 0 && s.mode_text() == "Panned: left and right only; ahead and behind sound alike.");
+}

@@ -1,0 +1,289 @@
+// The package nav (spec §8.2): a navigation mesh built by Recast around an obstacle, paths and the
+// nearest point by Detour, two rooms that are not connected, a mesh saved and loaded again, a crowd,
+// and A* on grids. Each check prints its name and whether it holds, against expected.txt.
+import std.io;
+import std.vec;
+import math.linear;
+import nav.nav;
+import nav.grid;
+
+void say(str name, bool holds) uses io {
+    io.print("{}: {}", name, holds ? "ok" : "FAILED");
+}
+
+bool near(f32 a, f32 b, f32 tolerance) {
+    return abs(a - b) <= tolerance;
+}
+
+// The triangles of a level, as they are added.
+class Level {
+    vec.Vec<linear.Vec3>* vertices;
+    vec.Vec<ui32>* indices;
+
+    void init(keeps Arena* arena) {
+        vertices = vec.new<linear.Vec3>(arena);
+        indices = vec.new<ui32>(arena);
+    }
+
+    void quad(linear.Vec3 a, linear.Vec3 b, linear.Vec3 c, linear.Vec3 d) {
+        ui32 first = vertices.len() as ui32;
+        vertices.push(a);
+        vertices.push(b);
+        vertices.push(c);
+        vertices.push(d);
+        indices.push(first);
+        indices.push(first + 1);
+        indices.push(first + 2);
+        indices.push(first);
+        indices.push(first + 2);
+        indices.push(first + 3);
+    }
+
+    // A flat floor at `y`, from (x0, z0) to (x1, z1), facing up.
+    void floor(f32 x0, f32 z0, f32 x1, f32 z1, f32 y) {
+        quad(linear.vec3(x0, y, z0), linear.vec3(x0, y, z1), linear.vec3(x1, y, z1), linear.vec3(x1, y, z0));
+    }
+
+    // A block from (x0, z0) to (x1, z1), `h` high: its top and its four sides.
+    void block(f32 x0, f32 z0, f32 x1, f32 z1, f32 h) {
+        floor(x0, z0, x1, z1, h);
+        quad(linear.vec3(x0, 0.0, z0), linear.vec3(x1, 0.0, z0), linear.vec3(x1, h, z0), linear.vec3(x0, h, z0));
+        quad(linear.vec3(x1, 0.0, z1), linear.vec3(x0, 0.0, z1), linear.vec3(x0, h, z1), linear.vec3(x1, h, z1));
+        quad(linear.vec3(x0, 0.0, z1), linear.vec3(x0, 0.0, z0), linear.vec3(x0, h, z0), linear.vec3(x0, h, z1));
+        quad(linear.vec3(x1, 0.0, z0), linear.vec3(x1, 0.0, z1), linear.vec3(x1, h, z1), linear.vec3(x1, h, z0));
+    }
+}
+
+f32 length_of(linear.Vec3[] points) {
+    mut f32 total = 0.0;
+    for (usize i in 1..points.len) {
+        total += points[i].distance(points[i - 1]);
+    }
+    return total;
+}
+
+// No corner of the path inside the block from (-1, -5) to (1, 5).
+bool around_block(linear.Vec3[] points) {
+    for (linear.Vec3 p in points) {
+        if (p.x > -1.0 && p.x < 1.0 && p.z > -5.0 && p.z < 5.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool adjacent(grid.Cell a, grid.Cell b, bool diagonal) {
+    i32 dx = abs(a.x - b.x);
+    i32 dy = abs(a.y - b.y);
+    return diagonal ? max(dx, dy) == 1 : dx + dy == 1;
+}
+
+bool valid_path(grid.Grid* g, grid.Cell[] cells, grid.Cell from, grid.Cell to, bool diagonal) {
+    if (cells.len == 0 || !cells[0].same(from) || !cells[cells.len - 1].same(to)) {
+        return false;
+    }
+    for (usize i in 0..cells.len) {
+        if (!g.walkable(cells[i]) || (i > 0 && !adjacent(cells[i - 1], cells[i], diagonal))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+f32 cost_of(grid.Grid* g, grid.Cell[] cells) {
+    mut f32 total = 0.0;
+    for (usize i in 1..cells.len) {
+        bool diagonal = cells[i].x != cells[i - 1].x && cells[i].y != cells[i - 1].y;
+        total += g.cost(cells[i]) * (diagonal ? 1.4142135 : 1.0);
+    }
+    return total;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+
+    // a room of 20 m with a block in its middle, and a second room 10 m away
+    Level* level = arena.new(Level, &arena);
+    level.floor(-10.0, -10.0, 10.0, 10.0, 0.0);
+    level.block(-1.0, -5.0, 1.0, 5.0, 2.0);
+    level.floor(20.0, -5.0, 30.0, 5.0, 0.0);
+    nav.Mesh* mesh = match (nav.build(&arena, level.vertices.items(), level.indices.items(), nav.agent())) {
+        ok(m) => m,
+        err(e) => {
+            io.print("build: {}", nav.message(e));
+            return 1;
+        },
+    };
+    defer mesh.close();
+    say("a mesh is built", mesh.polygons() > 4);
+
+    linear.Vec3 west = linear.vec3(-5.0, 0.0, 0.0);
+    linear.Vec3 east = linear.vec3(5.0, 0.0, 0.0);
+    match (mesh.path(&arena, west, east)) {
+        some(points) => {
+            say("the path starts and ends at the two points", points.len >= 3 && points[0].distance(west) < 0.2
+                    && points[points.len - 1].distance(east) < 0.2);
+            say("it goes around the block", around_block(points) && length_of(points) > 11.0 && length_of(points) < 16.0);
+        },
+        none => say("a path around the block", false),
+    }
+    say("two rooms that are not connected have no path", match (mesh.path(&arena, west, linear.vec3(25.0, 0.0, 0.0))) {
+        some(p) => false,
+        none => true,
+    });
+    match (mesh.path(&arena, linear.vec3(-5.0, 0.0, 8.0), linear.vec3(5.0, 0.0, 8.0))) {
+        some(points) => say("a path in the open is a straight line", points.len == 2 && near(length_of(points), 10.0, 0.2)),
+        none => say("a path in the open is a straight line", false),
+    }
+    match (mesh.nearest(linear.vec3(3.0, 0.6, 3.0))) {
+        some(p) => say("the nearest point is on the floor", near(p.y, 0.0, 0.3) && near(p.x, 3.0, 0.01) && near(p.z, 3.0, 0.01)),
+        none => say("the nearest point is on the floor", false),
+    }
+    say("a point far above has no nearest point", match (mesh.nearest(linear.vec3(3.0, 20.0, 3.0))) {
+        some(p) => false,
+        none => true,
+    });
+    say("the edge keeps the radius of the agent away from the walls", match (mesh.nearest(linear.vec3(-1.1, 0.0, 0.0))) {
+        some(p) => p.x <= -1.3 && near(p.y, 0.0, 0.3),
+        none => false,
+    });
+
+    // saved and loaded again
+    ui8[] bytes = mesh.bytes(&arena);
+    match (nav.load(&arena, bytes)) {
+        ok(again) => {
+            bool same = match (again.path(&arena, west, east)) {
+                some(points) => around_block(points) && again.polygons() == mesh.polygons(),
+                none => false,
+            };
+            say("a mesh loaded again finds the same paths", same && bytes.len > 100);
+            again.close();
+        },
+        err(e) => say("a mesh loaded again finds the same paths", false),
+    }
+    mut ui8[] garbage = arena.alloc_slice(ui8, 64);
+    for (usize i in 0..garbage.len) {
+        garbage[i] = i as ui8;
+    }
+    say("bytes that are not a mesh are refused", match (nav.load(&arena, garbage)) {
+        ok(m) => false,
+        err(e) => match (e) {
+            Damaged => true,
+            _ => false,
+        },
+    });
+
+    // what cannot be built
+    Level* wall = arena.new(Level, &arena);
+    // a slope of 68 degrees: steeper than the agent walks
+    wall.quad(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 5.0, 2.0), linear.vec3(5.0, 5.0, 2.0), linear.vec3(5.0, 0.0, 0.0));
+    say("a steep slope alone has nothing to walk on", match (nav.build(&arena, wall.vertices.items(), wall.indices.items(), nav.agent())) {
+        ok(m) => false,
+        err(e) => match (e) {
+            NothingWalkable => true,
+            _ => false,
+        },
+    });
+    mut ui32[3] wrong = [0, 1, 9];
+    say("an index out of the vertices is refused", match (nav.build(&arena, wall.vertices.items(), wrong[0..3], nav.agent())) {
+        ok(m) => false,
+        err(e) => match (e) {
+            Invalid => true,
+            _ => false,
+        },
+    });
+
+    // a crowd walks around the block
+    match (mesh.crowd(&arena, 8, 0.6)) {
+        some(crowd) => {
+            mut bool added = true;
+            nav.CrowdAgent a = match (crowd.add(linear.vec3(-5.0, 0.0, -2.0), nav.AgentDesc{})) {
+                some(x) => x,
+                none => {
+                    say("a crowd", false);
+                    return 1;
+                },
+            };
+            nav.CrowdAgent b = match (crowd.add(linear.vec3(5.0, 0.0, 2.0), nav.AgentDesc{})) {
+                some(x) => x,
+                none => {
+                    say("a crowd", false);
+                    return 1;
+                },
+            };
+            say("agents head for their targets", crowd.go_to(a, linear.vec3(5.0, 0.0, -2.0)) && crowd.go_to(b, linear.vec3(-5.0, 0.0, 2.0)));
+            mut bool crossed = true;
+            for (i32 i in 0..600) {
+                crowd.update(1.0 / 60.0);
+                linear.Vec3 p = crowd.position(a);
+                if (p.x > -0.9 && p.x < 0.9 && p.z > -4.9 && p.z < 4.9) {
+                    crossed = false;
+                }
+            }
+            say("they reach them, around the block", crowd.position(a).distance(linear.vec3(5.0, 0.0, -2.0)) < 0.5
+                    && crowd.position(b).distance(linear.vec3(-5.0, 0.0, 2.0)) < 0.5 && crossed);
+            say("and stop there", crowd.velocity(a).length() < 0.2);
+            crowd.close();
+        },
+        none => say("a crowd", false),
+    }
+
+    // A* on a grid: a wall with a gap at its far end
+    grid.Grid* g = grid.grid(&arena, 10, 10);
+    for (i32 y in 0..9) {
+        g.wall(grid.cell(5, y));
+    }
+    grid.Cell from = grid.cell(0, 0);
+    grid.Cell to = grid.cell(9, 0);
+    match (g.path(&arena, from, to, false)) {
+        some(cells) => say("a path of four ways goes through the gap", valid_path(g, cells, from, to, false) && cells.len == 28),
+        none => say("a path of four ways goes through the gap", false),
+    }
+    match (g.path(&arena, from, to, true)) {
+        some(cells) => say("a path of eight ways is cheaper", valid_path(g, cells, from, to, true)
+                && near(cost_of(g, cells), 7.0 * 1.4142135 + 13.0, 0.01)),
+        none => say("a path of eight ways is cheaper", false),
+    }
+    say("a path to the same cell is that cell", match (g.path(&arena, from, from, true)) {
+        some(cells) => cells.len == 1 && cells[0].same(from),
+        none => false,
+    });
+    say("a path to a wall is none", match (g.path(&arena, from, grid.cell(5, 3), true)) {
+        some(cells) => false,
+        none => true,
+    });
+    say("a path outside the grid is none", match (g.path(&arena, from, grid.cell(12, 3), true)) {
+        some(cells) => false,
+        none => true,
+    });
+    g.wall(grid.cell(5, 9));
+    say("a closed wall leaves no path", match (g.path(&arena, from, to, true)) {
+        some(cells) => false,
+        none => true,
+    });
+    // costs: mud on the straight way, a dry way around
+    grid.Grid* field = grid.grid(&arena, 9, 5);
+    for (i32 x in 2..7) {
+        field.set(grid.cell(x, 2), 10.0);
+    }
+    match (field.path(&arena, grid.cell(0, 2), grid.cell(8, 2), false)) {
+        some(cells) => {
+            mut bool dry = true;
+            for (grid.Cell c in cells) {
+                dry = dry && field.cost(c) < 2.0;
+            }
+            say("a path goes around the mud", dry && near(cost_of(field, cells), 10.0, 0.01));
+        },
+        none => say("a path goes around the mud", false),
+    }
+    // diagonals do not cut the corners of walls
+    grid.Grid* corner = grid.grid(&arena, 3, 3);
+    corner.wall(grid.cell(1, 0));
+    corner.wall(grid.cell(0, 1));
+    say("a diagonal does not cut between two walls", match (corner.path(&arena, grid.cell(0, 0), grid.cell(1, 1), true)) {
+        some(cells) => false,
+        none => true,
+    });
+    return 0;
+}

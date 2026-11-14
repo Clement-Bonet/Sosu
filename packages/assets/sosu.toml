@@ -1,0 +1,13 @@
+# The files of a game loaded in the background (spec §8.2): textures and sounds read and decoded
+# in threads, models and shaders read when the frame has time, all behind handles that a cache by
+# path gives at once; hot reload of the files that changed, on the desktop.
+[package]
+name = "assets"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../platform" }
+gpu = { path = "../gpu" }
+image = { path = "../image" }
+audio = { path = "../audio" }
+model = { path = "../model" }

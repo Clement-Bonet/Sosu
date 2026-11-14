@@ -1,0 +1,283 @@
+// math.polygon: polygons of the plane, as their corners in order (`Vec2`, the last joined to the
+// first): their area and the way they turn, whether a point is inside, their center, cut into
+// triangles (to fill or to mesh a shape drawn by hand: a zone, a floor, a navigation area),
+// the convex hull of points (what a lasso of selection holds, the outline of a group), and a
+// polygon cut by a line or a rectangle (`math.delaunay` builds its Voronoi cells so).
+//
+//   usize[] triangles = polygon.triangulate(arena, outline);   // three corners per triangle
+import std.math;
+import std.sort;
+import std.vec;
+import math.linear;
+
+// The area, positive when the corners turn counterclockwise (y up), negative when
+// they turn clockwise (the shoelace formula).
+pub f32 signed_area(linear.Vec2[] p) {
+    mut f64 sum = 0.0;
+    for (usize i in 0..p.len) {
+        linear.Vec2 a = p[i];
+        linear.Vec2 b = p[(i + 1) % p.len];
+        sum += (a.x as f64) * (b.y as f64) - (b.x as f64) * (a.y as f64);
+    }
+    return (sum / 2.0) as f32;
+}
+
+// The area, whichever way the corners turn.
+pub f32 area(linear.Vec2[] p) {
+    return abs(signed_area(p));
+}
+
+// Whether the corners turn counterclockwise (y up).
+pub bool counterclockwise(linear.Vec2[] p) {
+    return signed_area(p) > 0.0;
+}
+
+// Whether `q` is inside the polygon (the rule of even and odd: for a polygon that crosses
+// itself, the parts covered an odd number of times). A point on an edge may fall either way.
+pub bool contains(linear.Vec2[] p, linear.Vec2 q) {
+    mut bool inside = false;
+    mut usize j = p.len == 0 ? 0 : p.len - 1;
+    for (usize i in 0..p.len) {
+        linear.Vec2 a = p[i];
+        linear.Vec2 b = p[j];
+        if ((a.y > q.y) != (b.y > q.y) && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    return inside;
+}
+
+// The center of the surface of the polygon (its centroid); the mean of its corners when it has
+// no area.
+pub linear.Vec2 centroid(linear.Vec2[] p) {
+    if (p.len == 0) {
+        return linear.vec2(0.0, 0.0);
+    }
+    mut f64 cx = 0.0;
+    mut f64 cy = 0.0;
+    mut f64 twice = 0.0;
+    for (usize i in 0..p.len) {
+        linear.Vec2 a = p[i];
+        linear.Vec2 b = p[(i + 1) % p.len];
+        f64 cross = (a.x as f64) * (b.y as f64) - (b.x as f64) * (a.y as f64);
+        twice += cross;
+        cx += ((a.x + b.x) as f64) * cross;
+        cy += ((a.y + b.y) as f64) * cross;
+    }
+    if (abs(twice) < 1.0e-12) {
+        mut linear.Vec2 sum = linear.vec2(0.0, 0.0);
+        for (linear.Vec2 q in p) {
+            sum = sum.add(q);
+        }
+        return sum.scale(1.0 / p.len as f32);
+    }
+    return linear.vec2((cx / (3.0 * twice)) as f32, (cy / (3.0 * twice)) as f32);
+}
+
+// The polygon cut into triangles: three indices of its corners per triangle, each turning
+// counterclockwise, `p.len - 2` triangles for a simple polygon (one that does not cross
+// itself), convex or not, whichever way its corners turn (ear clipping, O(n^2)); no triangle is
+// flat (a corner in a straight line is left out when it cannot be part of one). A polygon that crosses itself gives the triangles found until
+// no ear is left. In `arena`.
+pub usize[] triangulate(Arena* arena, linear.Vec2[] p) {
+    vec.Vec<usize>* out = vec.new<usize>(arena);
+    if (p.len < 3) {
+        return out.items();
+    }
+    vec.Vec<usize>* left = vec.new<usize>(arena);  // the corners not cut yet, counterclockwise
+    bool ccw = signed_area(p) >= 0.0;
+    for (usize i in 0..p.len) {
+        left.push(ccw ? i : p.len - 1 - i);
+    }
+    while (left.len() > 3) {
+        usize m = left.len();
+        usize[] l = left.items();
+        mut bool cut = false;
+        for (usize i in 0..m) {
+            usize a = l[(i + m - 1) % m];
+            usize b = l[i];
+            usize c = l[(i + 1) % m];
+            if (turn(p[a], p[b], p[c]) <= 1.0e-12) {
+                continue;  // not convex here, or flat
+            }
+            mut bool empty = true;
+            for (usize k in 0..m) {
+                usize o = l[k];
+                if (o != a && o != b && o != c && in_triangle(p[o], p[a], p[b], p[c])) {
+                    empty = false;
+                    break;
+                }
+            }
+            if (empty) {
+                out.push(a);
+                out.push(b);
+                out.push(c);
+                left.remove(i);
+                cut = true;
+                break;
+            }
+        }
+        if (!cut) {
+            // no ear: a corner in a straight line goes without a triangle, else it is not simple
+            mut bool flat = false;
+            for (usize i in 0..m) {
+                if (abs(turn(p[l[(i + m - 1) % m]], p[l[i]], p[l[(i + 1) % m]])) <= 1.0e-12) {
+                    left.remove(i);
+                    flat = true;
+                    break;
+                }
+            }
+            if (!flat) {
+                return out.items();
+            }
+        }
+    }
+    usize[] l = left.items();
+    if (turn(p[l[0]], p[l[1]], p[l[2]]) > 1.0e-12) {
+        out.push(l[0]);
+        out.push(l[1]);
+        out.push(l[2]);
+    }
+    return out.items();
+}
+
+// Twice the signed area of the triangle (a, b, c): positive when it turns counterclockwise.
+f64 turn(linear.Vec2 a, linear.Vec2 b, linear.Vec2 c) {
+    return ((b.x - a.x) as f64) * ((c.y - a.y) as f64) - ((b.y - a.y) as f64) * ((c.x - a.x) as f64);
+}
+
+// Whether `q` is in the counterclockwise triangle (a, b, c), its edges included.
+bool in_triangle(linear.Vec2 q, linear.Vec2 a, linear.Vec2 b, linear.Vec2 c) {
+    return turn(a, b, q) >= 0.0 && turn(b, c, q) >= 0.0 && turn(c, a, q) >= 0.0;
+}
+
+// The smallest convex polygon that holds the points, its corners counterclockwise from the lowest
+// leftmost, without corners in a straight line (Andrew's monotone chain, O(n log n)). In `arena`.
+pub linear.Vec2[] convex_hull(Arena* arena, linear.Vec2[] points) {
+    mut linear.Vec2[] sorted = arena.alloc_slice(linear.Vec2, points.len);
+    for (usize i in 0..points.len) {
+        sorted[i] = points[i];
+    }
+    sort.sort_by(sorted, (linear.Vec2 a, linear.Vec2 b) => a.x < b.x || a.x == b.x && a.y < b.y);
+    vec.Vec<linear.Vec2>* hull = vec.new<linear.Vec2>(arena);
+    if (sorted.len < 3) {
+        for (linear.Vec2 q in sorted) {
+            if (hull.len() == 0 || !hull.items()[hull.len() - 1].near(q, 0.0)) {
+                hull.push(q);
+            }
+        }
+        return hull.items();
+    }
+    // the lower chain from left to right, then the upper one back
+    for (usize i in 0..sorted.len) {
+        while (hull.len() >= 2 && turn(hull.items()[hull.len() - 2], hull.items()[hull.len() - 1], sorted[i]) <= 0.0) {
+            hull.pop();
+        }
+        hull.push(sorted[i]);
+    }
+    usize lower = hull.len() + 1;
+    mut usize i = sorted.len - 1;
+    while (i > 0) {
+        i -= 1;
+        while (hull.len() >= lower && turn(hull.items()[hull.len() - 2], hull.items()[hull.len() - 1], sorted[i]) <= 0.0) {
+            hull.pop();
+        }
+        hull.push(sorted[i]);
+    }
+    hull.pop();  // the first, met again
+    return hull.items();
+}
+
+// The part of the polygon on the side of the line through `point` that `normal` points away from
+// (where (q - point) . normal <= 0), its corners in the same order (Sutherland and Hodgman). In
+// `arena`; empty when nothing is left.
+pub linear.Vec2[] clip_half(Arena* arena, linear.Vec2[] p, linear.Vec2 point, linear.Vec2 normal) {
+    vec.Vec<linear.Vec2>* out = vec.new<linear.Vec2>(arena);
+    for (usize i in 0..p.len) {
+        linear.Vec2 a = p[i];
+        linear.Vec2 b = p[(i + 1) % p.len];
+        f32 da = a.sub(point).dot(normal);
+        f32 db = b.sub(point).dot(normal);
+        if (da <= 0.0) {
+            out.push(a);
+        }
+        if (da < 0.0 && db > 0.0 || da > 0.0 && db < 0.0) {
+            out.push(a.lerp(b, da / (da - db)));  // where the edge crosses the line
+        }
+    }
+    return out.items();
+}
+
+// The part of the polygon inside the rectangle from `low` to `high`. In `arena`.
+pub linear.Vec2[] clip_rect(Arena* arena, linear.Vec2[] p, linear.Vec2 low, linear.Vec2 high) {
+    linear.Vec2[] a = clip_half(arena, p, low, linear.vec2(-1.0, 0.0));
+    linear.Vec2[] b = clip_half(arena, a, low, linear.vec2(0.0, -1.0));
+    linear.Vec2[] c = clip_half(arena, b, high, linear.vec2(1.0, 0.0));
+    return clip_half(arena, c, high, linear.vec2(0.0, 1.0));
+}
+
+test "polygons: areas, insides, centers" {
+    mut linear.Vec2[4] square = [linear.vec2(0.0, 0.0), linear.vec2(2.0, 0.0), linear.vec2(2.0, 2.0), linear.vec2(0.0, 2.0)];
+    linear.Vec2[] s = square[0..4];
+    assert(signed_area(s) == 4.0 && counterclockwise(s));
+    mut linear.Vec2[4] backward = [square[3], square[2], square[1], square[0]];
+    assert(signed_area(backward[0..4]) == -4.0 && area(backward[0..4]) == 4.0);
+    assert(contains(s, linear.vec2(1.0, 1.0)) && !contains(s, linear.vec2(3.0, 1.0)) && !contains(s, linear.vec2(1.0, -0.1)));
+    assert(centroid(s).near(linear.vec2(1.0, 1.0), 0.0001));
+    // an L: its center is not the mean of its corners
+    mut linear.Vec2[6] l = [
+        linear.vec2(0.0, 0.0), linear.vec2(2.0, 0.0), linear.vec2(2.0, 1.0),
+        linear.vec2(1.0, 1.0), linear.vec2(1.0, 2.0), linear.vec2(0.0, 2.0)
+    ];
+    assert(area(l[0..6]) == 3.0 && centroid(l[0..6]).near(linear.vec2(0.8333333, 0.8333333), 0.0001));
+    assert(contains(l[0..6], linear.vec2(0.5, 1.5)) && !contains(l[0..6], linear.vec2(1.5, 1.5)));
+}
+
+test "polygons cut into triangles, hulls, clips" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    // a concave arrow, clockwise: n - 2 triangles, all counterclockwise, covering its area
+    mut linear.Vec2[7] arrow = [
+        linear.vec2(0.0, 1.0), linear.vec2(2.0, 1.0), linear.vec2(2.0, 2.0), linear.vec2(4.0, 0.0),
+        linear.vec2(2.0, -2.0), linear.vec2(2.0, -1.0), linear.vec2(0.0, -1.0)
+    ];
+    mut linear.Vec2[7] cw = [arrow[6], arrow[5], arrow[4], arrow[3], arrow[2], arrow[1], arrow[0]];
+    for (linear.Vec2[] shape in [arrow[0..7], cw[0..7]]) {
+        usize[] t = triangulate(&arena, shape);
+        assert(t.len == 15);
+        mut f64 sum = 0.0;
+        for (usize i in 0..5) {
+            f64 twice = turn(shape[t[3 * i]], shape[t[3 * i + 1]], shape[t[3 * i + 2]]);
+            assert(twice > 0.0);
+            sum += twice / 2.0;
+        }
+        assert(abs(sum - area(shape) as f64) < 0.0001);
+    }
+    // a corner in a straight line: left out
+    mut linear.Vec2[5] flat = [linear.vec2(0.0, 0.0), linear.vec2(1.0, 0.0), linear.vec2(2.0, 0.0), linear.vec2(2.0, 2.0), linear.vec2(0.0, 2.0)];
+    usize[] ft = triangulate(&arena, flat[0..5]);
+    mut f64 covered = 0.0;
+    for (usize i in 0..ft.len / 3) {
+        f64 twice = turn(flat[ft[3 * i]], flat[ft[3 * i + 1]], flat[ft[3 * i + 2]]);
+        assert(twice > 0.0);  // none flat
+        covered += twice / 2.0;
+    }
+    assert(ft.len <= 9 && abs(covered - 4.0) < 0.0001 && triangulate(&arena, flat[0..2]).len == 0);
+    // the hull of a cloud: its outer corners only, counterclockwise
+    mut linear.Vec2[8] cloud = [
+        linear.vec2(0.0, 0.0), linear.vec2(1.0, 1.0), linear.vec2(4.0, 0.0), linear.vec2(2.0, 0.5),
+        linear.vec2(4.0, 3.0), linear.vec2(2.0, 0.0), linear.vec2(0.0, 3.0), linear.vec2(3.0, 2.0)
+    ];
+    linear.Vec2[] h = convex_hull(&arena, cloud[0..8]);
+    assert(h.len == 4 && h[0].near(linear.vec2(0.0, 0.0), 0.0) && h[1].near(linear.vec2(4.0, 0.0), 0.0));
+    assert(h[2].near(linear.vec2(4.0, 3.0), 0.0) && h[3].near(linear.vec2(0.0, 3.0), 0.0) && counterclockwise(h));
+    assert(convex_hull(&arena, cloud[0..1]).len == 1);
+    // a square cut by a diagonal, and clipped by a rectangle
+    mut linear.Vec2[4] square = [linear.vec2(0.0, 0.0), linear.vec2(2.0, 0.0), linear.vec2(2.0, 2.0), linear.vec2(0.0, 2.0)];
+    linear.Vec2[] half = clip_half(&arena, square[0..4], linear.vec2(1.0, 1.0), linear.vec2(1.0, 1.0));
+    assert(half.len == 3 && area(half) == 2.0);
+    linear.Vec2[] corner = clip_rect(&arena, square[0..4], linear.vec2(1.0, 1.0), linear.vec2(5.0, 5.0));
+    assert(abs(area(corner) - 1.0) < 0.0001 && contains(corner, linear.vec2(1.5, 1.5)));
+    assert(clip_rect(&arena, square[0..4], linear.vec2(3.0, 3.0), linear.vec2(5.0, 5.0)).len == 0);
+}

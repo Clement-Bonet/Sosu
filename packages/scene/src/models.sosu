@@ -1,0 +1,112 @@
+// scene.models: the nodes of a model of `model` as entities (spec §8.2). Each node becomes an
+// entity with its name and its transform (`linear.decompose` of its matrix), under its parent; a
+// table of `NodeOf` says which node of the model each one stands for, so that the program finds
+// its meshes (`model.nodes[n].meshes`) to draw them with render3d or give them bodies.
+import std.vec;
+import math.linear;
+import image.image;
+import model.model;
+import scene.scene;
+
+// The node of a model that an entity stands for.
+pub struct NodeOf {
+    pub usize node;
+}
+
+// The nodes of `m` spawned in `w`, under one entity named `name` at `at` (under `parent` when
+// there is one), which it returns. A node reached twice (a file that makes a cycle) is spawned once.
+pub scene.Entity spawn_model(
+    scene.World* w,
+    keeps model.Model m,
+    scene.Table<NodeOf>* nodes,
+    keeps str name,
+    linear.Transform at,
+    scene.Entity? parent
+) {
+    scene.Entity top = w.spawn_at(name, at, parent);
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    mut bool[] spawned = scratch.alloc_slice(bool, m.nodes.len);
+    vec.Vec<usize>* stack = vec.new(&scratch);
+    vec.Vec<scene.Entity>* under = vec.new(&scratch);
+    for (usize root in m.roots) {
+        if (root < m.nodes.len && !spawned[root]) {
+            stack.push(root);
+            under.push(top);
+            spawned[root] = true;
+        }
+        while (stack.len() > 0) {
+            usize n = match (stack.pop()) {
+                some(x) => x,
+                none => 0,
+            };
+            scene.Entity up = match (under.pop()) {
+                some(x) => x,
+                none => top,
+            };
+            scene.Entity e = w.spawn_at(m.nodes[n].name, linear.decompose(m.nodes[n].local), some(up));
+            nodes.set(e, NodeOf{ node: n });
+            for (usize child in m.nodes[n].children) {
+                if (child < m.nodes.len && !spawned[child]) {
+                    spawned[child] = true;
+                    stack.push(child);
+                    under.push(e);
+                }
+            }
+        }
+    }
+    return top;
+}
+
+test "the nodes of a model as entities" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    scene.Table<NodeOf>* nodes = w.table<NodeOf>();
+    vec.Vec<model.Node>* list = vec.new(&arena);
+    mut usize[] kids = arena.alloc_slice(usize, 1);
+    kids[0] = 1;
+    list.push(model.Node{
+        name: "body",
+        local: linear.translation(linear.vec3(0.0, 1.0, 0.0)),
+        meshes: arena.alloc_slice(usize, 0),
+        children: kids
+    });
+    list.push(model.Node{
+        name: "wheel",
+        local: linear.translation(linear.vec3(2.0, 0.0, 0.0)).mul(linear.rotation_y(0.5)),
+        meshes: arena.alloc_slice(usize, 0),
+        children: arena.alloc_slice(usize, 0)
+    });
+    mut usize[] roots = arena.alloc_slice(usize, 1);
+    roots[0] = 0;
+    model.Model m = model.Model{
+        meshes: vec.new<model.Mesh>(&arena).items(),
+        materials: vec.new<model.Material>(&arena).items(),
+        images: vec.new<image.Image>(&arena).items(),
+        nodes: list.items(),
+        roots: roots
+    };
+    mut linear.Transform at = linear.transform();
+    at.position = linear.vec3(10.0, 0.0, 0.0);
+    scene.Entity car = spawn_model(w, m, nodes, "car", at, none);
+    w.propagate();
+    assert(w.count() == 3 && w.children(&arena, car).len == 1);
+    mut bool found = false;
+    nodes.each((scene.Entity e, NodeOf* n) => {
+        if (n.node == 1) {
+            match (w.world_matrices.get(e)) {
+                some(world) => {
+                    assert(world.transform_point(linear.vec3(0.0, 0.0, 0.0)).near(linear.vec3(12.0, 1.0, 0.0), 0.0001));
+                },
+                none => {
+                    assert(false);
+                },
+            }
+            assert(match (w.names.get(e)) {
+                some(name) => *name == "wheel",
+                none => false,
+            });
+        }
+    });
+}

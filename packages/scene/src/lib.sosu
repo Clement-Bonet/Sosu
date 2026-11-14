@@ -1,0 +1,6 @@
+// scene: entities and components (spec §8.2). Programs import `scene.scene` (the world, its
+// entities and tables), `scene.save` (scenes and prefabs as JSON) and `scene.models` (the nodes of
+// a model as entities).
+import scene.scene;
+import scene.save;
+import scene.models;

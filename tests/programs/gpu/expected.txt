@@ -1,0 +1,7 @@
+short image: refused
+triangle: ok
+depth: ok
+texture: ok
+mipmaps: ok
+overlay: ok
+compute: ok

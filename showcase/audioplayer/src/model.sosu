@@ -1,0 +1,448 @@
+// audioplayer.model: the playlist, the track that plays (an `audio.stream`, read as it plays), the
+// controls the interface binds to, and the analyzer of its spectrum. No window here: the tests
+// drive it without a sound card (`pump` mixes as the device would).
+import std.io;
+import std.math;
+import std.text;
+import std.vec;
+import audio.audio;
+import audio.mixer;
+import audio.device;
+import audio.stream;
+import audio.spectrum;
+import render.canvas;
+import image.image;
+import platform.dialogs;
+import audioplayer.bars;
+
+// The icons of Font Awesome (assets/fa-solid-900.ttf).
+pub str ICON_PLAY = "\u{f04b}";
+pub str ICON_PAUSE = "\u{f04c}";
+pub str ICON_STOP = "\u{f04d}";
+pub str ICON_NEXT = "\u{f051}";
+pub str ICON_PREVIOUS = "\u{f048}";
+pub str ICON_OPEN = "\u{f07c}";
+pub str ICON_VOLUME = "\u{f028}";
+
+// The tag of the file dialog.
+ui32 OPEN = 1;
+
+// The samples of a window of the analyzer: 2048 at 44.1 kHz, bins of 21.5 Hz.
+usize WINDOW = 2048;
+usize BANDS = 56;
+
+pub class Model {
+    mixer.Mixer* mix;
+    device.Player*? player;  // none in the tests: `pump` stands for it
+    Arena* keep;             // the names of the playlist
+    vec.Vec<str>* paths;
+    vec.Vec<str>* names;
+    vec.Vec<ui8[]>* given;   // the bytes of a track added without a file (tests), or empty
+    mut Arena track;         // what the track that plays holds: its bytes, its ring, its decoder
+    mut stream.Stream*? current;
+    mut spectrum.Analyzer*? analyzer;
+    mut f32[] window;
+    pub mut i32 chosen;      // the row chosen in the list
+    mut i32 playing;         // the row that plays, -1: none
+    pub mut bool paused;
+    pub mut i64 volume;      // 0 to 100
+    mut i64 applied_volume;
+    pub mut i64 place;       // the slider of the position: 0 to 1000
+    mut i64 shown_place;
+    pub mut str message;
+    mut Arena words;         // the texts of one frame
+    mut Arena pixels;
+    mut canvas.Canvas view;  // the spectrum, drawn each frame, shown as an image
+
+    void init(keeps Arena* keep, keeps mixer.Mixer* mix, keeps device.Player*? player) {
+        self.keep = keep;
+        self.mix = mix;
+        self.player = player;
+        paths = vec.new<str>(keep);
+        names = vec.new<str>(keep);
+        given = vec.new<ui8[]>(keep);
+        track = Arena.new(64 * KB);
+        current = none;
+        analyzer = none;
+        window = keep.alloc_slice(f32, WINDOW);
+        chosen = -1;
+        playing = -1;
+        paused = false;
+        volume = 80;
+        applied_volume = 80;
+        place = 0;
+        shown_place = 0;
+        message = "";
+        words = Arena.new(4 * KB);
+        pixels = Arena.new(1 * MB);
+        view = canvas.create(&pixels, bars.WIDTH, bars.HEIGHT);
+    }
+
+    // ---- The playlist ----
+
+    pub i32 rows() {
+        return names.len() as i32;
+    }
+
+    pub str name_at(i32 i) {
+        return i >= 0 && (i as usize) < names.len() ? names.items()[i as usize] : "";
+    }
+
+    // The file at `path` added to the playlist; it plays if nothing does.
+    pub void add(str path) uses io {
+        str kept = text.repeat(keep, path, 1);
+        paths.push(kept);
+        names.push(file_name(kept));
+        given.push(keep.alloc_slice(ui8, 0));
+        if (playing < 0) {
+            play(names.len() as i32 - 1);
+        }
+    }
+
+    // A track of `bytes` (a file read elsewhere, or made by a test), named `name`.
+    pub void add_bytes(str name, keeps ui8[] bytes) uses io {
+        paths.push("");
+        names.push(text.repeat(keep, name, 1));
+        given.push(bytes);
+        if (playing < 0) {
+            play(names.len() as i32 - 1);
+        }
+    }
+
+    // The dialog of the system to choose files; they come to `answered`.
+    pub void open_dialog() uses io {
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        mut dialogs.Filter[] filters = scratch.alloc_slice(dialogs.Filter, 2);
+        filters[0] = dialogs.Filter{ name: "Sounds", extensions: text.split(&scratch, "wav,ogg,mp3,flac", ",") };
+        filters[1] = dialogs.Filter{ name: "All files", extensions: text.split(&scratch, "*", ",") };
+        dialogs.open_files(OPEN, filters, "");
+    }
+
+    // What the file dialog answered: the files chosen added.
+    pub void answered(dialogs.Answer answer) uses io {
+        match (answer) {
+            Chosen(tag, chosen_paths, filter) => {
+                if (tag == OPEN) {
+                    for (str p in chosen_paths) {
+                        add(p);
+                    }
+                }
+            },
+            Cancelled(tag) => { },
+            Failed(tag, said) => {
+                message = joined(keep, "no file dialog: ", said, "");
+            },
+        }
+    }
+
+    // ---- Playing ----
+
+    void release() {
+        match (current) {
+            some(s) => {
+                s.close();
+            },
+            none => { },
+        }
+        track.free();
+        track = Arena.new(64 * KB);
+        current = none;
+        analyzer = none;
+    }
+
+    // The row `i` played from its start.
+    pub void play(i32 i) uses io {
+        if (i < 0 || i as usize >= names.len()) {
+            return;
+        }
+        release();
+        chosen = i;
+        playing = i;
+        place = 0;
+        shown_place = 0;
+        ui8[] bytes = given.items()[i as usize];
+        ui8[] data = bytes.len > 0 ? bytes : match (io.read_bytes(&track, paths.items()[i as usize])) {
+            ok(b) => b,
+            err(e) => {
+                message = joined(keep, "cannot read ", names.items()[i as usize], "");
+                playing = -1;
+                chosen = -1;  // not tried again at each frame
+                return;
+            },
+        };
+        match (stream.open(&track, data, mix, stream.Options{ volume: volume as f32 / 100.0, seconds: 3.0, history: 0.75 })) {
+            ok(s) => {
+                current = some(s);
+                analyzer = some(spectrum.analyzer(&track, WINDOW, s.rate(), BANDS, 30.0, 16000.0));
+                message = "";
+                paused = false;
+                resume_device();
+            },
+            err(e) => {
+                message = joined(keep, names.items()[i as usize], ": ", audio.message(e));
+                playing = -1;
+                chosen = -1;  // not tried again at each frame
+            },
+        }
+    }
+
+    void resume_device() uses io {
+        match (player) {
+            some(p) => {
+                p.resume();
+            },
+            none => { },
+        }
+    }
+
+    // Play or pause; the first track when nothing plays.
+    pub void toggle() uses io {
+        match (current) {
+            some(s) => {
+                paused = !paused;
+                match (player) {
+                    some(p) => {
+                        if (paused) {
+                            p.pause();
+                        } else {
+                            p.resume();
+                        }
+                    },
+                    none => { },
+                }
+            },
+            none => {
+                play(chosen >= 0 ? chosen : 0);
+            },
+        }
+    }
+
+    pub void stop() uses io {
+        release();
+        playing = -1;
+        chosen = -1;  // else the row chosen would play again
+        paused = false;
+        place = 0;
+        shown_place = 0;
+        resume_device();
+    }
+
+    pub void next() uses io {
+        if (names.len() > 0) {
+            play(playing < 0 ? 0 : (playing + 1) % names.len() as i32);
+        }
+    }
+
+    pub void previous() uses io {
+        if (names.len() == 0) {
+            return;
+        }
+        // well into the track: its start again, as players do
+        match (current) {
+            some(s) => {
+                if (s.position() > s.rate() as ui64 * 3) {
+                    play(playing);
+                    return;
+                }
+            },
+            none => { },
+        }
+        play(playing <= 0 ? names.len() as i32 - 1 : playing - 1);
+    }
+
+    pub bool is_playing() {
+        return playing >= 0 && !paused;
+    }
+
+    // ---- Each frame ----
+
+    // The controls read, the stream fed, the next track at the end of one, and the spectrum
+    // analyzed and drawn; `dt` seconds since the last call.
+    pub void update(f32 dt) uses io {
+        words.free();
+        words = Arena.new(4 * KB);
+        // the list: a row chosen plays
+        if (chosen >= 0 && chosen != playing && (chosen as usize) < names.len()) {
+            play(chosen);
+        }
+        match (current) {
+            some(s) => {
+                if (volume != applied_volume) {
+                    s.set_volume(volume as f32 / 100.0);
+                    applied_volume = volume;
+                }
+                // the slider moved by the user: a seek
+                if (place != shown_place && s.frames() > 0) {
+                    s.seek(s.frames() * place as ui64 / 1000);
+                }
+                s.update();
+                if (!s.playing() && !paused) {
+                    // its end: the next one, until the end of the list
+                    if (playing + 1 < names.len() as i32) {
+                        play(playing + 1);
+                    } else {
+                        stop();
+                    }
+                }
+            },
+            none => { },
+        }
+        match (current) {
+            some(s) => {
+                place = s.frames() > 0 ? (s.position() * 1000 / s.frames()) as i64 : 0;
+                shown_place = place;
+            },
+            none => { },
+        }
+        listen(dt);
+        bars.draw(&view, analyzer, is_playing());
+    }
+
+    // The spectrum of what the device plays now: it plays `ahead_ms` behind the mixer.
+    void listen(f32 dt) {
+        match (analyzer) {
+            some(a) => {
+                match (current) {
+                    some(s) => {
+                        if (paused) {
+                            return;  // the bars stay where they are
+                        }
+                        i64 ahead = match (player) {
+                            some(p) => p.ahead_ms() as i64 * s.rate() as i64 / 1000,
+                            none => 0,
+                        };
+                        s.peek(window, -ahead - WINDOW as i64);
+                        a.analyze(window, dt);
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+    }
+
+    // `frames` frames mixed as the device would take them, and the frame updated: for the tests
+    // and the snapshot, without a sound card.
+    pub void pump(usize frames, f32 dt) uses io {
+        mut Arena scratch = Arena.new(frames * 8 * 4 + 64);
+        defer scratch.free();
+        usize c = mix.channels as usize;
+        mut f32[] out = scratch.alloc_slice(f32, 512 * c);
+        mut usize left = frames;
+        while (left > 0) {
+            usize n = min(512, left);
+            mix.mix(out[0..n * c]);
+            match (current) {
+                some(s) => {
+                    s.update();
+                },
+                none => { },
+            }
+            left -= n;
+        }
+        update(dt);
+    }
+
+    // ---- What the interface shows ----
+
+    pub image.Image picture() {
+        return view.image();
+    }
+
+    pub str title() {
+        return playing >= 0 ? names.items()[playing as usize] : names.len() == 0 ? "Open files, or drop them here" : "Stopped";
+    }
+
+    pub str play_icon() {
+        return is_playing() ? ICON_PAUSE : ICON_PLAY;
+    }
+
+    pub str time_text() {
+        match (current) {
+            some(s) => {
+                text.TextBuilder* t = text.builder(&words);
+                push_time(t, s.position() / max(s.rate(), 1) as ui64);
+                t.push(" / ");
+                push_time(t, s.frames() / max(s.rate(), 1) as ui64);
+                return t.text();
+            },
+            none => {
+                return "0:00 / 0:00";
+            },
+        }
+    }
+
+    // What the track is: its rate and its channels.
+    pub str details() {
+        match (current) {
+            some(s) => {
+                text.TextBuilder* t = text.builder(&words);
+                t.push_i64(s.rate() as i64);
+                t.push(" Hz, ");
+                t.push(s.channels() == 1 ? "mono" : s.channels() == 2 ? "stereo" : "multichannel");
+                return t.text();
+            },
+            none => {
+                return message;
+            },
+        }
+    }
+
+    // The middle of the loudest band of the spectrum, in Hz (0 when nothing plays): for the tests.
+    pub f32 loudest_hz() {
+        match (analyzer) {
+            some(a) => {
+                mut usize best = 0;
+                for (usize b in 0..a.bands.len) {
+                    if (a.bands[b] > a.bands[best]) {
+                        best = b;
+                    }
+                }
+                return math.sqrt((a.edge(best) * a.edge(best + 1)) as f64) as f32;
+            },
+            none => {
+                return 0.0;
+            },
+        }
+    }
+
+    pub bool has_tracks() {
+        return names.len() > 0;
+    }
+
+    pub void close() {
+        release();
+        track.free();
+        words.free();
+        pixels.free();
+    }
+}
+
+void push_time(text.TextBuilder* t, ui64 seconds) {
+    t.push_u64(seconds / 60);
+    t.push(":");
+    if (seconds % 60 < 10) {
+        t.push("0");
+    }
+    t.push_u64(seconds % 60);
+}
+
+str joined(Arena* arena, str a, str b, str c) {
+    text.TextBuilder* t = text.builder(arena);
+    t.push(a);
+    t.push(b);
+    t.push(c);
+    return t.text();
+}
+
+// The name of a file, without its folders.
+pub str file_name(str path) {
+    mut usize start = 0;
+    for (usize i in 0..path.len) {
+        if (path.bytes[i] == 0x2F || path.bytes[i] == 0x5C) {  // '/' or '\'
+            start = i + 1;
+        }
+    }
+    return text.slice(path, start, path.len);
+}

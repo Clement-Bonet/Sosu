@@ -1,0 +1,8 @@
+# platform.library (spec §8.2): a program loads the library of tests/programs/library, calls it,
+# survives its faults, and loads it again from a copy, as an editor loads the game it edits.
+[package]
+name = "loader"
+version = "0.1.0"
+
+[dependencies]
+platform = { path = "../../../packages/platform" }

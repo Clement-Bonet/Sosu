@@ -25,6 +25,7 @@ struct Package {
     SourceFile manifest_file;
     Manifest manifest;
     Package **deps; /* aligned with manifest.deps; NULL where loading failed */
+    char **native_roots; /* aligned with manifest.natives: the folder of each clone; NULL where it failed */
 };
 
 typedef struct {

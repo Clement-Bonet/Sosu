@@ -45,6 +45,12 @@ static const Case cases[] = {
     { "run", "kept_closures", "expected.txt", 0, NULL }, /* closures in an arena (spec §6.1, rule 5) */
     { "run", "iterators", "expected.txt", 0, NULL },
     { "run", "csources", "expected.txt", 0, NULL },
+    { "run", "cppsources", "expected.txt", 0, NULL }, /* [link] cpp: C++ files of a package (spec §9.1) */
+    { "run", "physics2d", "expected.txt", 0, NULL }, /* physics2d on Box2D, a [native.box2d] (spec §8.2) */
+    { "run", "physics", "expected.txt", 0, NULL }, /* physics on Jolt, a [native.jolt] of C++ (spec §8.2) */
+    { "run", "nav", "expected.txt", 0, NULL }, /* nav on Recast and Detour, and A* on grids (spec §8.2) */
+    /* Jolt built to give the same steps on every machine: one fingerprint for MSVC, gcc, clang, x64, ARM */
+    { "run", "determinism", "expected.txt", 0, NULL },
     { "run", "threads", "expected.txt", 0, NULL },
     { "run", "thread_closure", "expected.txt", 101, NULL },
     { "run", "mathematics", "expected.txt", 0, NULL },
@@ -57,6 +63,8 @@ static const Case cases[] = {
     { "run", "hashes", "expected.txt", 0, NULL },
     { "run", "compression", "expected.txt", 0, NULL },
     { "run", "geometry", "expected.txt", 0, NULL },
+    { "run", "controls", "expected.txt", 0, NULL }, /* platform.gamepad, with a virtual pad (spec §8.2) */
+    { "run", "inputs", "expected.txt", 0, NULL },   /* platform.actions, with devices of the test */
     { "run --release", "overflow", "expected_release.txt", 0, NULL },
     { "run --release", "unsigned_floats", "expected_release.txt", 0, NULL },
     { "test", "testing", "expected.txt", 1, NULL },
@@ -75,6 +83,9 @@ static const Case cases[] = {
     { "run", "examples/bookshelf", NULL, 0, NULL },  /* db and sqlite */
     { "run", "examples/fetch", NULL, 0, NULL },      /* net, with a server of its own */
     { "run", "examples/greetings", NULL, 0, NULL },  /* i18n */
+    /* the libraries of 3D together, played for five seconds by a script, without a window */
+    { "run", "examples/brawl", NULL, 0, "--check" },
+    { "run", "examples/scene", NULL, 0, "--check" },
 };
 
 /* Reads a file in text mode, so that line endings are the same on every system. */
@@ -173,6 +184,58 @@ static void test_library(const char *sosuc) {
         free(actual);
         free(expected);
     }
+    /* the shared library loaded and unloaded by a C host: its handlers of faults leave with it, and a
+       fault of the host afterwards is the host's (spec §9.2) */
+    {
+        char command[1024];
+#ifdef _MSC_VER
+        snprintf(command, sizeof command,
+                 "cl /nologo /W3 /Fetests\\programs\\library\\build\\unload.exe /Fotests\\programs\\library\\build\\ "
+                 "tests\\programs\\library\\host\\unload.c > build\\unload.log");
+        CHECK(run(command) == 0, "the unloading host does not compile (see build/unload.log)");
+        snprintf(command, sizeof command,
+                 "tests\\programs\\library\\build\\unload.exe tests\\programs\\library\\build\\geom.dll > build\\unload.out");
+#else
+#ifdef __APPLE__
+        const char *shared_lib = "tests/programs/library/build/libgeom.dylib";
+#else
+        const char *shared_lib = "tests/programs/library/build/libgeom.so";
+#endif
+        snprintf(command, sizeof command,
+                 "cc -std=c99 -D_POSIX_C_SOURCE=200809L tests/programs/library/host/unload.c -ldl -o tests/programs/library/build/unload "
+                 "> build/unload.log 2>&1");
+        CHECK(run(command) == 0, "the unloading host does not compile (see build/unload.log)");
+        snprintf(command, sizeof command, "tests/programs/library/build/unload %s > build/unload.out", shared_lib);
+#endif
+        CHECK(run(command) == 0, "the unloading host failed: a handler of the library stayed after it was unloaded");
+        char *actual = read_text("build/unload.out");
+        char *expected = read_text("tests/programs/library/expected_unload.txt");
+        CHECK(actual && expected && strcmp(actual, expected) == 0, "the unloading host: output differs\n--- got:\n%s",
+              actual ? actual : "(none)\n");
+        free(actual);
+        free(expected);
+    }
+    /* the shared library loaded by a program of Sosu (platform.library): called, its faults read as
+       errors while the program goes on, loaded again from a second copy (an editor and its game) */
+    {
+#ifdef _WIN32
+        const char *built = "tests/programs/library/build/geom.dll";
+#elif defined(__APPLE__)
+        const char *built = "tests/programs/library/build/libgeom.dylib";
+#else
+        const char *built = "tests/programs/library/build/libgeom.so";
+#endif
+        char command[1024];
+        snprintf(command, sizeof command, "%s run tests/programs/loader -- %s > build/loader.out 2> build/loader.err", sosuc,
+                 built);
+        CHECK(run(command) == 0, "run loader: failed (see build/loader.err)");
+        char *actual = read_text("build/loader.out");
+        char *expected = read_text("tests/programs/loader/expected.txt");
+        CHECK(actual && expected && strcmp(actual, expected) == 0, "run loader: output differs\n--- got:\n%s",
+              actual ? actual : "(none)\n");
+        free(actual);
+        free(expected);
+    }
 #ifdef _WIN32
     /* the version of the DLL, in the properties of the file: from [package], without [app] */
     CHECK(file_type("tests/programs/library/build/geom.dll") == 2, "geom.dll: no version resource of a DLL");
@@ -182,6 +245,85 @@ static void test_library(const char *sosuc) {
           details ? details : "(none)\n", expected);
     free(details);
 #endif
+}
+
+/* A game as Sozo loads it (engine.host, spec 9.2): built as a shared library, with the C++ of
+   Jolt in it, and driven by a C host as the editor drives it (the contract `sozo_...`). */
+static void test_gamehost(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command, "%s build --lib=shared tests/programs/gamehost > build/gamehost.out 2> build/gamehost.err",
+             sosuc);
+    CHECK(run(command) == 0, "build the game library: failed (see build/gamehost.err)");
+#ifdef _MSC_VER
+    const char *dir = "tests\\programs\\gamehost\\build";
+    snprintf(command, sizeof command,
+             "cl /nologo /W3 /I%s /Fe%s\\host.exe /Fo%s\\ tests\\programs\\gamehost\\host\\host.c %s\\crates.dll.lib > "
+             "build\\gamehost_host.log",
+             dir, dir, dir, dir);
+    CHECK(run(command) == 0, "the host of the game does not compile (see build/gamehost_host.log)");
+    snprintf(command, sizeof command, "%s\\host.exe > build\\gamehost_host.out", dir);
+#else
+    const char *dir = "tests/programs/gamehost/build";
+#ifdef __APPLE__
+    const char *shared_lib = "libcrates.dylib";
+#else
+    const char *shared_lib = "libcrates.so";
+#endif
+    snprintf(command, sizeof command,
+             "cc -std=c99 -I%s tests/programs/gamehost/host/host.c %s/%s -o %s/host > build/gamehost_host.log 2>&1", dir, dir,
+             shared_lib, dir);
+    CHECK(run(command) == 0, "the host of the game does not compile (see build/gamehost_host.log)");
+    snprintf(command, sizeof command, "%s/host > build/gamehost_host.out", dir);
+#endif
+    CHECK(run(command) == 0, "the host of the game failed");
+    char *actual = read_text("build/gamehost_host.out");
+    char *expected = read_text("tests/programs/gamehost/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "the host of the game: output differs\n--- got:\n%s",
+          actual ? actual : "(none)\n");
+    free(actual);
+    free(expected);
+}
+
+/* The objects of the user (spec §9.1): tests/programs/csources built with SOSU_CACHE in build/,
+   its object kept there; built again in a fresh build/obj, it takes it from there, as a broken
+   object put in its place shows (the link fails); without it, it is compiled again. */
+static void test_object_cache(const char *sosuc) {
+    char command[1024];
+#ifdef _WIN32
+    const char *clean = "rmdir /s /q tests\\programs\\csources\\build\\obj > NUL 2>&1";
+    run("rmdir /s /q build\\objects_test > NUL 2>&1");
+    run(clean);
+    snprintf(command, sizeof command, "set SOSU_CACHE=build\\objects_test&& %s build tests/programs/csources > build/objects.out 2>&1",
+             sosuc);
+    const char *list = "dir /s /b build\\objects_test\\obj\\*.obj > build\\objects.list 2> NUL";
+#else
+    const char *clean = "rm -rf tests/programs/csources/build/obj";
+    run("rm -rf build/objects_test");
+    run(clean);
+    snprintf(command, sizeof command, "SOSU_CACHE=build/objects_test %s build tests/programs/csources > build/objects.out 2>&1",
+             sosuc);
+    const char *list = "find build/objects_test/obj -name '*.o' > build/objects.list 2> /dev/null";
+#endif
+    CHECK(run(command) == 0, "object cache: the first build failed (see build/objects.out)");
+    run(list);
+    char *kept = read_text("build/objects.list");
+    char *end = kept ? strpbrk(kept, "\r\n") : NULL;
+    bool one = kept && end && strspn(end, "\r\n") == strlen(end); /* one line: vendor/mathx.c */
+    CHECK(one, "object cache: one object is kept (got: %s)", kept ? kept : "(none)");
+    if (one) {
+        *end = '\0';
+        FILE *broken = fopen(kept, "wb");
+        if (broken) {
+            fputs("not an object\n", broken);
+            fclose(broken);
+        }
+        run(clean);
+        CHECK(run(command) != 0, "object cache: the object was compiled again instead of being taken from the cache");
+        remove(kept);
+        run(clean);
+        CHECK(run(command) == 0, "object cache: without the object kept, it is compiled again (see build/objects.out)");
+    }
+    free(kept);
 }
 
 /* The text of a file after its first `lines` lines. */
@@ -240,6 +382,86 @@ static void test_stack_overflow(const char *sosuc) {
         CHECK(said && strstr(said, "sosu: stack overflow"), "run %s: the stop does not say why (see %s)", name, path);
         free(said);
     }
+}
+
+/* The package gpu (spec §8.2): scenes drawn without a window and read back, and a computation.
+   A machine without a GPU driver (Vulkan, Direct3D 12, Metal) makes the program exit with 77:
+   the test is skipped, and says so. The shaders it loads must be up to date. */
+static void test_gpu(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command, "%s shaders tests/programs/gpu --check > build/gpu_shaders.out 2>&1", sosuc);
+    CHECK(run(command) == 0, "the shaders of tests/programs/gpu are out of date (see build/gpu_shaders.out)");
+    /* the shaders of gpu.overlay, carried by the package in C */
+    snprintf(command, sizeof command, "%s shaders packages/gpu --c native/shaders.c --check > build/gpu_shaders.out 2>&1",
+             sosuc);
+    CHECK(run(command) == 0, "packages/gpu/native/shaders.c is out of date (see build/gpu_shaders.out)");
+    snprintf(command, sizeof command, "%s run tests/programs/gpu > build/gpu.out 2> build/gpu.err", sosuc);
+    int status = run(command);
+    if (status == 77) {
+        char *said = read_text("build/gpu.out");
+        printf("gpu: skipped, %s", said ? said : "no device\n");
+        free(said);
+        return;
+    }
+    CHECK(status == 0, "run gpu: exit code %d (see build/gpu.out and build/gpu.err)", status);
+    char *actual = read_text("build/gpu.out");
+    char *expected = read_text("tests/programs/gpu/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run gpu: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+
+    /* a handle used after its release stops the program, even when its line was taken again */
+    snprintf(command, sizeof command, "%s run tests/programs/gpu_released > build/gpu_released.out 2> build/gpu_released.err",
+             sosuc);
+    status = run(command);
+    CHECK(status == 101, "run gpu_released: exit code %d, expected 101 (see build/gpu_released.err)", status);
+    char *said = read_text("build/gpu_released.err");
+    CHECK(said && strstr(said, "assertion failed: s.alive && s.generation == generation"),
+          "run gpu_released: the stop does not say why (see build/gpu_released.err)");
+    free(said);
+    char *printed = read_text("build/gpu_released.out");
+    CHECK(printed && !strstr(printed, "not reached"), "run gpu_released: the program went on after the dead handle");
+    free(printed);
+
+    /* render3d: a lit scene with its shadow, read back; its shaders carried in C */
+    snprintf(command, sizeof command,
+             "%s shaders packages/render3d --c native/render3d_shaders.c --check > build/gpu_shaders.out 2>&1", sosuc);
+    CHECK(run(command) == 0, "packages/render3d/native/render3d_shaders.c is out of date (see build/gpu_shaders.out)");
+    snprintf(command, sizeof command, "%s run tests/programs/render3d > build/render3d.out 2> build/render3d.err", sosuc);
+    status = run(command);
+    CHECK(status == 0, "run render3d: exit code %d (see build/render3d.out and build/render3d.err)", status);
+    actual = read_text("build/render3d.out");
+    expected = read_text("tests/programs/render3d/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run render3d: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+
+    /* particles: drawn over a scene of render3d, hidden by what is nearer; its shaders carried in C */
+    snprintf(command, sizeof command,
+             "%s shaders packages/particles --c native/particles_shaders.c --check > build/gpu_shaders.out 2>&1", sosuc);
+    CHECK(run(command) == 0, "packages/particles/native/particles_shaders.c is out of date (see build/gpu_shaders.out)");
+    snprintf(command, sizeof command, "%s run tests/programs/particles > build/particles.out 2> build/particles.err", sosuc);
+    status = run(command);
+    CHECK(status == 0, "run particles: exit code %d (see build/particles.out and build/particles.err)", status);
+    actual = read_text("build/particles.out");
+    expected = read_text("tests/programs/particles/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run particles: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
+
+    /* assets: files loaded by threads, failures, a release, and a texture loaded again */
+    snprintf(command, sizeof command, "%s run tests/programs/assets > build/assets.out 2> build/assets.err", sosuc);
+    status = run(command);
+    CHECK(status == 0, "run assets: exit code %d (see build/assets.out and build/assets.err)", status);
+    actual = read_text("build/assets.out");
+    expected = read_text("tests/programs/assets/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "run assets: output differs\n--- got:\n%s--- expected:\n%s",
+          actual ? actual : "(none)\n", expected ? expected : "(none)\n");
+    free(actual);
+    free(expected);
 }
 
 static void test_bindgen(const char *sosuc) {
@@ -426,6 +648,110 @@ static void test_android(const char *sosuc) {
           "libmain.so for android-x64 is not an ELF library for x86_64");
 }
 
+static void write_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    CHECK(file != NULL, "cannot write %s", path);
+    if (!file) return;
+    fputs(text, file);
+    fclose(file);
+}
+
+/* git in build/native_test/lib */
+static bool lib_git(const char *args) {
+    char command[512];
+    snprintf(command, sizeof command,
+             "git -C build/native_test/lib -c user.name=test -c user.email=test@example.com %s > build/native_git.out 2>&1",
+             args);
+    return run(command) == 0;
+}
+
+static void write_app_manifest(const char *tag, const char *c) {
+    char text[1024];
+    snprintf(text, sizeof text,
+             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n"
+             "# C and C++ files of a Git repository\n"
+             "[native.lib]\ngit = \"../lib\"\ntag = \"%s\"\nc = [\"%s\"]\ncpp = [\"cpp/\"]\ninclude = [\"include\"]\n"
+             "defines = [\"LIB_BASE=100\"]\n",
+             tag, c);
+    write_file("build/native_test/app/sosu.toml", text);
+}
+
+/* [native.<name>] (spec §9.1): the C and C++ files of a Git repository, cloned at a tag and kept in
+   sosu.lock; `dir/ **` (no space) takes those of the subfolders (two files of one name among them), `dir/` those
+   of a folder; a path above the clone is refused. `sosuc deps upgrade` moves the tag to the newest
+   version, not to a pre-release. */
+static void test_native(const char *sosuc) {
+#ifdef _WIN32
+    run("rmdir /s /q build\\native_test > NUL 2>&1");
+    run("mkdir build\\native_test\\lib\\src\\a build\\native_test\\lib\\src\\b build\\native_test\\lib\\cpp "
+        "build\\native_test\\lib\\include build\\native_test\\app\\src");
+#else
+    run("rm -rf build/native_test");
+    run("mkdir -p build/native_test/lib/src/a build/native_test/lib/src/b build/native_test/lib/cpp "
+        "build/native_test/lib/include build/native_test/app/src");
+#endif
+    write_file("build/native_test/lib/include/lib.h", "int lib_a(void);\nint lib_b(void);\n");
+    write_file("build/native_test/lib/src/a/part.c", "#include \"lib.h\"\nint lib_a(void) { return LIB_BASE + 1; }\n");
+    write_file("build/native_test/lib/src/b/part.c", "#include \"lib.h\"\nint lib_b(void) { return 2; }\n");
+    write_file("build/native_test/lib/cpp/version.cpp",
+               "#include <string>\nextern \"C\" int lib_version(void) { return (int)std::string(\"v1\").size(); }\n");
+    write_file("build/native_test/app/src/main.sosu",
+               "import std.io;\n\nextern \"C\" {\n    i32 lib_a();\n    i32 lib_b();\n    i32 lib_version();\n}\n\n"
+               "i32 main() uses io {\n    unsafe {\n        io.print(\"{} {} {}\", lib_a(), lib_b(), lib_version());\n    }\n"
+               "    return 0;\n}\n");
+    bool ready = lib_git("init --quiet") && lib_git("add .") && lib_git("commit --quiet -m one") && lib_git("tag v1.0.0");
+    CHECK(ready, "native: cannot create the test repository (is git installed?)");
+    if (!ready) return;
+
+    char command[1024];
+    write_app_manifest("v1.0.0", "src/**");
+    snprintf(command, sizeof command, "%s run build/native_test/app > build/native.out 2> build/native.err", sosuc);
+    CHECK(run(command) == 0, "native: run failed (see build/native.err)");
+    char *out = read_text("build/native.out");
+    CHECK(out && strcmp(out, "101 2 2\n") == 0, "native: output `%s`, expected `101 2 2`", out ? out : "(none)");
+    free(out);
+    char *lock = read_text("build/native_test/app/sosu.lock");
+    CHECK(lock && strstr(lock, "\nnative.lib ../lib tag v1.0.0 "), "native: sosu.lock\n%s", lock ? lock : "(none)");
+    free(lock);
+
+    /* newer tags: a pre-release is skipped */
+    write_file("build/native_test/lib/src/b/part.c", "#include \"lib.h\"\nint lib_b(void) { return 3; }\n");
+    CHECK(lib_git("commit --quiet -am two") && lib_git("tag v1.2.0") && lib_git("tag v2.0-beta") && lib_git("tag nightly"),
+          "native: second commit");
+    snprintf(command, sizeof command, "%s deps upgrade build/native_test/app > build/native_deps.out 2> build/native.err",
+             sosuc);
+    CHECK(run(command) == 0, "native: deps upgrade failed (see build/native.err)");
+    char *manifest = read_text("build/native_test/app/sosu.toml");
+    CHECK(manifest && strstr(manifest, "tag = \"v1.2.0\""), "native: deps upgrade wrote\n%s", manifest ? manifest : "");
+    CHECK(manifest && strstr(manifest, "# C and C++ files of a Git repository\n"), "native: the comments are kept");
+    free(manifest);
+    snprintf(command, sizeof command, "%s deps upgrade build/native_test/app > build/native_deps.out 2> build/native.err",
+             sosuc);
+    CHECK(run(command) == 0, "native: deps upgrade, already the newest");
+    out = read_text("build/native_deps.out");
+    CHECK(out && strstr(out, "lib: v1.2.0 is the newest"), "native: deps upgrade said `%s`", out ? out : "");
+    free(out);
+    snprintf(command, sizeof command, "%s run build/native_test/app > build/native.out 2> build/native.err", sosuc);
+    CHECK(run(command) == 0, "native: run after the upgrade failed (see build/native.err)");
+    out = read_text("build/native.out");
+    CHECK(out && strcmp(out, "101 3 2\n") == 0, "native: output after the upgrade `%s`", out ? out : "(none)");
+    free(out);
+    lock = read_text("build/native_test/app/sosu.lock");
+    CHECK(lock && strstr(lock, "\nnative.lib ../lib tag v1.2.0 "), "native: sosu.lock upgraded\n%s", lock ? lock : "");
+    free(lock);
+    snprintf(command, sizeof command, "%s deps upgrade build/native_test/app other > build/native_deps.out 2> build/native.err",
+             sosuc);
+    CHECK(run(command) == 2, "native: deps upgrade of an unknown name is refused");
+
+    /* a path above the clone */
+    write_app_manifest("v1.2.0", "../src/**");
+    snprintf(command, sizeof command, "%s build build/native_test/app > build/native.out 2> build/native.err", sosuc);
+    CHECK(run(command) != 0, "native: a path above the repository was accepted");
+    char *err = read_text("build/native.err");
+    CHECK(err && strstr(err, "leaves its repository"), "native: the refusal says `%s`", err ? err : "");
+    free(err);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fputs("usage: program_tests <path to sosuc>\n", stderr);
@@ -465,7 +791,10 @@ int main(int argc, char **argv) {
     }
 
     test_library(argv[1]);
+    test_gamehost(argv[1]);
     test_bindgen(argv[1]);
+    test_object_cache(argv[1]);
+    test_gpu(argv[1]);
     test_doc(argv[1]);
     test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);
     test_guide(argv[1], "guide", "docs/GUIDE.md", 55);
@@ -473,6 +802,7 @@ int main(int argc, char **argv) {
     test_stack_overflow(argv[1]);
     test_package(argv[1]);
     test_android(argv[1]);
+    test_native(argv[1]);
 
     /* `assert(a == b)` shows both sides, on the error output (spec §7.3) */
     char *sides = read_text("build/checks.err");

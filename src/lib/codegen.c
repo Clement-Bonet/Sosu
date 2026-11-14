@@ -1437,6 +1437,10 @@ static char *gen_builtin_call(Fn *f, Expr *e, const char *name) {
     Expr **args = e->as.call.args;
     size_t count = e->as.call.arg_count;
     if (strcmp(name, "size_of") == 0) return sosu_format("((uint64_t)sizeof(%s))", value_type(f->g, args[0]->type));
+    if (strcmp(name, "offset_of") == 0) {
+        Name field = args[1]->as.name;
+        return sosu_format("((uint64_t)offsetof(%s, f_%.*s))", value_type(f->g, args[0]->type), NAME_ARGS(field));
+    }
     if (strcmp(name, "assert") == 0 && gen_assert_comparison(f, e)) return NULL;
     char **values = gen_operands(f, args, count);
     const char *type = e->type->tag == T_VOID ? "void" : value_type(f->g, e->type);
@@ -2610,13 +2614,17 @@ static void gen_exports(Gen *g, Buf *out) {
                g->program->packages.items[0]->name);
 }
 
-static FnInfo *find_main(Gen *g) {
+static FnInfo *find_entry(Gen *g, const char *wanted) {
     Unit *entry = g->program->units.items[0];
     for (size_t i = 0; i < g->s->fns.count; i++) {
         FnInfo *fn = g->s->fns.items[i];
-        if (fn->unit == entry && !fn->is_extern && name_is(fn->decl->name, "main")) return fn;
+        if (fn->unit == entry && !fn->is_extern && name_is(fn->decl->name, wanted)) return fn;
     }
     return NULL;
+}
+
+static FnInfo *find_main(Gen *g) {
+    return find_entry(g, "main");
 }
 
 char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOptions options) {
@@ -2640,6 +2648,22 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
                                                : "the entry module has no `main` function");
             diag_help(d, main_fn ? "a program starts with `i32 main()`; its value is the exit code"
                                  : "add `i32 main() { ... }` to `src/main.sosu`, or run the tests with `sosuc test`");
+            return NULL;
+        }
+    }
+    FnInfo *fuzz_fn = NULL;
+    if (mode == CODEGEN_FUZZ) {
+        fuzz_fn = find_entry(&g, "fuzz");
+        const Type *fn_type = fuzz_fn ? fuzz_fn->type : NULL;
+        bool valid = fn_type && fn_type->as.fn.param_count == 1 && fn_type->as.fn.ret->tag == T_VOID &&
+                     fn_type->as.fn.params[0]->tag == T_SLICE &&
+                     fn_type->as.fn.params[0]->as.inner == builtin(&g, "ui8");
+        if (!valid) {
+            Name name = fuzz_fn ? fuzz_fn->decl->name : (Name){ "", 0, 0 };
+            Diagnostic *d = diag_error(&program->diags, "E0502", &entry->file, name.offset, name.length,
+                                       fuzz_fn ? "`fuzz` must be declared `void fuzz(ui8[] data)`"
+                                               : "the entry module has no `fuzz` function");
+            diag_help(d, "a target of `sosuc fuzz` reads its input in `void fuzz(ui8[] data) { ... }`");
             return NULL;
         }
     }
@@ -2672,6 +2696,26 @@ char *codegen_program(Sema *s, Program *program, CodegenMode mode, CodegenOption
     Buf main_code = {0};
     if (mode == CODEGEN_LIBRARY) {
         gen_exports(&g, &main_code);
+    } else if (mode == CODEGEN_FUZZ) {
+        char *name = fn_c_name(fuzz_fn);
+        const char *slice = value_type(&g, fuzz_fn->type->as.fn.params[0]);
+        /* libFuzzer gives each input; a failed check of Sosu (an index out of bounds, an
+           `assert`) stops the program, which libFuzzer reports with the input */
+        buf_printf(&main_code,
+                   "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n"
+                   "    static int started = 0;\n"
+                   "    if (!started) {\n        sosu_set_args(0, NULL);\n        started = 1;\n    }\n"
+                   "    static uint8_t empty[1];\n"
+                   "    %s input;\n"
+                   "    input.ptr = size ? (uint8_t *)data : empty;\n"
+                   "    input.len = size;\n"
+                   "    %s(input);\n"
+                   "    return 0;\n"
+                   "}\n",
+                   /* with SOSU_FUZZ_REPLAY, the `main` of sosu_rt.c gives it the files: the C names
+                      of std.io (`fopen`...) would clash with <stdio.h> here */
+                   slice, name);
+        free(name);
     } else if (mode == CODEGEN_PROGRAM) {
         char *name = fn_c_name(main_fn);
         /* on a phone, the activity or the application of SDL starts the program: its entry is

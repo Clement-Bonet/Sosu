@@ -1,0 +1,245 @@
+// math.octree: an octree over points in 3D that come, go and move: the units of a game, the
+// sounds playing, the pickups lying around. A cube split in eight when it holds too many, so that
+// a search for a region or for what is near a point looks only at the cubes it touches. Each thing
+// is a number of the program and its point; `move` follows it. For points that never move,
+// `math.kdtree` is smaller and faster; for things with a size, `math.bvh`.
+//
+//   octree.Octree* units = octree.octree(arena, world_bounds);
+//   units.insert(id, position);
+//   units.within(explosion, 8.0, hit);                   // the units in the blast
+import std.vec;
+import math.linear;
+import math.geometry;
+
+// Things in a cube before it splits, and how deep cubes split at most (a cube of the bounds
+// divided by 2^8 on each side: things at the same place stay together beyond).
+usize CAPACITY = 8;
+usize DEEPEST = 8;
+
+struct Entry {
+    usize item;
+    linear.Vec3 point;
+}
+
+struct Node {
+    mut geometry.Aabb box;
+    mut usize children;  // the first of its eight children, 0 for a leaf (the root is 0, never a child)
+    mut usize depth;
+    vec.Vec<Entry>* entries;
+}
+
+pub class Octree {
+    Arena* arena;
+    vec.Vec<Node>* nodes;
+    mut usize total;
+
+    void init(keeps Arena* arena, geometry.Aabb bounds) {
+        self.arena = arena;
+        nodes = vec.new<Node>(arena);
+        nodes.push(Node{ box: bounds, children: 0, depth: 0, entries: vec.new<Entry>(arena) });
+        total = 0;
+    }
+
+    // How many things it holds.
+    pub usize count() {
+        return total;
+    }
+
+    // The leaf whose cube holds `p` (inside the bounds).
+    usize leaf_of(linear.Vec3 p) {
+        mut usize at = 0;
+        while (nodes.items()[at].children != 0) {
+            Node n = nodes.items()[at];
+            linear.Vec3 c = n.box.center();
+            usize octant = (p.x >= c.x ? 1 : 0) + (p.y >= c.y ? 2 : 0) + (p.z >= c.z ? 4 : 0);
+            at = n.children + octant;
+        }
+        return at;
+    }
+
+    // The thing `item` at `p`; false, and not added, when `p` is outside the bounds.
+    pub bool insert(usize item, linear.Vec3 p) {
+        if (!nodes.items()[0].box.contains(p)) {
+            return false;
+        }
+        usize at = leaf_of(p);
+        nodes.items()[at].entries.push(Entry{ item: item, point: p });
+        total += 1;
+        Node n = nodes.items()[at];
+        if (n.entries.len() > CAPACITY && n.depth < DEEPEST) {
+            split(at);
+        }
+        return true;
+    }
+
+    // The cube `at` cut in eight, its things given to them.
+    void split(usize at) {
+        Node n = nodes.items()[at];
+        linear.Vec3 c = n.box.center();
+        usize first = nodes.len();
+        for (usize octant in 0..8) {
+            linear.Vec3 low = linear.vec3(
+                octant & 1 == 0 ? n.box.min.x : c.x,
+                octant & 2 == 0 ? n.box.min.y : c.y,
+                octant & 4 == 0 ? n.box.min.z : c.z
+            );
+            linear.Vec3 high = linear.vec3(
+                octant & 1 == 0 ? c.x : n.box.max.x,
+                octant & 2 == 0 ? c.y : n.box.max.y,
+                octant & 4 == 0 ? c.z : n.box.max.z
+            );
+            nodes.push(Node{ box: geometry.aabb(low, high), children: 0, depth: n.depth + 1, entries: vec.new<Entry>(arena) });
+        }
+        nodes.at(at).children = first;
+        for (Entry e in n.entries.items()) {
+            usize octant = (e.point.x >= c.x ? 1 : 0) + (e.point.y >= c.y ? 2 : 0) + (e.point.z >= c.z ? 4 : 0);
+            nodes.items()[first + octant].entries.push(e);
+        }
+        n.entries.clear();
+        for (usize octant in 0..8) {
+            Node child = nodes.items()[first + octant];
+            if (child.entries.len() > CAPACITY && child.depth < DEEPEST) {
+                split(first + octant);  // all of them in one octant: deeper
+            }
+        }
+    }
+
+    // The thing `item` taken away from `p`, where it was put (or last moved to); false when it is
+    // not there. Cubes stay split.
+    pub bool remove(usize item, linear.Vec3 p) {
+        if (!nodes.items()[0].box.contains(p)) {
+            return false;
+        }
+        vec.Vec<Entry>* entries = nodes.items()[leaf_of(p)].entries;
+        for (usize i in 0..entries.len()) {
+            Entry e = entries.items()[i];
+            if (e.item == item && e.point.near(p, 0.0)) {
+                entries.remove(i);
+                total -= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The thing `item` moved from `from` to `to`; false when it is not at `from`, or `to` is outside
+    // the bounds (it is then taken away).
+    pub bool move(usize item, linear.Vec3 from, linear.Vec3 to) {
+        if (!remove(item, from)) {
+            return false;
+        }
+        return insert(item, to);
+    }
+
+    // The things whose points are in `region`, added to `out`.
+    pub void overlapping(geometry.Aabb region, vec.Vec<usize>* out) {
+        mut usize[96] stack = [0; 96];
+        mut usize top = 1;
+        while (top > 0) {
+            top -= 1;
+            Node n = nodes.items()[stack[top]];
+            if (!n.box.overlaps(region)) {
+                continue;
+            }
+            if (n.children == 0) {
+                for (Entry e in n.entries.items()) {
+                    if (region.contains(e.point)) {
+                        out.push(e.item);
+                    }
+                }
+            } else {
+                for (usize octant in 0..8) {
+                    stack[top] = n.children + octant;
+                    top += 1;
+                }
+            }
+        }
+    }
+
+    // The things within `radius` of `p`, added to `out`.
+    pub void within(linear.Vec3 p, f32 radius, vec.Vec<usize>* out) {
+        mut usize[96] stack = [0; 96];
+        mut usize top = 1;
+        f32 r2 = radius * radius;
+        while (top > 0) {
+            top -= 1;
+            Node n = nodes.items()[stack[top]];
+            linear.Vec3 gap = n.box.closest(p).sub(p);
+            if (gap.dot(gap) > r2) {
+                continue;
+            }
+            if (n.children == 0) {
+                for (Entry e in n.entries.items()) {
+                    linear.Vec3 d = e.point.sub(p);
+                    if (d.dot(d) <= r2) {
+                        out.push(e.item);
+                    }
+                }
+            } else {
+                for (usize octant in 0..8) {
+                    stack[top] = n.children + octant;
+                    top += 1;
+                }
+            }
+        }
+    }
+}
+
+// An empty octree over `bounds`: things outside of it are refused.
+pub Octree* octree(keeps Arena* arena, geometry.Aabb bounds) {
+    return arena.new(Octree, arena, bounds);
+}
+
+test "an octree: regions and spheres as testing them all says, while things move" {
+    mut Arena arena = Arena.new(1024 * KB);
+    defer arena.free();
+    usize n = 600;
+    mut linear.Vec3[] at = arena.alloc_slice(linear.Vec3, n);
+    Octree* tree = octree(&arena, geometry.aabb(linear.vec3(-50.0, -50.0, -50.0), linear.vec3(50.0, 50.0, 50.0)));
+    mut ui32 h = 5;
+    for (usize i in 0..n) {
+        mut f32[3] c = [0.0, 0.0, 0.0];
+        for (usize k in 0..3) {
+            h = wrapping_add(wrapping_mul(h, 1664525), 1013904223);
+            c[k] = (h >> 8) as f32 / 16777216.0 * 100.0 - 50.0;
+        }
+        at[i] = linear.vec3(c[0], c[1], c[2]);
+        assert(tree.insert(i, at[i]));
+    }
+    assert(tree.count() == n && !tree.insert(n, linear.vec3(60.0, 0.0, 0.0)));
+    for (i32 round in 0..3) {
+        geometry.Aabb region = geometry.aabb(linear.vec3(-20.0, -10.0, -30.0), linear.vec3(15.0, 25.0, 5.0));
+        vec.Vec<usize>* inside = vec.new<usize>(&arena);
+        tree.overlapping(region, inside);
+        vec.Vec<usize>* near = vec.new<usize>(&arena);
+        tree.within(linear.vec3(5.0, -3.0, 8.0), 18.0, near);
+        mut usize want_box = 0;
+        mut usize want_ball = 0;
+        for (usize i in 0..n) {
+            if (region.contains(at[i])) {
+                want_box += 1;
+            }
+            if (at[i].distance(linear.vec3(5.0, -3.0, 8.0)) <= 18.0) {
+                want_ball += 1;
+            }
+        }
+        assert(inside.len() == want_box && near.len() == want_ball && want_box > 0 && want_ball > 0);
+        // every thing moves a step
+        for (usize i in 0..n) {
+            linear.Vec3 to = linear.vec3(at[i].x * 0.9 + 1.0, at[i].y * 0.9 - 2.0, at[i].z * 0.9);
+            assert(tree.move(i, at[i], to));
+            at[i] = to;
+        }
+    }
+    // taken away: no longer found, and not twice
+    assert(tree.remove(0, at[0]) && !tree.remove(0, at[0]) && tree.count() == n - 1);
+    assert(!tree.move(0, at[0], linear.vec3(0.0, 0.0, 0.0)));
+    // many at the same place: they stay together at the deepest cube
+    Octree* pile = octree(&arena, geometry.aabb(linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 1.0, 1.0)));
+    for (usize i in 0..50) {
+        assert(pile.insert(i, linear.vec3(0.3, 0.3, 0.3)));
+    }
+    vec.Vec<usize>* piled = vec.new<usize>(&arena);
+    pile.within(linear.vec3(0.3, 0.3, 0.3), 0.01, piled);
+    assert(piled.len() == 50);
+}

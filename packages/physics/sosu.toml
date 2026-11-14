@@ -1,0 +1,19 @@
+# Rigid bodies in 3D (spec §8.2, physics), on Jolt Physics (C++, MIT, THIRD_PARTY_NOTICES.md),
+# taken from its repository at a tag, pinned by sosu.lock, never copied here (§9.1), and reached
+# through native/physics.cpp, a few functions of C.
+[package]
+name = "physics"
+version = "0.1.0"
+
+[native.jolt]
+git = "https://github.com/jrouwe/JoltPhysics"
+tag = "v5.6.0"
+cpp = ["Jolt/**"]
+include = ["."]
+
+[link]
+cpp = ["native/physics.cpp"]
+
+[dependencies]
+math = { path = "../math" }
+scene = { path = "../scene" }  # sync: the transforms of entities

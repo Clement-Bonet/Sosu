@@ -1,0 +1,588 @@
+// platform.gamepad: the gamepads connected (spec §8.2), read each frame rather than through
+// events, as Unity's Input System does: `pads.update()` at the start of a frame, then the state of
+// each pad, and what changed since the frame before (`went_down`, `went_up`). The layout is
+// positional, as in SDL 3: `South` is A on Xbox, Cross on PlayStation and B on Nintendo, where it
+// sits at the bottom too; `label` gives what that controller prints on it.
+import std.io;
+import std.vec;
+import platform.sdl_c;
+import platform.app;
+import math.linear;
+
+// The buttons, by their place.
+pub enum Button {
+    South,
+    East,
+    West,
+    North,
+    Back,
+    Guide,
+    Start,
+    LeftStick,  // the left stick pressed
+    RightStick,
+    LeftShoulder,
+    RightShoulder,
+    Up,  // the directional pad
+    Down,
+    Left,
+    Right,
+}
+
+pub enum Stick {
+    LeftStick,
+    RightStick,
+}
+
+pub enum Trigger {
+    LeftTrigger,
+    RightTrigger,
+}
+
+// The family of a controller, for the prompts a program shows.
+pub enum Kind {
+    Xbox,
+    PlayStation,
+    Switch,
+    Other,
+}
+
+// The code of SDL of a button (0 to 14), and back: for files of bindings.
+pub i32 button_code_of(Button b) {
+    return button_code(b);
+}
+
+pub Button button_of(i32 code) {
+    Button[15] all = [
+        South, East, West, North, Back, Guide, Start, LeftStick, RightStick, LeftShoulder, RightShoulder, Up, Down,
+        Left, Right,
+    ];
+    return code >= 0 && code < 15 ? all[code as usize] : Right;
+}
+
+// The keys of the arrows, Enter and Escape (SDL's key codes, as in `app.Event.Key`).
+ui32 KEY_RIGHT = 0x4000004F;
+ui32 KEY_LEFT = 0x40000050;
+ui32 KEY_DOWN = 0x40000051;
+ui32 KEY_UP = 0x40000052;
+ui32 KEY_ENTER = 13;
+ui32 KEY_ESCAPE = 27;
+ui64 REPEAT_AFTER_MS = 400;
+ui64 REPEAT_EVERY_MS = 80;
+
+i32 button_code(Button b) {
+    return match (b) {
+        South => 0,
+        East => 1,
+        West => 2,
+        North => 3,
+        Back => 4,
+        Guide => 5,
+        Start => 6,
+        LeftStick => 7,
+        RightStick => 8,
+        LeftShoulder => 9,
+        RightShoulder => 10,
+        Up => 11,
+        Down => 12,
+        Left => 13,
+        Right => 14,
+    };
+}
+
+i32 BUTTONS = 15;
+f32 DEAD_ZONE = 0.15;
+
+// A gamepad connected. Its state is that of the last `Pads.update()`.
+pub class Pad {
+    ui32 instance;  // SDL_JoystickID: stable while it stays connected
+    sdl_c.SDL_Gamepad* handle;
+    mut ui32 down;  // bit i: the button of code i, now
+    mut ui32 before;  // the same, at the update before
+    mut i16[6] axes;  // left x, left y, right x, right y, left trigger, right trigger (SDL: y down)
+    mut f32 dead_zone;
+    mut bool connected;
+
+    void init(ui32 instance, keeps sdl_c.SDL_Gamepad* handle) {
+        self.instance = instance;
+        self.handle = handle;
+        down = 0;
+        before = 0;
+        axes = [0, 0, 0, 0, 0, 0];
+        dead_zone = DEAD_ZONE;
+        connected = true;
+    }
+
+    pub ui32 id() {
+        return instance;
+    }
+
+    pub bool pressed(Button b) {
+        return down & 1 as ui32 << button_code(b) as ui32 != 0;
+    }
+
+    // Pressed now, not at the update before.
+    pub bool went_down(Button b) {
+        ui32 bit = 1 as ui32 << button_code(b) as ui32;
+        return down & bit != 0 && before & bit == 0;
+    }
+
+    // Released now, pressed at the update before (and on the update where the pad leaves).
+    pub bool went_up(Button b) {
+        ui32 bit = 1 as ui32 << button_code(b) as ui32;
+        return down & bit == 0 && before & bit != 0;
+    }
+
+    // Where a stick is pushed, x to the right and y up, each from -1 to 1: within the dead zone,
+    // zero; beyond it, scaled again from 0, so that a small push is not lost (a radial dead zone).
+    pub linear.Vec2 stick(Stick s) {
+        usize first = match (s) {
+            LeftStick => 0,
+            RightStick => 2,
+        };
+        f32 x = axes[first] as f32 / 32767.0;
+        f32 y = -(axes[first + 1] as f32) / 32767.0;
+        linear.Vec2 raw = linear.vec2(max(-1.0, min(1.0, x)), max(-1.0, min(1.0, y)));
+        f32 length = raw.length();
+        if (length <= dead_zone || length == 0.0) {
+            return linear.vec2(0.0, 0.0);
+        }
+        f32 scaled = min(1.0, (length - dead_zone) / (1.0 - dead_zone));
+        return raw.scale(scaled / length);
+    }
+
+    // How far a trigger is pulled, from 0 to 1.
+    pub f32 trigger(Trigger t) {
+        usize at = match (t) {
+            LeftTrigger => 4,
+            RightTrigger => 5,
+        };
+        return max(0.0, min(1.0, axes[at] as f32 / 32767.0));
+    }
+
+    // The dead zone of the sticks, from 0 to 0.9 (0.15 by default).
+    pub void set_dead_zone(f32 zone) {
+        dead_zone = max(0.0, min(0.9, zone));
+    }
+
+    pub bool is_connected() {
+        return connected;
+    }
+
+    // Its name, as the system gives it.
+    pub str name(Arena* arena) uses io {
+        if (!connected) {
+            return "";
+        }
+        unsafe {
+            return copy_cstring(arena, sdl_c.SDL_GetGamepadName(handle), 256);
+        }
+    }
+
+    pub Kind kind() uses io {
+        if (!connected) {
+            return Other;
+        }
+        mut i32 t = 0;
+        unsafe {
+            t = sdl_c.SDL_GetGamepadType(handle);
+        }
+        if (t == sdl_c.SDL_GAMEPAD_TYPE_XBOX360 || t == sdl_c.SDL_GAMEPAD_TYPE_XBOXONE) {
+            return Xbox;
+        }
+        if (t == sdl_c.SDL_GAMEPAD_TYPE_PS3 || t == sdl_c.SDL_GAMEPAD_TYPE_PS4 || t == sdl_c.SDL_GAMEPAD_TYPE_PS5) {
+            return PlayStation;
+        }
+        if (t >= sdl_c.SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO
+                && t <= sdl_c.SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) {
+            return Switch;
+        }
+        return Other;
+    }
+
+    // What this controller prints on a button: "A", "B", "X", "Y", "Cross", "Circle", "Square",
+    // "Triangle", or "" when SDL does not know (the shoulders, the pad...).
+    pub str label(Button b) uses io {
+        if (!connected) {
+            return "";
+        }
+        mut i32 l = 0;
+        unsafe {
+            l = sdl_c.SDL_GetGamepadButtonLabel(handle, button_code(b));
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_A) {
+            return "A";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_B) {
+            return "B";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_X) {
+            return "X";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_Y) {
+            return "Y";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_CROSS) {
+            return "Cross";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_CIRCLE) {
+            return "Circle";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_SQUARE) {
+            return "Square";
+        }
+        if (l == sdl_c.SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE) {
+            return "Triangle";
+        }
+        return "";
+    }
+
+    // Shakes it: `low` and `high` from 0 to 1 (its two motors), for `ms` milliseconds. False when
+    // it cannot.
+    pub bool rumble(f32 low, f32 high, ui32 ms) uses io {
+        if (!connected) {
+            return false;
+        }
+        ui16 l = (max(0.0, min(1.0, low)) * 65535.0) as ui16;
+        ui16 h = (max(0.0, min(1.0, high)) * 65535.0) as ui16;
+        unsafe {
+            return sdl_c.SDL_RumbleGamepad(handle, l, h, ms);
+        }
+    }
+
+    // The charge of its battery, from 0 to 100, or none when it has none or does not say.
+    pub i32? battery() uses io {
+        if (!connected) {
+            return none;
+        }
+        mut i32 percent = -1;
+        unsafe {
+            sdl_c.SDL_GetGamepadPowerInfo(handle, &percent);
+        }
+        return percent >= 0 ? some(percent) : none;
+    }
+
+    // The state of SDL copied, the former kept.
+    void read() uses io {
+        before = down;
+        mut ui32 now = 0;
+        unsafe {
+            for (i32 code in 0..BUTTONS) {
+                if (sdl_c.SDL_GetGamepadButton(handle, code)) {
+                    now = now | 1 as ui32 << code as ui32;
+                }
+            }
+            for (usize axis in 0..6) {
+                axes[axis] = sdl_c.SDL_GetGamepadAxis(handle, axis as i32);
+            }
+        }
+        down = now;
+    }
+
+    // Gone: released, its buttons read as let go at this update.
+    void leave() uses io {
+        before = down;
+        down = 0;
+        axes = [0, 0, 0, 0, 0, 0];
+        connected = false;
+        unsafe {
+            sdl_c.SDL_CloseGamepad(handle);
+        }
+    }
+}
+
+// The gamepads of the system, kept in the state of the program and updated once per frame. A
+// program that has none never starts the gamepads of SDL. It has no global state: Sosu has none.
+pub class Pads {
+    Arena* arena;
+    vec.Vec<Pad*>* pads;
+    vec.Vec<Pad*>* came;
+    vec.Vec<Pad*>* left;
+    mut bool started;
+    mut ui32 held;  // the arrow the pads hold for `navigation`, or 0
+    mut ui64 repeat_at;  // when that arrow repeats
+
+    void init(keeps Arena* arena) uses io {
+        self.arena = arena;
+        pads = vec.new(arena);
+        came = vec.new(arena);
+        left = vec.new(arena);
+        held = 0;
+        repeat_at = 0;
+        unsafe {
+            started = sdl_c.SDL_InitSubSystem(sdl_c.SDL_INIT_GAMEPAD);
+        }
+    }
+
+    // Reads the pads: those that came, those that left, and the state of each. At the start of
+    // each frame, once: `went_down` and `went_up` compare two updates.
+    pub void update() uses io {
+        came.clear();
+        left.clear();
+        if (!started) {
+            return;
+        }
+        mut ui32[] ids = arena.alloc_slice(ui32, 0);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_UpdateGamepads();
+            mut i32 count = 0;
+            ui32* found = sdl_c.SDL_GetGamepads(&count);
+            ids = scratch.alloc_slice(ui32, max(count, 0) as usize);
+            if (found as ui64 != 0) {
+                for (usize i in 0..ids.len) {
+                    ids[i] = *(found + i);
+                }
+                sdl_c.SDL_free(found as ui8*);
+            }
+        }
+        // those that left
+        mut usize i = 0;
+        while (i < pads.len()) {
+            Pad* p = pads.items()[i];
+            mut bool still = false;
+            for (ui32 id in ids) {
+                if (id == p.instance) {
+                    still = true;
+                }
+            }
+            if (still) {
+                i += 1;
+            } else {
+                p.leave();
+                left.push(p);
+                pads.remove(i);
+            }
+        }
+        // those that came
+        for (ui32 id in ids) {
+            mut bool known = false;
+            for (Pad* p in pads.items()) {
+                if (p.instance == id) {
+                    known = true;
+                }
+            }
+            if (!known) {
+                unsafe {
+                    sdl_c.SDL_Gamepad* handle = sdl_c.SDL_OpenGamepad(id);
+                    if (handle as ui64 != 0) {
+                        Pad* p = arena.new(Pad, id, handle);
+                        pads.push(p);
+                        came.push(p);
+                    }
+                }
+            }
+        }
+        for (Pad* p in pads.items()) {
+            p.read();
+        }
+    }
+
+    // The pads connected, in the order they came.
+    pub Pad*[] connected() {
+        return pads.items();
+    }
+
+    // The pads that came at the last update.
+    pub Pad*[] went_connected() {
+        return came.items();
+    }
+
+    // The pads that left at the last update: they read as released, never as frozen.
+    pub Pad*[] went_disconnected() {
+        return left.items();
+    }
+
+    // The pads as the keys that move through the widgets of `ui` (spec §10.6): the D-pad and the
+    // left stick as the arrows, repeated while held, South as Enter and East as Escape. After
+    // `update()`, the program gives these events to its interface as those of the keyboard.
+    pub app.Event[] navigation(Arena* out) uses io {
+        vec.Vec<app.Event>* events = vec.new(out);
+        app.Mods none_held = app.Mods{ shift: false, ctrl: false, alt: false, command: false };
+        mut ui32 arrow = 0;
+        for (Pad* p in pads.items()) {
+            if (p.went_down(South)) {
+                events.push(app.Event.Key(KEY_ENTER, true, none_held));
+            }
+            if (p.went_up(South)) {
+                events.push(app.Event.Key(KEY_ENTER, false, none_held));
+            }
+            if (p.went_down(East)) {
+                events.push(app.Event.Key(KEY_ESCAPE, true, none_held));
+            }
+            if (p.went_up(East)) {
+                events.push(app.Event.Key(KEY_ESCAPE, false, none_held));
+            }
+            arrow = p.pressed(Up) ? KEY_UP
+                    : p.pressed(Down) ? KEY_DOWN
+                    : p.pressed(Left) ? KEY_LEFT
+                    : p.pressed(Right) ? KEY_RIGHT
+                    : arrow;
+            if (arrow == 0) {
+                linear.Vec2 s = p.stick(LeftStick);
+                if (s.length() >= 0.5) {
+                    arrow = abs(s.x) > abs(s.y) ? s.x > 0.0 ? KEY_RIGHT : KEY_LEFT : s.y > 0.0 ? KEY_UP : KEY_DOWN;
+                }
+            }
+        }
+        mut ui64 now = 0;
+        unsafe {
+            now = sdl_c.SDL_GetTicks();
+        }
+        if (arrow != held) {
+            if (held != 0) {
+                events.push(app.Event.Key(held, false, none_held));
+            }
+            if (arrow != 0) {
+                events.push(app.Event.Key(arrow, true, none_held));
+                repeat_at = now + REPEAT_AFTER_MS;
+            }
+            held = arrow;
+        } else if (held != 0 && now >= repeat_at) {
+            events.push(app.Event.Key(held, true, none_held));  // a key held repeats its `down`
+            repeat_at = now + REPEAT_EVERY_MS;
+        }
+        return events.items();
+    }
+
+    // The first pad connected, for a game of one player.
+    pub Pad*? first() {
+        return pads.len() == 0 ? none : some(pads.items()[0]);
+    }
+
+    // Closes the pads, and the gamepads of SDL.
+    pub void close() uses io {
+        for (Pad* p in pads.items()) {
+            p.leave();
+        }
+        pads.clear();
+        if (started) {
+            unsafe {
+                sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_GAMEPAD);
+            }
+            started = false;
+        }
+    }
+}
+
+// The gamepads of the system: starts the gamepads of SDL (`SDL_INIT_GAMEPAD`), which `platform`
+// does not start for programs that have none. `arena` holds the pads, and lives as long.
+pub Pads* open(keeps Arena* arena) uses io {
+    return arena.new(Pads, arena);
+}
+
+// A gamepad that is not there, for tests (SDL's virtual joysticks): its buttons pressed and its
+// sticks pushed by the program, read by `Pads` as those of a real pad.
+pub class Virtual {
+    ui32 instance;
+    sdl_c.SDL_Joystick* joystick;
+    mut bool attached;
+
+    void init(ui32 instance, keeps sdl_c.SDL_Joystick* joystick) {
+        self.instance = instance;
+        self.joystick = joystick;
+        attached = true;
+    }
+
+    // Its id, as `Pad.id()` gives it once `Pads` read it.
+    pub ui32 id() {
+        return instance;
+    }
+
+    pub void press(Button b, bool down) uses io {
+        if (attached) {
+            unsafe {
+                sdl_c.SDL_SetJoystickVirtualButton(joystick, button_code(b), down);
+            }
+        }
+    }
+
+    // The stick at (x, y), each from -1 to 1, y up.
+    pub void push(Stick s, f32 x, f32 y) uses io {
+        i32 first = match (s) {
+            LeftStick => 0,
+            RightStick => 2,
+        };
+        if (attached) {
+            unsafe {
+                sdl_c.SDL_SetJoystickVirtualAxis(joystick, first, axis_value(x));
+                sdl_c.SDL_SetJoystickVirtualAxis(joystick, first + 1, axis_value(-y));
+            }
+        }
+    }
+
+    // The trigger pulled from 0 to 1.
+    pub void pull(Trigger t, f32 amount) uses io {
+        i32 axis = match (t) {
+            LeftTrigger => 4,
+            RightTrigger => 5,
+        };
+        if (attached) {
+            unsafe {
+                sdl_c.SDL_SetJoystickVirtualAxis(joystick, axis, axis_value(max(0.0, min(1.0, amount)) * 2.0 - 1.0));
+            }
+        }
+    }
+
+    // Unplugged: the next update of `Pads` sees it leave.
+    pub void detach() uses io {
+        if (attached) {
+            unsafe {
+                sdl_c.SDL_CloseJoystick(joystick);
+                sdl_c.SDL_DetachVirtualJoystick(instance);
+            }
+            attached = false;
+        }
+    }
+}
+
+i16 axis_value(f32 v) {
+    f32 clamped = max(-1.0, min(1.0, v));
+    return clamped < 0.0 ? (clamped * 32768.0) as i16 : (clamped * 32767.0) as i16;
+}
+
+// A virtual gamepad plugged in (after `open`), or none when SDL cannot make one.
+pub Virtual*? plug_virtual(Arena* arena, str name) uses io {
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    unsafe {
+        sdl_c.SDL_VirtualJoystickDesc* desc = scratch.alloc(sdl_c.SDL_VirtualJoystickDesc);
+        desc.version = size_of(sdl_c.SDL_VirtualJoystickDesc) as ui32;
+        desc.type = sdl_c.SDL_JOYSTICK_TYPE_GAMEPAD as ui16;
+        desc.naxes = 6;
+        desc.nbuttons = BUTTONS as ui16;
+        desc.name = name.to_cstr(&scratch);
+        ui32 id = sdl_c.SDL_AttachVirtualJoystick(desc);
+        if (id == 0) {
+            return none;
+        }
+        sdl_c.SDL_Joystick* joystick = sdl_c.SDL_OpenJoystick(id);
+        if (joystick as ui64 == 0) {
+            sdl_c.SDL_DetachVirtualJoystick(id);
+            return none;
+        }
+        return some(arena.new(Virtual, id, joystick));
+    }
+}
+
+// A copy of the C string `text` in `arena`, `limit` bytes at most; "" if it is not UTF-8.
+str copy_cstring(Arena* arena, ui8* text, usize limit) {
+    mut usize length = 0;
+    mut ui8[] bytes = arena.alloc_slice(ui8, 0);
+    unsafe {
+        if (text as ui64 == 0) {
+            return "";
+        }
+        while (length < limit && *(text + length) != 0) {
+            length += 1;
+        }
+        bytes = arena.alloc_slice(ui8, length);
+        for (usize i in 0..length) {
+            bytes[i] = *(text + i);
+        }
+    }
+    return match (str.from_bytes(bytes)) {
+        ok(valid) => valid,
+        err(e) => "",
+    };
+}

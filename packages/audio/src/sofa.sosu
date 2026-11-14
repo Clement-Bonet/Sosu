@@ -1,0 +1,164 @@
+// audio.sofa: head-related impulse responses read from a SOFA file (AES69, the convention
+// SimpleFreeFieldHRIR: the responses of the two ears of a listener, measured from many directions),
+// as an `hrtf.Hrtf` that the mixer hears through (`Mixer.use_hrtf`): the measurements of another
+// dummy head, or of a listener, in place of KEMAR.
+//
+// A SOFA file is a netCDF-4 file, read by audio.hdf5. Its variables `Data.IR` (directions × 2 ears
+// × frames), `Data.SamplingRate` and `SourcePosition` (spherical, in degrees: the azimuth turning
+// left from ahead, as SOFA has it; or cartesian: x ahead, y left, z up) are read, and `Data.Delay`
+// (frames before each response) and `ReceiverPosition` (which ear is first: the left has y > 0)
+// when they are there. Each response is cut `KEEP_MS` after its onset, as KEMAR's compact set is:
+// the tail of a measurement holds the room and the noise more than the head, and it would make the
+// blocks of the mixer longer. The directions may be anywhere on the sphere: `Hrtf.filters` mixes
+// the three nearest.
+import std.io;
+import std.math;
+import audio.audio;
+import audio.hdf5;
+import audio.hrtf;
+
+// The milliseconds kept of each response after its onset: 2.9, 128 frames at 44.1 kHz, as the
+// compact set of KEMAR.
+pub f32 KEEP_MS = 2.9;
+
+hdf5.Variable? variable_named(hdf5.File* f, hdf5.Link[] links, str name) {
+    for (hdf5.Link l in links) {
+        if (l.name == name) {
+            return match (f.variable(l.header)) {
+                ok(v) => some(v),
+                err(e) => none,
+            };
+        }
+    }
+    return none;
+}
+
+// The variable `name`, which the file must hold: why not, when it cannot be read.
+hdf5.Variable!audio.AudioError required(hdf5.File* f, hdf5.Link[] links, str name) {
+    for (hdf5.Link l in links) {
+        if (l.name == name) {
+            return f.variable(l.header);
+        }
+    }
+    return err(audio.AudioError.Unsupported);
+}
+
+bool listed(hdf5.Link[] links, str name) {
+    for (hdf5.Link l in links) {
+        if (l.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+f64 finite(f64 x) {
+    return x == x && x < 1.0e30 && x > -1.0e30 ? x : 0.0;
+}
+
+// The responses of the SOFA file `data` at `rate`, in `arena`.
+pub hrtf.Hrtf*!audio.AudioError decode(keeps Arena* arena, keeps ui8[] data, i32 rate) {
+    if (rate < audio.MIN_RATE || rate > audio.MAX_RATE) {
+        return err(audio.AudioError.Unsupported);
+    }
+    hdf5.File* f = try hdf5.open(arena, data);
+    hdf5.Link[] links = try f.links();
+    if (!listed(links, "Data.IR") || !listed(links, "SourcePosition") || !listed(links, "Data.SamplingRate")) {
+        return err(audio.AudioError.Unsupported);  // not SimpleFreeFieldHRIR
+    }
+    hdf5.Variable ir = try required(f, links, "Data.IR");
+    hdf5.Variable positions = try required(f, links, "SourcePosition");
+    hdf5.Variable rates = try required(f, links, "Data.SamplingRate");
+    if (ir.dims.len != 3 || ir.dims[1] != 2 || ir.dims[0] == 0 || ir.dims[2] < 8) {
+        return err(audio.AudioError.Unsupported);
+    }
+    usize count = ir.dims[0];
+    usize taps = ir.dims[2];
+    if (positions.dims.len != 2 || positions.dims[1] != 3 || positions.dims[0] != count) {
+        return err(audio.AudioError.Damaged);
+    }
+    f64[] measured_rates = try f.floats_of(rates);
+    if (measured_rates.len == 0) {
+        return err(audio.AudioError.Damaged);
+    }
+    f64 measured_rate = finite(measured_rates[0]);
+    if (measured_rate < audio.MIN_RATE as f64 || measured_rate > audio.MAX_RATE as f64) {
+        return err(audio.AudioError.Unsupported);
+    }
+    i32 measured = math.round(measured_rate) as i32;
+    f64[] values = try f.floats_of(ir);
+    f64[] where = try f.floats_of(positions);
+    // which ear is first: the left has y > 0 (SOFA: x ahead, y left, z up)
+    mut bool swapped = false;
+    match (variable_named(f, links, "ReceiverPosition")) {
+        some(v) => {
+            if (v.dims.len >= 2 && v.dims[0] == 2 && v.dims[1] == 3 && v.count() >= 6) {
+                f64[] r = try f.floats_of(v);
+                usize per = r.len / 2;  // 3 or more: x, y, z of each ear
+                swapped = finite(r[1]) < finite(r[per + 1]);
+            }
+        },
+        none => { },
+    }
+    // the frames of delay before each response: one for all, or one for each direction
+    mut f32[] extra = arena.alloc_slice(f32, 2 * count);
+    match (variable_named(f, links, "Data.Delay")) {
+        some(v) => {
+            if (v.dims.len == 2 && v.dims[1] == 2 && (v.dims[0] == 1 || v.dims[0] == count)) {
+                f64[] d = try f.floats_of(v);
+                for (usize i in 0..count) {
+                    usize row = v.dims[0] == 1 ? 0 : i;
+                    for (usize ear in 0..2) {
+                        f64 frames = max(0.0, min(finite(d[2 * row + ear]), taps as f64));
+                        extra[2 * i + (swapped ? 1 - ear : ear)] = frames as f32;
+                    }
+                }
+            }
+        },
+        none => { },
+    }
+    // where each direction is, as audio.hrtf counts: the azimuth turning right, in degrees
+    bool cartesian = match (positions.text_of("Type")) {
+        some(t) => t == "cartesian",
+        none => false,
+    };
+    mut f32[] azimuths = arena.alloc_slice(f32, count);
+    mut f32[] elevations = arena.alloc_slice(f32, count);
+    for (usize i in 0..count) {
+        f64 a = finite(where[3 * i]);
+        f64 b = finite(where[3 * i + 1]);
+        f64 c = finite(where[3 * i + 2]);
+        mut f64 azimuth = a;
+        mut f64 elevation = b;
+        if (cartesian) {
+            azimuth = math.atan2(b, a) * 57.29577951308232;
+            elevation = math.atan2(c, math.sqrt(a * a + b * b)) * 57.29577951308232;
+        }
+        f64 right = math.fmod(540.0 - azimuth, 360.0) - 180.0;  // -180 to 180, turning right
+        azimuths[i] = right as f32;
+        elevations[i] = max(-90.0, min(90.0, elevation)) as f32;
+    }
+    mut f32[] raw = arena.alloc_slice(f32, 2 * count * taps);
+    for (usize i in 0..count) {
+        for (usize ear in 0..2) {
+            usize from = (2 * i + ear) * taps;
+            usize to = (2 * i + (swapped ? 1 - ear : ear)) * taps;
+            for (usize k in 0..taps) {
+                raw[to + k] = finite(values[from + k]) as f32;
+            }
+        }
+    }
+    usize keep = max(8, min(taps, (KEEP_MS * measured as f32 / 1000.0 + 0.5) as usize));
+    return ok(hrtf.measured(arena, measured, rate, taps, keep, elevations, azimuths, raw, extra, false));
+}
+
+// The responses of the SOFA file at `path`, at `rate`.
+pub hrtf.Hrtf*!audio.AudioError load(keeps Arena* arena, str path, i32 rate) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(audio.AudioError.Unreadable);
+        },
+    };
+    return decode(arena, data, rate);
+}

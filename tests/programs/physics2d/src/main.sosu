@@ -1,0 +1,289 @@
+// The package physics2d (spec §8.2), on Box2D: each check prints its name and whether it holds,
+// against expected.txt; the numbers are compared within tolerances, not printed.
+import std.io;
+import math.linear;
+import scene.scene;
+import physics2d.physics2d;
+import render.canvas;
+
+void say(str name, bool holds) uses io {
+    io.print("{}: {}", name, holds ? "ok" : "FAILED");
+}
+
+bool near(f32 a, f32 b, f32 tolerance) {
+    return abs(a - b) <= tolerance;
+}
+
+physics2d.Material layer(ui64 layers, ui64 mask) {
+    return physics2d.Material{ layers: layers, mask: mask };
+}
+
+// A floor whose top is at y = 0, on layer 1.
+physics2d.Body floor(physics2d.World* w) {
+    physics2d.Body ground = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(0.0, -0.5) });
+    ground.box(linear.vec2(50.0, 0.5), physics2d.material());
+    return ground;
+}
+
+// A ball dropped from 10 m, and a box thrown: where they are after `seconds`.
+linear.Vec2[] scenario(Arena* arena, i32 steps) {
+    physics2d.World* w = physics2d.world(arena, physics2d.options());
+    defer w.close();
+    floor(w);
+    physics2d.Body ball = w.body(physics2d.BodyDesc{ position: linear.vec2(0.0, 10.0) });
+    ball.circle(0.5, physics2d.Material{ restitution: 0.3 });
+    physics2d.Body crate = w.body(physics2d.BodyDesc{ position: linear.vec2(-3.0, 4.0), angle: 0.4 });
+    crate.box(linear.vec2(0.5, 0.25), physics2d.material());
+    crate.set_velocity(linear.vec2(2.0, 3.0), 1.5);
+    for (i32 i in 0..steps) {
+        w.step();
+    }
+    mut linear.Vec2[] out = arena.alloc_slice(linear.Vec2, 3);
+    out[0] = ball.position();
+    out[1] = crate.position();
+    out[2] = linear.vec2(crate.angle(), 0.0);
+    return out;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+
+    // a fall without a floor: y = 10 - g t² / 2 after one second (semi-implicit Euler: within 10 cm)
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body ball = w.body(physics2d.BodyDesc{ position: linear.vec2(0.0, 10.0) });
+        ball.circle(0.5, physics2d.material());
+        say("mass of a disc of 0.5 m", near(ball.mass(), 3.14159 * 0.25, 0.01));
+        mut i32 steps = 0;
+        for (i32 i in 0..60) {
+            steps += w.advance(1.0 / 60.0 + 0.00001);
+        }
+        physics2d.State s = ball.state();
+        say("advance runs one step per frame", steps == 60 && w.step_count() == 60);
+        say("free fall for one second", near(s.position.y, 10.0 - 9.81 / 2.0, 0.1) && near(s.velocity.y, -9.81, 0.05));
+        w.close();
+    }
+
+    // the time is stepped by whole steps; the rest waits
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        i32 done = w.advance(0.05);
+        say("advance(0.05) runs 3 steps", done == 3 && near(w.alpha(), 0.0, 0.01));
+        i32 more = w.advance(0.01);
+        say("the rest waits for the next frame", more == 0 && near(w.alpha(), 0.6, 0.01));
+        i32 behind = w.advance(10.0);
+        say("a long pause runs max_steps", behind == 8 && near(w.alpha(), 0.0, 0.001));
+        w.close();
+    }
+
+    // a ball on a floor: a contact begins, then it rests
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body ground = floor(w);
+        physics2d.Body ball = w.body(physics2d.BodyDesc{ position: linear.vec2(0.0, 2.0) });
+        ball.circle(0.5, physics2d.material());
+        mut bool touched = false;
+        for (i32 i in 0..180) {
+            w.advance(1.0 / 60.0 + 0.00001);
+            for (physics2d.Contact c in w.contacts()) {
+                bool pair = (c.a.body().same(ground) && c.b.body().same(ball))
+                        || (c.a.body().same(ball) && c.b.body().same(ground));
+                if (c.began && !c.sensor && pair) {
+                    touched = true;
+                }
+            }
+        }
+        say("a contact began with the floor", touched);
+        say("the ball rests on the floor", near(ball.position().y, 0.5, 0.02) && near(ball.state().velocity.y, 0.0, 0.05));
+        w.close();
+    }
+
+    // a stack of boxes stands, and sleeps
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        floor(w);
+        mut physics2d.Body top = floor(w);
+        for (i32 i in 0..6) {
+            top = w.body(physics2d.BodyDesc{ position: linear.vec2(0.0, 0.5 + i as f32 * 1.0) });
+            top.box(linear.vec2(0.5, 0.5), physics2d.material());
+        }
+        for (i32 i in 0..600) {
+            w.step();
+        }
+        say("the stack stands", near(top.position().y, 5.5, 0.05) && near(top.position().x, 0.0, 0.05));
+        say("the stack sleeps", w.awake() == 0 && !top.awake());
+        top.add_impulse(linear.vec2(1.0, 0.0), 0.0);
+        say("an impulse wakes it", top.awake() && w.awake() > 0);
+        w.close();
+    }
+
+    // rays and layers
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body ground = floor(w);
+        physics2d.Body pole = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(3.0, 1.0) });
+        pole.box(linear.vec2(0.25, 1.0), layer(2, physics2d.ALL));
+        match (w.ray(linear.vec2(0.0, 5.0), linear.vec2(0.0, -5.0), physics2d.ALL)) {
+            some(h) => say("a ray hits the floor", h.body.same(ground) && near(h.point.y, 0.0, 0.001)
+                    && near(h.normal.y, 1.0, 0.001) && near(h.distance, 5.0, 0.001)),
+            none => say("a ray hits the floor", false),
+        }
+        match (w.ray(linear.vec2(0.0, 1.0), linear.vec2(10.0, 1.0), physics2d.ALL)) {
+            some(h) => say("a ray hits the pole", h.body.same(pole) && near(h.point.x, 2.75, 0.001)
+                    && near(h.normal.x, -1.0, 0.001)),
+            none => say("a ray hits the pole", false),
+        }
+        say("a ray on layer 1 misses the pole", match (w.ray(linear.vec2(0.0, 1.0), linear.vec2(10.0, 1.0), 1)) {
+            some(h) => false,
+            none => true,
+        });
+        say("a ray into the void hits nothing", match (w.ray(linear.vec2(0.0, 5.0), linear.vec2(0.0, 50.0), physics2d.ALL)) {
+            some(h) => false,
+            none => true,
+        });
+        physics2d.Shape[] found = w.overlap(&arena, linear.vec2(2.5, 0.5), linear.vec2(3.5, 1.5), 2);
+        say("overlap finds the pole alone on layer 2", found.len == 1 && found[0].body().same(pole));
+        w.close();
+    }
+
+    // a sensor sees the ball go through it; a dead body
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body zone = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(0.0, 3.0) });
+        zone.box(linear.vec2(2.0, 0.5), physics2d.Material{ sensor: true });
+        physics2d.Body ball = w.body(physics2d.BodyDesc{ position: linear.vec2(0.0, 6.0) });
+        ball.circle(0.25, physics2d.material());
+        mut bool entered = false;
+        mut bool left = false;
+        for (i32 i in 0..120) {
+            w.advance(1.0 / 60.0 + 0.00001);
+            for (physics2d.Contact c in w.contacts()) {
+                if (c.sensor && c.a.body().same(zone) && c.b.body().same(ball)) {
+                    if (c.began) {
+                        entered = true;
+                    } else {
+                        left = true;
+                    }
+                }
+            }
+        }
+        say("the ball enters the sensor, then leaves it", entered && left);
+        say("a body is alive", ball.alive());
+        w.remove(ball);
+        say("a removed body is dead", !ball.alive());
+        w.close();
+    }
+
+    // shapes: a polygon, a capsule, a chain
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body ground = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static });
+        mut linear.Vec2[4] valley = [linear.vec2(10.0, 5.0), linear.vec2(10.0, 0.0), linear.vec2(-10.0, 0.0), linear.vec2(-10.0, 5.0)];
+        say("a chain of 4 points", ground.chain(&arena, valley[0..4], false, physics2d.material()));
+        say("a loop of 2 points is refused", !ground.chain(&arena, valley[0..2], true, physics2d.material()));
+        physics2d.Body rock = w.body(physics2d.BodyDesc{ position: linear.vec2(0.0, 3.0) });
+        mut linear.Vec2[3] triangle = [linear.vec2(-0.5, 0.0), linear.vec2(0.5, 0.0), linear.vec2(0.0, 0.8)];
+        bool made = match (rock.polygon(triangle[0..3], 0.0, physics2d.material())) {
+            some(s) => s.body().same(rock),
+            none => false,
+        };
+        say("a polygon", made && near(rock.mass(), 0.4, 0.01));
+        mut linear.Vec2[3] flat = [linear.vec2(0.0, 0.0), linear.vec2(1.0, 0.0), linear.vec2(2.0, 0.0)];
+        say("points on a line make no polygon", match (rock.polygon(flat[0..3], 0.0, physics2d.material())) {
+            some(s) => false,
+            none => true,
+        });
+        physics2d.Body pill = w.body(physics2d.BodyDesc{ position: linear.vec2(3.0, 3.0), fixed_rotation: true });
+        pill.capsule(linear.vec2(0.0, -0.5), linear.vec2(0.0, 0.5), 0.25, physics2d.material());
+        for (i32 i in 0..240) {
+            w.step();
+        }
+        say("they land on the chain", near(rock.position().y, 0.0, 0.05) && near(pill.position().y, 0.75, 0.02));
+        say("a fixed rotation stays", near(pill.angle(), 0.0, 0.0001));
+        w.close();
+    }
+
+    // joints: a pendulum on a hinge, a slider with limits, a weld
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body anchor = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(0.0, 10.0) });
+        physics2d.Body bob = w.body(physics2d.BodyDesc{ position: linear.vec2(2.0, 10.0) });
+        bob.circle(0.25, physics2d.material());
+        w.hinge(anchor, bob, linear.vec2(0.0, 10.0), physics2d.joint_options());
+        physics2d.Body slide = w.body(physics2d.BodyDesc{ position: linear.vec2(5.0, 10.0) });
+        slide.box(linear.vec2(0.25, 0.25), physics2d.material());
+        w.slider(anchor, slide, linear.vec2(5.0, 10.0), linear.vec2(0.0, 1.0),
+                physics2d.JointOptions{ limit: true, lower: -1.0, upper: 0.0 });
+        physics2d.Body left = w.body(physics2d.BodyDesc{ position: linear.vec2(-5.0, 10.0) });
+        left.box(linear.vec2(0.5, 0.25), physics2d.material());
+        physics2d.Body right = w.body(physics2d.BodyDesc{ position: linear.vec2(-4.0, 10.0) });
+        right.box(linear.vec2(0.5, 0.25), physics2d.material());
+        w.weld(left, right, linear.vec2(-4.5, 10.0));
+        mut f32 longest = 0.0;
+        mut f32 shortest = 10.0;
+        for (i32 i in 0..120) {
+            w.step();
+            f32 d = bob.position().distance(linear.vec2(0.0, 10.0));
+            longest = max(longest, d);
+            shortest = min(shortest, d);
+        }
+        say("the pendulum keeps its length", near(longest, 2.0, 0.02) && near(shortest, 2.0, 0.02));
+        say("the pendulum swings below its anchor", bob.position().y < 10.0);
+        say("the slider stops at its limit", near(slide.position().y, 9.0, 0.02) && near(slide.position().x, 5.0, 0.01));
+        say("the welded boxes fall together", near(right.position().x - left.position().x, 1.0, 0.01)
+                && near(left.position().y, right.position().y, 0.01) && left.position().y < 9.0);
+        w.close();
+    }
+
+    // the transforms of the entities follow their bodies
+    {
+        scene.World* world = scene.world(&arena);
+        scene.Table<physics2d.Body>* bodies = world.table<physics2d.Body>();
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body box = w.body(physics2d.BodyDesc{ position: linear.vec2(1.0, 2.0), angle: 0.5, gravity_scale: 0.0 });
+        box.box(linear.vec2(0.5, 0.5), physics2d.material());
+        scene.Entity e = world.spawn();
+        mut linear.Transform t = linear.transform();
+        t.position = linear.vec3(0.0, 0.0, 7.0);
+        world.transforms.set(e, t);
+        bodies.set(e, box);
+        physics2d.sync(world, bodies);
+        bool synced = match (world.transforms.get(e)) {
+            some(got) => near(got.position.x, 1.0, 0.0001) && near(got.position.y, 2.0, 0.0001)
+                    && near(got.position.z, 7.0, 0.0001)
+                    && got.rotation.near(linear.from_axis_angle(linear.vec3(0.0, 0.0, 1.0), 0.5), 0.0001),
+            none => false,
+        };
+        say("sync writes x, y and the turn, and keeps z", synced);
+        w.close();
+    }
+
+    // the debug view: the outlines of a box and a ball on a canvas
+    {
+        physics2d.World* w = physics2d.world(&arena, physics2d.options());
+        physics2d.Body box = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(0.0, 0.0) });
+        box.box(linear.vec2(1.0, 1.0), physics2d.material());
+        physics2d.Body ball = w.body(physics2d.BodyDesc{ kind: physics2d.Kind.Static, position: linear.vec2(3.0, 0.0) });
+        ball.circle(1.0, physics2d.material());
+        mut canvas.Canvas c = canvas.create(&arena, 200, 100);
+        c.clear(canvas.Color{ r: 0, g: 0, b: 0 });
+        usize drawn = w.debug_draw(&c, physics2d.View{ x: 50.0, y: 50.0, scale: 20.0 }, true, false);
+        // the box from (30, 30) to (70, 70), the ball around (110, 50) of radius 20
+        bool edge = c.pixels[30 * 200 + 50] != 0xFF000000 && c.pixels[50 * 200 + 70] != 0xFF000000;
+        bool inside = c.pixels[50 * 200 + 50] == 0xFF000000;
+        bool round = c.pixels[50 * 200 + 130] != 0xFF000000 || c.pixels[50 * 200 + 129] != 0xFF000000;
+        say("the debug view draws the outlines of the shapes", drawn >= 5 && edge && inside && round);
+        w.close();
+    }
+
+    // the same steps from the same inputs give the same world
+    linear.Vec2[] first = scenario(&arena, 300);
+    linear.Vec2[] second = scenario(&arena, 300);
+    mut bool same = true;
+    for (usize i in 0..first.len) {
+        same = same && first[i].x == second[i].x && first[i].y == second[i].y;
+    }
+    say("the same steps twice give the same world", same);
+    return 0;
+}

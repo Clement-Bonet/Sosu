@@ -50,6 +50,12 @@ void bindgen_macro_names(const char *source, size_t length, const char *const *p
 /* The marker that asks the preprocessor for the value of a macro: `__sosu_macro__ "NAME" NAME ;`. */
 #define BINDGEN_PROBE "__sosu_macro__"
 
+/* Each probe is preceded by `#line BINDGEN_PROBE_LINE "BINDGEN_PROBE_FILE"`: a macro whose value
+   comes from `__LINE__`, `__FILE__` or `__FILE_NAME__`, even through other macros
+   (`#define SDL_ASSERT_FILE SDL_FILE`), expands to one of them, and is not a constant. */
+#define BINDGEN_PROBE_LINE "7777777"
+#define BINDGEN_PROBE_FILE "__sosu_probe__"
+
 bool bindgen_generate(const BindgenInput *input, BindgenOutput *output);
 void bindgen_output_free(BindgenOutput *output);
 void bindgen_names_free(BindgenNames *names);

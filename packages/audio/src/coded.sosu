@@ -1,0 +1,446 @@
+// audio.coded: what audio.mp3, audio.flac and audio.stream share: the decoders of dr_libs
+// (native/dr.c) and of stb_vorbis (native/ogg.c) behind one `Decoder`, and the loop that takes all
+// the samples of one into a `Sound`. Not for programs: they import audio.mp3, audio.flac,
+// audio.ogg or audio.stream.
+import std.vec;
+import audio.audio;
+
+extern "C" {
+    ui8* sosu_audio_mp3_open(ui8* data, i32 size, ui8* memory, i32 memory_size, i32* error);
+    i32 sosu_audio_mp3_channels(ui8* decoder);
+    i32 sosu_audio_mp3_rate(ui8* decoder);
+    i32 sosu_audio_mp3_read(ui8* decoder, i32 channels, f32* out, i32 floats);
+    void sosu_audio_mp3_close(ui8* decoder);
+    ui8* sosu_audio_flac_open(ui8* data, i32 size, ui8* memory, i32 memory_size, i32* error);
+    i32 sosu_audio_flac_channels(ui8* decoder);
+    i32 sosu_audio_flac_rate(ui8* decoder);
+    i32 sosu_audio_flac_read(ui8* decoder, i32 channels, f32* out, i32 floats);
+    void sosu_audio_flac_close(ui8* decoder);
+    i32 sosu_audio_mp3_rewind(ui8* decoder);
+    i32 sosu_audio_flac_rewind(ui8* decoder);
+    ui8* sosu_audio_ogg_open(ui8* data, i32 size, ui8* memory, i32 memory_size, i32* error);
+    i32 sosu_audio_ogg_channels(ui8* decoder);
+    i32 sosu_audio_ogg_rate(ui8* decoder);
+    i32 sosu_audio_ogg_read(ui8* decoder, i32 channels, f32* out, i32 floats);
+    i32 sosu_audio_ogg_rewind(ui8* decoder);
+    i64 sosu_audio_ogg_length(ui8* decoder);
+    i32 sosu_audio_ogg_seek(ui8* decoder, i64 frame);
+    i64 sosu_audio_mp3_length(ui8* decoder);
+    i32 sosu_audio_mp3_seek(ui8* decoder, i64 frame);
+    i64 sosu_audio_flac_length(ui8* decoder);
+    i32 sosu_audio_flac_seek(ui8* decoder, i64 frame);
+    void sosu_audio_ogg_close(ui8* decoder);
+}
+
+pub enum Codec {
+    Mp3,
+    Flac,
+    Ogg,
+}
+
+// The codec of a file by its first bytes (`audio.wav` is not decoded here: its samples are there).
+pub Codec? codec_of(ui8[] data) {
+    if (data.len >= 42 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61 && data[3] == 0x43) {
+        return some(Codec.Flac);
+    }
+    if (data.len >= 27 && data[0] == 0x4F && data[1] == 0x67 && data[2] == 0x67 && data[3] == 0x53) {
+        return some(Codec.Ogg);
+    }
+    if (data.len >= 10 && data[0] == 0x49 && data[1] == 0x44 && data[2] == 0x33) {
+        return some(Codec.Mp3);
+    }
+    if (data.len >= 4 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 && (data[1] & 0x06) == 0x02) {
+        return some(Codec.Mp3);
+    }
+    return none;
+}
+
+// A decoder open on the bytes of a file, which must live as long as it.
+pub struct Decoder {
+    pub Codec codec;
+    ui8* handle;
+    pub i32 channels;
+    pub i32 rate;
+}
+
+// What `vorbis_pages` reads of each group of an Ogg file: the stream chosen, or none.
+struct Choice {
+    ui32 serial;
+    bool found;
+}
+
+// The stream read in each group (the pages that begin streams, one after the other, then the
+// pages of all of them, mixed; a chained file starts a new group with each link): the Vorbis stream
+// `track` (from 0), or the first one when the group holds fewer.
+Choice[] choices(Arena* arena, ui8[] data, usize track) {
+    vec.Vec<Choice>* out = vec.new<Choice>(arena);
+    mut usize at = 0;
+    mut bool grouping = false;
+    mut usize count = 0;    // the Vorbis streams of this group
+    mut ui32 first = 0;
+    mut ui32 picked = 0;
+    mut bool open = false;  // a group has started
+    while (data.len - at >= 27 && data[at] == 0x4F && data[at + 1] == 0x67 && data[at + 2] == 0x67 && data[at + 3] == 0x53) {
+        usize length = page_length(data, at);
+        if (length == 0) {
+            break;
+        }
+        if (data[at + 5] & 2 != 0) {
+            if (!grouping) {
+                if (open) {
+                    out.push(Choice{ serial: count > track ? picked : first, found: count > 0 });
+                }
+                open = true;
+                count = 0;
+            }
+            grouping = true;
+            if (begins_vorbis(data, at, length)) {
+                ui32 s = le32(data, at + 14);
+                if (count == 0) {
+                    first = s;
+                }
+                if (count == track) {
+                    picked = s;
+                }
+                count += 1;
+            }
+        } else {
+            grouping = false;
+        }
+        at += length;
+    }
+    if (open) {
+        out.push(Choice{ serial: count > track ? picked : first, found: count > 0 });
+    }
+    return out.items();
+}
+
+// The pages of `data` that `chosen` keeps, copied into `out` when it is long enough to hold them
+// (else only counted); the bytes they take, and whether every page is kept.
+usize kept_pages(ui8[] data, Choice[] chosen, ui8[] out, bool* all) {
+    mut ui8[] o = out;
+    mut usize at = 0;
+    mut usize kept = 0;
+    mut bool grouping = false;
+    mut usize group = 0;
+    mut bool started = false;
+    mut bool every = true;
+    while (data.len - at >= 27 && data[at] == 0x4F && data[at + 1] == 0x67 && data[at + 2] == 0x67 && data[at + 3] == 0x53) {
+        usize length = page_length(data, at);
+        if (length == 0) {
+            break;
+        }
+        if (data[at + 5] & 2 != 0) {
+            if (!grouping) {
+                if (started) {
+                    group += 1;
+                }
+                started = true;
+            }
+            grouping = true;
+        } else {
+            grouping = false;
+        }
+        bool keep = started && group < chosen.len && chosen[group].found && le32(data, at + 14) == chosen[group].serial;
+        if (keep) {
+            if (o.len >= kept + length) {
+                for (usize i in 0..length) {
+                    o[kept + i] = data[at + i];
+                }
+            }
+            kept += length;
+        } else {
+            every = false;
+        }
+        at += length;
+    }
+    *all = every;
+    return kept;
+}
+
+// The pages of the Vorbis stream read of an Ogg file that groups several streams side by side (a
+// video: Theora and its sound; several tracks), in a copy of `arena`: of each group, the Vorbis
+// stream `track` (from 0; the first when a group holds fewer), its pages kept whole, their
+// checksums with them. None when every page is kept (one stream at a time: no copy), or when the
+// file is not made of pages from its start (the decoder says what it is).
+pub ui8[]? vorbis_pages(Arena* arena, ui8[] data, usize track) {
+    Choice[] chosen = choices(arena, data, track);
+    mut bool all = true;
+    usize kept = kept_pages(data, chosen, data[0..0], &all);
+    if (all) {
+        return none;
+    }
+    mut ui8[] out = arena.alloc_slice(ui8, kept);
+    kept_pages(data, chosen, out, &all);
+    return some(out);
+}
+
+// The Vorbis streams side by side in the first group of an Ogg file: its tracks (1 for a file of
+// one stream, 0 for one without Vorbis).
+pub usize tracks(ui8[] data) {
+    mut usize at = 0;
+    mut usize count = 0;
+    while (data.len - at >= 27 && data[at] == 0x4F && data[at + 1] == 0x67 && data[at + 2] == 0x67 && data[at + 3] == 0x53) {
+        usize length = page_length(data, at);
+        if (length == 0 || data[at + 5] & 2 == 0) {
+            break;  // the end of the first group
+        }
+        if (begins_vorbis(data, at, length)) {
+            count += 1;
+        }
+        at += length;
+    }
+    return count;
+}
+
+// The bytes of the Ogg page at `at` (its header, its table of segments, its body), 0 when the page
+// is cut.
+usize page_length(ui8[] data, usize at) {
+    usize segments = data[at + 26] as usize;
+    if (data.len - at - 27 < segments) {
+        return 0;
+    }
+    mut usize body = 0;
+    for (usize i in 0..segments) {
+        body += data[at + 27 + i] as usize;
+    }
+    if (data.len - at - 27 - segments < body) {
+        return 0;
+    }
+    return 27 + segments + body;
+}
+
+// Whether the page at `at` starts with the identification header of Vorbis (1, "vorbis").
+bool begins_vorbis(ui8[] data, usize at, usize length) {
+    usize body = at + 27 + data[at + 26] as usize;
+    if (body + 7 > at + length) {
+        return false;
+    }
+    return data[body] == 0x01 && data[body + 1] == 0x76 && data[body + 2] == 0x6F && data[body + 3] == 0x72
+        && data[body + 4] == 0x62 && data[body + 5] == 0x69 && data[body + 6] == 0x73;
+}
+
+ui32 le32(ui8[] data, usize at) {
+    return data[at] as ui32 | data[at + 1] as ui32 << 8 | data[at + 2] as ui32 << 16 | data[at + 3] as ui32 << 24;
+}
+
+// A decoder of `codec` on `data`, its memory (`MEMORY`) taken from `arena`, which must live as long
+// as it (an Ogg file of several streams side by side is copied there, its Vorbis pages only).
+pub Decoder!audio.AudioError open(Arena* arena, Codec codec, keeps ui8[] given) {
+    return open_track(arena, codec, given, 0);
+}
+
+// As `open`, of an Ogg file of several Vorbis streams side by side, the stream `track` (from 0):
+// `Unsupported` when its first group holds fewer.
+pub Decoder!audio.AudioError open_track(Arena* arena, Codec codec, keeps ui8[] given, usize track) {
+    mut ui8[] data = given;
+    match (codec) {
+        Ogg => {
+            if (track > 0 && track >= tracks(given)) {
+                return err(audio.AudioError.Unsupported);
+            }
+            match (vorbis_pages(arena, given, track)) {
+                some(pages) => {
+                    data = pages;
+                },
+                none => { },
+            }
+        },
+        _ => { },
+    }
+    if (data.len == 0 || data.len > 0x7FFFFFFF) {
+        return err(data.len == 0 ? audio.AudioError.Damaged : audio.AudioError.TooLarge);
+    }
+    mut ui8[] memory = arena.alloc_slice(ui8, MEMORY as usize);
+    mut i32 error = 0;
+    mut ui8* handle = &memory[0];
+    mut i32 channels = 0;
+    mut i32 rate = 0;
+    unsafe {
+        handle = match (codec) {
+            Mp3 => sosu_audio_mp3_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Flac => sosu_audio_flac_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Ogg => sosu_audio_ogg_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+        };
+        if (handle as ui64 == 0) {
+            return err(error == 1 ? audio.AudioError.TooLarge : audio.AudioError.Damaged);
+        }
+        channels = match (codec) {
+            Mp3 => sosu_audio_mp3_channels(handle),
+            Flac => sosu_audio_flac_channels(handle),
+            Ogg => sosu_audio_ogg_channels(handle),
+        };
+        rate = match (codec) {
+            Mp3 => sosu_audio_mp3_rate(handle),
+            Flac => sosu_audio_flac_rate(handle),
+            Ogg => sosu_audio_ogg_rate(handle),
+        };
+    }
+    Decoder d = Decoder{ codec: codec, handle: handle, channels: channels, rate: rate };
+    if (!audio.fits(rate as i64, channels as i64, 0)) {
+        finish(d);
+        return err(audio.AudioError.Unsupported);
+    }
+    return ok(d);
+}
+
+// Up to `out.len / channels` frames decoded into `out`; the frames given, 0 at the end.
+pub usize read_into(Decoder d, f32[] out) {
+    usize c = d.channels as usize;
+    if (out.len < c) {
+        return 0;
+    }
+    i32 floats = min(out.len / c * c, 0x7FFFFFF0) as i32;
+    i32 frames = read(d.codec, d.handle, d.channels, &out[0], floats);
+    return frames <= 0 ? 0 : frames as usize;
+}
+
+// Back to the start of the file; false when the decoder cannot.
+pub bool rewind(Decoder d) {
+    unsafe {
+        i32 done = match (d.codec) {
+            Mp3 => sosu_audio_mp3_rewind(d.handle),
+            Flac => sosu_audio_flac_rewind(d.handle),
+            Ogg => sosu_audio_ogg_rewind(d.handle),
+        };
+        return done != 0;
+    }
+}
+
+// The frames of the file, 0 when the decoder cannot say.
+pub ui64 length(Decoder d) {
+    unsafe {
+        i64 n = match (d.codec) {
+            Mp3 => sosu_audio_mp3_length(d.handle),
+            Flac => sosu_audio_flac_length(d.handle),
+            Ogg => sosu_audio_ogg_length(d.handle),
+        };
+        return n <= 0 ? 0 : n as ui64;
+    }
+}
+
+// To the frame `frame` of the file; false when the decoder cannot (past the end, a damaged file).
+pub bool seek(Decoder d, ui64 frame) {
+    if (frame > 0x7FFFFFFFFFFFFFFF) {
+        return false;
+    }
+    unsafe {
+        i32 done = match (d.codec) {
+            Mp3 => sosu_audio_mp3_seek(d.handle, frame as i64),
+            Flac => sosu_audio_flac_seek(d.handle, frame as i64),
+            Ogg => sosu_audio_ogg_seek(d.handle, frame as i64),
+        };
+        return done != 0;
+    }
+}
+
+// The decoder closed (its memory is the arena's).
+pub void finish(Decoder d) {
+    close(d.codec, d.handle);
+}
+
+// The memory a decoder may take: its state, and the buffers of a frame (FLAC: up to 65 535 samples
+// for each of 8 channels).
+pub i32 MEMORY = 4194304;
+
+void close(Codec codec, ui8* decoder) {
+    unsafe {
+        match (codec) {
+            Mp3 => {
+                sosu_audio_mp3_close(decoder);
+            },
+            Flac => {
+                sosu_audio_flac_close(decoder);
+            },
+            Ogg => {
+                sosu_audio_ogg_close(decoder);
+            },
+        }
+    }
+}
+
+i32 read(Codec codec, ui8* decoder, i32 channels, f32* out, i32 floats) {
+    unsafe {
+        return match (codec) {
+            Mp3 => sosu_audio_mp3_read(decoder, channels, out, floats),
+            Flac => sosu_audio_flac_read(decoder, channels, out, floats),
+            Ogg => sosu_audio_ogg_read(decoder, channels, out, floats),
+        };
+    }
+}
+
+// The sound of `data`, a file of `codec` already recognized by its first bytes.
+pub audio.Sound!audio.AudioError decode(Arena* arena, Codec codec, ui8[] given) {
+    mut ui8[] data = given;
+    match (codec) {
+        Ogg => {
+            match (vorbis_pages(arena, given, 0)) {
+                some(pages) => {
+                    data = pages;
+                },
+                none => { },
+            }
+        },
+        _ => { },
+    }
+    if (data.len == 0 || data.len > 0x7FFFFFFF) {
+        return err(audio.AudioError.TooLarge);
+    }
+    mut ui8[] memory = arena.alloc_slice(ui8, MEMORY as usize);
+    mut i32 error = 0;
+    mut ui8* decoder = &memory[0];
+    unsafe {
+        decoder = match (codec) {
+            Mp3 => sosu_audio_mp3_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Flac => sosu_audio_flac_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+            Ogg => sosu_audio_ogg_open(&data[0] as ui8*, data.len as i32, &memory[0], MEMORY, &error),
+        };
+        if (decoder as ui64 == 0) {
+            return err(error == 1 ? audio.AudioError.TooLarge : audio.AudioError.Damaged);
+        }
+    }
+    defer close(codec, decoder);
+    mut i32 channels = 0;
+    mut i32 rate = 0;
+    unsafe {
+        channels = match (codec) {
+            Mp3 => sosu_audio_mp3_channels(decoder),
+            Flac => sosu_audio_flac_channels(decoder),
+            Ogg => sosu_audio_ogg_channels(decoder),
+        };
+        rate = match (codec) {
+            Mp3 => sosu_audio_mp3_rate(decoder),
+            Flac => sosu_audio_flac_rate(decoder),
+            Ogg => sosu_audio_ogg_rate(decoder),
+        };
+    }
+    if (!audio.fits(rate as i64, channels as i64, 0)) {
+        return err(audio.AudioError.Unsupported);
+    }
+    usize c = channels as usize;
+    usize limit = audio.MAX_SAMPLES as usize / c * c;
+    mut f32[] samples = arena.alloc_slice(f32, 16384 * c);
+    mut usize length = 0;  // the samples decoded
+    while (true) {
+        if (length == samples.len) {
+            if (length >= limit) {
+                return err(audio.AudioError.TooLarge);
+            }
+            mut f32[] larger = arena.alloc_slice(f32, min(samples.len * 2, limit));
+            for (usize i in 0..length) {
+                larger[i] = samples[i];
+            }
+            samples = larger;
+        }
+        usize room = min(samples.len - length, 65536 * c);  // whole frames
+        i32 frames = read(codec, decoder, channels, &samples[length], room as i32);
+        if (frames <= 0) {
+            break;
+        }
+        length += frames as usize * c;
+    }
+    if (length == 0) {
+        return err(audio.AudioError.Damaged);  // a header, and no sound
+    }
+    return ok(audio.Sound{ rate: rate, channels: channels, samples: samples[0..length] });
+}

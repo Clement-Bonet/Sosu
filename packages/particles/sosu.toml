@@ -1,0 +1,17 @@
+# Systems of particles (spec §8.2): simulated on the processor in Sosu, the same with the same
+# seed (particles.particles), and drawn on `gpu` as billboards facing the camera or stretched
+# along their velocity (particles.draw). Its shaders: `sosuc shaders packages/particles --c
+# native/particles_shaders.c`.
+[package]
+name = "particles"
+version = "0.1.0"
+
+[link]
+c = ["native/particles_shaders.c"]
+
+[dependencies]
+math = { path = "../math" }
+gpu = { path = "../gpu" }
+image = { path = "../image" }
+render3d = { path = "../render3d" }  # its Camera
+model = { path = "../model" }

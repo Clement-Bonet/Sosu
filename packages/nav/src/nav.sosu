@@ -1,0 +1,297 @@
+// nav.nav: navigation meshes (spec §8.2). `build` turns the triangles of a level into the surface
+// an agent can walk on, with Recast; `Mesh.path` gives the corners of the shortest way along it and
+// `Mesh.nearest` the closest point, with Detour; a `Crowd` moves agents along their paths while they
+// avoid each other, with DetourCrowd. These are C++ (zlib), taken by [native.recast] and reached
+// through native/nav.cpp; their memory is outside the arenas: `close` releases it. Building takes
+// from milliseconds to seconds: a program builds once and keeps the result (`bytes`, `load`).
+import math.linear;
+
+extern "C" {
+    ui8* sosu_nav_build(f32* xyz, i32 vertices, i32* indices, i32 index_count, f32 radius, f32 height, f32 climb,
+                        f32 slope, f32 cell, f32 cell_height, i32* stage);
+    ui8* sosu_nav_load(ui8* data, i32 size);
+    i32 sosu_nav_size(ui8* mesh);
+    ui8* sosu_nav_data(ui8* mesh);
+    i32 sosu_nav_polygons(ui8* mesh);
+    void sosu_nav_free(ui8* mesh);
+    i32 sosu_nav_nearest(ui8* mesh, f32* p, f32 reach, f32* out);
+    i32 sosu_nav_path(ui8* mesh, f32* from, f32* to, f32 reach, f32* corners, i32 capacity);
+    ui8* sosu_nav_crowd(ui8* mesh, i32 max_agents, f32 max_radius);
+    void sosu_nav_crowd_free(ui8* crowd);
+    i32 sosu_nav_agent(ui8* crowd, f32* p, f32 radius, f32 height, f32 speed, f32 acceleration);
+    void sosu_nav_agent_remove(ui8* crowd, i32 agent);
+    i32 sosu_nav_agent_target(ui8* crowd, i32 agent, f32* p);
+    void sosu_nav_crowd_update(ui8* crowd, f32 dt);
+    i32 sosu_nav_agent_state(ui8* crowd, i32 agent, f32* out);
+}
+
+// What walks on the mesh. The mesh keeps away from walls by `radius`, leaves out what is lower
+// than `height`, and joins what is less than `climb` apart in height (steps) and less steep than
+// `slope` (radians).
+pub struct Agent {
+    pub f32 radius = 0.4;
+    pub f32 height = 1.8;
+    pub f32 climb = 0.4;
+    pub f32 slope = 0.7853982;  // 45 degrees
+    // The size of the voxels across, and up: 0 for radius / 2 and half of that (smaller is finer
+    // and slower to build).
+    pub f32 cell = 0.0;
+    pub f32 cell_height = 0.0;
+}
+
+pub Agent agent() {
+    return Agent{};
+}
+
+pub enum NavError {
+    Invalid,          // no triangles, an index out of the vertices, a size that is not positive, a level too large
+    Failed(str stage),  // a stage of Recast or Detour failed
+    NothingWalkable,  // no triangle the agent can stand on
+    Damaged,          // bytes that are not those of `bytes`
+}
+
+pub str message(NavError e) {
+    return match (e) {
+        Invalid => "nav: invalid triangles or sizes",
+        Failed(stage) => stage,
+        NothingWalkable => "nav: nothing to walk on",
+        Damaged => "nav: these bytes are not a navigation mesh",
+    };
+}
+
+// How far a point may be from the mesh, across, to be brought onto it (twice that up and down).
+pub f32 REACH = 2.0;
+
+usize MAX_CORNERS = 256;
+
+pub class Mesh {
+    ui8* handle;
+    mut bool closed;
+
+    void init(keeps ui8* handle) {
+        self.handle = handle;
+        closed = false;
+    }
+
+    pub usize polygons() {
+        unsafe {
+            return sosu_nav_polygons(handle) as usize;
+        }
+    }
+
+    // The closest point of the mesh to `p`; none when it is farther than `REACH`.
+    pub linear.Vec3? nearest(linear.Vec3 p) {
+        mut f32[3] at = [p.x, p.y, p.z];
+        mut f32[3] out = [0.0, 0.0, 0.0];
+        mut i32 found = 0;
+        unsafe {
+            found = sosu_nav_nearest(handle, &at[0], REACH, &out[0]);
+        }
+        return found == 1 ? some(linear.vec3(out[0], out[1], out[2])) : none;
+    }
+
+    // The corners of the shortest path from `from` to `to` along the mesh, both brought onto it
+    // first (at most 256 corners); none when either is off the mesh or the two are not connected.
+    pub linear.Vec3[]? path(Arena* into, linear.Vec3 from, linear.Vec3 to) {
+        mut f32[3] a = [from.x, from.y, from.z];
+        mut f32[3] b = [to.x, to.y, to.z];
+        mut f32[] corners = into.alloc_slice(f32, MAX_CORNERS * 3);
+        mut i32 count = 0;
+        unsafe {
+            count = sosu_nav_path(handle, &a[0], &b[0], REACH, &corners[0], MAX_CORNERS as i32);
+        }
+        if (count <= 0) {
+            return none;
+        }
+        mut linear.Vec3[] points = into.alloc_slice(linear.Vec3, count as usize);
+        for (usize i in 0..points.len) {
+            points[i] = linear.vec3(corners[3 * i], corners[3 * i + 1], corners[3 * i + 2]);
+        }
+        return some(points);
+    }
+
+    // The data of the mesh, to write in a file and give back to `load`.
+    pub ui8[] bytes(Arena* into) {
+        mut i32 size = 0;
+        unsafe {
+            size = sosu_nav_size(handle);
+        }
+        mut ui8[] out = into.alloc_slice(ui8, size as usize);
+        unsafe {
+            ui8* data = sosu_nav_data(handle);
+            for (usize i in 0..out.len) {
+                out[i] = *(data + i);
+            }
+        }
+        return out;
+    }
+
+    // A crowd of up to `max_agents` agents of `max_radius` at most, on this mesh, which must stay
+    // open while it lives.
+    pub Crowd*? crowd(keeps Arena* arena, i32 max_agents, f32 max_radius) {
+        unsafe {
+            ui8* c = sosu_nav_crowd(handle, max_agents, max_radius);
+            if (c as ui64 == 0) {
+                return none;
+            }
+            return some(arena.new(Crowd, c));
+        }
+    }
+
+    pub void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        unsafe {
+            sosu_nav_free(handle);
+        }
+    }
+}
+
+str stage_name(i32 stage) {
+    if (stage == 2) {
+        return "nav: Recast could not make the voxels";
+    } else if (stage == 3) {
+        return "nav: Recast could not make the regions";
+    } else if (stage == 4) {
+        return "nav: Recast could not make the contours";
+    } else if (stage == 5) {
+        return "nav: Recast could not make the polygons";
+    }
+    return "nav: Detour could not make its data";
+}
+
+// The navigation mesh of the triangles of a level: `indices` name the vertices, three by triangle,
+// counterclockwise seen from above.
+pub Mesh*!NavError build(keeps Arena* arena, linear.Vec3[] vertices, ui32[] indices, Agent a) {
+    if (vertices.len < 3 || indices.len < 3 || indices.len % 3 != 0 || vertices.len > 0x7FFFFFFF) {
+        return err(NavError.Invalid);
+    }
+    mut Arena scratch = Arena.new(vertices.len * 12 + indices.len * 4 + 64);
+    defer scratch.free();
+    mut f32[] xyz = scratch.alloc_slice(f32, vertices.len * 3);
+    for (usize i in 0..vertices.len) {
+        xyz[3 * i] = vertices[i].x;
+        xyz[3 * i + 1] = vertices[i].y;
+        xyz[3 * i + 2] = vertices[i].z;
+    }
+    mut i32[] tris = scratch.alloc_slice(i32, indices.len);
+    for (usize i in 0..indices.len) {
+        if (indices[i] as usize >= vertices.len) {
+            return err(NavError.Invalid);
+        }
+        tris[i] = indices[i] as i32;
+    }
+    f32 cell = a.cell > 0.0 ? a.cell : a.radius / 2.0;
+    f32 cell_height = a.cell_height > 0.0 ? a.cell_height : cell / 2.0;
+    f32 degrees = a.slope * 57.29578;
+    mut i32 stage = 0;
+    unsafe {
+        ui8* m = sosu_nav_build(&xyz[0], vertices.len as i32, &tris[0], tris.len as i32, a.radius, a.height, a.climb,
+                degrees, cell, cell_height, &stage);
+        if (m as ui64 != 0) {
+            return ok(arena.new(Mesh, m));
+        }
+    }
+    if (stage == 1) {
+        return err(NavError.Invalid);
+    } else if (stage == 7) {
+        return err(NavError.NothingWalkable);
+    }
+    return err(NavError.Failed(stage_name(stage)));
+}
+
+// A mesh from the bytes `Mesh.bytes` gave. Only their header is checked: give it the files the
+// program wrote itself, not files of others.
+pub Mesh*!NavError load(keeps Arena* arena, ui8[] data) {
+    if (data.len == 0 || data.len > 0x7FFFFFFF) {
+        return err(NavError.Damaged);
+    }
+    unsafe {
+        ui8* m = sosu_nav_load(&data[0], data.len as i32);
+        if (m as ui64 == 0) {
+            return err(NavError.Damaged);
+        }
+        return ok(arena.new(Mesh, m));
+    }
+}
+
+// An agent of a crowd.
+pub struct CrowdAgent {
+    i32 index;
+}
+
+pub struct AgentDesc {
+    pub f32 radius = 0.4;
+    pub f32 height = 1.8;
+    pub f32 speed = 3.5;         // m/s at most
+    pub f32 acceleration = 8.0;  // m/s²
+}
+
+pub class Crowd {
+    ui8* handle;
+    mut bool closed;
+
+    void init(keeps ui8* handle) {
+        self.handle = handle;
+        closed = false;
+    }
+
+    // An agent at `p` (brought onto the mesh); none when the crowd is full.
+    pub CrowdAgent? add(linear.Vec3 p, AgentDesc d) {
+        mut f32[3] at = [p.x, p.y, p.z];
+        mut i32 index = -1;
+        unsafe {
+            index = sosu_nav_agent(handle, &at[0], d.radius, d.height, d.speed, d.acceleration);
+        }
+        return index < 0 ? none : some(CrowdAgent{ index: index });
+    }
+
+    pub void remove(CrowdAgent agent) {
+        unsafe {
+            sosu_nav_agent_remove(handle, agent.index);
+        }
+    }
+
+    // The agent heads for `p`; false when it is off the mesh.
+    pub bool go_to(CrowdAgent agent, linear.Vec3 p) {
+        mut f32[3] at = [p.x, p.y, p.z];
+        unsafe {
+            return sosu_nav_agent_target(handle, agent.index, &at[0]) == 1;
+        }
+    }
+
+    // The agents moved along their paths for `dt` seconds.
+    pub void update(f32 dt) {
+        unsafe {
+            sosu_nav_crowd_update(handle, dt);
+        }
+    }
+
+    pub linear.Vec3 position(CrowdAgent agent) {
+        mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            sosu_nav_agent_state(handle, agent.index, &v[0]);
+        }
+        return linear.vec3(v[0], v[1], v[2]);
+    }
+
+    pub linear.Vec3 velocity(CrowdAgent agent) {
+        mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            sosu_nav_agent_state(handle, agent.index, &v[0]);
+        }
+        return linear.vec3(v[3], v[4], v[5]);
+    }
+
+    pub void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        unsafe {
+            sosu_nav_crowd_free(handle);
+        }
+    }
+}

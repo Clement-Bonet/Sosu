@@ -11,7 +11,7 @@ static void check_assignable(Body *b, Expr *target);
 static void check_stmt(Body *b, Stmt *stmt);
 
 static const char *const builtin_names[] = { "some", "none", "ok", "err", "assert", "min", "max", "abs", "KB", "MB", "GB",
-                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash", "size_of" };
+                                             "wrapping_add", "wrapping_sub", "wrapping_mul", "hash", "size_of", "offset_of" };
 
 /* ---- Helpers ---- */
 
@@ -1773,6 +1773,12 @@ static Type *check_cast(Body *b, Expr *e) {
         /* the same function with other effects: what a library gives to C, which does not know them */
         allowed = needs_unsafe = true;
         for (size_t i = 0; i < from->as.fn.param_count; i++) allowed &= from->as.fn.params[i] == target->as.fn.params[i];
+    }
+    if (!allowed && from->tag == T_FN && target->tag == T_FN && from->as.fn.param_count == 0 &&
+        from->as.fn.ret->tag == T_VOID) {
+        /* `fn() -> void`, a function of unknown type (C's `void (*)(void)`), as a shared library gives
+           one by its name (platform.library): to the type the program knows it has */
+        allowed = needs_unsafe = true;
     }
     if (!allowed) {
         sema_error_expr(b, "E0339", e, "cannot convert `%s` to `%s`", sema_tn(&n, from), sema_tn(&n, target));

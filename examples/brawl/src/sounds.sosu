@@ -1,0 +1,35 @@
+// brawl.sounds: the sounds of the game, made in code: a hit (a burst of noise over a low thump),
+// a step (a short thump), a swing (a breath of noise). Mono, at 48 kHz.
+import std.math;
+import std.random;
+import audio.audio;
+
+i32 RATE = 48000;
+
+// `seconds` of sound, each sample given by `wave` from its time.
+audio.Sound made(Arena* arena, f64 seconds, f32 low, f32 noise, f32 decay, ui64 seed) {
+    usize frames = (seconds * RATE as f64) as usize;
+    audio.Sound s = audio.create(arena, RATE, 1, frames);
+    mut f32[] out = s.samples;
+    mut random.Rng rng = random.seeded(seed);
+    for (usize i in 0..frames) {
+        f64 t = i as f64 / RATE as f64;
+        f32 envelope = math.exp(-(t * decay as f64)) as f32 * min(1.0, (i as f32) / 96.0);  // 2 ms of attack: no click
+        f32 thump = math.sin(t * low as f64 * 6.283185307 * (1.0 - t * 1.5)) as f32;  // falling in pitch
+        f32 hiss = (rng.unit() as f32 * 2.0 - 1.0) * noise;
+        out[i] = (thump * (1.0 - noise) + hiss) * envelope * 0.9;
+    }
+    return s;
+}
+
+pub audio.Sound hit(Arena* arena) {
+    return made(arena, 0.35, 110.0, 0.55, 14.0, 7);
+}
+
+pub audio.Sound step(Arena* arena) {
+    return made(arena, 0.09, 70.0, 0.25, 45.0, 11);
+}
+
+pub audio.Sound swing(Arena* arena) {
+    return made(arena, 0.18, 300.0, 0.85, 22.0, 13);
+}

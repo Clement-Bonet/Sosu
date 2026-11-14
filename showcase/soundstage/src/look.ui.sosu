@@ -1,0 +1,40 @@
+// The look of the soundstage (spec §10.7): a dark theme, amber for the sound, and the big button
+// that makes it turn.
+
+theme Dusk {
+    accent: #FAB046
+    surface: #2A2B3D
+    color: #D8DAEE
+    field: #16161F
+
+    Window { background: #1B1B29 }
+    Title { color: accent }
+    Button {
+        background: surface
+        radius: 6
+        padding: 10
+        hover { background: #3A3C55 }
+        pressed { background: field }
+        disabled { color: #5C5F7A, background: field }
+    }
+    Slider {
+        accent: #FAB046
+    }
+}
+
+style Big {
+    background: #FAB046
+    color: #16161F
+    radius: 18
+    padding: 12
+    hover { background: #FFC56E }
+    pressed { background: #D9922E }
+}
+
+style Muted {
+    color: #8A8DAA
+}
+
+style Said {
+    color: #FAB046
+}

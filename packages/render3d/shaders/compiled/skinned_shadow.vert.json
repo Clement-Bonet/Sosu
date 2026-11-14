@@ -1,0 +1,1 @@
+{ "samplers": 0, "storage_textures": 0, "storage_buffers": 1, "uniform_buffers": 3, "inputs": [{ "name": "in.var.TEXCOORD0", "type": "float3", "location": 0 }, { "name": "in.var.TEXCOORD3", "type": "float4", "location": 3 }, { "name": "in.var.TEXCOORD4", "type": "float4", "location": 4 }], "outputs": [] }

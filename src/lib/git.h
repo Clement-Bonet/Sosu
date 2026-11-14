@@ -46,13 +46,17 @@ const char *git_check_source(const char *url, const char *ref);
 /* True for a URL that names a folder (not `https://...` nor `user@host:path`). */
 bool git_is_local(const char *url);
 
-/* The folder of a dependency already checked out at `commit`, or NULL. Runs nothing. */
-char *git_cached(const char *deps_dir, const char *name, const char *commit);
+/* The folder of a dependency already checked out at `commit`, or NULL. Runs nothing. `package`:
+   the folder must hold a sosu.toml (a package); else any checkout (a native dependency). */
+char *git_cached(const char *deps_dir, const char *name, const char *commit, bool package);
 
 /* Clones `url` into `deps_dir/<name>-<commit>` and checks out `commit` if it is not NULL,
    else the tag or rev. Nothing is fetched when that folder already holds a package.
    Returns the folder and sets *commit_out; on failure, returns NULL and sets *error. */
 char *git_fetch(const char *deps_dir, const char *name, const char *url, const char *kind, const char *ref,
-                const char *commit, char **commit_out, char **error);
+                const char *commit, bool package, char **commit_out, char **error);
+
+/* The tags of the repository at `url` (`git ls-remote --tags`), or NULL with *error set. */
+char **git_remote_tags(const char *url, size_t *count, char **error);
 
 #endif

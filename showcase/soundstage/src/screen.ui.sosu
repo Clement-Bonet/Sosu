@@ -1,0 +1,56 @@
+// The window of the soundstage (spec §10.2, §10.5): the scene from above on the left; on the right,
+// where the sound is (buttons, then sliders), whether it turns, which sound, and how it is heard.
+// Its state is model.sosu.
+import soundstage.look;
+import soundstage.model;
+
+window Soundstage(keeps model.Model* m) uses io {
+    title: "Soundstage"
+    width: 1180
+    height: 640
+
+    TitleBar(height: 48, gap: 8, padding: 6) {
+        Text("Soundstage")
+    }
+    Row(gap: 18, padding: 18) {
+        Image(m.picture(), size: 520)
+        Column(gap: 12) {
+            Text("Where the sound is", style: look.Muted)
+            Row(gap: 8) {
+                Button("Ahead", on_click: m.ahead)
+                Button("Right", on_click: m.right)
+                Button("Behind", on_click: m.behind)
+                Button("Left", on_click: m.left)
+                Button("Above", on_click: m.above)
+            }
+            Button(m.orbit_label(), on_click: m.toggle_orbit, style: look.Big)
+            Row(gap: 10) {
+                Slider(bind: m.azimuth, min: -180, max: 180, step: 1, width: 300)
+                Text(m.azimuth_text())
+            }
+            Row(gap: 10) {
+                Slider(bind: m.elevation, min: -40, max: 90, step: 1, width: 300)
+                Text(m.elevation_text())
+            }
+            Row(gap: 10) {
+                Slider(bind: m.distance, min: 5, max: 100, step: 1, width: 300)
+                Text(m.distance_text())
+            }
+            Row(gap: 10) {
+                Slider(bind: m.speed, min: 10, max: 360, step: 5, width: 300)
+                Text(m.speed_text())
+            }
+            Row(gap: 10) {
+                Dropdown(bind: m.kind, width: 160) {
+                    Option("Clicks", value: Clicks)
+                    Option("Chime", value: Chime)
+                    Option("Engine", value: Engine)
+                }
+                Checkbox("Headphones (HRTF)", bind: m.headphones)
+            }
+            Text(m.heard_text(), style: look.Said)
+            Text(m.mode_text(), style: look.Muted)
+            Text("Space: turn or stop. Best heard with headphones.", style: look.Muted)
+        }
+    }
+}

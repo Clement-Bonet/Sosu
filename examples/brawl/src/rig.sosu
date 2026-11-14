@@ -1,0 +1,209 @@
+// brawl.rig: a character made in code, as a glTF file would give it: a skinned mesh of boxes on a
+// skeleton of ten joints (hips, spine, head, two arms, two legs of two parts), and its animations
+// (idle, walk, run, strike), with the feet named by events. No file is needed.
+import std.vec;
+import math.linear;
+import math.curve;
+import model.model;
+import image.image;
+
+// A joint: its name, its parent (-1 for the hips), where it is relative to its parent at rest,
+// and the box of the body it carries (its half sizes, and its center from the joint).
+struct Part {
+    str name;
+    i32 parent;
+    linear.Vec3 at;
+    linear.Vec3 half;
+    linear.Vec3 center;
+}
+
+usize HIPS = 0;
+usize SPINE = 1;
+usize HEAD = 2;
+usize ARM_L = 3;
+usize ARM_R = 4;
+usize THIGH_L = 5;
+usize SHIN_L = 6;
+usize THIGH_R = 7;
+usize SHIN_R = 8;
+
+Part[] parts(Arena* arena) {
+    mut Part[] p = arena.alloc_slice(Part, 9);
+    p[0] = Part{ name: "hips", parent: -1, at: linear.vec3(0.0, 0.95, 0.0), half: linear.vec3(0.2, 0.1, 0.12), center: linear.vec3(0.0, 0.0, 0.0) };
+    p[1] = Part{ name: "spine", parent: 0, at: linear.vec3(0.0, 0.1, 0.0), half: linear.vec3(0.22, 0.28, 0.13), center: linear.vec3(0.0, 0.28, 0.0) };
+    p[2] = Part{ name: "head", parent: 1, at: linear.vec3(0.0, 0.6, 0.0), half: linear.vec3(0.13, 0.14, 0.13), center: linear.vec3(0.0, 0.16, 0.0) };
+    p[3] = Part{ name: "arm.l", parent: 1, at: linear.vec3(-0.3, 0.52, 0.0), half: linear.vec3(0.07, 0.3, 0.07), center: linear.vec3(0.0, -0.28, 0.0) };
+    p[4] = Part{ name: "arm.r", parent: 1, at: linear.vec3(0.3, 0.52, 0.0), half: linear.vec3(0.07, 0.3, 0.07), center: linear.vec3(0.0, -0.28, 0.0) };
+    p[5] = Part{ name: "thigh.l", parent: 0, at: linear.vec3(-0.11, -0.08, 0.0), half: linear.vec3(0.08, 0.2, 0.08), center: linear.vec3(0.0, -0.2, 0.0) };
+    p[6] = Part{ name: "shin.l", parent: 5, at: linear.vec3(0.0, -0.42, 0.0), half: linear.vec3(0.07, 0.2, 0.07), center: linear.vec3(0.0, -0.2, 0.0) };
+    p[7] = Part{ name: "thigh.r", parent: 0, at: linear.vec3(0.11, -0.08, 0.0), half: linear.vec3(0.08, 0.2, 0.08), center: linear.vec3(0.0, -0.2, 0.0) };
+    p[8] = Part{ name: "shin.r", parent: 7, at: linear.vec3(0.0, -0.42, 0.0), half: linear.vec3(0.07, 0.2, 0.07), center: linear.vec3(0.0, -0.2, 0.0) };
+    return p;
+}
+
+// Where each joint is at rest, in the space of the character (feet at y = 0).
+linear.Vec3[] rest_positions(Arena* arena, Part[] p) {
+    mut linear.Vec3[] out = arena.alloc_slice(linear.Vec3, p.len);
+    for (usize j in 0..p.len) {
+        out[j] = p[j].parent < 0 ? p[j].at : out[p[j].parent as usize].add(p[j].at);
+    }
+    return out;
+}
+
+// The six faces of a box, added to the vertices and indices, all on `joint`.
+void add_box(vec.Vec<model.Vertex>* vertices, vec.Vec<model.Influence>* influences, vec.Vec<ui32>* indices,
+        linear.Vec3 center, linear.Vec3 half, usize joint) {
+    // each face: its normal, then two axes of its plane, so that (u, v, n) turns counterclockwise
+    mut f32[18] faces = [
+        1.0, 0.0, 0.0, -1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0, -1.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, 0.0, -1.0
+    ];
+    for (usize f in 0..6) {
+        linear.Vec3 n = linear.vec3(faces[f * 3], faces[f * 3 + 1], faces[f * 3 + 2]);
+        linear.Vec3 u = abs(n.y) > 0.5 ? linear.vec3(1.0, 0.0, 0.0) : linear.vec3(0.0, 1.0, 0.0);
+        linear.Vec3 v = n.cross(u);
+        ui32 first = vertices.len() as ui32;
+        mut f32[8] corners = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+        for (usize c in 0..4) {
+            linear.Vec3 local = n.add(u.scale(corners[c * 2])).add(v.scale(corners[c * 2 + 1]));
+            linear.Vec3 p = center.add(local.mul(half));
+            vertices.push(model.Vertex{ position: [p.x, p.y, p.z], normal: [n.x, n.y, n.z], uv: [0.0, 0.0] });
+            influences.push(model.Influence{ joints: [joint as ui16, 0, 0, 0], weights: [1.0, 0.0, 0.0, 0.0] });
+        }
+        // (u, v) seen from the side of n: counterclockwise when u × v = n, else the other way
+        bool forward = u.cross(v).dot(n) > 0.0;
+        indices.push(first);
+        indices.push(forward ? first + 1 : first + 2);
+        indices.push(forward ? first + 2 : first + 1);
+        indices.push(first);
+        indices.push(forward ? first + 2 : first + 3);
+        indices.push(forward ? first + 3 : first + 2);
+    }
+}
+
+f32[] keys_of(Arena* arena, f32[] values) {
+    mut f32[] out = arena.alloc_slice(f32, values.len);
+    for (usize i in 0..values.len) {
+        out[i] = values[i];
+    }
+    return out;
+}
+
+// Turns about x of a joint at the times, as a channel of rotation.
+model.Channel swing(Arena* arena, usize node, f32[] times, f32[] angles) {
+    mut f32[] values = arena.alloc_slice(f32, angles.len * 4);
+    for (usize k in 0..angles.len) {
+        linear.Quat q = linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), angles[k]);
+        values[k * 4] = q.x;
+        values[k * 4 + 1] = q.y;
+        values[k * 4 + 2] = q.z;
+        values[k * 4 + 3] = q.w;
+    }
+    return model.Channel{ node: node, target: model.Target.Rotation, mode: curve.Interpolation.Linear,
+            times: keys_of(arena, times), values: values };
+}
+
+// A stride of `seconds`: the legs and arms swing by `reach` (radians), the knees bend, the hips bob.
+model.Animation stride(Arena* arena, str name, f32 seconds, f32 reach, Part[] p) {
+    mut f32[5] t = [0.0, seconds * 0.25, seconds * 0.5, seconds * 0.75, seconds];
+    mut f32[5] forth = [reach, 0.0, -reach, 0.0, reach];
+    mut f32[5] back = [-reach, 0.0, reach, 0.0, -reach];
+    mut f32[5] knee_l = [0.0, -reach * 1.2, 0.0, 0.0, 0.0];  // the foot goes back: +z
+    mut f32[5] knee_r = [0.0, 0.0, 0.0, -reach * 1.2, 0.0];
+    vec.Vec<model.Channel>* channels = vec.new<model.Channel>(arena);
+    // node n + 1 is the joint n (node 0 is the body)
+    channels.push(swing(arena, THIGH_L + 1, t[0..5], forth[0..5]));
+    channels.push(swing(arena, THIGH_R + 1, t[0..5], back[0..5]));
+    channels.push(swing(arena, SHIN_L + 1, t[0..5], knee_l[0..5]));
+    channels.push(swing(arena, SHIN_R + 1, t[0..5], knee_r[0..5]));
+    channels.push(swing(arena, ARM_L + 1, t[0..5], back[0..5]));
+    channels.push(swing(arena, ARM_R + 1, t[0..5], forth[0..5]));
+    // the hips lowest when both feet are down
+    f32 y = p[HIPS].at.y;
+    mut f32[15] bob = [0.0, y - 0.04, 0.0, 0.0, y + 0.02, 0.0, 0.0, y - 0.04, 0.0, 0.0, y + 0.02, 0.0, 0.0, y - 0.04, 0.0];
+    channels.push(model.Channel{ node: HIPS + 1, target: model.Target.Translation, mode: curve.Interpolation.Linear,
+            times: keys_of(arena, t[0..5]), values: keys_of(arena, bob[0..15]) });
+    return model.Animation{ name: name, channels: channels.items(), duration: seconds };
+}
+
+// The character, its body of `color`.
+pub model.Model character(Arena* arena, f32[4] color) {
+    Part[] p = parts(arena);
+    linear.Vec3[] rest = rest_positions(arena, p);
+    vec.Vec<model.Vertex>* vertices = vec.new<model.Vertex>(arena);
+    vec.Vec<model.Influence>* influences = vec.new<model.Influence>(arena);
+    vec.Vec<ui32>* indices = vec.new<ui32>(arena);
+    for (usize j in 0..p.len) {
+        // the mesh is at rest in the space of the character: the box around its joint
+        add_box(vertices, influences, indices, rest[j].add(p[j].center), p[j].half, j);
+    }
+    mut model.Material[] materials = arena.alloc_slice(model.Material, 1);
+    materials[0] = model.default_material("body");
+    materials[0].base_color = color;
+    materials[0].roughness = 0.6;
+    materials[0].metallic = 0.0;
+    mut model.Mesh[] meshes = arena.alloc_slice(model.Mesh, 1);
+    meshes[0] = model.Mesh{ name: "body", vertices: vertices.items(), indices: indices.items(), material: some(0),
+            bounds: model.bounds_of(vertices.items()), influences: some(influences.items()) };
+    // node 0: the body, which holds the mesh; node j + 1: the joint j
+    mut model.Node[] nodes = arena.alloc_slice(model.Node, p.len + 1);
+    mut usize[] body_meshes = arena.alloc_slice(usize, 1);
+    body_meshes[0] = 0;
+    nodes[0] = model.Node{ name: "body", local: linear.identity4(), meshes: body_meshes, children: arena.alloc_slice(usize, 0),
+            skin: some(0) };
+    for (usize j in 0..p.len) {
+        vec.Vec<usize>* children = vec.new<usize>(arena);
+        for (usize k in 0..p.len) {
+            if (p[k].parent == j as i32) {
+                children.push(k + 1);
+            }
+        }
+        linear.Transform t = linear.Transform{ position: p[j].at, rotation: linear.identity_quat(), scale: linear.vec3(1.0, 1.0, 1.0) };
+        nodes[j + 1] = model.Node{ name: p[j].name, local: t.to_mat4(), meshes: arena.alloc_slice(usize, 0),
+                children: children.items(), transform: some(t) };
+    }
+    mut usize[] joints = arena.alloc_slice(usize, p.len);
+    mut linear.Mat4[] binds = arena.alloc_slice(linear.Mat4, p.len);
+    for (usize j in 0..p.len) {
+        joints[j] = j + 1;
+        binds[j] = linear.translation(rest[j].neg());
+    }
+    mut model.Skin[] skins = arena.alloc_slice(model.Skin, 1);
+    skins[0] = model.Skin{ name: "rig", joints: joints, inverse_binds: binds };
+
+    vec.Vec<model.Animation>* animations = vec.new<model.Animation>(arena);
+    // idle: breathing, the arms a little apart
+    mut f32[3] t = [0.0, 1.0, 2.0];
+    mut f32[3] breathe = [0.0, 0.05, 0.0];
+    mut f32[3] rest_arm = [0.05, 0.12, 0.05];
+    vec.Vec<model.Channel>* idle = vec.new<model.Channel>(arena);
+    idle.push(swing(arena, SPINE + 1, t[0..3], breathe[0..3]));
+    idle.push(swing(arena, ARM_L + 1, t[0..3], rest_arm[0..3]));
+    idle.push(swing(arena, ARM_R + 1, t[0..3], rest_arm[0..3]));
+    animations.push(model.Animation{ name: "idle", channels: idle.items(), duration: 2.0 });
+    animations.push(stride(arena, "walk", 1.0, 0.5, p));
+    animations.push(stride(arena, "run", 0.6, 0.9, p));
+    // strike: the right arm raised forward (the character faces -z: a turn of +x), then down, the
+    // spine leaning back, then forward
+    mut f32[4] st = [0.0, 0.12, 0.25, 0.45];
+    mut f32[4] blow = [0.0, 2.4, 1.2, 0.0];
+    mut f32[4] lean = [0.0, 0.15, -0.25, 0.0];
+    vec.Vec<model.Channel>* strike = vec.new<model.Channel>(arena);
+    strike.push(swing(arena, ARM_R + 1, st[0..4], blow[0..4]));
+    strike.push(swing(arena, SPINE + 1, st[0..4], lean[0..4]));
+    animations.push(model.Animation{ name: "strike", channels: strike.items(), duration: 0.45 });
+
+    mut usize[] roots = arena.alloc_slice(usize, 2);
+    roots[0] = 0;
+    roots[1] = 1;
+    return model.Model{
+        meshes: meshes,
+        materials: materials,
+        images: arena.alloc_slice(image.Image, 0),
+        nodes: nodes,
+        roots: roots,
+        skins: some(skins),
+        animations: some(animations.items())
+    };
+}

@@ -1,0 +1,8 @@
+particles drawn: 80
+a cloud in the open: ok
+a cloud behind the cube is hidden: ok
+gpu: 256 particles, as the processor moves them: ok
+gpu: on the floor: ok
+gpu: through the cube without the depth: ok
+gpu: bounced off the cube with the depth: ok
+gpu: a cloud drawn from its buffer: ok

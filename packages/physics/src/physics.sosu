@@ -1,0 +1,793 @@
+// physics.physics: rigid bodies in 3D (spec §8.2), on Jolt Physics (C++, MIT), taken from its
+// repository by [native.jolt] and reached through native/physics.cpp. A `World` steps at a fixed
+// rate: `advance(dt)` runs as many steps as the time given holds and keeps the rest, so that the
+// simulation does not depend on the frame rate. Bodies are handles; shapes are made once and given
+// to as many bodies as need them. Contacts are read after the steps, never called back. Jolt
+// allocates through the C library, not in arenas: `close` releases the world and its bodies, and
+// `Shape.release` a shape (the bodies that use it keep it). Units are meters, kilograms and
+// seconds, angles in radians, y up. The world steps in the thread of the program.
+import std.vec;
+import math.linear;
+import scene.scene;
+
+extern "C" {
+    ui8* sosu_jolt_world(f32 gx, f32 gy, f32 gz, ui32 max_bodies);
+    void sosu_jolt_world_free(ui8* world);
+    void sosu_jolt_set_gravity(ui8* world, f32 gx, f32 gy, f32 gz);
+    i32 sosu_jolt_step(ui8* world, f32 dt, i32 collision_steps);
+    void sosu_jolt_optimize(ui8* world);
+    i32 sosu_jolt_active_count(ui8* world);
+    i32 sosu_jolt_events(ui8* world);
+    i32 sosu_jolt_event(ui8* world, i32 i, ui32* a, ui32* b, f32* point_normal);
+    ui8* sosu_jolt_box(f32 hx, f32 hy, f32 hz, f32 density);
+    ui8* sosu_jolt_sphere(f32 radius, f32 density);
+    ui8* sosu_jolt_capsule(f32 half_height, f32 radius, f32 density);
+    ui8* sosu_jolt_cylinder(f32 half_height, f32 radius, f32 density);
+    ui8* sosu_jolt_convex(f32* xyz, i32 count, f32 density);
+    ui8* sosu_jolt_mesh(f32* xyz, i32 vertices, ui32* indices, i32 index_count);
+    ui8* sosu_jolt_heightfield(f32* heights, ui32 size, f32 cell, f32 ox, f32 oy, f32 oz);
+    ui8* sosu_jolt_compound_new();
+    void sosu_jolt_compound_add(ui8* compound, ui8* shape, f32 px, f32 py, f32 pz, f32 qx, f32 qy, f32 qz, f32 qw);
+    ui8* sosu_jolt_compound_build(ui8* compound);
+    void sosu_jolt_shape_release(ui8* shape);
+    ui32 sosu_jolt_body(ui8* world, ui8* shape, i32 kind, f32* pose, f32 mass, f32 friction, f32 restitution,
+                        f32 damping, f32 angular_damping, f32 gravity_factor, ui32 layers, ui32 mask, bool sensor,
+                        bool bullet);
+    bool sosu_jolt_body_valid(ui8* world, ui32 body);
+    void sosu_jolt_body_remove(ui8* world, ui32 body);
+    void sosu_jolt_body_state(ui8* world, ui32 body, f32* out);
+    f32 sosu_jolt_body_mass(ui8* world, ui32 body);
+    bool sosu_jolt_body_active(ui8* world, ui32 body);
+    void sosu_jolt_body_set_active(ui8* world, ui32 body, bool active);
+    void sosu_jolt_body_set_velocity(ui8* world, ui32 body, f32 vx, f32 vy, f32 vz, f32 ax, f32 ay, f32 az);
+    void sosu_jolt_body_force(ui8* world, ui32 body, f32 fx, f32 fy, f32 fz, f32 tx, f32 ty, f32 tz);
+    void sosu_jolt_body_impulse(ui8* world, ui32 body, f32 ix, f32 iy, f32 iz, f32 ax, f32 ay, f32 az);
+    void sosu_jolt_body_teleport(ui8* world, ui32 body, f32* pose);
+    void sosu_jolt_body_move(ui8* world, ui32 body, f32* pose, f32 dt);
+    ui32 sosu_jolt_ray(ui8* world, f32 ox, f32 oy, f32 oz, f32 dx, f32 dy, f32 dz, ui32 mask, f32* out);
+    i32 sosu_jolt_ray_all(ui8* world, f32 ox, f32 oy, f32 oz, f32 dx, f32 dy, f32 dz, ui32 mask, ui32* bodies,
+                          f32* fractions, i32 capacity);
+    i32 sosu_jolt_overlap(ui8* world, ui8* shape, f32* pose, ui32 mask, ui32* bodies, i32 capacity);
+    ui32 sosu_jolt_sphere_cast(ui8* world, f32 radius, f32 ox, f32 oy, f32 oz, f32 dx, f32 dy, f32 dz, ui32 mask,
+                               f32* out);
+    ui8* sosu_jolt_character(ui8* world, f32 height, f32 radius, f32 px, f32 py, f32 pz, f32 max_slope, f32 step_up,
+                             ui32 layers, ui32 mask);
+    void sosu_jolt_character_free(ui8* character);
+    void sosu_jolt_character_update(ui8* world, ui8* character, f32 dt, f32 vx, f32 vy, f32 vz);
+    i32 sosu_jolt_character_state(ui8* character, f32* out);
+    void sosu_jolt_character_teleport(ui8* character, f32 px, f32 py, f32 pz);
+    void sosu_jolt_threads(ui8* world, i32 threads);
+    ui32 sosu_jolt_joint(ui8* world, i32 kind, ui32 a, ui32 b, f32* anchor, f32* other, f32* axis, bool limit, f32 lower,
+                         f32 upper, bool motor, f32 speed, f32 strength);
+    void sosu_jolt_joint_remove(ui8* world, ui32 joint);
+    bool sosu_jolt_joint_valid(ui8* world, ui32 joint);
+    f32 sosu_jolt_joint_position(ui8* world, ui32 joint);
+    void sosu_jolt_joint_motor(ui8* world, ui32 joint, f32 speed);
+}
+
+ui32 NONE = 0xFFFFFFFF;
+
+// Every layer: what a body collides with, and a query sees, by default.
+pub ui32 ALL = 0xFFFFFFFF;
+
+pub struct Options {
+    pub linear.Vec3 gravity = linear.Vec3{ x: 0.0, y: -9.81, z: 0.0 };
+    pub f32 step = 0.016666668;  // 1/60 s
+    pub i32 collision_steps = 1;  // of each step: more for very fast bodies
+    pub i32 max_steps = 8;        // at most, in one `advance`: a long pause does not freeze the program
+    pub ui32 max_bodies = 4096;
+}
+
+pub Options options() {
+    return Options{};
+}
+
+pub enum Kind {
+    Static,     // never moves: floors, walls, levels
+    Dynamic,    // moved by forces and contacts
+    Kinematic,  // moved by the program (`move_to`, a velocity); pushes the dynamic bodies
+}
+
+// A shape, kept by Jolt with a count of its users: the bodies made with it keep it after
+// `release`. `valid` is false when its sizes or points made none.
+pub struct Shape {
+    ui64 handle;  // the pointer of Jolt's shape, 0 for none
+
+    pub bool valid() {
+        return handle != 0;
+    }
+
+    pub void release() {
+        if (handle != 0) {
+            unsafe {
+                sosu_jolt_shape_release(handle as ui8*);
+            }
+        }
+    }
+}
+
+Shape shape_of(ui8* p) {
+    unsafe {
+        return Shape{ handle: p as ui64 };
+    }
+}
+
+// Shapes of a density in kg per m³ (1000, water, by default): the mass of a dynamic body comes
+// from its shape, unless its `BodyDesc.mass` is given.
+pub f32 DENSITY = 1000.0;
+
+// A box of half sizes `half`, centered on its body.
+pub Shape box(linear.Vec3 half) {
+    unsafe {
+        return shape_of(sosu_jolt_box(half.x, half.y, half.z, DENSITY));
+    }
+}
+
+pub Shape sphere(f32 radius) {
+    unsafe {
+        return shape_of(sosu_jolt_sphere(radius, DENSITY));
+    }
+}
+
+// Along y: a cylinder of `half_height`, ended by two half spheres of `radius`.
+pub Shape capsule(f32 half_height, f32 radius) {
+    unsafe {
+        return shape_of(sosu_jolt_capsule(half_height, radius, DENSITY));
+    }
+}
+
+// Along y.
+pub Shape cylinder(f32 half_height, f32 radius) {
+    unsafe {
+        return shape_of(sosu_jolt_cylinder(half_height, radius, DENSITY));
+    }
+}
+
+// The convex hull of the points (4 at least, not flat).
+pub Shape convex(Arena* scratch, linear.Vec3[] points) {
+    if (points.len < 4) {
+        return Shape{ handle: 0 };
+    }
+    mut f32[] xyz = scratch.alloc_slice(f32, points.len * 3);
+    for (usize i in 0..points.len) {
+        xyz[3 * i] = points[i].x;
+        xyz[3 * i + 1] = points[i].y;
+        xyz[3 * i + 2] = points[i].z;
+    }
+    unsafe {
+        return shape_of(sosu_jolt_convex(&xyz[0], points.len as i32, DENSITY));
+    }
+}
+
+// Triangles: the vertices named by `indices`, three by triangle, counterclockwise seen from their
+// front. For static bodies only (a dynamic body of a mesh is refused).
+pub Shape mesh(Arena* scratch, linear.Vec3[] vertices, ui32[] indices) {
+    if (vertices.len < 3 || indices.len < 3 || indices.len % 3 != 0) {
+        return Shape{ handle: 0 };
+    }
+    mut f32[] xyz = scratch.alloc_slice(f32, vertices.len * 3);
+    for (usize i in 0..vertices.len) {
+        xyz[3 * i] = vertices[i].x;
+        xyz[3 * i + 1] = vertices[i].y;
+        xyz[3 * i + 2] = vertices[i].z;
+    }
+    mut ui32[] copy = scratch.alloc_slice(ui32, indices.len);
+    for (usize i in 0..indices.len) {
+        copy[i] = indices[i];
+    }
+    unsafe {
+        return shape_of(sosu_jolt_mesh(&xyz[0], vertices.len as i32, &copy[0], indices.len as i32));
+    }
+}
+
+// A ground of `size` by `size` heights (an even number, 4 at least; rows along z, then x), `cell`
+// meters apart, its first corner at `corner`.
+pub Shape heightfield(Arena* scratch, f32[] heights, ui32 size, f32 cell, linear.Vec3 corner) {
+    if (size < 4 || heights.len != (size * size) as usize) {
+        return Shape{ handle: 0 };
+    }
+    mut f32[] copy = scratch.alloc_slice(f32, heights.len);
+    for (usize i in 0..heights.len) {
+        copy[i] = heights[i];
+    }
+    unsafe {
+        return shape_of(sosu_jolt_heightfield(&copy[0], size, cell, corner.x, corner.y, corner.z));
+    }
+}
+
+// A part of a compound: a shape placed in the frame of the body.
+pub struct Part {
+    pub Shape shape;
+    pub linear.Vec3 position;
+    pub linear.Quat rotation;
+}
+
+// Shapes put together, each at its place: a chair, a car.
+pub Shape compound(Part[] parts) {
+    unsafe {
+        ui8* c = sosu_jolt_compound_new();
+        for (Part p in parts) {
+            if (p.shape.valid()) {
+                sosu_jolt_compound_add(c, p.shape.handle as ui8*, p.position.x, p.position.y, p.position.z, p.rotation.x,
+                        p.rotation.y, p.rotation.z, p.rotation.w);
+            }
+        }
+        return shape_of(sosu_jolt_compound_build(c));
+    }
+}
+
+pub struct BodyDesc {
+    pub Kind kind = Kind.Dynamic;
+    pub Shape shape;
+    pub linear.Vec3 position = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
+    pub linear.Quat rotation = linear.Quat{ x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+    pub f32 mass = 0.0;  // kg; 0: from the shape and its density
+    pub f32 friction = 0.2;
+    pub f32 restitution = 0.0;  // 0: no bounce, 1: all of it
+    pub f32 damping = 0.05;     // of the velocity, per second
+    pub f32 angular_damping = 0.05;
+    pub f32 gravity_scale = 1.0;
+    // The layers of the body (bits of 32), and those it collides with: two bodies collide when
+    // each one's `mask` has a layer of the other.
+    pub ui32 layers = 1;
+    pub ui32 mask = 0xFFFFFFFF;
+    pub bool sensor = false;  // detects what enters and leaves it, without contact
+    pub bool bullet = false;  // a fast body, swept between steps
+}
+
+// The position, rotation and velocities of a body.
+pub struct State {
+    pub linear.Vec3 position;
+    pub linear.Quat rotation;
+    pub linear.Vec3 velocity;
+    pub linear.Vec3 spin;  // radians per second, around its axis
+}
+
+f32[7] pose(linear.Vec3 p, linear.Quat q) {
+    return [p.x, p.y, p.z, q.x, q.y, q.z, q.w];
+}
+
+// A body of a world: a handle, dead once removed (`alive`).
+pub struct Body {
+    ui64 world;  // the pointer of the world, kept as a number: a Body is a plain value
+    ui32 id;
+
+    pub bool same(Body o) {
+        return id == o.id;
+    }
+
+    pub bool alive() {
+        unsafe {
+            return sosu_jolt_body_valid(world as ui8*, id);
+        }
+    }
+
+    pub State state() {
+        mut f32[13] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            sosu_jolt_body_state(world as ui8*, id, &v[0]);
+        }
+        return State{
+            position: linear.vec3(v[0], v[1], v[2]),
+            rotation: linear.Quat{ x: v[3], y: v[4], z: v[5], w: v[6] },
+            velocity: linear.vec3(v[7], v[8], v[9]),
+            spin: linear.vec3(v[10], v[11], v[12])
+        };
+    }
+
+    pub linear.Vec3 position() {
+        return state().position;
+    }
+
+    // 0 for a static or kinematic body.
+    pub f32 mass() {
+        unsafe {
+            return sosu_jolt_body_mass(world as ui8*, id);
+        }
+    }
+
+    // False once it sleeps: a body at rest stops being simulated until something touches it.
+    pub bool awake() {
+        unsafe {
+            return sosu_jolt_body_active(world as ui8*, id);
+        }
+    }
+
+    pub void wake() {
+        unsafe {
+            sosu_jolt_body_set_active(world as ui8*, id, true);
+        }
+    }
+
+    pub void sleep() {
+        unsafe {
+            sosu_jolt_body_set_active(world as ui8*, id, false);
+        }
+    }
+
+    pub void set_velocity(linear.Vec3 v, linear.Vec3 spin) {
+        unsafe {
+            sosu_jolt_body_set_velocity(world as ui8*, id, v.x, v.y, v.z, spin.x, spin.y, spin.z);
+        }
+    }
+
+    // A force at the center (N) and a torque (N·m), for the next step.
+    pub void add_force(linear.Vec3 f, linear.Vec3 torque) {
+        unsafe {
+            sosu_jolt_body_force(world as ui8*, id, f.x, f.y, f.z, torque.x, torque.y, torque.z);
+        }
+    }
+
+    // A change of momentum at once (N·s), and of angular momentum.
+    pub void add_impulse(linear.Vec3 i, linear.Vec3 angular) {
+        unsafe {
+            sosu_jolt_body_impulse(world as ui8*, id, i.x, i.y, i.z, angular.x, angular.y, angular.z);
+        }
+    }
+
+    // Moved there at once, without crossing what is between.
+    pub void teleport(linear.Vec3 p, linear.Quat q) {
+        mut f32[7] at = pose(p, q);
+        unsafe {
+            sosu_jolt_body_teleport(world as ui8*, id, &at[0]);
+        }
+    }
+
+    // A kinematic body moved to `p` and `q` during the next `dt` seconds, pushing what it meets.
+    pub void move_to(linear.Vec3 p, linear.Quat q, f32 dt) {
+        mut f32[7] at = pose(p, q);
+        unsafe {
+            sosu_jolt_body_move(world as ui8*, id, &at[0], dt);
+        }
+    }
+}
+
+// A joint between two bodies: a handle, dead once removed (or once one of its bodies is).
+pub struct Joint {
+    ui64 world;
+    ui32 id;
+
+    pub bool alive() {
+        unsafe {
+            return sosu_jolt_joint_valid(world as ui8*, id);
+        }
+    }
+
+    // The angle of a hinge (radians, 0 where it was made), or the translation of a slider (m); 0
+    // for the others.
+    pub f32 position() {
+        unsafe {
+            return sosu_jolt_joint_position(world as ui8*, id);
+        }
+    }
+
+    // The speed of the motor of a hinge (rad/s) or a slider (m/s), from now.
+    pub void set_motor(f32 speed) {
+        unsafe {
+            sosu_jolt_joint_motor(world as ui8*, id, speed);
+        }
+    }
+}
+
+// The limits and the motor of a joint: angles for a hinge (`lower` from -π to 0, `upper` from 0 to
+// π), translations for a slider, lengths for a distance.
+pub struct JointOptions {
+    pub bool limit = false;
+    pub f32 lower = 0.0;
+    pub f32 upper = 0.0;
+    pub bool motor = false;
+    pub f32 speed = 0.0;        // rad/s or m/s
+    pub f32 strength = 1000.0;  // N m or N, at most
+}
+
+pub JointOptions joint_options() {
+    return JointOptions{};
+}
+
+// A contact that began or ended during the last `advance`, or a body that entered or left a
+// sensor. `point` and `normal` (from `a` toward `b`) are given when it began.
+pub struct Contact {
+    pub Body a;
+    pub Body b;
+    pub bool began;
+    pub linear.Vec3 point;
+    pub linear.Vec3 normal;
+}
+
+// What a ray or a cast touched first.
+pub struct Hit {
+    pub Body body;
+    pub linear.Vec3 point;
+    pub linear.Vec3 normal;
+    pub f32 distance;
+}
+
+// A character: a capsule standing on its feet, walking, climbing steps and sliding along walls,
+// moved by the program each frame (`update`). It is not a body: rays do not see it.
+pub struct CharacterDesc {
+    pub f32 height = 1.8;
+    pub f32 radius = 0.3;
+    pub linear.Vec3 position = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };  // of its feet
+    pub f32 max_slope = 0.87266463;  // 50 degrees: what it can walk up
+    pub f32 step = 0.4;              // the highest step it climbs, and steps down
+    pub ui32 layers = 1;
+    pub ui32 mask = 0xFFFFFFFF;
+}
+
+pub class Character {
+    ui8* world;
+    ui8* handle;
+    mut bool closed;
+
+    void init(keeps ui8* world, keeps ui8* handle) {
+        self.world = world;
+        self.handle = handle;
+        closed = false;
+    }
+
+    // One frame of `dt` seconds, walking at `velocity` (x and z); a positive y jumps, from the
+    // ground only. Gravity is the world's.
+    pub void update(f32 dt, linear.Vec3 velocity) {
+        unsafe {
+            sosu_jolt_character_update(world, handle, dt, velocity.x, velocity.y, velocity.z);
+        }
+    }
+
+    // Its feet.
+    pub linear.Vec3 position() {
+        mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            sosu_jolt_character_state(handle, &v[0]);
+        }
+        return linear.vec3(v[0], v[1], v[2]);
+    }
+
+    pub linear.Vec3 velocity() {
+        mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            sosu_jolt_character_state(handle, &v[0]);
+        }
+        return linear.vec3(v[3], v[4], v[5]);
+    }
+
+    pub bool on_ground() {
+        mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        unsafe {
+            return sosu_jolt_character_state(handle, &v[0]) == 1;
+        }
+    }
+
+    pub void teleport(linear.Vec3 feet) {
+        unsafe {
+            sosu_jolt_character_teleport(handle, feet.x, feet.y, feet.z);
+        }
+    }
+
+    pub void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        unsafe {
+            sosu_jolt_character_free(handle);
+        }
+    }
+}
+
+usize FOUND = 256;
+
+pub class World {
+    ui8* handle;
+    Arena* arena;
+    Options options;
+    mut f32 left;
+    mut ui64 steps;
+    mut bool closed;
+    mut i32 failure;
+    vec.Vec<Contact>* events;
+    ui32[] found;
+    f32[] fractions;
+
+    void init(keeps Arena* arena, keeps ui8* handle, Options options) {
+        self.arena = arena;
+        self.handle = handle;
+        self.options = options;
+        left = 0.0;
+        steps = 0;
+        closed = false;
+        failure = 0;
+        events = vec.new<Contact>(arena);
+        found = arena.alloc_slice(ui32, FOUND);
+        fractions = arena.alloc_slice(f32, FOUND);
+    }
+
+    Body handle_of(ui32 id) {
+        unsafe {
+            return Body{ world: handle as ui64, id: id };
+        }
+    }
+
+    pub void set_gravity(linear.Vec3 g) {
+        unsafe {
+            sosu_jolt_set_gravity(handle, g.x, g.y, g.z);
+        }
+    }
+
+    // A body; dead from the start (`alive()` false) when its shape is not valid, a dynamic body
+    // has a mesh, or the world holds `max_bodies` already.
+    pub Body body(BodyDesc d) {
+        i32 kind = match (d.kind) {
+            Static => 0,
+            Dynamic => 1,
+            Kinematic => 2,
+        };
+        mut f32[7] at = pose(d.position, d.rotation);
+        mut ui32 id = NONE;
+        unsafe {
+            id = sosu_jolt_body(handle, d.shape.handle as ui8*, kind, &at[0], d.mass, d.friction, d.restitution, d.damping,
+                    d.angular_damping, d.gravity_scale, d.layers, d.mask, d.sensor, d.bullet);
+        }
+        return handle_of(id);
+    }
+
+    // The body. Its handle is dead after.
+    pub void remove(Body b) {
+        unsafe {
+            sosu_jolt_body_remove(handle, b.id);
+        }
+    }
+
+    // After adding many static bodies at once (a level): the broad phase rebuilt for queries.
+    pub void optimize() {
+        unsafe {
+            sosu_jolt_optimize(handle);
+        }
+    }
+
+    void read_events() {
+        mut i32 count = 0;
+        unsafe {
+            count = sosu_jolt_events(handle);
+        }
+        for (i32 i in 0..count) {
+            mut ui32 a = 0;
+            mut ui32 b = 0;
+            mut f32[6] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            mut i32 began = 0;
+            unsafe {
+                began = sosu_jolt_event(handle, i, &a, &b, &v[0]);
+            }
+            events.push(Contact{
+                a: handle_of(a),
+                b: handle_of(b),
+                began: began == 1,
+                point: linear.vec3(v[0], v[1], v[2]),
+                normal: linear.vec3(v[3], v[4], v[5])
+            });
+        }
+    }
+
+    // One step of `options.step`, now. False when Jolt ran out of room for its pairs of bodies or
+    // contacts (`max_bodies` too small): the step is still done, with some contacts left out.
+    pub bool step() {
+        mut i32 error = 0;
+        unsafe {
+            error = sosu_jolt_step(handle, options.step, options.collision_steps);
+        }
+        steps += 1;
+        read_events();
+        return error == 0;
+    }
+
+    // As many steps as `dt` (seconds) holds with what was left before, at most `max_steps`; the
+    // rest waits for the next call. The contacts of these steps replace those of the last call.
+    pub i32 advance(f32 dt) {
+        events.clear();
+        left += max(dt, 0.0);
+        f32 due = options.step * 0.9999;  // 0.05 s holds three steps of 1/60, which f32 rounds below
+        mut i32 done = 0;
+        while (left >= due && done < options.max_steps) {
+            step();
+            left = max(left - options.step, 0.0);
+            done += 1;
+        }
+        if (done == options.max_steps && left >= due) {
+            left = 0.0;  // behind: the time is dropped rather than caught up
+        }
+        return done;
+    }
+
+    // How far the world is into its next step, from 0 to 1: to draw between two states.
+    pub f32 alpha() {
+        return left / options.step;
+    }
+
+    pub ui64 step_count() {
+        return steps;
+    }
+
+    // The contacts that began or ended during the last `advance` (or `step`).
+    pub Contact[] contacts() {
+        return events.items();
+    }
+
+    // The bodies that are awake.
+    pub usize awake() {
+        unsafe {
+            return sosu_jolt_active_count(handle) as usize;
+        }
+    }
+
+    // The first body on the segment from `from` to `to`, on a layer of `mask`.
+    pub Hit? ray(linear.Vec3 from, linear.Vec3 to, ui32 mask) {
+        mut f32[7] out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        linear.Vec3 d = to.sub(from);
+        mut ui32 id = NONE;
+        unsafe {
+            id = sosu_jolt_ray(handle, from.x, from.y, from.z, d.x, d.y, d.z, mask, &out[0]);
+        }
+        if (id == NONE) {
+            return none;
+        }
+        return some(Hit{
+            body: handle_of(id),
+            point: linear.vec3(out[0], out[1], out[2]),
+            normal: linear.vec3(out[3], out[4], out[5]),
+            distance: out[6] * d.length()
+        });
+    }
+
+    // Every body on the segment, nearest first (one hit by body, at most 256), its point and its
+    // distance; the normals are not computed.
+    pub Hit[] ray_all(Arena* into, linear.Vec3 from, linear.Vec3 to, ui32 mask) {
+        linear.Vec3 d = to.sub(from);
+        mut i32 count = 0;
+        unsafe {
+            count = sosu_jolt_ray_all(handle, from.x, from.y, from.z, d.x, d.y, d.z, mask, &found[0], &fractions[0],
+                    found.len as i32);
+        }
+        usize n = min(count as usize, found.len);
+        mut Hit[] hits = into.alloc_slice(Hit, n);
+        for (usize i in 0..n) {
+            hits[i] = Hit{
+                body: handle_of(found[i]),
+                point: from.add(d.scale(fractions[i])),
+                normal: linear.vec3(0.0, 0.0, 0.0),
+                distance: fractions[i] * d.length()
+            };
+        }
+        return hits;
+    }
+
+    // A sphere of `radius` swept from `from` to `to`: the first body it touches.
+    pub Hit? sphere_cast(f32 radius, linear.Vec3 from, linear.Vec3 to, ui32 mask) {
+        mut f32[7] out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        linear.Vec3 d = to.sub(from);
+        mut ui32 id = NONE;
+        unsafe {
+            id = sosu_jolt_sphere_cast(handle, radius, from.x, from.y, from.z, d.x, d.y, d.z, mask, &out[0]);
+        }
+        if (id == NONE) {
+            return none;
+        }
+        return some(Hit{
+            body: handle_of(id),
+            point: linear.vec3(out[0], out[1], out[2]),
+            normal: linear.vec3(out[3], out[4], out[5]),
+            distance: out[6] * d.length()
+        });
+    }
+
+    // The bodies that `shape` overlaps, placed at `position` and `rotation` (each once, at most 256).
+    pub Body[] overlap(Arena* into, Shape shape, linear.Vec3 position, linear.Quat rotation, ui32 mask) {
+        if (!shape.valid()) {
+            return into.alloc_slice(Body, 0);
+        }
+        mut f32[7] at = pose(position, rotation);
+        mut i32 count = 0;
+        unsafe {
+            count = sosu_jolt_overlap(handle, shape.handle as ui8*, &at[0], mask, &found[0], found.len as i32);
+        }
+        usize n = min(count as usize, found.len);
+        mut Body[] bodies = into.alloc_slice(Body, n);
+        for (usize i in 0..n) {
+            bodies[i] = handle_of(found[i]);
+        }
+        return bodies;
+    }
+
+    // A character in this world; none when its height is not more than twice its radius.
+    pub Character*? character(CharacterDesc d) {
+        unsafe {
+            ui8* c = sosu_jolt_character(handle, d.height, d.radius, d.position.x, d.position.y, d.position.z,
+                    d.max_slope, d.step, d.layers, d.mask);
+            if (c as ui64 == 0) {
+                return none;
+            }
+            return some(arena.new(Character, handle, c));
+        }
+    }
+
+    // Jolt's threads for the steps of the world from now: `n` of them, 0 for the thread of the
+    // program. They touch Jolt's memory only, during `step` and `advance`; the steps are the same
+    // with any number of threads.
+    pub void use_threads(i32 n) uses threads {
+        unsafe {
+            sosu_jolt_threads(handle, max(n, 0));
+        }
+    }
+
+    Joint joint(i32 kind, Body a, Body b, linear.Vec3 anchor, linear.Vec3 other, linear.Vec3 axis, JointOptions o) {
+        mut f32[3] p = [anchor.x, anchor.y, anchor.z];
+        mut f32[3] q = [other.x, other.y, other.z];
+        mut f32[3] d = [axis.x, axis.y, axis.z];
+        unsafe {
+            return Joint{ world: handle as ui64, id: sosu_jolt_joint(handle, kind, a.id, b.id, &p[0], &q[0], &d[0], o.limit,
+                    o.lower, o.upper, o.motor, o.speed, o.strength) };
+        }
+    }
+
+    // The two bodies held as they are now.
+    pub Joint fixed(Body a, Body b) {
+        linear.Vec3 zero = linear.vec3(0.0, 0.0, 0.0);
+        return joint(0, a, b, zero, zero, linear.vec3(0.0, 1.0, 0.0), JointOptions{});
+    }
+
+    // `b` turns about `axis` through `anchor` (in the world) relative to `a`: a door, a wheel.
+    pub Joint hinge(Body a, Body b, linear.Vec3 anchor, linear.Vec3 axis, JointOptions o) {
+        return joint(1, a, b, anchor, anchor, axis, o);
+    }
+
+    // `b` slides along `axis` relative to `a`, without turning: a drawer, a lift.
+    pub Joint slider(Body a, Body b, linear.Vec3 anchor, linear.Vec3 axis, JointOptions o) {
+        return joint(2, a, b, anchor, anchor, axis, o);
+    }
+
+    // `anchor_a` on `a` and `anchor_b` on `b` (in the world) kept at the distance they are now, or
+    // between `lower` and `upper` with `limit`: a rope.
+    pub Joint distance(Body a, Body b, linear.Vec3 anchor_a, linear.Vec3 anchor_b, JointOptions o) {
+        return joint(3, a, b, anchor_a, anchor_b, linear.vec3(0.0, 1.0, 0.0), o);
+    }
+
+    // `b` hangs from `anchor`, turning freely within `half_angle` of `axis`: a shoulder, a lamp.
+    pub Joint cone(Body a, Body b, linear.Vec3 anchor, linear.Vec3 axis, f32 half_angle) {
+        return joint(4, a, b, anchor, anchor, axis, JointOptions{ upper: half_angle });
+    }
+
+    pub void remove_joint(Joint j) {
+        unsafe {
+            sosu_jolt_joint_remove(handle, j.id);
+        }
+    }
+
+    // The world and its bodies; its characters must be closed before. The handles are dead after.
+    pub void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        unsafe {
+            sosu_jolt_world_free(handle);
+        }
+    }
+}
+
+// A world, empty. Its events and buffers are kept in `arena`; Jolt's memory, outside.
+pub World* world(keeps Arena* arena, Options options) {
+    unsafe {
+        ui8* handle = sosu_jolt_world(options.gravity.x, options.gravity.y, options.gravity.z, options.max_bodies);
+        return arena.new(World, arena, handle, options);
+    }
+}
+
+// The positions and rotations of the bodies of `bodies` written into the transforms of their
+// entities (the scale is left as it is). Static bodies do not move; dead ones are skipped.
+pub void sync(scene.World* scene_world, scene.Table<Body>* bodies) {
+    bodies.join(scene_world.transforms, (scene.Entity e, Body* b, linear.Transform* t) => {
+        if (b.alive()) {
+            State s = b.state();
+            t.position = s.position;
+            t.rotation = s.rotation;
+        }
+    });
+}

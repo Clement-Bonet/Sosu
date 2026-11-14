@@ -1,0 +1,628 @@
+// scene.save: scenes and prefabs as JSON (spec §8.2). A `Writer` numbers the entities it writes
+// (every living one, or a prefab: a root and its children) and writes their names, parents and
+// transforms; the program adds each table of its own with a `Codec<T>`, which writes and reads one
+// component, since Sosu has no reflection. A `Reader` spawns the entities of a text, with their
+// names, parents and transforms, and the program reads its tables back with the same codecs.
+//
+// {"sosu_scene": 1, "entities": 3, "names": [[0, "door"]], "parents": [[1, 0]],
+//  "transforms": [[0, x, y, z, qx, qy, qz, qw, sx, sy, sz]], "components": {"spin": [[2, ...]]}}
+import std.vec;
+import std.json;
+import std.text;
+import math.linear;
+import scene.scene;
+
+// How a component of type T is written and read: one JSON value each.
+pub interface Codec<T> {
+    // The name of its table in the file: letters, digits and `_`.
+    str name();
+    void write(text.TextBuilder* out, T* value);
+    // The component of `v`, none when `v` is not one; its texts copied into `arena`.
+    T? read(Arena* arena, json.Value v);
+}
+
+pub enum SceneError {
+    Damaged(str why),
+    TooLarge,
+}
+
+pub str message(SceneError e) {
+    return match (e) {
+        Damaged(why) => why,
+        TooLarge => "the scene holds more than MAX_ENTITIES entities",
+    };
+}
+
+pub usize MAX_ENTITIES = 1048576;
+
+void number(text.TextBuilder* t, f32 x) {
+    f64 v = x as f64;
+    t.push_f64_shortest(v == v && v < 3.0e38 && v > -3.0e38 ? v : 0.0);
+}
+
+// What a scene, or a prefab, writes.
+pub class Writer {
+    Arena* arena;
+    scene.World* world;
+    vec.Vec<scene.Entity>* order;
+    vec.Vec<i64>* numbers;  // by index of entity: its number in the file, -1 when not written
+    text.TextBuilder* tables;
+    mut bool first_table;
+
+    void init(keeps Arena* arena, keeps scene.World* world) {
+        self.arena = arena;
+        self.world = world;
+        order = vec.new(arena);
+        numbers = vec.new(arena);
+        tables = text.builder(arena);
+        first_table = true;
+    }
+
+    void take(scene.Entity e) {
+        while (numbers.len() <= e.id() as usize) {
+            numbers.push(-1);
+        }
+        if (numbers.items()[e.id() as usize] < 0) {
+            numbers.set(e.id() as usize, order.len() as i64);
+            order.push(e);
+        }
+    }
+
+    i64 number_of(scene.Entity e) {
+        if (e.id() as usize >= numbers.len() || !world.alive(e)) {
+            return -1;
+        }
+        i64 n = numbers.items()[e.id() as usize];
+        return n >= 0 && order.items()[n as usize].same(e) ? n : -1;
+    }
+
+    // The components of `table` of the entities written, by `codec`.
+    pub void add<T>(scene.Table<T>* table, Codec<T>* codec) {
+        tables.push(first_table ? "" : ", ");
+        first_table = false;
+        tables.push(json.write(arena, json.Value.Text(codec.name())));
+        tables.push(": [");
+        mut bool first = true;
+        for (usize k in 0..order.len()) {
+            scene.Entity e = order.items()[k];
+            match (table.get(e)) {
+                some(value) => {
+                    tables.push(first ? "[" : ", [");
+                    first = false;
+                    tables.push_u64(k as ui64);
+                    tables.push(", ");
+                    codec.write(tables, value);
+                    tables.push("]");
+                },
+                none => { },
+            }
+        }
+        tables.push("]");
+    }
+
+    // The text written: the entities, their names, parents and transforms, and the tables added.
+    pub str written() {
+        text.TextBuilder* t = text.builder(arena);
+        t.push("{\"sosu_scene\": 1, \"entities\": ");
+        t.push_u64(order.len() as ui64);
+        t.push(", \"names\": [");
+        mut bool first = true;
+        for (usize k in 0..order.len()) {
+            match (world.names.get(order.items()[k])) {
+                some(name) => {
+                    t.push(first ? "[" : ", [");
+                    first = false;
+                    t.push_u64(k as ui64);
+                    t.push(", ");
+                    t.push(json.write(arena, json.Value.Text(*name)));
+                    t.push("]");
+                },
+                none => { },
+            }
+        }
+        t.push("], \"parents\": [");
+        first = true;
+        for (usize k in 0..order.len()) {
+            match (world.parent_of(order.items()[k])) {
+                some(p) => {
+                    i64 n = number_of(p);
+                    if (n >= 0) {  // a parent outside of a prefab: its root stands alone
+                        t.push(first ? "[" : ", [");
+                        first = false;
+                        t.push_u64(k as ui64);
+                        t.push(", ");
+                        t.push_u64(n as ui64);
+                        t.push("]");
+                    }
+                },
+                none => { },
+            }
+        }
+        t.push("], \"transforms\": [");
+        first = true;
+        for (usize k in 0..order.len()) {
+            match (world.transforms.get(order.items()[k])) {
+                some(tr) => {
+                    t.push(first ? "[" : ", [");
+                    first = false;
+                    t.push_u64(k as ui64);
+                    f32[10] values = [
+                        tr.position.x, tr.position.y, tr.position.z, tr.rotation.x, tr.rotation.y, tr.rotation.z,
+                        tr.rotation.w, tr.scale.x, tr.scale.y, tr.scale.z,
+                    ];
+                    for (f32 v in values) {
+                        t.push(", ");
+                        number(t, v);
+                    }
+                    t.push("]");
+                },
+                none => { },
+            }
+        }
+        t.push("], \"components\": {");
+        t.push(tables.text());
+        t.push("}}");
+        return t.text();
+    }
+}
+
+// A writer of every living entity of `world`.
+pub Writer* writer(keeps Arena* arena, keeps scene.World* world) {
+    Writer* w = arena.new(Writer, arena, world);
+    for (scene.Entity e in world.entities(arena)) {
+        w.take(e);
+    }
+    return w;
+}
+
+// A writer of a prefab: `root` and its children, and theirs; `root` written without its parent.
+pub Writer* prefab(keeps Arena* arena, keeps scene.World* world, scene.Entity root) {
+    Writer* w = arena.new(Writer, arena, world);
+    if (!world.alive(root)) {
+        return w;
+    }
+    w.take(root);
+    mut usize k = 0;
+    while (k < w.order.len()) {  // breadth first: each one's children after it
+        for (scene.Entity c in world.children(arena, w.order.items()[k])) {
+            w.take(c);
+        }
+        k += 1;
+    }
+    return w;
+}
+
+// What a scene, or a prefab, made in a world.
+pub class Reader {
+    Arena* arena;
+    scene.World* world;
+    json.Value root;
+    vec.Vec<scene.Entity>* made;  // by number of the file
+    mut scene.Entity? top;
+
+    void init(keeps Arena* arena, keeps scene.World* world, keeps json.Value root) {
+        self.arena = arena;
+        self.world = world;
+        self.root = root;
+        made = vec.new(arena);
+        top = none;
+    }
+
+    // The entities made, in the order of the file.
+    pub scene.Entity[] entities() {
+        return made.items();
+    }
+
+    // The first entity of the file without a parent in it: the root of a prefab.
+    pub scene.Entity? root_entity() {
+        return top;
+    }
+
+    // The components of `table` read by `codec`; false when the file holds a value that `codec`
+    // does not read, or a number that is not an entity of the file (what was read stays).
+    pub bool add<T>(scene.Table<T>* table, Codec<T>* codec) {
+        json.Value tables = match (json.get(root, "components")) {
+            some(c) => c,
+            none => {
+                return true;
+            },
+        };
+        json.Value list = match (json.get(tables, codec.name())) {
+            some(l) => l,
+            none => {
+                return true;  // none of this table
+            },
+        };
+        for (usize i in 0..json.len(list)) {
+            json.Value pair = match (json.at(list, i)) {
+                some(p) => p,
+                none => {
+                    return false;
+                },
+            };
+            usize n = match (entity_number(pair, made.len())) {
+                some(x) => x,
+                none => {
+                    return false;
+                },
+            };
+            json.Value value = match (json.at(pair, 1)) {
+                some(v) => v,
+                none => {
+                    return false;
+                },
+            };
+            match (codec.read(arena, value)) {
+                some(c) => {
+                    table.set(made.items()[n], c);
+                },
+                none => {
+                    return false;
+                },
+            }
+        }
+        return true;
+    }
+}
+
+// The number of entity that starts `pair`, `[n, ...]`, when it is one of the `count`.
+usize? entity_number(json.Value pair, usize count) {
+    return match (json.at(pair, 0)) {
+        some(v) => match (json.as_i64(v)) {
+            some(n) => n >= 0 && n as ui64 < count as ui64 ? some(n as usize) : none,
+            none => none,
+        },
+        none => none,
+    };
+}
+
+f32? float_at(json.Value pair, usize i) {
+    return match (json.at(pair, i)) {
+        some(v) => match (json.as_f64(v)) {
+            some(x) => x == x && x < 3.0e38 && x > -3.0e38 ? some(x as f32) : none,
+            none => none,
+        },
+        none => none,
+    };
+}
+
+// The entities of `source` made in `world`, with their names, parents and transforms; the roots
+// of the file placed under `parent` when there is one. The tables of the program follow with
+// `Reader.add`. A damaged text spawns nothing.
+pub Reader*!SceneError read(keeps Arena* arena, keeps scene.World* world, str source, scene.Entity? parent) {
+    json.Value root = match (json.parse(arena, source)) {
+        ok(v) => v,
+        err(e) => {
+            return err(SceneError.Damaged("scene: JSON that does not parse"));
+        },
+    };
+    usize count = match (json.get(root, "entities")) {
+        some(v) => match (json.as_i64(v)) {
+            some(n) => n >= 0 ? n as usize : 0,
+            none => {
+                return err(SceneError.Damaged("scene: a count of entities that is not a number"));
+            },
+        },
+        none => {
+            return err(SceneError.Damaged("scene: no count of entities"));
+        },
+    };
+    if (count > MAX_ENTITIES) {
+        return err(SceneError.TooLarge);
+    }
+    // everything checked before an entity is made
+    json.Value? names = json.get(root, "names");
+    json.Value? parents = json.get(root, "parents");
+    json.Value? transforms = json.get(root, "transforms");
+    for (json.Value? list in [names, parents, transforms]) {
+        match (list) {
+            some(l) => {
+                for (usize i in 0..json.len(l)) {
+                    match (json.at(l, i)) {
+                        some(pair) => {
+                            if (match (entity_number(pair, count)) {
+                                some(n) => false,
+                                none => true,
+                            }) {
+                                return err(SceneError.Damaged("scene: a number that is not an entity of the file"));
+                            }
+                        },
+                        none => { },
+                    }
+                }
+            },
+            none => { },
+        }
+    }
+    mut bool[] has_parent = arena.alloc_slice(bool, count);
+    mut usize[] parent_of = arena.alloc_slice(usize, count);
+    match (parents) {
+        some(l) => {
+            for (usize i in 0..json.len(l)) {
+                json.Value pair = match (json.at(l, i)) {
+                    some(p) => p,
+                    none => json.Value.Null,
+                };
+                usize child = match (entity_number(pair, count)) {
+                    some(n) => n,
+                    none => 0,
+                };
+                usize up = match (json.at(pair, 1)) {
+                    some(v) => match (json.as_i64(v)) {
+                        some(n) => n >= 0 && n as ui64 < count as ui64 ? n as usize : count,
+                        none => count,
+                    },
+                    none => count,
+                };
+                if (up >= count || up == child) {
+                    return err(SceneError.Damaged("scene: a parent that is not another entity of the file"));
+                }
+                has_parent[child] = true;
+                parent_of[child] = up;
+            }
+        },
+        none => { },
+    }
+
+    Reader* r = arena.new(Reader, arena, world, root);
+    for (usize i in 0..count) {
+        r.made.push(world.spawn());
+    }
+    match (names) {
+        some(l) => {
+            for (usize i in 0..json.len(l)) {
+                match (json.at(l, i)) {
+                    some(pair) => {
+                        usize n = match (entity_number(pair, count)) {
+                            some(x) => x,
+                            none => 0,
+                        };
+                        str? name = match (json.at(pair, 1)) {
+                            some(v) => json.as_str(v),
+                            none => none,
+                        };
+                        match (name) {
+                            some(s) => {
+                                world.names.set(r.made.items()[n], s);
+                            },
+                            none => { },
+                        }
+                    },
+                    none => { },
+                }
+            }
+        },
+        none => { },
+    }
+    match (transforms) {
+        some(l) => {
+            for (usize i in 0..json.len(l)) {
+                match (json.at(l, i)) {
+                    some(pair) => {
+                        usize n = match (entity_number(pair, count)) {
+                            some(x) => x,
+                            none => 0,
+                        };
+                        mut f32[10] v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+                        for (usize k in 0..10) {
+                            v[k] = match (float_at(pair, k + 1)) {
+                                some(x) => x,
+                                none => v[k],
+                            };
+                        }
+                        world.transforms.set(
+                            r.made.items()[n],
+                            linear.Transform{
+                                position: linear.vec3(v[0], v[1], v[2]),
+                                rotation: linear.Quat{ x: v[3], y: v[4], z: v[5], w: v[6] },
+                                scale: linear.vec3(v[7], v[8], v[9])
+                            }
+                        );
+                    },
+                    none => { },
+                }
+            }
+        },
+        none => { },
+    }
+    // parents: a cycle in the file is refused by `set_parent`, and that entity stays a root
+    for (usize i in 0..count) {
+        if (has_parent[i]) {
+            if (!world.set_parent(r.made.items()[i], r.made.items()[parent_of[i]])) {
+                has_parent[i] = false;
+            }
+        }
+    }
+    for (usize i in 0..count) {
+        if (!has_parent[i]) {
+            match (r.top) {
+                some(t) => { },
+                none => {
+                    r.top = some(r.made.items()[i]);
+                },
+            }
+            match (parent) {
+                some(p) => {
+                    world.set_parent(r.made.items()[i], p);
+                },
+                none => { },
+            }
+        }
+    }
+    return ok(r);
+}
+
+// A new copy of the prefab `source` (the text of a `prefab` writer), under `parent` when there is
+// one; its tables follow with `Reader.add`, and `root_entity()` gives its root.
+pub Reader*!SceneError instantiate(keeps Arena* arena, keeps scene.World* world, str source, scene.Entity? parent) {
+    return read(arena, world, source, parent);
+}
+
+struct Turn {
+    mut f32 speed;
+    mut str label;
+}
+
+class TurnCodec : Codec<Turn> {
+    void init() { }
+
+    override str name() {
+        return "turn";
+    }
+
+    override void write(text.TextBuilder* out, Turn* value) {
+        out.push("[");
+        number(out, value.speed);
+        out.push(", ");
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        out.push(json.write(&scratch, json.Value.Text(value.label)));
+        out.push("]");
+    }
+
+    override Turn? read(Arena* arena, json.Value v) {
+        f32 speed = match (float_at(v, 0)) {
+            some(x) => x,
+            none => {
+                return none;
+            },
+        };
+        str label = match (json.at(v, 1)) {
+            some(l) => match (json.as_str(l)) {
+                some(s) => s,
+                none => "",
+            },
+            none => "",
+        };
+        return some(Turn{ speed: speed, label: label });
+    }
+}
+
+test "a world saved, and read back into another" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    scene.Table<Turn>* turns = w.table<Turn>();
+    mut linear.Transform at = linear.transform();
+    at.position = linear.vec3(1.0, 2.0, 3.0);
+    scene.Entity door = w.spawn_at("door \"front\"", at, none);
+    scene.Entity hinge = w.spawn_at("hinge", linear.transform(), some(door));
+    w.spawn_at("lamp", linear.transform(), none);
+    turns.set(hinge, Turn{ speed: 0.5, label: "slow" });
+    Writer* out = writer(&arena, w);
+    TurnCodec* codec = arena.new(TurnCodec);
+    out.add(turns, codec as Codec<Turn>*);
+    str saved = out.written();
+
+    scene.World* again = scene.world(&arena);
+    scene.Table<Turn>* read_turns = again.table<Turn>();
+    Reader* r = match (read(&arena, again, saved, none)) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(r.add(read_turns, codec as Codec<Turn>*));
+    assert(again.count() == 3);
+    scene.Entity d = r.entities()[0];
+    scene.Entity h = r.entities()[1];
+    assert(match (again.names.get(d)) {
+        some(n) => *n == "door \"front\"",
+        none => false,
+    });
+    assert(match (again.parent_of(h)) {
+        some(p) => p.same(d),
+        none => false,
+    });
+    assert(match (again.transforms.get(d)) {
+        some(t) => t.position.near(linear.vec3(1.0, 2.0, 3.0), 0.0001),
+        none => false,
+    });
+    assert(match (read_turns.get(h)) {
+        some(t) => t.speed == 0.5 && t.label == "slow",
+        none => false,
+    });
+}
+
+test "a prefab instantiated twice" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    scene.Entity house = w.spawn_at("house", linear.transform(), none);
+    scene.Entity door = w.spawn_at("door", linear.transform(), some(house));
+    w.spawn_at("knob", linear.transform(), some(door));
+    w.spawn_at("other", linear.transform(), none);
+    str door_prefab = prefab(&arena, w, door).written();  // the door and its knob, not the house
+    mut linear.Transform far = linear.transform();
+    far.position = linear.vec3(100.0, 0.0, 0.0);
+    scene.Entity street = w.spawn_at("street", far, none);
+    usize before = w.count();
+    for (scene.Entity? under in [some(street), none]) {
+        Reader* r = match (instantiate(&arena, w, door_prefab, under)) {
+            ok(x) => x,
+            err(e) => {
+                assert(false);
+                return;
+            },
+        };
+        assert(r.entities().len == 2);
+        scene.Entity root = match (r.root_entity()) {
+            some(x) => x,
+            none => {
+                assert(false);
+                return;
+            },
+        };
+        assert(match (w.names.get(root)) {
+            some(n) => *n == "door",
+            none => false,
+        });
+        assert(w.children(&arena, root).len == 1);
+        match (under) {
+            some(s) => {
+                assert(match (w.parent_of(root)) {
+                    some(p) => p.same(s),
+                    none => false,
+                });
+            },
+            none => {
+                assert(match (w.parent_of(root)) {
+                    some(p) => false,
+                    none => true,
+                });
+            },
+        }
+    }
+    assert(w.count() == before + 4);
+}
+
+test "damaged scenes spawn nothing" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    str[6] damaged = [
+        "not JSON",
+        "{\"names\": []}",
+        "{\"entities\": 2, \"names\": [[5, \"x\"]]}",
+        "{\"entities\": 2, \"parents\": [[0, 0]]}",
+        "{\"entities\": 2, \"parents\": [[0, 9]]}",
+        "{\"entities\": 99999999999}",
+    ];
+    for (str s in damaged) {
+        assert(match (read(&arena, w, s, none)) {
+            ok(r) => false,
+            err(e) => true,
+        });
+    }
+    assert(w.count() == 0);
+    // a cycle of parents in the file: refused by `set_parent`, both stay
+    Reader* r = match (read(&arena, w, "{\"entities\": 2, \"parents\": [[0, 1], [1, 0]]}", none)) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(r.entities().len == 2 && w.count() == 2);
+}

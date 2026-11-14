@@ -57,6 +57,8 @@ typedef struct {
     StringList frameworks; /* macOS and iOS frameworks */
     StringList copy;       /* files placed next to the program (DLLs...) */
     StringList c;          /* C files compiled with the program (spec §9.1): a library given as its sources */
+    StringList cpp;        /* C++ files compiled with the program by the C++ compiler, without exceptions nor RTTI;
+                              a program that has one links the C++ library of the system (spec §9.1) */
     StringList include;    /* folders of their headers */
     StringList defines;    /* `NAME` or `NAME=value`, for them */
     char *subsystem;       /* "window": a program that links it opens windows, without a console (in release, on
@@ -85,6 +87,23 @@ typedef struct {
     size_t length;
 } Dependency;
 
+/* [native.<name>]: C or C++ sources taken from a Git repository (spec §9.1), cloned as the git
+   dependencies are, at a `tag` or a `rev`, the commit kept in sosu.lock. Its paths are relative to
+   the clone: `dir/` is the files of a folder, `dir/ **` (written without the space) those of its subfolders too. */
+typedef struct {
+    char *name;
+    char *git;
+    char *tag;
+    char *rev;
+    StringList c;
+    StringList cpp;
+    StringList include;
+    StringList defines;
+    StringList exclude; /* files of `c` and `cpp` left out, relative to the clone */
+    size_t offset; /* span of the name in the header, for diagnostics */
+    size_t length;
+} NativeDep;
+
 typedef struct {
     char *name;
     char *version;
@@ -97,6 +116,11 @@ typedef struct {
     } deps;
     LinkSection link[LINK_SECTION_COUNT];
     AppSection app;
+    struct {
+        NativeDep *items;
+        size_t count;
+        size_t cap;
+    } natives;
 } Manifest;
 
 /* Parses a manifest. Problems are reported to `diags`; returns true if there were none. */

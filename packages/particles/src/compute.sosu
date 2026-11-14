@@ -1,0 +1,435 @@
+// particles.compute: a system of particles simulated on the GPU (spec §8.2), for tens of thousands
+// of them. The processor still decides the births, with the same `Emitter` (its rate, its bursts,
+// its shape, its ranges); a compute shader moves every particle (gravity, drag toward the wind, a
+// turbulence of noise, the curve of speed), makes it collide with the planes of the emitter and, when
+// asked, with what the scene drew (the depth of the frame), and a vertex shader draws them from the
+// same buffer: nothing comes back to the processor. The curves of size and speed and the gradient of
+// color are read as 32 samples each.
+//
+// What differs from `particles.particles`: the buffer is a ring of `emitter.max` places, and a birth
+// takes the place of the oldest when it is full; the noise is another one (the same swirls, not the
+// same particles); particles are not sorted (additive ones look the same; alpha ones may cross).
+//
+// In a frame: what the scene draws (`render3d`), then `simulate` (a compute pass), then `draw`.
+import std.math;
+import math.linear;
+import math.curve;
+import image.image;
+import gpu.gpu;
+import render3d.render3d;
+import particles.particles;
+
+extern "C" {
+    ui8* sosu_shader_simulate_comp_spv(usize* size) uses io;
+    ui8* sosu_shader_simulate_comp_dxil(usize* size) uses io;
+    ui8* sosu_shader_simulate_comp_msl(usize* size) uses io;
+    ui8* sosu_shader_gpu_particle_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_gpu_particle_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_gpu_particle_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_particle_frag_spv(usize* size) uses io;
+    ui8* sosu_shader_particle_frag_dxil(usize* size) uses io;
+    ui8* sosu_shader_particle_frag_msl(usize* size) uses io;
+}
+
+// A particle as the shaders read it: position and age, velocity and life, size at birth,
+// rotation, spin, where it reads the noise. A life of 0 is a free place.
+struct Slot {
+    f32[4] position_age;
+    f32[4] velocity_life;
+    f32[4] size_turn;
+}
+
+// The uniforms of the compute shader, as its cbuffer `Step` lays them out.
+struct Step {
+    linear.Mat4 view_projection;
+    linear.Mat4 inverse_view_projection;
+    f32[4] camera;
+    f32[4] wind;
+    f32[4] forces;
+    f32[4] contact;
+    f32[4] counts;
+    f32[16] planes;
+    f32[4] extra;
+    f32[32] speeds;
+}
+
+// The uniforms of the vertex shader, as its cbuffer `Draw` lays them out.
+struct Look {
+    linear.Mat4 view_projection;
+    f32[4] right;
+    f32[4] up;
+    f32[4] facing;
+    f32[4] flip;
+    f32[4] tint;
+    f32[32] sizes;
+    f32[128] colors;
+}
+
+usize THREADS = 64;  // [numthreads] of simulate.comp.hlsl
+
+ui8[] copy_code(Arena* arena, ui8* bytes, usize size) {
+    mut ui8[] out = arena.alloc_slice(ui8, size);
+    unsafe {
+        for (usize i in 0..size) {
+            out[i] = *(bytes + i);
+        }
+    }
+    return out;
+}
+
+// The code of a shader of the package: 0 the compute shader, 1 the vertex shader, 2 the fragment one.
+ui8[] code_of(Arena* arena, gpu.ShaderFormat format, i32 which) uses io {
+    mut usize size = 0;
+    unsafe {
+        ui8* bytes = match (format) {
+            Spirv => which == 0 ? sosu_shader_simulate_comp_spv(&size)
+                    : which == 1 ? sosu_shader_gpu_particle_vert_spv(&size) : sosu_shader_particle_frag_spv(&size),
+            Dxil => which == 0 ? sosu_shader_simulate_comp_dxil(&size)
+                    : which == 1 ? sosu_shader_gpu_particle_vert_dxil(&size) : sosu_shader_particle_frag_dxil(&size),
+            Msl => which == 0 ? sosu_shader_simulate_comp_msl(&size)
+                    : which == 1 ? sosu_shader_gpu_particle_vert_msl(&size) : sosu_shader_particle_frag_msl(&size),
+        };
+        return copy_code(arena, bytes, size);
+    }
+}
+
+pub class GpuSystem {
+    pub particles.Emitter emitter;
+    particles.System* births;  // the same emitter, whose list is emptied at each step
+    gpu.Device* device;
+    gpu.ComputePipeline step;
+    gpu.Pipeline look;
+    gpu.Sampler nearest;
+    gpu.Sampler sampler;
+    gpu.Texture white;
+    gpu.Buffer places;
+    gpu.Buffer born;
+    usize capacity;
+    mut usize head;  // where the next birth goes
+    mut f32 time;
+    mut f32 thickness;  // 0: no collision with the depth
+    Slot[] sent;        // the births of a step, as the shader reads them
+    f32[32] speeds;
+    f32[32] sizes;
+    f32[128] colors;
+
+    void init(keeps Arena* arena, keeps particles.Emitter emitter, keeps gpu.Device* device, gpu.ComputePipeline step,
+            gpu.Pipeline look, gpu.Sampler nearest, gpu.Sampler sampler, gpu.Texture white, gpu.Buffer places,
+            gpu.Buffer born) {
+        self.emitter = emitter;
+        self.device = device;
+        self.step = step;
+        self.look = look;
+        self.nearest = nearest;
+        self.sampler = sampler;
+        self.white = white;
+        self.places = places;
+        self.born = born;
+        capacity = max(emitter.max, 1);
+        births = arena.new(particles.System, arena, emitter);
+        head = 0;
+        time = 0.0;
+        thickness = 0.0;
+        sent = arena.alloc_slice(Slot, capacity);
+        mut f32[32] s = [1.0; 32];
+        mut f32[32] z = [1.0; 32];
+        mut f32[128] c = [1.0; 128];
+        for (usize i in 0..32) {
+            f32 t = i as f32 / 31.0;
+            match (emitter.speed_over_life) {
+                some(k) => {
+                    s[i] = k.sample(t);
+                },
+                none => { },
+            }
+            match (emitter.size_over_life) {
+                some(k) => {
+                    z[i] = k.sample(t);
+                },
+                none => { },
+            }
+            match (emitter.color_over_life) {
+                some(g) => {
+                    linear.Vec4 x = g.sample(t);
+                    c[4 * i] = x.x;
+                    c[4 * i + 1] = x.y;
+                    c[4 * i + 2] = x.z;
+                    c[4 * i + 3] = x.w;
+                },
+                none => { },
+            }
+        }
+        speeds = s;
+        sizes = z;
+        colors = c;
+    }
+
+    // Where the system is: its particles are born there, then live in the world.
+    pub void move_to(linear.Mat4 m) {
+        births.move_to(m);
+    }
+
+    // No particle born from now on; those alive live on.
+    pub void stop() {
+        births.stop();
+    }
+
+    // `n` particles at the next `simulate`.
+    pub void burst(usize n) {
+        births.burst(n);
+    }
+
+    pub f32 elapsed() {
+        return time;
+    }
+
+    // The places of its buffer: the particles alive at most.
+    pub usize places_count() {
+        return capacity;
+    }
+
+    // Collide with what the scene drew before `simulate` in the frame, when a particle is behind a
+    // surface by less than `meters` (what the depth cannot say: how thick it is); 0 for none.
+    pub void collide_with_depth(f32 meters) {
+        thickness = max(meters, 0.0);
+    }
+
+    // The system `dt` seconds later, as a compute pass of `frame` after the passes of the scene:
+    // the births of the emitter sent, then every particle moved. `camera` is the one the scene was
+    // drawn with, into the window (or a target of `width` by `height`: `simulate_for`).
+    pub void simulate(gpu.Frame frame, f32 dt, render3d.Camera camera) uses io {
+        simulate_for(frame, dt, camera, frame.width, frame.height);
+    }
+
+    pub void simulate_for(gpu.Frame frame, f32 dt, render3d.Camera camera, ui32 width, ui32 height) uses io {
+        if (dt <= 0.0) {
+            return;
+        }
+        // those of `burst` as they were born, then those of the rate and the bursts of the emitter
+        usize bursts = take(0);
+        births.advance(dt);
+        usize count = take(bursts);
+        mut Slot[] out = sent;
+        if (count > 0) {
+            frame.upload(born, out[0..count]);
+        }
+        particles.Emitter e = emitter;
+        f32 aspect = width as f32 / max(height, 1) as f32;
+        linear.Mat4 vp = camera.view_projection(aspect);
+        linear.Mat4 inverse = match (vp.inverse()) {
+            some(m) => m,
+            none => linear.identity4(),
+        };
+        mut f32[16] planes = [0.0; 16];
+        mut usize planes_count = 0;
+        match (e.planes) {
+            some(list_of) => {
+                for (particles.Plane pl in list_of) {
+                    if (planes_count == 4) {
+                        break;
+                    }
+                    planes[4 * planes_count] = pl.normal.x;
+                    planes[4 * planes_count + 1] = pl.normal.y;
+                    planes[4 * planes_count + 2] = pl.normal.z;
+                    planes[4 * planes_count + 3] = pl.offset;
+                    planes_count += 1;
+                }
+            },
+            none => { },
+        }
+        mut gpu.Buffer[1] written = [places];
+        gpu.ComputePass pass = frame.compute(written[0..1]);
+        pass.bind(step);
+        bool depth = thickness > 0.0 && pass.frame_depth(0, nearest);
+        if (!depth) {
+            pass.texture(0, white, nearest);  // white: the farthest, nothing hit
+        }
+        pass.read(0, born);
+        mut Step u = Step{
+            view_projection: vp,
+            inverse_view_projection: inverse,
+            camera: [camera.position.x, camera.position.y, camera.position.z, thickness],
+            wind: [e.wind.x, e.wind.y, e.wind.z, e.drag],
+            forces: [9.81 * e.gravity, e.turbulence, e.turbulence_scale, time],
+            contact: [e.bounce, e.friction, e.die_on_contact ? 1.0 : 0.0, depth ? 1.0 : 0.0],
+            counts: [dt, capacity as f32, head as f32, count as f32],
+            planes: planes,
+            extra: [planes_count as f32, 1.0 / max(width, 1) as f32, 1.0 / max(height, 1) as f32, 0.0],
+            speeds: speeds
+        };
+        pass.uniform(0, &u);
+        pass.dispatch(((capacity + THREADS - 1) / THREADS) as ui32, 1, 1);
+        pass.end();
+        head = (head + count) % capacity;
+        time += dt;
+    }
+
+    // The particles born since the last call, after the `from` first places of `sent` (as many as
+    // fit), and the list of births emptied; the places now filled.
+    usize take(usize from) {
+        particles.Particle[] list = births.particles();
+        usize count = min(list.len, capacity - from);
+        mut Slot[] out = sent;
+        for (usize i in 0..count) {
+            particles.Particle p = list[i];
+            out[from + i] = Slot{
+                position_age: [p.position.x, p.position.y, p.position.z, 0.0],
+                velocity_life: [p.velocity.x, p.velocity.y, p.velocity.z, p.life],
+                size_turn: [p.size, p.rotation, p.spin, p.offset]
+            };
+        }
+        births.clear();
+        return from + count;
+    }
+
+    // Its particles drawn into the window of `frame`, over what the scene drew (hidden by what is
+    // nearer), with `texture` (white squares without one).
+    pub void draw(gpu.Frame frame, render3d.Camera camera, gpu.Texture? texture) uses io {
+        render(frame, none, frame.width, frame.height, camera, texture);
+    }
+
+    // The same, into `target`, a texture of `device.target`.
+    pub void draw_into(gpu.Frame frame, gpu.Texture target, render3d.Camera camera, gpu.Texture? texture) uses io {
+        render(frame, some(target), target.width, target.height, camera, texture);
+    }
+
+    void render(gpu.Frame frame, gpu.Texture? target, ui32 width, ui32 height, render3d.Camera camera,
+            gpu.Texture? texture) uses io {
+        particles.Emitter e = emitter;
+        linear.Mat4 view = camera.view();
+        f32 aspect = width as f32 / max(height, 1) as f32;
+        mut f32 stretched = 0.0;
+        mut f32 stretch = 0.0;
+        match (e.facing) {
+            Velocity(s) => {
+                stretched = 1.0;
+                stretch = s;
+            },
+            Camera => { },
+        }
+        ui32 columns = max(e.columns, 1);
+        ui32 rows = (max(e.frames, 1) + columns - 1) / columns;
+        mut Look u = Look{
+            view_projection: camera.view_projection(aspect),
+            right: [view.at(0, 0), view.at(0, 1), view.at(0, 2), stretched],
+            up: [view.at(1, 0), view.at(1, 1), view.at(1, 2), stretch],
+            facing: [view.at(2, 0), view.at(2, 1), view.at(2, 2), max(e.frames, 1) as f32],
+            flip: [columns as f32, rows as f32, 0.0, 0.0],
+            tint: [e.color.x, e.color.y, e.color.z, e.color.w],
+            sizes: sizes,
+            colors: colors
+        };
+        gpu.Clear keep = gpu.Clear{ color: gpu.rgba(0.0, 0.0, 0.0, 0.0), keep: true };
+        gpu.Pass pass = match (target) {
+            some(t) => frame.pass_into(t, keep),
+            none => frame.pass(keep),
+        };
+        pass.bind(look);
+        pass.vertex_uniform(0, &u);
+        pass.vertex_storage(0, places);
+        gpu.Texture t = match (texture) {
+            some(x) => x,
+            none => white,
+        };
+        pass.texture(0, t, sampler);
+        pass.draw((capacity * 6) as ui32, 1);
+        pass.end();
+    }
+
+    // The particles alive, read back from the GPU (it waits for it): for tests and tools, not for
+    // each frame.
+    pub particles.Particle[]!gpu.GpuError read(Arena* arena) uses io {
+        mut Slot[] all = arena.alloc_slice(Slot, capacity);
+        try device.read_buffer(places, all);
+        mut usize alive = 0;
+        for (Slot s in all) {
+            if (s.velocity_life[3] > 0.0 && s.position_age[3] < s.velocity_life[3]) {
+                alive += 1;
+            }
+        }
+        mut particles.Particle[] out = arena.alloc_slice(particles.Particle, alive);
+        mut usize k = 0;
+        for (Slot s in all) {
+            if (s.velocity_life[3] > 0.0 && s.position_age[3] < s.velocity_life[3]) {
+                out[k] = particles.Particle{
+                    position: linear.vec3(s.position_age[0], s.position_age[1], s.position_age[2]),
+                    velocity: linear.vec3(s.velocity_life[0], s.velocity_life[1], s.velocity_life[2]),
+                    age: s.position_age[3],
+                    life: s.velocity_life[3],
+                    size: s.size_turn[0],
+                    rotation: s.size_turn[1],
+                    spin: s.size_turn[2],
+                    offset: s.size_turn[3]
+                };
+                k += 1;
+            }
+        }
+        return ok(out);
+    }
+
+    pub void close() uses io {
+        device.release_compute_pipeline(step);
+        device.release_pipeline(look);
+        device.release_sampler(nearest);
+        device.release_sampler(sampler);
+        device.release_texture(white);
+        device.release_buffer(places);
+        device.release_buffer(born);
+    }
+}
+
+// A system of `emitter` on the GPU of `device`: `emitter.max` places.
+pub GpuSystem*!gpu.GpuError gpu_system(keeps Arena* arena, keeps gpu.Device* device, keeps particles.Emitter emitter) uses io {
+    usize capacity = max(emitter.max, 1);
+    mut Arena scratch = Arena.new(capacity * size_of(Slot) + 256 * KB);
+    defer scratch.free();
+    gpu.ShaderFormat format = device.format();
+    str entry = match (format) {
+        Msl => "main0",
+        _ => "main",
+    };
+    gpu.ComputePipeline step = try device.compute_pipeline(gpu.ComputeDesc{
+        format: format,
+        code: code_of(&scratch, format, 0),
+        entry: entry,
+        samplers: 1,
+        readonly_storage_buffers: 1,
+        readwrite_storage_buffers: 1,
+        uniform_buffers: 1,
+        threads_x: THREADS as ui32
+    });
+    gpu.Shader vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, 1),
+        entry: entry,
+        storage_buffers: 1,
+        uniform_buffers: 1
+    });
+    gpu.Shader fs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Fragment,
+        format: format,
+        code: code_of(&scratch, format, 2),
+        entry: entry,
+        samplers: 1
+    });
+    bool light = match (emitter.blending) {
+        Additive => true,
+        Alpha => false,
+    };
+    gpu.Layout none_of = gpu.Layout{ stride: 0, attributes: scratch.alloc_slice(gpu.Attribute, 0) };
+    gpu.Pipeline look = try device.pipeline(gpu.PipelineDesc{ vertex: vs, fragment: fs, layout: none_of, cull: gpu.Cull.Off,
+            blend: light ? gpu.Blend.Additive : gpu.Blend.Alpha, depth_write: false });
+    device.release_shader(vs);
+    device.release_shader(fs);
+    gpu.Sampler nearest = try device.sampler(gpu.SamplerDesc{ filter: gpu.Filter.Nearest, wrap: gpu.Wrap.Clamp, mipmaps: false });
+    gpu.Sampler sampler = try device.sampler(gpu.SamplerDesc{ wrap: gpu.Wrap.Clamp });
+    mut image.Image one = image.create(&scratch, 1, 1);
+    one.set(0, 0, 0xFFFFFFFF);
+    gpu.Texture white = try device.texture_of(one, false);
+    // every place free: a life of 0
+    Slot[] empty = scratch.alloc_slice(Slot, capacity);
+    gpu.Buffer places = try device.buffer_of(gpu.Usage.Storage, empty);
+    gpu.Buffer born = try device.buffer(gpu.Usage.Storage, (capacity * size_of(Slot)) as ui32);
+    return ok(arena.new(GpuSystem, arena, emitter, device, step, look, nearest, sampler, white, places, born));
+}

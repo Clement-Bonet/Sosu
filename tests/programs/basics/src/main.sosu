@@ -107,6 +107,13 @@ void!ParseError check_digit(str s) {
     return ok();
 }
 
+// A vertex as the GPU reads it: three floats, a color of four bytes, a float (offset_of).
+struct Vertex {
+    f32[3] position;
+    ui32 color;
+    f32 u;
+}
+
 struct Checked {
     str text;
     void!ParseError outcome;
@@ -209,5 +216,11 @@ i32 main() uses io {
     rows[0] = arena.alloc_slice(i32, 4);
     io.print("names: {} {} {}, rows: {} {}", names.len, present(names[0]), present(names[1]), rows[0].len, rows[1].len);
     io.print("a pointer is as large as a usize: {}", size_of(ui8*) == size_of(usize));
+    io.print(
+        "offsets of a vertex: {} {} {}",
+        offset_of(Vertex, position),
+        offset_of(Vertex, color),
+        offset_of(Vertex, u)
+    );
     return 0;
 }

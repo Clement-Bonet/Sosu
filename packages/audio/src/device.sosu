@@ -120,7 +120,8 @@ void close_stream(Opened o) uses io {
 
 // ---- Play ----
 
-// How a `Player` opens its device: the mixer runs at `rate` with `channels` (1 or 2), and keeps
+// How a `Player` opens its device: the mixer runs at `rate` with `channels` (1, 2, 6 for 5.1 or 8 for
+// 7.1: SDL mixes them down to what the device has), and keeps
 // `ahead_ms` milliseconds mixed in advance (more: safer from gaps; less: a sound starts sooner).
 // When the device runs dry between two calls of `update()` close together (a program slower than
 // that, as on a phone), the player keeps twice as much in advance, up to `MOST_AHEAD_MS`.
@@ -231,7 +232,8 @@ pub class Player {
 // A player on the device of `output`, or none if it cannot be opened (`last_error` says why).
 pub Player*? open_player(Arena* arena, Output output) uses io
     requires output.rate >= audio.MIN_RATE && output.rate <= audio.MAX_RATE
-            && (output.channels == 1 || output.channels == 2) && output.ahead_ms > 0 && output.ahead_ms <= 2000
+            && (output.channels == 1 || output.channels == 2 || output.channels == 6 || output.channels == 8)
+            && output.ahead_ms > 0 && output.ahead_ms <= 2000
 {
     return match (open_stream(output.device, output.rate, output.channels)) {
         some(o) => some(arena.new(Player, arena, o, output)),

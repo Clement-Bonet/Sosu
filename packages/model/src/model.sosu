@@ -1,0 +1,464 @@
+// model.model: what `model.obj` and `model.gltf` read (spec §8.2). A `Model` holds meshes (each
+// one material: a primitive of glTF, a group of OBJ), materials, images, and a tree of nodes that
+// place the meshes. Its vertices are laid out as `gpu` reads them: `size_of(model.Vertex)` and
+// `offset_of(model.Vertex, normal)` give the layout of a pipeline.
+import std.io;
+import std.fs;
+import std.os;
+import std.text;
+import std.vec;
+import math.linear;
+import math.geometry;
+import math.curve;
+import image.image;
+import image.png;
+import image.jpeg;
+
+// A corner of a triangle.
+pub struct Vertex {
+    pub mut f32[3] position;
+    pub mut f32[3] normal;
+    pub mut f32[2] uv;  // 0, 0 at the top left of the texture, as glTF and `gpu` have it
+}
+
+// The joints that move a vertex and their weights (whose sum is 1): indices into the `joints` of
+// the skin of the node that holds the mesh. Unused places have a weight of 0.
+pub struct Influence {
+    pub mut ui16[4] joints;
+    pub mut f32[4] weights;
+}
+
+// A morph target: what it moves each vertex by (3 numbers each), and its normals by (empty
+// when the file gives none), at a weight of 1: a smile, a blink.
+pub struct Morph {
+    pub str name;
+    pub f32[] positions;
+    pub f32[] normals;
+}
+
+// Triangles of one material: three indices of `vertices` each.
+pub struct Mesh {
+    pub str name;
+    pub Vertex[] vertices;
+    pub ui32[] indices;
+    pub mut usize? material;  // in `Model.materials`
+    pub geometry.Aabb bounds;  // in the space of the mesh
+    pub Influence[]? influences = none;  // one per vertex, for a mesh moved by a skin
+    pub Morph[]? morphs = none;  // its morph targets
+    pub f32[]? weights = none;   // their weights when nothing animates them
+}
+
+// The vertices of `m` moved by its morph targets at `weights` (one per target; the missing ones
+// count 0), into `out` (as many as its vertices): each position plus the weighted sum of what the
+// targets move it by, each normal likewise, then made of length 1 again.
+pub void morph(Mesh m, f32[] weights, Vertex[] out) {
+    mut Vertex[] o = out;
+    for (usize i in 0..min(m.vertices.len, o.len)) {
+        o[i] = m.vertices[i];
+    }
+    Morph[] list = match (m.morphs) {
+        some(l) => l,
+        none => {
+            return;
+        },
+    };
+    for (usize t in 0..min(list.len, weights.len)) {
+        f32 w = weights[t];
+        if (w == 0.0) {
+            continue;
+        }
+        Morph target = list[t];
+        for (usize i in 0..min(m.vertices.len, o.len)) {
+            mut Vertex v = o[i];
+            if (target.positions.len >= (i + 1) * 3) {
+                v.position = [v.position[0] + w * target.positions[3 * i], v.position[1] + w * target.positions[3 * i + 1],
+                        v.position[2] + w * target.positions[3 * i + 2]];
+            }
+            if (target.normals.len >= (i + 1) * 3) {
+                v.normal = [v.normal[0] + w * target.normals[3 * i], v.normal[1] + w * target.normals[3 * i + 1],
+                        v.normal[2] + w * target.normals[3 * i + 2]];
+            }
+            o[i] = v;
+        }
+    }
+    for (usize i in 0..min(m.vertices.len, o.len)) {
+        mut Vertex v = o[i];
+        linear.Vec3 n = linear.vec3(v.normal[0], v.normal[1], v.normal[2]).normalized();
+        v.normal = [n.x, n.y, n.z];
+        o[i] = v;
+    }
+}
+
+// A material of metal and roughness, as glTF has it (OBJ gives its color and texture).
+pub struct Material {
+    pub str name;
+    pub mut f32[4] base_color;  // linear RGBA, times the texture
+    pub mut usize? texture;  // in `Model.images`
+    pub mut str texture_path;  // the file named by an OBJ (`map_Kd`) or an FBX; "" else
+    pub mut f32 metallic;
+    pub mut f32 roughness;
+}
+
+// A node of the tree: where it is relative to its parent, its meshes and its children.
+pub struct Node {
+    pub str name;
+    pub linear.Mat4 local;
+    pub usize[] meshes;  // in `Model.meshes`
+    pub usize[] children;  // in `Model.nodes`
+    pub usize? skin = none;  // in `Model.skins`: what moves its meshes
+    // `local` taken apart, as animations change it (identity for a node given by a matrix that
+    // is not one of translation, rotation and scale)
+    pub linear.Transform? transform = none;
+}
+
+// A skeleton: the nodes that are its joints, and for each the matrix that brings a vertex from
+// the space of the mesh into that of the joint at rest (its inverse bind matrix).
+pub struct Skin {
+    pub str name;
+    pub usize[] joints;  // in `Model.nodes`
+    pub linear.Mat4[] inverse_binds;  // one per joint
+}
+
+// What a channel of an animation moves.
+pub enum Target {
+    Translation,
+    Rotation,  // a quaternion, x y z w
+    Scale,
+    Weights,   // of the morph targets of the meshes of the node: one number per target
+}
+
+// The keys of one property of one node. `values` holds 3 numbers per key (4 for a rotation, one
+// per morph target for weights); for
+// `Hermite`, three such groups per key: the tangent in, the value, the tangent out, as glTF has them.
+pub struct Channel {
+    pub usize node;  // in `Model.nodes`
+    pub Target target;
+    pub curve.Interpolation mode;
+    pub f32[] times;  // seconds, increasing
+    pub f32[] values;
+}
+
+pub struct Animation {
+    pub str name;
+    pub Channel[] channels;
+    pub f32 duration;  // the last time of its channels
+}
+
+pub struct Model {
+    pub Mesh[] meshes;
+    pub Material[] materials;
+    pub image.Image[] images;
+    pub Node[] nodes;
+    pub usize[] roots;  // the nodes of the scene shown, without a parent
+    pub Skin[]? skins = none;
+    pub Animation[]? animations = none;
+
+    // The animation named `name`.
+    pub Animation? animation(str name) {
+        return match (animations) {
+            some(list) => {
+                for (Animation a in list) {
+                    if (a.name == name) {
+                        return some(a);
+                    }
+                }
+                return none;
+            },
+            none => none,
+        };
+    }
+}
+
+// What went wrong. `Damaged` says what, for a message.
+pub enum ModelError {
+    Unreadable,  // the file could not be read
+    Damaged(str why),  // not what the format says
+    TooLarge,  // beyond MAX_VERTICES, MAX_INDICES or MAX_NODES
+    Unsupported(str what),
+}
+
+pub str message(ModelError e) {
+    return match (e) {
+        Unreadable => "the model could not be read",
+        Damaged(why) => why,
+        TooLarge => "the model is too large",
+        Unsupported(what) => what,
+    };
+}
+
+// Limits: what a file may ask for, checked before anything is allocated.
+pub usize MAX_VERTICES = 16777216;  // 2^24
+pub usize MAX_INDICES = 67108864;  // 2^26
+pub usize MAX_NODES = 1048576;  // 2^20
+
+// The world matrix of each node, parents first: the roots at `origin`, their children after them.
+// A node reached twice (a file that makes a cycle) is placed once.
+pub linear.Mat4[] world_matrices(Arena* arena, Model m, linear.Mat4 origin) {
+    mut linear.Mat4[] world = arena.alloc_slice(linear.Mat4, m.nodes.len);
+    mut bool[] placed = arena.alloc_slice(bool, m.nodes.len);
+    mut usize[] stack = arena.alloc_slice(usize, m.nodes.len + 1);
+    mut usize top = 0;
+    for (usize root in m.roots) {
+        if (root < m.nodes.len && !placed[root]) {
+            world[root] = origin.mul(m.nodes[root].local);
+            placed[root] = true;
+            stack[top] = root;
+            top += 1;
+        }
+        while (top > 0) {
+            top -= 1;
+            usize n = stack[top];
+            for (usize child in m.nodes[n].children) {
+                if (child < m.nodes.len && !placed[child] && top < stack.len) {
+                    world[child] = world[n].mul(m.nodes[child].local);
+                    placed[child] = true;
+                    stack[top] = child;
+                    top += 1;
+                }
+            }
+        }
+    }
+    return world;
+}
+
+// The normals of the vertices, from the triangles around them (weighed by their area): for a
+// file that gives none.
+pub void smooth_normals(Vertex[] vertices, ui32[] indices) {
+    for (usize i in 0..vertices.len) {
+        vertices[i].normal = [0.0, 0.0, 0.0];
+    }
+    mut usize t = 0;
+    while (t + 2 < indices.len) {
+        usize a = indices[t] as usize;
+        usize b = indices[t + 1] as usize;
+        usize c = indices[t + 2] as usize;
+        t += 3;
+        if (a >= vertices.len || b >= vertices.len || c >= vertices.len) {
+            continue;
+        }
+        linear.Vec3 pa = position_of(vertices[a]);
+        linear.Vec3 face = position_of(vertices[b]).sub(pa).cross(position_of(vertices[c]).sub(pa));
+        for (usize v in [a, b, c]) {
+            vertices[v].normal = [
+                vertices[v].normal[0] + face.x, vertices[v].normal[1] + face.y, vertices[v].normal[2] + face.z,
+            ];
+        }
+    }
+    for (usize i in 0..vertices.len) {
+        linear.Vec3 n = linear.vec3(vertices[i].normal[0], vertices[i].normal[1], vertices[i].normal[2]).normalized();
+        vertices[i].normal = [n.x, n.y, n.z];
+    }
+}
+
+pub linear.Vec3 position_of(Vertex v) {
+    return linear.vec3(v.position[0], v.position[1], v.position[2]);
+}
+
+// The bounds of the vertices (a point at the origin when there are none).
+pub geometry.Aabb bounds_of(Vertex[] vertices) {
+    if (vertices.len == 0) {
+        return geometry.aabb(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
+    }
+    mut geometry.Aabb box = geometry.aabb(position_of(vertices[0]), position_of(vertices[0]));
+    for (Vertex v in vertices) {
+        box = box.grown(position_of(v));
+    }
+    return box;
+}
+
+// A material of plain white, for what has none.
+pub Material default_material(str name) {
+    return Material{
+        name: name,
+        base_color: [1.0, 1.0, 1.0, 1.0],
+        texture: none,
+        texture_path: "",
+        metallic: 0.0,
+        roughness: 1.0
+    };
+}
+
+// The image of the file at `path`, PNG or JPEG, or none when it is not there or does not decode.
+image.Image? read_image(Arena* arena, str path) uses io {
+    ui8[] bytes = match (io.read_bytes(arena, path)) {
+        ok(b) => b,
+        err(e) => {
+            return none;
+        },
+    };
+    if (png.is_png(bytes)) {
+        return match (png.decode(arena, bytes)) {
+            ok(img) => some(img),
+            err(e) => none,
+        };
+    }
+    if (jpeg.is_jpeg(bytes)) {
+        return match (jpeg.decode(arena, bytes)) {
+            ok(img) => some(img),
+            err(e) => none,
+        };
+    }
+    return none;
+}
+
+// The name of the file at the end of `path`, after its last `/` or `\\`.
+str file_name_of(str path) {
+    mut usize start = 0;
+    for (usize i in 0..path.len) {
+        if (path.bytes[i] == 47 || path.bytes[i] == 92) {  // '/' or '\\'
+            start = i + 1;
+        }
+    }
+    return text.slice(path, start, path.len);
+}
+
+// `m` with the textures its materials name by a file (`texture_path`), read from `folder`: the
+// path relative to it, else the name of the file alone in it (an FBX often keeps the absolute
+// path of the machine where it was made). Only files under `folder` are read: a path that goes
+// above it (`..`) or is absolute gives its name alone. PNG and JPEG; a file that is missing or
+// does not decode leaves its material without a texture. A file named twice is read once.
+pub Model with_textures(Arena* arena, Model m, str folder) uses io {
+    vec.Vec<Material>* materials = vec.new(arena);
+    vec.Vec<image.Image>* images = vec.new(arena);
+    for (image.Image img in m.images) {
+        images.push(img);
+    }
+    vec.Vec<str>* read_paths = vec.new(arena);
+    vec.Vec<usize>* read_images = vec.new(arena);
+    for (Material material in m.materials) {
+        mut Material made = material;
+        bool wanted = match (material.texture) {
+            some(t) => false,
+            none => material.texture_path.len > 0,
+        };
+        if (wanted) {
+            str path = text.replace(arena, material.texture_path, "\\", "/");
+            mut str[2] candidates = ["", fs.join(arena, folder, file_name_of(path))];
+            if (!fs.is_absolute(path) && !text.contains(path, "..")) {
+                candidates[0] = folder.len == 0 ? path : fs.join(arena, folder, path);
+            }
+            for (str candidate in candidates) {
+                if (candidate.len == 0 || match (made.texture) {
+                    some(t) => true,
+                    none => false,
+                }) {
+                    continue;
+                }
+                for (usize k in 0..read_paths.len()) {
+                    if (read_paths.items()[k] == candidate) {
+                        made.texture = some(read_images.items()[k]);
+                    }
+                }
+                if (match (made.texture) {
+                    some(t) => true,
+                    none => false,
+                }) {
+                    continue;
+                }
+                match (read_image(arena, candidate)) {
+                    some(img) => {
+                        images.push(img);
+                        read_paths.push(candidate);
+                        read_images.push(images.len() - 1);
+                        made.texture = some(images.len() - 1);
+                    },
+                    none => { },
+                }
+            }
+        }
+        materials.push(made);
+    }
+    return Model{
+        meshes: m.meshes,
+        materials: materials.items(),
+        images: images.items(),
+        nodes: m.nodes,
+        roots: m.roots,
+        skins: m.skins,
+        animations: m.animations
+    };
+}
+
+// The folder of `path`, "" when it has none.
+pub str folder_of(str path) {
+    return match (fs.parent(path)) {
+        some(p) => p,
+        none => "",
+    };
+}
+
+test "textures read beside the model" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str temp = match (os.env(&arena, "TEMP")) {
+        some(t) => t,
+        none => match (os.env(&arena, "TMPDIR")) {
+            some(t) => t,
+            none => "/tmp",
+        },
+    };
+    str folder = fs.join(&arena, temp, "sosu-model-textures");
+    assert(match (fs.create_dirs(&arena, fs.join(&arena, folder, "maps"))) {
+        ok => true,
+        err(e) => false,
+    });
+    mut image.Image red = image.create(&arena, 2, 2);
+    red.set(0, 0, image.rgba(255, 0, 0, 255));
+    assert(match (png.save(&arena, fs.join(&arena, folder, "maps/red.png"), red)) {
+        ok => true,
+        err(e) => false,
+    });
+    assert(match (png.save(&arena, fs.join(&arena, folder, "wood.png"), image.create(&arena, 4, 4))) {
+        ok => true,
+        err(e) => false,
+    });
+    vec.Vec<Material>* given = vec.new(&arena);
+    mut Material a = default_material("relative");
+    a.texture_path = "maps/red.png";
+    given.push(a);
+    mut Material b = default_material("absolute elsewhere");
+    b.texture_path = "C:\\Users\\artist\\textures\\wood.png";  // its name alone, beside the model
+    given.push(b);
+    mut Material c = default_material("again");
+    c.texture_path = "maps/red.png";
+    given.push(c);
+    mut Material d = default_material("missing");
+    d.texture_path = "nowhere.png";
+    given.push(d);
+    mut Material up = default_material("above");
+    up.texture_path = "../secret/red.png";  // not above the folder: its name alone, which is not there
+    given.push(up);
+    Model none_yet = Model{
+        meshes: vec.new<Mesh>(&arena).items(),
+        materials: given.items(),
+        images: vec.new<image.Image>(&arena).items(),
+        nodes: vec.new<Node>(&arena).items(),
+        roots: vec.new<usize>(&arena).items()
+    };
+    Model m = with_textures(&arena, none_yet, folder);
+    assert(m.images.len == 2);
+    assert(match (m.materials[0].texture) {
+        some(i) => m.images[i].at(0, 0) == image.rgba(255, 0, 0, 255),
+        none => false,
+    });
+    assert(match (m.materials[1].texture) {
+        some(i) => m.images[i].width == 4,
+        none => false,
+    });
+    assert(match (m.materials[2].texture) {
+        some(i) => i == 0,
+        none => false,
+    });  // read once
+    assert(match (m.materials[3].texture) {
+        some(i) => false,
+        none => true,
+    });
+    assert(match (m.materials[4].texture) {
+        some(i) => false,
+        none => true,
+    });
+    match (fs.remove_all(&arena, folder)) {
+        ok => { },
+        err(e) => { },
+    }
+}

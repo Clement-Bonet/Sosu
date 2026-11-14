@@ -1,0 +1,4 @@
+brawl: the hero moved: yes
+brawl: the hero stands on the floor: yes
+brawl: strikes: some, hits: some
+brawl: crates at rest on the level: yes

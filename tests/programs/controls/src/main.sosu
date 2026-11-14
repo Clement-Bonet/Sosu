@@ -1,0 +1,80 @@
+// platform.gamepad with a virtual pad of SDL (spec §8.2): connections, buttons across updates,
+// the dead zone of the sticks, the triggers, and a pad that leaves with a button held.
+import std.io;
+import platform.gamepad;
+import math.linear;
+
+bool near(f32 a, f32 b) {
+    return abs(a - b) < 0.02;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    gamepad.Pads* pads = gamepad.open(&arena);
+    defer pads.close();
+    pads.update();
+    usize before = pads.connected().len;  // the real pads of the machine, if any
+
+    gamepad.Virtual* pad = match (gamepad.plug_virtual(&arena, "Sosu test pad")) {
+        some(v) => v,
+        none => {
+            io.print("no virtual pad");
+            return 1;
+        },
+    };
+    pads.update();
+    io.print("plugged: {} came, one more connected: {}", pads.went_connected().len, pads.connected().len == before + 1);
+    if (pads.went_connected().len != 1) {
+        return 1;
+    }
+    gamepad.Pad* p = pads.went_connected()[0];
+    io.print("its name: {}", p.name(&arena));
+
+    // a button across three updates
+    pad.press(gamepad.Button.South, true);
+    pads.update();
+    io.print("South pressed: {}, went down: {}", p.pressed(gamepad.Button.South), p.went_down(gamepad.Button.South));
+    pads.update();
+    io.print("still held: {}, went down: {}", p.pressed(gamepad.Button.South), p.went_down(gamepad.Button.South));
+    pad.press(gamepad.Button.South, false);
+    pads.update();
+    io.print("released: {}, went up: {}", p.pressed(gamepad.Button.South), p.went_up(gamepad.Button.South));
+
+    // the sticks: within the dead zone, nothing; y up
+    pad.push(gamepad.Stick.LeftStick, 0.1, 0.0);
+    pads.update();
+    linear.Vec2 small = p.stick(gamepad.Stick.LeftStick);
+    io.print("a small push: {}", small.x == 0.0 && small.y == 0.0 ? "nothing" : "something");
+    pad.push(gamepad.Stick.LeftStick, 1.0, 0.0);
+    pad.push(gamepad.Stick.RightStick, 0.0, 1.0);
+    pads.update();
+    linear.Vec2 right = p.stick(gamepad.Stick.LeftStick);
+    linear.Vec2 up = p.stick(gamepad.Stick.RightStick);
+    io.print("left stick to the right: {}", near(right.x, 1.0) && near(right.y, 0.0));
+    io.print("right stick up: {}", near(up.x, 0.0) && near(up.y, 1.0));
+    pad.push(gamepad.Stick.LeftStick, 0.575, 0.0);  // halfway beyond the dead zone
+    pads.update();
+    io.print("halfway: {}", near(p.stick(gamepad.Stick.LeftStick).x, 0.5));
+
+    // the triggers
+    pad.pull(gamepad.Trigger.RightTrigger, 1.0);
+    pads.update();
+    io.print("right trigger pulled: {}", near(p.trigger(gamepad.Trigger.RightTrigger), 1.0));
+    pad.pull(gamepad.Trigger.RightTrigger, 0.0);
+    pads.update();
+    io.print("right trigger let go: {}", near(p.trigger(gamepad.Trigger.RightTrigger), 0.0));
+
+    // unplugged with East held: it leaves, and East reads as let go
+    pad.press(gamepad.Button.East, true);
+    pads.update();
+    pad.detach();
+    pads.update();
+    io.print(
+        "unplugged: {} left, as many connected as before: {}, East went up: {}",
+        pads.went_disconnected().len,
+        pads.connected().len == before,
+        p.went_up(gamepad.Button.East)
+    );
+    return 0;
+}

@@ -1,0 +1,12 @@
+the same path, the same handle: true
+texture: ready
+its size: true
+sound: ready
+its samples: true
+model: ready
+its mesh: true
+not an image: not an image of PNG or JPEG that decodes
+missing: the file is not there
+by update: ready
+loaded again: true
+released: released

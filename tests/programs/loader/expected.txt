@@ -1,0 +1,13 @@
+loaded a copy: true
+geom_nothing: none
+half 8 = 4, error: none
+half 7 = 0, error: requires
+deep = 0, error: stack overflow
+poke = 0, error: invalid memory access
+loaded a copy: true
+geom_nothing: none
+half 8 = 4, error: none
+half 7 = 0, error: requires
+deep = 0, error: stack overflow
+poke = 0, error: invalid memory access
+copies removed: 2

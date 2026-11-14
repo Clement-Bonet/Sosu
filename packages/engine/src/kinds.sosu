@@ -1,0 +1,648 @@
+// engine.kinds: the kinds of components of a world, each seen the same way whatever its type: its
+// name and fields (from its `Describe`), whether an entity has one, adding and removing it,
+// reading and writing a field through a `describe.Value`. What an editor needs to show and change
+// every component, the common ones of `engine` and those of a game alike, and what a graph of Kumi
+// will call. A generic class cannot implement an interface in Sosu, so each kind is a small class
+// of its own, whose methods call the generic functions of this module (`table_get`...); a game
+// writes one for each of its components (later, `sosuc describe` writes them).
+//
+//   kinds.Kinds* all = kinds.common(arena, components);   // the seven of engine
+//   all.add(arena.new(SpeedKind, arena, speeds));           // one of the game
+//   kinds.Kind* k = all.named("body");
+//   k.set(crate, 3, describe.Value.Number(12.5));           // its mass
+import std.vec;
+import std.text;
+import math.linear;
+import scene.scene;
+import engine.describe;
+import engine.components;
+
+// A kind of component of a world.
+pub interface Kind {
+    // The name of its table in a scene file (`Describe.name`).
+    str name();
+    usize count();
+    describe.Field field(usize i);
+    bool has(scene.Entity e);
+    // A new one (`Describe.fresh`) given to `e`, unless it has one.
+    void add(scene.Entity e);
+    void remove(scene.Entity e);
+    // The field `i` of the component of `e`, none if it has none.
+    describe.Value? get(scene.Entity e, usize i);
+    // `v` given to the field `i` of the component of `e`, held within its bounds, a text copied
+    // where the world lives: false if it has none.
+    bool set(scene.Entity e, usize i, describe.Value v);
+}
+
+// What every kind does, on its table and its description.
+
+pub describe.Value? table_get<T>(scene.Table<T>* table, describe.Describe<T>* d, scene.Entity e, usize i) {
+    if (i >= d.count()) {
+        return none;
+    }
+    return match (table.get(e)) {
+        some(c) => some(d.get(c, i)),
+        none => none,
+    };
+}
+
+pub bool table_set<T>(
+    Arena* texts,
+    scene.Table<T>* table,
+    describe.Describe<T>* d,
+    scene.Entity e,
+    usize i,
+    describe.Value v
+) {
+    if (i >= d.count()) {
+        return false;
+    }
+    match (table.get(e)) {
+        some(c) => {
+            describe.Value kept = match (v) {
+                Text(s) => describe.Value.Text(text.repeat(texts, s, 1)),
+                _ => v,
+            };
+            d.set(c, i, describe.bounded(d.field(i), kept));
+            return true;
+        },
+        none => {
+            return false;
+        },
+    }
+}
+
+pub void table_add<T>(scene.Table<T>* table, keeps describe.Describe<T>* d, scene.Entity e) {
+    if (!table.has(e)) {
+        table.set(e, d.fresh());
+    }
+}
+
+// The kinds of a world: those of `engine`, then those a game adds.
+pub class Kinds {
+    vec.Vec<Kind*>* all;
+
+    void init(keeps Arena* arena) {
+        all = vec.new<Kind*>(arena);
+    }
+
+    // `k` added (a kind of the game); one of the same name replaces it.
+    pub void add(keeps Kind* k) {
+        for (usize i in 0..all.len()) {
+            if (all.items()[i].name() == k.name()) {
+                all.set(i, k);
+                return;
+            }
+        }
+        all.push(k);
+    }
+
+    pub usize count() {
+        return all.len();
+    }
+
+    pub Kind* at(usize i) {
+        return all.items()[i];
+    }
+
+    // The kind named `name`, none if there is none.
+    pub Kind*? named(str name) {
+        for (Kind* k in all.items()) {
+            if (k.name() == name) {
+                return some(k);
+            }
+        }
+        return none;
+    }
+
+    // The names of the kinds `e` has, in the order of the kinds.
+    pub str[] of(Arena* into, scene.Entity e) {
+        vec.Vec<str>* out = vec.new<str>(into);
+        for (Kind* k in all.items()) {
+            if (k.has(e)) {
+                out.push(text.repeat(into, k.name(), 1));
+            }
+        }
+        return out.items();
+    }
+}
+
+// An empty registry of kinds.
+pub Kinds* kinds(keeps Arena* arena) {
+    return arena.new(Kinds, arena);
+}
+
+// The seven common kinds of `engine`, on the tables of `c`; texts set are copied into `arena`, which
+// must live as long as the world.
+pub Kinds* common(keeps Arena* arena, keeps components.Components* c) {
+    Kinds* k = kinds(arena);
+    k.add(arena.new(MeshKind, arena, c) as Kind*);
+    k.add(arena.new(LightKind, arena, c) as Kind*);
+    k.add(arena.new(ViewKind, arena, c) as Kind*);
+    k.add(arena.new(BodyKind, arena, c) as Kind*);
+    k.add(arena.new(SoundKind, arena, c) as Kind*);
+    k.add(arena.new(EmitterKind, arena, c) as Kind*);
+    k.add(arena.new(AnimatorKind, arena, c) as Kind*);
+    return k;
+}
+
+// ---- The kinds of the common components ----
+
+class MeshKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Mesh>* d() {
+        return c.mesh_fields as describe.Describe<components.Mesh>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.meshes.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.meshes, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.meshes.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.meshes, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.meshes, d(), e, i, v);
+    }
+}
+
+class LightKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Light>* d() {
+        return c.light_fields as describe.Describe<components.Light>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.lights.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.lights, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.lights.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.lights, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.lights, d(), e, i, v);
+    }
+}
+
+class ViewKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.View>* d() {
+        return c.view_fields as describe.Describe<components.View>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.views.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.views, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.views.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.views, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.views, d(), e, i, v);
+    }
+}
+
+class BodyKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Body>* d() {
+        return c.body_fields as describe.Describe<components.Body>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.bodies.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.bodies, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.bodies.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.bodies, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.bodies, d(), e, i, v);
+    }
+}
+
+class SoundKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Sound>* d() {
+        return c.sound_fields as describe.Describe<components.Sound>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.sounds.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.sounds, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.sounds.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.sounds, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.sounds, d(), e, i, v);
+    }
+}
+
+class EmitterKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Emitter>* d() {
+        return c.emitter_fields as describe.Describe<components.Emitter>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.emitters.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.emitters, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.emitters.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.emitters, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.emitters, d(), e, i, v);
+    }
+}
+
+class AnimatorKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Animator>* d() {
+        return c.animator_fields as describe.Describe<components.Animator>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.animators.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.animators, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.animators.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.animators, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.animators, d(), e, i, v);
+    }
+}
+
+// ---- Tests ----
+
+// A component of a game, outside of engine: a speed and a tag.
+pub struct Speed {
+    pub mut f32 value = 1.0;
+    pub mut str tag = "slow";
+}
+
+class SpeedFields : describe.Describe<Speed> {
+    void init() { }
+
+    override str name() {
+        return "speed";
+    }
+
+    override Speed fresh() {
+        return Speed{ };
+    }
+
+    override usize count() {
+        return 2;
+    }
+
+    override describe.Field field(usize i) {
+        return i == 0 ? describe.number("value", "Value", 0.0, 10.0) : describe.text_field("tag", "Tag");
+    }
+
+    override describe.Value get(Speed* s, usize i) {
+        return i == 0 ? describe.Value.Number(s.value) : describe.Value.Text(s.tag);
+    }
+
+    override void set(Speed* s, usize i, describe.Value v) {
+        if (i == 0) {
+            s.value = describe.number_of(v, s.value);
+        } else {
+            s.tag = describe.text_of(v, s.tag);
+        }
+    }
+}
+
+class SpeedKind : Kind {
+    Arena* arena;
+    scene.Table<Speed>* speeds;
+    SpeedFields* fields;
+
+    void init(keeps Arena* arena, keeps scene.Table<Speed>* speeds) {
+        self.arena = arena;
+        self.speeds = speeds;
+        fields = arena.new(SpeedFields);
+    }
+
+    describe.Describe<Speed>* d() {
+        return fields as describe.Describe<Speed>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return speeds.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(speeds, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        speeds.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(speeds, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, speeds, d(), e, i, v);
+    }
+}
+
+// The index of the field `name` of `k`.
+usize field_named(Kind* k, str name) {
+    for (usize i in 0..k.count()) {
+        if (k.field(i).name == name) {
+            return i;
+        }
+    }
+    return k.count();
+}
+
+f32 number_in(describe.Value? v) {
+    return match (v) {
+        some(x) => describe.number_of(x, -1.0),
+        none => -2.0,
+    };
+}
+
+str text_in(describe.Value? v) {
+    return match (v) {
+        some(x) => describe.text_of(x, "?"),
+        none => "none",
+    };
+}
+
+test "the kinds of components: the common ones and one of a game, each read and written alike" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Kinds* all = common(&arena, c);
+    assert(all.count() == 7 && all.at(0).name() == "mesh");
+    scene.Entity crate = w.spawn_at("crate", linear.transform(), none);
+    Kind* body = match (all.named("body")) {
+        some(k) => k,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    Kind* mesh = match (all.named("mesh")) {
+        some(k) => k,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(!body.has(crate) && number_in(body.get(crate, 0)) == -2.0);
+    body.add(crate);
+    mesh.add(crate);
+    assert(body.has(crate) && c.bodies.has(crate));
+    // a number, and one held within its bounds
+    assert(body.set(crate, field_named(body, "mass"), describe.Value.Number(12.5)));
+    assert(number_in(body.get(crate, field_named(body, "mass"))) == 12.5);
+    body.set(crate, field_named(body, "restitution"), describe.Value.Number(5.0));
+    assert(number_in(body.get(crate, field_named(body, "restitution"))) <= 1.0);
+    // a text, copied where the world lives: still there when what it came from is gone
+    mut Arena brief = Arena.new(1 * KB);
+    str given = text.repeat(&brief, "models/crate.glb", 1);
+    assert(mesh.set(crate, 0, describe.Value.Text(given)));
+    brief.free();
+    assert(text_in(mesh.get(crate, 0)) == "models/crate.glb");
+    mut Arena names = Arena.new(1 * KB);
+    defer names.free();
+    str[] has = all.of(&names, crate);
+    assert(has.len == 2 && has[0] == "mesh" && has[1] == "body");
+    // removed
+    body.remove(crate);
+    assert(!body.has(crate) && !body.set(crate, 0, describe.Value.Number(1.0)));
+    // a kind of the game, added to them
+    scene.Table<Speed>* speeds = w.table<Speed>();
+    all.add(arena.new(SpeedKind, &arena, speeds) as Kind*);
+    assert(all.count() == 8);
+    Kind* speed = match (all.named("speed")) {
+        some(k) => k,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    speed.add(crate);
+    assert(text_in(speed.get(crate, 1)) == "slow");
+    speed.set(crate, 0, describe.Value.Number(25.0));
+    assert(number_in(speed.get(crate, 0)) == 10.0);  // its bounds
+    assert(match (speeds.get(crate)) {
+        some(s) => s.value == 10.0,
+        none => false,
+    });
+}

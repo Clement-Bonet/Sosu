@@ -1,0 +1,67 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct type_Object
+{
+    float4x4 model;
+    float4x4 light_view_projection;
+};
+
+struct type_StructuredBuffer_v4float
+{
+    float4 _m0[1];
+};
+
+struct type_Morph
+{
+    float4 morph_weights[2];
+    uint4 morph_targets[2];
+    uint4 morph_info;
+};
+
+struct main0_out
+{
+    float4 gl_Position [[position]];
+};
+
+struct main0_in
+{
+    float3 in_var_TEXCOORD0 [[attribute(0)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant type_Object& Object [[buffer(0)]], constant type_Morph& Morph [[buffer(1)]], const device type_StructuredBuffer_v4float& morphs [[buffer(2)]], uint gl_VertexIndex [[vertex_id]])
+{
+    main0_out out = {};
+    float3 _50;
+    _50 = in.in_var_TEXCOORD0;
+    uint _53 = 0u;
+    for (;;)
+    {
+        bool _63;
+        if (_53 < Morph.morph_info.x)
+        {
+            _63 = _53 < 8u;
+        }
+        else
+        {
+            _63 = false;
+        }
+        if (_63)
+        {
+            uint _64 = _53 >> 2u;
+            uint _65 = _53 & 3u;
+            _50 += (morphs._m0[((Morph.morph_targets[_64][_65] * 2u) * Morph.morph_info.y) + gl_VertexIndex].xyz * Morph.morph_weights[_64][_65]);
+            _53++;
+            continue;
+        }
+        else
+        {
+            break;
+        }
+    }
+    out.gl_Position = Object.light_view_projection * (Object.model * float4(_50, 1.0));
+    return out;
+}
+

@@ -4512,13 +4512,13 @@ static int vorbis_search_for_page_pushdata(vorb *f, const uint8 *data, int data_
                n = f->page_crc_tests++;
                f->scan[n].bytes_left = len-j;
                f->scan[n].crc_so_far = crc;
-               f->scan[n].goal_crc = data[i+22] + (data[i+23] << 8) + (data[i+24]<<16) + (data[i+25]<<24);
+               f->scan[n].goal_crc = data[i+22] + (data[i+23] << 8) + (data[i+24]<<16) + ((uint32)data[i+25]<<24);  // Sosu: uint32, not int
                // if the last frame on a page is continued to the next, then
                // we can't recover the sample_loc immediately
                if (data[i+27+data[i+26]-1] == 255)
                   f->scan[n].sample_loc = ~0;
                else
-                  f->scan[n].sample_loc = data[i+6] + (data[i+7] << 8) + (data[i+ 8]<<16) + (data[i+ 9]<<24);
+                  f->scan[n].sample_loc = data[i+6] + (data[i+7] << 8) + (data[i+ 8]<<16) + ((uint32)data[i+ 9]<<24);  // Sosu: uint32, not int
                f->scan[n].bytes_done = i+j;
                if (f->page_crc_tests == STB_VORBIS_PUSHDATA_CRC_COUNT)
                   break;
@@ -4789,7 +4789,8 @@ static int get_seek_page_info(stb_vorbis *f, ProbedPage *z)
    z->page_end = z->page_start + 27 + header[26] + len;
 
    // read the last-decoded sample out of the data
-   z->last_decoded_sample = header[6] + (header[7] << 8) + (header[8] << 16) + (header[9] << 24);
+   // Sosu: shifted as uint32: a byte of 128 or more shifted by 24 in an int was undefined
+   z->last_decoded_sample = header[6] + (header[7] << 8) + (header[8] << 16) + ((uint32) header[9] << 24);
 
    // restore file state to where we were
    set_file_offset(f, z->page_start);
@@ -4854,7 +4855,8 @@ static int seek_to_sample_coarse(stb_vorbis *f, uint32 sample_number)
    }
 
    right = f->p_last;
-   assert(right.last_decoded_sample != ~0U);
+   // Sosu: a hostile file reaches these, which only asserted: the seek fails instead
+   if (right.last_decoded_sample == ~0U) goto error;
 
    // starting from the start is handled differently
    if (last_sample_limit <= left.last_decoded_sample) {
@@ -4867,7 +4869,7 @@ static int seek_to_sample_coarse(stb_vorbis *f, uint32 sample_number)
    }
 
    while (left.page_end != right.page_start) {
-      assert(left.page_end < right.page_start);
+      if (left.page_end > right.page_start) goto error;  // Sosu: was an assert
       // search range in bytes
       delta = right.page_start - left.page_end;
       if (delta <= 65536) {
@@ -4909,7 +4911,7 @@ static int seek_to_sample_coarse(stb_vorbis *f, uint32 sample_number)
          if (mid.last_decoded_sample != ~0U) break;
          // (untested) no frames end on this page
          set_file_offset(f, mid.page_end);
-         assert(mid.page_start < right.page_start);
+         if (mid.page_start >= right.page_start) goto error;  // Sosu: was an assert
       }
 
       // if we've just found the last page again then we're in a tricky file,
@@ -4932,7 +4934,7 @@ static int seek_to_sample_coarse(stb_vorbis *f, uint32 sample_number)
    set_file_offset(f, page_start);
    if (!start_page(f)) return error(f, VORBIS_seek_failed);
    end_pos = f->end_seg_with_known_loc;
-   assert(end_pos >= 0);
+   if (end_pos < 0) goto error;  // Sosu: was an assert
 
    for (;;) {
       for (i = end_pos; i > 0; --i)
@@ -5014,8 +5016,8 @@ int stb_vorbis_seek_frame(stb_vorbis *f, unsigned int sample_number)
    if (!seek_to_sample_coarse(f, sample_number))
       return 0;
 
-   assert(f->current_loc_valid);
-   assert(f->current_loc <= sample_number);
+   // Sosu: were asserts
+   if (!f->current_loc_valid || f->current_loc > sample_number) return error(f, VORBIS_seek_failed);
 
    // linear search for the relevant packet
    max_frame_samples = (f->blocksize_1*3 - f->blocksize_0) >> 2;
@@ -5055,8 +5057,12 @@ int stb_vorbis_seek(stb_vorbis *f, unsigned int sample_number)
       int n;
       uint32 frame_start = f->current_loc;
       stb_vorbis_get_frame_float(f, &n, NULL);
-      assert(sample_number > frame_start);
-      assert(f->channel_buffer_start + (int) (sample_number-frame_start) <= f->channel_buffer_end);
+      // Sosu: were asserts; the frame decoded does not hold the sample of a hostile file
+      if (sample_number <= frame_start || f->channel_buffer_end < f->channel_buffer_start
+          || sample_number - frame_start > (uint32) (f->channel_buffer_end - f->channel_buffer_start)) {
+         f->current_playback_loc_valid = FALSE;
+         return error(f, VORBIS_seek_failed);
+      }
       f->channel_buffer_start += (sample_number - frame_start);
    }
 

@@ -10,6 +10,9 @@ typedef enum {
     CODEGEN_PROGRAM, /* `main` of the entry module */
     CODEGEN_TESTS,   /* runs the `test` blocks of the root package */
     CODEGEN_LIBRARY, /* no `main`: the `export "C"` functions, each under a guard (spec §9.2) */
+    CODEGEN_FUZZ,    /* `void fuzz(ui8[] data)` of the entry module as the target of libFuzzer
+                        (`LLVMFuzzerTestOneInput`), and with SOSU_FUZZ_REPLAY a `main` that gives it
+                        the files of its arguments (spec §13.1, work 5) */
 } CodegenMode;
 
 /* Run-time checks (spec §7.7). Debug: all on. Release: bounds only, unless `--checks=off`. */

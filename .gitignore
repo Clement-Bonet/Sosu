@@ -1,4 +1,5 @@
 build/
+.sosu-cache/
 packages/*/vendor/
 .gradle/
 graphify-out/

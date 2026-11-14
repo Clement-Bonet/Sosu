@@ -1,0 +1,13 @@
+# 3D drawing on the GPU (spec §8.2): SDL_GPU (Vulkan, Metal, Direct3D 12), through the
+# declarations of platform.sdl_c, on a window of `app.run_window`.
+[package]
+name = "gpu"
+version = "0.1.0"
+
+[link]
+c = ["native/shaders.c"]  # the shaders of gpu.overlay: `sosuc shaders packages/gpu --c native/shaders.c`
+
+[dependencies]
+platform = { path = "../platform" }  # SDL3, its declarations, and the window of run_window
+image = { path = "../image" }        # textures from images
+render = { path = "../render" }      # the canvas that gpu.overlay draws over the 3D

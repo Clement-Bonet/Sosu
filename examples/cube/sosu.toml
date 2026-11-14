@@ -1,0 +1,16 @@
+# A textured cube turning on the GPU (spec §8.2): app.run_window, gpu and gpu.shaders.
+# The shaders of shaders/*.hlsl are compiled by `sosuc shaders examples/cube` (shadercross).
+[package]
+name = "cube"
+version = "0.1.0"
+
+[app]
+id = "org.sosu.cube"
+name = "Sosu cube"
+assets = ["shaders/compiled"]
+
+[dependencies]
+platform = { path = "../../packages/platform" }
+gpu = { path = "../../packages/gpu" }
+image = { path = "../../packages/image" }
+math = { path = "../../packages/math" }

@@ -1,0 +1,222 @@
+// Soundstage: a sound placed around the listener, ahead, behind, left, right, above, or turning
+// around the head, heard panned or through a head (audio.hrtf: best with headphones), and the
+// scene drawn from above. The window runs here and passes the input to the widgets of
+// screen.ui.sosu; model.sosu places the sound, stage.sosu draws the scene.
+//
+//   sosuc run --release .              the soundstage (a head costs less in a build --release)
+//   sosuc run . -- --snapshot x.png    draws the window into a PNG, without a screen or a sound card
+import std.io;
+import std.math;
+import std.os;
+import platform.app;
+import render.canvas;
+import render.truetype;
+import image.png;
+import audio.mixer;
+import audio.device;
+import ui.widgets;
+import soundstage.look;
+import soundstage.model;
+import soundstage.screen;
+import soundstage.checks;  // the tests of checks.sosu, which `sosuc test` finds from here
+
+i32 RATE = 48000;
+
+class App : app.Handler, app.TitleBar {
+    mut widgets.Ui ui;
+    model.Model* m;
+    device.Player*? player;
+    mut f32 display_scale;
+    mut ui64 last;
+
+    void init(keeps model.Model* m, keeps device.Player*? player) {
+        ui = widgets.Ui{ };
+        display_scale = 1.0;
+        last = 0;
+        self.m = m;
+        self.player = player;
+    }
+
+    // Asked by the system between two frames: the empty space of the title bar moves the window.
+    override bool is_drag_area(f32 x, f32 y) {
+        return ui.is_drag_area(x, y);
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            CustomTitleBar(active) => {
+                ui.custom_title_bar = active;
+            },
+            Maximized(on) => {
+                ui.maximized = on;
+            },
+            Key(code, down, mods) => {
+                if (down && code == 27) {
+                    return false;
+                }
+                if (down && code == 32) {
+                    m.toggle_orbit();
+                    return true;
+                }
+                ui.key(code, down, mods.shift, mods.ctrl || mods.command);
+            },
+            MouseMove(x, y) => {
+                ui.mouse_move(x, y);
+            },
+            Click(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(true);
+            },
+            Release(x, y, button) => {
+                ui.mouse_move(x, y);
+                ui.mouse_button(false);
+            },
+            Wheel(x, y) => {
+                ui.scroll_wheel(y);
+            },
+            ScaleChanged(scale) => {
+                display_scale = scale;
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(canvas.Canvas* surface) uses io {
+        ui64 now = app.now_ms();
+        f32 dt = last == 0 ? 0.016 : max(0.0, min(0.1, (now - last) as f32 / 1000.0));
+        last = now;
+        m.update(dt);
+        match (player) {
+            some(p) => {
+                p.update();
+            },
+            none => { },
+        }
+        draw(surface);
+        match (ui.take_window_request()) {
+            some(request) => {
+                match (request) {
+                    Minimize => {
+                        app.minimize();
+                    },
+                    ToggleMaximize => {
+                        app.toggle_maximize();
+                    },
+                    Close => {
+                        app.request_quit();
+                    },
+                }
+            },
+            none => { },
+        }
+    }
+
+    void draw(canvas.Canvas* surface) uses io {
+        ui.theme = some(look.Dusk());
+        ui.scale = min(display_scale, surface.height as f32 / 640.0);
+        mut widgets.Frame f = widgets.begin(&ui, surface, 0.0, 0.0);
+        screen.Soundstage(&f, m);
+        f.finish();
+    }
+}
+
+// A TrueType font from the first of `places` that holds one (assets/, or beside the executable).
+truetype.Font*? read_face(Arena* arena, str[2] places) uses io {
+    for (str place in places) {
+        match (app.read_asset(arena, place)) {
+            some(bytes) => {
+                match (truetype.parse(arena, bytes)) {
+                    ok(face) => {
+                        return some(face);
+                    },
+                    err(e) => { },
+                }
+            },
+            none => { },
+        }
+    }
+    return none;
+}
+
+// Noto Sans from assets/, or else the built-in font; Font Awesome behind it.
+void load_font(Arena* arena, App* handler) uses io {
+    match (read_face(arena, ["assets/NotoSans-Regular.ttf", "NotoSans-Regular.ttf"])) {
+        some(noto) => {
+            match (read_face(arena, ["assets/fa-solid-900.ttf", "fa-solid-900.ttf"])) {
+                some(icons) => {
+                    noto.fallback = some(icons);
+                },
+                none => { },
+            }
+            handler.ui.font = some(noto);
+        },
+        none => {
+            io.print("Noto Sans not found: the built-in font is used");
+        },
+    }
+}
+
+// The window drawn into a PNG: the clicks turning around the head, behind on the right, through a
+// head, as the device would take them.
+i32 snapshot(keeps Arena* arena, App* handler, str path) uses io {
+    mut canvas.Canvas surface = canvas.create(arena, 1180, 640);
+    handler.ui.custom_title_bar = true;
+    handler.m.elevation = 20;
+    handler.m.distance = 45;
+    handler.m.speed = 90;
+    handler.m.toggle_orbit();
+    for (i32 frame in 0..90) {
+        handler.m.pump(800, 1.0 / 60.0);  // 1.5 s: from ahead to behind on the right
+    }
+    for (i32 frame in 0..3) {
+        handler.draw(&surface);
+    }
+    match (png.save(arena, path, surface.image())) {
+        ok => {
+            io.print("written to {}", path);
+            return 0;
+        },
+        err(e) => {
+            io.print("{} cannot be written", path);
+            return 1;
+        },
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(32 * MB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    if (args.len == 2 && args[0] == "--snapshot") {
+        mixer.Mixer* quiet = mixer.create(&arena, RATE, 2);
+        model.Model* shown = arena.new(model.Model, &arena, quiet, none);
+        App* shot = arena.new(App, shown, none);
+        load_font(&arena, shot);
+        i32 code = snapshot(&arena, shot, args[1]);
+        shown.close();
+        return code;
+    }
+    device.Player* player = match (device.open_player(&arena, device.Output{ rate: RATE })) {
+        some(p) => p,
+        none => {
+            io.print("no sound device: {}", device.last_error(&arena));
+            return 1;
+        },
+    };
+    model.Model* m = arena.new(model.Model, &arena, player.sounds, some(player));
+    App* handler = arena.new(App, m, some(player));
+    load_font(&arena, handler);
+    widgets.Window window = screen.SoundstageConfig();
+    app.TitleBar*? bar = window.custom_title_bar ? some(handler as app.TitleBar*) : none;
+    i32 code = app.run(
+        app.Config{ title: window.title, width: window.width, height: window.height, title_bar: bar },
+        handler as app.Handler*
+    );
+    m.close();
+    player.close();
+    return code;
+}

@@ -1,0 +1,4 @@
+// nav: navigation meshes and crowds (Recast, Detour), and A* on grids (spec §8.2). Programs import
+// `nav.nav` and `nav.grid`.
+import nav.nav;
+import nav.grid;

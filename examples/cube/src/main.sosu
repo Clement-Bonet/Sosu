@@ -1,0 +1,245 @@
+// A textured cube turning on the GPU (spec §8.2): `app.run_window` opens a window that the
+// program draws itself, `gpu` draws on it, `gpu.shaders` loads the shaders that
+// `sosuc shaders examples/cube` compiled, `math.linear` places the camera. Dragging with the
+// mouse turns the camera around the cube; Escape closes the window.
+// On Windows: run packages/platform/fetch-sdl3.ps1 once, then `sosuc run examples/cube`.
+import std.io;
+import platform.app;
+import gpu.gpu;
+import gpu.shaders;
+import image.image;
+import math.linear;
+
+// A corner of a face, as the vertex shader reads it.
+struct Vertex {
+    f32[3] position;
+    f32[2] uv;
+}
+
+Vertex corner(f32 x, f32 y, f32 z, f32 u, f32 v) {
+    return Vertex{ position: [x, y, z], uv: [u, v] };
+}
+
+// What is drawn: made in `on_start`, released in `on_stop`.
+struct Scene {
+    gpu.Pipeline pipeline;
+    gpu.Buffer vertices;
+    gpu.Buffer indices;
+    gpu.Texture crate;
+    gpu.Sampler sampler;
+}
+
+// The four corners of each face, counter-clockwise seen from outside: bottom left, bottom right,
+// top right, top left.
+Vertex[] cube_vertices(Arena* arena) {
+    mut Vertex[] v = arena.alloc_slice(Vertex, 24);
+    mut f32[72] p = [
+        -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0,  // +z
+        1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0,  // -z
+        1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0,  // +x
+        -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0,  // -x
+        -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0,  // +y
+        -1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0,  // -y
+    ];
+    f32[8] uv = [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0];  // the texture has its origin at the top left
+    for (usize i in 0..24) {
+        usize c = i % 4;
+        v[i] = corner(p[i * 3], p[i * 3 + 1], p[i * 3 + 2], uv[c * 2], uv[c * 2 + 1]);
+    }
+    return v;
+}
+
+ui16[] cube_indices(Arena* arena) {
+    mut ui16[] indices = arena.alloc_slice(ui16, 36);
+    for (usize face in 0..6) {
+        ui16 b = (face * 4) as ui16;
+        usize at = face * 6;
+        indices[at] = b;
+        indices[at + 1] = b + 1;
+        indices[at + 2] = b + 2;
+        indices[at + 3] = b;
+        indices[at + 4] = b + 2;
+        indices[at + 5] = b + 3;
+    }
+    return indices;
+}
+
+// A checkerboard of two woods, 256 pixels a side.
+image.Image checkers(Arena* arena) {
+    mut image.Image img = image.create(arena, 256, 256);
+    ui32 light = image.rgba(222, 184, 135, 255);
+    ui32 dark = image.rgba(139, 90, 43, 255);
+    for (i32 y in 0..256) {
+        for (i32 x in 0..256) {
+            bool even = (x / 32 + y / 32) % 2 == 0;
+            bool edge = x % 32 == 0 || y % 32 == 0;
+            img.set(x, y, edge ? image.rgba(60, 40, 20, 255) : even ? light : dark);
+        }
+    }
+    return img;
+}
+
+Scene!gpu.GpuError build(Arena* arena, gpu.Device* device) uses io {
+    gpu.Shader vs = try shaders.load(arena, device, "examples/cube/shaders/cube.vert");
+    gpu.Shader fs = try shaders.load(arena, device, "examples/cube/shaders/cube.frag");
+    mut gpu.Attribute[2] attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(Vertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float2, offset: offset_of(Vertex, uv) as ui32 },
+    ];
+    gpu.Layout layout = gpu.Layout{ stride: size_of(Vertex) as ui32, attributes: attributes[0..2] };
+    gpu.Pipeline pipeline = try device.pipeline(gpu.PipelineDesc{ vertex: vs, fragment: fs, layout: layout });
+    device.release_shader(vs);  // the pipeline keeps what it needs
+    device.release_shader(fs);
+    gpu.Buffer vertices = try device.buffer_of(gpu.Usage.Vertex, cube_vertices(arena));
+    gpu.Buffer indices = try device.buffer_of(gpu.Usage.Index, cube_indices(arena));
+    gpu.Texture crate = try device.texture_of(checkers(arena), true);
+    gpu.Sampler sampler = try device.sampler(gpu.SamplerDesc{ anisotropy: 4.0 });
+    return ok(Scene{ pipeline: pipeline, vertices: vertices, indices: indices, crate: crate, sampler: sampler });
+}
+
+class Cube : app.WindowHandler {
+    mut Arena arena;
+    mut gpu.Device*? device;
+    mut Scene? scene;
+    mut f32 yaw;  // the camera around the cube, in radians
+    mut f32 pitch;
+    mut bool dragging;
+    mut f32 last_x;
+    mut f32 last_y;
+
+    void init() {
+        arena = Arena.new(64 * KB);
+        device = none;
+        scene = none;
+        yaw = 0.0;
+        pitch = 0.3;
+        dragging = false;
+        last_x = 0.0;
+        last_y = 0.0;
+    }
+
+    override void on_start(app.Window window) uses io {
+        match (gpu.open(&arena, window, gpu.Options{ debug: true, driver: "vulkan" })) {
+            ok(d) => {
+                device = some(d);
+                match (build(&arena, d)) {
+                    ok(s) => {
+                        scene = some(s);
+                    },
+                    err(e) => {
+                        io.print("cube: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                        app.request_quit();
+                    },
+                }
+            },
+            err(e) => {
+                io.print("cube: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                app.request_quit();
+            },
+        }
+    }
+
+    override bool on_event(app.Event e) uses io {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Key(code, down, mods) => {
+                if (code == 27) {
+                    return false;
+                }
+            },
+            Click(x, y, button) => {
+                dragging = true;
+                last_x = x;
+                last_y = y;
+            },
+            Release(x, y, button) => {
+                dragging = false;
+            },
+            MouseMove(x, y) => {
+                if (dragging) {
+                    yaw -= (x - last_x) * 0.01;
+                    pitch = max(-1.4, min(1.4, pitch + (y - last_y) * 0.01));
+                    last_x = x;
+                    last_y = y;
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(app.Window window) uses io {
+        match (device) {
+            some(d) => {
+                match (scene) {
+                    some(s) => {
+                        draw(d, s);
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+    }
+
+    void draw(gpu.Device* d, Scene s) uses io {
+        match (d.begin()) {
+            some(frame) => {
+                f32 t = (app.now_ms() % 3600000) as f32 / 1000.0;
+                linear.Mat4 model = linear.rotation_y(t * 0.8).mul(linear.rotation_x(t * 0.5));
+                linear.Vec3 eye = linear.vec3(0.0, 0.0, 5.5);
+                linear.Mat4 orbit = linear.rotation_y(yaw).mul(linear.rotation_x(-pitch));
+                linear.Mat4 view = linear.look_at(
+                    orbit.transform_point(eye),
+                    linear.vec3(0.0, 0.0, 0.0),
+                    linear.vec3(0.0, 1.0, 0.0)
+                );
+                f32 aspect = frame.width as f32 / max(frame.height, 1) as f32;
+                linear.Mat4 projection = linear.perspective(0.9, aspect, 0.1, 100.0);
+                mut linear.Mat4 transform = projection.mul(view).mul(model);
+
+                gpu.Pass pass = frame.pass(gpu.Clear{ color: gpu.rgba(0.08, 0.09, 0.12, 1.0) });
+                pass.bind(s.pipeline);
+                pass.vertices(s.vertices);
+                pass.indices(s.indices, gpu.IndexSize.U16);
+                pass.texture(0, s.crate, s.sampler);
+                pass.vertex_uniform(0, &transform);
+                pass.draw_indexed(36, 1);
+                pass.end();
+                frame.submit();
+            },
+            none => { },
+        }
+    }
+
+    override void on_stop(app.Window window) uses io {
+        match (device) {
+            some(d) => {
+                match (scene) {
+                    some(s) => {
+                        d.release_pipeline(s.pipeline);
+                        d.release_buffer(s.vertices);
+                        d.release_buffer(s.indices);
+                        d.release_texture(s.crate);
+                        d.release_sampler(s.sampler);
+                    },
+                    none => { },
+                }
+                d.close();
+            },
+            none => { },
+        }
+        device = none;
+        scene = none;
+        arena.free();
+    }
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    Cube* cube = arena.new(Cube);
+    return app.run_window(app.Config{ title: "Sosu cube", width: 960, height: 640 }, cube as app.WindowHandler*);
+}

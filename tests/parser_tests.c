@@ -987,6 +987,14 @@ static void test_ui_themes(void) {
     expect_ui_error("style S { colour: #FFFFFF }\n", "E0215", 1, 11);
     expect_ui_error("style S { active { color: #FFFFFF } }\n", "E0215", 1, 11);
     expect_ui_error("style S { radius: 2, radius: 3 }\n", "E0215", 1, 22);
+    /* a number of a theme is an `f32`, as `font_size` is: `font_size: 14` for every widget */
+    expect_ui("theme Small {\n    font_size: 14\n    gap: 6\n}\n",
+              "(fn pub widgets.Theme Small ()\n"
+              "  (block\n"
+              "    (var f32 font_size 14)\n"
+              "    (var f32 gap 6)\n"
+              "    (return (lit widgets.Theme (all (lit widgets.Props (font_size (call some font_size))))))))\n"
+              "(import ui.widgets)\n");
     expect_ui_error("theme T { Label { color: #FFFFFF } }\n", "E0215", 1, 11);
     expect_ui_error("theme T : Missing { }\n", "E0215", 1, 11);
     expect_ui_error("theme T { a: 1\n    a: 2 }\n", "E0215", 2, 5);

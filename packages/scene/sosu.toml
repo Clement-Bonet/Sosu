@@ -1,0 +1,11 @@
+# Entities and components (spec §8.2): a small ECS in Sosu. Entities are handles, components
+# live packed in tables, the hierarchy of transforms gives world matrices; scenes and prefabs are
+# saved as JSON, and the nodes of a model of `model` become entities.
+[package]
+name = "scene"
+version = "0.1.0"
+
+[dependencies]
+math = { path = "../math" }
+model = { path = "../model" }
+image = { path = "../image" }  # the images of a model, named by its type

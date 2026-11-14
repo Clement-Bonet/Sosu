@@ -1,0 +1,11 @@
+# The package physics (spec §8.2), on Jolt: a ball falling on a floor, a stack that sleeps, rays,
+# casts and layers, contacts and sensors, the character on a step, the transforms of scene, and the
+# same steps twice from the same inputs.
+[package]
+name = "physicstest"
+version = "0.1.0"
+
+[dependencies]
+physics = { path = "../../../packages/physics" }
+math = { path = "../../../packages/math" }
+scene = { path = "../../../packages/scene" }

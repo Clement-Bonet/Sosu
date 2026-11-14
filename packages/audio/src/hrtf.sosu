@@ -1,0 +1,390 @@
+// audio.hrtf: how a head hears a sound from each direction (head-related impulse responses), for
+// headphones: the mixer convolves a voice placed by `set_direction` and `set_elevation` with the
+// responses of its direction, ear by ear, rather than panning it (`Mixer.use_hrtf`). Before and
+// behind, above and below are then told apart, as panning cannot.
+//
+// The responses are those of KEMAR, a dummy head measured by Bill Gardner and Keith Martin at the
+// MIT Media Lab (1994), their "compact" set: 368 directions on the right, from 40 degrees below to
+// above the head, 128 frames at 44.1 kHz, compiled into the package (native/kemar.c, written by
+// native/kemar.py; Copyright 1994 by the MIT Media Lab, without restrictions on use, the authors
+// cited: THIRD_PARTY_NOTICES.md). The left side is the right one, the ears swapped.
+//
+// Each response is cut at its onset: what is before it becomes a delay of its ear (the difference
+// between the two is the time the sound takes around the head, up to 0.7 ms), and the responses
+// are mixed between the four directions measured around the one asked, their delays too, without
+// the combing that mixing two responses arriving at other times would give. They are resampled to
+// the rate of the mixer, and scaled so that a sound ahead is as loud as it is panned in the middle.
+// The mixer convolves by blocks, through `spectrum.Plan`: one block late (`Mixer.latency`).
+import std.math;
+import audio.audio;
+import audio.resample;
+
+extern "C" {
+    i32 sosu_audio_kemar_count();
+    i32 sosu_audio_kemar_taps();
+    void sosu_audio_kemar_copy(f32* places, f32* responses);
+}
+
+// The rate of the measurements.
+pub i32 KEMAR_RATE = 44100;
+
+// The frames kept before the onset of a response.
+usize LEAD = 2;
+
+pub class Hrtf {
+    pub i32 rate;
+    pub usize taps;        // of each response, at `rate`
+    pub usize count;       // the directions measured
+    pub f32 longest;       // the longest delay, in frames
+    pub bool mirrored;     // the right side only (azimuths 0 to 180), the left its mirror
+    f32[] elevations;      // degrees, by direction
+    f32[] azimuths;        // degrees: 0 ahead, 90 right (-90 left when not mirrored)
+    f32[] responses;       // count × 2 × taps: the left ear, the right ear, from their onsets
+    f32[] delays;          // count × 2: where each starts, in frames
+    usize[] ring_first;    // mirrored: the first direction of each ring of one elevation
+    usize[] ring_count;
+    f32[] directions;      // not mirrored: count × 3, where each is, a unit vector (right, up, ahead)
+
+    void init(i32 rate, usize taps, usize count, f32 longest, bool mirrored, keeps f32[] elevations,
+            keeps f32[] azimuths, keeps f32[] responses, keeps f32[] delays, keeps usize[] ring_first,
+            keeps usize[] ring_count, keeps f32[] directions) {
+        self.rate = rate;
+        self.taps = taps;
+        self.count = count;
+        self.longest = longest;
+        self.mirrored = mirrored;
+        self.elevations = elevations;
+        self.azimuths = azimuths;
+        self.responses = responses;
+        self.delays = delays;
+        self.ring_first = ring_first;
+        self.ring_count = ring_count;
+        self.directions = directions;
+    }
+
+    // Where the direction `i` measured is: its azimuth (degrees, 90 right) and elevation.
+    pub f32[2] place(usize i) {
+        return [azimuths[i], elevations[i]];
+    }
+
+    // The responses of the left and right ears for a sound from `azimuth` (radians: 0 ahead, pi/2
+    // right, -pi/2 left) and `elevation` (radians, above positive; held within what was measured),
+    // into `left` and `right` (`taps` each), and their delays, in frames.
+    pub f32[2] filters(f32 azimuth, f32 elevation, f32[] left, f32[] right)
+        requires left.len >= taps && right.len >= taps
+    {
+        mut f32[] l = left;
+        mut f32[] r = right;
+        for (usize k in 0..taps) {
+            l[k] = 0.0;
+            r[k] = 0.0;
+        }
+        if (!mirrored) {
+            return nearest(azimuth, elevation, l, r);
+        }
+        f32 turned = math.fmod((azimuth * 57.29578) as f64 + 540.0, 360.0) as f32 - 180.0;  // -180..180
+        bool mirrored = turned < 0.0;
+        f32 a = abs(turned);
+        usize rings = ring_first.len;
+        f32 lowest = elevations[ring_first[0]];
+        f32 highest = elevations[ring_first[rings - 1]];
+        f32 e = max(lowest, min(highest, elevation * 57.29578));
+        mut usize below = 0;
+        while (below + 1 < rings && elevations[ring_first[below + 1]] <= e) {
+            below += 1;
+        }
+        usize above = min(below + 1, rings - 1);
+        f32 low_e = elevations[ring_first[below]];
+        f32 high_e = elevations[ring_first[above]];
+        f32 up = above == below || high_e <= low_e ? 0.0 : (e - low_e) / (high_e - low_e);
+        mut f32[2] d = [0.0, 0.0];
+        f32[2] d0 = add_ring(below, a, 1.0 - up, l, r);
+        f32[2] d1 = add_ring(above, a, up, l, r);
+        d[0] = d0[0] + d1[0];
+        d[1] = d0[1] + d1[1];
+        if (mirrored) {
+            for (usize k in 0..taps) {
+                f32 x = l[k];
+                l[k] = r[k];
+                r[k] = x;
+            }
+            return [d[1], d[0]];
+        }
+        return d;
+    }
+
+    // For directions measured anywhere on the sphere (a SOFA file): the three nearest to the one
+    // asked, each by how much nearer it is than the fourth (1 / d - 1 / d4), so that a direction
+    // that comes in or goes out of the three counts for nothing at that moment: no jump.
+    f32[2] nearest(f32 azimuth, f32 elevation, f32[] left, f32[] right) {
+        f64 ce = math.cos(elevation as f64);
+        f32 x = (ce * math.sin(azimuth as f64)) as f32;
+        f32 y = math.sin(elevation as f64) as f32;
+        f32 z = (ce * math.cos(azimuth as f64)) as f32;
+        mut usize[4] best = [0, 0, 0, 0];
+        mut f32[4] far = [10.0, 10.0, 10.0, 10.0];  // angles, in radians: the four nearest
+        for (usize i in 0..count) {
+            f32 dx = directions[3 * i];
+            f32 dy = directions[3 * i + 1];
+            f32 dz = directions[3 * i + 2];
+            // atan2(|u × v|, u · v): exact near 0, where acos(u · v) loses its digits in f32
+            f32 cx = y * dz - z * dy;
+            f32 cy = z * dx - x * dz;
+            f32 cz = x * dy - y * dx;
+            f32 angle = math.atan2(math.sqrt((cx * cx + cy * cy + cz * cz) as f64), (x * dx + y * dy + z * dz) as f64) as f32;
+            if (angle < far[3]) {
+                mut usize k = 3;
+                while (k > 0 && angle < far[k - 1]) {
+                    far[k] = far[k - 1];
+                    best[k] = best[k - 1];
+                    k -= 1;
+                }
+                far[k] = angle;
+                best[k] = i;
+            }
+        }
+        mut f32[3] weights = [0.0, 0.0, 0.0];
+        if (far[0] < 0.0001 || count < 4) {
+            weights[0] = 1.0;  // on a direction measured, or too few to share
+        } else {
+            mut f32 total = 0.0;
+            for (usize k in 0..3) {
+                weights[k] = max(0.0, 1.0 / far[k] - 1.0 / far[3]);
+                total += weights[k];
+            }
+            for (usize k in 0..3) {
+                weights[k] = total > 0.0 ? weights[k] / total : (k == 0 ? 1.0 : 0.0);
+            }
+        }
+        mut f32[] l = left;
+        mut f32[] r = right;
+        mut f32[2] d = [0.0, 0.0];
+        for (usize k in 0..3) {
+            f32 w = weights[k];
+            if (w <= 0.0) {
+                continue;
+            }
+            usize at = 2 * best[k] * taps;
+            for (usize j in 0..taps) {
+                l[j] += w * responses[at + j];
+                r[j] += w * responses[at + taps + j];
+            }
+            d[0] += w * delays[2 * best[k]];
+            d[1] += w * delays[2 * best[k] + 1];
+        }
+        return d;
+    }
+
+    // The two directions of the ring `ring` around the azimuth `a` (degrees, 0 to 180), added to
+    // `left` and `right` by `weight`; their delays, by `weight`.
+    f32[2] add_ring(usize ring, f32 a, f32 weight, f32[] left, f32[] right) {
+        if (weight <= 0.0) {
+            return [0.0, 0.0];
+        }
+        usize first = ring_first[ring];
+        usize n = ring_count[ring];
+        mut usize i0 = first;
+        while (i0 + 1 < first + n && azimuths[i0 + 1] <= a) {
+            i0 += 1;
+        }
+        usize i1 = min(i0 + 1, first + n - 1);
+        f32 span = azimuths[i1] - azimuths[i0];
+        f32 w1 = i1 == i0 || span <= 0.0 ? 0.0 : max(0.0, min(1.0, (a - azimuths[i0]) / span));
+        mut f32[] l = left;
+        mut f32[] r = right;
+        f32 g0 = weight * (1.0 - w1);
+        f32 g1 = weight * w1;
+        usize at0 = 2 * i0 * taps;
+        usize at1 = 2 * i1 * taps;
+        for (usize k in 0..taps) {
+            l[k] += g0 * responses[at0 + k] + g1 * responses[at1 + k];
+            r[k] += g0 * responses[at0 + taps + k] + g1 * responses[at1 + taps + k];
+        }
+        return [g0 * delays[2 * i0] + g1 * delays[2 * i1], g0 * delays[2 * i0 + 1] + g1 * delays[2 * i1 + 1]];
+    }
+}
+
+// The responses of KEMAR at `rate`, in `arena` (about 2 KB a direction at 48 kHz: 800 KB).
+pub Hrtf* kemar(keeps Arena* arena, i32 rate)
+    requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE
+{
+    mut i32 count_c = 0;
+    mut i32 taps_c = 0;
+    unsafe {
+        count_c = sosu_audio_kemar_count();
+        taps_c = sosu_audio_kemar_taps();
+    }
+    usize count = count_c as usize;
+    usize measured_taps = taps_c as usize;
+    mut f32[] places = arena.alloc_slice(f32, 2 * count);
+    mut f32[] raw = arena.alloc_slice(f32, 2 * count * measured_taps);
+    unsafe {
+        sosu_audio_kemar_copy(&places[0], &raw[0]);
+    }
+    mut f32[] elevations = arena.alloc_slice(f32, count);
+    mut f32[] azimuths = arena.alloc_slice(f32, count);
+    for (usize i in 0..count) {
+        elevations[i] = places[2 * i];
+        azimuths[i] = places[2 * i + 1];
+    }
+    return measured(arena, KEMAR_RATE, rate, measured_taps, measured_taps, elevations, azimuths, raw,
+            arena.alloc_slice(f32, 2 * count), true);
+}
+
+// The responses of `elevations.len` directions measured at `measured_rate` (`raw`: for each, the
+// left ear then the right, `measured_taps` frames each, and `extra` frames of delay before each), at
+// `rate`: each cut at its onset, `keep` frames kept after it (the last ones fading out), resampled,
+// and all scaled so that a sound ahead is as loud as one panned in the middle. `mirrored`: the
+// directions are on the right only, by rings of one elevation sorted by azimuth.
+pub Hrtf* measured(keeps Arena* arena, i32 measured_rate, i32 rate, usize measured_taps, usize keep,
+        keeps f32[] elevations, keeps f32[] azimuths, f32[] raw, f32[] extra, bool mirrored)
+    requires rate >= audio.MIN_RATE && rate <= audio.MAX_RATE && measured_rate >= audio.MIN_RATE
+        && measured_rate <= audio.MAX_RATE && elevations.len == azimuths.len && elevations.len > 0 && keep > 0
+        && keep <= measured_taps && raw.len == 2 * elevations.len * measured_taps && extra.len == 2 * elevations.len
+{
+    usize count = elevations.len;
+    usize taps = rate == measured_rate ? keep : resample.frames_at(keep, measured_rate, rate);
+    f32 ratio = rate as f32 / measured_rate as f32;
+    mut f32[] responses = arena.alloc_slice(f32, 2 * count * taps);
+    mut f32[] delays = arena.alloc_slice(f32, 2 * count);
+    mut f32[] aligned = arena.alloc_slice(f32, keep);
+    usize fade = keep < measured_taps ? min(keep / 4, 16) : 0;  // a response cut fades out
+    mut f32 longest = 0.0;
+    for (usize i in 0..count) {
+        for (usize ear in 0..2) {
+            f32[] h = raw[(2 * i + ear) * measured_taps..(2 * i + ear + 1) * measured_taps];
+            mut f32 peak = 0.0;
+            for (f32 x in h) {
+                peak = max(peak, abs(x));
+            }
+            mut usize onset = 0;
+            while (onset < measured_taps && abs(h[onset]) < 0.1 * peak) {
+                onset += 1;
+            }
+            usize start = onset >= measured_taps ? 0 : onset - min(onset, LEAD);
+            for (usize k in 0..keep) {
+                mut f32 x = start + k < measured_taps ? h[start + k] : 0.0;
+                if (fade > 0 && k >= keep - fade) {
+                    f32 t = (k - (keep - fade) + 1) as f32 / (fade + 1) as f32;
+                    x = x * (0.5 + 0.5 * math.cos((t * 3.1415927) as f64) as f32);
+                }
+                aligned[k] = x;
+            }
+            usize at = (2 * i + ear) * taps;
+            if (rate == measured_rate) {
+                for (usize k in 0..taps) {
+                    responses[at + k] = aligned[k];
+                }
+            } else {
+                audio.Sound s = resample.to_rate(arena, audio.Sound{ rate: measured_rate, channels: 1, samples: aligned }, rate);
+                for (usize k in 0..taps) {
+                    // the response of a frame is spread over more frames: as loud, its sum kept
+                    responses[at + k] = k < s.samples.len ? s.samples[k] / ratio : 0.0;
+                }
+            }
+            delays[2 * i + ear] = (start as f32 + max(extra[2 * i + ear], 0.0)) * ratio;
+            longest = max(longest, delays[2 * i + ear]);
+        }
+    }
+    // where each is: a unit vector (right, up, ahead)
+    mut f32[] directions = arena.alloc_slice(f32, 3 * count);
+    for (usize i in 0..count) {
+        f64 a = azimuths[i] as f64 * 0.017453292519943295;
+        f64 e = elevations[i] as f64 * 0.017453292519943295;
+        directions[3 * i] = (math.cos(e) * math.sin(a)) as f32;
+        directions[3 * i + 1] = math.sin(e) as f32;
+        directions[3 * i + 2] = (math.cos(e) * math.cos(a)) as f32;
+    }
+    // a sound ahead as loud as a mono sound panned in the middle: half its power in each ear
+    mut usize ahead = 0;
+    mut f32 closest = -2.0;
+    for (usize i in 0..count) {
+        if (directions[3 * i + 2] > closest) {
+            closest = directions[3 * i + 2];
+            ahead = i;
+        }
+    }
+    mut f32 energy = 0.0;
+    for (usize k in 0..2 * taps) {
+        f32 x = responses[2 * ahead * taps + k];
+        energy += x * x;
+    }
+    f32 scale = energy > 0.0 ? math.sqrt((1.0 / energy) as f64) as f32 : 1.0;
+    for (usize k in 0..responses.len) {
+        responses[k] = responses[k] * scale;
+    }
+    // mirrored: the rings, the directions of one elevation, by azimuth (native/kemar.c sorts them so)
+    mut usize rings = 0;
+    if (mirrored) {
+        for (usize i in 0..count) {
+            if (i == 0 || elevations[i] != elevations[i - 1]) {
+                rings += 1;
+            }
+        }
+    }
+    mut usize[] ring_first = arena.alloc_slice(usize, rings);
+    mut usize[] ring_count = arena.alloc_slice(usize, rings);
+    if (mirrored) {
+        mut usize ring = 0;
+        for (usize i in 0..count) {
+            if (i > 0 && elevations[i] != elevations[i - 1]) {
+                ring += 1;
+            }
+            if (ring_count[ring] == 0) {
+                ring_first[ring] = i;
+            }
+            ring_count[ring] += 1;
+        }
+    }
+    return arena.new(Hrtf, rate, taps, count, longest, mirrored, elevations, azimuths, responses, delays, ring_first,
+            ring_count, directions);
+}
+
+f32 energy_of(f32[] x) {
+    mut f32 e = 0.0;
+    for (f32 v in x) {
+        e += v * v;
+    }
+    return e;
+}
+
+test "KEMAR: its directions, the ears of a sound on the right, the left side mirrored" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    Hrtf* h = kemar(&arena, 44100);
+    assert(h.count == 368 && h.taps == 128 && h.ring_first.len == 14);
+    mut f32[] left = arena.alloc_slice(f32, h.taps);
+    mut f32[] right = arena.alloc_slice(f32, h.taps);
+    // ahead: both ears alike, half the power each, at the same time
+    f32[2] ahead = h.filters(0.0, 0.0, left, right);
+    assert(abs(ahead[0] - ahead[1]) <= 1.0 && abs(energy_of(left) + energy_of(right) - 1.0) < 0.001);
+    // on the right: the right ear louder, and first by 0.5 to 0.9 ms
+    f32[2] d = h.filters(1.5707964, 0.0, left, right);
+    assert(energy_of(right) > 4.0 * energy_of(left));
+    f32 lag = (d[0] - d[1]) / 44.1;
+    assert(lag > 0.5 && lag < 0.9);
+    // on the left: the same, the ears swapped
+    mut f32[] left2 = arena.alloc_slice(f32, h.taps);
+    mut f32[] right2 = arena.alloc_slice(f32, h.taps);
+    f32[2] e = h.filters(-1.5707964, 0.0, left2, right2);
+    assert(e[0] == d[1] && e[1] == d[0]);
+    for (usize k in 0..h.taps) {
+        assert(left2[k] == right[k] && right2[k] == left[k]);
+    }
+    // between two directions measured: between their responses; beyond what was measured: held
+    f32[2] between = h.filters(0.0436332, 0.0872665, left, right);  // 2.5 degrees right, 5 up
+    assert(between[0] >= 0.0 && between[1] >= 0.0);
+    f32[2] below = h.filters(0.0, -1.5, left, right);
+    mut f32[] low_l = arena.alloc_slice(f32, h.taps);
+    mut f32[] low_r = arena.alloc_slice(f32, h.taps);
+    f32[2] lowest = h.filters(0.0, -0.6981317, low_l, low_r);  // -40 degrees
+    assert(below[0] == lowest[0] && left[5] == low_l[5]);
+    // at 48 kHz: longer responses, the same delays in time, the same loudness ahead
+    Hrtf* h48 = kemar(&arena, 48000);
+    mut f32[] l48 = arena.alloc_slice(f32, h48.taps);
+    mut f32[] r48 = arena.alloc_slice(f32, h48.taps);
+    f32[2] d48 = h48.filters(1.5707964, 0.0, l48, r48);
+    assert(h48.taps > 128 && abs((d48[0] - d48[1]) / 48.0 - lag) < 0.05);
+    h48.filters(0.0, 0.0, l48, r48);
+    assert(abs(energy_of(l48) + energy_of(r48) - 1.0) < 0.05);
+}

@@ -1,0 +1,19 @@
+# Navigation (spec §8.2, nav): navigation meshes built from the triangles of a level by Recast,
+# paths and crowds on them by Detour and DetourCrowd (C++, zlib, THIRD_PARTY_NOTICES.md), taken
+# from their repository at a tag, pinned by sosu.lock, never copied here (§9.1), reached through
+# native/nav.cpp; and A* on grids, in Sosu.
+[package]
+name = "nav"
+version = "0.1.0"
+
+[native.recast]
+git = "https://github.com/recastnavigation/recastnavigation"
+tag = "v1.6.0"
+cpp = ["Recast/Source/", "Detour/Source/", "DetourCrowd/Source/"]
+include = ["Recast/Include", "Detour/Include", "DetourCrowd/Include"]
+
+[link]
+cpp = ["native/nav.cpp"]
+
+[dependencies]
+math = { path = "../math" }

@@ -1,0 +1,385 @@
+// soundstage.model: where the sound is around the listener (its azimuth, elevation and distance),
+// whether it turns around the head, which sound plays, and whether it is heard through a head
+// (audio.hrtf, for headphones) or panned. Each frame it places the sound in an `audio.spatial`
+// space and draws the scene from above (stage.sosu). No window here: the tests drive it without a
+// sound card (`pump` mixes as the device would).
+import std.io;
+import std.math;
+import std.text;
+import math.linear;
+import audio.audio;
+import audio.mixer;
+import audio.device;
+import audio.spatial;
+import audio.hrtf;
+import render.canvas;
+import image.image;
+import soundstage.sounds;
+import soundstage.stage;
+
+pub enum Kind {
+    Clicks,
+    Chime,
+    Engine,
+}
+
+// The places of the scene drawn, kept for the trail of the sound.
+usize TRAIL = 48;
+
+pub class Model {
+    mixer.Mixer* mix;
+    device.Player*? player;  // none in the tests: `pump` stands for it
+    Arena* keep;
+    spatial.Space* space;
+    mut hrtf.Hrtf*? head;    // made the first time headphones are asked for
+    audio.Sound clicks;
+    audio.Sound chime;
+    audio.Sound engine;
+    mut spatial.Source? source;
+    pub mut Kind kind;
+    mut Kind playing;
+    mut bool started;
+    pub mut i64 azimuth;     // degrees: 0 ahead, 90 right, -90 left, 180 behind (the slider)
+    mut i64 shown_azimuth;
+    pub mut i64 elevation;   // degrees, from -40 (below) to 90 (above)
+    pub mut i64 distance;    // decimeters, from 5 to 100
+    pub mut i64 speed;       // degrees a second, of the turn
+    pub mut bool orbiting;
+    pub mut bool headphones;
+    mut f32 angle;           // degrees, exactly: the slider shows it rounded
+    mut f32[96] trail;       // x, z of the last places
+    mut usize trail_at;
+    mut usize trail_count;
+    pub mut f32[4] measured; // of the last buffer of `pump`: the power of each ear, then above 3 kHz
+    pub mut str message;
+    mut Arena words;
+    mut Arena pixels;
+    mut canvas.Canvas view;
+
+    void init(keeps Arena* keep, keeps mixer.Mixer* mix, keeps device.Player*? player) {
+        self.keep = keep;
+        self.mix = mix;
+        self.player = player;
+        space = spatial.space(keep, mix);
+        space.listener(linear.transform(), linear.vec3(0.0, 0.0, 0.0));
+        head = none;
+        clicks = sounds.clicks(keep, mix.rate);
+        chime = sounds.chime(keep, mix.rate);
+        engine = sounds.engine(keep, mix.rate);
+        source = none;
+        kind = Kind.Clicks;
+        playing = Kind.Clicks;
+        started = false;
+        azimuth = 0;
+        shown_azimuth = 0;
+        elevation = 0;
+        distance = 20;
+        speed = 60;
+        orbiting = false;
+        headphones = mix.channels == 2;
+        angle = 0.0;
+        trail = [0.0; 96];
+        trail_at = 0;
+        trail_count = 0;
+        measured = [0.0, 0.0, 0.0, 0.0];
+        message = "";
+        words = Arena.new(4 * KB);
+        pixels = Arena.new(1 * MB);
+        view = canvas.create(&pixels, stage.WIDTH, stage.HEIGHT);
+    }
+
+    // ---- The buttons ----
+
+    void place_at(f32 degrees, i64 up) {
+        orbiting = false;
+        angle = degrees;
+        azimuth = degrees as i64;
+        shown_azimuth = azimuth;
+        elevation = up;
+    }
+
+    pub void ahead() {
+        place_at(0.0, 0);
+    }
+
+    pub void right() {
+        place_at(90.0, 0);
+    }
+
+    pub void behind() {
+        place_at(180.0, 0);
+    }
+
+    pub void left() {
+        place_at(-90.0, 0);
+    }
+
+    pub void above() {
+        place_at(0.0, 70);
+    }
+
+    // The sound turns around the head, or stops where it is.
+    pub void toggle_orbit() {
+        orbiting = !orbiting;
+    }
+
+    pub str orbit_label() {
+        return orbiting ? "Stop turning" : "Turn around the head";
+    }
+
+    // ---- Each frame ----
+
+    audio.Sound sound_of(Kind k) {
+        return match (k) {
+            Clicks => clicks,
+            Chime => chime,
+            Engine => engine,
+        };
+    }
+
+    // Through a head or panned, as the box says (a head needs a stereo output).
+    void apply_headphones() {
+        if (headphones == mix.binaural()) {
+            return;
+        }
+        if (!headphones) {
+            mix.no_hrtf();
+            return;
+        }
+        if (mix.channels != 2) {
+            headphones = false;
+            message = "headphones need a stereo output";
+            return;
+        }
+        hrtf.Hrtf* h = match (head) {
+            some(made) => made,
+            none => hrtf.kemar(keep, mix.rate),
+        };
+        head = some(h);
+        mix.use_hrtf(h);
+    }
+
+    // The sound chosen playing, in a loop (again when another is chosen).
+    void apply_kind() {
+        if (started && kind == playing) {
+            return;
+        }
+        match (source) {
+            some(s) => {
+                space.stop(s);
+            },
+            none => { },
+        }
+        source = some(space.play(sound_of(kind), spatial.Placed{ position: where(), looping: true, near: 1.0, far: 30.0,
+                doppler: 0.0 }));
+        playing = kind;
+        started = true;
+    }
+
+    // Where the sound is: the listener at the origin, facing -z, its right +x, its up +y.
+    pub linear.Vec3 where() {
+        f32 d = distance as f32 / 10.0;
+        f32 az = angle * 0.017453292;
+        f32 el = elevation as f32 * 0.017453292;
+        f32 flat = d * math.cos(el as f64) as f32;
+        return linear.vec3(flat * math.sin(az as f64) as f32, d * math.sin(el as f64) as f32, -flat * math.cos(az as f64) as f32);
+    }
+
+    // The controls read, the sound moved (turning `speed` degrees a second when it orbits) and
+    // placed, and the scene drawn; `dt` seconds since the last call.
+    pub void update(f32 dt) {
+        words.free();
+        words = Arena.new(4 * KB);
+        apply_headphones();
+        apply_kind();
+        if (azimuth != shown_azimuth) {
+            angle = azimuth as f32;  // the slider moved by the user
+        }
+        if (orbiting) {
+            angle += speed as f32 * dt;
+            angle = math.fmod((angle + 180.0) as f64, 360.0) as f32;
+            angle = angle < 0.0 ? angle + 180.0 : angle - 180.0;
+        }
+        azimuth = math.round(angle as f64) as i64;
+        if (azimuth <= -180) {
+            azimuth += 360;
+        }
+        shown_azimuth = azimuth;
+        linear.Vec3 at = where();
+        match (source) {
+            some(s) => {
+                space.move(s, at, linear.vec3(0.0, 0.0, 0.0));
+            },
+            none => { },
+        }
+        space.update();
+        trail[2 * trail_at] = at.x;
+        trail[2 * trail_at + 1] = at.z;
+        trail_at = (trail_at + 1) % TRAIL;
+        trail_count = min(trail_count + 1, TRAIL);
+        f32[2] ears = ear_levels();
+        stage.draw(&view, at, elevation as f32, trail[0..2 * TRAIL], trail_at, trail_count, ears, mix.binaural());
+    }
+
+    // `frames` frames mixed as the device would take them after the frame is updated, their power
+    // by ear kept in `measured`: for the tests and the snapshot, without a sound card.
+    pub void pump(usize frames, f32 dt) {
+        update(dt);
+        mut Arena scratch = Arena.new(frames * 8 + 64);
+        defer scratch.free();
+        mut f32[] out = scratch.alloc_slice(f32, frames * 2);
+        mix.mix(out);
+        mut f32[4] p = [0.0, 0.0, 0.0, 0.0];
+        for (usize f in 1..frames) {
+            p[0] += out[2 * f] * out[2 * f];
+            p[1] += out[2 * f + 1] * out[2 * f + 1];
+            // the difference of two samples: what is high, mostly
+            f32 dl = out[2 * f] - out[2 * f - 2];
+            f32 dr = out[2 * f + 1] - out[2 * f - 1];
+            p[2] += dl * dl;
+            p[3] += dr * dr;
+        }
+        measured = p;
+    }
+
+    // How loud each ear hears the sound now (0 to 1): its volume, and its panning, or the power of
+    // the responses of the head for its direction.
+    pub f32[2] ear_levels() {
+        spatial.Heard heard = match (source) {
+            some(s) => space.heard(s),
+            none => spatial.Heard{ volume: 0.0, pan: 0.0, speed: 1.0, cutoff: 0.0, angle: 0.0, elevation: 0.0 },
+        };
+        match (head) {
+            some(h) => {
+                if (mix.binaural()) {
+                    mut Arena scratch = Arena.new(4 * h.taps * 4 + 64);
+                    defer scratch.free();
+                    mut f32[] l = scratch.alloc_slice(f32, h.taps);
+                    mut f32[] r = scratch.alloc_slice(f32, h.taps);
+                    h.filters(heard.angle, heard.elevation, l, r);
+                    mut f32 el = 0.0;
+                    mut f32 er = 0.0;
+                    for (usize k in 0..h.taps) {
+                        el += l[k] * l[k];
+                        er += r[k] * r[k];
+                    }
+                    return [heard.volume * math.sqrt(el as f64) as f32, heard.volume * math.sqrt(er as f64) as f32];
+                }
+            },
+            none => { },
+        }
+        // a mono sound panned with equal power
+        f64 a = (max(-1.0, min(1.0, heard.pan)) as f64 + 1.0) * math.PI / 4.0;
+        return [heard.volume * math.cos(a) as f32, heard.volume * math.sin(a) as f32];
+    }
+
+    // ---- What the interface shows ----
+
+    pub image.Image picture() {
+        return view.image();
+    }
+
+    pub str azimuth_text() {
+        text.TextBuilder* t = text.builder(&words);
+        t.push("Azimuth ");
+        t.push_i64(azimuth);
+        t.push("°");
+        return t.text();
+    }
+
+    pub str elevation_text() {
+        text.TextBuilder* t = text.builder(&words);
+        t.push("Elevation ");
+        t.push_i64(elevation);
+        t.push("°");
+        return t.text();
+    }
+
+    pub str distance_text() {
+        text.TextBuilder* t = text.builder(&words);
+        t.push("Distance ");
+        t.push_f64(distance as f64 / 10.0, 1);
+        t.push(" m");
+        return t.text();
+    }
+
+    pub str speed_text() {
+        text.TextBuilder* t = text.builder(&words);
+        t.push("Turn speed ");
+        t.push_i64(speed);
+        t.push("°/s");
+        return t.text();
+    }
+
+    // Where it is said in words, and how each ear hears it.
+    pub str heard_text() {
+        if (message.len > 0) {
+            return message;
+        }
+        f32[2] ears = ear_levels();
+        text.TextBuilder* t = text.builder(&words);
+        t.push(direction_name(azimuth, elevation));
+        t.push(": left ear ");
+        t.push(decibels(ears[0]));
+        t.push(", right ear ");
+        t.push(decibels(ears[1]));
+        return t.text();
+    }
+
+    str decibels(f32 level) {
+        if (level < 0.0001) {
+            return "silent";
+        }
+        text.TextBuilder* t = text.builder(&words);
+        t.push_f64(20.0 * math.log10(level as f64), 1);
+        t.push(" dB");
+        return t.text();
+    }
+
+    pub str mode_text() {
+        return mix.binaural() ? "Heard through a head (KEMAR): before, behind and above told apart."
+            : "Panned: left and right only; ahead and behind sound alike.";
+    }
+
+    pub bool binaural() {
+        return mix.binaural();
+    }
+
+    pub void close() {
+        words.free();
+        pixels.free();
+    }
+}
+
+// "ahead", "behind on the left", "above"...
+pub str direction_name(i64 azimuth, i64 elevation) {
+    if (elevation >= 60) {
+        return "above";
+    }
+    if (elevation <= -30) {
+        return azimuth > -45 && azimuth < 45 ? "below, ahead" : "below";
+    }
+    i64 a = azimuth;
+    if (a >= -22 && a <= 22) {
+        return "ahead";
+    }
+    if (a > 22 && a < 68) {
+        return "ahead on the right";
+    }
+    if (a >= 68 && a <= 112) {
+        return "on the right";
+    }
+    if (a > 112 && a < 158) {
+        return "behind on the right";
+    }
+    if (a < -22 && a > -68) {
+        return "ahead on the left";
+    }
+    if (a <= -68 && a >= -112) {
+        return "on the left";
+    }
+    if (a < -112 && a > -158) {
+        return "behind on the left";
+    }
+    return "behind";
+}

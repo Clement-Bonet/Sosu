@@ -1,0 +1,36 @@
+// audio.mp3: MP3 files (MPEG-1, 2 and 2.5, layer III), read by dr_mp3 (dr_libs, public domain or
+// MIT No Attribution), taken from its repository by [native.dr_libs] (spec §9.1) and compiled by
+// native/dr.c. Every allocation of the decoder comes from `coded.MEMORY` bytes of the arena: a file
+// that asks for more gives `TooLarge`, and the samples decoded stop at `audio.MAX_SAMPLES`. An ID3v2
+// tag at the start is skipped; the CI fuzzes it, but it is C: a file from an unknown source is still
+// safer read in a process of its own.
+import std.io;
+import audio.audio;
+import audio.coded;
+
+// Whether `data` starts as an MP3 file: an ID3v2 tag, or the sync of a frame of layer III.
+pub bool is_mp3(ui8[] data) {
+    if (data.len >= 10 && data[0] == 0x49 && data[1] == 0x44 && data[2] == 0x33) {
+        return true;  // "ID3"
+    }
+    return data.len >= 4 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 && (data[1] & 0x06) == 0x02;
+}
+
+// The sound of the MP3 file `data`.
+pub audio.Sound!audio.AudioError decode(Arena* arena, ui8[] data) {
+    if (!is_mp3(data)) {
+        return err(audio.AudioError.UnknownFormat);
+    }
+    return coded.decode(arena, coded.Codec.Mp3, data);
+}
+
+// The sound of the MP3 file at `path`.
+pub audio.Sound!audio.AudioError load(Arena* arena, str path) uses io {
+    ui8[] data = match (io.read_bytes(arena, path)) {
+        ok(bytes) => bytes,
+        err(e) => {
+            return err(audio.AudioError.Unreadable);
+        },
+    };
+    return decode(arena, data);
+}

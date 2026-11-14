@@ -1,0 +1,166 @@
+// gpu.overlay: a canvas of `render` drawn over the 3D (spec §8.2), so that `render` and `ui` work
+// on top of a scene: a heads-up display, menus, text. Each frame, the pixels of the canvas go to
+// a texture of the size of the canvas, drawn over what the frame holds, blended by their alpha.
+// The canvas is cleared transparent (`Color{ a: 0 }`) where the 3D shows through. Its shaders are
+// in the package (native/shaders.c, written by `sosuc shaders packages/gpu --c native/shaders.c`).
+import render.canvas;
+import image.image;
+import gpu.gpu;
+
+extern "C" {
+    ui8* sosu_shader_overlay_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_overlay_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_overlay_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_overlay_frag_spv(usize* size) uses io;
+    ui8* sosu_shader_overlay_frag_dxil(usize* size) uses io;
+    ui8* sosu_shader_overlay_frag_msl(usize* size) uses io;
+}
+
+// A copy of `size` bytes from `bytes` in `arena`.
+ui8[] copied(Arena* arena, ui8* bytes, usize size) {
+    mut ui8[] out = arena.alloc_slice(ui8, size);
+    unsafe {
+        for (usize i in 0..size) {
+            out[i] = *(bytes + i);
+        }
+    }
+    return out;
+}
+
+// The code of a shader of the overlay, in the format of `device`.
+ui8[] code_of(Arena* arena, gpu.ShaderFormat format, gpu.Stage stage) uses io {
+    mut usize size = 0;
+    mut ui8* bytes = "".to_cstr(arena);
+    unsafe {
+        bytes = match (stage) {
+            Vertex => match (format) {
+                Spirv => sosu_shader_overlay_vert_spv(&size),
+                Dxil => sosu_shader_overlay_vert_dxil(&size),
+                Msl => sosu_shader_overlay_vert_msl(&size),
+            },
+            Fragment => match (format) {
+                Spirv => sosu_shader_overlay_frag_spv(&size),
+                Dxil => sosu_shader_overlay_frag_dxil(&size),
+                Msl => sosu_shader_overlay_frag_msl(&size),
+            },
+        };
+    }
+    return copied(arena, bytes, size);
+}
+
+// Draws canvases over the frames of a device. Made once, with `create`.
+pub class Overlay {
+    gpu.Device* device;
+    gpu.Pipeline pipeline;
+    gpu.Sampler sampler;
+    mut gpu.Texture? texture;  // of the size of the last canvas drawn
+
+    void init(keeps gpu.Device* device, gpu.Pipeline pipeline, gpu.Sampler sampler) {
+        self.device = device;
+        self.pipeline = pipeline;
+        self.sampler = sampler;
+        texture = none;
+    }
+
+    // `surface` over what `frame` drew into the window: after its passes, before `submit`. The
+    // canvas covers the window, stretched if it is not of its size.
+    pub void!gpu.GpuError draw(gpu.Frame frame, canvas.Canvas* surface) uses io {
+        gpu.Texture t = try picture(frame, surface);
+        gpu.Pass pass = frame.pass(gpu.Clear{ color: gpu.rgba(0.0, 0.0, 0.0, 0.0), depth: false, keep: true });
+        over(pass, t);
+        return ok();
+    }
+
+    // `surface` over what `target` holds (a texture of `device.target`), in a frame of `commands()`.
+    pub void!gpu.GpuError draw_into(gpu.Frame frame, gpu.Texture target, canvas.Canvas* surface) uses io {
+        gpu.Texture t = try picture(frame, surface);
+        gpu.Pass pass = frame.pass_into(
+            target,
+            gpu.Clear{ color: gpu.rgba(0.0, 0.0, 0.0, 0.0), depth: false, keep: true }
+        );
+        over(pass, t);
+        return ok();
+    }
+
+    // The texture of the canvas, its pixels uploaded in `frame`; made again when its size changed.
+    gpu.Texture!gpu.GpuError picture(gpu.Frame frame, canvas.Canvas* surface) uses io {
+        if (surface.width <= 0 || surface.height <= 0) {
+            return err(gpu.GpuError.Unsupported);
+        }
+        match (texture) {
+            some(t) => {
+                if (t.width == surface.width as ui32 && t.height == surface.height as ui32) {
+                    frame.upload_texture(t, surface.pixels);
+                    return ok(t);
+                }
+                device.release_texture(t);
+                texture = none;
+            },
+            none => { },
+        }
+        image.Image pixels = image.Image{ width: surface.width, height: surface.height, pixels: surface.pixels };
+        gpu.Texture made = try device.texture_of(pixels, false);  // uploaded now
+        texture = some(made);
+        return ok(made);
+    }
+
+    void over(gpu.Pass pass, gpu.Texture t) uses io {
+        pass.bind(pipeline);
+        pass.texture(0, t, sampler);
+        pass.draw(3, 1);  // one triangle that covers the target
+        pass.end();
+    }
+
+    // Its pipeline, sampler and texture released.
+    pub void release() uses io {
+        match (texture) {
+            some(t) => {
+                device.release_texture(t);
+            },
+            none => { },
+        }
+        texture = none;
+        device.release_pipeline(pipeline);
+        device.release_sampler(sampler);
+    }
+}
+
+// The overlay of `device`, its pipeline made.
+pub Overlay*!gpu.GpuError create(Arena* arena, keeps gpu.Device* device) uses io {
+    mut Arena scratch = Arena.new(16 * KB);
+    defer scratch.free();
+    gpu.ShaderFormat format = device.format();
+    str entry = match (format) {
+        Msl => "main0",
+        _ => "main",
+    };
+    gpu.Shader vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, gpu.Stage.Vertex),
+        entry: entry
+    });
+    gpu.Shader fs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Fragment,
+        format: format,
+        code: code_of(&scratch, format, gpu.Stage.Fragment),
+        entry: entry,
+        samplers: 1
+    });
+    gpu.Pipeline pipeline = try device.pipeline(gpu.PipelineDesc{
+        vertex: vs,
+        fragment: fs,
+        layout: gpu.Layout{ stride: 0, attributes: scratch.alloc_slice(gpu.Attribute, 0) },
+        depth: false,
+        cull: gpu.Cull.Off,
+        blend: gpu.Blend.Alpha
+    });
+    device.release_shader(vs);
+    device.release_shader(fs);
+    gpu.Sampler sampler = try device.sampler(gpu.SamplerDesc{
+        filter: gpu.Filter.Nearest,
+        wrap: gpu.Wrap.Clamp,
+        mipmaps: false
+    });
+    return ok(arena.new(Overlay, device, pipeline, sampler));
+}

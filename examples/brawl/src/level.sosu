@@ -1,0 +1,114 @@
+// brawl.level: the level, a floor walled in, with blocks on it. Each block is drawn (a cube of
+// render3d), is a static body of physics, and gives its triangles to the navigation mesh.
+import std.vec;
+import math.linear;
+
+pub f32 SIZE = 18.0;  // half the side of the floor
+
+// A block: its center on the floor, and its half sizes (`half.y` up from the floor).
+pub struct Block {
+    pub f32 x;
+    pub f32 z;
+    pub linear.Vec3 half;
+
+    pub linear.Vec3 center() {
+        return linear.vec3(x, half.y, z);
+    }
+
+    // The matrix of a cube of render3d (a side of 2 around the origin) made this block.
+    pub linear.Mat4 matrix() {
+        return linear.translation(center()).mul(linear.scaling(half));
+    }
+}
+
+Block block(f32 x, f32 z, f32 hx, f32 hy, f32 hz) {
+    return Block{ x: x, z: z, half: linear.vec3(hx, hy, hz) };
+}
+
+pub Block[] blocks(Arena* arena) {
+    vec.Vec<Block>* list = vec.new<Block>(arena);
+    // the walls around
+    list.push(block(0.0, -SIZE - 0.5, SIZE + 1.0, 1.2, 0.5));
+    list.push(block(0.0, SIZE + 0.5, SIZE + 1.0, 1.2, 0.5));
+    list.push(block(-SIZE - 0.5, 0.0, 0.5, 1.2, SIZE));
+    list.push(block(SIZE + 0.5, 0.0, 0.5, 1.2, SIZE));
+    // inside: a wall, pillars, low blocks
+    list.push(block(0.0, -7.0, 6.0, 1.0, 0.5));
+    list.push(block(-8.0, 2.0, 0.5, 1.0, 5.0));
+    list.push(block(5.0, -2.0, 1.0, 1.6, 1.0));
+    list.push(block(-3.0, 9.0, 2.5, 0.8, 1.0));
+    list.push(block(10.0, 7.0, 1.5, 1.0, 1.5));
+    list.push(block(11.0, -11.0, 2.0, 0.5, 2.0));
+    return list.items();
+}
+
+// Where the crates fall from.
+pub linear.Vec3[] crate_spots(Arena* arena) {
+    vec.Vec<linear.Vec3>* list = vec.new<linear.Vec3>(arena);
+    mut f32[16] xz = [2.0, 3.0, 2.6, 3.4, -4.0, -3.0, 7.5, 3.0, -12.0, -9.0, 3.0, 12.0, -13.0, 12.0, 13.0, -4.0];
+    for (usize i in 0..8) {
+        list.push(linear.vec3(xz[2 * i], 3.0 + i as f32 * 0.8, xz[2 * i + 1]));
+    }
+    return list.items();
+}
+
+// Where the enemies come from.
+pub linear.Vec3[] spawn_spots(Arena* arena) {
+    mut linear.Vec3[] spots = arena.alloc_slice(linear.Vec3, 4);
+    spots[0] = linear.vec3(-14.0, 0.0, -14.0);
+    spots[1] = linear.vec3(14.0, 0.0, -14.0);
+    spots[2] = linear.vec3(-14.0, 0.0, 14.0);
+    spots[3] = linear.vec3(14.0, 0.0, 14.0);
+    return spots;
+}
+
+// The triangles of the level, for the navigation mesh: the floor, and the top and sides of each block.
+pub class Triangles {
+    pub vec.Vec<linear.Vec3>* vertices;
+    pub vec.Vec<ui32>* indices;
+
+    void init(keeps Arena* arena) {
+        vertices = vec.new<linear.Vec3>(arena);
+        indices = vec.new<ui32>(arena);
+    }
+
+    void quad(linear.Vec3 a, linear.Vec3 b, linear.Vec3 c, linear.Vec3 d) {
+        ui32 first = vertices.len() as ui32;
+        vertices.push(a);
+        vertices.push(b);
+        vertices.push(c);
+        vertices.push(d);
+        indices.push(first);
+        indices.push(first + 1);
+        indices.push(first + 2);
+        indices.push(first);
+        indices.push(first + 2);
+        indices.push(first + 3);
+    }
+
+    void floor(f32 x0, f32 z0, f32 x1, f32 z1, f32 y) {
+        quad(linear.vec3(x0, y, z0), linear.vec3(x0, y, z1), linear.vec3(x1, y, z1), linear.vec3(x1, y, z0));
+    }
+
+    void box(Block b) {
+        f32 x0 = b.x - b.half.x;
+        f32 x1 = b.x + b.half.x;
+        f32 z0 = b.z - b.half.z;
+        f32 z1 = b.z + b.half.z;
+        f32 h = b.half.y * 2.0;
+        floor(x0, z0, x1, z1, h);
+        quad(linear.vec3(x0, 0.0, z0), linear.vec3(x1, 0.0, z0), linear.vec3(x1, h, z0), linear.vec3(x0, h, z0));
+        quad(linear.vec3(x1, 0.0, z1), linear.vec3(x0, 0.0, z1), linear.vec3(x0, h, z1), linear.vec3(x1, h, z1));
+        quad(linear.vec3(x0, 0.0, z1), linear.vec3(x0, 0.0, z0), linear.vec3(x0, h, z0), linear.vec3(x0, h, z1));
+        quad(linear.vec3(x1, 0.0, z0), linear.vec3(x1, 0.0, z1), linear.vec3(x1, h, z1), linear.vec3(x1, h, z0));
+    }
+}
+
+pub Triangles* triangles(keeps Arena* arena, Block[] list) {
+    Triangles* t = arena.new(Triangles, arena);
+    t.floor(-SIZE, -SIZE, SIZE, SIZE, 0.0);
+    for (Block b in list) {
+        t.box(b);
+    }
+    return t;
+}

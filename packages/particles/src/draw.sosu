@@ -1,0 +1,348 @@
+// particles.draw: systems of particles drawn on `gpu` (spec §8.2), over a scene that render3d drew
+// in the same frame: the depth of the scene hides them, they do not hide each other. Each particle
+// is a square facing the camera (turned by its rotation), or stretched along its velocity; its
+// texture, or the frame of its flipbook, times its color. Particles of alpha are sorted from far to
+// near, their systems too; additive ones come after, in any order.
+import std.vec;
+import std.math;
+import math.linear;
+import image.image;
+import gpu.gpu;
+import render3d.render3d;
+import particles.particles;
+
+extern "C" {
+    ui8* sosu_shader_particle_vert_spv(usize* size) uses io;
+    ui8* sosu_shader_particle_vert_dxil(usize* size) uses io;
+    ui8* sosu_shader_particle_vert_msl(usize* size) uses io;
+    ui8* sosu_shader_particle_frag_spv(usize* size) uses io;
+    ui8* sosu_shader_particle_frag_dxil(usize* size) uses io;
+    ui8* sosu_shader_particle_frag_msl(usize* size) uses io;
+}
+
+// A system to draw, with its texture (white squares without one).
+pub struct Sprite {
+    pub particles.System* system;
+    pub gpu.Texture? texture = none;
+}
+
+pub Sprite sprite(particles.System* s, gpu.Texture? t) {
+    return Sprite{ system: s, texture: t };
+}
+
+struct Vertex {
+    f32[3] position;
+    f32[2] uv;
+    f32[4] color;
+}
+
+struct CameraUniform {
+    linear.Mat4 view_projection;
+}
+
+// A part of the buffer: the quads of one system.
+struct Part {
+    usize sprite;
+    ui32 first;  // its first quad
+    ui32 count;
+    bool additive;
+}
+
+ui8[] code_of(Arena* arena, gpu.ShaderFormat format, bool fragment) uses io {
+    mut usize size = 0;
+    unsafe {
+        ui8* bytes = match (format) {
+            Spirv => fragment ? sosu_shader_particle_frag_spv(&size) : sosu_shader_particle_vert_spv(&size),
+            Dxil => fragment ? sosu_shader_particle_frag_dxil(&size) : sosu_shader_particle_vert_dxil(&size),
+            Msl => fragment ? sosu_shader_particle_frag_msl(&size) : sosu_shader_particle_vert_msl(&size),
+        };
+        mut ui8[] out = arena.alloc_slice(ui8, size);
+        for (usize i in 0..size) {
+            out[i] = *(bytes + i);
+        }
+        return out;
+    }
+}
+
+struct Ranked {
+    f32 distance;
+    usize index;
+}
+
+void sort_far_first(Ranked[] items) {
+    mut Ranked[] a = items;
+    // a merge sort would be faster for many; an insertion sort keeps equal ones in order
+    for (usize i in 1..a.len) {
+        Ranked x = a[i];
+        mut usize k = i;
+        while (k > 0 && a[k - 1].distance < x.distance) {
+            a[k] = a[k - 1];
+            k -= 1;
+        }
+        a[k] = x;
+    }
+}
+
+pub class Drawer {
+    gpu.Device* device;
+    gpu.Pipeline alpha;
+    gpu.Pipeline additive;
+    gpu.Sampler sampler;
+    gpu.Texture white;
+    mut gpu.Buffer vertices;
+    mut gpu.Buffer indices;
+    mut usize capacity;  // quads the buffers hold
+    mut usize last_drawn;
+
+    void init(
+        keeps gpu.Device* device,
+        gpu.Pipeline alpha,
+        gpu.Pipeline additive,
+        gpu.Sampler sampler,
+        gpu.Texture white,
+        gpu.Buffer vertices,
+        gpu.Buffer indices,
+        usize capacity
+    ) {
+        self.device = device;
+        self.alpha = alpha;
+        self.additive = additive;
+        self.sampler = sampler;
+        self.white = white;
+        self.vertices = vertices;
+        self.indices = indices;
+        self.capacity = capacity;
+        last_drawn = 0;
+    }
+
+    // The particles drawn by the last `draw`.
+    pub usize drawn() {
+        return last_drawn;
+    }
+
+    // Buffers for `quads` quads at least.
+    void!gpu.GpuError reserve(usize quads) uses io {
+        if (quads <= capacity) {
+            return ok();
+        }
+        mut usize grown = max(capacity * 2, quads);
+        mut Arena scratch = Arena.new(grown * 24 + 64);
+        defer scratch.free();
+        mut ui32[] list = scratch.alloc_slice(ui32, grown * 6);
+        for (usize q in 0..grown) {
+            ui32 v = (q * 4) as ui32;
+            list[q * 6] = v;
+            list[q * 6 + 1] = v + 1;
+            list[q * 6 + 2] = v + 2;
+            list[q * 6 + 3] = v;
+            list[q * 6 + 4] = v + 2;
+            list[q * 6 + 5] = v + 3;
+        }
+        gpu.Buffer new_vertices = try device.buffer(gpu.Usage.Vertex, (grown * 4 * size_of(Vertex)) as ui32);
+        gpu.Buffer new_indices = try device.buffer_of(gpu.Usage.Index, list);
+        device.release_buffer(vertices);
+        device.release_buffer(indices);
+        vertices = new_vertices;
+        indices = new_indices;
+        capacity = grown;
+        return ok();
+    }
+
+    // The systems drawn into the window of `frame`, over what it holds, seen by `camera`.
+    pub void!gpu.GpuError draw(gpu.Frame frame, render3d.Camera camera, Sprite[] sprites) uses io {
+        return render(frame, none, frame.width, frame.height, camera, sprites);
+    }
+
+    // The same, into `target`, a texture of `device.target`.
+    pub void!gpu.GpuError draw_into(gpu.Frame frame, gpu.Texture target, render3d.Camera camera, Sprite[] sprites) uses io {
+        return render(frame, some(target), target.width, target.height, camera, sprites);
+    }
+
+    void!gpu.GpuError render(gpu.Frame frame, gpu.Texture? target, ui32 width, ui32 height, render3d.Camera camera,
+            Sprite[] sprites) uses io {
+        mut usize total = 0;
+        for (Sprite s in sprites) {
+            total += s.system.count();
+        }
+        last_drawn = total;
+        if (total == 0) {
+            return ok();
+        }
+        try reserve(total);
+        mut Arena scratch = Arena.new(total * 4 * size_of(Vertex) + total * 16 + sprites.len * 64 + 1024);
+        defer scratch.free();
+        linear.Mat4 view = camera.view();
+        linear.Vec3 right = linear.vec3(view.at(0, 0), view.at(0, 1), view.at(0, 2));
+        linear.Vec3 up = linear.vec3(view.at(1, 0), view.at(1, 1), view.at(1, 2));
+        linear.Vec3 facing = linear.vec3(view.at(2, 0), view.at(2, 1), view.at(2, 2));  // toward the camera
+
+        // the order of the systems: alpha ones far to near, then the additive ones
+        mut Ranked[] order = scratch.alloc_slice(Ranked, sprites.len);
+        for (usize i in 0..sprites.len) {
+            particles.System* s = sprites[i].system;
+            bool light = match (s.emitter.blending) {
+                Additive => true,
+                Alpha => false,
+            };
+            mut linear.Vec3 middle = linear.vec3(0.0, 0.0, 0.0);
+            for (particles.Particle p in s.particles()) {
+                middle = middle.add(p.position);
+            }
+            if (s.count() > 0) {
+                middle = middle.scale(1.0 / s.count() as f32);
+            }
+            // additive ones after all the others: a distance below any
+            order[i] = Ranked{ distance: light ? -1.0 : middle.distance(camera.position), index: i };
+        }
+        sort_far_first(order);
+
+        mut Vertex[] data = scratch.alloc_slice(Vertex, total * 4);
+        vec.Vec<Part>* parts = vec.new<Part>(&scratch);
+        mut usize quad = 0;
+        for (Ranked r in order) {
+            particles.System* s = sprites[r.index].system;
+            particles.Particle[] list = s.particles();
+            particles.Emitter e = s.emitter;
+            bool light = match (e.blending) {
+                Additive => true,
+                Alpha => false,
+            };
+            mut Ranked[] by_distance = scratch.alloc_slice(Ranked, list.len);
+            for (usize i in 0..list.len) {
+                by_distance[i] = Ranked{ distance: light ? 0.0 : list[i].position.distance(camera.position), index: i };
+            }
+            if (!light) {
+                sort_far_first(by_distance);
+            }
+            ui32 columns = max(e.columns, 1);
+            ui32 rows = (max(e.frames, 1) + columns - 1) / columns;
+            ui32 first = quad as ui32;
+            for (Ranked k in by_distance) {
+                particles.Particle p = list[k.index];
+                f32 half = s.size_of(p) / 2.0;
+                linear.Vec4 c = s.color_of(p);
+                mut linear.Vec3 a = right;
+                mut linear.Vec3 b = up;
+                match (e.facing) {
+                    Camera => {
+                        f32 co = math.cos(p.rotation as f64) as f32;
+                        f32 si = math.sin(p.rotation as f64) as f32;
+                        a = right.scale(co).add(up.scale(si)).scale(half);
+                        b = up.scale(co).sub(right.scale(si)).scale(half);
+                    },
+                    Velocity(stretch) => {
+                        // along the velocity seen by the camera, as wide as the particle
+                        linear.Vec3 along = p.velocity.sub(facing.scale(p.velocity.dot(facing)));
+                        f32 l = along.length();
+                        if (l > 0.000001) {
+                            b = along.scale(1.0 / l).scale(half + stretch * p.velocity.length() / 2.0);
+                            a = along.scale(1.0 / l).cross(facing).scale(half);
+                        } else {
+                            a = right.scale(half);
+                            b = up.scale(half);
+                        }
+                    },
+                }
+                ui32 f = s.frame_of(p);
+                f32 u0 = (f % columns) as f32 / columns as f32;
+                f32 v0 = (f / columns) as f32 / rows as f32;
+                f32 u1 = u0 + 1.0 / columns as f32;
+                f32 v1 = v0 + 1.0 / rows as f32;
+                f32[4] color = [c.x, c.y, c.z, c.w];
+                linear.Vec3 p0 = p.position.sub(a).sub(b);
+                linear.Vec3 p1 = p.position.add(a).sub(b);
+                linear.Vec3 p2 = p.position.add(a).add(b);
+                linear.Vec3 p3 = p.position.sub(a).add(b);
+                data[quad * 4] = Vertex{ position: [p0.x, p0.y, p0.z], uv: [u0, v1], color: color };
+                data[quad * 4 + 1] = Vertex{ position: [p1.x, p1.y, p1.z], uv: [u1, v1], color: color };
+                data[quad * 4 + 2] = Vertex{ position: [p2.x, p2.y, p2.z], uv: [u1, v0], color: color };
+                data[quad * 4 + 3] = Vertex{ position: [p3.x, p3.y, p3.z], uv: [u0, v0], color: color };
+                quad += 1;
+            }
+            if (list.len > 0) {
+                parts.push(Part{ sprite: r.index, first: first, count: list.len as ui32, additive: light });
+            }
+        }
+        frame.upload(vertices, data);
+
+        f32 aspect = width as f32 / max(height, 1) as f32;
+        mut CameraUniform u = CameraUniform{ view_projection: camera.view_projection(aspect) };
+        gpu.Clear keep = gpu.Clear{ color: gpu.rgba(0.0, 0.0, 0.0, 0.0), keep: true };
+        gpu.Pass pass = match (target) {
+            some(t) => frame.pass_into(t, keep),
+            none => frame.pass(keep),
+        };
+        mut i32 bound = -1;  // 0 alpha, 1 additive
+        for (Part part in parts.items()) {
+            i32 wanted = part.additive ? 1 : 0;
+            if (wanted != bound) {
+                pass.bind(part.additive ? additive : alpha);
+                pass.vertex_uniform(0, &u);
+                pass.vertices(vertices);
+                pass.indices(indices, gpu.IndexSize.U32);
+                bound = wanted;
+            }
+            gpu.Texture t = match (sprites[part.sprite].texture) {
+                some(x) => x,
+                none => white,
+            };
+            pass.texture(0, t, sampler);
+            pass.draw_indexed_range(part.count * 6, part.first * 6);
+        }
+        pass.end();
+        return ok();
+    }
+
+    pub void close() uses io {
+        device.release_pipeline(alpha);
+        device.release_pipeline(additive);
+        device.release_sampler(sampler);
+        device.release_texture(white);
+        device.release_buffer(vertices);
+        device.release_buffer(indices);
+    }
+}
+
+// The drawer of `device`: its pipelines (alpha and additive), and buffers that grow as needed.
+pub Drawer*!gpu.GpuError drawer(keeps Arena* arena, keeps gpu.Device* device) uses io {
+    mut Arena scratch = Arena.new(64 * KB);
+    defer scratch.free();
+    gpu.ShaderFormat format = device.format();
+    str entry = match (format) {
+        Msl => "main0",
+        _ => "main",
+    };
+    gpu.Shader vs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Vertex,
+        format: format,
+        code: code_of(&scratch, format, false),
+        entry: entry,
+        uniform_buffers: 1
+    });
+    gpu.Shader fs = try device.shader(gpu.ShaderDesc{
+        stage: gpu.Stage.Fragment,
+        format: format,
+        code: code_of(&scratch, format, true),
+        entry: entry,
+        samplers: 1
+    });
+    mut gpu.Attribute[3] attributes = [
+        gpu.Attribute{ location: 0, format: gpu.Format.Float3, offset: offset_of(Vertex, position) as ui32 },
+        gpu.Attribute{ location: 1, format: gpu.Format.Float2, offset: offset_of(Vertex, uv) as ui32 },
+        gpu.Attribute{ location: 2, format: gpu.Format.Float4, offset: offset_of(Vertex, color) as ui32 },
+    ];
+    gpu.Layout layout = gpu.Layout{ stride: size_of(Vertex) as ui32, attributes: attributes[0..3] };
+    gpu.Pipeline alpha = try device.pipeline(gpu.PipelineDesc{ vertex: vs, fragment: fs, layout: layout, cull: gpu.Cull.Off,
+            blend: gpu.Blend.Alpha, depth_write: false });
+    gpu.Pipeline additive = try device.pipeline(gpu.PipelineDesc{ vertex: vs, fragment: fs, layout: layout, cull: gpu.Cull.Off,
+            blend: gpu.Blend.Additive, depth_write: false });
+    device.release_shader(vs);
+    device.release_shader(fs);
+    gpu.Sampler sampler = try device.sampler(gpu.SamplerDesc{ wrap: gpu.Wrap.Clamp });
+    mut image.Image one = image.create(&scratch, 1, 1);
+    one.set(0, 0, 0xFFFFFFFF);
+    gpu.Texture white = try device.texture_of(one, false);
+    gpu.Buffer vertices = try device.buffer(gpu.Usage.Vertex, 4);
+    gpu.Buffer indices = try device.buffer(gpu.Usage.Index, 4);
+    return ok(arena.new(Drawer, device, alpha, additive, sampler, white, vertices, indices, 0));
+}

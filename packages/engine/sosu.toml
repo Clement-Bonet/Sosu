@@ -1,0 +1,20 @@
+# The common components of a game (spec §8.2): what a scene holds beside its transforms, a mesh,
+# a light, a camera, a body, a sound, an emitter, an animator, each described field by field
+# (`engine.describe`), which an inspector shows and a scene saves; and the systems that give them
+# to the packages of this repository (render3d, physics, audio, particles, anim).
+[package]
+name = "engine"
+version = "0.1.0"
+
+[dependencies]
+scene = { path = "../scene" }
+math = { path = "../math" }
+model = { path = "../model" }
+gpu = { path = "../gpu" }
+render3d = { path = "../render3d" }
+physics = { path = "../physics" }
+audio = { path = "../audio" }
+particles = { path = "../particles" }
+anim = { path = "../anim" }
+assets = { path = "../assets" }
+image = { path = "../image" }

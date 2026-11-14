@@ -1,0 +1,12 @@
+plugged: 1 came, one more connected: true
+its name: Sosu test pad
+South pressed: true, went down: true
+still held: true, went down: false
+released: false, went up: true
+a small push: nothing
+left stick to the right: true
+right stick up: true
+halfway: true
+right trigger pulled: true
+right trigger let go: true
+unplugged: 1 left, as many connected as before: true, East went up: true

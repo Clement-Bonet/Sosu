@@ -1,0 +1,9 @@
+# A target of `sosuc fuzz` (spec §13.1, work 5): audio.sofa and audio.hdf5, SOFA files (HDF5) given
+# what libFuzzer makes; `corpus/` holds its seeds (the small files of tests/programs/sounds) and the
+# inputs that once failed, replayed by `make test`.
+[package]
+name = "fuzz_sofa"
+version = "0.1.0"
+
+[dependencies]
+audio = { path = "../../../packages/audio" }

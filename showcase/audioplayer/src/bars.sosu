@@ -1,0 +1,98 @@
+// audioplayer.bars: the spectrum drawn into a canvas, which the interface shows as an image: a bar
+// per band of the analyzer (on a scale of octaves, 30 Hz to 16 kHz), its color from teal to coral
+// as it rises, the peak that holds above it, lines every 12 dB and the frequencies below.
+import std.math;
+import std.text;
+import render.canvas;
+import audio.spectrum;
+
+pub i32 WIDTH = 900;
+pub i32 HEIGHT = 340;
+
+f32 LEFT = 44.0;    // room for the decibels
+f32 BOTTOM = 26.0;  // room for the frequencies
+f32 TOP = 12.0;
+
+canvas.Color mixed(canvas.Color a, canvas.Color b, f32 t) {
+    f32 u = max(0.0, min(1.0, t));
+    return canvas.Color{
+        r: (a.r as f32 + (b.r as f32 - a.r as f32) * u) as ui8,
+        g: (a.g as f32 + (b.g as f32 - a.g as f32) * u) as ui8,
+        b: (a.b as f32 + (b.b as f32 - a.b as f32) * u) as ui8
+    };
+}
+
+// The color of a bar at the height `t` (0 to 1): teal, then violet, then coral.
+pub canvas.Color shade(f32 t) {
+    canvas.Color teal = canvas.Color{ r: 64, g: 210, b: 190 };
+    canvas.Color violet = canvas.Color{ r: 160, g: 120, b: 250 };
+    canvas.Color coral = canvas.Color{ r: 250, g: 120, b: 110 };
+    return t < 0.6 ? mixed(teal, violet, t / 0.6) : mixed(violet, coral, (t - 0.6) / 0.4);
+}
+
+// Where the frequency `hz` is across the bars, from 0 to 1.
+f32 across(spectrum.Analyzer* a, f32 hz) {
+    f32 low = a.edge(0);
+    f32 high = a.edge(a.bands.len);
+    return (math.log((hz / low) as f64) / math.log((high / low) as f64)) as f32;
+}
+
+// The spectrum of `analyzer` (none: nothing plays) into `c`; `active` dims it when paused.
+pub void draw(canvas.Canvas* c, spectrum.Analyzer*? analyzer, bool active) {
+    f32 w = c.width as f32;
+    f32 h = c.height as f32;
+    c.clear(canvas.Color{ r: 22, g: 22, b: 34 });
+    f32 plot_w = w - LEFT - 12.0;
+    f32 plot_h = h - TOP - BOTTOM;
+    // the lines of the decibels: 0, -12... -60
+    canvas.Color grid = canvas.Color{ r: 44, g: 46, b: 64 };
+    canvas.Color label = canvas.Color{ r: 120, g: 124, b: 150 };
+    mut i32 db = 0;
+    while (db >= -60) {
+        f32 y = TOP + plot_h * (-db as f32 / spectrum.FLOOR_DB);
+        c.fill(canvas.Rect{ x: LEFT, y: y, w: plot_w, h: 1.0 }, grid);
+        mut Arena line = Arena.new(64);
+        c.text(4.0, y - 4.0, db == 0 ? "0 dB" : text.format_i64(&line, db as i64), label, 1);
+        line.free();
+        db -= 12;
+    }
+    spectrum.Analyzer* a = match (analyzer) {
+        some(x) => x,
+        none => {
+            c.text(LEFT + plot_w / 2.0 - 60.0, TOP + plot_h / 2.0, "no sound", label, 2);
+            return;
+        },
+    };
+    // the frequencies
+    mut f32[7] marks = [50.0, 100.0, 250.0, 1000.0, 2500.0, 5000.0, 10000.0];
+    mut str[7] names = ["50", "100", "250", "1k", "2.5k", "5k", "10k"];
+    for (usize i in 0..7) {
+        f32 x = LEFT + plot_w * across(a, marks[i]);
+        c.fill(canvas.Rect{ x: x, y: TOP, w: 1.0, h: plot_h }, grid);
+        c.text(x - 8.0, h - BOTTOM + 8.0, names[i], label, 1);
+    }
+    // the bars, and their peaks
+    usize n = a.bands.len;
+    f32 slot = plot_w / n as f32;
+    f32 gap = max(1.0, slot * 0.18);
+    f32 dim = active ? 1.0 : 0.45;
+    for (usize b in 0..n) {
+        f32 x = LEFT + slot * b as f32 + gap / 2.0;
+        f32 level = a.bands[b];
+        f32 tall = plot_h * level;
+        // a bar of stripes of colors, from its foot up
+        mut f32 y = 0.0;
+        while (y < tall) {
+            f32 piece = min(4.0, tall - y);
+            canvas.Color k = shade((y + piece) / plot_h);
+            c.fill(canvas.Rect{ x: x, y: TOP + plot_h - y - piece, w: slot - gap, h: piece },
+                    canvas.Color{ r: (k.r as f32 * dim) as ui8, g: (k.g as f32 * dim) as ui8, b: (k.b as f32 * dim) as ui8 });
+            y += piece;
+        }
+        f32 peak = a.peaks[b];
+        if (peak > 0.01) {
+            canvas.Color k = shade(peak);
+            c.fill(canvas.Rect{ x: x, y: TOP + plot_h * (1.0 - peak) - 2.0, w: slot - gap, h: 2.0 }, k);
+        }
+    }
+}

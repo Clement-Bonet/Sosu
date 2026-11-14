@@ -22,10 +22,15 @@ jobs:
           path: |
             build/fuzz_corpus
             build/fuzz_ogg_corpus
+            build/fuzz_coded_corpus
             build/fuzz_manifest_corpus
             build/fuzz_ui_corpus
             build/fuzz_bindgen_corpus
             build/fuzz_lsp_corpus
+            build/fuzz_gltf_corpus
+            build/fuzz_obj_corpus
+            build/fuzz_fbx_corpus
+            build/fuzz_sofa_corpus
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - name: Fuzz the compiler
@@ -35,6 +40,10 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: make fuzz-ogg FUZZ_TIME=1800
+      - name: Fuzz the MP3 and FLAC decoders
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: make fuzz-coded FUZZ_TIME=1800
       - name: Fuzz sosu.toml
         if: ${{ !cancelled() }}
         timeout-minutes: 40
@@ -51,6 +60,21 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: make fuzz-lsp FUZZ_TIME=1800
+      # the SOFA target is a program of the package audio, linked with SDL3 by `platform`: the
+      # library alone, as the job of Linux takes it
+      - name: Install SDL3
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        run: |
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update
+          sudo apt-get $APT install -y --no-install-recommends libsdl3-0
+          sudo ln -sf "$(ls /usr/lib/x86_64-linux-gnu/libSDL3.so.0)" /usr/local/lib/libSDL3.so
+          sudo ldconfig
+      - name: Fuzz the readers of models
+        if: ${{ !cancelled() }}
+        timeout-minutes: 50
+        run: make build/sosuc && make fuzz-models FUZZ_TIME=600
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

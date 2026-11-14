@@ -1,0 +1,2 @@
+// physics2d: rigid bodies in the plane (spec §8.2), on Box2D. Programs import `physics2d.physics2d`.
+import physics2d.physics2d;
