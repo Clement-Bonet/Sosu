@@ -9,6 +9,7 @@ unset: true
 env: none
 PATH: true
 child: code 7, [child output été]
+failing: code 101, output true, error true
 missing program: not found
 create_dirs: ok
 create_dirs again: ok
