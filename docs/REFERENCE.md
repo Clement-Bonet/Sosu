@@ -41,6 +41,8 @@ do not edit. The language itself is described in [SPEC.md](SPEC.md).
 | [compress.checksum](#compresschecksum) | The checksums of the containers, Adler-32 (zlib) and CRC-32 (gzip, PNG, zip) |
 | [compress.deflate](#compressdeflate) | The deflate stream (RFC 1951), without container |
 | [compress.gzip](#compressgzip) | The gzip format (RFC 1952) of `.gz` files and of HTTP: a header, a deflate stream, its CRC-32 and its size |
+| [compress.tar](#compresstar) | The files of a tar archive read (POSIX ustar, with the long names of GNU and of pax): the archives of `sosuc package` on Linux, once their gzip is undone (`compress.gzip`), the releases of a program downloaded |
+| [compress.zip](#compresszip) | The files of a ZIP archive read (PKWARE APPNOTE), stored or deflated: the archives of `sosuc package` on Windows and macOS, the releases of a program downloaded (SozoHub installs the versions of Sozo from them) |
 | [compress.zlib](#compresszlib) | The zlib container (RFC 1950): two bytes of header, a deflate stream, and the Adler-32 of what it holds, checked when read |
 | [crypto.base64](#cryptobase64) | Bytes as base64 text (RFC 4648), and back |
 | [crypto.hex](#cryptohex) | Bytes written as hexadecimal text, two digits each, and read back. |
@@ -1063,6 +1065,14 @@ pub Output!io.IoError run(Arena* arena, str[] command) uses io requires command.
 
 ```sosu
 pub Output!io.IoError run_with_errors(Arena* arena, str[] command) uses io requires command.len > 0
+```
+
+### `start`
+
+Starts the program `command[0]` (looked for in the folders of PATH) with the other elements as its arguments, and does not wait for it: it goes on, and outlives this program (an editor opened by its launcher). Its output and its errors are not kept. NotFound if there is no such program, Other if it could not start (on iOS, never).
+
+```sosu
+pub void!io.IoError start(Arena* arena, str[] command) uses io requires command.len > 0
 ```
 
 ## std.random
@@ -3067,6 +3077,134 @@ As `decompress`, with at most `limit` bytes for all the members (`TooLarge` beyo
 
 ```sosu
 pub ui8[]!deflate.CompressError decompress_limit(Arena* arena, ui8[] data, usize limit)
+```
+
+## compress.tar
+
+The files of a tar archive read (POSIX ustar, with the long names of GNU and of pax): the archives of `sosuc package` on Linux, once their gzip is undone (`compress.gzip`), the releases of a program downloaded. Each header is a block of 512 bytes, its checksum checked; the data follows, rounded to a block. Links and the other kinds of entries are listed, as `Other`, for the program to skip.      ui8[] archive = try gzip.decompress(&arena, bytes);     tar.Entry[] all = try tar.entries(&arena, archive);     ui8[] data = tar.data_of(archive, all[0]);
+
+### enum `TarError`
+
+```sosu
+pub enum TarError {
+    Damaged,  // a header whose checksum does not match, a size beyond the archive
+}
+```
+
+### `message`
+
+```sosu
+pub str message(TarError e)
+```
+
+### enum `Kind`
+
+```sosu
+pub enum Kind {
+    File,
+    Directory,
+    Other,  // a link, a device...: not extracted
+}
+```
+
+### struct `Entry`
+
+```sosu
+pub struct Entry
+```
+
+- `pub str name`  
+  its path, with `/` (a folder without its last `/`)
+- `pub Kind kind`
+- `pub ui32 mode`  
+  its permissions (0x1ED for rwxr-xr-x...)
+- `pub ui64 size`
+- `pub usize start`  
+  where its data starts in the archive
+
+### `data_of`
+
+The data of the entry `e` of the archive `data`.
+
+```sosu
+pub ui8[] data_of(ui8[] data, Entry e)
+```
+
+### `entries`
+
+The entries of the tar archive `data` (not compressed), in their order.
+
+```sosu
+pub Entry[]!TarError entries(Arena* arena, ui8[] data)
+```
+
+## compress.zip
+
+The files of a ZIP archive read (PKWARE APPNOTE), stored or deflated: the archives of `sosuc package` on Windows and macOS, the releases of a program downloaded (SozoHub installs the versions of Sozo from them). The central directory at the end of the archive lists the entries; each is read on its own, its CRC-32 checked. ZIP64 (archives or files beyond 4 GB), encrypted entries and the other methods of compression are refused.      zip.Entry[] all = try zip.entries(&arena, bytes);     for (zip.Entry e in all) {         if (!e.directory && zip.safe_path(e.name)) { ui8[] data = try zip.read(&arena, bytes, e); }     }
+
+### enum `ZipError`
+
+```sosu
+pub enum ZipError {
+    NotZip,  // no end of central directory: not a ZIP archive
+    Damaged,  // a header out of the archive, a size or a CRC that does not match
+    Unsupported,  // ZIP64, an encrypted entry, a method other than stored and deflated
+    BadName,  // a name that is not UTF-8
+}
+```
+
+### `message`
+
+```sosu
+pub str message(ZipError e)
+```
+
+### struct `Entry`
+
+An entry of the archive.
+
+```sosu
+pub struct Entry
+```
+
+- `pub str name`  
+  its path in the archive, with `/`
+- `pub bool directory`  
+  a folder (its name ends with `/`)
+- `pub ui32 mode`  
+  its Unix permissions when the archive was made on Unix (0x1ED for rwxr-xr-x...), else 0
+- `pub ui64 size`  
+  its size, read
+- `pub ui64 packed`  
+  its size in the archive
+- `pub ui16 method`  
+  0 stored, 8 deflated
+- `pub ui32 crc`
+- `pub usize start`  
+  where its data starts in the archive
+
+### `entries`
+
+The entries of the archive `data`, in the order of its central directory.
+
+```sosu
+pub Entry[]!ZipError entries(Arena* arena, ui8[] data)
+```
+
+### `read`
+
+The data of the entry `e` of the archive `data`, its size and its CRC-32 checked.
+
+```sosu
+pub ui8[]!ZipError read(Arena* arena, ui8[] data, Entry e)
+```
+
+### `safe_path`
+
+Whether `name` stays in the folder it is extracted to: not empty, relative (no `/` first, no drive), no `\`, no part `..` (an archive that writes outside its folder, "zip slip").
+
+```sosu
+pub bool safe_path(str name)
 ```
 
 ## compress.zlib
@@ -5578,7 +5716,7 @@ pub struct Running
 
 ## net.http
 
-An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
+An HTTP/1.1 client. A request is sent on a connection of its own (`Connection: close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads its answer whole into the arena, `open` gives its body to read as it comes (a large file). Either way, the server may give the length of the body, send it in chunks or close the connection at its end. Redirects are followed (5 by default); one to another origin (another scheme, host or port: a download that the server sends to its storage) drops the headers that prove who asks, `Authorization`, `Proxy-Authorization` and `Cookie`, as browsers do. Every wait (connect, read, write) is limited (30 s by default), and so is the size of the answer (16 MB by default). Compressed bodies are not asked for.      http.Response r = try http.get(&arena, "http://example.org/");     if (r.ok()) { io.print("{}", r.text()); }
 
 ### enum `HttpError`
 

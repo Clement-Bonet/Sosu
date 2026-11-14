@@ -1,0 +1,174 @@
+// compress.zip: the files of a ZIP archive read (PKWARE APPNOTE), stored or deflated: the archives of
+// `sosuc package` on Windows and macOS, the releases of a program downloaded (SozoHub installs the
+// versions of Sozo from them). The central directory at the end of the archive lists the entries;
+// each is read on its own, its CRC-32 checked. ZIP64 (archives or files beyond 4 GB), encrypted
+// entries and the other methods of compression are refused.
+//
+//     zip.Entry[] all = try zip.entries(&arena, bytes);
+//     for (zip.Entry e in all) {
+//         if (!e.directory && zip.safe_path(e.name)) { ui8[] data = try zip.read(&arena, bytes, e); }
+//     }
+import compress.checksum;
+import compress.deflate;
+
+pub enum ZipError {
+    NotZip,       // no end of central directory: not a ZIP archive
+    Damaged,      // a header out of the archive, a size or a CRC that does not match
+    Unsupported,  // ZIP64, an encrypted entry, a method other than stored and deflated
+    BadName,      // a name that is not UTF-8
+}
+
+pub str message(ZipError e) {
+    return match (e) {
+        NotZip => "not a ZIP archive",
+        Damaged => "the ZIP archive is damaged",
+        Unsupported => "the ZIP archive uses what is not read (ZIP64, encryption, a method of compression)",
+        BadName => "a name in the ZIP archive is not UTF-8",
+    };
+}
+
+// An entry of the archive.
+pub struct Entry {
+    pub str name;        // its path in the archive, with `/`
+    pub bool directory;  // a folder (its name ends with `/`)
+    pub ui32 mode;       // its Unix permissions when the archive was made on Unix (0x1ED for rwxr-xr-x...), else 0
+    pub ui64 size;       // its size, read
+    pub ui64 packed;     // its size in the archive
+    pub ui16 method;     // 0 stored, 8 deflated
+    pub ui32 crc;
+    pub usize start;     // where its data starts in the archive
+}
+
+ui16 u16_at(ui8[] b, usize at) {
+    return b[at] as ui16 | (b[at + 1] as ui16 << 8);
+}
+
+ui32 u32_at(ui8[] b, usize at) {
+    return b[at] as ui32 | (b[at + 1] as ui32 << 8) | (b[at + 2] as ui32 << 16) | (b[at + 3] as ui32 << 24);
+}
+
+// The entries of the archive `data`, in the order of its central directory.
+pub Entry[]!ZipError entries(Arena* arena, ui8[] data) {
+    if (data.len < 22) {
+        return err(ZipError.NotZip);
+    }
+    // the end of central directory: 22 bytes, then a comment of at most 65535
+    mut usize at = data.len - 22;
+    usize lowest = data.len > 22 + 65535 ? data.len - 22 - 65535 : 0;
+    mut bool found = false;
+    while (true) {
+        if (u32_at(data, at) == 0x06054b50) {
+            found = true;
+            break;
+        }
+        if (at == lowest) {
+            break;
+        }
+        at -= 1;
+    }
+    if (!found) {
+        return err(ZipError.NotZip);
+    }
+    usize count = u16_at(data, at + 10) as usize;
+    ui32 directory_size = u32_at(data, at + 12);
+    ui32 directory_at = u32_at(data, at + 16);
+    if (count == 0xFFFF || directory_at == 0xFFFFFFFF || directory_size == 0xFFFFFFFF) {
+        return err(ZipError.Unsupported);
+    }
+    if (directory_at as usize + directory_size as usize > at) {
+        return err(ZipError.Damaged);
+    }
+    Entry[] out = arena.alloc_slice(Entry, count);
+    mut usize p = directory_at as usize;
+    for (usize i in 0..count) {
+        if (p + 46 > at || u32_at(data, p) != 0x02014b50) {
+            return err(ZipError.Damaged);
+        }
+        ui16 made_by = u16_at(data, p + 4);
+        ui16 flags = u16_at(data, p + 8);
+        ui16 method = u16_at(data, p + 10);
+        ui32 crc = u32_at(data, p + 16);
+        ui32 packed = u32_at(data, p + 20);
+        ui32 size = u32_at(data, p + 24);
+        usize name_length = u16_at(data, p + 28) as usize;
+        usize extra_length = u16_at(data, p + 30) as usize;
+        usize comment_length = u16_at(data, p + 32) as usize;
+        ui32 external = u32_at(data, p + 38);
+        ui32 local = u32_at(data, p + 42);
+        if (flags & 1 != 0 || (method != 0 && method != 8) || packed == 0xFFFFFFFF || size == 0xFFFFFFFF
+                || local == 0xFFFFFFFF) {
+            return err(ZipError.Unsupported);
+        }
+        if (p + 46 + name_length + extra_length + comment_length > at) {
+            return err(ZipError.Damaged);
+        }
+        str name = match (str.from_bytes(data[p + 46..p + 46 + name_length])) {
+            ok(s) => s,
+            err(e) => {
+                return err(ZipError.BadName);
+            },
+        };
+        // where the data starts: after the local header, whose name and extra field may differ
+        usize l = local as usize;
+        if (l + 30 > directory_at as usize || u32_at(data, l) != 0x04034b50) {
+            return err(ZipError.Damaged);
+        }
+        usize start = l + 30 + u16_at(data, l + 26) as usize + u16_at(data, l + 28) as usize;
+        if (start + packed as usize > directory_at as usize) {
+            return err(ZipError.Damaged);
+        }
+        bool unix = made_by >> 8 == 3;
+        out[i] = Entry{
+            name: name,
+            directory: name.len > 0 && name.bytes[name.len - 1] == 47,
+            mode: unix ? (external >> 16) & 0xFFF : 0,
+            size: size as ui64,
+            packed: packed as ui64,
+            method: method,
+            crc: crc,
+            start: start
+        };
+        p += 46 + name_length + extra_length + comment_length;
+    }
+    return ok(out);
+}
+
+// The data of the entry `e` of the archive `data`, its size and its CRC-32 checked.
+pub ui8[]!ZipError read(Arena* arena, ui8[] data, Entry e) {
+    ui8[] packed = data[e.start..e.start + e.packed as usize];
+    mut ui8[] out = packed;
+    if (e.method == 8) {
+        out = match (deflate.inflate_limit(arena, packed, e.size as usize)) {
+            ok(x) => x,
+            err(problem) => {
+                return err(ZipError.Damaged);
+            },
+        };
+    }
+    if (out.len as ui64 != e.size || checksum.crc32(out) != e.crc) {
+        return err(ZipError.Damaged);
+    }
+    return ok(out);
+}
+
+// Whether `name` stays in the folder it is extracted to: not empty, relative (no `/` first, no
+// drive), no `\`, no part `..` (an archive that writes outside its folder, "zip slip").
+pub bool safe_path(str name) {
+    if (name.len == 0 || name.bytes[0] == 47) {
+        return false;
+    }
+    mut usize part = 0;  // where the current part of the path starts
+    for (usize i in 0..name.len + 1) {
+        ui8 c = i < name.len ? name.bytes[i] : 47;
+        if (c == 92 || c == 58) {  // `\`, `:`
+            return false;
+        }
+        if (c == 47) {
+            if (i - part == 2 && name.bytes[part] == 46 && name.bytes[part + 1] == 46) {
+                return false;
+            }
+            part = i + 1;
+        }
+    }
+    return true;
+}

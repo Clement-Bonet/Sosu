@@ -6,6 +6,8 @@ import compress.checksum;
 import compress.deflate;
 import compress.zlib;
 import compress.gzip;
+import compress.zip;
+import compress.tar;
 import crypto.hex;
 
 ui8[] bytes_of_hex(Arena* arena, str digits) {
@@ -80,6 +82,123 @@ str as_text(ui8[] bytes) {
         ok(s) => s,
         err(e) => "(not UTF-8)",
     };
+}
+
+// An archive written by Python's zipfile: a folder, a file stored, a script deflated (rwxr-xr-x), a
+// name that leaves its folder.
+ui8[] python_zip(Arena* arena) {
+    text.TextBuilder* h = text.builder(arena);
+    h.push("504b030414000000000000606e5d00000000000000000000000005000000736f7a6f2f504b030414000000000000606e");
+    h.push("5db3eb1f780d0000000d0000000f000000736f7a6f2f524541444d452e747874536f7a6f2c2073746f7265640a504b03");
+    h.push("0414000000080000606e5def18ab7d1a0000009a0100000d000000736f7a6f2f62696e2f736f7a6f5356d44fcaccd32f");
+    h.push("cee04a4dcec85728ceafca1f65550d061600504b030414000000000000606e5d996deab903000000030000000b000000");
+    h.push("2e2e2f6576696c2e7478746f7574504b0102140314000000000000606e5d000000000000000000000000050000000000");
+    h.push("000000001000ed4100000000736f7a6f2f504b0102140314000000000000606e5db3eb1f780d0000000d0000000f0000");
+    h.push("000000000000000000a48123000000736f7a6f2f524541444d452e747874504b0102140314000000080000606e5def18");
+    h.push("ab7d1a0000009a0100000d0000000000000000000000ed815d000000736f7a6f2f62696e2f736f7a6f504b0102140014");
+    h.push("000000000000606e5d996deab903000000030000000b00000000000000000000008001a20000002e2e2f6576696c2e74");
+    h.push("7874504b05060000000004000400e4000000ce0000000000");
+    return bytes_of_hex(arena, h.text());
+}
+
+// The same tree written by Python's tarfile (GNU, a name of 129 characters, a link), gzipped.
+ui8[] python_tgz(Arena* arena) {
+    text.TextBuilder* h = text.builder(arena);
+    h.push("1f8b08000000000000ffedd74d6ac3301005e059e71453bab747b27eb63d802fa1169384a412d42e849c3e5881420ca1");
+    h.push("2bcb10bd6f23e38d8d9f9f068de99a5a5a978888b736af22b25cf3b5b2da3b31cee6fbce9b8ed85201bfe3147e98a952");
+    h.push("e39cffe731b6f3c556f96bf398bf12a33db1500195e7fffe764fffb01bbe0e89e7bf60b7f53b41394ddbb41f7d8afbfe");
+    h.push("184f2b3de349effffaaf453fcc0211ef8d27eea980cafb9ff7ffb09166ba4c5b7f80ca95c87f2eb533e6f9fc578bf9df");
+    h.push("89ef30ff8b087c4e71cf317c0f98fbb5f6ff1ca6615c6f27feb7ffcbf39f52aeb3c47ae573495679ff01000000000000");
+    h.push("00000000805ece0d53ae164100280000");
+    return bytes_of_hex(arena, h.text());
+}
+
+// The first line of `s`, "-" when it is empty.
+str first_line(Arena* arena, str s) {
+    str[] all = text.lines(arena, s);
+    return all.len > 0 && all[0].len > 0 ? all[0] : "-";
+}
+
+// The archives ZIP and tar read: their entries, their data, a damaged byte refused.
+void archives(Arena* arena) uses io {
+    ui8[] z = python_zip(arena);
+    match (zip.entries(arena, z)) {
+        ok(all) => {
+            io.print("zip: {} entries", all.len);
+            for (zip.Entry e in all) {
+                str shown = e.directory ? "(folder)" : match (zip.read(arena, z, e)) {
+                    ok(data) => first_line(arena, as_text(data)),
+                    err(problem) => zip.message(problem),
+                };
+                io.print(
+                    "  {} mode {} size {} method {} safe {}: {}",
+                    e.name,
+                    e.mode,
+                    e.size,
+                    e.method,
+                    zip.safe_path(e.name),
+                    shown
+                );
+            }
+            // a byte of the deflated data changed: its CRC-32 refuses it
+            mut ui8[] damaged = arena.alloc_slice(ui8, z.len);
+            for (usize i in 0..z.len) {
+                damaged[i] = z[i];
+            }
+            damaged[all[2].start + 3] ^= 0x55;
+            match (zip.read(arena, damaged, all[2])) {
+                ok(data) => io.print("zip damaged: read"),
+                err(problem) => io.print("zip damaged: {}", zip.message(problem)),
+            }
+        },
+        err(problem) => io.print("zip: {}", zip.message(problem)),
+    }
+    match (zip.entries(arena, "not an archive at all, but text".bytes)) {
+        ok(all) => io.print("not zip: {} entries", all.len),
+        err(problem) => io.print("not zip: {}", zip.message(problem)),
+    }
+    mut str[8] paths = ["a/b.txt", "a/..b", "/abs", "C:/x", "a/../b", "..", "a\\b", ""];
+    for (str p in paths) {
+        io.print("safe [{}]: {}", p, zip.safe_path(p));
+    }
+    ui8[] t = match (gzip.decompress(arena, python_tgz(arena))) {
+        ok(x) => x,
+        err(problem) => {
+            io.print("tgz: {}", deflate.message(problem));
+            return;
+        },
+    };
+    match (tar.entries(arena, t)) {
+        ok(all) => {
+            io.print("tar: {} entries", all.len);
+            for (tar.Entry e in all) {
+                str kind = match (e.kind) {
+                    File => "file",
+                    Directory => "folder",
+                    Other => "other",
+                };
+                io.print(
+                    "  {} ({} characters) {} mode {} size {}: {}",
+                    e.name.len > 40 ? "long name" : e.name,
+                    e.name.len,
+                    kind,
+                    e.mode,
+                    e.size,
+                    first_line(arena, as_text(tar.data_of(t, e)))
+                );
+            }
+        },
+        err(problem) => io.print("tar: {}", tar.message(problem)),
+    }
+    mut ui8[] broken = arena.alloc_slice(ui8, t.len);
+    for (usize i in 0..t.len) {
+        broken[i] = t[i];
+    }
+    broken[3] ^= 1;  // a byte of the first name: its checksum no longer matches
+    match (tar.entries(arena, broken)) {
+        ok(all) => io.print("tar damaged: {} entries", all.len),
+        err(problem) => io.print("tar damaged: {}", tar.message(problem)),
+    }
 }
 
 i32 main() uses io {
@@ -187,5 +306,6 @@ i32 main() uses io {
         ok(n) => io.print("into 5 bytes: {} \"{}\"", n, as_text(exact[0..n])),
         err(e) => io.print("into 5 bytes: {}", deflate.message(e)),
     }
+    archives(&arena);
     return 0;
 }

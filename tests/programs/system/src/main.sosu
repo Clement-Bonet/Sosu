@@ -4,6 +4,7 @@ import std.io;
 import std.fs;
 import std.os;
 import std.text;
+import std.time;
 
 str describe(io.IoError e) {
     return match (e) {
@@ -23,13 +24,20 @@ void names(Arena* arena, str path) uses io {
     }
 }
 
-i32 main() uses io {
+i32 main() uses io, time {
     mut Arena arena = Arena.new(64 * KB);
     defer arena.free();
     str[] args = os.args(&arena);
     if (args.len == 1 && args[0] == "child") {
         io.print("child output été");
         return 7;
+    }
+    if (args.len == 2 && args[0] == "touch") {
+        match (io.write_file(&arena, args[1], "started")) {  // started by os.start: a file says it ran
+            ok => { },
+            err(e) => { },
+        }
+        return 0;
     }
     if (args.len == 1 && args[0] == "failing") {
         io.print("before the failure");
@@ -253,6 +261,32 @@ i32 main() uses io {
         fs.is_absolute("C:x")
     );
     io.print("current is absolute: {}", fs.is_absolute(fs.current_dir(&arena)));
+
+    // a program started without waiting for it: the file it writes shows that it ran
+    str started = "tests/programs/system/build/started.txt";
+    if (fs.exists(&arena, started)) {
+        match (fs.remove_file(&arena, started)) {
+            ok => { },
+            err(e) => { },
+        }
+    }
+    mut str[3] touch = [os.program(&arena), "touch", started];
+    match (os.start(&arena, touch[0..3])) {
+        ok => {
+            mut i32 waited = 0;
+            while (!fs.exists(&arena, started) && waited < 10000) {
+                time.sleep_ms(10);
+                waited += 10;
+            }
+            io.print("start: ok, it ran: {}", fs.exists(&arena, started));
+        },
+        err(e) => io.print("start: {}", describe(e)),
+    }
+    mut str[1] nowhere = ["sosu-no-such-program"];
+    match (os.start(&arena, nowhere[0..1])) {
+        ok => io.print("start missing: started"),
+        err(e) => io.print("start missing: {}", describe(e)),
+    }
     os.exit(3);
     return 0;
 }

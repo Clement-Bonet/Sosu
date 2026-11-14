@@ -23,3 +23,24 @@ wrong CRC-32: wrong checksum
 wrong size: wrong checksum
 into 4 bytes: too large for the room given
 into 5 bytes: 5 "hello"
+zip: 4 entries
+  sozo/ mode 493 size 0 method 0 safe true: (folder)
+  sozo/README.txt mode 420 size 13 method 0 safe true: Sozo, stored
+  sozo/bin/sozo mode 493 size 410 method 8 safe true: #!/bin/sh
+  ../evil.txt mode 0 size 3 method 0 safe false: out
+zip damaged: the ZIP archive is damaged
+not zip: not a ZIP archive
+safe [a/b.txt]: true
+safe [a/..b]: true
+safe [/abs]: false
+safe [C:/x]: false
+safe [a/../b]: false
+safe [..]: false
+safe [a\b]: false
+safe []: false
+tar: 4 entries
+  sozo (4 characters) folder mode 493 size 0: -
+  sozo/bin/sozo (13 characters) file mode 493 size 20: #!/bin/sh
+  long name (129 characters) file mode 420 size 12: a long name
+  sozo/latest (11 characters) other mode 420 size 0: -
+tar damaged: the tar archive is damaged
