@@ -369,7 +369,7 @@ bool refused(url.Url? u) {
 // What the client thread of an HTTP test asks for.
 struct Ask {
     ui16 port;
-    i32 kind;  // 0: GET /, 1: GET /small (64 bytes at most), 2: POST /form
+    i32 kind;  // 0: GET /, 1: GET /small (64 bytes at most), 2: POST /form, 3: GET / with a token and a cookie
 }
 
 // The client of an HTTP test: the status times 100 000 plus the length of the body, or a
@@ -386,6 +386,12 @@ i64 ask(Arena* arena, Ask a) uses io {
     }
     if (a.kind == 2) {
         r.body = "name=sosu".bytes;
+    }
+    if (a.kind == 3) {
+        mut http.Header[] proofs = arena.alloc_slice(http.Header, 2);
+        proofs[0] = http.Header{ name: "Authorization", value: "Bearer secret" };
+        proofs[1] = http.Header{ name: "Cookie", value: "id=1" };
+        r.headers = proofs;
     }
     return match (http.send(arena, r)) {
         ok(answer) => answer.status as i64 * 100000 + answer.body.len as i64,
@@ -492,6 +498,28 @@ test "an HTTP client: lengths, chunks, the end of the stream, redirects, limits"
     assert(text.starts_with(first, "GET / HTTP/1.1"));
     assert(text.starts_with(second, "GET /next HTTP/1.1"));
     assert(client.join() == 20000002);
+    // a token and a cookie: kept by a redirect to the same origin, dropped by one to another (port)
+    tcp.Listener* other = match (tcp.listen(&arena, ip.localhost(), 0)) {
+        ok(l) => l,
+        err(e) => {
+            failed(e);
+            return;
+        },
+    };
+    defer other.close();
+    auto proving = thread.spawn(&arena, ask, Ask{ port: server.port(), kind: 3 });
+    str asked = answer(&arena, server, "HTTP/1.1 302 Found\r\nLocation: /same\r\nContent-Length: 0\r\n\r\n", 0);
+    text.TextBuilder* away = text.builder(&arena);
+    away.push("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:");
+    away.push_u64(other.port() as ui64);
+    away.push("/away\r\nContent-Length: 0\r\n\r\n");
+    str same = answer(&arena, server, away.text(), 0);
+    str elsewhere = answer(&arena, other, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 0);
+    assert(text.contains(asked, "\r\nAuthorization: Bearer secret\r\n") && text.contains(asked, "\r\nCookie: id=1\r\n"));
+    assert(text.starts_with(same, "GET /same HTTP/1.1") && text.contains(same, "\r\nAuthorization: Bearer secret\r\n"));
+    assert(text.starts_with(elsewhere, "GET /away HTTP/1.1") && !text.contains(elsewhere, "Authorization")
+            && !text.contains(elsewhere, "Cookie"));
+    assert(proving.join() == 20000002);
     // a URL refused before any connection
     match (http.get(&arena, "http://bad url/")) {
         ok(r) => {

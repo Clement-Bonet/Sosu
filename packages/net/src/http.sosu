@@ -2,7 +2,9 @@
 // close`), over TLS for https (`net.tls`: the certificate of the server is checked); `send` reads
 // its answer whole into the arena, `open` gives its body to read as it comes (a large file).
 // Either way, the server may give the length of the body, send it in chunks or close the
-// connection at its end. Redirects are followed (5 by default). Every wait (connect, read, write) is limited (30 s by default), and so is the
+// connection at its end. Redirects are followed (5 by default); one to another origin (another
+// scheme, host or port: a download that the server sends to its storage) drops the headers that
+// prove who asks, `Authorization`, `Proxy-Authorization` and `Cookie`, as browsers do. Every wait (connect, read, write) is limited (30 s by default), and so is the
 // size of the answer (16 MB by default). Compressed bodies are not asked for.
 //
 //     http.Response r = try http.get(&arena, "http://example.org/");
@@ -146,10 +148,11 @@ pub Body*!HttpError open(Arena* arena, Request r) uses io {
     };
     mut str method = r.method;
     mut ui8[] body = r.body;
+    mut Header[] headers = r.headers;
     mut i32 left = r.redirects;
     while (true) {
         tcp.Connection* c = try connect_for(arena, target, r);
-        Body* answer = match (start(arena, c, target, method, r.headers, body, r.max_size)) {
+        Body* answer = match (start(arena, c, target, method, headers, body, r.max_size)) {
             ok(b) => b,
             err(e) => {
                 c.close();
@@ -173,12 +176,16 @@ pub Body*!HttpError open(Arena* arena, Request r) uses io {
             return err(HttpError.TooManyRedirects);
         }
         left -= 1;
+        url.Url from = target;
         target = match (url.resolve(arena, target, next)) {
             some(u) => u,
             none => {
                 return err(HttpError.BadResponse);
             },
         };
+        if (from.scheme != target.scheme || !same_name(from.host, target.host) || from.port != target.port) {
+            headers = without_credentials(arena, headers);
+        }
         // 303, and 301 or 302 after a POST: the next request is a GET without a body
         if (status == 303 || (status == 301 || status == 302) && method == "POST") {
             method = "GET";
@@ -632,6 +639,19 @@ ui8[] copied(Arena* arena, ui8[] bytes) {
         out[i] = bytes[i];
     }
     return out;
+}
+
+// `headers` but those that prove who asks: not sent to another origin after a redirect.
+Header[] without_credentials(Arena* arena, Header[] headers) {
+    Header[] kept = arena.alloc_slice(Header, headers.len);
+    mut usize n = 0;
+    for (Header h in headers) {
+        if (!same_name(h.name, "Authorization") && !same_name(h.name, "Proxy-Authorization") && !same_name(h.name, "Cookie")) {
+            kept[n] = h;
+            n += 1;
+        }
+    }
+    return kept[0..n];
 }
 
 // Two names of headers, the same but for the case of ASCII letters.

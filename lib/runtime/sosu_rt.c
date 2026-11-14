@@ -953,6 +953,34 @@ int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code, boo
     return keep(output, length);
 }
 
+/* Starts the program `args[0]` (looked for in PATH) with the others, and does not wait for it: it
+   goes on after this program ends (an editor opened by its launcher). 0, or -1: not found, -2:
+   other failure. */
+int64_t sosu_os_start(const uint8_t *const *args, size_t count) {
+    wchar_t *line = NULL;
+    size_t size = 0, cap = 0;
+    for (size_t i = 0; i < count; i++) {
+        wchar_t *w = wide(args[i]);
+        if (!w) return -2;
+        quote_wide(&line, &size, &cap, w);
+        free(w);
+    }
+    if (!line) return -2;
+    STARTUPINFOW start;
+    memset(&start, 0, sizeof start);
+    start.cb = sizeof start;
+    PROCESS_INFORMATION process;
+    /* its own group, without the console of this one: closing this program leaves it running */
+    BOOL started = CreateProcessW(NULL, line, NULL, NULL, FALSE, CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS, NULL, NULL,
+                                  &start, &process);
+    DWORD failure = GetLastError();
+    free(line);
+    if (!started) return failure == ERROR_FILE_NOT_FOUND || failure == ERROR_PATH_NOT_FOUND ? -1 : -2;
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    return 0;
+}
+
 int32_t sosu_fs_create_dir(const uint8_t *path) {
     wchar_t *w = wide(path);
     int32_t error = !w ? 5 : CreateDirectoryW(w, NULL) ? 0 : fs_error(GetLastError());
@@ -1172,6 +1200,63 @@ int64_t sosu_os_run(const uint8_t *const *args, size_t count, int32_t *code, boo
     if (!output) return -2;
     *code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
     return keep(output, length);
+#endif
+}
+
+
+/* Starts the program `args[0]` (looked for in PATH) with the others, and does not wait for it: a
+   child of a child that ends at once (a session of its own, never a zombie of this program). 0,
+   or -1: not found, -2: other failure. */
+int64_t sosu_os_start(const uint8_t *const *args, size_t count) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    (void)args;
+    (void)count;
+    return -2; /* iOS runs no other program */
+#else
+    char **argv = malloc((count + 1) * sizeof *argv);
+    int report[2];
+    if (!argv || count == 0) {
+        free(argv);
+        return -2;
+    }
+    for (size_t i = 0; i < count; i++) argv[i] = (char *)args[i];
+    argv[count] = NULL;
+    if (pipe(report) != 0) {
+        free(argv);
+        return -2;
+    }
+    fcntl(report[1], F_SETFD, FD_CLOEXEC); /* closed by a successful exec */
+    pid_t child = fork();
+    if (child == 0) {
+        close(report[0]);
+        setsid();
+        pid_t grandchild = fork();
+        if (grandchild == 0) {
+            execvp(argv[0], argv);
+            int failure = errno;
+            ssize_t written = write(report[1], &failure, sizeof failure);
+            (void)written;
+            _exit(127);
+        }
+        _exit(grandchild < 0 ? 127 : 0);
+    }
+    free(argv);
+    close(report[1]);
+    if (child < 0) {
+        close(report[0]);
+        return -2;
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    int failure = 0;
+    ssize_t reported;
+    while ((reported = read(report[0], &failure, sizeof failure)) < 0 && errno == EINTR) {
+    }
+    close(report[0]);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -2;
+    if (reported == (ssize_t)sizeof failure) return failure == ENOENT ? -1 : -2;
+    return 0;
 #endif
 }
 

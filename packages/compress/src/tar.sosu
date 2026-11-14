@@ -1,0 +1,202 @@
+// compress.tar: the files of a tar archive read (POSIX ustar, with the long names of GNU and of pax):
+// the archives of `sosuc package` on Linux, once their gzip is undone (`compress.gzip`), the
+// releases of a program downloaded. Each header is a block of 512 bytes, its checksum checked; the
+// data follows, rounded to a block. Links and the other kinds of entries are listed, as `Other`,
+// for the program to skip.
+//
+//     ui8[] archive = try gzip.decompress(&arena, bytes);
+//     tar.Entry[] all = try tar.entries(&arena, archive);
+//     ui8[] data = tar.data_of(archive, all[0]);
+pub enum TarError {
+    Damaged,  // a header whose checksum does not match, a size beyond the archive
+}
+
+pub str message(TarError e) {
+    return match (e) {
+        Damaged => "the tar archive is damaged",
+    };
+}
+
+pub enum Kind {
+    File,
+    Directory,
+    Other,  // a link, a device...: not extracted
+}
+
+pub struct Entry {
+    pub str name;   // its path, with `/` (a folder without its last `/`)
+    pub Kind kind;
+    pub ui32 mode;  // its permissions (0x1ED for rwxr-xr-x...)
+    pub ui64 size;
+    pub usize start;  // where its data starts in the archive
+}
+
+// The data of the entry `e` of the archive `data`.
+pub ui8[] data_of(ui8[] data, Entry e) {
+    return data[e.start..e.start + e.size as usize];
+}
+
+// The number written in octal in `field` (ended by a space or a zero); none when it is not one.
+ui64? octal(ui8[] field) {
+    mut ui64 n = 0;
+    mut bool digits = false;
+    for (ui8 c in field) {
+        if (c == 0 || c == 32) {
+            if (digits) {
+                break;
+            }
+            continue;
+        }
+        if (c < 48 || c > 55 || n > 0x1FFFFFFFFFFFFFF) {
+            return none;
+        }
+        n = n * 8 + (c - 48) as ui64;
+        digits = true;
+    }
+    return some(n);
+}
+
+// The text of `field` up to its first zero.
+str field_text(ui8[] field) {
+    mut usize n = 0;
+    while (n < field.len && field[n] != 0) {
+        n += 1;
+    }
+    return match (str.from_bytes(field[0..n])) {
+        ok(s) => s,
+        err(e) => "",
+    };
+}
+
+// The value of `path` in the records of a pax header (`<length> path=<value>\n`...), "" when none.
+str pax_path(ui8[] records) {
+    mut usize at = 0;
+    while (at < records.len) {
+        mut usize length = 0;
+        mut usize i = at;
+        while (i < records.len && records[i] >= 48 && records[i] <= 57) {
+            length = length * 10 + (records[i] - 48) as usize;
+            i += 1;
+        }
+        if (length == 0 || at + length > records.len || i >= records.len || records[i] != 32) {
+            return "";
+        }
+        ui8[] record = records[i + 1..at + length - 1];  // without its length, its space and its line end
+        if (record.len > 5 && record[0] == 112 && record[1] == 97 && record[2] == 116 && record[3] == 104
+                && record[4] == 61) {  // "path="
+            return match (str.from_bytes(record[5..record.len])) {
+                ok(s) => s,
+                err(e) => "",
+            };
+        }
+        at += length;
+    }
+    return "";
+}
+
+// The text `a` then `b` (the prefix and the name of a ustar header).
+str joined(Arena* arena, str a, str b) {
+    ui8[] out = arena.alloc_slice(ui8, a.len + 1 + b.len);
+    for (usize i in 0..a.len) {
+        out[i] = a.bytes[i];
+    }
+    out[a.len] = 47;
+    for (usize i in 0..b.len) {
+        out[a.len + 1 + i] = b.bytes[i];
+    }
+    return match (str.from_bytes(out)) {
+        ok(s) => s,
+        err(e) => b,
+    };
+}
+
+// The entries of the tar archive `data` (not compressed), in their order.
+pub Entry[]!TarError entries(Arena* arena, ui8[] data) {
+    mut usize count = 0;
+    mut usize at = 0;
+    // counted first, then read: an entry per header of a file, a folder or another kind
+    Entry[] room = arena.alloc_slice(Entry, data.len / 512 + 1);
+    mut str long_name = "";
+    while (at + 512 <= data.len) {
+        ui8[] h = data[at..at + 512];
+        mut bool empty = true;
+        for (ui8 c in h) {
+            if (c != 0) {
+                empty = false;
+                break;
+            }
+        }
+        if (empty) {
+            break;  // the end of the archive
+        }
+        // the checksum: the bytes of the header, its own field read as spaces
+        mut ui64 sum = 0;
+        for (usize i in 0..512) {
+            sum += i >= 148 && i < 156 ? 32 : h[i] as ui64;
+        }
+        ui64 written = match (octal(h[148..156])) {
+            some(n) => n,
+            none => {
+                return err(TarError.Damaged);
+            },
+        };
+        ui64 size = match (octal(h[124..136])) {
+            some(n) => n,
+            none => {
+                return err(TarError.Damaged);
+            },
+        };
+        if (sum != written || at + 512 + size as usize > data.len) {
+            return err(TarError.Damaged);
+        }
+        usize start = at + 512;
+        ui8 type = h[156];
+        at = start + ((size as usize + 511) / 512) * 512;
+        if (type == 76) {  // 'L': the long name of the next entry (GNU)
+            long_name = field_text(data[start..start + size as usize]);
+            continue;
+        }
+        if (type == 120) {  // 'x': the pax header of the next entry
+            str p = pax_path(data[start..start + size as usize]);
+            if (p.len > 0) {
+                long_name = p;
+            }
+            continue;
+        }
+        if (type == 103) {  // 'g': a global pax header
+            continue;
+        }
+        mut str name = long_name;
+        if (name.len == 0) {
+            name = field_text(h[0..100]);
+            bool ustar = h[257] == 117 && h[258] == 115 && h[259] == 116 && h[260] == 97 && h[261] == 114;
+            str prefix = ustar ? field_text(h[345..500]) : "";
+            if (prefix.len > 0) {
+                name = joined(arena, prefix, name);
+            }
+        }
+        long_name = "";
+        Kind kind = type == 48 || type == 0 || type == 55 ? Kind.File : type == 53 ? Kind.Directory : Kind.Other;
+        if (name.len > 0 && name.bytes[name.len - 1] == 47) {
+            name = match (str.from_bytes(name.bytes[0..name.len - 1])) {
+                ok(s) => s,
+                err(e) => name,
+            };
+        }
+        room[count] = Entry{
+            name: name,
+            kind: kind,
+            mode: match (octal(h[100..108])) {
+                some(m) => (m & 0xFFF) as ui32,
+                none => 0x1A4,
+            },
+            size: match (kind) {
+                File => size,
+                _ => 0,
+            },
+            start: start
+        };
+        count += 1;
+    }
+    return ok(room[0..count]);
+}

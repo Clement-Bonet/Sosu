@@ -1,7 +1,9 @@
 // compress: deflate (RFC 1951), and its zlib (RFC 1950) and gzip (RFC 1952) containers, in Sosu
-// (spec §8.2). Programs import `compress.zlib`, `compress.gzip`, or `compress.deflate` for the
-// bare stream.
+// (spec §8.2), and the archives ZIP and tar read. Programs import `compress.zlib`, `compress.gzip`,
+// `compress.deflate` for the bare stream, `compress.zip` and `compress.tar`.
 import compress.checksum;
 import compress.deflate;
 import compress.zlib;
 import compress.gzip;
+import compress.zip;
+import compress.tar;
