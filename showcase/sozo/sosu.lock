@@ -1,3 +1,0 @@
-# sosu.lock: the commit of each git dependency, written by sosuc. Keep it in version control.
-native.dr_libs https://github.com/mackron/dr_libs rev f12e197fd462e4c22873fbd70d11b1d2f2c1dc3c f12e197fd462e4c22873fbd70d11b1d2f2c1dc3c
-native.jolt https://github.com/jrouwe/JoltPhysics tag v5.6.0 e77f175595e64cb44218cc9d9d56fc365ad0e36a

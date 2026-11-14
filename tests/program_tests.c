@@ -247,6 +247,85 @@ static void test_library(const char *sosuc) {
 #endif
 }
 
+/* A game as Sozo loads it (engine.host, spec 9.2): built as a shared library, with the C++ of
+   Jolt in it, and driven by a C host as the editor drives it (the contract `sozo_...`). */
+static void test_gamehost(const char *sosuc) {
+    char command[1024];
+    snprintf(command, sizeof command, "%s build --lib=shared tests/programs/gamehost > build/gamehost.out 2> build/gamehost.err",
+             sosuc);
+    CHECK(run(command) == 0, "build the game library: failed (see build/gamehost.err)");
+#ifdef _MSC_VER
+    const char *dir = "tests\\programs\\gamehost\\build";
+    snprintf(command, sizeof command,
+             "cl /nologo /W3 /I%s /Fe%s\\host.exe /Fo%s\\ tests\\programs\\gamehost\\host\\host.c %s\\crates.dll.lib > "
+             "build\\gamehost_host.log",
+             dir, dir, dir, dir);
+    CHECK(run(command) == 0, "the host of the game does not compile (see build/gamehost_host.log)");
+    snprintf(command, sizeof command, "%s\\host.exe > build\\gamehost_host.out", dir);
+#else
+    const char *dir = "tests/programs/gamehost/build";
+#ifdef __APPLE__
+    const char *shared_lib = "libcrates.dylib";
+#else
+    const char *shared_lib = "libcrates.so";
+#endif
+    snprintf(command, sizeof command,
+             "cc -std=c99 -I%s tests/programs/gamehost/host/host.c %s/%s -o %s/host > build/gamehost_host.log 2>&1", dir, dir,
+             shared_lib, dir);
+    CHECK(run(command) == 0, "the host of the game does not compile (see build/gamehost_host.log)");
+    snprintf(command, sizeof command, "%s/host > build/gamehost_host.out", dir);
+#endif
+    CHECK(run(command) == 0, "the host of the game failed");
+    char *actual = read_text("build/gamehost_host.out");
+    char *expected = read_text("tests/programs/gamehost/expected.txt");
+    CHECK(actual && expected && strcmp(actual, expected) == 0, "the host of the game: output differs\n--- got:\n%s",
+          actual ? actual : "(none)\n");
+    free(actual);
+    free(expected);
+}
+
+/* The objects of the user (spec §9.1): tests/programs/csources built with SOSU_CACHE in build/,
+   its object kept there; built again in a fresh build/obj, it takes it from there, as a broken
+   object put in its place shows (the link fails); without it, it is compiled again. */
+static void test_object_cache(const char *sosuc) {
+    char command[1024];
+#ifdef _WIN32
+    const char *clean = "rmdir /s /q tests\\programs\\csources\\build\\obj > NUL 2>&1";
+    run("rmdir /s /q build\\objects_test > NUL 2>&1");
+    run(clean);
+    snprintf(command, sizeof command, "set SOSU_CACHE=build\\objects_test&& %s build tests/programs/csources > build/objects.out 2>&1",
+             sosuc);
+    const char *list = "dir /s /b build\\objects_test\\obj\\*.obj > build\\objects.list 2> NUL";
+#else
+    const char *clean = "rm -rf tests/programs/csources/build/obj";
+    run("rm -rf build/objects_test");
+    run(clean);
+    snprintf(command, sizeof command, "SOSU_CACHE=build/objects_test %s build tests/programs/csources > build/objects.out 2>&1",
+             sosuc);
+    const char *list = "find build/objects_test/obj -name '*.o' > build/objects.list 2> /dev/null";
+#endif
+    CHECK(run(command) == 0, "object cache: the first build failed (see build/objects.out)");
+    run(list);
+    char *kept = read_text("build/objects.list");
+    char *end = kept ? strpbrk(kept, "\r\n") : NULL;
+    bool one = kept && end && strspn(end, "\r\n") == strlen(end); /* one line: vendor/mathx.c */
+    CHECK(one, "object cache: one object is kept (got: %s)", kept ? kept : "(none)");
+    if (one) {
+        *end = '\0';
+        FILE *broken = fopen(kept, "wb");
+        if (broken) {
+            fputs("not an object\n", broken);
+            fclose(broken);
+        }
+        run(clean);
+        CHECK(run(command) != 0, "object cache: the object was compiled again instead of being taken from the cache");
+        remove(kept);
+        run(clean);
+        CHECK(run(command) == 0, "object cache: without the object kept, it is compiled again (see build/objects.out)");
+    }
+    free(kept);
+}
+
 /* The text of a file after its first `lines` lines. */
 static const char *after_lines(const char *text, int lines) {
     while (text && lines-- > 0) {
@@ -712,7 +791,9 @@ int main(int argc, char **argv) {
     }
 
     test_library(argv[1]);
+    test_gamehost(argv[1]);
     test_bindgen(argv[1]);
+    test_object_cache(argv[1]);
     test_gpu(argv[1]);
     test_doc(argv[1]);
     test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);

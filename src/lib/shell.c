@@ -1,5 +1,8 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L /* mkdir, rmdir, unlink with -std=c99 */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* _SC_NPROCESSORS_ONLN */
+#endif
 #endif
 
 #include "shell.h"
@@ -18,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utime.h>
 #endif
 
 char *shell_path(const char *path) {
@@ -83,8 +87,9 @@ static HANDLE open_output(const char *path) {
                        FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
-/* Runs a command line as it is, with the folder and the files of `command`. */
-static int run_line(char *line, const Command *command, const char *program) {
+/* Starts a command line as it is, with the folder and the files of `command`: -1 when it started
+   (`*process` holds it), 127 after saying why it did not. */
+static int start_line(char *line, const Command *command, const char *program, PROCESS_INFORMATION *process) {
     STARTUPINFOA start;
     memset(&start, 0, sizeof start);
     start.cb = sizeof start;
@@ -114,8 +119,7 @@ static int run_line(char *line, const Command *command, const char *program) {
     }
     fflush(stdout);
     fflush(stderr);
-    PROCESS_INFORMATION process;
-    BOOL started = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, command->dir, &start, &process);
+    BOOL started = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, command->dir, &start, process);
     DWORD failure = GetLastError();
     if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
     if (err != INVALID_HANDLE_VALUE) CloseHandle(err);
@@ -124,21 +128,45 @@ static int run_line(char *line, const Command *command, const char *program) {
                 failure == ERROR_FILE_NOT_FOUND || failure == ERROR_PATH_NOT_FOUND ? ": it is not in the PATH" : "");
         return 127;
     }
-    WaitForSingleObject(process.hProcess, INFINITE);
+    return -1;
+}
+
+/* Waits for a process started by `start_line`: its exit code. */
+static int finish_process(PROCESS_INFORMATION *process) {
+    WaitForSingleObject(process->hProcess, INFINITE);
     DWORD code = 0;
-    GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hProcess);
-    CloseHandle(process.hThread);
+    GetExitCodeProcess(process->hProcess, &code);
+    CloseHandle(process->hProcess);
+    CloseHandle(process->hThread);
     return (int)code;
 }
 
-int command_run(const Command *command) {
+/* Runs a command line as it is, with the folder and the files of `command`. */
+static int run_line(char *line, const Command *command, const char *program) {
+    PROCESS_INFORMATION process;
+    int status = start_line(line, command, program, &process);
+    return status >= 0 ? status : finish_process(&process);
+}
+
+/* A command running, for `command_run_all`. */
+typedef struct {
+    PROCESS_INFORMATION process;
+} Running;
+
+/* Starts `command`: -1 when it started, else its status (127). */
+static int start_command(const Command *command, Running *running) {
     char *line = NULL;
     size_t size = 0, cap = 0;
     for (size_t i = 0; i < command->count; i++) quote_arg(&line, &size, &cap, command->items[i]);
-    int status = line ? run_line(line, command, command->items[0]) : 127;
+    int status = line ? start_line(line, command, command->items[0], &running->process) : 127;
     free(line);
     return status;
+}
+
+/* Waits for a command started by `start_command`: its status. */
+static int finish_command(const Command *command, Running *running) {
+    (void)command;
+    return finish_process(&running->process);
 }
 
 /* The first line of a file, without its end of line, or "" (new string). */
@@ -229,7 +257,14 @@ static int open_output(const char *path, int fd) {
     return 0;
 }
 
-int command_run(const Command *command) {
+/* A command running, for `command_run_all`. */
+typedef struct {
+    pid_t child;
+    int report; /* a pipe that the child writes the reason into when it cannot run the program */
+} Running;
+
+/* Starts `command`: -1 when it started, else its status (127). */
+static int start_command(const Command *command, Running *running) {
     if (command->count == 0) return 127;
     char **argv = sosu_alloc((command->count + 1) * sizeof *argv);
     for (size_t i = 0; i < command->count; i++) argv[i] = command->items[i];
@@ -240,6 +275,7 @@ int command_run(const Command *command) {
         return 127;
     }
     fcntl(report[1], F_SETFD, FD_CLOEXEC); /* closed by a successful exec */
+    fcntl(report[0], F_SETFD, FD_CLOEXEC); /* and not kept by the commands started after it */
     fflush(stdout);
     fflush(stderr);
     pid_t child = fork();
@@ -267,13 +303,20 @@ int command_run(const Command *command) {
         fprintf(stderr, "sosuc: cannot run `%s`\n", command->items[0]);
         return 127;
     }
+    running->child = child;
+    running->report = report[0];
+    return -1;
+}
+
+/* Waits for a command started by `start_command`: its status. */
+static int finish_command(const Command *command, Running *running) {
     int failure = 0;
     ssize_t reported;
-    while ((reported = read(report[0], &failure, sizeof failure)) < 0 && errno == EINTR) {
+    while ((reported = read(running->report, &failure, sizeof failure)) < 0 && errno == EINTR) {
     }
-    close(report[0]);
+    close(running->report);
     int status = 0;
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    while (waitpid(running->child, &status, 0) < 0 && errno == EINTR) {
     }
     if (reported == (ssize_t)sizeof failure) {
         fprintf(stderr, "sosuc: cannot run `%s`: %s\n", command->items[0],
@@ -283,6 +326,56 @@ int command_run(const Command *command) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 }
 #endif
+
+int command_run(const Command *command) {
+    Running running;
+    int status = start_command(command, &running);
+    return status >= 0 ? status : finish_command(command, &running);
+}
+
+void command_run_all(const Command *commands, size_t count, size_t jobs, int *status) {
+    if (jobs < 1) jobs = 1;
+    Running *running = sosu_alloc((count ? count : 1) * sizeof *running);
+    size_t started = 0, finished = 0;
+    while (finished < count) {
+        /* as many running as `jobs`, then the oldest waited for: the files compiled take about as
+           long as each other, so waiting for whichever ends first would gain little */
+        while (started < count && started - finished < jobs) {
+            status[started] = start_command(&commands[started], &running[started]);
+            started++;
+        }
+        if (status[finished] < 0) status[finished] = finish_command(&commands[finished], &running[finished]);
+        finished++;
+    }
+    free(running);
+}
+
+size_t shell_processors(void) {
+#ifdef _WIN32
+    DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    return n ? (size_t)n : 1;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (size_t)n : 1;
+#else
+    return 4;
+#endif
+}
+
+bool shell_touch(const char *path) {
+#ifdef _WIN32
+    HANDLE file = CreateFileA(path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    BOOL ok = SetFileTime(file, NULL, &now, &now);
+    CloseHandle(file);
+    return ok != 0;
+#else
+    return utime(path, NULL) == 0;
+#endif
+}
 
 void shell_set_env(const char *name, const char *value) {
 #ifdef _WIN32
@@ -617,3 +710,22 @@ void shell_wait_second(void) {
     Sleep(1000);
 }
 #endif
+
+bool shell_wait_free(const char *path, int seconds) {
+#ifdef _WIN32
+    for (int tries = 0; tries <= seconds * 10; tries++) {
+        HANDLE file = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            return true;
+        }
+        DWORD failure = GetLastError();
+        if (failure != ERROR_SHARING_VIOLATION && failure != ERROR_ACCESS_DENIED) return false;
+        Sleep(100);
+    }
+    return false;
+#else
+    (void)seconds;
+    return shell_file_exists(path);
+#endif
+}

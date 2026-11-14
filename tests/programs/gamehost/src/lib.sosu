@@ -1,0 +1,161 @@
+// A game as Sozo loads it (spec §9.2, engine.host): the contract comes with `engine.host`; the game
+// writes `sozo_setup`, which adds its component `lift` to each world, and what lifts do in Play.
+import std.json;
+import std.text;
+import math.linear;
+import scene.scene;
+import scene.save;
+import engine.describe;
+import engine.kinds;
+import engine.host;
+
+// What rises in Play, `speed` meters per second; `broken`, its step fails a check of Sosu.
+pub struct Lift {
+    pub mut f32 speed = 1.0;
+    pub mut bool broken = false;
+}
+
+class LiftFields : describe.Describe<Lift>, save.Codec<Lift> {
+    void init() { }
+
+    override str name() {
+        return "lift";
+    }
+
+    override Lift fresh() {
+        return Lift{ };
+    }
+
+    override usize count() {
+        return 2;
+    }
+
+    override describe.Field field(usize i) {
+        return i == 0 ? describe.number("speed", "Speed", 0.0, 10.0) : describe.flag("broken", "Broken");
+    }
+
+    override describe.Value get(Lift* l, usize i) {
+        return i == 0 ? describe.Value.Number(l.speed) : describe.Value.Flag(l.broken);
+    }
+
+    override void set(Lift* l, usize i, describe.Value v) {
+        if (i == 0) {
+            l.speed = describe.number_of(v, l.speed);
+        } else {
+            l.broken = describe.flag_of(v, l.broken);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Lift* value) {
+        describe.write_object(out, self as describe.Describe<Lift>*, value);
+    }
+
+    override Lift? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Lift>*, v);
+    }
+}
+
+class LiftKind : kinds.Kind, host.Saved {
+    Arena* arena;
+    pub scene.Table<Lift>* lifts;
+    LiftFields* fields;
+
+    void init(keeps Arena* arena, keeps scene.Table<Lift>* lifts) {
+        self.arena = arena;
+        self.lifts = lifts;
+        fields = arena.new(LiftFields);
+    }
+
+    describe.Describe<Lift>* d() {
+        return fields as describe.Describe<Lift>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return lifts.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        kinds.table_add(lifts, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        lifts.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return kinds.table_get(lifts, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return kinds.table_set(arena, lifts, d(), e, i, v);
+    }
+
+    override void write(save.Writer* out) {
+        out.add(lifts, fields as save.Codec<Lift>*);
+    }
+
+    override bool read(save.Reader* r) {
+        return r.add(lifts, fields as save.Codec<Lift>*);
+    }
+}
+
+void add_lifts(host.Level* l) {
+    LiftKind* k = l.arena.new(LiftKind, l.arena, l.world.table<Lift>());
+    l.add(k as kinds.Kind*);
+    l.add_saved(k as host.Saved*);
+}
+
+// Each step of Play: the lifts rise; a broken one reads past the end of an array.
+void rise(host.Level* l, f32 dt) uses io {
+    for (usize i in 0..l.registry.count()) {
+        kinds.Kind* k = l.registry.at(i);
+        if (k.name() != "lift") {
+            continue;
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        for (scene.Entity e in l.world.entities(&scratch)) {
+            f32 speed = match (k.get(e, 0)) {
+                some(v) => describe.number_of(v, 0.0),
+                none => -1.0,
+            };
+            bool broken = match (k.get(e, 1)) {
+                some(v) => describe.flag_of(v, false),
+                none => false,
+            };
+            if (speed < 0.0) {
+                continue;
+            }
+            if (broken) {
+                mut i32[2] two = [1, 2];
+                usize far = 5;
+                l.logs.write(text.repeat(&scratch, "broken", two[far] as usize));
+            }
+            match (l.world.transforms.get(e)) {
+                some(t) => {
+                    t.position = t.position.add(linear.vec3(0.0, speed * dt, 0.0));
+                },
+                none => { },
+            }
+            l.logs.write("lifted");
+        }
+    }
+}
+
+// The only export the game writes: what it adds to the editor.
+export "C" void sozo_setup(host.Game* g) {
+    host.on_world(g, add_lifts);
+    host.on_step(g, rise);
+}

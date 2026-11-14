@@ -291,8 +291,6 @@ folder (`../../build/sosuc run .`):
   they stopped, and keep to a limit of bandwidth;
 - `showcase/audioplayer`: an audio player for WAV, Ogg Vorbis, MP3 and FLAC, played as they are read, with the spectrum of
   what plays (a Fourier transform written in Sosu);
-- `showcase/sozo`: the first draft of Sozo, the editor of games of Sosu: a scene of the common components of `engine`, its
-  entities chosen in the view or a list, moved by the arrows of a gizmo, played and stopped, saved;
 - `showcase/soundstage`: a sound placed around the listener (ahead, behind, left, right, above) or turning around the
   head, heard panned or through a head (`audio.hrtf`, for headphones), and drawn from above.
 

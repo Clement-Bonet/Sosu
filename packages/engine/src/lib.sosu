@@ -1,6 +1,8 @@
 // engine: the common components of a game (spec §8.2). Programs import `engine.describe` (the
-// fields of a component, for an inspector and for saving).
+// fields of a component, for an inspector and for saving); a game loaded by Sozo imports
+// `engine.host` (the contract of the editor, its exports).
 import engine.describe;
 import engine.components;
 import engine.engine;
 import engine.kinds;
+import engine.host;

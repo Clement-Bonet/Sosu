@@ -64,7 +64,6 @@ build\sosuc.exe test packages\scene || exit /b 1
 build\sosuc.exe test packages\anim || exit /b 1
 build\sosuc.exe test packages\particles || exit /b 1
 build\sosuc.exe test packages\engine || exit /b 1
-build\sosuc.exe test packages\editor || exit /b 1
 build\sosuc.exe check packages\assets || exit /b 1
 build\sosuc.exe test packages\image || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1
@@ -92,7 +91,6 @@ build\sosuc.exe test showcase\vault || exit /b 1
 build\sosuc.exe test showcase\courier || exit /b 1
 build\sosuc.exe test showcase\audioplayer || exit /b 1
 build\sosuc.exe test showcase\soundstage || exit /b 1
-build\sosuc.exe test showcase\sozo || exit /b 1
 for %%f in (tests\samples\*.sosu) do (
     build\sosuc.exe parse "%%f" >nul || (echo FAIL %%f & exit /b 1)
 )

@@ -45,7 +45,6 @@ test: all
 	./build/sosuc test packages/anim
 	./build/sosuc test packages/particles
 	./build/sosuc test packages/engine
-	./build/sosuc test packages/editor
 	./build/sosuc check packages/assets
 	./build/sosuc test packages/image
 	./build/sosuc test packages/render
@@ -77,7 +76,6 @@ test: all
 	./build/sosuc test showcase/courier
 	./build/sosuc test showcase/audioplayer
 	./build/sosuc test showcase/soundstage
-	./build/sosuc test showcase/sozo
 	@for f in tests/samples/*.sosu; do ./build/sosuc parse "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
 	./build/sosuc parse tests/samples/ui/login.ui.sosu > /dev/null
 	@for f in tests/samples/ui/*.sosu; do ./build/sosuc lex "$$f" > /dev/null || { echo "FAIL $$f"; exit 1; }; done
