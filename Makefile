@@ -44,6 +44,7 @@ test: all
 	./build/sosuc test packages/scene
 	./build/sosuc test packages/anim
 	./build/sosuc test packages/particles
+	./build/sosuc test packages/engine
 	./build/sosuc check packages/assets
 	./build/sosuc test packages/image
 	./build/sosuc test packages/render

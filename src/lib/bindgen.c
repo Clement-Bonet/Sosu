@@ -424,6 +424,7 @@ struct EnumDef {
     size_t count;
     size_t cap;
     CType *fixed; /* `enum E : ui8` (C23) */
+    size_t end;   /* the token after its `}` */
 };
 
 typedef struct {
@@ -475,6 +476,12 @@ typedef struct {
     struct { Typedef *items; size_t count; size_t cap; } typedefs;
     struct { Record **items; size_t count; size_t cap; } records;
     struct { EnumDef **items; size_t count; size_t cap; } enums;
+    /* the enum whose body starts at each token, read once: an expression read again (the width of
+       a bit field, the value of a macro) reads its enums again, which would add them again, and a
+       search for an enumerator would grow with each time a nested one was read */
+    EnumDef **enum_at;
+    Record **record_at; /* the same for the bodies of structs and unions, */
+    size_t *record_end; /* and the token after each (a struct declared again inside itself has two) */
     struct { Function *items; size_t count; size_t cap; } functions;
     struct { Macro *items; size_t count; size_t cap; } macros;
     struct { CType **items; size_t count; size_t cap; } types; /* every CType, freed at the end */
@@ -1228,11 +1235,17 @@ static CType *parse_record(P *p, bool is_union) {
     if (tag) p->pos++;
     skip_ignored(p);
     Record *r = tag ? find_record(p, tag) : NULL;
-    if (accept(p, "{")) {
+    if (is(p, "{") && p->record_at[p->pos]) {
+        r = p->record_at[p->pos];
+        p->pos = p->record_end[p->pos];
+    } else if (is(p, "{")) {
+        size_t open = p->pos++;
         if (!r || r->complete) r = new_record(p, tag ? tok_dup(tag) : NULL, is_union);
         r->is_union = is_union;
         r->own = tok_own(p, tag ? tag : &p->toks.items[p->pos - 1]);
         parse_record_body(p, r);
+        p->record_end[open] = p->pos;
+        p->record_at[open] = r;
     } else if (!r) {
         if (!tag) return NULL;
         r = new_record(p, tok_dup(tag), is_union);
@@ -1263,7 +1276,11 @@ static CType *parse_enum(P *p) {
         fixed = parse_specifiers(p, &t, &s);
     }
     EnumDef *e = tag ? find_enum(p, tag) : NULL;
-    if (is(p, "{")) {
+    if (is(p, "{") && p->enum_at[p->pos]) {
+        e = p->enum_at[p->pos];
+        p->pos = e->end;
+    } else if (is(p, "{")) {
+        size_t open = p->pos;
         p->pos++;
         e = sosu_alloc(sizeof *e);
         memset(e, 0, sizeof *e);
@@ -1300,6 +1317,8 @@ static CType *parse_enum(P *p) {
             if (!accept(p, ",")) break;
         }
         accept(p, "}");
+        e->end = p->pos;
+        p->enum_at[open] = e;
     } else if (!e) {
         e = sosu_alloc(sizeof *e);
         memset(e, 0, sizeof *e);
@@ -2241,6 +2260,11 @@ bool bindgen_generate(const BindgenInput *in, BindgenOutput *out) {
     memset(&p, 0, sizeof p);
     p.in = in;
     lex(in, &p.toks, &p.files);
+    p.enum_at = sosu_alloc((p.toks.count + 1) * sizeof *p.enum_at);
+    memset(p.enum_at, 0, (p.toks.count + 1) * sizeof *p.enum_at);
+    p.record_at = sosu_alloc((p.toks.count + 1) * sizeof *p.record_at);
+    memset(p.record_at, 0, (p.toks.count + 1) * sizeof *p.record_at);
+    p.record_end = sosu_alloc((p.toks.count + 1) * sizeof *p.record_end);
     while (!at_eof(&p)) {
         size_t before = p.pos;
         parse_declaration(&p);
@@ -2342,6 +2366,9 @@ bool bindgen_generate(const BindgenInput *in, BindgenOutput *out) {
         free(e);
     }
     free(p.enums.items);
+    free(p.enum_at);
+    free(p.record_at);
+    free(p.record_end);
     for (size_t i = 0; i < p.typedefs.count; i++) free(p.typedefs.items[i].name);
     free(p.typedefs.items);
     for (size_t i = 0; i < p.functions.count; i++) free(p.functions.items[i].name);

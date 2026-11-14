@@ -63,6 +63,7 @@ build\sosuc.exe test packages\model || exit /b 1
 build\sosuc.exe test packages\scene || exit /b 1
 build\sosuc.exe test packages\anim || exit /b 1
 build\sosuc.exe test packages\particles || exit /b 1
+build\sosuc.exe test packages\engine || exit /b 1
 build\sosuc.exe check packages\assets || exit /b 1
 build\sosuc.exe test packages\image || exit /b 1
 build\sosuc.exe test packages\render || exit /b 1

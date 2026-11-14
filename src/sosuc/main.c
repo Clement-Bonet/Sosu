@@ -790,11 +790,210 @@ static bool file_holds(const char *path, const char *text) {
     return same;
 }
 
+/* ---- The objects kept for every program of the user, by what they are made of ----
+
+   Beside build/obj, each object compiled is kept in a folder of the user (SOSU_CACHE, or the
+   cache folder of the system: %LOCALAPPDATA%\sosu\cache, ~/Library/Caches/sosu, ~/.cache/sosu),
+   under a hash of what made it: the compiler (what it says of its version), the command, the
+   contents of the file and of every file of the folders of the headers and of the sources. A
+   program built again in a fresh folder (a machine of the CI that keeps the folder between runs,
+   a build/ deleted), or another program of the same packages, takes them from there instead of
+   compiling them again. Dates do not count: a checkout gives every file a new one. The folder of
+   the git dependencies of the program (build/deps) is named alike in every program, so that two
+   programs that use the same library share its objects. An object taken from the folder gets
+   the time of now: what has not been used for long can be removed by date. */
+
+/* A hash of 128 bits: two FNV-1a of 64 bits, from two starting points. Not made against an
+   adversary: it names objects the user made. */
+typedef struct {
+    uint64_t a, b;
+} Digest;
+
+static Digest digest_new(void) {
+    Digest d = { 14695981039346656037ull, 0x84222325cbf29ce4ull };
+    return d;
+}
+
+static void digest_bytes(Digest *d, const void *data, size_t n) {
+    const uint8_t *p = data;
+    for (size_t i = 0; i < n; i++) {
+        d->a = (d->a ^ p[i]) * 1099511628211ull;
+        d->b = (d->b ^ (uint8_t)(p[i] + 0x5bu)) * 0x100000001b3ull;
+        d->b ^= d->b >> 29;
+    }
+}
+
+/* A text and its end: "ab" "c" differs from "a" "bc". */
+static void digest_text(Digest *d, const char *text) {
+    digest_bytes(d, text, strlen(text) + 1);
+}
+
+/* The contents of a file; false if it cannot be read. */
+static bool digest_file(Digest *d, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    char buffer[65536];
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof buffer, f)) > 0) digest_bytes(d, buffer, n);
+    bool ok = !ferror(f);
+    fclose(f);
+    return ok;
+}
+
+static char *digest_hex(const Digest *d) {
+    return sosu_format("%016llx%016llx", (unsigned long long)d->a, (unsigned long long)d->b);
+}
+
+/* `path` with `/`, the folder of the git dependencies of the program named `@deps`. New string. */
+static char *keyed_path(const char *path, const char *deps) {
+    char *p = sosu_strdup(path);
+    for (char *c = p; *c; c++) {
+        if (*c == '\\') *c = '/';
+    }
+    size_t n = strlen(deps);
+    char *found = n ? strstr(p, deps) : NULL;
+    if (found) {
+        char *keyed = sosu_format("%.*s@deps%s", (int)(found - p), p, found + n);
+        free(p);
+        p = keyed;
+    }
+    return p;
+}
+
+/* The folder of the objects kept for the user, NULL when SOSU_CACHE is `off` or there is no
+   folder for it. New string. */
+static char *object_cache_dir(void) {
+    const char *set = getenv("SOSU_CACHE");
+    char *base;
+    if (set && set[0]) {
+        if (strcmp(set, "off") == 0) return NULL;
+        base = sosu_strdup(set);
+    } else {
+#ifdef _WIN32
+        const char *local = getenv("LOCALAPPDATA");
+        if (!local || !local[0]) return NULL;
+        base = path_join(local, "sosu/cache");
+#else
+        const char *home = getenv("HOME");
+#ifdef __APPLE__
+        if (!home || !home[0]) return NULL;
+        base = path_join(home, "Library/Caches/sosu");
+#else
+        const char *xdg = getenv("XDG_CACHE_HOME");
+        if (xdg && xdg[0]) base = path_join(xdg, "sosu");
+        else if (home && home[0]) base = path_join(home, ".cache/sosu");
+        else return NULL;
+#endif
+#endif
+    }
+    char *dir = path_join(base, "obj");
+    free(base);
+    return dir;
+}
+
+/* How many files are compiled at a time: SOSU_JOBS, or the processors of the machine. */
+static size_t compile_jobs(void) {
+    const char *set = getenv("SOSU_JOBS");
+    if (set && set[0]) {
+        long n = strtol(set, NULL, 10);
+        if (n > 0) return (size_t)n;
+    }
+    return shell_processors();
+}
+
+/* What the compiler `program` says of itself: its version, which the objects depend on. */
+static void digest_compiler(Digest *d, const char *program, bool msvc, const char *obj_dir) {
+    char *said = path_join(obj_dir, "compiler.txt");
+    Command version = {0};
+    command_add(&version, program);
+    if (!msvc) command_add(&version, "--version"); /* cl alone prints its version, then its usage */
+    version.out = version.err = said;
+    int status = command_run(&version);
+    command_free(&version);
+    digest_text(d, program);
+    if (!digest_file(d, said)) digest_text(d, "?");
+    char *code = sosu_format("%d", status);
+    digest_text(d, code);
+    free(code);
+    remove(said);
+    free(said);
+}
+
+static int compare_texts(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* The contents of the folders `dirs` (with `/`) and of their files, those of `skip` but (the files
+   compiled: each counts in its own key, so that a change compiles it alone again). A folder
+   inside another is read once, with it. */
+static void digest_folders(Digest *d, char **dirs, size_t count, const StringList *skip, const char *deps) {
+    for (size_t i = 0; i < count; i++) { /* `native/` as `native` */
+        size_t n = strlen(dirs[i]);
+        while (n > 1 && dirs[i][n - 1] == '/') dirs[i][--n] = '\0';
+    }
+    qsort(dirs, count, sizeof *dirs, compare_texts);
+    char **keyed_skip = sosu_alloc((skip->count ? skip->count : 1) * sizeof *keyed_skip);
+    for (size_t i = 0; i < skip->count; i++) keyed_skip[i] = keyed_path(skip->items[i], "");
+    for (size_t i = 0; i < count; i++) {
+        bool inside = false;
+        for (size_t j = 0; j < count && !inside; j++) {
+            size_t n = strlen(dirs[j]);
+            inside = j != i && strncmp(dirs[i], dirs[j], n) == 0 && dirs[i][n] == '/' && strlen(dirs[i]) > n;
+        }
+        if (inside || (i > 0 && strcmp(dirs[i], dirs[i - 1]) == 0) || !dirs[i][0]) continue;
+        char *keyed = keyed_path(dirs[i], deps);
+        digest_text(d, keyed);
+        free(keyed);
+        size_t n = 0;
+        char **files = shell_files_below(dirs[i], "", &n);
+        for (size_t k = 0; k < n; k++) {
+            char *full = sosu_format("%s/%s", dirs[i], files[k]);
+            bool skipped = false;
+            for (size_t s = 0; s < skip->count && !skipped; s++) skipped = strcmp(full, keyed_skip[s]) == 0;
+            if (!skipped) {
+                digest_text(d, files[k]);
+                if (!digest_file(d, full)) digest_text(d, "?");
+            }
+            free(full);
+            free(files[k]);
+        }
+        free(files);
+    }
+    for (size_t i = 0; i < skip->count; i++) free(keyed_skip[i]);
+    free(keyed_skip);
+}
+
+/* `from` copied to `to` through a file of its own, so that two builds that keep the same object
+   at once never leave half of one. */
+static bool copy_through(const char *from, const char *to) {
+    static unsigned serial = 0;
+    char *part = sosu_format("%s.%lx-%u.part", to, (unsigned long)time(NULL), serial++);
+    bool ok = copy_file(from, part);
+    if (ok && rename(part, to) != 0) {
+        remove(to); /* Windows renames onto no file */
+        ok = rename(part, to) == 0 || shell_file_exists(to);
+    }
+    remove(part);
+    free(part);
+    return ok;
+}
+
+/* A file of the packages to compile. */
+typedef struct {
+    const char *source;
+    char *object;
+    char *key_file;
+    char *key;
+    char *kept; /* its place in the folder of the user, or NULL */
+    char *log;  /* MSVC: its output */
+} Pending;
+
 /* The C files of the packages, as objects of `obj_dir` added to `link` (the command that links
-   the program): those that changed are compiled again, with `base` (the compiler and its
-   options) and the folders and defines of [link]. False if the C compiler failed. */
-static bool package_objects(const Links *links, const StringList *files, const char *obj_dir, const Command *base,
-                            bool msvc, const char *log, Command *link) {
+   the program): those that changed are taken from the folder of the user, or compiled again,
+   several at a time, with `base` (the compiler and its options) and the folders and defines of
+   [link]. False if the C compiler failed. */
+static bool package_objects(const Links *links, const StringList *files, const char *obj_dir, const char *build_dir,
+                            const Command *base, bool msvc, Command *link) {
     if (files->count == 0) return true;
     shell_make_dir(obj_dir);
     StringList dirs = {0}; /* the folders of headers and of sources */
@@ -812,58 +1011,144 @@ static bool package_objects(const Links *links, const StringList *files, const c
         /* a compiled file counts in its own key only, so that a change recompiles it alone */
         long long t = shell_newest_time(dirs.items[i], files->items, files->count);
         if (t > newest) newest = t;
-        free(dirs.items[i]);
     }
-    free(dirs.items);
 
     Command compile = {0}; /* what compiles one file: the key of its object */
-    for (size_t i = 0; i < base->count; i++) command_add(&compile, base->items[i]);
-    char *native_dir = shell_path(obj_dir);
-    if (msvc) {
-        command_add(&compile, "/c");
-        command_addf(&compile, "/Fd%s\\", native_dir);
-    } else {
-        command_add(&compile, "-c");
+    for (size_t i = 0; i < base->count; i++) {
+        /* MSVC: the debugging information in each object (/Z7), not in a .pdb shared by those
+           compiled together, so that an object stands alone in the folder of the user */
+        command_add(&compile, msvc && strcmp(base->items[i], "/Zi") == 0 ? "/Z7" : base->items[i]);
     }
+    command_add(&compile, msvc ? "/c" : "-c");
     add_source_flags(&compile, links, msvc);
-    bool ok = true;
-    /* each file to its own object, named by its path too: two files of one name in two folders */
+
+    /* the objects that changed: taken from the folder of the user, or compiled */
+    Pending *pending = sosu_alloc(files->count * sizeof *pending);
+    size_t pending_count = 0;
+    char *cache = NULL;
+    char *deps = NULL;
+    Digest context = digest_new();
+    bool context_made = false;
     for (size_t i = 0; i < files->count; i++) {
         const char *source = files->items[i];
         char *object = source_object(source, obj_dir, msvc ? ".obj" : ".o");
         char *key_file = sosu_format("%s.key", object);
         char *key = object_key(&compile, source, newest);
-        bool kept = shell_file_exists(object) && file_holds(key_file, key);
-        if (!kept && ok) {
-            remove(key_file); /* until it is compiled again */
-            char *native = shell_path(source);
-            Command one = {0};
-            for (size_t k = 0; k < compile.count; k++) command_add(&one, compile.items[k]);
-            if (msvc) {
-                command_addf(&one, "/Fo%s", object);
-                command_add(&one, native);
-#ifdef _WIN32
-                ok = run_logged(&one, log);
-#endif
-            } else {
-                command_add(&one, native);
-                command_add(&one, "-o");
-                command_add(&one, object);
-                ok = run(&one);
+        command_add(link, object);
+        if (shell_file_exists(object) && file_holds(key_file, key)) {
+            free(object);
+            free(key_file);
+            free(key);
+            continue;
+        }
+        remove(key_file); /* until it is made again */
+        Pending p = { source, object, key_file, key, NULL, NULL };
+        if (!context_made) {
+            context_made = true;
+            cache = object_cache_dir();
+            char *deps_dir = path_join(build_dir, "deps");
+            char *slashed = keyed_path(deps_dir, "");
+            deps = sosu_format("%s/", slashed);
+            free(slashed);
+            free(deps_dir);
+            if (cache) {
+                digest_compiler(&context, compile.items[0], msvc, obj_dir);
+                for (size_t k = 0; k < compile.count; k++) {
+                    char *arg = keyed_path(compile.items[k], deps);
+                    digest_text(&context, arg);
+                    free(arg);
+                }
+                char **folders = sosu_alloc(dirs.count * sizeof *folders);
+                for (size_t k = 0; k < dirs.count; k++) folders[k] = keyed_path(dirs.items[k], "");
+                digest_folders(&context, folders, dirs.count, files, deps);
+                for (size_t k = 0; k < dirs.count; k++) free(folders[k]);
+                free(folders);
             }
-            ok = ok && write_file(key_file, key);
+        }
+        if (cache) {
+            Digest d = context;
+            char *name = keyed_path(source, deps);
+            digest_text(&d, name);
+            free(name);
+            if (!digest_file(&d, source)) digest_text(&d, "?");
+            char *hex = digest_hex(&d);
+            char *folder = sosu_format("%s/%.2s", cache, hex);
+            p.kept = sosu_format("%s/%s%s", folder, hex + 2, msvc ? ".obj" : ".o");
+            free(folder);
+            free(hex);
+            if (shell_file_exists(p.kept) && copy_file(p.kept, object) && write_file(key_file, key)) {
+                shell_touch(p.kept);
+                free(p.object);
+                free(p.key_file);
+                free(p.key);
+                free(p.kept);
+                continue;
+            }
+        }
+        pending[pending_count++] = p;
+    }
+    for (size_t i = 0; i < dirs.count; i++) free(dirs.items[i]);
+    free(dirs.items);
+
+    /* compiled, several at a time */
+    bool ok = true;
+    if (pending_count > 0) {
+        Command *commands = sosu_alloc(pending_count * sizeof *commands);
+        int *status = sosu_alloc(pending_count * sizeof *status);
+        for (size_t i = 0; i < pending_count; i++) {
+            Command *one = &commands[i];
+            memset(one, 0, sizeof *one);
+            for (size_t k = 0; k < compile.count; k++) command_add(one, compile.items[k]);
+            char *native = shell_path(pending[i].source);
+            if (msvc) {
+                command_addf(one, "/Fo%s", pending[i].object);
+                command_add(one, native);
+                pending[i].log = sosu_format("%s.log", pending[i].object);
+                one->out = one->err = pending[i].log; /* cl writes the name of each file it compiles */
+            } else {
+                command_add(one, native);
+                command_add(one, "-o");
+                command_add(one, pending[i].object);
+            }
             free(native);
         }
-        command_add(link, object);
-        free(key);
-        free(key_file);
-        free(object);
-    }
-#ifndef _WIN32
-    (void)log; /* MSVC only */
+        command_run_all(commands, pending_count, compile_jobs(), status);
+        for (size_t i = 0; i < pending_count; i++) {
+            Pending *p = &pending[i];
+            /* many files written at once: on Windows one may stay held a moment, which the linker
+               would then fail to open */
+            if (status[i] == 0) shell_wait_free(p->object, 10);
+            if (status[i] == 0) {
+                ok = write_file(p->key_file, p->key) && ok;
+                if (p->kept) {
+                    char *folder = path_dirname(p->kept);
+                    shell_make_dir(folder);
+                    free(folder);
+                    copy_through(p->object, p->kept); /* not kept: compiled again next time */
+                }
+            } else {
+                ok = false;
+#ifdef _WIN32
+                if (p->log) print_file(p->log, stderr);
 #endif
+            }
+            if (p->log && remove(p->log) != 0 && shell_wait_free(p->log, 2)) remove(p->log);
+            free(p->log);
+            command_free(&commands[i]);
+        }
+        free(commands);
+        free(status);
+    }
+    for (size_t i = 0; i < pending_count; i++) {
+        free(pending[i].object);
+        free(pending[i].key_file);
+        free(pending[i].key);
+        free(pending[i].kept);
+    }
+    free(pending);
+    free(cache);
+    free(deps);
     command_free(&compile);
-    free(native_dir);
     return ok;
 }
 
@@ -929,7 +1214,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         add_all(&base, options);
         if (extra_c_flags) add_all(&base, extra_c_flags);
         char *obj_dir = objects_dir(build_dir, target, optimize);
-        if (ok) ok = package_objects(links, &links->sources, obj_dir, &base, true, log, &cl);
+        if (ok) ok = package_objects(links, &links->sources, obj_dir, build_dir, &base, true, &cl);
         if (ok && links->cpp_sources.count > 0) {
             /* C++ ([link] cpp): the same compiler, as C++17, without exceptions nor RTTI; the C++
                library comes with the objects that need it */
@@ -938,7 +1223,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
                                           optimize ? "/O2" : "/Od", NULL };
             add_all(&cpp, cpp_options);
             if (extra_c_flags) add_all(&cpp, extra_c_flags);
-            ok = package_objects(links, &links->cpp_sources, obj_dir, &cpp, true, log, &cl);
+            ok = package_objects(links, &links->cpp_sources, obj_dir, build_dir, &cpp, true, &cl);
             command_free(&cpp);
         }
         free(obj_dir);
@@ -979,7 +1264,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
         command_add(&command, c_file);
         command_add(&command, runtime_c);
         char *obj_dir = objects_dir(build_dir, target, optimize);
-        if (ok) ok = package_objects(links, &links->sources, obj_dir, &base, false, NULL, &command);
+        if (ok) ok = package_objects(links, &links->sources, obj_dir, build_dir, &base, false, &command);
         if (ok && links->cpp_sources.count > 0) {
             /* C++ ([link] cpp): the C++ driver of the compiler (g++, clang++, c++) */
             Command cpp = {0};
@@ -992,7 +1277,7 @@ static bool compile_c(const char *build_dir, const char *c_file, const char *exe
                                           "-fno-strict-aliasing", "-ffp-contract=off", NULL };
             add_all(&cpp, cpp_options);
             if (extra_c_flags) add_all(&cpp, extra_c_flags);
-            ok = package_objects(links, &links->cpp_sources, obj_dir, &cpp, false, NULL, &command);
+            ok = package_objects(links, &links->cpp_sources, obj_dir, build_dir, &cpp, false, &command);
             command_free(&cpp);
         }
         free(obj_dir);
@@ -1347,10 +1632,14 @@ static void free_library_files(LibraryFiles *files) {
 /* Compiles the generated C file of a library, and the runtime, into `files`. */
 static bool compile_library(const char *build_dir, const char *c_file, const char *name, const char *lib, bool optimize,
                             bool shared, const Links *links, const LibraryFiles *files) {
-    if (links->cpp_sources.count > 0) {
-        fputs("sosuc: the C++ files of [link] cpp are not built into libraries yet (spec 9.1)\n", stderr);
+    if (links->cpp_sources.count > 0 && !shared) {
+        fputs("sosuc: the C++ files of [link] cpp are built into shared libraries only (--lib=shared), not yet into "
+              "static ones (spec 9.1)\n",
+              stderr);
         return false;
     }
+    /* C++ ([link] cpp) in a shared library: objects of their own, kept as a program keeps them */
+    char *cpp_dir = path_join(build_dir, optimize ? "obj/shared-release" : "obj/shared-debug");
     char *runtime = path_join(lib, "runtime");
     char *runtime_c = path_join(runtime, "sosu_rt.c");
     const char *cc = getenv("SOSU_CC");
@@ -1377,6 +1666,14 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
             command_add(&cl, "/DSOSU_SHARED");
             command_addf(&cl, "/Fe%s", out);
             add_sources(&cl, links, true);
+            if (ok && links->cpp_sources.count > 0) {
+                Command cpp = {0};
+                const char *cpp_options[] = { "cl", "/nologo", "/std:c++17", "/TP", "/EHs-c-", "/GR-", "/utf-8", "/W0", "/Zi",
+                                              optimize ? "/O2" : "/Od", NULL };
+                add_all(&cpp, cpp_options);
+                ok = package_objects(links, &links->cpp_sources, cpp_dir, build_dir, &cpp, true, &cl);
+                command_free(&cpp);
+            }
             command_add(&cl, c);
             command_add(&cl, rt_c);
             if (links->resource) command_add(&cl, links->resource);
@@ -1435,15 +1732,32 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
             command_add(&command, c_file);
             command_add(&command, runtime_c);
             add_sources(&command, links, false);
+            ok = true;
+            if (links->cpp_sources.count > 0) {
+                /* hidden too: the copy of a C++ library in this one never answers for that of the host */
+                Command cpp = {0};
+                command_add(&cpp, cpp_compiler(compiler));
+                const char *cpp_options[] = { "-std=c++17", "-fno-exceptions", "-fno-rtti", "-g", optimize ? "-O2" : "-O0", "-w",
+                                              "-fno-strict-aliasing", "-ffp-contract=off", "-fPIC", "-fvisibility=hidden",
+                                              NULL };
+                add_all(&cpp, cpp_options);
+                ok = package_objects(links, &links->cpp_sources, cpp_dir, build_dir, &cpp, false, &command);
+                command_free(&cpp);
+            }
             if (links->resource) command_add(&command, links->resource);
             command_add(&command, "-o");
             command_add(&command, files->library);
             add_link_arguments(&command, links, false);
+#ifdef __APPLE__
+            if (links->cpp_sources.count > 0) command_add(&command, "-lc++");
+#else
+            if (links->cpp_sources.count > 0) command_add(&command, "-lstdc++");
+#endif
 #ifndef _WIN32
             command_add(&command, "-pthread"); /* std.thread (spec §5.6), std.math */
             command_add(&command, "-lm");
 #endif
-            ok = run(&command);
+            ok = ok && run(&command);
         } else {
             char *object = sosu_format("%s/%s.o", build_dir, name);
             char *rt_object = sosu_format("%s/sosu_rt.o", build_dir);
@@ -1492,6 +1806,7 @@ static bool compile_library(const char *build_dir, const char *c_file, const cha
     }
     free(runtime);
     free(runtime_c);
+    free(cpp_dir);
     return ok;
 }
 

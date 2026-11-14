@@ -3,6 +3,8 @@
 // changes from one run to the next, with the effect `random` (spec §7.4).
 // Not for cryptography.
 
+import std.math;
+
 extern "C" {
     ui64 sosu_random_seed() uses random;
 }
@@ -40,6 +42,63 @@ pub struct Rng {
     // A float from 0.0 (included) to 1.0 (excluded).
     pub f64 unit() {
         return (next() >> 11) as f64 / 9007199254740992.0;
+    }
+
+    // A float from `low` (included) to `high` (excluded).
+    pub f64 range(f64 low, f64 high) {
+        return low + unit() * (high - low);
+    }
+
+    // The same in f32, as games use them.
+    pub f32 range_f32(f32 low, f32 high) {
+        return low + unit() as f32 * (high - low);
+    }
+
+    // True with the probability `p` (0: never, 1: always).
+    pub bool chance(f64 p) {
+        return unit() < p;
+    }
+
+    // A number of the normal law (a bell curve): around `mean`, two in three within `deviation`
+    // of it (Box-Muller).
+    pub f64 normal(f64 mean, f64 deviation) {
+        f64 u = 1.0 - unit();  // in (0, 1]: its logarithm is finite
+        f64 v = unit();
+        return mean + deviation * math.sqrt(-2.0 * math.log(u)) * math.cos(2.0 * math.PI * v);
+    }
+
+    // An index of `weights`, each as likely as its weight (none negative): a loot table, a choice
+    // of what to spawn. 0 when they are all 0.
+    pub usize weighted(f64[] weights)
+        requires weights.len > 0
+    {
+        mut f64 total = 0.0;
+        for (f64 w in weights) {
+            total += max(w, 0.0);
+        }
+        if (total <= 0.0) {
+            return 0;
+        }
+        mut f64 left = unit() * total;
+        for (usize i in 0..weights.len) {
+            left -= max(weights[i], 0.0);
+            if (left < 0.0) {
+                return i;
+            }
+        }
+        return weights.len - 1;
+    }
+
+    // `items` in a random order, each order as likely (Fisher-Yates).
+    pub void shuffle<T>(T[] items) {
+        mut usize i = items.len;
+        while (i > 1) {
+            i -= 1;
+            usize j = below((i + 1) as ui64) as usize;
+            T kept = items[i];
+            items[i] = items[j];
+            items[j] = kept;
+        }
     }
 }
 

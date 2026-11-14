@@ -99,6 +99,13 @@ pub enum IndexSize {
     U32,
 }
 
+// What the vertices of a draw make: triangles (three each), or lines (two each, one pixel wide:
+// the grid of an editor, the shapes of colliders, the lines a game draws to debug).
+pub enum Primitive {
+    Triangles,
+    Lines,
+}
+
 pub enum Cull {
     Off,
     Back,  // the faces seen from behind are not drawn: counter-clockwise faces are the front
@@ -216,6 +223,7 @@ pub struct PipelineDesc {
     pub bool depth_write = true;  // false: tested only (what is seen through, as particles)
     pub Cull cull = Back;
     pub Blend blend = Opaque;
+    pub Primitive primitive = Triangles;
     // Writes a color: false for a pipeline that draws the depth alone (`frame.depth_pass`: the
     // map of the shadows of a light).
     pub bool color = true;
@@ -254,6 +262,7 @@ struct Slot {
     mut ui32 generation;
     mut ui8 kind;
     mut bool alive;
+    mut bool owned;  // released by this device (not a texture of another, `adopt_texture`)
 }
 
 struct Handle {
@@ -261,12 +270,14 @@ struct Handle {
     ui32 generation;
 }
 
-// A device of the GPU, on one window, or without one (`open_headless`). It belongs to the thread
-// that opened it (spec §5.6).
+// A device of the GPU, on one window, or without one (`open_headless`), or the device of another
+// part of the program (`adopt`). It belongs to the thread that opened it (spec §5.6).
 pub class Device {
     sdl_c.SDL_GPUDevice* device;
     sdl_c.SDL_Window* window;  // 0 without a window
     bool windowed;
+    bool owner;  // it made the device, and destroys it on `close` (not one of `adopt`)
+    vec.Vec<ui64>* others;  // the windows of `claim`, beside the first
     vec.Vec<Slot>* slots;
     i32 color_format;  // of the window, and of the targets of `target`
     i32 depth_format;
@@ -281,15 +292,20 @@ pub class Device {
         keeps sdl_c.SDL_GPUDevice* device,
         keeps sdl_c.SDL_Window* window,
         bool windowed,
-        bool debug
-    ) uses io {
+        bool debug,
+        bool owner,
+        i32 format
+    ) uses io {  // the format of its targets, -1: that of the window, or B8G8R8A8 without one
         self.device = device;
         self.window = window;
         self.windowed = windowed;
         self.debug = debug;
+        self.owner = owner;
         slots = vec.new(arena);
+        others = vec.new<ui64>(arena);
         unsafe {
-            color_format = windowed ? sdl_c.SDL_GetGPUSwapchainTextureFormat(device, window)
+            color_format = format >= 0 ? format
+                    : windowed ? sdl_c.SDL_GetGPUSwapchainTextureFormat(device, window)
                     : sdl_c.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
             // the depth of frames and of the maps of shadows: one format, that can be sampled too
             ui32 usage = sdl_c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | sdl_c.SDL_GPU_TEXTUREUSAGE_SAMPLER;
@@ -339,11 +355,44 @@ pub class Device {
                 s.resource = resource;
                 s.kind = kind;
                 s.alive = true;
+                s.owned = true;
                 return Handle{ index: i as ui32, generation: s.generation };
             }
         }
-        slots.push(Slot{ resource: resource, generation: 1, kind: kind, alive: true });
+        slots.push(Slot{ resource: resource, generation: 1, kind: kind, alive: true, owned: true });
         return Handle{ index: (slots.len() - 1) as ui32, generation: 1 };
+    }
+
+    // ---- Shared with another part of the program ----
+
+    // The SDL device, for another part of the program that draws with it (`adopt`): a game loaded
+    // as a library by its editor, which passes it as an opaque pointer.
+    pub ui8* native() {
+        unsafe {
+            return device as ui8*;
+        }
+    }
+
+    // The format of its targets, for `adopt`.
+    pub i32 target_format() {
+        return color_format;
+    }
+
+    // The SDL texture of `t`, for another part of the program (`adopt_texture`).
+    pub ui8* native_texture(Texture t) {
+        unsafe {
+            return texture_of_handle(t) as ui8*;
+        }
+    }
+
+    // A texture of another device of the same GPU device (`native_texture`), to draw into
+    // (`pass_into`) and sample, `width` by `height`: this device never releases it
+    // (`release_texture` only forgets it).
+    pub Texture adopt_texture(keeps ui8* texture, ui32 width, ui32 height) {
+        Handle h = add(texture, KIND_TEXTURE);
+        Slot* s = slots.at(h.index as usize);
+        s.owned = false;
+        return Texture{ index: h.index, generation: h.generation, width: width, height: height };
     }
 
     // The resource of a handle; a handle released, or of another device, stops the program.
@@ -565,8 +614,12 @@ pub class Device {
     }
 
     pub void release_texture(Texture t) uses io {
-        unsafe {
-            sdl_c.SDL_ReleaseGPUTexture(device, take(t.index, t.generation, KIND_TEXTURE) as sdl_c.SDL_GPUTexture*);
+        bool owned = t.index as usize < slots.len() && slots.at(t.index as usize).owned;
+        ui8* texture = take(t.index, t.generation, KIND_TEXTURE);
+        if (owned) {
+            unsafe {
+                sdl_c.SDL_ReleaseGPUTexture(device, texture as sdl_c.SDL_GPUTexture*);
+            }
         }
     }
 
@@ -685,7 +738,10 @@ pub class Device {
             info.vertex_input_state.vertex_attributes = &attributes[0];
             info.vertex_input_state.num_vertex_attributes = count as ui32;
 
-            info.primitive_type = sdl_c.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            info.primitive_type = match (desc.primitive) {
+                Triangles => sdl_c.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+                Lines => sdl_c.SDL_GPU_PRIMITIVETYPE_LINELIST,
+            };
             info.rasterizer_state.fill_mode = sdl_c.SDL_GPU_FILLMODE_FILL;
             info.rasterizer_state.cull_mode = match (desc.cull) {
                 Off => sdl_c.SDL_GPU_CULLMODE_NONE,
@@ -766,6 +822,61 @@ pub class Device {
                 return none;
             }
             return some(Frame{ device: self, commands: commands, target: target, width: w, height: h });
+        }
+    }
+
+    // Another window drawn by this device (`app.open_window`, spec §10.13): its frames are those
+    // of `begin_on`, with the pipelines of the device. False when the system refuses it, or when
+    // its pixels would not be in the format of the first window.
+    pub bool claim(app.Window w) uses io {
+        assert(!closed && windowed);
+        unsafe {
+            sdl_c.SDL_Window* handle = w.native();
+            if (!sdl_c.SDL_ClaimWindowForGPUDevice(device, handle)) {
+                return false;
+            }
+            if (sdl_c.SDL_GetGPUSwapchainTextureFormat(device, handle) != color_format) {
+                sdl_c.SDL_ReleaseWindowFromGPUDevice(device, handle);
+                return false;
+            }
+            others.push(handle as ui64);
+        }
+        return true;
+    }
+
+    // A window of `claim` let go, before it closes: once the GPU is done with it.
+    pub void release_window(app.Window w) uses io {
+        unsafe {
+            ui64 handle = w.native() as ui64;
+            for (usize i in 0..others.len()) {
+                if (others.items()[i] == handle) {
+                    sdl_c.SDL_WaitForGPUIdle(device);
+                    sdl_c.SDL_ReleaseWindowFromGPUDevice(device, w.native());
+                    others.remove(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    // The next frame of a window of `claim`, or none when it cannot be drawn now. It does not wait
+    // for the screen: the frames of the first window pace the loop.
+    pub Frame? begin_on(app.Window w) uses io {
+        assert(!closed && windowed);
+        unsafe {
+            sdl_c.SDL_GPUCommandBuffer* commands = sdl_c.SDL_AcquireGPUCommandBuffer(device);
+            if (commands as ui64 == 0) {
+                return none;
+            }
+            mut sdl_c.SDL_GPUTexture* target = 0 as sdl_c.SDL_GPUTexture*;
+            mut ui32 width = 0;
+            mut ui32 height = 0;
+            if (!sdl_c.SDL_AcquireGPUSwapchainTexture(commands, w.native(), &target, &width, &height)
+                    || target as ui64 == 0) {
+                sdl_c.SDL_SubmitGPUCommandBuffer(commands);
+                return none;
+            }
+            return some(Frame{ device: self, commands: commands, target: target, width: width, height: height });
         }
     }
 
@@ -1058,8 +1169,10 @@ pub class Device {
             for (usize i in 0..slots.len()) {
                 Slot* s = slots.at(i);
                 if (s.alive) {
-                    left += 1;
-                    release_slot(s);
+                    if (s.owned) {
+                        left += 1;
+                        release_slot(s);
+                    }
                     s.alive = false;
                 }
             }
@@ -1069,7 +1182,14 @@ pub class Device {
             if (depth as ui64 != 0) {
                 sdl_c.SDL_ReleaseGPUTexture(device, depth as sdl_c.SDL_GPUTexture*);
             }
+            if (!owner) {
+                closed = true;  // the device, and its windows, belong to the part that made it
+                return;
+            }
             if (windowed) {
+                for (ui64 other in others.items()) {
+                    sdl_c.SDL_ReleaseWindowFromGPUDevice(device, other as sdl_c.SDL_Window*);
+                }
                 sdl_c.SDL_ReleaseWindowFromGPUDevice(device, window);
             }
             sdl_c.SDL_DestroyGPUDevice(device);
@@ -1152,7 +1272,7 @@ pub Device*!GpuError open(Arena* arena, app.Window window, Options options) uses
                 sdl_c.SDL_GPU_PRESENTMODE_MAILBOX
             );
         }
-        return ok(arena.new(Device, arena, device, handle, true, options.debug));
+        return ok(arena.new(Device, arena, device, handle, true, options.debug, true, -1));
     }
 }
 
@@ -1177,7 +1297,26 @@ pub Device*!GpuError open_headless(Arena* arena, Options options) uses io {
             sdl_c.SDL_QuitSubSystem(sdl_c.SDL_INIT_VIDEO);
             return err(NoDevice);
         }
-        return ok(arena.new(Device, arena, device, 0 as sdl_c.SDL_Window*, false, options.debug));
+        return ok(arena.new(Device, arena, device, 0 as sdl_c.SDL_Window*, false, options.debug, true, -1));
+    }
+}
+
+// The device of another part of the program (`Device.native`, and its `target_format`): a game
+// loaded as a library draws with the device of its editor, into textures of the editor
+// (`adopt_texture`). Its resources are its own, released by `close`; the device is not: `close`
+// leaves it, and its windows, to the part that made it, which must outlive this one.
+pub Device* adopt(Arena* arena, ui8* native, i32 format) uses io {
+    unsafe {
+        return arena.new(
+            Device,
+            arena,
+            native as sdl_c.SDL_GPUDevice*,
+            0 as sdl_c.SDL_Window*,
+            false,
+            false,
+            false,
+            format
+        );
     }
 }
 
@@ -1234,6 +1373,53 @@ pub struct Frame {
             sdl_c.SDL_UploadToGPUTexture(pass, source, region, true);
             sdl_c.SDL_EndGPUCopyPass(pass);
             sdl_c.SDL_ReleaseGPUTransferBuffer(device.device, transfer);
+        }
+    }
+
+    // `t` (a texture of `device.target`) copied into the rectangle of `x`, `y`, `w`, `h` pixels of
+    // the window, stretched to it: a scene drawn apart (`render3d.Renderer.draw_into`) shown in a
+    // part of a window, as the view of an editor. A pass must not be open; what is around is kept.
+    pub void blit(Texture t, ui32 x, ui32 y, ui32 w, ui32 h) uses io {
+        unsafe {
+            assert(target as ui64 != 0);  // a frame of `commands()` has no window: `blit_into`
+            blit_to(t, target, width, height, x, y, w, h);
+        }
+    }
+
+    // The same into `into`, a texture of `device.target`: a window composed without one (a
+    // picture, a test).
+    pub void blit_into(Texture t, Texture into, ui32 x, ui32 y, ui32 w, ui32 h) uses io {
+        blit_to(t, device.texture_of_handle(into), into.width, into.height, x, y, w, h);
+    }
+
+    void blit_to(
+        Texture t,
+        sdl_c.SDL_GPUTexture* to,
+        ui32 to_width,
+        ui32 to_height,
+        ui32 x,
+        ui32 y,
+        ui32 w,
+        ui32 h
+    ) uses io {
+        if (w == 0 || h == 0 || x >= to_width || y >= to_height) {
+            return;
+        }
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            sdl_c.SDL_GPUBlitInfo* info = scratch.alloc(sdl_c.SDL_GPUBlitInfo);
+            info.source.texture = device.texture_of_handle(t);
+            info.source.w = t.width;
+            info.source.h = t.height;
+            info.destination.texture = to;
+            info.destination.x = x;
+            info.destination.y = y;
+            info.destination.w = min(w, to_width - x);
+            info.destination.h = min(h, to_height - y);
+            info.load_op = sdl_c.SDL_GPU_LOADOP_LOAD;
+            info.filter = sdl_c.SDL_GPU_FILTER_LINEAR;
+            sdl_c.SDL_BlitGPUTexture(commands, info);
         }
     }
 

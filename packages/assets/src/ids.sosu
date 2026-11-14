@@ -1,0 +1,552 @@
+// assets.ids: an identity for each file of a project, kept when the file is renamed or moved, so
+// that what refers to it (a scene, a material) never breaks. Each file has a companion beside it,
+// its name followed by a suffix (`crate.glb` and `crate.glb.asset.sozo` for Sozo), a text of JSON
+// that holds its GUID, a hash of its content, and its settings of import:
+//
+//   {"guid":"4f1c...","hash":"9a3e...","size":1234,"modified":1763120000,"settings":{}}
+//
+// `scan` walks the folder of the project: a file without companion gets one, with a new GUID; a
+// companion left alone (its file moved or renamed outside the editor, without it) is joined
+// again to the file of the same content that has none; a file copied with its companion (two
+// companions with the same GUID) gives the copy a new GUID. Then `path_of` and `guid_of` answer,
+// and `move` renames a file and its companion together.
+import std.io;
+import std.fs;
+import std.vec;
+import std.text;
+import std.json;
+import std.random;
+import std.os;
+
+// What a scan did.
+pub struct Report {
+    pub mut usize files;  // the files of the project, each with its companion now
+    pub mut usize made;  // companions made: new files, and copies given a GUID of their own
+    pub mut usize joined;  // companions left alone, joined again to their moved file
+    pub mut usize orphans;  // companions still alone (their file is gone): kept, and counted
+}
+
+struct Entry {
+    str guid;
+    str path;  // relative to the root, with `/`
+    str hash;
+}
+
+// A companion read: its GUID and hash, and what else it holds (its settings), written back as is.
+struct Companion {
+    str guid;
+    str hash;
+    i64 size;
+    i64 modified;
+    str settings;  // a JSON object
+}
+
+// The identities of the files under a folder.
+pub class Catalog {
+    Arena* arena;
+    str root;
+    str suffix;
+    vec.Vec<Entry>* entries;
+    mut Arena work;  // what a scan finds, made again at each scan
+
+    void init(keeps Arena* arena, keeps str root, keeps str suffix) {
+        self.arena = arena;
+        self.root = root;
+        self.suffix = suffix;
+        entries = vec.new<Entry>(arena);
+        work = Arena.new(4 * KB);
+    }
+
+    // Its memory given back (the arena given to `catalog` keeps the rest).
+    pub void close() {
+        work.free();
+    }
+
+    pub usize count() {
+        return entries.len();
+    }
+
+    // The path (relative to the root, with `/`) of the file of `guid`, none if there is none.
+    pub str? path_of(str guid) {
+        for (Entry e in entries.items()) {
+            if (e.guid == guid) {
+                return some(e.path);
+            }
+        }
+        return none;
+    }
+
+    // The GUID of the file at `path` (relative to the root, with `/`), none if it has none.
+    pub str? guid_of(str path) {
+        for (Entry e in entries.items()) {
+            if (e.path == path) {
+                return some(e.guid);
+            }
+        }
+        return none;
+    }
+
+    // The file at `from` and its companion renamed to `to` (paths relative to the root, with
+    // `/`): its GUID stays. False if either cannot be moved (nothing is changed then).
+    pub bool move(str from, str to) uses io {
+        mut Arena scratch = Arena.new(4 * KB);
+        defer scratch.free();
+        str a = full(&scratch, from);
+        str b = full(&scratch, to);
+        if (!fs.is_file(&scratch, a) || fs.exists(&scratch, b)) {
+            return false;
+        }
+        match (fs.parent(b)) {
+            some(folder) => {
+                match (fs.create_dirs(&scratch, folder)) {
+                    ok => { },
+                    err(e) => { },
+                }
+            },
+            none => { },
+        }
+        match (fs.rename(&scratch, a, b)) {
+            ok => { },
+            err(e) => {
+                return false;
+            },
+        }
+        str ca = companion_of(&scratch, a);
+        if (fs.exists(&scratch, ca)) {
+            match (fs.rename(&scratch, ca, companion_of(&scratch, b))) {
+                ok => { },
+                err(e) => {
+                    match (fs.rename(&scratch, b, a)) {  // back as it was
+                        ok => { },
+                        err(e2) => { },
+                    }
+                    return false;
+                },
+            }
+        }
+        for (usize i in 0..entries.len()) {
+            Entry e = entries.items()[i];
+            if (e.path == from) {
+                entries.set(i, Entry{ guid: e.guid, path: text.repeat(arena, to, 1), hash: e.hash });
+            }
+        }
+        return true;
+    }
+
+    str full(Arena* into, str relative) {
+        return relative.len == 0 ? root : fs.join(into, root, relative);
+    }
+
+    str companion_of(Arena* into, str path) {
+        mut str[2] parts = [path, suffix];
+        return text.join(into, parts[0..2], "");
+    }
+
+    // Walks the folder and gives every file its companion (see the top of the module).
+    pub Report scan() keeps self uses io, random {
+        mut Arena scratch = Arena.new(64 * KB);
+        defer scratch.free();
+        entries.clear();
+        work.free();
+        work = Arena.new(64 * KB);
+        vec.Vec<str>* files = vec.new<str>(&work);
+        vec.Vec<str>* companions = vec.new<str>(&work);
+        walk("", files, companions);
+        mut random.Rng rng = random.from_system();
+        mut Report report = Report{ files: 0, made: 0, joined: 0, orphans: 0 };
+        // the companions whose file is gone: candidates for the moved files
+        vec.Vec<str>* lonely = vec.new<str>(&scratch);
+        vec.Vec<Companion>* lonely_read = vec.new<Companion>(&scratch);
+        for (str c in companions.items()) {
+            str file = text.slice(c, 0, c.len - suffix.len);
+            if (!contains(files.items(), file)) {
+                match (read_companion(&scratch, full(&scratch, c))) {
+                    some(read) => {
+                        lonely.push(c);
+                        lonely_read.push(read);
+                    },
+                    none => { },
+                }
+            }
+        }
+        vec.Vec<bool>* used = vec.new<bool>(&scratch);
+        for (usize i in 0..lonely.len()) {
+            used.push(false);
+        }
+        for (str file in files.items()) {
+            str path = full(&scratch, file);
+            str cpath = companion_of(&scratch, path);
+            mut fs.Info info = fs.Info{ kind: fs.Kind.Other, size: 0, modified: 0 };
+            match (fs.info(&scratch, path)) {
+                ok(x) => {
+                    info = x;
+                },
+                err(e) => {
+                    continue;
+                },
+            }
+            mut Companion? had = none;
+            if (fs.exists(&scratch, cpath)) {
+                had = read_companion(&scratch, cpath);
+            }
+            match (had) {
+                some(c) => {
+                    // its content changed: its hash follows; the same GUID as another file (a copy
+                    // made with its companion): a GUID of its own
+                    bool copy = guid_taken(c.guid);
+                    bool changed = c.size != info.size || c.modified != info.modified;
+                    str hash = changed ? hash_file(&scratch, path) : c.hash;
+                    str guid = copy ? new_guid(&scratch, &rng) : c.guid;
+                    if (copy || changed) {
+                        write_companion(
+                            &scratch,
+                            cpath,
+                            Companion{
+                                guid: guid,
+                                hash: hash,
+                                size: info.size,
+                                modified: info.modified,
+                                settings: c.settings
+                            }
+                        );
+                    }
+                    if (copy) {
+                        report.made += 1;
+                    }
+                    entries.push(Entry{
+                        guid: text.repeat(arena, guid, 1),
+                        path: text.repeat(arena, file, 1),
+                        hash: text.repeat(arena, hash, 1)
+                    });
+                },
+                none => {
+                    str hash = hash_file(&scratch, path);
+                    // a companion left alone with the same content: the file was moved without it
+                    mut i32 found = -1;
+                    for (usize i in 0..lonely.len()) {
+                        if (!used.items()[i] && lonely_read.items()[i].hash == hash
+                                && !guid_taken(lonely_read.items()[i].guid)) {
+                            found = i as i32;
+                            break;
+                        }
+                    }
+                    mut str guid = "";
+                    mut str settings = "{}";
+                    if (found >= 0) {
+                        used.set(found as usize, true);
+                        Companion old = lonely_read.items()[found as usize];
+                        guid = old.guid;
+                        settings = old.settings;
+                        match (fs.remove_file(&scratch, full(&scratch, lonely.items()[found as usize]))) {
+                            ok => { },
+                            err(e) => { },
+                        }
+                        report.joined += 1;
+                    } else {
+                        guid = new_guid(&scratch, &rng);
+                        report.made += 1;
+                    }
+                    write_companion(
+                        &scratch,
+                        cpath,
+                        Companion{
+                            guid: guid,
+                            hash: hash,
+                            size: info.size,
+                            modified: info.modified,
+                            settings: settings
+                        }
+                    );
+                    entries.push(Entry{
+                        guid: text.repeat(arena, guid, 1),
+                        path: text.repeat(arena, file, 1),
+                        hash: text.repeat(arena, hash, 1)
+                    });
+                },
+            }
+            report.files += 1;
+        }
+        for (bool u in used.items()) {
+            if (!u) {
+                report.orphans += 1;
+            }
+        }
+        return report;
+    }
+
+    bool guid_taken(str guid) {
+        for (Entry e in entries.items()) {
+            if (e.guid == guid) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The files and companions under `relative`: names starting with `.` and the folder `build` of
+    // the root are passed over.
+    void walk(keeps str relative, vec.Vec<str>* files, vec.Vec<str>* companions) keeps self uses io {
+        str[] names = match (fs.list(&work, full(&work, relative))) {
+            ok(x) => x,
+            err(e) => {
+                return;
+            },
+        };
+        for (str name in names) {
+            if (name.len == 0 || name.bytes[0] == 46 || relative.len == 0 && name == "build") {  // '.'
+                continue;
+            }
+            str rel = relative.len == 0 ? name : slash(&work, relative, name);
+            str path = full(&work, rel);
+            if (fs.is_dir(&work, path)) {
+                walk(rel, files, companions);
+            } else if (text.ends_with(name, suffix)) {
+                companions.push(rel);
+            } else {
+                files.push(rel);
+            }
+        }
+    }
+}
+
+// The identities of the files under `root`, their companions ending in `suffix`; empty until
+// `scan`.
+pub Catalog* catalog(keeps Arena* arena, keeps str root, keeps str suffix) {
+    return arena.new(Catalog, arena, root, suffix);
+}
+
+str slash(Arena* into, str a, str b) {
+    mut str[3] parts = [a, "/", b];
+    return text.join(into, parts[0..3], "");
+}
+
+bool contains(str[] list, str s) {
+    for (str x in list) {
+        if (x == s) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 128 random bits, as 32 hexadecimal digits.
+str new_guid(Arena* into, random.Rng* rng) {
+    text.TextBuilder* b = text.builder(into);
+    hex(b, rng.next());
+    hex(b, rng.next());
+    return b.text();
+}
+
+void hex(text.TextBuilder* b, ui64 v) {
+    str digits = "0123456789abcdef";
+    for (ui64 i in 0..16) {
+        ui64 d = v >> 60 - i * 4 & 15;
+        b.push(text.slice(digits, d as usize, d as usize + 1));
+    }
+}
+
+// FNV-1a of the bytes of the file, 64 bits as 16 hexadecimal digits ("" if it cannot be read): to
+// know a moved file by its content, not for security.
+str hash_file(Arena* into, str path) uses io {
+    mut Arena bytes = Arena.new(64 * KB);
+    defer bytes.free();
+    ui8[] data = match (io.read_bytes(&bytes, path)) {
+        ok(x) => x,
+        err(e) => {
+            return "";
+        },
+    };
+    text.TextBuilder* b = text.builder(into);
+    hex(b, fnv(data));
+    return b.text();
+}
+
+ui64 fnv(ui8[] data) {
+    mut ui64 h = 0xcbf29ce484222325;
+    for (ui8 c in data) {
+        h = h ^ c as ui64;
+        h = wrapping_mul(h, 0x100000001b3);
+    }
+    return h;
+}
+
+Companion? read_companion(Arena* into, str path) uses io {
+    str t = match (io.read_file(into, path)) {
+        ok(x) => x,
+        err(e) => {
+            return none;
+        },
+    };
+    json.Value v = match (json.parse(into, t)) {
+        ok(x) => x,
+        err(e) => {
+            return none;
+        },
+    };
+    str guid = text_at(v, "guid");
+    if (guid.len == 0) {
+        return none;
+    }
+    str settings = match (json.get(v, "settings")) {
+        some(s) => json.write(into, s),
+        none => "{}",
+    };
+    return some(Companion{
+        guid: guid,
+        hash: text_at(v, "hash"),
+        size: number_at(v, "size"),
+        modified: number_at(v, "modified"),
+        settings: settings
+    });
+}
+
+void write_companion(Arena* into, str path, Companion c) uses io {
+    text.TextBuilder* b = text.builder(into);
+    b.push("{\"guid\":\"");
+    b.push(c.guid);
+    b.push("\",\"hash\":\"");
+    b.push(c.hash);
+    b.push("\",\"size\":");
+    b.push_i64(c.size);
+    b.push(",\"modified\":");
+    b.push_i64(c.modified);
+    b.push(",\"settings\":");
+    b.push(c.settings);
+    b.push("}\n");
+    match (io.write_file(into, path, b.text())) {
+        ok => { },
+        err(e) => { },
+    }
+}
+
+str text_at(json.Value v, str key) {
+    return match (json.get(v, key)) {
+        some(x) => match (json.as_str(x)) {
+            some(s) => s,
+            none => "",
+        },
+        none => "",
+    };
+}
+
+i64 number_at(json.Value v, str key) {
+    return match (json.get(v, key)) {
+        some(x) => match (json.as_i64(x)) {
+            some(n) => n,
+            none => -1,
+        },
+        none => -1,
+    };
+}
+
+// A folder of its own for a test, under the temporary folder of the system.
+str test_folder(Arena* arena, str name) uses io, random {
+    str temp = match (os.env(arena, "TEMP")) {
+        some(t) => t,
+        none => match (os.env(arena, "TMPDIR")) {
+            some(t) => t,
+            none => "/tmp",
+        },
+    };
+    mut random.Rng rng = random.from_system();
+    text.TextBuilder* b = text.builder(arena);
+    b.push(name);
+    b.push("-");
+    hex(b, rng.next());
+    str folder = fs.join(arena, temp, b.text());
+    match (fs.create_dirs(arena, folder)) {
+        ok => { },
+        err(e) => { },
+    }
+    return folder;
+}
+
+void put(Arena* arena, str root, str relative, str content) uses io {
+    str path = fs.join(arena, root, relative);
+    match (fs.parent(path)) {
+        some(p) => {
+            match (fs.create_dirs(arena, p)) {
+                ok => { },
+                err(e) => { },
+            }
+        },
+        none => { },
+    }
+    match (io.write_file(arena, path, content)) {
+        ok => { },
+        err(e) => { },
+    }
+}
+
+str guid_or(Catalog* c, str path) {
+    return match (c.guid_of(path)) {
+        some(g) => g,
+        none => "",
+    };
+}
+
+test "files known by their GUID: made, kept, moved outside, copied, moved, gone" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str root = test_folder(&arena, "sosu-assets-ids");
+    put(&arena, root, "a.txt", "alpha");
+    put(&arena, root, "sub/b.txt", "beta, longer");
+    put(&arena, root, "build/out.txt", "not a file of the project");
+    Catalog* c = catalog(&arena, root, ".asset.sozo");
+    defer c.close();
+    // companions made, one for each file (not those of build/)
+    mut Report r = c.scan();
+    assert(r.files == 2 && r.made == 2 && r.joined == 0 && r.orphans == 0);
+    str a = text.repeat(&arena, guid_or(c, "a.txt"), 1);
+    str b = text.repeat(&arena, guid_or(c, "sub/b.txt"), 1);
+    assert(a.len == 32 && b.len == 32 && a != b);
+    assert(fs.is_file(&arena, fs.join(&arena, root, "a.txt.asset.sozo")));
+    assert(match (c.path_of(b)) {
+        some(p) => p == "sub/b.txt",
+        none => false,
+    });
+    // scanned again: the same
+    r = c.scan();
+    assert(r.made == 0 && r.joined == 0 && guid_or(c, "a.txt") == a);
+    // moved outside the editor, without its companion: joined again by its content
+    match (fs.create_dirs(&arena, fs.join(&arena, root, "moved"))) {
+        ok => { },
+        err(e) => { },
+    }
+    match (fs.rename(&arena, fs.join(&arena, root, "sub/b.txt"), fs.join(&arena, root, "moved/b2.txt"))) {
+        ok => { },
+        err(e) => { },
+    }
+    r = c.scan();
+    assert(r.joined == 1 && r.made == 0 && r.orphans == 0 && guid_or(c, "moved/b2.txt") == b);
+    assert(!fs.exists(&arena, fs.join(&arena, root, "sub/b.txt.asset.sozo")));
+    // copied with its companion: the copy gets a GUID of its own
+    match (fs.copy(&arena, fs.join(&arena, root, "a.txt"), fs.join(&arena, root, "c.txt"))) {
+        ok => { },
+        err(e) => { },
+    }
+    match (fs.copy(&arena, fs.join(&arena, root, "a.txt.asset.sozo"), fs.join(&arena, root, "c.txt.asset.sozo"))) {
+        ok => { },
+        err(e) => { },
+    }
+    r = c.scan();
+    str copied = guid_or(c, "c.txt");
+    assert(r.made == 1 && copied.len == 32 && copied != a && guid_or(c, "a.txt") == a);
+    // moved by the catalog: the file and its companion, its GUID kept
+    assert(c.move("a.txt", "deep/er/a.txt"));
+    assert(guid_or(c, "deep/er/a.txt") == a && guid_or(c, "a.txt").len == 0);
+    assert(fs.is_file(&arena, fs.join(&arena, root, "deep/er/a.txt.asset.sozo")));
+    r = c.scan();
+    assert(r.made == 0 && r.joined == 0 && guid_or(c, "deep/er/a.txt") == a);
+    // a file gone: its companion stays alone, counted
+    match (fs.remove_file(&arena, fs.join(&arena, root, "c.txt"))) {
+        ok => { },
+        err(e) => { },
+    }
+    r = c.scan();
+    assert(r.orphans == 1 && r.files == 2);
+    match (fs.remove_all(&arena, root)) {
+        ok => { },
+        err(e) => { },
+    }
+}

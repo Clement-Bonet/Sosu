@@ -1,0 +1,829 @@
+// engine.host: a game loaded by an editor (Sozo) as a shared library, the world held by the game,
+// in edit mode as in play. Its `export "C"` functions (`sozo_...`, the contract of Sozo) are those
+// of every game that imports this module: built with `sosuc build --lib=shared`, a game offers
+// them without writing them. The game writes one export of its own, `sozo_setup`, which says what
+// it adds to each world: its kinds of components (`engine.kinds`), the tables it saves, what it
+// does each step of Play.
+//
+//   export "C" void sozo_setup(host.Game* g) {     // in the game: its only export
+//       host.on_world(g, add_mine);                 // called for each world made
+//       host.on_step(g, move_mine);                 // each step of Play
+//   }
+//
+// Only numbers, structs of numbers, `str`, views and opaque pointers cross: an entity is the
+// struct `scene.Entity`, a value of a field the C struct `Value` (a tag and a field by kind). A text
+// returned (a scene saved, the logs, a name) stays valid until the next call of the same export,
+// or until the entity or the game is gone: the editor copies it. A failed check of the game (and a
+// fault of the processor) comes back through `<package>_error()` of the library (spec §9.2); what
+// the host says itself (a scene that does not read) through `sozo_message`.
+import std.vec;
+import std.json;
+import std.text;
+import math.linear;
+import scene.scene;
+import scene.save;
+import engine.describe;
+import engine.components;
+import engine.kinds;
+import engine.engine;
+
+// The version of the contract: the editor refuses a library of another one.
+pub ui32 CONTRACT = 1;
+
+// ---- What crosses to C ----
+
+pub enum Tag {
+    Empty,   // no value: the entity has no such component, or no such field
+    Number,  // `number`
+    Whole,   // `whole`
+    Flag,    // `flag`
+    Text,    // `text`: a text or the path of an asset
+    Vector,  // `x`, `y`, `z`: a vector or a color
+    Choice,  // `choice`, the index of one of the choices of the field
+}
+
+// A value of a field, as C sees it: a tag and the field of its kind.
+pub struct Value {
+    pub mut Tag tag = Tag.Empty;
+    pub mut f32 number = 0.0;
+    pub mut i64 whole = 0;
+    pub mut bool flag = false;
+    pub mut str text = "";
+    pub mut f32 x = 0.0;
+    pub mut f32 y = 0.0;
+    pub mut f32 z = 0.0;
+    pub mut usize choice = 0;
+}
+
+// A field of a kind of component, as C sees it: its choices are read by `sozo_choice`.
+pub struct FieldInfo {
+    pub str name;
+    pub str label;
+    pub describe.Kind kind;
+    pub f32 low;
+    pub f32 high;
+    pub usize choices;
+}
+
+// `v` as C sees it.
+pub Value to_c(describe.Value v) {
+    return match (v) {
+        Number(x) => Value{ tag: Tag.Number, number: x },
+        Whole(n) => Value{ tag: Tag.Whole, whole: n },
+        Flag(on) => Value{ tag: Tag.Flag, flag: on },
+        Text(s) => Value{ tag: Tag.Text, text: s },
+        Vector(p) => Value{ tag: Tag.Vector, x: p.x, y: p.y, z: p.z },
+        Choice(i) => Value{ tag: Tag.Choice, choice: i },
+    };
+}
+
+// The value `v` of C, none when it is empty.
+pub describe.Value? from_c(Value v) {
+    return match (v.tag) {
+        Empty => none,
+        Number => some(describe.Value.Number(v.number)),
+        Whole => some(describe.Value.Whole(v.whole)),
+        Flag => some(describe.Value.Flag(v.flag)),
+        Text => some(describe.Value.Text(v.text)),
+        Vector => some(describe.Value.Vector(linear.vec3(v.x, v.y, v.z))),
+        Choice => some(describe.Value.Choice(v.choice)),
+    };
+}
+
+// ---- A world ----
+
+// Tables of the game saved with the scene beside the common components: `write` adds them to the
+// writer (`out.add(table, codec)`), `read` to the reader.
+pub interface Saved {
+    void write(save.Writer* out);
+    bool read(save.Reader* r);
+}
+
+// What the game writes for the editor to show (`sozo_logs`): kept from one world to the next.
+pub class Logs {
+    mut Arena arena;
+    mut text.TextBuilder* lines;
+
+    void init() {
+        arena = Arena.new(4 * KB);
+        lines = text.builder(&arena);
+    }
+
+    // A line written.
+    pub void write(str line) {
+        lines.push(line);
+        lines.push("\n");
+    }
+
+    // What was written since the last time, copied into `into`; then nothing.
+    str take(Arena* into) {
+        str written = text.repeat(into, lines.text(), 1);
+        arena.free();
+        arena = Arena.new(4 * KB);
+        lines = text.builder(&arena);
+        return written;
+    }
+
+    void free() {
+        arena.free();
+    }
+}
+
+// A world of the game: its entities, the common components and those of the game, the engine that
+// runs them. Made again by a scene loaded and by Stop: what the game keeps of it (its tables, its
+// kinds) is made by its `on_world` for each.
+pub class Level {
+    pub Arena* arena;
+    pub scene.World* world;
+    pub components.Components* c;
+    pub kinds.Kinds* registry;
+    pub engine.Engine* runner;
+    pub Logs* logs;
+    vec.Vec<Saved*>* saved;
+
+    void init(keeps Arena* arena, keeps Logs* logs) keeps self {
+        self.arena = arena;
+        self.logs = logs;
+        world = scene.world(arena);
+        c = components.components(arena, world);
+        registry = kinds.common(arena, c);
+        runner = engine.engine(arena, c, none, none, none, none);
+        runner.paused = true;
+        saved = vec.new<Saved*>(arena);
+    }
+
+    // A kind of component of the game, shown and changed by the editor (one of the same name
+    // replaces it).
+    pub void add(keeps kinds.Kind* k) {
+        registry.add(k);
+    }
+
+    // A table of the game saved and read with the scene.
+    pub void add_saved(keeps Saved* s) {
+        saved.push(s);
+    }
+
+    // The whole world as a scene file.
+    str written(keeps Arena* into) keeps self {
+        save.Writer* out = save.writer(into, world);
+        c.add_to(out);
+        for (Saved* s in saved.items()) {
+            s.write(out);
+        }
+        return out.written();
+    }
+
+    // The entities of the scene file `source` spawned into it: none, or what is wrong.
+    str? read(str source) {
+        return match (save.read(arena, world, source, none)) {
+            ok(r) => {
+                mut bool good = c.read_from(r);
+                for (Saved* s in saved.items()) {
+                    good = s.read(r) && good;
+                }
+                return good ? none : some("scene: a component of the scene is damaged");
+            },
+            err(e) => some(save.message(e)),
+        };
+    }
+}
+
+void nothing(Level* l) { }
+
+void standing(Level* l, f32 dt) uses io { }
+
+// A game: the world it holds, and what the editor asked of it. It owns the arena it lies in
+// (`sozo_open`, `sozo_close`).
+pub class Game {
+    mut Arena home;
+    mut Arena place;  // the world: freed and made again with it
+    pub mut Level* level;
+    pub Logs* logs;
+    mut Arena kept;  // the scene saved by Play, which Stop brings back
+    mut str before;
+    mut Arena out;  // the texts returned to the editor
+    mut Arena said;
+    mut str message;
+    pub mut bool playing;
+    pub mut bool paused;
+    mut fn(Level*) -> void setup;
+    mut fn(Level*, f32) -> void uses io stepper;
+
+    void init(Arena arena) keeps self {
+        home = arena;
+        logs = home.new(Logs);
+        place = Arena.new(64 * KB);
+        kept = Arena.new(1 * KB);
+        before = "";
+        out = Arena.new(1 * KB);
+        said = Arena.new(1 * KB);
+        message = "";
+        playing = false;
+        paused = false;
+        setup = nothing;
+        stepper = standing;
+        level = place.new(Level, &place, logs);
+    }
+
+    // A new world from the scene file `source` (empty: an empty world), in place of the one held;
+    // false, and an empty world, when it does not read (`message` says why).
+    bool remake(str source) keeps self uses io, threads {
+        level.runner.close();
+        place.free();
+        place = Arena.new(64 * KB);
+        level = place.new(Level, &place, logs);
+        setup(level);
+        mut bool good = true;
+        if (source.len > 0) {
+            // the world keeps texts of the file (its names): a copy where it lives, since the source
+            // is the memory of the host, or the scene saved by Play, freed by the next
+            str copy = text.repeat(&place, source, 1);
+            match (level.read(copy)) {
+                some(problem) => {
+                    say(problem);
+                    good = false;
+                    level.runner.close();
+                    place.free();
+                    place = Arena.new(64 * KB);
+                    level = place.new(Level, &place, logs);
+                    setup(level);
+                },
+                none => { },
+            }
+        }
+        level.runner.paused = !playing || paused;
+        level.runner.update(0.0);
+        return good;
+    }
+
+    void say(str m) {
+        said.free();
+        said = Arena.new(1 * KB);
+        message = text.repeat(&said, m, 1);
+    }
+
+    // Play: the scene saved, then run.
+    void play() keeps self {
+        if (playing) {
+            return;
+        }
+        kept.free();
+        kept = Arena.new(4 * KB);
+        before = level.written(&kept);
+        playing = true;
+        paused = false;
+        level.runner.paused = false;
+    }
+
+    // An arena for a text returned now: the one before is gone.
+    Arena* fresh_out() {
+        out.free();
+        out = Arena.new(1 * KB);
+        return &out;
+    }
+}
+
+// ---- What the game writes in Sosu ----
+
+// `make` called for each world made (now for the one held): it adds the kinds and the saved
+// tables of the game.
+pub void on_world(Game* g, keeps fn(Level*) -> void make) {
+    g.setup = make;
+    make(g.level);
+}
+
+// `step` called at each step of Play, after the engine, with the seconds since the last.
+pub void on_step(Game* g, keeps fn(Level*, f32) -> void uses io step) {
+    g.stepper = step;
+}
+
+// ---- The exports: the contract of Sozo ----
+
+export "C" ui32 sozo_contract() {
+    return CONTRACT;
+}
+
+// A game with an empty world, in edit mode.
+export "C" Game* sozo_open() {
+    mut Arena arena = Arena.new(4 * KB);
+    return arena.new(Game, arena);
+}
+
+// The game and all it holds freed: nothing it returned stays valid.
+export "C" void sozo_close(Game* g) {
+    g.level.runner.close();
+    g.place.free();
+    g.kept.free();
+    g.out.free();
+    g.said.free();
+    g.logs.free();
+    g.home.free();
+}
+
+// What the host said last (a scene that does not read), "" when nothing went wrong.
+export "C" str sozo_message(Game* g) {
+    return g.message;
+}
+
+// The scene file `source` in place of the world held; false, and an empty world, when it does
+// not read.
+export "C" bool sozo_load(Game* g, str source) uses io, threads {
+    g.say("");
+    return g.remake(source);
+}
+
+// The world as a scene file.
+export "C" str sozo_save(Game* g) {
+    return g.level.written(g.fresh_out());
+}
+
+// An empty world.
+export "C" void sozo_clear(Game* g) uses io, threads {
+    g.remake("");
+}
+
+// ---- Entities ----
+
+export "C" usize sozo_count(Game* g) {
+    return g.level.world.count();
+}
+
+// Every living entity, in the order of their indices.
+export "C" scene.Entity[] sozo_entities(Game* g) {
+    return g.level.world.entities(g.fresh_out());
+}
+
+export "C" bool sozo_alive(Game* g, scene.Entity e) {
+    return g.level.world.alive(e);
+}
+
+// A new entity named `name`, at the root, at the origin.
+export "C" scene.Entity sozo_spawn(Game* g, str name) {
+    str kept = text.repeat(g.level.arena, name, 1);
+    return g.level.world.spawn_at(kept, linear.transform(), none);
+}
+
+// `e` and its children despawned, with what the engine had given them.
+export "C" void sozo_despawn(Game* g, scene.Entity e) {
+    forget(g.level, e);
+    g.level.world.despawn(e);
+}
+
+void forget(Level* l, scene.Entity e) {
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    for (scene.Entity child in l.world.children(&scratch, e)) {
+        forget(l, child);
+    }
+    l.runner.refresh(e);
+}
+
+// The parent of `e` written into `parent`; false when it is at the root.
+export "C" bool sozo_parent_of(Game* g, scene.Entity e, scene.Entity* parent) {
+    return match (g.level.world.parent_of(e)) {
+        some(p) => {
+            *parent = p;
+            return true;
+        },
+        none => false,
+    };
+}
+
+// The living children of `e`.
+export "C" scene.Entity[] sozo_children(Game* g, scene.Entity e) {
+    return g.level.world.children(g.fresh_out(), e);
+}
+
+// `e` placed under `parent`, where it stays in the world when `keep_world` (its transform made
+// relative to its new parent), else at the same local transform; false when it would be a cycle.
+export "C" bool sozo_set_parent(Game* g, scene.Entity e, scene.Entity parent, bool keep_world) {
+    linear.Mat4 was = world_of(g.level, e);
+    if (!g.level.world.set_parent(e, parent)) {
+        return false;
+    }
+    if (keep_world) {
+        keep_at(g.level, e, was);
+    }
+    return true;
+}
+
+// `e` at the root again, where it is in the world when `keep_world`.
+export "C" void sozo_clear_parent(Game* g, scene.Entity e, bool keep_world) {
+    linear.Mat4 was = world_of(g.level, e);
+    g.level.world.clear_parent(e);
+    if (keep_world) {
+        keep_at(g.level, e, was);
+    }
+}
+
+linear.Mat4 world_of(Level* l, scene.Entity e) {
+    l.world.propagate();
+    return match (l.world.world_matrices.get(e)) {
+        some(m) => *m,
+        none => linear.identity4(),
+    };
+}
+
+// The local transform of `e` that puts it at `world` under its parent.
+void keep_at(Level* l, scene.Entity e, linear.Mat4 world) {
+    linear.Mat4 local = match (l.world.parent_of(e)) {
+        some(p) => match (world_of(l, p).inverse()) {
+            some(inverse) => inverse.mul(world),
+            none => world,
+        },
+        none => world,
+    };
+    l.world.transforms.set(e, linear.decompose(local));
+}
+
+export "C" str sozo_name_of(Game* g, scene.Entity e) {
+    return match (g.level.world.names.get(e)) {
+        some(n) => *n,
+        none => "",
+    };
+}
+
+export "C" void sozo_set_name(Game* g, scene.Entity e, str name) {
+    if (g.level.world.alive(e)) {
+        g.level.world.names.set(e, text.repeat(g.level.arena, name, 1));
+    }
+}
+
+// ---- Transforms ----
+
+// The transform of `e`, relative to its parent (the identity when it has none).
+export "C" linear.Transform sozo_transform(Game* g, scene.Entity e) {
+    return match (g.level.world.transforms.get(e)) {
+        some(t) => *t,
+        none => linear.transform(),
+    };
+}
+
+export "C" void sozo_set_transform(Game* g, scene.Entity e, linear.Transform t) {
+    if (g.level.world.alive(e)) {
+        g.level.world.transforms.set(e, t);
+    }
+}
+
+// Where `e` is in the world, its parents applied.
+export "C" linear.Mat4 sozo_world_matrix(Game* g, scene.Entity e) {
+    return world_of(g.level, e);
+}
+
+// ---- Components ----
+
+// The kinds of components, those of `engine` first, then those of the game; each is named by
+// its index.
+export "C" usize sozo_kind_count(Game* g) {
+    return g.level.registry.count();
+}
+
+export "C" str sozo_kind_name(Game* g, usize kind) {
+    return kind < g.level.registry.count() ? g.level.registry.at(kind).name() : "";
+}
+
+export "C" usize sozo_field_count(Game* g, usize kind) {
+    return kind < g.level.registry.count() ? g.level.registry.at(kind).count() : 0;
+}
+
+export "C" FieldInfo sozo_field(Game* g, usize kind, usize field) {
+    if (field >= sozo_field_count(g, kind)) {
+        return FieldInfo{ name: "", label: "", kind: describe.Kind.Number, low: 0.0, high: 0.0, choices: 0 };
+    }
+    describe.Field f = g.level.registry.at(kind).field(field);
+    usize choices = match (f.choices) {
+        some(c) => c.len,
+        none => 0,
+    };
+    return FieldInfo{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, choices: choices };
+}
+
+// The name of the choice `choice` of a field of kind `Choice`.
+export "C" str sozo_choice(Game* g, usize kind, usize field, usize choice) {
+    if (field >= sozo_field_count(g, kind)) {
+        return "";
+    }
+    return match (g.level.registry.at(kind).field(field).choices) {
+        some(c) => choice < c.len ? c[choice] : "",
+        none => "",
+    };
+}
+
+export "C" bool sozo_has(Game* g, scene.Entity e, usize kind) {
+    return kind < g.level.registry.count() && g.level.registry.at(kind).has(e);
+}
+
+// A new component of `kind` given to `e` (its fields as it is made new), unless it has one.
+export "C" void sozo_add(Game* g, scene.Entity e, usize kind) {
+    if (kind < g.level.registry.count() && g.level.world.alive(e)) {
+        g.level.registry.at(kind).add(e);
+        g.level.runner.refresh(e);
+    }
+}
+
+export "C" void sozo_remove(Game* g, scene.Entity e, usize kind) {
+    if (kind < g.level.registry.count()) {
+        g.level.registry.at(kind).remove(e);
+        g.level.runner.refresh(e);
+    }
+}
+
+// The field `field` of the component `kind` of `e`; `Empty` when it has none.
+export "C" Value sozo_get(Game* g, scene.Entity e, usize kind, usize field) {
+    if (kind >= g.level.registry.count()) {
+        return Value{ };
+    }
+    return match (g.level.registry.at(kind).get(e, field)) {
+        some(v) => to_c(v),
+        none => Value{ },
+    };
+}
+
+// `v` given to the field `field` of the component `kind` of `e`, held within its bounds, a text
+// copied; false when it has none (or `v` is empty). What the engine gave `e` is made again.
+export "C" bool sozo_set(Game* g, scene.Entity e, usize kind, usize field, Value v) {
+    if (kind >= g.level.registry.count()) {
+        return false;
+    }
+    describe.Value given = match (from_c(v)) {
+        some(x) => x,
+        none => {
+            return false;
+        },
+    };
+    bool done = g.level.registry.at(kind).set(e, field, given);
+    if (done) {
+        g.level.runner.refresh(e);
+    }
+    return done;
+}
+
+// ---- Running ----
+
+// Play: the scene saved, then run as the game runs it.
+export "C" void sozo_play(Game* g) {
+    g.play();
+}
+
+// Stop: the world made again from the scene saved by Play.
+export "C" void sozo_stop(Game* g) uses io, threads {
+    if (!g.playing) {
+        return;
+    }
+    g.playing = false;
+    g.paused = false;
+    g.remake(g.before);
+}
+
+export "C" void sozo_pause(Game* g, bool on) {
+    g.paused = on;
+    g.level.runner.paused = !g.playing || on;
+}
+
+export "C" bool sozo_playing(Game* g) {
+    return g.playing;
+}
+
+// A step of `dt` seconds: in Play, the engine moves the world and the game steps; in edit mode
+// (and paused), the files still load and the world matrices follow the transforms.
+export "C" void sozo_step(Game* g, f32 dt) uses io, threads {
+    bool running = g.playing && !g.paused;
+    g.level.runner.paused = !running;
+    g.level.runner.update(running ? dt : 0.0);
+    if (running) {
+        g.stepper(g.level, dt);
+    }
+}
+
+// ---- Logs ----
+
+// What the game wrote (`Logs.write`) since the last call.
+export "C" str sozo_logs(Game* g) {
+    return g.logs.take(g.fresh_out());
+}
+
+// ---- Tests: the contract called as the editor calls it ----
+
+// A component of a game: a spin around y, in degrees per second.
+pub struct Spin {
+    pub mut f32 speed = 90.0;
+    pub mut bool on = true;
+}
+
+class SpinFields : describe.Describe<Spin>, save.Codec<Spin> {
+    void init() { }
+
+    override str name() {
+        return "spin";
+    }
+
+    override Spin fresh() {
+        return Spin{ };
+    }
+
+    override usize count() {
+        return 2;
+    }
+
+    override describe.Field field(usize i) {
+        return i == 0 ? describe.number("speed", "Speed", -720.0, 720.0) : describe.flag("on", "On");
+    }
+
+    override describe.Value get(Spin* s, usize i) {
+        return i == 0 ? describe.Value.Number(s.speed) : describe.Value.Flag(s.on);
+    }
+
+    override void set(Spin* s, usize i, describe.Value v) {
+        if (i == 0) {
+            s.speed = describe.number_of(v, s.speed);
+        } else {
+            s.on = describe.flag_of(v, s.on);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Spin* value) {
+        describe.write_object(out, self as describe.Describe<Spin>*, value);
+    }
+
+    override Spin? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Spin>*, v);
+    }
+}
+
+class SpinKind : kinds.Kind, Saved {
+    Arena* arena;
+    scene.Table<Spin>* spins;
+    SpinFields* fields;
+
+    void init(keeps Arena* arena, keeps scene.Table<Spin>* spins) {
+        self.arena = arena;
+        self.spins = spins;
+        fields = arena.new(SpinFields);
+    }
+
+    describe.Describe<Spin>* d() {
+        return fields as describe.Describe<Spin>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return spins.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        kinds.table_add(spins, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        spins.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return kinds.table_get(spins, d(), e, i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return kinds.table_set(arena, spins, d(), e, i, v);
+    }
+
+    override void write(save.Writer* out) {
+        out.add(spins, fields as save.Codec<Spin>*);
+    }
+
+    override bool read(save.Reader* r) {
+        return r.add(spins, fields as save.Codec<Spin>*);
+    }
+}
+
+// What a game does in `on_world`: its table and its kind.
+void add_spin(Level* l) {
+    SpinKind* k = l.arena.new(SpinKind, l.arena, l.world.table<Spin>());
+    l.add(k as kinds.Kind*);
+    l.add_saved(k as Saved*);
+}
+
+// What it does each step: what spins turns, and it says so once.
+void turn(Level* l, f32 dt) uses io {
+    for (usize i in 0..l.registry.count()) {
+        kinds.Kind* k = l.registry.at(i);
+        if (k.name() == "spin") {
+            l.logs.write("spinning");
+        }
+    }
+}
+
+usize kind_named(Game* g, str name) {
+    for (usize i in 0..sozo_kind_count(g)) {
+        if (sozo_kind_name(g, i) == name) {
+            return i;
+        }
+    }
+    return sozo_kind_count(g);
+}
+
+usize field_named(Game* g, usize kind, str name) {
+    for (usize i in 0..sozo_field_count(g, kind)) {
+        if (sozo_field(g, kind, i).name == name) {
+            return i;
+        }
+    }
+    return sozo_field_count(g, kind);
+}
+
+test "the contract: entities, components of engine and of the game, saved, played and stopped" {
+    Game* g = sozo_open();
+    defer sozo_close(g);
+    assert(sozo_contract() == CONTRACT && sozo_count(g) == 0 && sozo_kind_count(g) == 7);
+    on_world(g, add_spin);
+    on_step(g, turn);
+    assert(sozo_kind_count(g) == 8 && sozo_kind_name(g, 7) == "spin");
+    // entities, names, parents
+    scene.Entity crate = sozo_spawn(g, "crate");
+    scene.Entity lid = sozo_spawn(g, "lid");
+    assert(sozo_count(g) == 2 && sozo_name_of(g, lid) == "lid" && sozo_entities(g).len == 2);
+    mut linear.Transform up = linear.transform();
+    up.position = linear.vec3(0.0, 5.0, 0.0);
+    sozo_set_transform(g, crate, up);
+    assert(sozo_set_parent(g, lid, crate, true));
+    assert(!sozo_set_parent(g, crate, lid, false));  // a cycle
+    mut scene.Entity found = crate;
+    assert(sozo_parent_of(g, lid, &found) && found.same(crate) && sozo_children(g, crate).len == 1);
+    // kept where it was in the world: its local transform now under the crate
+    assert(sozo_transform(g, lid).position.near(linear.vec3(0.0, -5.0, 0.0), 0.0001));
+    assert(sozo_world_matrix(g, lid).at(1, 3) == 0.0 && sozo_world_matrix(g, crate).at(1, 3) == 5.0);
+    sozo_set_name(g, lid, "top");
+    assert(sozo_name_of(g, lid) == "top");
+    // components of engine: a body, its mass, a choice
+    usize body = kind_named(g, "body");
+    sozo_add(g, crate, body);
+    assert(sozo_has(g, crate, body) && !sozo_has(g, lid, body));
+    usize mass = field_named(g, body, "mass");
+    assert(sozo_set(g, crate, body, mass, Value{ tag: Tag.Number, number: 12.5 }));
+    assert(sozo_get(g, crate, body, mass).number == 12.5);
+    assert(!sozo_set(g, crate, body, mass, Value{ }));  // empty
+    usize kind = field_named(g, body, "kind");
+    FieldInfo info = sozo_field(g, body, kind);
+    assert(info.kind == describe.Kind.Choice && info.choices == 3 && sozo_choice(g, body, kind, 1) == "dynamic");
+    match (sozo_get(g, lid, body, mass).tag) {
+        Empty => { },
+        _ => {
+            assert(false);
+        },
+    }
+    // a component of the game
+    usize spin = kind_named(g, "spin");
+    sozo_add(g, lid, spin);
+    sozo_set(g, lid, spin, 0, Value{ tag: Tag.Number, number: 1000.0 });
+    assert(sozo_get(g, lid, spin, 0).number == 720.0);  // its bounds
+    // saved, cleared, loaded back: the game's table with the rest
+    mut Arena keep = Arena.new(4 * KB);
+    defer keep.free();
+    str saved = text.repeat(&keep, sozo_save(g), 1);
+    sozo_clear(g);
+    assert(sozo_count(g) == 0 && sozo_kind_count(g) == 8);
+    assert(sozo_load(g, saved) && sozo_count(g) == 2 && sozo_message(g) == "");
+    scene.Entity[] back = sozo_entities(g);
+    assert(sozo_name_of(g, back[1]) == "top" && sozo_get(g, back[1], kind_named(g, "spin"), 0).number == 720.0);
+    assert(sozo_get(g, back[0], kind_named(g, "body"), mass).number == 12.5);
+    // played: the crate falls; stopped: it is back where it was
+    sozo_play(g);
+    assert(sozo_playing(g));
+    for (i32 i in 0..30) {
+        sozo_step(g, 1.0 / 30.0);
+    }
+    scene.Entity fallen = sozo_entities(g)[0];
+    assert(sozo_transform(g, fallen).position.y < 4.0);
+    assert(text.contains(sozo_logs(g), "spinning") && sozo_logs(g) == "");
+    sozo_stop(g);
+    assert(!sozo_playing(g) && sozo_count(g) == 2);
+    assert(sozo_transform(g, sozo_entities(g)[0]).position.y == 5.0);
+    // in edit mode, steps move nothing
+    sozo_step(g, 1.0);
+    assert(sozo_transform(g, sozo_entities(g)[0]).position.y == 5.0);
+    // played again (the scene of the first Play gone, the names read from it kept), paused, stopped
+    sozo_play(g);
+    sozo_pause(g, true);
+    sozo_step(g, 1.0);
+    assert(sozo_transform(g, sozo_entities(g)[0]).position.y == 5.0 && sozo_name_of(g, sozo_entities(g)[1]) == "top");
+    sozo_pause(g, false);
+    sozo_step(g, 0.5);
+    assert(sozo_transform(g, sozo_entities(g)[0]).position.y < 5.0);
+    sozo_stop(g);
+    assert(sozo_transform(g, sozo_entities(g)[0]).position.y == 5.0);
+    // despawned with its children
+    sozo_despawn(g, sozo_entities(g)[0]);
+    assert(sozo_count(g) == 0);
+    // a scene that does not read: an empty world, and why
+    assert(!sozo_load(g, "{ not json") && sozo_count(g) == 0 && sozo_message(g).len > 0);
+}

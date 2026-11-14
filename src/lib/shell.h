@@ -32,6 +32,14 @@ void command_add(Command *command, const char *arg);
 void command_addf(Command *command, const char *fmt, ...);
 /* Runs it and waits for it; returns its exit code, or 127 after saying why it did not start. */
 int command_run(const Command *command);
+/* Runs the commands, `jobs` of them at a time (at least one), and waits for them all; `status[i]`
+   gets what `command_run` would give for the command `i`. Each command has its own `out` and
+   `err`, or shares those of this program, where the outputs of those running together mix. */
+void command_run_all(const Command *commands, size_t count, size_t jobs, int *status);
+/* The number of processors this program can use, at least one. */
+size_t shell_processors(void);
+/* The time of the last change of the file at `path` set to now; false if it cannot be. */
+bool shell_touch(const char *path);
 void command_free(Command *command);
 #ifdef _WIN32
 /* Makes the tools of MSVC (`cl`, `lib`, `rc`) those of the commands run after it, for `arch`
@@ -54,6 +62,10 @@ bool shell_dir_exists(const char *path);
 /* Waits about a second: a file just written may stay open a moment (antivirus, indexing). */
 void shell_wait_second(void);
 #endif
+/* Waits up to `seconds` until no other program holds the file at `path` open (on Windows, an
+   antivirus that reads a file just written, or a program started by a compiler that keeps the
+   files it was given); false if it is still held, or not there. */
+bool shell_wait_free(const char *path, int seconds);
 /* The entry of a folder that comes last in byte order (the newest of folders named by version,
    `27.1.12297006`), or NULL if it is empty or does not exist. New string. */
 char *shell_last_entry(const char *dir);

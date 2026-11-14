@@ -1,5 +1,20 @@
-// math: the mathematics beyond `std.math` (spec §8.2). Programs import `math.linear`, `math.geometry`
-// and `math.curve`.
+// math: the mathematics beyond `std.math` (spec §8.2). Programs import `math.linear`, `math.geometry`,
+// `math.curve`, `math.noise`, `math.sample`, `math.color`, `math.scalar`, `math.ease`, `math.spline`,
+// `math.ballistic`, `math.polygon`, `math.delaunay`, `math.stats`, `math.kdtree`, `math.octree` and
+// `math.bvh`.
 import math.linear;
 import math.geometry;
 import math.curve;
+import math.noise;
+import math.sample;
+import math.color;
+import math.scalar;
+import math.ease;
+import math.spline;
+import math.ballistic;
+import math.polygon;
+import math.delaunay;
+import math.stats;
+import math.kdtree;
+import math.octree;
+import math.bvh;

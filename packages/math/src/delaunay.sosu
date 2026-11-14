@@ -1,0 +1,298 @@
+// math.delaunay: the Delaunay triangulation of points of the plane (the triangles whose circles
+// hold no other point: the fewest thin triangles, for a mesh of a ground from scattered heights,
+// a graph of neighbors between rooms or towns) and the Voronoi cells of points (the region nearer
+// to each point than to any other: territories, the cells of a map, cracks, the stones of a
+// wall), clipped to a rectangle.
+//
+//   usize[] t = delaunay.triangulate(arena, points);              // three points per triangle
+//   linear.Vec2[][] cells = delaunay.voronoi(arena, points, low, high);
+import std.math;
+import std.vec;
+import math.linear;
+import math.polygon;
+
+struct Tri {
+    usize a;
+    usize b;
+    usize c;
+    f64 cx;  // the center of its circle
+    f64 cy;
+    f64 r2;  // the square of its radius
+}
+
+struct Edge {
+    usize a;
+    usize b;
+}
+
+// The Delaunay triangles of the points: three indices per triangle, each turning counterclockwise
+// (Bowyer and Watson, O(n^2) at worst: for thousands of points, not millions). A point at the same
+// place as one before it is left out; points all in a line give no triangle. In `arena`.
+pub usize[] triangulate(Arena* arena, linear.Vec2[] points) {
+    vec.Vec<usize>* out = vec.new<usize>(arena);
+    usize n = points.len;
+    if (n < 3) {
+        return out.items();
+    }
+    // the points in f64, and three more, of a triangle far around them all
+    mut f64[] xs = arena.alloc_slice(f64, n + 3);
+    mut f64[] ys = arena.alloc_slice(f64, n + 3);
+    mut f64 lowx = points[0].x as f64;
+    mut f64 lowy = points[0].y as f64;
+    mut f64 highx = lowx;
+    mut f64 highy = lowy;
+    for (usize i in 0..n) {
+        xs[i] = points[i].x as f64;
+        ys[i] = points[i].y as f64;
+        lowx = min(lowx, xs[i]);
+        lowy = min(lowy, ys[i]);
+        highx = max(highx, xs[i]);
+        highy = max(highy, ys[i]);
+    }
+    f64 size = max(max(highx - lowx, highy - lowy), 1.0e-9);
+    f64 mx = (lowx + highx) / 2.0;
+    f64 my = (lowy + highy) / 2.0;
+    xs[n] = mx - 20.0 * size;
+    ys[n] = my - 10.0 * size;
+    xs[n + 1] = mx + 20.0 * size;
+    ys[n + 1] = my - 10.0 * size;
+    xs[n + 2] = mx;
+    ys[n + 2] = my + 20.0 * size;
+    vec.Vec<Tri>* tris = vec.new<Tri>(arena);
+    tris.push(tri(xs, ys, n, n + 1, n + 2));
+    vec.Vec<Edge>* hole = vec.new<Edge>(arena);
+    vec.Vec<Tri>* kept = vec.new<Tri>(arena);
+    for (usize p in 0..n) {
+        if (seen_before(xs, ys, p)) {
+            continue;
+        }
+        f64 px = xs[p];
+        f64 py = ys[p];
+        // the triangles whose circles hold the point: the edges they do not share make the hole
+        hole.clear();
+        kept.clear();
+        for (Tri t in tris.items()) {
+            f64 dx = px - t.cx;
+            f64 dy = py - t.cy;
+            if (dx * dx + dy * dy < t.r2 * (1.0 + 1.0e-12)) {
+                add_edge(hole, t.a, t.b);
+                add_edge(hole, t.b, t.c);
+                add_edge(hole, t.c, t.a);
+            } else {
+                kept.push(t);
+            }
+        }
+        tris.clear();
+        for (Tri t in kept.items()) {
+            tris.push(t);
+        }
+        // the hole filled by triangles to the point
+        for (Edge e in hole.items()) {
+            if (e.a != e.b) {
+                tris.push(tri(xs, ys, e.a, e.b, p));
+            }
+        }
+    }
+    for (Tri t in tris.items()) {
+        if (t.a < n && t.b < n && t.c < n) {
+            out.push(t.a);
+            out.push(t.b);
+            out.push(t.c);
+        }
+    }
+    return out.items();
+}
+
+bool seen_before(f64[] xs, f64[] ys, usize p) {
+    for (usize i in 0..p) {
+        if (xs[i] == xs[p] && ys[i] == ys[p]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// An edge of the hole: one met twice (shared by two triangles taken away) is not on its border,
+// and is marked by `a == b`.
+void add_edge(vec.Vec<Edge>* hole, usize a, usize b) {
+    for (usize i in 0..hole.len()) {
+        Edge e = hole.items()[i];
+        if (e.a == b && e.b == a || e.a == a && e.b == b) {
+            hole.set(i, Edge{ a: 0, b: 0 });
+            return;
+        }
+    }
+    hole.push(Edge{ a: a, b: b });
+}
+
+// The triangle (a, b, c), turned counterclockwise, with its circle.
+Tri tri(f64[] xs, f64[] ys, usize a, usize b, usize c) {
+    f64 cross = (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a]);
+    usize bb = cross < 0.0 ? c : b;
+    usize cc = cross < 0.0 ? b : c;
+    f64 ax = xs[a];
+    f64 ay = ys[a];
+    f64 bx = xs[bb] - ax;
+    f64 by = ys[bb] - ay;
+    f64 cx = xs[cc] - ax;
+    f64 cy = ys[cc] - ay;
+    f64 d = 2.0 * (bx * cy - by * cx);
+    if (abs(d) < 1.0e-300) {
+        return Tri{ a: a, b: bb, c: cc, cx: ax, cy: ay, r2: 0.0 };  // flat: a circle of nothing
+    }
+    f64 b2 = bx * bx + by * by;
+    f64 c2 = cx * cx + cy * cy;
+    f64 ux = (cy * b2 - by * c2) / d;
+    f64 uy = (bx * c2 - cx * b2) / d;
+    return Tri{ a: a, b: bb, c: cc, cx: ax + ux, cy: ay + uy, r2: ux * ux + uy * uy };
+}
+
+// The Voronoi cell of each point, clipped to the rectangle from `low` to `high`: the corners of a
+// convex polygon, counterclockwise, of the region nearer to that point than to any other (the
+// cell of a point at the same place as one before it is empty). Each cell is the rectangle cut by
+// the lines halfway to the neighbors of its point in the Delaunay triangulation. In `arena`.
+pub linear.Vec2[][] voronoi(Arena* arena, linear.Vec2[] points, linear.Vec2 low, linear.Vec2 high) {
+    usize n = points.len;
+    mut linear.Vec2[][] cells = arena.alloc_slice(linear.Vec2[], n);
+    usize[] t = triangulate(arena, points);
+    // the neighbors of each point, side by side: those of `i` from `start[i]` to `start[i + 1]`
+    // of `near`; all the others when there are no triangles (points in a line)
+    mut usize[] start = arena.alloc_slice(usize, n + 1);
+    mut usize[] near = arena.alloc_slice(usize, t.len == 0 ? n * n : 2 * t.len);
+    if (t.len == 0) {
+        for (usize i in 0..n) {
+            start[i + 1] = start[i] + n;
+            for (usize j in 0..n) {
+                near[i * n + j] = j;  // itself among them: the same place, left below
+            }
+        }
+    } else {
+        for (usize e in 0..t.len) {
+            start[t[e] + 1] += 2;  // each corner of a triangle: the two others
+        }
+        for (usize i in 0..n) {
+            start[i + 1] += start[i];
+        }
+        mut usize[] filled = arena.alloc_slice(usize, n);
+        for (usize k in 0..t.len / 3) {
+            for (usize e in 0..3) {
+                usize a = t[3 * k + e];
+                near[start[a] + filled[a]] = t[3 * k + (e + 1) % 3];
+                near[start[a] + filled[a] + 1] = t[3 * k + (e + 2) % 3];
+                filled[a] += 2;
+            }
+        }
+    }
+    mut linear.Vec2[] box = arena.alloc_slice(linear.Vec2, 4);
+    box[0] = low;
+    box[1] = linear.vec2(high.x, low.y);
+    box[2] = high;
+    box[3] = linear.vec2(low.x, high.y);
+    for (usize i in 0..n) {
+        mut linear.Vec2[] cell = box;
+        mut bool empty = false;
+        for (usize k in start[i]..start[i + 1]) {
+            usize j = near[k];
+            linear.Vec2 d = points[j].sub(points[i]);
+            if (d.x == 0.0 && d.y == 0.0) {
+                empty = empty || j < i;  // the same place: the first keeps the cell
+                continue;
+            }
+            cell = polygon.clip_half(arena, cell, points[i].add(d.scale(0.5)), d);
+        }
+        cells[i] = empty || cell.len < 3 ? box[0..0] : cell;
+    }
+    return cells;
+}
+
+test "Delaunay triangles: no point in a circle, the hull covered" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    // a square and its center: four triangles around the center
+    mut linear.Vec2[5] five = [linear.vec2(0.0, 0.0), linear.vec2(2.0, 0.0), linear.vec2(2.0, 2.0), linear.vec2(0.0, 2.0), linear.vec2(1.0, 1.0)];
+    usize[] t5 = triangulate(&arena, five[0..5]);
+    assert(t5.len == 12);
+    // points at random: each triangle counterclockwise, its circle empty, their areas the hull's
+    mut linear.Vec2[] cloud = arena.alloc_slice(linear.Vec2, 120);
+    mut ui32 h = 1;
+    for (usize i in 0..120) {
+        h = wrapping_add(wrapping_mul(h, 1664525), 1013904223);
+        f32 x = (h >> 8) as f32 / 16777216.0 * 10.0;
+        h = wrapping_add(wrapping_mul(h, 1664525), 1013904223);
+        f32 y = (h >> 8) as f32 / 16777216.0 * 6.0;
+        cloud[i] = linear.vec2(x, y);
+    }
+    usize[] t = triangulate(&arena, cloud);
+    mut f64 total = 0.0;
+    for (usize k in 0..t.len / 3) {
+        Tri c = tri_of(cloud, t[3 * k], t[3 * k + 1], t[3 * k + 2]);
+        f64 twice = turn(cloud[t[3 * k]], cloud[t[3 * k + 1]], cloud[t[3 * k + 2]]);
+        assert(twice > 0.0);
+        total += twice / 2.0;
+        for (usize p in 0..cloud.len) {
+            if (p != t[3 * k] && p != t[3 * k + 1] && p != t[3 * k + 2]) {
+                f64 dx = cloud[p].x as f64 - c.cx;
+                f64 dy = cloud[p].y as f64 - c.cy;
+                assert(dx * dx + dy * dy >= c.r2 * (1.0 - 1.0e-6));
+            }
+        }
+    }
+    assert(abs(total - polygon.area(polygon.convex_hull(&arena, cloud)) as f64) < 0.001);
+    // 2n - 2 - (corners of the hull) triangles, for points in general position
+    assert(t.len / 3 == 2 * 120 - 2 - polygon.convex_hull(&arena, cloud).len);
+    // a point twice, and points in a line
+    mut linear.Vec2[4] twice = [linear.vec2(0.0, 0.0), linear.vec2(1.0, 0.0), linear.vec2(1.0, 0.0), linear.vec2(0.0, 1.0)];
+    assert(triangulate(&arena, twice[0..4]).len == 3);
+    mut linear.Vec2[3] line = [linear.vec2(0.0, 0.0), linear.vec2(1.0, 1.0), linear.vec2(2.0, 2.0)];
+    assert(triangulate(&arena, line[0..3]).len == 0);
+}
+
+test "Voronoi cells: each point in its own, the rectangle covered" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut linear.Vec2[] sites = arena.alloc_slice(linear.Vec2, 40);
+    mut ui32 h = 7;
+    for (usize i in 0..40) {
+        h = wrapping_add(wrapping_mul(h, 1664525), 1013904223);
+        f32 x = (h >> 8) as f32 / 16777216.0 * 8.0 + 1.0;
+        h = wrapping_add(wrapping_mul(h, 1664525), 1013904223);
+        f32 y = (h >> 8) as f32 / 16777216.0 * 8.0 + 1.0;
+        sites[i] = linear.vec2(x, y);
+    }
+    linear.Vec2 low = linear.vec2(0.0, 0.0);
+    linear.Vec2 high = linear.vec2(10.0, 10.0);
+    linear.Vec2[][] cells = voronoi(&arena, sites, low, high);
+    mut f64 total = 0.0;
+    for (usize i in 0..40) {
+        assert(cells[i].len >= 3 && polygon.contains(cells[i], sites[i]) && polygon.counterclockwise(cells[i]));
+        total += polygon.area(cells[i]) as f64;
+    }
+    assert(abs(total - 100.0) < 0.01);
+    // a place belongs to the cell of its nearest point
+    for (i32 k in 0..200) {
+        linear.Vec2 q = linear.vec2((k % 20) as f32 * 0.5 + 0.2, (k / 20) as f32 + 0.3);
+        mut usize nearest = 0;
+        for (usize i in 1..40) {
+            if (sites[i].distance(q) < sites[nearest].distance(q)) {
+                nearest = i;
+            }
+        }
+        assert(polygon.contains(cells[nearest], q));
+    }
+    // two points: the rectangle cut in half; one: the whole rectangle
+    mut linear.Vec2[2] two = [linear.vec2(2.0, 5.0), linear.vec2(8.0, 5.0)];
+    linear.Vec2[][] halves = voronoi(&arena, two[0..2], low, high);
+    assert(abs(polygon.area(halves[0]) - 50.0) < 0.001 && abs(polygon.area(halves[1]) - 50.0) < 0.001);
+    mut linear.Vec2[1] one = [linear.vec2(3.0, 3.0)];
+    assert(abs(polygon.area(voronoi(&arena, one[0..1], low, high)[0]) - 100.0) < 0.001);
+}
+
+Tri tri_of(linear.Vec2[] p, usize a, usize b, usize c) {
+    mut f64[3] xs = [p[a].x as f64, p[b].x as f64, p[c].x as f64];
+    mut f64[3] ys = [p[a].y as f64, p[b].y as f64, p[c].y as f64];
+    return tri(xs[0..3], ys[0..3], 0, 1, 2);
+}
+
+f64 turn(linear.Vec2 a, linear.Vec2 b, linear.Vec2 c) {
+    return ((b.x - a.x) as f64) * ((c.y - a.y) as f64) - ((b.y - a.y) as f64) * ((c.x - a.x) as f64);
+}

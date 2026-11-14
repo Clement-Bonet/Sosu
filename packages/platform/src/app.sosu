@@ -73,6 +73,12 @@ pub enum Event {
     LocaleChanged,  // the languages the user prefers changed: see `locales`
     SystemThemeChanged(bool dark),  // the user chose a light or a dark theme for the system
     Dialog(dialogs.Answer answer),  // the answer of a file dialog (`platform.dialogs`)
+    // With windows of `open_window` (spec §10.13): the events that follow are those of the window
+    // `id` (`Window.id`), until the next `Target`; never sent while the program has one window.
+    Target(ui32 window),
+    // The button that closes a window of `open_window` was clicked: the program closes it
+    // (`Window.close`), or not. That of the window of `run_window` sends `Quit`.
+    Closed(ui32 window),
 }
 
 // What a finger does.
@@ -144,6 +150,95 @@ pub struct Window {
     // Pixels of the screen per unit of the window: 2 on a screen of high density.
     pub f32 scale() uses io {
         return sdl.display_scale(handle);
+    }
+
+    // What tells the window from the others in `Event.Target` and `Event.Closed`.
+    pub ui32 id() uses io {
+        unsafe {
+            return sdl_c.SDL_GetWindowID(handle);
+        }
+    }
+
+    // Where the window is on the screens (its top left corner, inside its border), in the
+    // coordinates of `mouse_position`.
+    pub i32[2] position() uses io {
+        mut i32 x = 0;
+        mut i32 y = 0;
+        unsafe {
+            sdl_c.SDL_GetWindowPosition(handle, &x, &y);
+        }
+        return [x, y];
+    }
+
+    pub void move_to(i32 x, i32 y) uses io {
+        unsafe {
+            sdl_c.SDL_SetWindowPosition(handle, x, y);
+        }
+    }
+
+    pub void resize_to(i32 width, i32 height) uses io {
+        unsafe {
+            sdl_c.SDL_SetWindowSize(handle, max(width, 1), max(height, 1));
+        }
+    }
+
+    // 1: opaque; less: the windows under it show through (where the system can).
+    pub void set_opacity(f32 opacity) uses io {
+        unsafe {
+            sdl_c.SDL_SetWindowOpacity(handle, max(0.0, min(1.0, opacity)));
+        }
+    }
+
+    // Above the other windows, and given the keyboard.
+    pub void raise() uses io {
+        unsafe {
+            sdl_c.SDL_RaiseWindow(handle);
+        }
+    }
+
+    // Closes a window of `open_window` (a device of `gpu` must have let it go before:
+    // `Device.release_window`). Not the window of `run_window`.
+    pub void close() uses io {
+        sdl.destroy_window(handle);
+    }
+}
+
+// The window `id` (`Window.id`), while it is open.
+pub Window? window_by_id(ui32 id) uses io {
+    unsafe {
+        sdl_c.SDL_Window* handle = sdl_c.SDL_GetWindowFromID(id);
+        if (handle as ui64 == 0) {
+            return none;
+        }
+        return some(Window{ handle: handle });
+    }
+}
+
+// Where the mouse is on the screens, wherever the windows are: as `Window.position` says them.
+pub f32[2] mouse_position() uses io {
+    mut f32 x = 0.0;
+    mut f32 y = 0.0;
+    unsafe {
+        sdl_c.SDL_GetGlobalMouseState(&x, &y);
+    }
+    return [x, y];
+}
+
+// Another window, beside that of `run_window` (spec §10.13): a panel floating out of the window of
+// the program. Its events come to the same `on_event`, after a `Target` that names it; the program
+// draws it with its device (`gpu.Device.claim`), and closes it (`Window.close`). None if the
+// system cannot open it. With `run_window` only.
+pub Window? open_window(Config config) uses io {
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    match (sdl.create_window(&scratch, config.title, config.width, config.height, true)) {
+        some(handle) => {
+            sdl.start_text_input(handle);
+            return some(Window{ handle: handle });
+        },
+        none => {
+            return none;
+        },
     }
 }
 
@@ -657,6 +752,12 @@ pub i32 run<uses E>(Config config, Handler<uses E>* handler) uses io, E {
     return 0;
 }
 
+// Whether events of `kind` name their window: those of windows, keys, text, the mouse, drops.
+bool carries_window(ui32 kind) {
+    return kind >= 0x200 && kind < 0x300 || kind >= 0x300 && kind <= 0x304 || kind >= 0x400 && kind <= 0x403
+            || kind >= 0x1000 && kind <= 0x1004;
+}
+
 void remove_watch(ExposeTarget* expose) uses io {
     unsafe {
         sdl.remove_event_watch(on_expose, expose as ui8*);
@@ -770,6 +871,9 @@ pub i32 run_window<uses E>(Config config, WindowHandler<uses E>* handler) uses i
         running = handler.on_event(ScaleChanged(density));
     }
     mut sdl_c.SDL_Point last = given;
+    ui32 main = window.id();
+    mut ui32 target = main;  // the window of the events, as the last `Target` said
+    mut bool several = false;  // a window of `open_window` sent events
     while (running) {
         frame.free();
         frame = Arena.new(4 * KB);
@@ -781,6 +885,32 @@ pub i32 run_window<uses E>(Config config, WindowHandler<uses E>* handler) uses i
                 continue;
             }
             if (request(handle, event)) {
+                continue;
+            }
+            // with windows of `open_window`: whose events these are, and the button that closes one
+            // (with one window, SDL follows its close request with SDL_EVENT_QUIT; not with several)
+            if (event.kind as i32 == sdl_c.SDL_EVENT_WINDOW_CLOSE_REQUESTED && (several || event.window != main)) {
+                if (!handler.on_event(event.window == main ? Quit : Closed(event.window))) {
+                    running = false;
+                }
+                continue;
+            }
+            if (event.window != 0 && event.window != target && carries_window(event.kind)) {
+                target = event.window;
+                several = true;
+                if (!handler.on_event(Target(target))) {
+                    running = false;
+                }
+            }
+            if (target != main) {  // the events of another window: as they are, its size its own
+                match (translate(event, &frame)) {
+                    some(e) => {
+                        if (!handler.on_event(e)) {
+                            running = false;
+                        }
+                    },
+                    none => { },
+                }
                 continue;
             }
             sdl_c.SDL_Point size = sdl.window_size(handle);

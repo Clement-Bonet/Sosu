@@ -20,6 +20,19 @@ bool close(f32 a, f32 b, f32 eps) {
     return abs(a - b) <= eps;
 }
 
+f32 atan2_32(f32 y, f32 x) {
+    return math.atan2(y as f64, x as f64) as f32;
+}
+
+// `value` on the nearest multiple of `step`: a grid of the editor, angles by 15 degrees
+// (`step` in radians). A step of 0 or less leaves it.
+pub f32 snap(f32 value, f32 step) {
+    if (step <= 0.0) {
+        return value;
+    }
+    return math.round((value / step) as f64) as f32 * step;
+}
+
 // ---- Vectors ----
 
 pub struct Vec2 {
@@ -83,6 +96,39 @@ pub struct Vec2 {
     pub bool near(Vec2 o, f32 eps) {
         return close(x, o.x, eps) && close(y, o.y, eps);
     }
+
+    // The angle between the two directions, 0 to pi (0 if one is zero).
+    pub f32 angle(Vec2 o) {
+        return abs(atan2_32(cross(o), dot(o)));
+    }
+
+    // The turn from this direction to `o`, -pi to pi: positive counterclockwise.
+    pub f32 signed_angle(Vec2 o) {
+        return atan2_32(cross(o), dot(o));
+    }
+
+    // The vector bounced on a surface of this `normal` (of length 1).
+    pub Vec2 reflect(Vec2 normal) {
+        return sub(normal.scale(2.0 * dot(normal)));
+    }
+
+    // A step of `step` at most toward `target`, stopping on it.
+    pub Vec2 move_towards(Vec2 target, f32 step) {
+        Vec2 to = target.sub(Vec2{ x: x, y: y });
+        f32 l = to.length();
+        return l <= step || l == 0.0 ? target : add(to.scale(step / l));
+    }
+
+    // The vector, shortened to `limit` if it is longer.
+    pub Vec2 clamp_length(f32 limit) {
+        f32 l = length();
+        return l > limit && l > 0.0 ? scale(limit / l) : Vec2{ x: x, y: y };
+    }
+
+    // Each component on the nearest multiple of `step`.
+    pub Vec2 snapped(f32 step) {
+        return Vec2{ x: snap(x, step), y: snap(y, step) };
+    }
 }
 
 pub struct Vec3 {
@@ -137,6 +183,53 @@ pub struct Vec3 {
 
     pub bool near(Vec3 o, f32 eps) {
         return close(x, o.x, eps) && close(y, o.y, eps) && close(z, o.z, eps);
+    }
+
+    // The angle between the two directions, 0 to pi (0 if one is zero).
+    pub f32 angle(Vec3 o) {
+        return atan2_32(cross(o).length(), dot(o));
+    }
+
+    // The turn from this direction to `o` around `axis`, -pi to pi: positive when it turns
+    // counterclockwise seen from the tip of `axis` (the right-hand rule).
+    pub f32 signed_angle(Vec3 o, Vec3 axis) {
+        Vec3 c = cross(o);
+        f32 a = atan2_32(c.length(), dot(o));
+        return c.dot(axis) < 0.0 ? -a : a;
+    }
+
+    // The part of the vector along `onto` (zero if `onto` is zero).
+    pub Vec3 project(Vec3 onto) {
+        f32 l = onto.dot(onto);
+        return l == 0.0 ? Vec3{ x: 0.0, y: 0.0, z: 0.0 } : onto.scale(dot(onto) / l);
+    }
+
+    // The vector flattened on the plane of `normal` (its part across `normal`).
+    pub Vec3 on_plane(Vec3 normal) {
+        return sub(project(normal));
+    }
+
+    // The vector bounced on a surface of this `normal` (of length 1).
+    pub Vec3 reflect(Vec3 normal) {
+        return sub(normal.scale(2.0 * dot(normal)));
+    }
+
+    // A step of `step` at most toward `target`, stopping on it.
+    pub Vec3 move_towards(Vec3 target, f32 step) {
+        Vec3 to = target.sub(Vec3{ x: x, y: y, z: z });
+        f32 l = to.length();
+        return l <= step || l == 0.0 ? target : add(to.scale(step / l));
+    }
+
+    // The vector, shortened to `limit` if it is longer.
+    pub Vec3 clamp_length(f32 limit) {
+        f32 l = length();
+        return l > limit && l > 0.0 ? scale(limit / l) : Vec3{ x: x, y: y, z: z };
+    }
+
+    // Each component on the nearest multiple of `step`: a point on the grid of the editor.
+    pub Vec3 snapped(f32 step) {
+        return Vec3{ x: snap(x, step), y: snap(y, step), z: snap(z, step) };
     }
 }
 
@@ -638,6 +731,40 @@ pub struct Quat {
     pub bool near(Quat o, f32 eps) {
         return abs(abs(dot(o)) - 1.0) <= eps;
     }
+
+    // The rotation back, for a quaternion of any length but 0.
+    pub Quat inverse() {
+        f32 l = x * x + y * y + z * z + w * w;
+        return l == 0.0 ? identity_quat() : Quat{ x: -x / l, y: -y / l, z: -z / l, w: w / l };
+    }
+
+    // The angle of the turn from this rotation to `o`, 0 to pi.
+    pub f32 angle(Quat o) {
+        f32 d = min(abs(dot(o)), 1.0);
+        return 2.0 * math.acos(d as f64) as f32;
+    }
+
+    // A turn of `step` radians at most from this rotation toward `o`, stopping on it.
+    pub Quat rotate_towards(Quat o, f32 step) {
+        f32 a = angle(o);
+        if (a <= step || a == 0.0) {
+            return o;
+        }
+        return slerp(o, step / a);
+    }
+
+    // The rotation as three angles in radians, `from_euler` giving it back: about x (pitch),
+    // y (yaw) and z (roll), applied z, then x, then y (as Unity shows them). At a pitch of a
+    // quarter of a turn, where yaw and roll turn about the same axis, the roll is 0.
+    pub Vec3 euler() {
+        Mat4 m = normalized().to_mat4();
+        f32 down = max(-1.0, min(1.0, -m.at(1, 2)));
+        f32 pitch = math.asin(down as f64) as f32;
+        if (abs(down) > 0.99999) {
+            return Vec3{ x: pitch, y: atan2_32(-m.at(2, 0), m.at(0, 0)), z: 0.0 };
+        }
+        return Vec3{ x: pitch, y: atan2_32(m.at(0, 2), m.at(2, 2)), z: atan2_32(m.at(1, 0), m.at(1, 1)) };
+    }
 }
 
 pub Quat identity_quat() {
@@ -648,6 +775,59 @@ pub Quat identity_quat() {
 pub Quat from_axis_angle(Vec3 axis, f32 angle) {
     Vec3 a = axis.normalized().scale(sin32(angle / 2.0));
     return Quat{ x: a.x, y: a.y, z: a.z, w: cos32(angle / 2.0) };
+}
+
+// The rotation of three angles in radians, as `Quat.euler` gives them: z first, then x, then y.
+pub Quat from_euler(Vec3 angles) {
+    Quat qx = from_axis_angle(Vec3{ x: 1.0, y: 0.0, z: 0.0 }, angles.x);
+    Quat qy = from_axis_angle(Vec3{ x: 0.0, y: 1.0, z: 0.0 }, angles.y);
+    Quat qz = from_axis_angle(Vec3{ x: 0.0, y: 0.0, z: 1.0 }, angles.z);
+    return qy.mul(qx).mul(qz).normalized();
+}
+
+// The shortest rotation that turns the direction `from` onto `to` (of any length but 0); half a
+// turn about some axis across them when they are opposite.
+pub Quat from_to(Vec3 from, Vec3 to) {
+    Vec3 a = from.normalized();
+    Vec3 b = to.normalized();
+    f32 d = a.dot(b);
+    if (d < -0.999999) {
+        mut Vec3 axis = Vec3{ x: 1.0, y: 0.0, z: 0.0 }.cross(a);
+        if (axis.length() < 0.000001) {
+            axis = Vec3{ x: 0.0, y: 1.0, z: 0.0 }.cross(a);
+        }
+        return from_axis_angle(axis, 3.14159265);
+    }
+    Vec3 c = a.cross(b);
+    return Quat{ x: c.x, y: c.y, z: c.z, w: 1.0 + d }.normalized();
+}
+
+// The rotation that turns the forward of an entity (-z, where its camera looks) toward
+// `forward`, its top (+y) as near `up` as it can be: an entity facing a point, a camera that
+// follows. When `forward` is along `up`, another up is taken.
+pub Quat look_rotation(Vec3 forward, Vec3 up) {
+    Vec3 back = forward.normalized().neg();  // the +z of the entity
+    if (back.length() == 0.0) {
+        return identity_quat();
+    }
+    mut Vec3 right = up.cross(back);
+    if (right.length() < 0.000001) {
+        Vec3 other = abs(back.y) < 0.9 ? Vec3{ x: 0.0, y: 1.0, z: 0.0 } : Vec3{ x: 0.0, y: 0.0, z: 1.0 };
+        right = other.cross(back);
+    }
+    right = right.normalized();
+    Vec3 top = back.cross(right);
+    mut Mat4 m = identity4();
+    m.set(0, 0, right.x);
+    m.set(1, 0, right.y);
+    m.set(2, 0, right.z);
+    m.set(0, 1, top.x);
+    m.set(1, 1, top.y);
+    m.set(2, 1, top.z);
+    m.set(0, 2, back.x);
+    m.set(1, 2, back.y);
+    m.set(2, 2, back.z);
+    return decompose(m).rotation;
 }
 
 // ---- Transforms ----
@@ -755,4 +935,54 @@ test "a matrix taken apart again" {
         Mat4 half = rotation(axis, 3.14159265);
         assert(decompose(half).to_mat4().near(half, 0.0001));
     }
+}
+
+test "angles between vectors, and steps toward a point" {
+    Vec3 x = vec3(1.0, 0.0, 0.0);
+    Vec3 y = vec3(0.0, 1.0, 0.0);
+    Vec3 z = vec3(0.0, 0.0, 1.0);
+    assert(close(x.angle(y), 1.5707963, 0.0001) && close(x.angle(x.scale(3.0)), 0.0, 0.0001));
+    assert(close(x.signed_angle(y, z), 1.5707963, 0.0001) && close(y.signed_angle(x, z), -1.5707963, 0.0001));
+    assert(close(vec2(1.0, 0.0).signed_angle(vec2(0.0, -2.0)), -1.5707963, 0.0001));
+    assert(vec3(2.0, 3.0, 4.0).project(y).near(vec3(0.0, 3.0, 0.0), 0.0001));
+    assert(vec3(2.0, 3.0, 4.0).on_plane(y).near(vec3(2.0, 0.0, 4.0), 0.0001));
+    assert(vec3(1.0, -1.0, 0.0).reflect(y).near(vec3(1.0, 1.0, 0.0), 0.0001));
+    assert(vec2(1.0, -1.0).reflect(vec2(0.0, 1.0)).near(vec2(1.0, 1.0), 0.0001));
+    Vec3 o = vec3(0.0, 0.0, 0.0);
+    assert(o.move_towards(vec3(10.0, 0.0, 0.0), 3.0).near(vec3(3.0, 0.0, 0.0), 0.0001));
+    assert(o.move_towards(vec3(1.0, 0.0, 0.0), 3.0).near(x, 0.0));
+    assert(vec3(3.0, 4.0, 0.0).clamp_length(1.0).near(vec3(0.6, 0.8, 0.0), 0.0001));
+    assert(vec3(0.3, 0.0, 0.0).clamp_length(1.0).near(vec3(0.3, 0.0, 0.0), 0.0));
+    assert(vec3(1.26, -0.74, 0.1).snapped(0.5).near(vec3(1.5, -0.5, 0.0), 0.0001));
+    assert(close(snap(0.4, 0.2617994), 0.5235988, 0.0001) && snap(1.3, 0.0) == 1.3);  // by 15 degrees
+}
+
+test "rotations: from angles and back, toward a direction, step by step" {
+    Vec3 angles = vec3(0.4, -1.2, 0.7);
+    Quat q = from_euler(angles);
+    assert(q.euler().near(angles, 0.0001));
+    // z first, then x, then y
+    Quat by_hand = from_axis_angle(vec3(0.0, 1.0, 0.0), -1.2).mul(from_axis_angle(
+        vec3(1.0, 0.0, 0.0),
+        0.4
+    )).mul(from_axis_angle(vec3(0.0, 0.0, 1.0), 0.7));
+    assert(q.near(by_hand, 0.0001));
+    // straight down: yaw and roll turn about the same axis, the roll is given to the yaw
+    Quat down = from_euler(vec3(1.5707963, 0.5, 0.3));
+    assert(from_euler(down.euler()).near(down, 0.0001) && down.euler().z == 0.0);
+    Vec3 a = vec3(1.0, 2.0, -0.5);
+    Vec3 b = vec3(-3.0, 0.5, 2.0);
+    assert(from_to(a, b).rotate(a.normalized()).near(b.normalized(), 0.0001));
+    assert(from_to(a, a.neg()).rotate(a.normalized()).near(a.normalized().neg(), 0.0001));
+    Quat look = look_rotation(vec3(1.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0));
+    assert(look.rotate(vec3(0.0, 0.0, -1.0)).near(vec3(0.70710678, 0.0, 0.70710678), 0.0001));
+    assert(look.rotate(vec3(0.0, 1.0, 0.0)).near(vec3(0.0, 1.0, 0.0), 0.0001));
+    Quat up = look_rotation(vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0));
+    assert(up.rotate(vec3(0.0, 0.0, -1.0)).near(vec3(0.0, 1.0, 0.0), 0.0001));
+    Quat i = identity_quat();
+    Quat turn = from_axis_angle(vec3(0.0, 1.0, 0.0), 1.0);
+    assert(close(i.angle(turn), 1.0, 0.0001));
+    Quat step = i.rotate_towards(turn, 0.25);
+    assert(close(i.angle(step), 0.25, 0.0001) && i.rotate_towards(turn, 2.0).near(turn, 0.0));
+    assert(turn.mul(turn.inverse()).near(i, 0.0001));
 }

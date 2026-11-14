@@ -1,0 +1,414 @@
+// math.bvh: a tree of boxes over many things of a scene, to find quickly those a ray meets (the
+// click of the editor, a shot, a line of sight) or those in a region (the meshes near a light, the
+// bodies near an explosion), without testing them all. Each thing is given by its box; the tree
+// splits them in halves along their longest spread, so that it stays balanced whatever their
+// places. When things move without changing much, `refit` makes the boxes follow without
+// building again.
+//
+//   bvh.Bvh* tree = bvh.build(arena, boxes);            // a box per mesh, in the world
+//   match (tree.first(ray, 1000.0, meshes as bvh.Hits*)) {
+//       some(hit) => select(hit.item),                    // the nearest mesh under the mouse
+//       none => {},
+//   }
+import std.vec;
+import std.random;
+import math.linear;
+import math.geometry;
+
+// Things per leaf of the tree, at most.
+usize LEAF = 4;
+
+// What a ray meets exactly, for `Bvh.first`: the boxes of the tree only say what it may meet.
+pub interface Hits {
+    // Where the ray `r` meets the thing `item` (a distance along it), none if it misses it.
+    f32? hit(usize item, geometry.Ray r);
+}
+
+// The thing a ray meets first, and where.
+pub struct Hit {
+    pub usize item;
+    pub f32 distance;
+}
+
+struct Node {
+    mut geometry.Aabb box;
+    mut usize first;  // a leaf: its first place in `order`; a branch: its left child (the right one next)
+    mut usize count;  // the things of a leaf; 0 for a branch
+}
+
+pub class Bvh {
+    mut geometry.Aabb[] boxes;  // the box of each thing
+    mut linear.Vec3[] centers;  // their centers, to split them
+    mut usize[] order;  // the things, those of a leaf side by side
+    mut Node[] nodes;
+    mut usize used;
+
+    void init(keeps Arena* arena, geometry.Aabb[] given) {
+        usize n = given.len;
+        boxes = arena.alloc_slice(geometry.Aabb, n);
+        centers = arena.alloc_slice(linear.Vec3, n);
+        order = arena.alloc_slice(usize, n);
+        nodes = arena.alloc_slice(Node, n == 0 ? 1 : 2 * n);
+        for (usize i in 0..n) {
+            boxes[i] = given[i];
+            centers[i] = given[i].center();
+            order[i] = i;
+        }
+        used = 0;
+        if (n > 0) {
+            used = 1;
+            make(0, 0, n);
+        }
+    }
+
+    // The node `at` over the things from `start` to `end` of `order`, and those below it.
+    void make(usize at, usize start, usize end) {
+        nodes[at].box = around(start, end);
+        if (end - start <= LEAF) {
+            nodes[at].first = start;
+            nodes[at].count = end - start;
+            return;
+        }
+        // the longest spread of the centers
+        mut geometry.Aabb spread = geometry.aabb(centers[order[start]], centers[order[start]]);
+        for (usize i in start + 1..end) {
+            spread = spread.grown(centers[order[i]]);
+        }
+        linear.Vec3 size = spread.size();
+        usize axis = size.x >= size.y && size.x >= size.z ? 0 : size.y >= size.z ? 1 : 2;
+        usize middle = start + (end - start) / 2;
+        select(start, end, middle, axis);  // half on each side: the depth stays that of a halving
+        usize left = used;
+        used += 2;
+        nodes[at].first = left;
+        nodes[at].count = 0;
+        make(left, start, middle);
+        make(left + 1, middle, end);
+    }
+
+    geometry.Aabb around(usize start, usize end) {
+        mut geometry.Aabb box = boxes[order[start]];
+        for (usize i in start + 1..end) {
+            box = box.union(boxes[order[i]]);
+        }
+        return box;
+    }
+
+    f32 key(usize place, usize axis) {
+        linear.Vec3 c = centers[order[place]];
+        return axis == 0 ? c.x : axis == 1 ? c.y : c.z;
+    }
+
+    // The things from `start` to `end` of `order` put so that the one at `k` is where a sort on
+    // `axis` would put it, those before it not after it, those after it not before (Hoare's
+    // selection, as Wirth writes it).
+    void select(usize start, usize end, usize k, usize axis) {
+        mut i64 l = start as i64;
+        mut i64 r = end as i64 - 1;
+        i64 kk = k as i64;
+        while (l < r) {
+            f32 x = key(k, axis);
+            mut i64 i = l;
+            mut i64 j = r;
+            while (i <= j) {
+                while (key(i as usize, axis) < x) {
+                    i += 1;
+                }
+                while (x < key(j as usize, axis)) {
+                    j -= 1;
+                }
+                if (i <= j) {
+                    usize kept = order[i as usize];
+                    order[i as usize] = order[j as usize];
+                    order[j as usize] = kept;
+                    i += 1;
+                    j -= 1;
+                }
+            }
+            if (j < kk) {
+                l = i;
+            }
+            if (kk < i) {
+                r = j;
+            }
+        }
+    }
+
+    // How many things the tree holds.
+    pub usize count() {
+        return boxes.len;
+    }
+
+    // The box around them all, none if there are none.
+    pub geometry.Aabb? bounds() {
+        return used == 0 ? none : some(nodes[0].box);
+    }
+
+    // The boxes of the things, moved (one per thing, in the same order): the tree keeps its
+    // shape, its boxes follow. False, and nothing changed, if there are not as many. A tree
+    // whose things moved far gets slower to search: build it again then.
+    pub bool refit(geometry.Aabb[] moved) {
+        if (moved.len != boxes.len) {
+            return false;
+        }
+        for (usize i in 0..moved.len) {
+            boxes[i] = moved[i];
+            centers[i] = moved[i].center();
+        }
+        // the children of a node come after it: from the last to the first, each sees them done
+        mut usize n = used;
+        while (n > 0) {
+            n -= 1;
+            Node node = nodes[n];
+            if (node.count > 0) {
+                nodes[n].box = around(node.first, node.first + node.count);
+            } else {
+                nodes[n].box = nodes[node.first].box.union(nodes[node.first + 1].box);
+            }
+        }
+        return true;
+    }
+
+    // The things whose boxes overlap `region`, added to `out`.
+    pub void overlapping(geometry.Aabb region, vec.Vec<usize>* out) {
+        if (used == 0) {
+            return;
+        }
+        mut usize[64] stack = [0; 64];
+        mut usize top = 1;
+        while (top > 0) {
+            top -= 1;
+            Node node = nodes[stack[top]];
+            if (!node.box.overlaps(region)) {
+                continue;
+            }
+            if (node.count > 0) {
+                for (usize i in node.first..node.first + node.count) {
+                    if (boxes[order[i]].overlaps(region)) {
+                        out.push(order[i]);
+                    }
+                }
+            } else {
+                stack[top] = node.first;
+                stack[top + 1] = node.first + 1;
+                top += 2;
+            }
+        }
+    }
+
+    // The things whose boxes the ray crosses within `max_distance`, added to `out`, in no order.
+    pub void along(geometry.Ray r, f32 max_distance, vec.Vec<usize>* out) {
+        if (used == 0) {
+            return;
+        }
+        mut usize[64] stack = [0; 64];
+        mut usize top = 1;
+        while (top > 0) {
+            top -= 1;
+            Node node = nodes[stack[top]];
+            if (!within(r, node.box, max_distance)) {
+                continue;
+            }
+            if (node.count > 0) {
+                for (usize i in node.first..node.first + node.count) {
+                    if (within(r, boxes[order[i]], max_distance)) {
+                        out.push(order[i]);
+                    }
+                }
+            } else {
+                stack[top] = node.first;
+                stack[top + 1] = node.first + 1;
+                top += 2;
+            }
+        }
+    }
+
+    // The thing the ray meets first within `max_distance`, as `hits` says where it meets each;
+    // none if it meets none. The nearer half of each node is searched first, and what lies
+    // beyond the best hit found is not searched.
+    pub Hit? first(geometry.Ray r, f32 max_distance, Hits* hits) {
+        if (used == 0) {
+            return none;
+        }
+        mut usize[64] stack = [0; 64];
+        mut usize top = 1;
+        mut f32 best = max_distance;
+        mut bool found = false;
+        mut usize item = 0;
+        while (top > 0) {
+            top -= 1;
+            Node node = nodes[stack[top]];
+            if (!within(r, node.box, best)) {
+                continue;
+            }
+            if (node.count > 0) {
+                for (usize i in node.first..node.first + node.count) {
+                    match (hits.hit(order[i], r)) {
+                        some(d) => {
+                            if (d >= 0.0 && d <= best) {
+                                best = d;
+                                found = true;
+                                item = order[i];
+                            }
+                        },
+                        none => { },
+                    }
+                }
+            } else {
+                f32 a = entry(r, nodes[node.first].box);
+                f32 b = entry(r, nodes[node.first + 1].box);
+                // the nearer one on top, searched first
+                stack[top] = a <= b ? node.first + 1 : node.first;
+                stack[top + 1] = a <= b ? node.first : node.first + 1;
+                top += 2;
+            }
+        }
+        return found ? some(Hit{ item: item, distance: best }) : none;
+    }
+}
+
+bool within(geometry.Ray r, geometry.Aabb box, f32 max_distance) {
+    return match (geometry.ray_box(r, box)) {
+        some(d) => d <= max_distance,
+        none => false,
+    };
+}
+
+f32 entry(geometry.Ray r, geometry.Aabb box) {
+    return match (geometry.ray_box(r, box)) {
+        some(d) => d,
+        none => 3.4e38,
+    };
+}
+
+// The tree over the things of these boxes, the thing `i` being that of `boxes[i]`.
+pub Bvh* build(keeps Arena* arena, geometry.Aabb[] boxes) {
+    return arena.new(Bvh, arena, boxes);
+}
+
+class Balls : Hits {
+    geometry.Sphere[] balls;
+
+    void init(keeps geometry.Sphere[] balls) {
+        self.balls = balls;
+    }
+
+    override f32? hit(usize item, geometry.Ray r) {
+        return geometry.ray_sphere(r, balls[item]);
+    }
+}
+
+test "a tree of boxes: the first hit and the regions as testing them all says" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    usize n = 500;
+    mut geometry.Sphere[] balls = arena.alloc_slice(geometry.Sphere, n);
+    mut geometry.Aabb[] boxes = arena.alloc_slice(geometry.Aabb, n);
+    mut random.Rng state = random.seeded(12345);
+    for (usize i in 0..n) {
+        linear.Vec3 c = linear.vec3(
+            next(&state) * 100.0 - 50.0,
+            next(&state) * 100.0 - 50.0,
+            next(&state) * 100.0 - 50.0
+        );
+        f32 radius = 0.2 + next(&state) * 2.0;
+        balls[i] = geometry.sphere(c, radius);
+        boxes[i] = box_of(balls[i]);
+    }
+    Bvh* tree = build(&arena, boxes);
+    assert(tree.count() == n);
+    Hits* hits = arena.new(Balls, balls) as Hits*;
+    mut i32 met = 0;
+    for (i32 k in 0..200) {
+        linear.Vec3 from = linear.vec3(next(&state) * 140.0 - 70.0, next(&state) * 140.0 - 70.0, -80.0);
+        geometry.Ray r = geometry.ray(from, linear.vec3(next(&state) - 0.5, next(&state) - 0.5, 1.0));
+        // all of them, one by one
+        mut f32 best = 1000.0;
+        mut bool any = false;
+        for (usize i in 0..n) {
+            match (geometry.ray_sphere(r, balls[i])) {
+                some(d) => {
+                    if (d < best) {
+                        best = d;
+                        any = true;
+                    }
+                },
+                none => { },
+            }
+        }
+        match (tree.first(r, 1000.0, hits)) {
+            some(hit) => {
+                assert(any && abs(hit.distance - best) < 0.0001);
+                met += 1;
+            },
+            none => {
+                assert(!any);
+            },
+        }
+    }
+    assert(met > 20);  // enough rays met a ball for the test to say something
+    // a region: the same things as all of them, one by one
+    geometry.Aabb region = geometry.aabb(linear.vec3(-10.0, -20.0, -5.0), linear.vec3(15.0, 5.0, 30.0));
+    vec.Vec<usize>* inside = vec.new<usize>(&arena);
+    tree.overlapping(region, inside);
+    mut usize want = 0;
+    for (usize i in 0..n) {
+        if (boxes[i].overlaps(region)) {
+            want += 1;
+        }
+    }
+    assert(inside.len() == want && want > 0);
+    // a ray, through the boxes: those it crosses
+    geometry.Ray across = geometry.ray(linear.vec3(-60.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0));
+    vec.Vec<usize>* crossed = vec.new<usize>(&arena);
+    tree.along(across, 1000.0, crossed);
+    mut usize crossing = 0;
+    for (usize i in 0..n) {
+        if (within(across, boxes[i], 1000.0)) {
+            crossing += 1;
+        }
+    }
+    assert(crossed.len() == crossing);
+    // all moved by 100 along x: the region finds nothing; moved back, the same as before
+    mut geometry.Aabb[] moved = arena.alloc_slice(geometry.Aabb, n);
+    for (usize i in 0..n) {
+        linear.Vec3 shift = linear.vec3(100.0, 0.0, 0.0);
+        moved[i] = geometry.aabb(boxes[i].min.add(shift), boxes[i].max.add(shift));
+    }
+    assert(tree.refit(moved));
+    vec.Vec<usize>* none_there = vec.new<usize>(&arena);
+    tree.overlapping(region, none_there);
+    assert(none_there.len() == 0);
+    assert(tree.refit(boxes));
+    vec.Vec<usize>* again = vec.new<usize>(&arena);
+    tree.overlapping(region, again);
+    assert(again.len() == want);
+    assert(!tree.refit(boxes[0..3]));
+    // no things at all
+    Bvh* empty = build(&arena, boxes[0..0]);
+    match (empty.first(across, 1000.0, hits)) {
+        some(_) => assert(false),
+        none => { },
+    }
+    match (empty.bounds()) {
+        some(_) => assert(false),
+        none => { },
+    }
+    // all at the same place: still a tree, still found
+    mut geometry.Aabb[] same = arena.alloc_slice(geometry.Aabb, 50);
+    for (usize i in 0..50) {
+        same[i] = box_of(geometry.sphere(linear.vec3(0.0, 0.0, 0.0), 1.0));
+    }
+    vec.Vec<usize>* all = vec.new<usize>(&arena);
+    build(&arena, same).overlapping(geometry.aabb(linear.vec3(-0.5, -0.5, -0.5), linear.vec3(0.5, 0.5, 0.5)), all);
+    assert(all.len() == 50);
+}
+
+geometry.Aabb box_of(geometry.Sphere s) {
+    linear.Vec3 r = linear.vec3(s.radius, s.radius, s.radius);
+    return geometry.aabb(s.center.sub(r), s.center.add(r));
+}
+
+f32 next(random.Rng* r) {
+    return r.range_f32(0.0, 1.0);
+}

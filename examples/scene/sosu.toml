@@ -1,0 +1,23 @@
+# A scene read from a file (spec §8.2): the common components of `engine` (meshes, lights, a view,
+# bodies, a sound, an emitter) in assets/level.json, made to run by an `engine.Engine`, drawn on the
+# GPU. Space drops a crate; R reads the scene again.
+[package]
+name = "scene_example"
+version = "0.1.0"
+
+[app]
+id = "org.sosu.scene"
+name = "Sosu scene"
+assets = ["assets"]
+
+[dependencies]
+engine = { path = "../../packages/engine" }
+scene = { path = "../../packages/scene" }
+platform = { path = "../../packages/platform" }
+gpu = { path = "../../packages/gpu" }
+render3d = { path = "../../packages/render3d" }
+particles = { path = "../../packages/particles" }
+audio = { path = "../../packages/audio" }
+math = { path = "../../packages/math" }
+model = { path = "../../packages/model" }
+image = { path = "../../packages/image" }

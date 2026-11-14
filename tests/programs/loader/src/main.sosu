@@ -1,0 +1,128 @@
+// platform.library: the library `geom` (tests/programs/library, built shared beforehand) loaded
+// from a copy, its functions found and called, its failed checks and its faults read as errors
+// while this program keeps running, then loaded again from a second copy, and the copies removed.
+//
+//   sosuc run tests/programs/loader -- tests/programs/library/build/geom.dll
+import std.io;
+import std.os;
+import platform.sdl;
+import platform.library;
+
+// What `geom_error()` says after the last call, or "none".
+str error_of(Arena* arena, library.Library* lib) uses io {
+    match (lib.symbol("geom_error")) {
+        some(f) => {
+            unsafe {
+                fn() -> ui8* uses io said = f as fn() -> ui8* uses io;
+                ui8* message = said();
+                if (message as ui64 == 0) {
+                    return "none";
+                }
+                return sdl.copy_cstring(arena, message, 4 * KB);
+            }
+        },
+        none => {
+            return "no geom_error";
+        },
+    }
+}
+
+// The kind of an error, short (its place in the files of the library changes as they do).
+str kind_of(str message) {
+    return text_has(message, "requires failed") ? "requires"
+            : text_has(message, "stack overflow") ? "stack overflow"
+            : text_has(message, "after the free()") ? "used after free"
+            : text_has(message, "invalid memory access") ? "invalid memory access"
+            : message;
+}
+
+bool text_has(str s, str part) {
+    if (part.len > s.len) {
+        return false;
+    }
+    for (usize i in 0..s.len - part.len + 1) {
+        mut bool same = true;
+        for (usize j in 0..part.len) {
+            if (s.bytes[i + j] != part.bytes[j]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            return true;
+        }
+    }
+    return false;
+}
+
+i32 use_once(Arena* arena, str path, str folder) uses io {
+    library.Library* lib = match (library.open_copy(arena, path, folder)) {
+        some(x) => x,
+        none => {
+            io.print("cannot load {}: {}", path, library.error(arena));
+            return 1;
+        },
+    };
+    io.print("loaded a copy: {}", lib.path != path);
+    match (lib.symbol("geom_nothing")) {
+        some(f) => {
+            io.print("geom_nothing found");
+        },
+        none => {
+            io.print("geom_nothing: none");
+        },
+    }
+    match (lib.symbol("geom_half")) {
+        some(f) => {
+            unsafe {
+                fn(i32) -> i32 uses io half = f as fn(i32) -> i32 uses io;
+                io.print("half 8 = {}, error: {}", half(8), error_of(arena, lib));
+                io.print("half 7 = {}, error: {}", half(7), kind_of(error_of(arena, lib)));
+            }
+        },
+        none => {
+            io.print("geom_half: none");
+        },
+    }
+    // its faults: errors, and this program goes on
+    match (lib.symbol("geom_deep")) {
+        some(f) => {
+            unsafe {
+                fn(i64) -> i64 uses io deep = f as fn(i64) -> i64 uses io;
+                io.print("deep = {}, error: {}", deep(0), kind_of(error_of(arena, lib)));
+            }
+        },
+        none => { },
+    }
+    match (lib.symbol("geom_poke")) {
+        some(f) => {
+            unsafe {
+                fn(usize) -> i32 uses io poke = f as fn(usize) -> i32 uses io;
+                io.print("poke = {}, error: {}", poke(16), kind_of(error_of(arena, lib)));
+            }
+        },
+        none => { },
+    }
+    lib.close();
+    return 0;
+}
+
+i32 main() uses io {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    if (args.len != 1) {
+        io.print("usage: loader <shared library>");
+        return 2;
+    }
+    str folder = "build/loaded";
+    library.clean_copies(args[0], folder);
+    // twice, from two copies: as an editor loads again the game it rebuilt
+    for (i32 i in 0..2) {
+        if (use_once(&arena, args[0], folder) != 0) {
+            return 1;
+        }
+    }
+    io.print("copies removed: {}", library.clean_copies(args[0], folder));
+    return 0;
+}

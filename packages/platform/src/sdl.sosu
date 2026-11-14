@@ -8,7 +8,7 @@ pub struct Event {
     pub ui32 kind;  // SDL_EventType
     ui32 reserved;
     ui64 timestamp;
-    ui32 window;
+    pub ui32 window;  // the window of a window, keyboard, text, mouse or drop event; 0 for the others
     pub ui32 word5;  // window events: data1; keyboard events: keyboard id
     pub ui32 word6;  // window events: data2; keyboard events: scancode
     pub ui32 word7;  // keyboard events: key code

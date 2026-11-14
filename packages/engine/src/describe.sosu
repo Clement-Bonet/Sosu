@@ -1,0 +1,468 @@
+// engine.describe: the fields of a component, said by the program, since Sosu has no reflection.
+// A `Describe<T>` lists the fields of a component of type T (their name, their kind, their bounds),
+// and reads and writes each through a `Value`: an inspector shows and changes them, and `codec`
+// `write_object` and `read_object` save and read it: a class implements `Describe<T>` and
+// `scene.Codec<T>` both, each method of the codec a call, one description for both.
+//
+// A component is saved as a JSON object of its fields by name: a field added later is read from
+// an older file as its default (`fresh`), a field the program no longer has is skipped, a choice is
+// written by its name, and a number is held within its bounds.
+//
+//   {"kind": "point", "color": [1, 0.9, 0.8], "intensity": 12, "range": 8, "shadows": false}
+import std.json;
+import std.text;
+import math.linear;
+import scene.scene;
+import scene.save;
+
+pub enum Kind {
+    Number,  // f32, within `low` and `high` when `low < high`
+    Whole,   // i64, within `low` and `high` when `low < high`
+    Flag,    // bool
+    Text,    // str
+    Vector,  // three numbers
+    Color,   // three numbers from 0 to 1: red, green, blue
+    Choice,  // one of `choices`, by its index
+    Asset,   // the path of a file of the project (a model, a sound...), relative to its folder
+}
+
+pub struct Field {
+    pub str name;   // its key in the file: letters, digits and `_`
+    pub str label;  // what an inspector shows
+    pub Kind kind;
+    pub f32 low = 0.0;
+    pub f32 high = 0.0;
+    pub str[]? choices = none;  // `Choice`: the names of the choices
+}
+
+// The value of a field.
+pub enum Value {
+    Number(f32 x),
+    Whole(i64 n),
+    Flag(bool on),
+    Text(str s),       // `Text` and `Asset`
+    Vector(linear.Vec3 v),  // `Vector` and `Color`
+    Choice(usize index),
+}
+
+// The fields of a component of type T.
+pub interface Describe<T> {
+    // The name of its table in a scene file: letters, digits and `_`.
+    str name();
+    // A component as it is made new: what a field missing from a file keeps.
+    T fresh();
+    usize count();
+    Field field(usize i);
+    Value get(T* component, usize i);
+    // `v` given to the field `i` (texts already copied where the component lives).
+    void set(T* component, usize i, Value v);
+}
+
+// ---- Helpers for the descriptions ----
+
+pub Field number(str name, str label, f32 low, f32 high) {
+    return Field{ name: name, label: label, kind: Kind.Number, low: low, high: high };
+}
+
+pub Field whole(str name, str label, f32 low, f32 high) {
+    return Field{ name: name, label: label, kind: Kind.Whole, low: low, high: high };
+}
+
+pub Field flag(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Flag };
+}
+
+pub Field text_field(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Text };
+}
+
+pub Field vector(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Vector };
+}
+
+pub Field color(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Color, low: 0.0, high: 1.0 };
+}
+
+pub Field choice(str name, str label, keeps str[] choices) {
+    return Field{ name: name, label: label, kind: Kind.Choice, choices: some(choices) };
+}
+
+pub Field asset(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Asset };
+}
+
+// The number of `v`, or `otherwise`.
+pub f32 number_of(Value v, f32 otherwise) {
+    return match (v) {
+        Number(x) => x,
+        Whole(n) => n as f32,
+        _ => otherwise,
+    };
+}
+
+pub i64 whole_of(Value v, i64 otherwise) {
+    return match (v) {
+        Whole(n) => n,
+        Number(x) => x as i64,
+        _ => otherwise,
+    };
+}
+
+pub bool flag_of(Value v, bool otherwise) {
+    return match (v) {
+        Flag(on) => on,
+        _ => otherwise,
+    };
+}
+
+pub str text_of(Value v, str otherwise) {
+    return match (v) {
+        Text(s) => s,
+        _ => otherwise,
+    };
+}
+
+pub linear.Vec3 vector_of(Value v, linear.Vec3 otherwise) {
+    return match (v) {
+        Vector(x) => x,
+        _ => otherwise,
+    };
+}
+
+pub usize choice_of(Value v, usize otherwise) {
+    return match (v) {
+        Choice(i) => i,
+        _ => otherwise,
+    };
+}
+
+// `v` held within the bounds of `f` (a number or a whole, a choice among its choices).
+pub Value bounded(Field f, Value v) {
+    bool bounds = f.low < f.high;
+    return match (v) {
+        Number(x) => Value.Number(bounds ? max(f.low, min(f.high, x)) : x),
+        Whole(n) => Value.Whole(bounds ? max(f.low as i64, min(f.high as i64, n)) : n),
+        Choice(i) => Value.Choice(match (f.choices) {
+            some(c) => i < c.len ? i : 0,
+            none => 0,
+        }),
+        _ => v,
+    };
+}
+
+// ---- Saving, from a description ----
+
+void write_number(text.TextBuilder* t, f32 x) {
+    f64 v = x as f64;
+    t.push_f64_shortest(v == v && v < 3.0e38 && v > -3.0e38 ? v : 0.0);
+}
+
+void write_value(text.TextBuilder* out, Field f, Value v) {
+    match (v) {
+        Number(x) => {
+            write_number(out, x);
+        },
+        Whole(n) => {
+            out.push_i64(n);
+        },
+        Flag(on) => {
+            out.push(on ? "true" : "false");
+        },
+        Text(s) => {
+            mut Arena scratch = Arena.new(s.len * 6 + 64);
+            out.push(json.write(&scratch, json.Value.Text(s)));
+            scratch.free();
+        },
+        Vector(x) => {
+            out.push("[");
+            write_number(out, x.x);
+            out.push(", ");
+            write_number(out, x.y);
+            out.push(", ");
+            write_number(out, x.z);
+            out.push("]");
+        },
+        Choice(i) => {
+            str chosen = match (f.choices) {
+                some(c) => i < c.len ? c[i] : "",
+                none => "",
+            };
+            mut Arena scratch = Arena.new(chosen.len * 6 + 64);
+            out.push(json.write(&scratch, json.Value.Text(chosen)));
+            scratch.free();
+        },
+    }
+}
+
+// The value of `f` in `v` (a member of a saved component), none when it is not one.
+Value? read_value(Arena* arena, Field f, json.Value v) {
+    return match (f.kind) {
+        Number => match (json.as_f64(v)) {
+            some(x) => some(Value.Number(x as f32)),
+            none => none,
+        },
+        Whole => match (json.as_f64(v)) {
+            some(x) => some(Value.Whole(x as i64)),
+            none => none,
+        },
+        Flag => match (json.as_bool(v)) {
+            some(on) => some(Value.Flag(on)),
+            none => none,
+        },
+        Text => text_in(arena, v),
+        Asset => text_in(arena, v),
+        Vector => vector_in(v),
+        Color => vector_in(v),
+        Choice => match (json.as_str(v)) {
+            some(s) => choice_named(f, s),
+            none => none,
+        },
+    };
+}
+
+Value? text_in(Arena* arena, json.Value v) {
+    return match (json.as_str(v)) {
+        some(s) => some(Value.Text(text.repeat(arena, s, 1))),
+        none => none,
+    };
+}
+
+Value? vector_in(json.Value v) {
+    if (json.len(v) != 3) {
+        return none;
+    }
+    mut f32[3] x = [0.0, 0.0, 0.0];
+    for (usize i in 0..3) {
+        match (json.at(v, i)) {
+            some(item) => {
+                match (json.as_f64(item)) {
+                    some(n) => {
+                        x[i] = n as f32;
+                    },
+                    none => {
+                        return none;
+                    },
+                }
+            },
+            none => {
+                return none;
+            },
+        }
+    }
+    return some(Value.Vector(linear.vec3(x[0], x[1], x[2])));
+}
+
+Value? choice_named(Field f, str name) {
+    match (f.choices) {
+        some(c) => {
+            for (usize i in 0..c.len) {
+                if (c[i] == name) {
+                    return some(Value.Choice(i));
+                }
+            }
+        },
+        none => { },
+    }
+    return none;  // a choice the program no longer has: the default stays
+}
+
+// A component written as an object of its fields: what the `write` of a `scene.Codec<T>` gives,
+// for a class that implements both (a generic class cannot implement an interface yet).
+pub void write_object<T>(text.TextBuilder* out, Describe<T>* fields, T* value) {
+    out.push("{");
+    for (usize i in 0..fields.count()) {
+        Field f = fields.field(i);
+        if (i > 0) {
+            out.push(", ");
+        }
+        out.push("\"");
+        out.push(f.name);
+        out.push("\": ");
+        write_value(out, f, fields.get(value, i));
+    }
+    out.push("}");
+}
+
+// The component of `v`, an object of its fields: what the `read` of a `scene.Codec<T>` gives. A
+// field missing, or of another kind, keeps its value of `fresh`.
+pub T? read_object<T>(Arena* arena, Describe<T>* fields, json.Value v) {
+    match (v) {
+        Object(members) => { },
+        _ => {
+            return none;
+        },
+    }
+    mut T component = fields.fresh();
+    for (usize i in 0..fields.count()) {
+        Field f = fields.field(i);
+        match (json.get(v, f.name)) {
+            some(member) => {
+                match (read_value(arena, f, member)) {
+                    some(x) => {
+                        fields.set(&component, i, bounded(f, x));
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+    }
+    return some(component);
+}
+
+// ---- Tests ----
+
+struct Lamp {
+    mut usize kind;  // 0 point, 1 spot
+    mut linear.Vec3 color;
+    mut f32 power;
+    mut i64 flicker;
+    mut bool on;
+    mut str label;
+    mut str sound;
+}
+
+class LampFields : Describe<Lamp>, save.Codec<Lamp> {
+    str[] kinds;
+
+    void init(keeps str[] kinds) {
+        self.kinds = kinds;
+    }
+
+    override str name() {
+        return "lamp";
+    }
+
+    override void write(text.TextBuilder* out, Lamp* value) {
+        write_object(out, self as Describe<Lamp>*, value);
+    }
+
+    override Lamp? read(Arena* arena, json.Value v) {
+        return read_object(arena, self as Describe<Lamp>*, v);
+    }
+
+    override Lamp fresh() {
+        return Lamp{ kind: 0, color: linear.vec3(1.0, 1.0, 1.0), power: 10.0, flicker: 0, on: true, label: "", sound: "" };
+    }
+
+    override usize count() {
+        return 7;
+    }
+
+    override Field field(usize i) {
+        if (i == 0) {
+            return choice("kind", "Kind", kinds);
+        }
+        if (i == 1) {
+            return color("color", "Color");
+        }
+        if (i == 2) {
+            return number("power", "Power", 0.0, 100.0);
+        }
+        if (i == 3) {
+            return whole("flicker", "Flicker", 0.0, 10.0);
+        }
+        if (i == 4) {
+            return flag("on", "On");
+        }
+        if (i == 5) {
+            return text_field("label", "Label");
+        }
+        return asset("sound", "Sound");
+    }
+
+    override Value get(Lamp* l, usize i) {
+        if (i == 0) {
+            return Value.Choice(l.kind);
+        }
+        if (i == 1) {
+            return Value.Vector(l.color);
+        }
+        if (i == 2) {
+            return Value.Number(l.power);
+        }
+        if (i == 3) {
+            return Value.Whole(l.flicker);
+        }
+        if (i == 4) {
+            return Value.Flag(l.on);
+        }
+        if (i == 5) {
+            return Value.Text(l.label);
+        }
+        return Value.Text(l.sound);
+    }
+
+    override void set(Lamp* l, usize i, Value v) {
+        if (i == 0) {
+            l.kind = choice_of(v, l.kind);
+        } else if (i == 1) {
+            l.color = vector_of(v, l.color);
+        } else if (i == 2) {
+            l.power = number_of(v, l.power);
+        } else if (i == 3) {
+            l.flicker = whole_of(v, l.flicker);
+        } else if (i == 4) {
+            l.on = flag_of(v, l.on);
+        } else if (i == 5) {
+            l.label = text_of(v, l.label);
+        } else {
+            l.sound = text_of(v, l.sound);
+        }
+    }
+}
+
+test "a component described once: saved, read back, and an older file read with its defaults" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    mut str[2] names = ["point", "spot"];
+    LampFields* fields = arena.new(LampFields, names[0..2]);
+    save.Codec<Lamp>* c = fields as save.Codec<Lamp>*;
+    scene.World* w = scene.world(&arena);
+    scene.Table<Lamp>* lamps = w.table<Lamp>();
+    scene.Entity e = w.spawn_at("hall", linear.transform(), none);
+    lamps.set(e, Lamp{ kind: 1, color: linear.vec3(1.0, 0.5, 0.25), power: 42.5, flicker: 3, on: false,
+            label: "a \"warm\" one", sound: "sounds/hum.ogg" });
+    save.Writer* out = save.writer(&arena, w);
+    out.add(lamps, c);
+    str saved = out.written();
+    assert(text.contains(saved, "\"kind\": \"spot\"") && text.contains(saved, "\"power\": 42.5"));
+    scene.World* again = scene.world(&arena);
+    scene.Table<Lamp>* read_lamps = again.table<Lamp>();
+    save.Reader* r = match (save.read(&arena, again, saved, none)) {
+        ok(x) => x,
+        err(err_) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(r.add(read_lamps, c));
+    mut Lamp l = match (read_lamps.get(r.entities()[0])) {
+        some(x) => *x,
+        none => fields.fresh(),
+    };
+    assert(l.kind == 1 && l.color.near(linear.vec3(1.0, 0.5, 0.25), 0.0001) && l.power == 42.5 && l.flicker == 3);
+    assert(!l.on && l.label == "a \"warm\" one" && l.sound == "sounds/hum.ogg");
+    // an older file: power missing, a kind no longer known, a flicker beyond its bounds, a color
+    // of the wrong kind
+    str older = "{\"sosu_scene\": 1, \"entities\": 1, \"components\": {\"lamp\": [[0, {\"kind\": \"neon\", \"flicker\": 99, \"color\": \"red\", \"on\": false}]]}}";
+    scene.World* old_world = scene.world(&arena);
+    scene.Table<Lamp>* old_lamps = old_world.table<Lamp>();
+    save.Reader* o = match (save.read(&arena, old_world, older, none)) {
+        ok(x) => x,
+        err(err_) => {
+            assert(false);
+            return;
+        },
+    };
+    assert(o.add(old_lamps, c));
+    Lamp m = match (old_lamps.get(o.entities()[0])) {
+        some(x) => *x,
+        none => Lamp{ kind: 9, color: linear.vec3(0.0, 0.0, 0.0), power: 0.0, flicker: 0, on: true, label: "x", sound: "" },
+    };
+    assert(m.kind == 0 && m.power == 10.0 && m.flicker == 10 && m.color.near(linear.vec3(1.0, 1.0, 1.0), 0.0001) && !m.on);
+    // what an inspector reads
+    assert(fields.count() == 7 && fields.field(2).label == "Power" && fields.field(2).high == 100.0);
+    assert(number_of(fields.get(&l, 2), 0.0) == 42.5);
+}

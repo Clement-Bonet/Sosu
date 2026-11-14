@@ -1,0 +1,425 @@
+// scene: a scene read from a file (assets/level.json), made of the common components of `engine`:
+// a ground and crates (meshes and bodies), the sun and a lamp, a camera, a fire (an emitter) and its
+// crackle (a sound under it). An `engine.Engine` makes them run: the crates fall and settle, the
+// fire burns, the crackle is heard where the fire is; the scene is drawn through its camera. The
+// models and the sound are made here and given to the engine by the names the file uses (no file
+// of models is needed). Space drops a crate from above; R reads the scene again; Escape quits.
+//
+//   sosuc run examples/scene                the window
+//   sosuc run examples/scene -- --check     without a window nor a sound card: what happened, said
+import std.io;
+import std.math;
+import std.text;
+import std.os;
+import math.linear;
+import scene.scene;
+import scene.save;
+import platform.app;
+import gpu.gpu;
+import render3d.render3d;
+import particles.draw;
+import audio.audio;
+import audio.device;
+import audio.mixer;
+import engine.components;
+import engine.engine;
+import image.png;
+
+// A crackle: short bursts of noise, at random, two seconds that loop.
+audio.Sound crackle(Arena* arena, i32 rate) {
+    audio.Sound s = audio.create(arena, rate, 1, 2 * rate as usize);
+    mut f32[] x = s.samples;
+    mut ui64 state = 3;
+    mut usize left = 0;
+    mut f32 height = 0.0;
+    for (usize i in 0..x.len) {
+        state = (state * 1103515245 + 12345) % 4294967296;
+        f32 noise = (state >> 8) as f32 / 8388608.0 - 1.0;
+        if (left == 0 && (state >> 4) % 900 == 0) {
+            left = 60 + (state >> 12) as usize % 400;
+            height = 0.2 + ((state >> 20) % 100) as f32 / 160.0;
+        }
+        if (left > 0) {
+            x[i] = noise * height * (left as f32 / 460.0);
+            left -= 1;
+        } else {
+            x[i] = noise * 0.015;  // the hiss of the fire
+        }
+    }
+    return audio.faded(arena, s, rate as usize / 100);
+}
+
+// The scene of assets/level.json in a new world, with what it names made here.
+engine.Engine*? load(keeps Arena* arena, keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer, keeps mixer.Mixer*? mix) uses io {
+    // from the root of the repository (sosuc run examples/scene), from its folder, or packaged
+    mut ui8[]? found = app.read_asset(arena, "examples/scene/assets/level.json");
+    if (match (found) {
+        some(x) => false,
+        none => true,
+    }) {
+        found = app.read_asset(arena, "assets/level.json");
+    }
+    ui8[] bytes = match (found) {
+        some(b) => b,
+        none => {
+            io.print("scene: assets/level.json not found");
+            return none;
+        },
+    };
+    str source = match (str.from_bytes(bytes)) {
+        ok(s) => s,
+        err(e) => {
+            io.print("scene: level.json is not text");
+            return none;
+        },
+    };
+    scene.World* w = scene.world(arena);
+    components.Components* c = components.components(arena, w);
+    match (components.load_scene(arena, c, source)) {
+        ok(r) => { },
+        err(e) => {
+            io.print("scene: level.json: {}", save_message(e));
+            return none;
+        },
+    }
+    engine.Engine* g = engine.engine(arena, c, none, renderer, drawer, mix);
+    g.adopt_model("crate", render3d.cube(arena, [0.72, 0.52, 0.3, 1.0]));
+    g.adopt_model("ground", render3d.ground(arena, 20.0, [0.34, 0.4, 0.3, 1.0]));
+    g.adopt_sound("crackle", crackle(arena, 48000));
+    return some(g);
+}
+
+str save_message(save.SceneError e) {
+    return save.message(e);
+}
+
+class Viewer : app.WindowHandler<uses threads> {
+    mut Arena arena;
+    mut Arena level;  // what the scene holds: made again by R
+    mut gpu.Device*? screen;
+    mut render3d.Renderer*? renderer;
+    mut draw.Drawer*? drawer;
+    mut device.Player*? player;
+    mut engine.Engine*? game;
+    mut ui64 last;
+    mut ui32 dropped;
+
+    void init() {
+        arena = Arena.new(1 * MB);
+        level = Arena.new(1 * MB);
+        screen = none;
+        renderer = none;
+        drawer = none;
+        player = none;
+        game = none;
+        last = 0;
+        dropped = 0;
+    }
+
+    void reload() uses io, threads {
+        match (game) {
+            some(g) => {
+                g.close();
+            },
+            none => { },
+        }
+        level.free();
+        level = Arena.new(1 * MB);
+        mixer.Mixer*? mix = match (player) {
+            some(p) => some(p.sounds),
+            none => none,
+        };
+        match (mix) {
+            some(m) => {
+                m.stop_all();
+            },
+            none => { },
+        }
+        game = load(&level, renderer, drawer, mix);
+    }
+
+    override void on_start(app.Window window) uses io, threads {
+        gpu.Device* d = match (gpu.open(&arena, window, gpu.Options{ })) {
+            ok(x) => x,
+            err(e) => {
+                io.print("scene: {} ({})", gpu.message(e), gpu.last_error(&arena));
+                app.request_quit();
+                return;
+            },
+        };
+        screen = some(d);
+        match (render3d.create(&arena, d, render3d.Options{ })) {
+            ok(r) => {
+                renderer = some(r);
+            },
+            err(e) => {
+                io.print("scene: {}", gpu.message(e));
+                app.request_quit();
+                return;
+            },
+        }
+        match (draw.drawer(&arena, d)) {
+            ok(x) => {
+                drawer = some(x);
+            },
+            err(e) => { },
+        }
+        match (device_open(&arena)) {
+            some(p) => {
+                player = some(p);
+            },
+            none => {
+                io.print("scene: no sound ({})", device.last_error(&arena));
+            },
+        }
+        reload();
+        last = app.now_ms();
+    }
+
+    // A crate from above, where the others fell: a mesh and a body added to the world as it runs.
+    void drop_crate() {
+        match (game) {
+            some(g) => {
+                dropped += 1;
+                f32 x = math.sin((dropped * 7) as f64) as f32 * 1.5;
+                f32 z = math.cos((dropped * 3) as f64) as f32 * 1.5;
+                scene.Entity e = g.world.spawn_at("dropped", linear.Transform{ position: linear.vec3(x, 8.0, z),
+                        rotation: linear.from_axis_angle(linear.vec3(1.0, 0.0, 1.0).normalized(), dropped as f32),
+                        scale: linear.vec3(0.4, 0.4, 0.4) }, none);
+                g.c.meshes.set(e, components.Mesh{ model: "crate" });
+                g.c.bodies.set(e, components.Body{ size: linear.vec3(0.4, 0.4, 0.4), restitution: 0.2 });
+            },
+            none => { },
+        }
+    }
+
+    override bool on_event(app.Event e) uses io, threads {
+        match (e) {
+            Quit => {
+                return false;
+            },
+            Key(code, down, mods) => {
+                if (down && code == 27) {
+                    return false;
+                }
+                if (down && code == 32) {
+                    drop_crate();
+                }
+                if (down && (code == 114 || code == 82)) {
+                    reload();
+                }
+            },
+            _ => { },
+        }
+        return true;
+    }
+
+    override void on_frame(app.Window window) uses io, threads {
+        ui64 now = app.now_ms();
+        f32 dt = max(0.0, min(0.1, (now - last) as f32 / 1000.0));
+        last = now;
+        engine.Engine* g = match (game) {
+            some(x) => x,
+            none => {
+                return;
+            },
+        };
+        g.update(dt);
+        match (player) {
+            some(p) => {
+                p.update();
+            },
+            none => { },
+        }
+        match (screen) {
+            some(d) => {
+                match (d.begin()) {
+                    some(frame) => {
+                        g.render(frame);
+                        frame.submit();
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+    }
+
+    override void on_stop(app.Window window) uses io, threads {
+        match (game) {
+            some(g) => {
+                g.close();
+            },
+            none => { },
+        }
+        match (player) {
+            some(p) => {
+                p.close();
+            },
+            none => { },
+        }
+        match (drawer) {
+            some(x) => {
+                x.close();
+            },
+            none => { },
+        }
+        match (renderer) {
+            some(r) => {
+                r.close();
+            },
+            none => { },
+        }
+        match (screen) {
+            some(d) => {
+                d.close();
+            },
+            none => { },
+        }
+        level.free();
+        arena.free();
+    }
+}
+
+device.Player*? device_open(Arena* arena) uses io {
+    return device.open_player(arena, device.Output{ });
+}
+
+// Without a window nor a sound card: the scene run three seconds, and what happened said.
+i32 check() uses io, threads {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    engine.Engine* g = match (load(&arena, none, none, none)) {
+        some(x) => x,
+        none => {
+            return 1;
+        },
+    };
+    defer g.close();
+    for (i32 i in 0..180) {
+        g.update(1.0 / 60.0);
+    }
+    // the crates at rest, above the ground
+    mut bool resting = true;
+    mut usize crates = 0;
+    for (scene.Entity e in g.c.bodies.entities_now()) {
+        match (g.body_of(e)) {
+            some(b) => {
+                if (b.mass() > 0.0) {
+                    crates += 1;
+                    resting = resting && !b.awake() || b.state().velocity.length() < 0.05;
+                    resting = resting && b.position().y > 0.3 && b.position().y < 4.0;
+                }
+            },
+            none => { },
+        }
+    }
+    mut usize sparks = 0;
+    for (scene.Entity e in g.c.emitters.entities_now()) {
+        match (g.system_of(e)) {
+            some(s) => {
+                sparks += s.count();
+            },
+            none => { },
+        }
+    }
+    // saved and read again: the same entities and components
+    str saved = components.save_scene(&arena, g.c);
+    scene.World* again = scene.world(&arena);
+    components.Components* c2 = components.components(&arena, again);
+    bool same = match (components.load_scene(&arena, c2, saved)) {
+        ok(r) => again.count() == g.world.count() && c2.bodies.len() == g.c.bodies.len() && c2.lights.len() == 2,
+        err(e) => false,
+    };
+    io.print("scene: {} entities", g.world.count());
+    io.print("scene: crates: {}, at rest on the ground: {}", crates, resting ? "yes" : "no");
+    io.print("scene: the fire burns: {}", sparks > 20 ? "yes" : "no");
+    io.print("scene: the camera looks at the crates: {}", g.camera().target.y < g.camera().position.y ? "yes" : "no");
+    io.print("scene: saved and read again the same: {}", same ? "yes" : "no");
+    return crates == 5 && resting && sparks > 20 && same ? 0 : 1;
+}
+
+// The scene drawn into a PNG after two seconds, on a GPU without a window (the picture of README).
+i32 snapshot(str path) uses io, threads {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    gpu.Device* d = match (gpu.open_headless(&arena, gpu.Options{ })) {
+        ok(x) => x,
+        err(e) => {
+            io.print("scene: no GPU ({})", gpu.last_error(&arena));
+            return 77;
+        },
+    };
+    defer d.close();
+    render3d.Renderer* r = match (render3d.create(&arena, d, render3d.Options{ })) {
+        ok(x) => x,
+        err(e) => {
+            return 1;
+        },
+    };
+    draw.Drawer*? drawer = match (draw.drawer(&arena, d)) {
+        ok(x) => some(x),
+        err(e) => none,
+    };
+    engine.Engine* g = match (load(&arena, some(r), drawer, none)) {
+        some(x) => x,
+        none => {
+            return 1;
+        },
+    };
+    for (i32 i in 0..120) {
+        g.update(1.0 / 60.0);
+    }
+    mut i32 code = 1;
+    match (d.target(1200, 760)) {
+        ok(target) => {
+            match (d.commands()) {
+                ok(frame) => {
+                    g.render_into(frame, target);
+                    match (frame.submit_and_wait()) {
+                        ok => {
+                            match (d.read_texture(&arena, target)) {
+                                ok(img) => {
+                                    match (png.save(&arena, path, img)) {
+                                        ok => {
+                                            io.print("written to {}", path);
+                                            code = 0;
+                                        },
+                                        err(e) => { },
+                                    }
+                                },
+                                err(e) => { },
+                            }
+                        },
+                        err(e) => { },
+                    }
+                },
+                err(e) => { },
+            }
+        },
+        err(e) => { },
+    }
+    g.close();
+    match (drawer) {
+        some(x) => {
+            x.close();
+        },
+        none => { },
+    }
+    r.close();
+    return code;
+}
+
+i32 main() uses io, threads {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    str[] args = os.args(&arena);
+    if (args.len == 1 && args[0] == "--check") {
+        return check();
+    }
+    if (args.len == 2 && args[0] == "--snapshot") {
+        return snapshot(args[1]);
+    }
+    Viewer* v = arena.new(Viewer);
+    return app.run_window(app.Config{ title: "Sosu scene", width: 1200, height: 760 }, v as app.WindowHandler<uses threads>*);
+}

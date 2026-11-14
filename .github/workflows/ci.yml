@@ -23,8 +23,20 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       SOSU_CC: ${{ matrix.cc }}
+      SOSU_CACHE: ${{ github.workspace }}/.sosu-cache
     steps:
       - uses: actions/checkout@v7
+      # The objects of the C and C++ files of the packages (Jolt, Mbed TLS, Recast...), kept from one
+      # run to the next by sosuc in SOSU_CACHE, by what they are made of (spec 9.1): only those that
+      # changed are compiled. Those this run did not use are removed before the folder is saved.
+      - uses: actions/cache@v6
+        with:
+          path: .sosu-cache
+          key: objects-linux-${{ matrix.cc }}-${{ github.run_id }}
+          restore-keys: objects-linux-${{ matrix.cc }}-
+      - name: The time the objects are used from
+        shell: bash
+        run: mkdir -p .sosu-cache && touch "$RUNNER_TEMP/objects-from"
       # Sosu declares the SDL functions itself and needs no header: the library is enough
       # (libsdl3-dev pulls in some 170 packages, slow when the mirror is). The link libSDL3.so,
       # which -lSDL3 looks for, comes with libsdl3-dev: it is made by hand. The tests package a
@@ -88,12 +100,29 @@ jobs:
         with:
           name: workspace-linux-x64
           path: examples/workspace/build/package/workspace-linux-x64.tar.gz
+      - name: Only the objects used by this run kept
+        if: always()
+        shell: bash
+        run: find .sosu-cache -type f ! -newer "$RUNNER_TEMP/objects-from" -delete
 
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest
+    env:
+      SOSU_CACHE: ${{ github.workspace }}/.sosu-cache
     steps:
       - uses: actions/checkout@v7
+      # The objects of the C and C++ files of the packages (Jolt, Mbed TLS, Recast...), kept from one
+      # run to the next by sosuc in SOSU_CACHE, by what they are made of (spec 9.1): only those that
+      # changed are compiled. Those this run did not use are removed before the folder is saved.
+      - uses: actions/cache@v6
+        with:
+          path: .sosu-cache
+          key: objects-windows-${{ github.run_id }}
+          restore-keys: objects-windows-
+      - name: The time the objects are used from
+        shell: bash
+        run: mkdir -p .sosu-cache && touch "$RUNNER_TEMP/objects-from"
       # The tests package a program of `platform` (spec 11.6): SDL comes first.
       - name: Download SDL3
         timeout-minutes: 5
@@ -125,6 +154,10 @@ jobs:
         with:
           name: workspace-windows-x64
           path: examples/workspace/build/package/workspace-windows-x64.zip
+      - name: Only the objects used by this run kept
+        if: always()
+        shell: bash
+        run: find .sosu-cache -type f ! -newer "$RUNNER_TEMP/objects-from" -delete
 
   macos:
     name: macOS (clang)
@@ -132,8 +165,20 @@ jobs:
     env:
       CC: clang
       SOSU_CC: clang
+      SOSU_CACHE: ${{ github.workspace }}/.sosu-cache
     steps:
       - uses: actions/checkout@v7
+      # The objects of the C and C++ files of the packages (Jolt, Mbed TLS, Recast...), kept from one
+      # run to the next by sosuc in SOSU_CACHE, by what they are made of (spec 9.1): only those that
+      # changed are compiled. Those this run did not use are removed before the folder is saved.
+      - uses: actions/cache@v6
+        with:
+          path: .sosu-cache
+          key: objects-macos-${{ github.run_id }}
+          restore-keys: objects-macos-
+      - name: The time the objects are used from
+        shell: bash
+        run: mkdir -p .sosu-cache && touch "$RUNNER_TEMP/objects-from"
       # The tests package a program of `platform` (spec 11.6): SDL comes first. Homebrew keeps
       # its libraries out of the default paths of the linker: LIBRARY_PATH gives it.
       - name: Install SDL3
@@ -167,6 +212,10 @@ jobs:
           sh packages/platform/fetch-sdl3-apple.sh
           ./build/sosuc package --target ios-sim examples/window
           test -x examples/window/build/ios/window.app/window
+      - name: Only the objects used by this run kept
+        if: always()
+        shell: bash
+        run: find .sosu-cache -type f ! -newer "$RUNNER_TEMP/objects-from" -delete
 
   # Android (spec 11.5): the NDK and the SDK of the image build examples/window up to its APK.
   # Running it on an emulator is done by hand.

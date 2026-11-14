@@ -1,0 +1,15 @@
+contract 1
+kinds before setup 7
+kinds 8, the last lift
+body.shape: Shape, kind 6, 4 choices, the second sphere
+mass 4.0
+parented 1
+lift local y -5.0, world y 0.0
+cleared 0
+loaded 1, 2 entities
+lift speed 2.0
+playing 1, fell 1, logs 1, error none
+stopped: playing 0, y 5.0
+broken step: set 1, index out of bounds
+after it: 2 entities, error none
+bad scene 0, 0 entities, said 1

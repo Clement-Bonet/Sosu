@@ -1,0 +1,2 @@
+poke 0, error: caught by the library
+after it is unloaded, a fault of the host: caught by the host

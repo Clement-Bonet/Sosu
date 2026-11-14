@@ -1774,6 +1774,12 @@ static Type *check_cast(Body *b, Expr *e) {
         allowed = needs_unsafe = true;
         for (size_t i = 0; i < from->as.fn.param_count; i++) allowed &= from->as.fn.params[i] == target->as.fn.params[i];
     }
+    if (!allowed && from->tag == T_FN && target->tag == T_FN && from->as.fn.param_count == 0 &&
+        from->as.fn.ret->tag == T_VOID) {
+        /* `fn() -> void`, a function of unknown type (C's `void (*)(void)`), as a shared library gives
+           one by its name (platform.library): to the type the program knows it has */
+        allowed = needs_unsafe = true;
+    }
     if (!allowed) {
         sema_error_expr(b, "E0339", e, "cannot convert `%s` to `%s`", sema_tn(&n, from), sema_tn(&n, target));
     } else if (needs_unsafe && b->unsafe_depth == 0) {
