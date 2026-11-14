@@ -1,0 +1,217 @@
+// math.stats: statistics of series of numbers, in f64: the mean, the spread, the median and
+// the percentiles (the time of a frame at the 99th: what a load test reads, beyond the mean),
+// a line fitted through points, and `Running`, which keeps them as values arrive, without
+// keeping the values (the frame times of a whole session).
+//
+//   stats.Running frames = stats.Running{ };
+//   frames.add(dt * 1000.0);                                    // each frame, in milliseconds
+//   f64 slow = stats.percentile(arena, times, 99.0);            // 1 frame in 100 is slower
+import std.math;
+import std.sort;
+
+// The mean of the values, 0 for none.
+pub f64 mean(f64[] values) {
+    if (values.len == 0) {
+        return 0.0;
+    }
+    mut f64 sum = 0.0;
+    for (f64 v in values) {
+        sum += v;
+    }
+    return sum / values.len as f64;
+}
+
+// The variance of the values as a whole population (divided by n), 0 for none.
+pub f64 variance(f64[] values) {
+    if (values.len == 0) {
+        return 0.0;
+    }
+    f64 m = mean(values);
+    mut f64 sum = 0.0;
+    for (f64 v in values) {
+        sum += (v - m) * (v - m);
+    }
+    return sum / values.len as f64;
+}
+
+// The variance of the values as a sample of a larger population (divided by n - 1: Bessel's
+// correction), 0 for fewer than two.
+pub f64 sample_variance(f64[] values) {
+    if (values.len < 2) {
+        return 0.0;
+    }
+    return variance(values) * values.len as f64 / (values.len - 1) as f64;
+}
+
+// The standard deviation (the square root of `variance`).
+pub f64 deviation(f64[] values) {
+    return math.sqrt(variance(values));
+}
+
+pub f64 sample_deviation(f64[] values) {
+    return math.sqrt(sample_variance(values));
+}
+
+// The value below which `p` percent of the values lie (0 the lowest, 50 the median, 100 the
+// highest), between two values by a straight line (as numpy's default); the values are not
+// changed (a sorted copy is made in `arena`). 0 for none.
+pub f64 percentile(Arena* arena, f64[] values, f64 p) {
+    if (values.len == 0) {
+        return 0.0;
+    }
+    mut f64[] sorted = arena.alloc_slice(f64, values.len);
+    for (usize i in 0..values.len) {
+        sorted[i] = values[i];
+    }
+    sort.sort(sorted);
+    return sorted_percentile(sorted, p);
+}
+
+// `percentile` of values already sorted, from the lowest: no copy.
+pub f64 sorted_percentile(f64[] sorted, f64 p) {
+    if (sorted.len == 0) {
+        return 0.0;
+    }
+    f64 at = max(0.0, min(100.0, p)) / 100.0 * (sorted.len - 1) as f64;
+    usize low = math.floor(at) as usize;
+    usize high = min(low + 1, sorted.len - 1);
+    return sorted[low] + (sorted[high] - sorted[low]) * (at - low as f64);
+}
+
+// The median: the value in the middle, or the mean of the two in the middle.
+pub f64 median(Arena* arena, f64[] values) {
+    return percentile(arena, values, 50.0);
+}
+
+// A straight line y = slope x + intercept, and how well it fits (`r2`, 1 for all on it, 0 for
+// no more than the mean).
+pub struct Fit {
+    pub f64 slope;
+    pub f64 intercept;
+    pub f64 r2;
+
+    pub f64 at(f64 x) {
+        return slope * x + intercept;
+    }
+}
+
+// The line nearest to the points (xs[i], ys[i]) by least squares: a trend, how the time of a
+// frame grows with the number of entities. A flat line at the mean when all the x are the same.
+pub Fit fit_line(f64[] xs, f64[] ys) {
+    usize n = min(xs.len, ys.len);
+    if (n == 0) {
+        return Fit{ slope: 0.0, intercept: 0.0, r2: 0.0 };
+    }
+    mut f64 mx = 0.0;
+    mut f64 my = 0.0;
+    for (usize i in 0..n) {
+        mx += xs[i];
+        my += ys[i];
+    }
+    mx /= n as f64;
+    my /= n as f64;
+    mut f64 sxx = 0.0;
+    mut f64 sxy = 0.0;
+    mut f64 syy = 0.0;
+    for (usize i in 0..n) {
+        sxx += (xs[i] - mx) * (xs[i] - mx);
+        sxy += (xs[i] - mx) * (ys[i] - my);
+        syy += (ys[i] - my) * (ys[i] - my);
+    }
+    if (sxx == 0.0) {
+        return Fit{ slope: 0.0, intercept: my, r2: 0.0 };
+    }
+    f64 slope = sxy / sxx;
+    f64 r2 = syy == 0.0 ? 1.0 : sxy * sxy / (sxx * syy);
+    return Fit{ slope: slope, intercept: my - slope * mx, r2: r2 };
+}
+
+// Statistics kept as values arrive, without keeping them: their count, mean, spread (Welford's
+// way, exact without the loss of a sum of squares), lowest and highest.
+pub struct Running {
+    pub mut usize count = 0;
+    mut f64 m = 0.0;
+    mut f64 squares = 0.0;  // the sum of the squares of the distances to the mean
+    pub mut f64 lowest = 0.0;
+    pub mut f64 highest = 0.0;
+
+    pub void add(f64 v) {
+        count += 1;
+        if (count == 1) {
+            lowest = v;
+            highest = v;
+        } else {
+            lowest = min(lowest, v);
+            highest = max(highest, v);
+        }
+        f64 delta = v - m;
+        m += delta / count as f64;
+        squares += delta * (v - m);
+    }
+
+    pub f64 mean() {
+        return m;
+    }
+
+    pub f64 variance() {
+        return count == 0 ? 0.0 : squares / count as f64;
+    }
+
+    pub f64 sample_variance() {
+        return count < 2 ? 0.0 : squares / (count - 1) as f64;
+    }
+
+    pub f64 deviation() {
+        return math.sqrt(variance());
+    }
+
+    // Back to no values.
+    pub void clear() {
+        count = 0;
+        m = 0.0;
+        squares = 0.0;
+        lowest = 0.0;
+        highest = 0.0;
+    }
+}
+
+test "statistics: means, spreads, percentiles, a line, as values arrive" {
+    mut Arena arena = Arena.new(16 * KB);
+    defer arena.free();
+    mut f64[8] data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+    f64[] v = data[0..8];
+    assert(mean(v) == 5.0 && variance(v) == 4.0 && deviation(v) == 2.0);
+    assert(abs(sample_variance(v) - 32.0 / 7.0) < 1.0e-12);
+    assert(mean(data[0..0]) == 0.0 && sample_variance(data[0..1]) == 0.0);
+    mut f64[5] odd = [9.0, 1.0, 5.0, 3.0, 7.0];
+    assert(median(&arena, odd[0..5]) == 5.0 && median(&arena, v) == 4.5);
+    assert(odd[0] == 9.0);  // not sorted in place
+    assert(percentile(&arena, odd[0..5], 0.0) == 1.0 && percentile(&arena, odd[0..5], 100.0) == 9.0);
+    assert(percentile(&arena, odd[0..5], 25.0) == 3.0 && percentile(&arena, odd[0..5], 90.0) == 8.2);
+    assert(percentile(&arena, odd[0..5], 250.0) == 9.0 && percentile(&arena, data[0..0], 50.0) == 0.0);
+    // a line: exact through points on it, and a noisy one near it
+    mut f64[4] xs = [0.0, 1.0, 2.0, 3.0];
+    mut f64[4] ys = [1.0, 3.0, 5.0, 7.0];
+    Fit f = fit_line(xs[0..4], ys[0..4]);
+    assert(abs(f.slope - 2.0) < 1.0e-12 && abs(f.intercept - 1.0) < 1.0e-12 && abs(f.r2 - 1.0) < 1.0e-12 && f.at(10.0) == 21.0);
+    mut f64[4] noisy = [1.1, 2.9, 5.2, 6.8];
+    Fit g = fit_line(xs[0..4], noisy[0..4]);
+    assert(abs(g.slope - 1.94) < 0.001 && g.r2 > 0.99 && g.r2 < 1.0);
+    mut f64[3] same = [2.0, 2.0, 2.0];
+    assert(fit_line(same[0..3], ys[0..3]).slope == 0.0 && fit_line(same[0..3], ys[0..3]).intercept == 3.0);
+    // running: the same as over the whole series
+    mut Running r = Running{ };
+    for (f64 x in v) {
+        r.add(x);
+    }
+    assert(r.count == 8 && r.mean() == 5.0 && abs(r.variance() - 4.0) < 1.0e-12 && abs(r.deviation() - 2.0) < 1.0e-12);
+    assert(r.lowest == 2.0 && r.highest == 9.0 && abs(r.sample_variance() - 32.0 / 7.0) < 1.0e-12);
+    // large values near each other: no loss
+    mut Running big = Running{ };
+    for (i32 i in 0..1000) {
+        big.add(1.0e9 + (i % 2) as f64);
+    }
+    assert(abs(big.variance() - 0.25) < 1.0e-6);
+    r.clear();
+    assert(r.count == 0 && r.mean() == 0.0 && r.variance() == 0.0);
+}

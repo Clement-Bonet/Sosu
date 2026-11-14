@@ -1,0 +1,179 @@
+// platform.library: shared libraries loaded while a program runs (a game loaded by its editor,
+// plugins), on SDL_LoadObject. A library of Sosu built with `sosuc build --lib=shared` (spec §9.2)
+// offers its `export "C"` functions: `symbol` finds one, and the program casts it to its type in
+// `unsafe`, since nothing checks that the type is the right one:
+//
+//   lib.Library* game = match (lib.open(arena, "build/game.dll")) { ... };
+//   match (game.symbol("game_half")) {
+//       some(f) => {
+//           unsafe {
+//               fn(i32) -> i32 half = f as fn(i32) -> i32;
+//               io.print("{}", half(8));
+//           }
+//       },
+//       none => { },
+//   }
+//   game.close();
+//
+// A library of Sosu runs each export under a guard: a failed check, or a fault of the processor,
+// comes back to the program as an error (its `<package>_error()`), and the program keeps running.
+//
+// Loading again a library that is being built: Windows locks a loaded DLL, so that the build could
+// not write the next one. `open_copy` loads a copy of the file, under a name of its own, in a
+// folder the program chooses; `clean_copies` removes the copies left there by an earlier run.
+import std.io;
+import std.fs;
+import std.text;
+import platform.sdl;
+import platform.sdl_c;
+
+// A shared library opened.
+pub class Library {
+    sdl_c.SDL_SharedObject* handle;
+    pub str path;  // the file opened: the copy, for `open_copy`
+    mut bool closed;
+
+    void init(keeps sdl_c.SDL_SharedObject* handle, keeps str path) {
+        self.handle = handle;
+        self.path = path;
+        closed = false;
+    }
+
+    // The function `name` of the library (its C name), none if it has none; cast it to its type
+    // in `unsafe`.
+    pub (fn() -> void uses io)? symbol(str name) uses io {
+        assert(!closed);
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        unsafe {
+            // a function pointer cannot be compared with 0 in Sosu: SDL says it found none by its error
+            sdl_c.SDL_ClearError();
+            fn() -> void uses io f = sdl_c.SDL_LoadFunction(handle, name.to_cstr(&scratch));
+            ui8* said = sdl_c.SDL_GetError();
+            if (*said != 0) {
+                return none;
+            }
+            return some(f);
+        }
+    }
+
+    // The library let go: its functions, and what they gave, must not be used afterwards.
+    pub void close() uses io {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        unsafe {
+            sdl_c.SDL_UnloadObject(handle);
+        }
+    }
+}
+
+// The library at `path`, none if the system cannot load it (`error` says why).
+pub Library*? open(keeps Arena* arena, str path) uses io {
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    unsafe {
+        sdl_c.SDL_SharedObject* handle = sdl_c.SDL_LoadObject(path.to_cstr(&scratch));
+        if (handle as ui64 == 0) {
+            return none;
+        }
+        return some(arena.new(Library, handle, text.repeat(arena, path, 1)));
+    }
+}
+
+// The library at `path`, loaded from a copy in `folder` (made if missing), named after it with a
+// number of its own (`game-3.dll`): the file at `path` stays free to be written again while the
+// copy is loaded. None if the copy or the loading fails.
+pub Library*? open_copy(keeps Arena* arena, str path, str folder) uses io {
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    match (fs.create_dirs(&scratch, folder)) {
+        ok => { },
+        err(e) => { },
+    }
+    str stem = fs.stem(path);
+    str ext = match (fs.extension(path)) {
+        some(x) => x,
+        none => "",
+    };
+    // the first number not used yet
+    mut i64 n = 1;
+    mut str copy = "";
+    while (n < 100000) {
+        text.TextBuilder* b = text.builder(&scratch);
+        b.push(stem);
+        b.push("-");
+        b.push_i64(n);
+        if (ext.len > 0) {
+            b.push(".");
+            b.push(ext);
+        }
+        copy = fs.join(&scratch, folder, b.text());
+        if (!fs.exists(&scratch, copy)) {
+            break;
+        }
+        n += 1;
+    }
+    match (fs.copy(&scratch, path, copy)) {
+        ok => { },
+        err(e) => {
+            return none;
+        },
+    }
+    return open(arena, copy);
+}
+
+// The copies of `path` that `open_copy` left in `folder` removed (those still loaded stay: the
+// system refuses to remove them). Returns how many were removed.
+pub i32 clean_copies(str path, str folder) uses io {
+    mut Arena scratch = Arena.new(4 * KB);
+    defer scratch.free();
+    str stem = fs.stem(path);
+    str[] names = match (fs.list(&scratch, folder)) {
+        ok(x) => x,
+        err(e) => {
+            return 0;
+        },
+    };
+    mut i32 removed = 0;
+    for (str name in names) {
+        if (copy_of(name, stem)) {
+            match (fs.remove_file(&scratch, fs.join(&scratch, folder, name))) {
+                ok => {
+                    removed += 1;
+                },
+                err(e) => { },
+            }
+        }
+    }
+    return removed;
+}
+
+// Whether `name` is `<stem>-<number>` with or without an extension.
+bool copy_of(str name, str stem) {
+    if (name.len < stem.len + 2 || !text.starts_with(name, stem) || name.bytes[stem.len] != 45) {  // '-'
+        return false;
+    }
+    mut usize i = stem.len + 1;
+    mut usize digits = 0;
+    while (i < name.len && name.bytes[i] >= 48 && name.bytes[i] <= 57) {
+        i += 1;
+        digits += 1;
+    }
+    return digits > 0 && (i == name.len || name.bytes[i] == 46);  // '.'
+}
+
+// Why the system could not load or find the last library or function (SDL's last error).
+pub str error(Arena* arena) uses io {
+    unsafe {
+        ui8* message = sdl_c.SDL_GetError();
+        return sdl.copy_cstring(arena, message, 4 * KB);
+    }
+}
+
+test "the copies of a library are told from other files" {
+    assert(copy_of("game-1.dll", "game") && copy_of("game-12.so", "game") && copy_of("game-3", "game"));
+    assert(!copy_of("game.dll", "game") && !copy_of("game-x.dll", "game") && !copy_of("gamer-1.dll", "game"));
+    assert(!copy_of("game-.dll", "game") && !copy_of("game-1a.dll", "game"));
+}

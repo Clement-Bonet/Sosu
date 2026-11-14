@@ -1,0 +1,300 @@
+// math.scalar: what is done to single numbers in a game, beyond `std.math`: smooth steps,
+// ranges mapped onto others, values that repeat or go back and forth, angles that wrap, values
+// that follow a target smoothly whatever the frame rate, and the roots of quadratics and cubics
+// (for `math.ballistic`, and where a time must be found).
+//
+//   f32 x = scalar.damp(x, target, 8.0, dt);                       // follows, the same at 30 or 144 Hz
+//   f32 y = scalar.smooth_damp(y, goal, &speed, 0.3, dt);          // arrives in about 0.3 s, no overshoot
+import std.math;
+import math.linear;
+
+// 0 below `edge0`, 1 above `edge1`, and an S between them (3t^2 - 2t^3).
+pub f32 smoothstep(f32 edge0, f32 edge1, f32 x) {
+    f32 t = clamp01(inverse_lerp(edge0, edge1, x));
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// As `smoothstep`, its slope and its curvature 0 at both ends (Perlin's 6t^5 - 15t^4 + 10t^3).
+pub f32 smootherstep(f32 edge0, f32 edge1, f32 x) {
+    f32 t = clamp01(inverse_lerp(edge0, edge1, x));
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+// Where `x` lies from `a` (0) to `b` (1), beyond them too; 0 when they are the same.
+pub f32 inverse_lerp(f32 a, f32 b, f32 x) {
+    return a == b ? 0.0 : (x - a) / (b - a);
+}
+
+// `x` of the range `from_low`..`from_high` brought to the range `to_low`..`to_high`, beyond them
+// too (a health of 0..100 to a bar of 0..200 pixels).
+pub f32 remap(f32 x, f32 from_low, f32 from_high, f32 to_low, f32 to_high) {
+    f32 t = inverse_lerp(from_low, from_high, x);
+    return to_low + (to_high - to_low) * t;
+}
+
+// `t` brought back within 0..`length`, as a time that loops; negative times too.
+pub f32 repeat(f32 t, f32 length) {
+    if (length <= 0.0) {
+        return 0.0;
+    }
+    return t - (math.floor((t / length) as f64) as f32) * length;
+}
+
+// `t` going from 0 to `length` and back, again and again.
+pub f32 ping_pong(f32 t, f32 length) {
+    if (length <= 0.0) {
+        return 0.0;
+    }
+    return length - abs(repeat(t, length * 2.0) - length);
+}
+
+// An angle in radians brought within -pi..pi.
+pub f32 wrap_angle(f32 a) {
+    f32 pi = 3.14159265;
+    f32 w = repeat(a + pi, 2.0 * pi) - pi;
+    return w == -pi ? pi : w;
+}
+
+// The shortest turn from the angle `from` to `to`, -pi..pi.
+pub f32 delta_angle(f32 from, f32 to) {
+    return wrap_angle(to - from);
+}
+
+// The angle at `t` from `a` (0) to `b` (1), the short way round.
+pub f32 lerp_angle(f32 a, f32 b, f32 t) {
+    return a + delta_angle(a, b) * t;
+}
+
+// `current` brought toward `target` for a frame of `dt` seconds, at the `rate` given (per
+// second): the same path whatever the frame rate, unlike `lerp(current, target, k)` each frame.
+// A rate of 10 covers about 63% of the way in a tenth of a second.
+pub f32 damp(f32 current, f32 target, f32 rate, f32 dt) {
+    return target + (current - target) * (math.exp((-rate * dt) as f64) as f32);
+}
+
+pub linear.Vec3 damp3(linear.Vec3 current, linear.Vec3 target, f32 rate, f32 dt) {
+    return target.add(current.sub(target).scale(math.exp((-rate * dt) as f64) as f32));
+}
+
+// `current` brought toward `target` as by a spring that does not bounce, arriving in about
+// `smooth_time` seconds and never beyond (Game Programming Gems 4, 1.10, as Unity's SmoothDamp):
+// `velocity` is kept by the caller from frame to frame, 0 at first. A camera that follows.
+pub f32 smooth_damp(f32 current, f32 target, f32* velocity, f32 smooth_time, f32 dt) {
+    if (dt <= 0.0) {
+        return current;
+    }
+    f32 omega = 2.0 / max(smooth_time, 0.0001);
+    f32 x = omega * dt;
+    f32 decay = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+    f32 change = current - target;
+    f32 temp = (*velocity + omega * change) * dt;
+    *velocity = (*velocity - omega * temp) * decay;
+    mut f32 out = target + (change + temp) * decay;
+    if ((target - current > 0.0) == (out > target)) {  // gone beyond: held on it
+        out = target;
+        *velocity = 0.0;
+    }
+    return out;
+}
+
+// `smooth_damp` on the three axes, each with its part of `velocity`.
+pub linear.Vec3 smooth_damp3(linear.Vec3 current, linear.Vec3 target, linear.Vec3* velocity, f32 smooth_time, f32 dt) {
+    mut f32 vx = velocity.x;
+    mut f32 vy = velocity.y;
+    mut f32 vz = velocity.z;
+    linear.Vec3 out = linear.vec3(
+        smooth_damp(current.x, target.x, &vx, smooth_time, dt),
+        smooth_damp(current.y, target.y, &vy, smooth_time, dt),
+        smooth_damp(current.z, target.z, &vz, smooth_time, dt)
+    );
+    *velocity = linear.vec3(vx, vy, vz);
+    return out;
+}
+
+f32 clamp01(f32 t) {
+    return t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+}
+
+// ---- Roots ----
+
+// The real roots of an equation, from the lowest: `count` of them in `values`.
+pub struct Roots {
+    pub mut usize count;
+    pub mut f32[3] values;
+
+    // The lowest root that is not below `low`, none if there is none (the first time ahead).
+    pub f32? first_from(f32 low) {
+        for (usize i in 0..count) {
+            if (values[i] >= low) {
+                return some(values[i]);
+            }
+        }
+        return none;
+    }
+}
+
+// The real x where a x^2 + b x + c = 0 (a line when a is 0; none for 0 = c, or 0 = 0).
+pub Roots solve_quadratic(f32 a, f32 b, f32 c) {
+    return quadratic(a as f64, b as f64, c as f64);
+}
+
+Roots quadratic(f64 a, f64 b, f64 c) {
+    mut Roots r = Roots{ count: 0, values: [0.0, 0.0, 0.0] };
+    if (abs(a) < 1.0e-12) {
+        if (abs(b) > 1.0e-12) {
+            r.count = 1;
+            r.values[0] = (-c / b) as f32;
+        }
+        return r;
+    }
+    f64 delta = b * b - 4.0 * a * c;
+    if (delta < 0.0) {
+        return r;
+    }
+    if (delta == 0.0) {
+        r.count = 1;
+        r.values[0] = (-b / (2.0 * a)) as f32;
+        return r;
+    }
+    // without the loss of the difference of two near numbers (Numerical Recipes, 5.6)
+    f64 q = -0.5 * (b + (b < 0.0 ? -math.sqrt(delta) : math.sqrt(delta)));
+    f64 x1 = q / a;
+    f64 x2 = q == 0.0 ? -x1 : c / q;
+    r.count = 2;
+    r.values[0] = (x1 < x2 ? x1 : x2) as f32;
+    r.values[1] = (x1 < x2 ? x2 : x1) as f32;
+    return r;
+}
+
+// The real x where a x^3 + b x^2 + c x + d = 0 (a quadratic when a is 0).
+pub Roots solve_cubic(f32 a, f32 b, f32 c, f32 d) {
+    if (abs(a) < 1.0e-12) {
+        return quadratic(b as f64, c as f64, d as f64);
+    }
+    // x = t - B/3 gives t^3 + p t + q = 0
+    f64 bb = b as f64 / a as f64;
+    f64 cc = c as f64 / a as f64;
+    f64 dd = d as f64 / a as f64;
+    f64 shift = bb / 3.0;
+    f64 p = cc - bb * bb / 3.0;
+    f64 q = 2.0 * bb * bb * bb / 27.0 - bb * cc / 3.0 + dd;
+    f64 delta = q * q / 4.0 + p * p * p / 27.0;
+    mut Roots r = Roots{ count: 0, values: [0.0, 0.0, 0.0] };
+    if (delta > 1.0e-14) {
+        // one real root (Cardano)
+        f64 s = math.sqrt(delta);
+        r.count = 1;
+        r.values[0] = (math.cbrt(-q / 2.0 + s) + math.cbrt(-q / 2.0 - s) - shift) as f32;
+        return r;
+    }
+    if (abs(p) < 1.0e-14) {
+        r.count = 1;  // a triple root
+        r.values[0] = (math.cbrt(-q) - shift) as f32;
+        return r;
+    }
+    // three real roots, two of them maybe the same (the trigonometric way)
+    f64 m = 2.0 * math.sqrt(-p / 3.0);
+    f64 inside = max(-1.0, min(1.0, 3.0 * q / (p * m)));
+    f64 theta = math.acos(inside) / 3.0;
+    mut f64[3] x = [0.0, 0.0, 0.0];
+    for (usize k in 0..3) {
+        x[k] = m * math.cos(theta - 2.0 * math.PI * k as f64 / 3.0) - shift;
+    }
+    // sorted, and a double root given once
+    for (usize i in 0..3) {
+        for (usize j in i + 1..3) {
+            if (x[j] < x[i]) {
+                f64 t = x[i];
+                x[i] = x[j];
+                x[j] = t;
+            }
+        }
+    }
+    for (usize k in 0..3) {
+        if (r.count == 0 || abs(x[k] - r.values[r.count - 1] as f64) > 1.0e-6 * (1.0 + abs(x[k]))) {
+            r.values[r.count] = x[k] as f32;
+            r.count += 1;
+        }
+    }
+    return r;
+}
+
+test "smooth steps, ranges, loops and angles" {
+    assert(smoothstep(0.0, 1.0, -1.0) == 0.0 && smoothstep(0.0, 1.0, 2.0) == 1.0 && smoothstep(0.0, 1.0, 0.5) == 0.5);
+    assert(abs(smoothstep(0.0, 2.0, 0.5) - 0.15625) < 0.00001 && abs(smootherstep(0.0, 1.0, 0.25) - 0.103515625) < 0.00001);
+    assert(inverse_lerp(10.0, 20.0, 15.0) == 0.5 && inverse_lerp(10.0, 20.0, 30.0) == 2.0 && inverse_lerp(3.0, 3.0, 9.0) == 0.0);
+    assert(remap(50.0, 0.0, 100.0, 0.0, 200.0) == 100.0 && remap(5.0, 0.0, 10.0, 1.0, -1.0) == 0.0);
+    assert(abs(repeat(7.5, 2.0) - 1.5) < 0.00001 && abs(repeat(-0.5, 2.0) - 1.5) < 0.00001 && repeat(1.0, 0.0) == 0.0);
+    assert(abs(ping_pong(1.5, 2.0) - 1.5) < 0.00001 && abs(ping_pong(3.0, 2.0) - 1.0) < 0.00001 && abs(ping_pong(4.0, 2.0)) < 0.00001);
+    f32 pi = 3.14159265;
+    assert(abs(wrap_angle(3.0 * pi) - pi) < 0.0001 && abs(wrap_angle(-1.5 * pi) - 0.5 * pi) < 0.0001);
+    assert(abs(delta_angle(0.1, 2.0 * pi - 0.1) + 0.2) < 0.0001);  // the short way, through 0
+    assert(abs(lerp_angle(3.0, -3.0, 0.5) - (3.0 + (2.0 * pi - 6.0) / 2.0)) < 0.0001);  // through pi
+}
+
+test "values that follow, the same whatever the frame rate" {
+    // a second at 30 frames and at 144 frames: the same place
+    mut f32 slow = 0.0;
+    mut f32 fast = 0.0;
+    for (i32 i in 0..30) {
+        slow = damp(slow, 10.0, 3.0, 1.0 / 30.0);
+    }
+    for (i32 i in 0..144) {
+        fast = damp(fast, 10.0, 3.0, 1.0 / 144.0);
+    }
+    assert(abs(slow - fast) < 0.001 && abs(slow - 10.0 * (1.0 - 0.0497871)) < 0.001);
+    linear.Vec3 d = damp3(linear.vec3(0.0, 0.0, 0.0), linear.vec3(10.0, -10.0, 0.0), 3.0, 1.0);
+    assert(d.near(linear.vec3(9.502129, -9.502129, 0.0), 0.001));
+    // smooth_damp: arrives, never beyond, at both frame rates
+    mut f32 x = 0.0;
+    mut f32 v = 0.0;
+    mut f32 highest = 0.0;
+    for (i32 i in 0..120) {
+        x = smooth_damp(x, 5.0, &v, 0.3, 1.0 / 60.0);
+        highest = max(highest, x);
+    }
+    assert(abs(x - 5.0) < 0.01 && highest <= 5.0);
+    mut f32 y = 0.0;
+    mut f32 w = 0.0;
+    for (i32 i in 0..60) {
+        y = smooth_damp(y, 5.0, &w, 0.3, 1.0 / 30.0);
+    }
+    assert(abs(y - x) < 0.02);
+    mut linear.Vec3 speed = linear.vec3(0.0, 0.0, 0.0);
+    mut linear.Vec3 p = linear.vec3(0.0, 0.0, 0.0);
+    for (i32 i in 0..240) {
+        p = smooth_damp3(p, linear.vec3(1.0, 2.0, -3.0), &speed, 0.5, 1.0 / 60.0);
+    }
+    assert(p.near(linear.vec3(1.0, 2.0, -3.0), 0.01));
+}
+
+test "roots of quadratics and cubics" {
+    Roots two = solve_quadratic(1.0, -3.0, 2.0);
+    assert(two.count == 2 && abs(two.values[0] - 1.0) < 0.0001 && abs(two.values[1] - 2.0) < 0.0001);
+    assert(solve_quadratic(1.0, 0.0, 1.0).count == 0);
+    Roots one = solve_quadratic(1.0, -2.0, 1.0);
+    assert(one.count == 1 && abs(one.values[0] - 1.0) < 0.0001);
+    Roots line = solve_quadratic(0.0, 2.0, -4.0);
+    assert(line.count == 1 && line.values[0] == 2.0 && solve_quadratic(0.0, 0.0, 1.0).count == 0);
+    // far apart: the small root kept exact
+    Roots apart = solve_quadratic(1.0, -10000.0, 1.0);
+    assert(apart.count == 2 && abs(apart.values[0] - 0.0001) < 0.0000001);
+    assert(match (two.first_from(1.5)) {
+        some(t) => t == two.values[1],
+        none => false,
+    });
+    // (x - 1)(x - 2)(x - 3)
+    Roots three = solve_cubic(1.0, -6.0, 11.0, -6.0);
+    assert(three.count == 3 && abs(three.values[0] - 1.0) < 0.0001 && abs(three.values[1] - 2.0) < 0.0001);
+    assert(abs(three.values[2] - 3.0) < 0.0001);
+    // x^3 + x + 10 = 0: one, -2
+    Roots single = solve_cubic(1.0, 0.0, 1.0, 10.0);
+    assert(single.count == 1 && abs(single.values[0] + 2.0) < 0.0001);
+    // (x - 1)^2 (x + 2): a double root, given once
+    Roots double = solve_cubic(1.0, 0.0, -3.0, 2.0);
+    assert(double.count == 2 && abs(double.values[0] + 2.0) < 0.001 && abs(double.values[1] - 1.0) < 0.001);
+    // (x - 2)^3, and a cubic that is a quadratic
+    Roots triple = solve_cubic(1.0, -6.0, 12.0, -8.0);
+    assert(triple.count == 1 && abs(triple.values[0] - 2.0) < 0.001);
+    assert(solve_cubic(0.0, 1.0, -3.0, 2.0).count == 2);
+}

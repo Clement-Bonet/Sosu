@@ -489,6 +489,10 @@ static void test_generics(void) {
                  "");
     expect_codes("import std.io;\nvoid show(i32 x) uses io { }\nvoid f() { fn(i32) -> void g = show as fn(i32) -> void; }",
                  "E0341");
+    /* `fn() -> void`, a function found by its name in a shared library, to its own type, in `unsafe` */
+    expect_codes("void f(fn() -> void g) { unsafe { fn(i32, f32) -> i64 h = g as fn(i32, f32) -> i64; } }", "");
+    expect_codes("void f(fn() -> void g) { fn(i32) -> i64 h = g as fn(i32) -> i64; }", "E0341");
+    expect_codes("void f(fn(i32) -> void g) { unsafe { fn(i64) -> i64 h = g as fn(i64) -> i64; } }", "E0339");
     /* generic interfaces */
     const char *shows = "interface Shows<T> { str show(T x); }\n";
     snprintf(text, sizeof text, "%sclass Num : Shows<i32> { override str show(i32 x) { return \"n\"; } }\n"

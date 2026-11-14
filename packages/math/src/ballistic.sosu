@@ -1,0 +1,156 @@
+// math.ballistic: what flies under gravity, without the drag of the air. The speed to throw a
+// thing so that it lands at a point (a grenade, an arrow: the low arc or the high one), the
+// speed to land there in a given time (a jump that must take a second), where it is after a
+// time and how high it goes, and where to aim to meet a thing that moves (a turret). Axes of
+// `math.linear`: y up; `gravity` is the downward pull, about 9.81 m/s^2 on Earth.
+//
+//   match (ballistic.launch_velocity(hand, target, 20.0, 9.81, false)) {
+//       some(v) => throw(v),           // the low arc, at 20 m/s
+//       none => {},                    // too far for that speed
+//   }
+import std.math;
+import math.linear;
+import math.scalar;
+
+// Where a thing thrown from `from` at `velocity` is after `time` seconds.
+pub linear.Vec3 position_at(linear.Vec3 from, linear.Vec3 velocity, f32 gravity, f32 time) {
+    return from.add(velocity.scale(time)).add(linear.vec3(0.0, -0.5 * gravity * time * time, 0.0));
+}
+
+// The highest point of the flight (`from` itself when thrown downward or flat).
+pub linear.Vec3 apex(linear.Vec3 from, linear.Vec3 velocity, f32 gravity) {
+    if (velocity.y <= 0.0 || gravity <= 0.0) {
+        return from;
+    }
+    return position_at(from, velocity, gravity, velocity.y / gravity);
+}
+
+// The velocity that takes a thing from `from` to `to` in exactly `time` seconds.
+pub linear.Vec3 velocity_for_time(linear.Vec3 from, linear.Vec3 to, f32 gravity, f32 time) {
+    f32 t = max(time, 0.0001);
+    linear.Vec3 d = to.sub(from);
+    return linear.vec3(d.x / t, (d.y + 0.5 * gravity * t * t) / t, d.z / t);
+}
+
+// The velocity of `speed` that takes a thing from `from` to `to`: the low arc, or the high one
+// (`high`, which falls more steeply and takes longer); none when `to` is out of reach at that
+// speed.
+pub linear.Vec3? launch_velocity(linear.Vec3 from, linear.Vec3 to, f32 speed, f32 gravity, bool high) {
+    linear.Vec3 d = to.sub(from);
+    linear.Vec3 flat = linear.vec3(d.x, 0.0, d.z);
+    f32 x = flat.length();
+    f32 y = d.y;
+    f32 s2 = speed * speed;
+    if (gravity <= 0.0) {
+        return d.length() == 0.0 ? none : some(d.normalized().scale(speed));
+    }
+    if (x < 0.000001) {
+        // straight up or down: up needs the speed to climb that high
+        if (y > 0.0 && s2 < 2.0 * gravity * y) {
+            return none;
+        }
+        return some(linear.vec3(0.0, y >= 0.0 ? speed : -speed, 0.0));
+    }
+    f32 inside = s2 * s2 - gravity * (gravity * x * x + 2.0 * y * s2);
+    if (inside < 0.0) {
+        return none;
+    }
+    f32 root = math.sqrt(inside as f64) as f32;
+    f32 tangent = (s2 + (high ? root : -root)) / (gravity * x);
+    f32 angle = math.atan(tangent as f64) as f32;
+    linear.Vec3 along = flat.scale(1.0 / x);
+    return some(along.scale(speed * math.cos(angle as f64) as f32).add(linear.vec3(0.0, speed * math.sin(angle as f64) as f32, 0.0)));
+}
+
+// The time when a shot of `speed` from `shooter`, flying straight (a bullet, a laser), meets a
+// thing at `target` moving at `velocity`; none if it never can (the thing flees faster).
+pub f32? intercept_time(linear.Vec3 shooter, linear.Vec3 target, linear.Vec3 velocity, f32 speed) {
+    linear.Vec3 p = target.sub(shooter);
+    scalar.Roots r = scalar.solve_quadratic(velocity.dot(velocity) - speed * speed, 2.0 * p.dot(velocity), p.dot(p));
+    return r.first_from(0.0);
+}
+
+// The direction to shoot at `speed` to meet the moving thing (of length 1), none if it cannot be
+// met: where the thing will be at `intercept_time`.
+pub linear.Vec3? aim(linear.Vec3 shooter, linear.Vec3 target, linear.Vec3 velocity, f32 speed) {
+    return match (intercept_time(shooter, target, velocity, speed)) {
+        some(t) => some(target.add(velocity.scale(t)).sub(shooter).normalized()),
+        none => none,
+    };
+}
+
+test "throws: through their target, low and high, in a given time" {
+    f32 g = 9.81;
+    linear.Vec3 from = linear.vec3(0.0, 1.0, 0.0);
+    linear.Vec3 to = linear.vec3(12.0, 3.0, 5.0);
+    linear.Vec3 v = velocity_for_time(from, to, g, 1.5);
+    assert(position_at(from, v, g, 1.5).near(to, 0.001));
+    // the low and the high arc of 20 m/s both pass through the target, the high one later
+    linear.Vec3 low = match (launch_velocity(from, to, 20.0, g, false)) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    linear.Vec3 high = match (launch_velocity(from, to, 20.0, g, true)) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(abs(low.length() - 20.0) < 0.001 && abs(high.length() - 20.0) < 0.001 && high.y > low.y);
+    for (linear.Vec3 shot in [low, high]) {
+        f32 t = 13.0 / linear.vec3(shot.x, 0.0, shot.z).length();  // when it has gone 13 m across
+        assert(position_at(from, shot, g, t).near(to, 0.001));
+    }
+    // too far for that speed; straight up, within reach and not
+    assert(match (launch_velocity(from, linear.vec3(100.0, 0.0, 0.0), 20.0, g, false)) {
+        some(_) => false,
+        none => true,
+    });
+    assert(match (launch_velocity(from, linear.vec3(0.0, 11.0, 0.0), 20.0, g, false)) {
+        some(x) => x.near(linear.vec3(0.0, 20.0, 0.0), 0.0),
+        none => false,
+    });
+    assert(match (launch_velocity(from, linear.vec3(0.0, 50.0, 0.0), 20.0, g, false)) {
+        some(_) => false,
+        none => true,
+    });
+    // the top of a throw at 10 m/s upward: 10^2 / (2 g) higher
+    assert(abs(apex(from, linear.vec3(3.0, 10.0, 0.0), g).y - (1.0 + 100.0 / (2.0 * g))) < 0.001);
+}
+
+test "aiming at what moves" {
+    linear.Vec3 shooter = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 target = linear.vec3(10.0, 0.0, 0.0);
+    linear.Vec3 moving = linear.vec3(0.0, 0.0, 3.0);
+    f32 t = match (intercept_time(shooter, target, moving, 5.0)) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    // the shot and the thing are at the same place at that time: 10^2 + (3t)^2 = (5t)^2, t = 2.5
+    assert(abs(t - 2.5) < 0.001);
+    linear.Vec3 dir = match (aim(shooter, target, moving, 5.0)) {
+        some(d) => d,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(dir.scale(5.0 * t).near(target.add(moving.scale(t)), 0.001));
+    // a thing that flees faster than the shot, straight away: never met
+    assert(match (intercept_time(shooter, target, linear.vec3(8.0, 0.0, 0.0), 5.0)) {
+        some(_) => false,
+        none => true,
+    });
+    // a thing that stands: the time of the distance
+    assert(match (intercept_time(shooter, target, linear.vec3(0.0, 0.0, 0.0), 5.0)) {
+        some(x) => abs(x - 2.0) < 0.001,
+        none => false,
+    });
+}

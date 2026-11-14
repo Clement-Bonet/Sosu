@@ -73,3 +73,36 @@ export "C" i64 geom_counter_total(Counter* c) {
 export "C" void geom_counter_free(Counter* c) {
     c.arena.free();
 }
+
+// Faults of the processor under the guard of an export (spec §9.2): they come back to the host as
+// errors, as failed checks do, and the library goes on working.
+
+i64 down(i64 n) {
+    mut i64[64] kept = [n; 64];  // a frame large enough that the stack fills fast
+    return down(n + 1) + kept[0];
+}
+
+// A recursion without end: the stack overflows.
+export "C" i64 geom_deep(i64 n) {
+    return down(n);
+}
+
+// A pointer kept past the free() of its arena, read (in debug, its pages are unreadable).
+export "C" i32 geom_freed() {
+    mut Arena arena = Arena.new(4096);
+    i32* p = arena.alloc(i32);
+    *p = 7;
+    arena.free();
+    unsafe {
+        return *p;
+    }
+}
+
+// A write through a pointer that points nowhere.
+export "C" i32 geom_poke(usize address) {
+    unsafe {
+        i32* p = address as i32*;
+        *p = 1;
+    }
+    return 1;
+}

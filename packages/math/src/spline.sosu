@@ -1,0 +1,256 @@
+// math.spline: smooth curves in space. Bézier curves of 3 and 4 points (a curve drawn by its
+// handles: a path of the editor, a cable, the arc of a jump), Catmull-Rom curves that pass through
+// their points, and `Path`, a curve through many points that can be walked at a steady speed by
+// its length (a rail of a camera, a patrol, a road, a river), open or closed in a loop.
+//
+//   spline.Path* rail = spline.path(arena, points, false);
+//   linear.Vec3 here = rail.at_distance(speed * time);          // the same speed on every segment
+//   linear.Quat facing = linear.look_rotation(rail.tangent_at_distance(speed * time), up);
+import std.math;
+import math.linear;
+
+// The quadratic Bézier curve at `t` (0..1): from `p0` to `p2`, drawn toward `p1`.
+pub linear.Vec3 bezier2(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, f32 t) {
+    f32 u = 1.0 - t;
+    return p0.scale(u * u).add(p1.scale(2.0 * u * t)).add(p2.scale(t * t));
+}
+
+// The cubic Bézier curve at `t` (0..1): from `p0` to `p3`, leaving toward `p1`, arriving from `p2`.
+pub linear.Vec3 bezier3(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t) {
+    f32 u = 1.0 - t;
+    return p0.scale(u * u * u).add(p1.scale(3.0 * u * u * t)).add(p2.scale(3.0 * u * t * t)).add(p3.scale(t * t * t));
+}
+
+// The derivative of `bezier3` at `t`: its direction, and its speed for a `t` that goes at 1.
+pub linear.Vec3 bezier3_tangent(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t) {
+    f32 u = 1.0 - t;
+    return p1.sub(p0).scale(3.0 * u * u).add(p2.sub(p1).scale(6.0 * u * t)).add(p3.sub(p2).scale(3.0 * t * t));
+}
+
+// The uniform Catmull-Rom curve at `t` (0..1), from `p1` to `p2`, `p0` and `p3` the points around
+// them that give its tangents.
+pub linear.Vec3 catmull_rom(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t) {
+    f32 t2 = t * t;
+    f32 t3 = t2 * t;
+    return p1.scale(2.0)
+            .add(p2.sub(p0).scale(t))
+            .add(p0.scale(2.0).sub(p1.scale(5.0)).add(p2.scale(4.0)).sub(p3).scale(t2))
+            .add(p1.scale(3.0).sub(p0).sub(p2.scale(3.0)).add(p3).scale(t3))
+            .scale(0.5);
+}
+
+// The centripetal Catmull-Rom curve at `t` (0..1), from `p1` to `p2`: as `catmull_rom`, but without
+// the loops and cusps that points far apart give (Barry and Goldman's form, an alpha of 0.5).
+pub linear.Vec3 centripetal(linear.Vec3 p0, linear.Vec3 p1, linear.Vec3 p2, linear.Vec3 p3, f32 t) {
+    f32 k0 = 0.0;
+    f32 k1 = k0 + knot(p0, p1);
+    f32 k2 = k1 + knot(p1, p2);
+    f32 k3 = k2 + knot(p2, p3);
+    f32 k = k1 + (k2 - k1) * t;
+    linear.Vec3 a1 = mix(p0, p1, k0, k1, k);
+    linear.Vec3 a2 = mix(p1, p2, k1, k2, k);
+    linear.Vec3 a3 = mix(p2, p3, k2, k3, k);
+    linear.Vec3 b1 = mix(a1, a2, k0, k2, k);
+    linear.Vec3 b2 = mix(a2, a3, k1, k3, k);
+    return mix(b1, b2, k1, k2, k);
+}
+
+f32 knot(linear.Vec3 a, linear.Vec3 b) {
+    return max(math.sqrt(a.distance(b) as f64) as f32, 0.0001);  // points at the same place: still apart
+}
+
+linear.Vec3 mix(linear.Vec3 a, linear.Vec3 b, f32 ka, f32 kb, f32 k) {
+    return a.scale((kb - k) / (kb - ka)).add(b.scale((k - ka) / (kb - ka)));
+}
+
+// Samples per segment for the length of a path.
+usize STEPS = 16;
+
+// A centripetal Catmull-Rom curve through `points`, open (from the first to the last) or closed
+// (back to the first), with the table of its lengths, to walk it by distance.
+pub class Path {
+    mut linear.Vec3[] points;
+    bool closed;
+    mut f32[] lengths;  // the distance from the start at each sample, STEPS per segment
+
+    void init(keeps Arena* arena, linear.Vec3[] given, bool closed) {
+        self.closed = closed;
+        points = arena.alloc_slice(linear.Vec3, given.len);
+        for (usize i in 0..given.len) {
+            points[i] = given[i];
+        }
+        usize samples = segments() * STEPS + 1;
+        lengths = arena.alloc_slice(f32, samples);
+        mut linear.Vec3 before = point(0.0);
+        lengths[0] = 0.0;
+        for (usize i in 1..samples) {
+            linear.Vec3 now = by_sample(i);
+            lengths[i] = lengths[i - 1] + now.distance(before);
+            before = now;
+        }
+    }
+
+    linear.Vec3 by_sample(usize i) {
+        usize segment = min(i / STEPS, segments() - 1);
+        f32 t = (i - segment * STEPS) as f32 / STEPS as f32;
+        return on(segment, t);
+    }
+
+    // How many pieces from point to point: one less than the points, as many when closed.
+    pub usize segments() {
+        if (points.len < 2) {
+            return 1;
+        }
+        return closed ? points.len : points.len - 1;
+    }
+
+    // The point `i` of the curve, those before the first and after the last of an open one
+    // made by continuing it straight.
+    linear.Vec3 control(i64 i) {
+        i64 n = points.len as i64;
+        if (n == 1) {
+            return points[0];
+        }
+        if (closed) {
+            return points[(((i % n) + n) % n) as usize];
+        }
+        if (i < 0) {
+            return points[0].scale(2.0).sub(points[1]);
+        }
+        if (i >= n) {
+            return points[(n - 1) as usize].scale(2.0).sub(points[(n - 2) as usize]);
+        }
+        return points[i as usize];
+    }
+
+    linear.Vec3 on(usize segment, f32 t) {
+        i64 s = segment as i64;
+        return centripetal(control(s - 1), control(s), control(s + 1), control(s + 2), t);
+    }
+
+    // The point at `t` from the start (0) to the end (1), each segment an equal part of `t`
+    // whatever its length (`at_distance` walks at a steady speed).
+    pub linear.Vec3 point(f32 t) {
+        if (points.len == 0) {
+            return linear.vec3(0.0, 0.0, 0.0);
+        }
+        f32 u = (t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t) * segments() as f32;
+        usize segment = min(u as usize, segments() - 1);
+        return on(segment, u - segment as f32);
+    }
+
+    // The length of the curve (by its samples: within a fraction of a percent).
+    pub f32 length() {
+        return lengths[lengths.len - 1];
+    }
+
+    // The `t` of `point` at `distance` along the curve; a closed one loops, an open one stops at
+    // its ends.
+    pub f32 t_at_distance(f32 distance) {
+        f32 total = length();
+        if (total <= 0.0) {
+            return 0.0;
+        }
+        mut f32 d = distance;
+        if (closed) {
+            d = d - (math.floor((d / total) as f64) as f32) * total;
+        }
+        d = d < 0.0 ? 0.0 : d > total ? total : d;
+        // the last sample at or before d
+        mut usize low = 0;
+        mut usize high = lengths.len - 1;
+        while (high - low > 1) {
+            usize middle = (low + high) / 2;
+            if (lengths[middle] <= d) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        f32 span = lengths[high] - lengths[low];
+        f32 within = span > 0.0 ? (d - lengths[low]) / span : 0.0;
+        return (low as f32 + within) / (lengths.len - 1) as f32;
+    }
+
+    // The point at `distance` along the curve.
+    pub linear.Vec3 at_distance(f32 distance) {
+        return point(t_at_distance(distance));
+    }
+
+    // The direction of the curve at `distance` along it (of length 1).
+    pub linear.Vec3 tangent_at_distance(f32 distance) {
+        f32 t = t_at_distance(distance);
+        f32 h = 0.0005;
+        f32 a = closed || t - h >= 0.0 ? t - h : 0.0;
+        f32 b = closed || t + h <= 1.0 ? t + h : 1.0;
+        return point(wrap(b)).sub(point(wrap(a))).normalized();
+    }
+
+    f32 wrap(f32 t) {
+        if (!closed) {
+            return t;
+        }
+        return t - math.floor(t as f64) as f32;
+    }
+}
+
+// The path through `points` (two at least for a curve; one gives a point), open or closed.
+pub Path* path(keeps Arena* arena, linear.Vec3[] points, bool closed) {
+    return arena.new(Path, arena, points, closed);
+}
+
+test "Bézier and Catmull-Rom curves: through their ends, toward their handles" {
+    linear.Vec3 a = linear.vec3(0.0, 0.0, 0.0);
+    linear.Vec3 b = linear.vec3(1.0, 2.0, 0.0);
+    linear.Vec3 c = linear.vec3(3.0, 2.0, 0.0);
+    linear.Vec3 d = linear.vec3(4.0, 0.0, 0.0);
+    assert(bezier3(a, b, c, d, 0.0).near(a, 0.0) && bezier3(a, b, c, d, 1.0).near(d, 0.0001));
+    assert(bezier3(a, b, c, d, 0.5).near(linear.vec3(2.0, 1.5, 0.0), 0.0001));
+    assert(bezier2(a, b, d, 0.5).near(linear.vec3(1.5, 1.0, 0.0), 0.0001));
+    // the tangent: toward the first handle at the start, three times its distance
+    assert(bezier3_tangent(a, b, c, d, 0.0).near(b.scale(3.0), 0.0001));
+    linear.Vec3 h = bezier3(a, b, c, d, 0.3001).sub(bezier3(a, b, c, d, 0.2999)).scale(1.0 / 0.0002);
+    assert(h.near(bezier3_tangent(a, b, c, d, 0.3), 0.01));
+    // through p1 and p2, both kinds
+    assert(catmull_rom(a, b, c, d, 0.0).near(b, 0.0001) && catmull_rom(a, b, c, d, 1.0).near(c, 0.0001));
+    assert(centripetal(a, b, c, d, 0.0).near(b, 0.0001) && centripetal(a, b, c, d, 1.0).near(c, 0.0001));
+    // points in a line: the curve stays on it
+    linear.Vec3 m = catmull_rom(a, linear.vec3(1.0, 0.0, 0.0), linear.vec3(2.0, 0.0, 0.0), linear.vec3(3.0, 0.0, 0.0), 0.5);
+    assert(m.near(linear.vec3(1.5, 0.0, 0.0), 0.0001));
+}
+
+test "paths: through their points, walked by their length, open and closed" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    // a straight line of three points, unevenly spaced: its length, and a steady speed
+    mut linear.Vec3[3] straight = [linear.vec3(0.0, 0.0, 0.0), linear.vec3(1.0, 0.0, 0.0), linear.vec3(10.0, 0.0, 0.0)];
+    Path* line = path(&arena, straight[0..3], false);
+    assert(line.segments() == 2 && abs(line.length() - 10.0) < 0.01);
+    assert(line.at_distance(5.0).near(linear.vec3(5.0, 0.0, 0.0), 0.02));
+    assert(line.at_distance(-3.0).near(linear.vec3(0.0, 0.0, 0.0), 0.0001) && line.at_distance(99.0).near(linear.vec3(10.0, 0.0, 0.0), 0.0001));
+    assert(line.tangent_at_distance(5.0).near(linear.vec3(1.0, 0.0, 0.0), 0.001));
+    assert(line.point(0.5).near(linear.vec3(1.0, 0.0, 0.0), 0.0001));  // by parameter: the middle point
+    // a square closed in a loop: near a circle of radius 1, through its corners
+    mut linear.Vec3[4] square = [
+        linear.vec3(1.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 1.0), linear.vec3(-1.0, 0.0, 0.0), linear.vec3(0.0, 0.0, -1.0)
+    ];
+    Path* loop = path(&arena, square[0..4], true);
+    assert(loop.segments() == 4);
+    f32 around = loop.length();
+    assert(abs(around - 5.9425) < 0.001);  // inside the circle through the corners, which is 2 pi long
+    for (i32 i in 0..4) {
+        assert(loop.point(i as f32 / 4.0).near(loop.at_distance(around * i as f32 / 4.0), 0.02));  // the corners
+    }
+    assert(loop.at_distance(around + 0.5).near(loop.at_distance(0.5), 0.0001));  // it loops
+    assert(loop.at_distance(-0.5).near(loop.at_distance(around - 0.5), 0.0001));
+    // steady: equal distances give equal chords
+    f32 c1 = loop.at_distance(0.0).distance(loop.at_distance(0.4));
+    f32 c2 = loop.at_distance(1.0).distance(loop.at_distance(1.4));
+    assert(abs(c1 - c2) < 0.01);
+    linear.Vec3 t = loop.tangent_at_distance(0.0);
+    assert(abs(t.y) < 0.0001 && abs(t.length() - 1.0) < 0.001 && t.z > 0.9);  // leaving the first corner toward the second
+    // one point: a point
+    mut linear.Vec3[1] alone = [linear.vec3(2.0, 3.0, 4.0)];
+    Path* dot = path(&arena, alone[0..1], false);
+    assert(dot.length() < 0.0001 && dot.at_distance(1.0).near(linear.vec3(2.0, 3.0, 4.0), 0.0001));
+}

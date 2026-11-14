@@ -173,21 +173,12 @@ describe.Value? text_of(widgets.Frame* f, describe.Value now, keeps Arena* texts
 // The turn of `q` as three angles in degrees: about x (pitch), y (yaw) and z (roll), applied z,
 // then x, then y (as Unity shows them).
 pub linear.Vec3 degrees_of(linear.Quat q) {
-    linear.Mat4 m = q.normalized().to_mat4();
-    f64 pitch = math.asin(max(-1.0, min(1.0, -m.at(1, 2))) as f64);
-    f64 yaw = math.atan2(m.at(0, 2) as f64, m.at(2, 2) as f64);
-    f64 roll = math.atan2(m.at(1, 0) as f64, m.at(1, 1) as f64);
-    f64 d = 57.29577951308232;
-    return linear.vec3((pitch * d) as f32, (yaw * d) as f32, (roll * d) as f32);
+    return q.euler().scale(57.29577951);
 }
 
 // The turn of three angles in degrees, as `degrees_of` gives them.
 pub linear.Quat quat_of(linear.Vec3 degrees) {
-    f32 r = 0.017453292;
-    linear.Quat qx = linear.from_axis_angle(linear.vec3(1.0, 0.0, 0.0), degrees.x * r);
-    linear.Quat qy = linear.from_axis_angle(linear.vec3(0.0, 1.0, 0.0), degrees.y * r);
-    linear.Quat qz = linear.from_axis_angle(linear.vec3(0.0, 0.0, 1.0), degrees.z * r);
-    return qy.mul(qx).mul(qz).normalized();
+    return linear.from_euler(degrees.scale(0.017453292));
 }
 
 // The place, the turn (in degrees) and the scale of `t`: true when one changed.

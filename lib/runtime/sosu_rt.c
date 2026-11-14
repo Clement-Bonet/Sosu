@@ -17,6 +17,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <malloc.h> /* _resetstkoflw */
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -47,6 +48,21 @@ static SOSU_THREAD jmp_buf *current_guard;
 static SOSU_THREAD bool guard_prints;
 static SOSU_THREAD char last_error[512];
 static SOSU_THREAD bool has_error;
+
+/* A fault of the processor under a guard (an arena used after its free(), a stack overflow, a
+   bad pointer of unsafe code or of C) jumps back to it as a failed check does, so that a library
+   does not end the process of its host (spec §9.2): see "Faults under a guard" below. */
+#ifdef _WIN32
+static PVOID freed_handler, stack_handler, guard_handler; /* removed when a library unloads */
+#endif
+static const char guard_freed[] = "a pointer into an arena was used after the free() of the arena (spec 7.7)";
+static const char guard_stack[] = "stack overflow: a recursion too deep, or a local array too large (spec 7.7)";
+static const char guard_memory[] = "invalid memory access: a bad pointer of unsafe code or of C (spec 7.7)";
+#ifdef _WIN32
+static LONG guard_resume(EXCEPTION_POINTERS *info, const char *why, bool stack);
+#else
+static void guard_jump(int sig, const char *why);
+#endif
 
 /* ---- For std.time and std.random ----
    Declared by std itself with `extern "C"`: the clock and sleeping differ by system. */
@@ -336,6 +352,7 @@ static LONG CALLBACK freed_fault(EXCEPTION_POINTERS *info) {
     if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2 ||
         !in_quarantine((uintptr_t)r->ExceptionInformation[1]))
         return EXCEPTION_CONTINUE_SEARCH;
+    if (current_guard) return guard_resume(info, guard_freed, false);
     fflush(stdout);
     fputs(freed_message, stderr);
     fflush(stderr);
@@ -344,7 +361,7 @@ static LONG CALLBACK freed_fault(EXCEPTION_POINTERS *info) {
 
 static void watch_faults(void) {
     static volatile LONG watching;
-    if (InterlockedExchange(&watching, 1) == 0) AddVectoredExceptionHandler(1, freed_fault);
+    if (InterlockedExchange(&watching, 1) == 0) freed_handler = AddVectoredExceptionHandler(1, freed_fault);
 }
 #else
 static struct sigaction previous_segv, previous_bus;
@@ -352,6 +369,7 @@ static struct sigaction previous_segv, previous_bus;
 static void freed_fault(int sig, siginfo_t *info, void *context) {
     (void)context;
     if (in_quarantine((uintptr_t)info->si_addr)) {
+        if (current_guard) guard_jump(sig, guard_freed);
         fflush(stdout); /* not safe in a handler in general, but the program stops here anyway */
         ssize_t written = write(2, freed_message, sizeof freed_message - 1);
         (void)written;
@@ -623,6 +641,7 @@ static const char stack_message[] =
 #if defined(_WIN32)
 static LONG CALLBACK stack_fault(EXCEPTION_POINTERS *info) {
     if (info->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    if (current_guard) return guard_resume(info, guard_stack, true);
     fflush(stdout); /* on the stack kept by SetThreadStackGuarantee */
     fputs(stack_message, stderr);
     fflush(stderr);
@@ -634,7 +653,7 @@ static void watch_stack(void) {
     static volatile LONG watching;
     ULONG kept = 64 * 1024; /* left to the handler when the stack is full */
     SetThreadStackGuarantee(&kept);
-    if (InterlockedExchange(&watching, 1) == 0) AddVectoredExceptionHandler(1, stack_fault);
+    if (InterlockedExchange(&watching, 1) == 0) stack_handler = AddVectoredExceptionHandler(1, stack_fault);
 }
 
 static void unwatch_stack(void) {}
@@ -649,6 +668,7 @@ static void stack_fault(int sig, siginfo_t *info, void *context) {
     (void)context;
     uintptr_t at = (uintptr_t)info->si_addr;
     if (stack_top && at < stack_top + STACK_SPARE && stack_top - at < stack_span) {
+        if (current_guard) guard_jump(sig, guard_stack);
         fflush(stdout); /* not safe in a handler in general, but the program stops here anyway */
         ssize_t written = write(2, stack_message, sizeof stack_message - 1);
         (void)written;
@@ -1268,9 +1288,242 @@ bool sosu_instance_of(const sosu_class *klass, const sosu_class *target) {
     return false;
 }
 
+/* ---- Faults under a guard ----
+   A failed check jumps back to the guard by sosu_fail. A fault of the processor raised under a
+   guard does the same, so that a library called by a host (an editor that loads a game, spec §9.2)
+   gives the host an error instead of ending its process; a test that faults fails instead of
+   stopping the others. Outside a guard, nothing changes: the handlers there were before take the
+   fault, and a program stops with 101.
+   - On POSIX, a handler of SIGSEGV, SIGBUS and SIGILL, on the spare stack of the thread (made here
+     for a thread that has none, so that a stack overflow still reaches it), unblocks the signal
+     and jumps.
+   - On Windows, the thread is resumed in guard_trampoline, which jumps without unwinding (the
+     stack under it may be the one of the fault). A stack overflow and an arena used after its
+     free() are taken by vectored handlers, which run first: they are certainly ours. Any other
+     access violation is taken by the filter of unhandled exceptions, which runs only once no
+     __try of the code that faulted took it, so that a driver or a library that faults on purpose
+     under its own __try keeps doing so. After a stack overflow, the guard page of the stack is
+     made again when the guard is left (_resetstkoflw). Under a debugger, the filter is not
+     called: the debugger takes the fault. */
+
+static void guard_note(const char *why) {
+    size_t i = 0;
+    for (; why[i] && i + 1 < sizeof last_error; i++) last_error[i] = why[i]; /* no snprintf in a handler */
+    last_error[i] = 0;
+    has_error = true;
+}
+
+#ifdef _WIN32
+static SOSU_THREAD bool guard_stack_hit; /* the stack overflowed: its guard page is made again on leaving */
+static SOSU_THREAD bool guard_thread_ready;
+static LPTOP_LEVEL_EXCEPTION_FILTER guard_previous_filter;
+
+static void guard_trampoline(void) {
+    jmp_buf *to = current_guard;
+#if defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || defined(__aarch64__)
+    ((_JUMP_BUFFER *)(void *)*to)->Frame = 0; /* a jump without unwinding */
+#endif
+    longjmp(*to, 1);
+}
+
+static LONG guard_resume(EXCEPTION_POINTERS *info, const char *why, bool stack) {
+    CONTEXT *c = info->ContextRecord;
+#if defined(_M_X64) || defined(__x86_64__)
+    c->Rsp = ((c->Rsp - 128) & ~(DWORD64)15) - 8; /* as after a call */
+    c->Rip = (DWORD64)(uintptr_t)guard_trampoline;
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    c->Sp = (c->Sp - 128) & ~(DWORD64)15;
+    c->Pc = (DWORD64)(uintptr_t)guard_trampoline;
+#else
+    (void)c;
+    return EXCEPTION_CONTINUE_SEARCH; /* 32 bits: not caught */
+#endif
+    if (guard_prints) {
+        fputs("    ", stderr);
+        fputs(why, stderr);
+        fputs("\n", stderr);
+    }
+    guard_note(why);
+    if (stack) guard_stack_hit = true;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static LONG CALLBACK guard_first(EXCEPTION_POINTERS *info) {
+    if (!current_guard) return EXCEPTION_CONTINUE_SEARCH;
+    EXCEPTION_RECORD *r = info->ExceptionRecord;
+    if (r->ExceptionCode == EXCEPTION_STACK_OVERFLOW) return guard_resume(info, guard_stack, true);
+#ifdef SOSU_QUARANTINE
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2 &&
+        in_quarantine((uintptr_t)r->ExceptionInformation[1]))
+        return guard_resume(info, guard_freed, false);
+#endif
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG WINAPI guard_filter(EXCEPTION_POINTERS *info) {
+    DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (current_guard && (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR ||
+                          code == EXCEPTION_ILLEGAL_INSTRUCTION || code == EXCEPTION_PRIV_INSTRUCTION ||
+                          code == EXCEPTION_DATATYPE_MISALIGNMENT || code == EXCEPTION_ARRAY_BOUNDS_EXCEEDED))
+        return guard_resume(info, guard_memory, false);
+    return guard_previous_filter ? guard_previous_filter(info) : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void watch_guard(void) {
+    static volatile LONG installed;
+    if (!guard_thread_ready) {
+        guard_thread_ready = true;
+        ULONG kept = 64 * 1024; /* left to the handlers when the stack is full */
+        SetThreadStackGuarantee(&kept);
+    }
+    if (InterlockedExchange(&installed, 1) == 0) {
+        guard_handler = AddVectoredExceptionHandler(1, guard_first);
+        guard_previous_filter = SetUnhandledExceptionFilter(guard_filter);
+    }
+}
+
+static void guard_recovered(void) {
+    if (guard_stack_hit) {
+        guard_stack_hit = false;
+        _resetstkoflw();
+    }
+}
+#elif !defined(__EMSCRIPTEN__)
+static SOSU_THREAD bool guard_thread_ready;
+static SOSU_THREAD uintptr_t guard_top;  /* a little below the start of the stack of the thread */
+static SOSU_THREAD uintptr_t guard_span; /* how far below it a fault is taken for an overflow */
+static struct sigaction guard_previous_segv, guard_previous_bus, guard_previous_ill;
+
+static void guard_jump(int sig, const char *why) {
+    if (guard_prints) {
+        ssize_t written = write(2, "    ", 4);
+        written = write(2, why, strlen(why));
+        written = write(2, "\n", 1);
+        (void)written;
+    }
+    guard_note(why);
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, sig);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL); /* the jump leaves the handler, which had it blocked */
+    longjmp(*current_guard, 1);
+}
+
+static void guard_fault(int sig, siginfo_t *info, void *context) {
+    if (current_guard) {
+        uintptr_t at = (uintptr_t)info->si_addr;
+        const char *why = guard_memory;
+#ifdef SOSU_QUARANTINE
+        if (in_quarantine(at)) why = guard_freed;
+        else
+#endif
+            if (guard_top && at < guard_top + 65536 && guard_top - at < guard_span && at > 65536)
+            why = guard_stack;
+        guard_jump(sig, why);
+    }
+    /* not under a guard: the handler there was before */
+    struct sigaction *previous = sig == SIGSEGV ? &guard_previous_segv : sig == SIGBUS ? &guard_previous_bus
+                                                                                        : &guard_previous_ill;
+    if ((previous->sa_flags & SA_SIGINFO) && previous->sa_sigaction) {
+        previous->sa_sigaction(sig, info, context);
+        return;
+    }
+    if (!(previous->sa_flags & SA_SIGINFO) && previous->sa_handler != SIG_DFL && previous->sa_handler != SIG_IGN) {
+        previous->sa_handler(sig);
+        return;
+    }
+    sigaction(sig, previous, NULL); /* the default: the instruction faults again, and the program ends */
+}
+
+static void watch_guard(void) {
+    static int installed;
+    if (!guard_thread_ready) {
+        guard_thread_ready = true;
+        char here;
+        guard_top = (uintptr_t)&here;
+        struct rlimit limit;
+        size_t size = 8u << 20;
+        if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY) size = (size_t)limit.rlim_cur;
+        if (size > ((size_t)1 << 30)) size = (size_t)1 << 30;
+        guard_span = size + ((size_t)1 << 20);
+        if (guard_span > guard_top) guard_span = guard_top;
+        stack_t current;
+        if (sigaltstack(NULL, &current) == 0 && (current.ss_flags & SS_DISABLE)) {
+            void *spare = malloc(64 * 1024); /* kept as long as the thread runs */
+            if (spare) {
+                stack_t made;
+                memset(&made, 0, sizeof made);
+                made.ss_sp = spare;
+                made.ss_size = 64 * 1024;
+                if (sigaltstack(&made, NULL) != 0) free(spare);
+            }
+        }
+    }
+    if (__atomic_exchange_n(&installed, 1, __ATOMIC_SEQ_CST) == 0) {
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = guard_fault;
+        action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGSEGV, &action, &guard_previous_segv);
+        sigaction(SIGBUS, &action, &guard_previous_bus);
+        sigaction(SIGILL, &action, &guard_previous_ill);
+    }
+}
+
+static void guard_recovered(void) {}
+#else
+static void guard_jump(int sig, const char *why) {
+    (void)sig;
+    (void)why;
+}
+static void watch_guard(void) {}
+static void guard_recovered(void) {}
+#endif
+
+/* A shared library unloaded (a game reloaded by its editor) takes its code away: its handlers of
+   faults must not stay where the process calls them, or the next fault of the host, or the next
+   exception of any library on Windows, would run code that is gone. */
+#if defined(SOSU_SHARED) && defined(_WIN32)
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+    (void)instance;
+    (void)reserved;
+    if (reason == DLL_PROCESS_DETACH) {
+        if (guard_handler) RemoveVectoredExceptionHandler(guard_handler);
+        if (freed_handler) RemoveVectoredExceptionHandler(freed_handler);
+        if (stack_handler) RemoveVectoredExceptionHandler(stack_handler);
+        guard_handler = freed_handler = stack_handler = NULL;
+        LPTOP_LEVEL_EXCEPTION_FILTER now = SetUnhandledExceptionFilter(guard_previous_filter);
+        if (now != guard_filter) SetUnhandledExceptionFilter(now); /* another took its place since: left */
+    }
+    return TRUE;
+}
+#elif defined(SOSU_SHARED) && !defined(__EMSCRIPTEN__)
+/* each handler of this library given back to the one before, where it still is the one in place */
+static void unwatch(int sig, void (*mine)(int, siginfo_t *, void *), struct sigaction *previous) {
+    struct sigaction now;
+    if (sigaction(sig, NULL, &now) == 0 && (now.sa_flags & SA_SIGINFO) && now.sa_sigaction == mine) {
+        sigaction(sig, previous, NULL);
+    }
+}
+
+__attribute__((destructor)) static void unwatch_all(void) {
+    unwatch(SIGSEGV, guard_fault, &guard_previous_segv);
+    unwatch(SIGBUS, guard_fault, &guard_previous_bus);
+    unwatch(SIGILL, guard_fault, &guard_previous_ill);
+#ifdef SOSU_QUARANTINE
+    unwatch(SIGSEGV, freed_fault, &previous_segv);
+    unwatch(SIGBUS, freed_fault, &previous_bus);
+#endif
+    unwatch(SIGSEGV, stack_fault, &stack_previous_segv);
+    unwatch(SIGBUS, stack_fault, &stack_previous_bus);
+}
+#endif
+
 bool sosu_run_test(void (*test)(void), const char *name) {
     jmp_buf here;
-    bool passed = false;
+    volatile bool passed = false; /* read after a longjmp */
+    watch_guard();
     current_guard = &here;
     guard_prints = true;
     if (setjmp(here) == 0) {
@@ -1279,18 +1532,23 @@ bool sosu_run_test(void (*test)(void), const char *name) {
     }
     current_guard = NULL;
     guard_prints = false;
+    guard_recovered();
     printf("test %s ... %s\n", name, passed ? "ok" : "FAILED");
     return passed;
 }
 
 jmp_buf *sosu_guard_enter(jmp_buf *here) {
+    watch_guard();
     jmp_buf *outer = current_guard;
     current_guard = here;
     has_error = false;
     return outer;
 }
 
-void sosu_guard_leave(jmp_buf *outer) { current_guard = outer; }
+void sosu_guard_leave(jmp_buf *outer) {
+    current_guard = outer;
+    guard_recovered();
+}
 
 const char *sosu_last_error(void) { return has_error ? last_error : NULL; }
 

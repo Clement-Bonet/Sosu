@@ -33,6 +33,20 @@ int main(void) {
     half = geom_half(8);
     printf("half %d, error: %s\n", half, geom_error() ? geom_error() : "none");
 
+    /* faults of the processor under the guard: errors too, and the library still works after them */
+    long long deep = (long long)geom_deep(0);
+    printf("deep %lld, error: %s\n", deep, geom_error() && strstr(geom_error(), "stack overflow") ? "stack overflow" : "none");
+    deep = (long long)geom_deep(0); /* again: the stack is whole again after the first */
+    printf("deep %lld, error: %s\n", deep, geom_error() && strstr(geom_error(), "stack overflow") ? "stack overflow" : "none");
+    int freed = geom_freed();
+    printf("freed %d, error: %s\n", freed,
+           geom_error() && strstr(geom_error(), "after the free()") ? "used after free" : "none");
+    int poked = geom_poke(16);
+    printf("poke %d, error: %s\n", poked,
+           geom_error() && strstr(geom_error(), "invalid memory access") ? "invalid memory access" : "none");
+    float dot = geom_dot(a, b); /* before geom_error(): the order of the arguments of printf is not fixed */
+    printf("dot after them %.1f, error: %s\n", dot, geom_error() ? geom_error() : "none");
+
     geom_Counter *counter = geom_counter_new();
     geom_counter_add(counter, 40);
     geom_counter_add(counter, 2);

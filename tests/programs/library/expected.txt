@@ -6,4 +6,9 @@ at 3, error: none
 at 0, error: index out of bounds
 half 0, error: requires
 half 4, error: none
+deep 0, error: stack overflow
+deep 0, error: stack overflow
+freed 0, error: used after free
+poke 0, error: invalid memory access
+dot after them 11.0, error: none
 counter 42

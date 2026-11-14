@@ -1,0 +1,182 @@
+// math.sample: points and turns drawn at random, each as likely as the others (uniform), from a
+// generator of `std.random`: where a particle is born, a rock thrown across a field, a spread of
+// shots, a creature facing anywhere. The same seed gives the same draws.
+import std.math;
+import std.random;
+import std.vec;
+import math.linear;
+
+// Points over the rectangle from (0, 0) to (`width`, `height`), none nearer than `radius` to
+// another, and no room left for one more but by chance (Bridson's Poisson disk sampling, 2007,
+// `tries` candidates around each point, 30 being usual): trees of a forest, rocks of a field,
+// spread as by nature, without the clumps and holes of points drawn one by one. In `arena`.
+pub linear.Vec2[] poisson2(Arena* arena, random.Rng* r, f32 width, f32 height, f32 radius, i32 tries) {
+    vec.Vec<linear.Vec2>* points = vec.new<linear.Vec2>(arena);
+    if (width <= 0.0 || height <= 0.0 || radius <= 0.0) {
+        return points.items();
+    }
+    f32 cell = radius / 1.41421356;  // a cell holds a point at most
+    usize columns = (width / cell) as usize + 1;
+    usize rows = (height / cell) as usize + 1;
+    mut usize[] grid = arena.alloc_slice(usize, columns * rows);  // the point of each cell plus one, 0 for none
+    vec.Vec<usize>* active = vec.new<usize>(arena);
+    linear.Vec2 first = linear.vec2(r.range_f32(0.0, width), r.range_f32(0.0, height));
+    points.push(first);
+    active.push(0);
+    grid[cell_of(first, cell, columns)] = 1;
+    while (active.len() > 0) {
+        usize pick = r.below(active.len() as ui64) as usize;
+        linear.Vec2 around = points.items()[active.items()[pick]];
+        mut bool placed = false;
+        for (i32 t in 0..max(tries, 1)) {
+            // a candidate in the ring of radius r to 2r around it
+            f32 angle = r.range_f32(0.0, 6.2831853);
+            f32 distance = radius * (1.0 + r.range_f32(0.0, 1.0));
+            linear.Vec2 p = around.add(linear.vec2(
+                math.cos(angle as f64) as f32 * distance,
+                math.sin(angle as f64) as f32 * distance
+            ));
+            if (p.x < 0.0 || p.x >= width || p.y < 0.0 || p.y >= height) {
+                continue;
+            }
+            if (free(points.items(), grid, p, cell, columns, rows, radius)) {
+                points.push(p);
+                active.push(points.len() - 1);
+                grid[cell_of(p, cell, columns)] = points.len();
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            active.remove(pick);  // no room around it any more
+        }
+    }
+    return points.items();
+}
+
+usize cell_of(linear.Vec2 p, f32 cell, usize columns) {
+    return (p.y / cell) as usize * columns + (p.x / cell) as usize;
+}
+
+// Whether no point lies within `radius` of `p`: those of the cells two away at most.
+bool free(linear.Vec2[] points, usize[] grid, linear.Vec2 p, f32 cell, usize columns, usize rows, f32 radius) {
+    i64 cx = (p.x / cell) as i64;
+    i64 cy = (p.y / cell) as i64;
+    for (i64 y in cy - 2..cy + 3) {
+        for (i64 x in cx - 2..cx + 3) {
+            if (x < 0 || y < 0 || x >= columns as i64 || y >= rows as i64) {
+                continue;
+            }
+            usize at = grid[y as usize * columns + x as usize];
+            if (at > 0 && points[at - 1].distance(p) < radius) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// A point in the disk of radius 1 (the square root of the radius keeps it uniform).
+pub linear.Vec2 in_circle(random.Rng* r) {
+    f64 radius = math.sqrt(r.unit());
+    f64 angle = r.unit() * 2.0 * math.PI;
+    return linear.vec2((radius * math.cos(angle)) as f32, (radius * math.sin(angle)) as f32);
+}
+
+// A point on the circle of radius 1.
+pub linear.Vec2 on_circle(random.Rng* r) {
+    f64 angle = r.unit() * 2.0 * math.PI;
+    return linear.vec2(math.cos(angle) as f32, math.sin(angle) as f32);
+}
+
+// A direction: a point on the sphere of radius 1 (its height uniform, Archimedes).
+pub linear.Vec3 on_sphere(random.Rng* r) {
+    f64 z = r.unit() * 2.0 - 1.0;
+    f64 angle = r.unit() * 2.0 * math.PI;
+    f64 ring = math.sqrt(max(0.0, 1.0 - z * z));
+    return linear.vec3((ring * math.cos(angle)) as f32, (ring * math.sin(angle)) as f32, z as f32);
+}
+
+// A point in the ball of radius 1 (a direction, at the cube root of a uniform radius).
+pub linear.Vec3 in_sphere(random.Rng* r) {
+    f64 radius = math.cbrt(r.unit());
+    return on_sphere(r).scale(radius as f32);
+}
+
+// A point in the box from `low` to `high`.
+pub linear.Vec3 in_box(random.Rng* r, linear.Vec3 low, linear.Vec3 high) {
+    return linear.vec3(r.range_f32(low.x, high.x), r.range_f32(low.y, high.y), r.range_f32(low.z, high.z));
+}
+
+// A turn, every one as likely (Shoemake's method): of length 1.
+pub linear.Quat rotation(random.Rng* r) {
+    f64 u1 = r.unit();
+    f64 u2 = r.unit() * 2.0 * math.PI;
+    f64 u3 = r.unit() * 2.0 * math.PI;
+    f64 a = math.sqrt(1.0 - u1);
+    f64 b = math.sqrt(u1);
+    return linear.Quat{
+        x: (a * math.sin(u2)) as f32,
+        y: (a * math.cos(u2)) as f32,
+        z: (b * math.sin(u3)) as f32,
+        w: (b * math.cos(u3)) as f32
+    };
+}
+
+test "draws at random: where they fall, and spread evenly" {
+    mut random.Rng r = random.seeded(11);
+    mut linear.Vec3 sum = linear.vec3(0.0, 0.0, 0.0);
+    mut i32 inner = 0;  // points of the ball within half its radius: an eighth of them
+    for (i32 i in 0..4000) {
+        linear.Vec2 c = in_circle(&r);
+        assert(c.x * c.x + c.y * c.y <= 1.0001);
+        linear.Vec2 o = on_circle(&r);
+        assert(abs(o.x * o.x + o.y * o.y - 1.0) < 0.001);
+        linear.Vec3 d = on_sphere(&r);
+        assert(abs(d.length() - 1.0) < 0.001);
+        sum = sum.add(d);
+        linear.Vec3 b = in_sphere(&r);
+        assert(b.length() <= 1.0001);
+        if (b.length() < 0.5) {
+            inner += 1;
+        }
+        linear.Vec3 p = in_box(&r, linear.vec3(-1.0, 2.0, 0.0), linear.vec3(1.0, 3.0, 5.0));
+        assert(p.x >= -1.0 && p.x < 1.0 && p.y >= 2.0 && p.y < 3.0 && p.z >= 0.0 && p.z < 5.0);
+        linear.Quat q = rotation(&r);
+        assert(abs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1.0) < 0.001);
+    }
+    assert(sum.scale(1.0 / 4000.0).length() < 0.05);  // the directions do not lean to one side
+    assert(inner > 400 && inner < 600);  // about 500
+}
+
+test "points of Poisson: none too near, the field filled" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut random.Rng r = random.seeded(5);
+    linear.Vec2[] points = poisson2(&arena, &r, 20.0, 10.0, 1.0, 30);
+    for (usize i in 0..points.len) {
+        linear.Vec2 p = points[i];
+        assert(p.x >= 0.0 && p.x < 20.0 && p.y >= 0.0 && p.y < 10.0);
+        for (usize j in i + 1..points.len) {
+            assert(p.distance(points[j]) >= 1.0);
+        }
+    }
+    // filled: a disk of radius 1 around each point covers about 0.7 of the field at the least
+    assert(points.len > 120 && points.len < 260);
+    // no hole: every place of the field has a point within 2 radii
+    for (i32 j in 0..20) {
+        for (i32 i in 0..40) {
+            linear.Vec2 q = linear.vec2(i as f32 * 0.5, j as f32 * 0.5);
+            mut bool near = false;
+            for (linear.Vec2 p in points) {
+                near = near || p.distance(q) < 2.0;
+            }
+            assert(near);
+        }
+    }
+    // the same seed, the same points; nothing for an empty field
+    mut random.Rng again = random.seeded(5);
+    linear.Vec2[] same = poisson2(&arena, &again, 20.0, 10.0, 1.0, 30);
+    assert(same.len == points.len && same[same.len - 1].near(points[points.len - 1], 0.0));
+    assert(poisson2(&arena, &r, 0.0, 10.0, 1.0, 30).len == 0);
+}

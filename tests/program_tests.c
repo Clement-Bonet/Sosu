@@ -184,6 +184,58 @@ static void test_library(const char *sosuc) {
         free(actual);
         free(expected);
     }
+    /* the shared library loaded and unloaded by a C host: its handlers of faults leave with it, and a
+       fault of the host afterwards is the host's (spec §9.2) */
+    {
+        char command[1024];
+#ifdef _MSC_VER
+        snprintf(command, sizeof command,
+                 "cl /nologo /W3 /Fetests\\programs\\library\\build\\unload.exe /Fotests\\programs\\library\\build\\ "
+                 "tests\\programs\\library\\host\\unload.c > build\\unload.log");
+        CHECK(run(command) == 0, "the unloading host does not compile (see build/unload.log)");
+        snprintf(command, sizeof command,
+                 "tests\\programs\\library\\build\\unload.exe tests\\programs\\library\\build\\geom.dll > build\\unload.out");
+#else
+#ifdef __APPLE__
+        const char *shared_lib = "tests/programs/library/build/libgeom.dylib";
+#else
+        const char *shared_lib = "tests/programs/library/build/libgeom.so";
+#endif
+        snprintf(command, sizeof command,
+                 "cc -std=c99 -D_POSIX_C_SOURCE=200809L tests/programs/library/host/unload.c -ldl -o tests/programs/library/build/unload "
+                 "> build/unload.log 2>&1");
+        CHECK(run(command) == 0, "the unloading host does not compile (see build/unload.log)");
+        snprintf(command, sizeof command, "tests/programs/library/build/unload %s > build/unload.out", shared_lib);
+#endif
+        CHECK(run(command) == 0, "the unloading host failed: a handler of the library stayed after it was unloaded");
+        char *actual = read_text("build/unload.out");
+        char *expected = read_text("tests/programs/library/expected_unload.txt");
+        CHECK(actual && expected && strcmp(actual, expected) == 0, "the unloading host: output differs\n--- got:\n%s",
+              actual ? actual : "(none)\n");
+        free(actual);
+        free(expected);
+    }
+    /* the shared library loaded by a program of Sosu (platform.library): called, its faults read as
+       errors while the program goes on, loaded again from a second copy (an editor and its game) */
+    {
+#ifdef _WIN32
+        const char *built = "tests/programs/library/build/geom.dll";
+#elif defined(__APPLE__)
+        const char *built = "tests/programs/library/build/libgeom.dylib";
+#else
+        const char *built = "tests/programs/library/build/libgeom.so";
+#endif
+        char command[1024];
+        snprintf(command, sizeof command, "%s run tests/programs/loader -- %s > build/loader.out 2> build/loader.err", sosuc,
+                 built);
+        CHECK(run(command) == 0, "run loader: failed (see build/loader.err)");
+        char *actual = read_text("build/loader.out");
+        char *expected = read_text("tests/programs/loader/expected.txt");
+        CHECK(actual && expected && strcmp(actual, expected) == 0, "run loader: output differs\n--- got:\n%s",
+              actual ? actual : "(none)\n");
+        free(actual);
+        free(expected);
+    }
 #ifdef _WIN32
     /* the version of the DLL, in the properties of the file: from [package], without [app] */
     CHECK(file_type("tests/programs/library/build/geom.dll") == 2, "geom.dll: no version resource of a DLL");
