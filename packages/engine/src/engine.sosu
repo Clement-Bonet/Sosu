@@ -19,6 +19,7 @@ import std.vec;
 import std.text;
 import math.linear;
 import math.curve;
+import math.geometry;
 import image.image;
 import model.model;
 import scene.scene;
@@ -38,6 +39,33 @@ bool present<T>(T? x) {
     return match (x) {
         some(v) => true,
         none => false,
+    };
+}
+
+// The space the box of an entity lies in (`Engine.bounds_of`).
+pub enum BoxSpace {
+    Scaled,  // its own: placed by its world matrix (a mesh)
+    Turned,  // its place and its turn, not its scale (a body)
+    Placed,  // its place alone: a marker keeps its size
+}
+
+pub struct Bounds {
+    pub geometry.Aabb box;
+    pub BoxSpace space;
+}
+
+// The half side of the box of what has no size of its own.
+pub f32 MARKER = 0.3;
+
+// The matrix that places a box lying in `space` for an entity whose world matrix is `world`.
+pub linear.Mat4 box_matrix(linear.Mat4 world, BoxSpace space) {
+    return match (space) {
+        Scaled => world,
+        Turned => {
+            linear.Transform t = linear.decompose(world);
+            return linear.translation(t.position).mul(t.rotation.to_mat4());
+        },
+        Placed => linear.translation(world.transform_point(linear.vec3(0.0, 0.0, 0.0))),
     };
 }
 
@@ -114,6 +142,9 @@ pub class Engine {
         sounds = vec.new<SoundSlot>(arena);
         looking = none;
         paused = false;
+        // the models every scene can name without a file
+        adopt_model("crate", render3d.cube(arena, [0.72, 0.52, 0.3, 1.0]));
+        adopt_model("ground", render3d.ground(arena, 20.0, [0.34, 0.4, 0.3, 1.0]));
     }
 
     // The model of `path` once it is loaded (or adopted), none before.
@@ -140,7 +171,8 @@ pub class Engine {
         models.push(ModelSlot{ path: path, handle: none, loaded: some(m), uploaded: none, failed: false });
     }
 
-    // The names of the models made in code (`adopt_model`), in the order they were given: what a
+    // The names of the models made in code (`adopt_model`), in the order they were given: those of
+    // the engine first ("crate", a cube of 2 m; "ground", a square of 40 m), then the game's; what a
     // mesh can name without a file (an editor offers them beside the files of the project).
     pub str[] adopted_models(keeps Arena* into) {
         vec.Vec<str>* out = vec.new<str>(into);
@@ -326,6 +358,62 @@ pub class Engine {
     }
 
     // Where `e` is in the world: its world matrix (its transform before the first `update`).
+    // The box of `e`, and the space it lies in: the bounds of the meshes of its model (each placed by
+    // its node), in its own space; else the shape of its body, in its place and turn (a body is not
+    // scaled); else a box of `MARKER` around its place for what has no size of its own (a light, a
+    // camera, a sound, an emitter); none for the rest. What an editor picks with the mouse.
+    pub Bounds? bounds_of(scene.Entity e) uses io, threads {
+        match (c.meshes.get(e)) {
+            some(m) => {
+                match (model_of(m.model)) {
+                    some(loaded) => {
+                        mut Arena scratch = Arena.new(4 * KB);
+                        defer scratch.free();
+                        linear.Mat4[] places = model.world_matrices(&scratch, loaded, linear.identity4());
+                        mut geometry.Aabb? box = none;
+                        for (usize n in 0..loaded.nodes.len) {
+                            for (usize k in loaded.nodes[n].meshes) {
+                                if (k < loaded.meshes.len) {
+                                    geometry.Aabb b = loaded.meshes[k].bounds.transformed(places[n]);
+                                    box = match (box) {
+                                        some(x) => some(x.union(b)),
+                                        none => some(b),
+                                    };
+                                }
+                            }
+                        }
+                        match (box) {
+                            some(b) => {
+                                return some(Bounds{ box: b, space: BoxSpace.Scaled });
+                            },
+                            none => { },
+                        }
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+        match (c.bodies.get(e)) {
+            some(b) => {
+                linear.Vec3 s = b.size;
+                linear.Vec3 half = match (b.shape) {
+                    Box => s,
+                    Sphere => linear.vec3(s.x, s.x, s.x),
+                    Capsule => linear.vec3(s.x, s.y + s.x, s.x),
+                    Cylinder => linear.vec3(s.x, s.y, s.x),
+                };
+                return some(Bounds{ box: geometry.aabb(half.scale(-1.0), half), space: BoxSpace.Turned });
+            },
+            none => { },
+        }
+        if (c.lights.has(e) || c.views.has(e) || c.sounds.has(e) || c.emitters.has(e)) {
+            linear.Vec3 m = linear.vec3(MARKER, MARKER, MARKER);
+            return some(Bounds{ box: geometry.aabb(m.scale(-1.0), m), space: BoxSpace.Placed });
+        }
+        return none;
+    }
+
     pub linear.Mat4 matrix_of(scene.Entity e) {
         return match (world.world_matrices.get(e)) {
             some(m) => *m,
@@ -995,7 +1083,7 @@ test "an animator plays a clip of the model of its mesh" {
     defer g.close();
     g.adopt_model("models/rig", rig);
     str[] made = g.adopted_models(&arena);
-    assert(made.len == 1 && made[0] == "models/rig");
+    assert(made.len == 3 && made[0] == "crate" && made[1] == "ground" && made[2] == "models/rig");
     scene.Entity hero = placed(w, "hero", linear.vec3(0.0, 0.0, 0.0));
     c.meshes.set(hero, components.Mesh{ model: "models/rig" });
     c.animators.set(hero, components.Animator{ clip: "slide" });
@@ -1024,6 +1112,58 @@ test "an animator plays a clip of the model of its mesh" {
     g.update(1.0 / 60.0);
     assert(match (g.palette_of(other)) {
         some(p) => false,
+        none => true,
+    });
+}
+
+test "the box of each entity: its model's, its body's, a marker, none; the models of the engine" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, none, none, none, none);
+    defer g.close();
+    str[] made = g.adopted_models(&arena);
+    assert(made.len == 2 && made[0] == "crate" && made[1] == "ground");
+    scene.Entity crate = placed(w, "crate", linear.vec3(0.0, 1.0, 0.0));
+    c.meshes.set(crate, components.Mesh{ model: "crate" });
+    scene.Entity floor = placed(w, "floor", linear.vec3(0.0, 0.0, 0.0));
+    c.bodies.set(floor, components.Body{ kind: components.BodyKind.Static, shape: components.ShapeKind.Capsule, size: linear.vec3(0.5, 1.0, 0.5) });
+    scene.Entity lamp = placed(w, "lamp", linear.vec3(3.0, 2.0, 0.0));
+    c.lights.set(lamp, components.Light{ });
+    scene.Entity empty = placed(w, "empty", linear.vec3(0.0, 0.0, 0.0));
+    g.update(0.0);
+    match (g.bounds_of(crate)) {
+        some(b) => {
+            assert(b.box.min.near(linear.vec3(-1.0, -1.0, -1.0), 0.001) && b.box.max.near(linear.vec3(1.0, 1.0, 1.0), 0.001));
+            assert(match (b.space) {
+                Scaled => true,
+                _ => false,
+            });
+        },
+        none => assert(false),
+    }
+    match (g.bounds_of(floor)) {
+        some(b) => {
+            assert(b.box.max.near(linear.vec3(0.5, 1.5, 0.5), 0.001));
+            assert(match (b.space) {
+                Turned => true,
+                _ => false,
+            });
+        },
+        none => assert(false),
+    }
+    match (g.bounds_of(lamp)) {
+        some(b) => {
+            assert(b.box.max.x == MARKER);
+            // a marker keeps its size, wherever its entity is and however it is scaled
+            linear.Mat4 m = box_matrix(linear.translation(linear.vec3(3.0, 2.0, 0.0)).mul(linear.scaling(linear.vec3(5.0, 5.0, 5.0))), b.space);
+            assert(m.transform_point(linear.vec3(1.0, 0.0, 0.0)).near(linear.vec3(4.0, 2.0, 0.0), 0.0001));
+        },
+        none => assert(false),
+    }
+    assert(match (g.bounds_of(empty)) {
+        some(b) => false,
         none => true,
     });
 }

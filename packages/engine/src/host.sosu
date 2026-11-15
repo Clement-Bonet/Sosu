@@ -20,15 +20,19 @@ import std.vec;
 import std.json;
 import std.text;
 import math.linear;
+import math.geometry;
 import scene.scene;
 import scene.save;
 import engine.describe;
 import engine.components;
 import engine.kinds;
 import engine.engine;
+import gpu.gpu;
+import render3d.render3d;
+import particles.draw;
 
 // The version of the contract: the editor refuses a library of another one.
-pub ui32 CONTRACT = 2;
+pub ui32 CONTRACT = 3;
 
 // ---- What crosses to C ----
 
@@ -141,13 +145,13 @@ pub class Level {
     pub Logs* logs;
     vec.Vec<Saved*>* saved;
 
-    void init(keeps Arena* arena, keeps Logs* logs) keeps self {
+    void init(keeps Arena* arena, keeps Logs* logs, keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer) keeps self {
         self.arena = arena;
         self.logs = logs;
         world = scene.world(arena);
         c = components.components(arena, world);
         registry = kinds.common(arena, c);
-        runner = engine.engine(arena, c, none, none, none, none);
+        runner = engine.engine(arena, c, none, renderer, drawer, none);
         runner.paused = true;
         saved = vec.new<Saved*>(arena);
     }
@@ -171,6 +175,33 @@ pub class Level {
             s.write(out);
         }
         return out.written();
+    }
+
+    // `e` and those under it as a prefab (`scene.save.prefab`), the tables of the game with them.
+    str branch(keeps Arena* into, scene.Entity e) keeps self {
+        save.Writer* out = save.prefab(into, world, e);
+        c.add_to(out);
+        for (Saved* s in saved.items()) {
+            s.write(out);
+        }
+        return out.written();
+    }
+
+    // The prefab `source` placed under `parent` (none: at the root): its entities, its root first;
+    // none when it does not read.
+    scene.Entity[]? place(str source, scene.Entity? parent) {
+        str copy = text.repeat(arena, source, 1);  // the names stay in the world
+        return match (save.instantiate(arena, world, copy, parent)) {
+            ok(r) => {
+                c.read_from(r);
+                for (Saved* s in saved.items()) {
+                    s.read(r);
+                }
+                world.propagate();
+                return some(r.entities());
+            },
+            err(e) => none,
+        };
     }
 
     // The entities of the scene file `source` spawned into it: none, or what is wrong.
@@ -208,6 +239,10 @@ pub class Game {
     pub mut bool paused;
     mut fn(Level*) -> void setup;
     mut fn(Level*, f32) -> void uses io stepper;
+    // The device of the editor (`sozo_gpu`), and what draws with it: each world made has them.
+    mut gpu.Device*? device;
+    mut render3d.Renderer*? renderer;
+    mut draw.Drawer*? drawer;
 
     void init(Arena arena) keeps self {
         home = arena;
@@ -222,7 +257,10 @@ pub class Game {
         paused = false;
         setup = nothing;
         stepper = standing;
-        level = place.new(Level, &place, logs);
+        device = none;
+        renderer = none;
+        drawer = none;
+        level = place.new(Level, &place, logs, renderer, drawer);
     }
 
     // A new world from the scene file `source` (empty: an empty world), in place of the one held;
@@ -231,7 +269,7 @@ pub class Game {
         level.runner.close();
         place.free();
         place = Arena.new(64 * KB);
-        level = place.new(Level, &place, logs);
+        level = place.new(Level, &place, logs, renderer, drawer);
         setup(level);
         mut bool good = true;
         if (source.len > 0) {
@@ -245,7 +283,7 @@ pub class Game {
                     level.runner.close();
                     place.free();
                     place = Arena.new(64 * KB);
-                    level = place.new(Level, &place, logs);
+                    level = place.new(Level, &place, logs, renderer, drawer);
                     setup(level);
                 },
                 none => { },
@@ -273,6 +311,34 @@ pub class Game {
         playing = true;
         paused = false;
         level.runner.paused = false;
+    }
+
+    // The device of the editor shared (`sozo_gpu`).
+    bool share_gpu(ui8* native, i32 format) keeps self uses io, threads {
+        match (device) {
+            some(d) => {
+                return true;
+            },
+            none => { },
+        }
+        gpu.Device* d = gpu.adopt(&home, native, format);
+        render3d.Renderer* r = match (render3d.create(&home, d, render3d.Options{ })) {
+            ok(x) => x,
+            err(e) => {
+                say("the game cannot draw: its renderer was not made");
+                d.close();
+                return false;
+            },
+        };
+        device = some(d);
+        renderer = some(r);
+        drawer = match (draw.drawer(&home, d)) {
+            ok(x) => some(x),
+            err(e) => none,
+        };
+        str now = level.written(fresh_out());
+        remake(now);
+        return true;
     }
 
     // An arena for a text returned now: the one before is gone.
@@ -310,8 +376,26 @@ export "C" Game* sozo_open() {
 }
 
 // The game and all it holds freed: nothing it returned stays valid.
-export "C" void sozo_close(Game* g) {
+export "C" void sozo_close(Game* g) uses io {
     g.level.runner.close();
+    match (g.drawer) {
+        some(d) => {
+            d.close();
+        },
+        none => { },
+    }
+    match (g.renderer) {
+        some(r) => {
+            r.close();
+        },
+        none => { },
+    }
+    match (g.device) {
+        some(d) => {
+            d.close();  // adopted: the device itself stays the editor's
+        },
+        none => { },
+    }
     g.place.free();
     g.kept.free();
     g.out.free();
@@ -614,6 +698,94 @@ export "C" str sozo_logs(Game* g) {
     return g.logs.take(g.fresh_out());
 }
 
+// ---- Drawing, with the device of the editor ----
+
+// The GPU of the editor shared (`gpu.adopt`: its native device and the format of its targets): the
+// game draws with it from now on, the world held made again so that it does. False when the
+// renderer cannot be made (the game then draws nothing); true at once when it already shares one.
+export "C" bool sozo_gpu(Game* g, ui8* device, i32 format) uses io, threads {
+    return g.share_gpu(device, format);
+}
+
+// The world drawn into the texture `target` of the editor (its native texture, `width` by `height`),
+// seen through `camera` when `editor_view` (else through the active view of the scene, in Play),
+// with the lines `lines` hidden behind it: ten numbers each (from x y z, to x y z, a color r g b a,
+// linear). The commands are sent at once, before the editor's own: it then shows the texture. False
+// when the game has no device (`sozo_gpu`).
+export "C" bool sozo_render(Game* g, ui8* target, ui32 width, ui32 height, render3d.Camera camera, bool editor_view, f32[] lines) uses io, threads {
+    gpu.Device* d = match (g.device) {
+        some(x) => x,
+        none => {
+            return false;
+        },
+    };
+    match (g.renderer) {
+        some(r) => {
+            usize n = lines.len / 10;
+            for (usize i in 0..n) {
+                usize k = i * 10;
+                r.line(linear.vec3(lines[k], lines[k + 1], lines[k + 2]), linear.vec3(lines[k + 3], lines[k + 4], lines[k + 5]),
+                        [lines[k + 6], lines[k + 7], lines[k + 8], lines[k + 9]]);
+            }
+        },
+        none => {
+            return false;
+        },
+    }
+    gpu.Texture into = d.adopt_texture(target, width, height);
+    gpu.Frame frame = match (d.commands()) {
+        ok(f) => f,
+        err(e) => {
+            d.release_texture(into);
+            return false;
+        },
+    };
+    g.level.runner.looking = editor_view ? some(camera) : none;
+    g.level.runner.render_into(frame, into);
+    frame.submit();
+    d.release_texture(into);  // forgotten: it is the editor's
+    return true;
+}
+
+// The box of `e` written into `box` (`Engine.bounds_of`), and the space it lies in: 1 its own (a
+// mesh), 2 its place and turn (a body), 3 its place alone (a marker); 0, and nothing written, when
+// it has none.
+export "C" ui32 sozo_bounds(Game* g, scene.Entity e, geometry.Aabb* box) uses io, threads {
+    return match (g.level.runner.bounds_of(e)) {
+        some(b) => {
+            *box = b.box;
+            return match (b.space) {
+                Scaled => 1,
+                Turned => 2,
+                Placed => 3,
+            };
+        },
+        none => 0,
+    };
+}
+
+// ---- Branches: copy, paste, duplicate ----
+
+// `e` and those under it as a prefab, the tables of the game with them.
+export "C" str sozo_branch(Game* g, scene.Entity e) {
+    return g.level.branch(g.fresh_out(), e);
+}
+
+// The prefab `source` placed under `parent` (at the root when `at_root`): its entities, its root
+// first; none (an empty view) when it does not read.
+export "C" scene.Entity[] sozo_place_branch(Game* g, str source, scene.Entity parent, bool at_root) {
+    return match (g.level.place(source, at_root ? none : some(parent))) {
+        some(all) => {
+            scene.Entity[] copy = g.fresh_out().alloc_slice(scene.Entity, all.len);
+            for (usize i in 0..all.len) {
+                copy[i] = all[i];
+            }
+            return copy;
+        },
+        none => g.fresh_out().alloc_slice(scene.Entity, 0),
+    };
+}
+
 // ---- Tests: the contract called as the editor calls it ----
 
 // A component of a game: a spin around y, in degrees per second.
@@ -844,6 +1016,28 @@ test "the contract: entities, components of engine and of the game, saved, playe
     assert(sozo_transform(g, sozo_entities(g)[0]).position.y < 5.0);
     sozo_stop(g);
     assert(sozo_transform(g, sozo_entities(g)[0]).position.y == 5.0);
+    // the boxes picked by the editor: the body of the crate, in its place and turn; the top has none
+    scene.Entity box_of = sozo_entities(g)[0];
+    mut geometry.Aabb box = geometry.aabb(linear.vec3(0.0, 0.0, 0.0), linear.vec3(0.0, 0.0, 0.0));
+    assert(sozo_bounds(g, box_of, &box) == 2 && box.max.near(linear.vec3(0.5, 0.5, 0.5), 0.0001));
+    assert(sozo_bounds(g, sozo_entities(g)[1], &box) == 0);
+    // a branch copied and placed again at the root: the crate and the top under it, with the game's
+    // table (the spin)
+    str branch = text.repeat(&keep, sozo_branch(g, box_of), 1);
+    scene.Entity[] placed = sozo_place_branch(g, branch, box_of, true);
+    assert(placed.len == 2 && sozo_count(g) == 4);
+    scene.Entity copy = placed[0];  // the view is gone at the next call that returns one
+    scene.Entity copy_top = placed[1];
+    mut scene.Entity under = copy;
+    assert(!sozo_parent_of(g, copy, &under) && sozo_parent_of(g, copy_top, &under) && under.same(copy));
+    assert(sozo_get(g, copy_top, kind_named(g, "spin"), 0).number == 720.0);
+    assert(sozo_place_branch(g, "{ not json", box_of, true).len == 0);
+    sozo_despawn(g, copy);
+    // without the device of an editor, nothing is drawn
+    mut f32[10] line = [0.0; 10];
+    mut ui8 nothing = 0;
+    assert(!sozo_render(g, &nothing, 16, 16, render3d.Camera{ position: linear.vec3(0.0, 0.0, 5.0), target: linear.vec3(0.0, 0.0, 0.0) },
+            true, line[0..10]));
     // despawned with its children
     sozo_despawn(g, sozo_entities(g)[0]);
     assert(sozo_count(g) == 0);
