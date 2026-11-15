@@ -369,7 +369,8 @@ bool refused(url.Url? u) {
 // What the client thread of an HTTP test asks for.
 struct Ask {
     ui16 port;
-    i32 kind;  // 0: GET /, 1: GET /small (64 bytes at most), 2: POST /form, 3: GET / with a token and a cookie
+    i32 kind;  // 0: GET /, 1: GET /small (64 bytes at most), 2: POST /form, 3: GET / with a token and a cookie,
+    // 4: GET / with its own Accept and User-Agent
 }
 
 // The client of an HTTP test: the status times 100 000 plus the length of the body, or a
@@ -386,6 +387,12 @@ i64 ask(Arena* arena, Ask a) uses io {
     }
     if (a.kind == 2) {
         r.body = "name=sosu".bytes;
+    }
+    if (a.kind == 4) {
+        mut http.Header[] own = arena.alloc_slice(http.Header, 2);
+        own[0] = http.Header{ name: "accept", value: "application/octet-stream" };
+        own[1] = http.Header{ name: "User-Agent", value: "sozohub" };
+        r.headers = own;
     }
     if (a.kind == 3) {
         mut http.Header[] proofs = arena.alloc_slice(http.Header, 2);
@@ -515,11 +522,19 @@ test "an HTTP client: lengths, chunks, the end of the stream, redirects, limits"
     away.push("/away\r\nContent-Length: 0\r\n\r\n");
     str same = answer(&arena, server, away.text(), 0);
     str elsewhere = answer(&arena, other, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 0);
-    assert(text.contains(asked, "\r\nAuthorization: Bearer secret\r\n") && text.contains(asked, "\r\nCookie: id=1\r\n"));
+    assert(text.contains(asked, "\r\nAuthorization: Bearer secret\r\n")
+            && text.contains(asked, "\r\nCookie: id=1\r\n"));
     assert(text.starts_with(same, "GET /same HTTP/1.1") && text.contains(same, "\r\nAuthorization: Bearer secret\r\n"));
     assert(text.starts_with(elsewhere, "GET /away HTTP/1.1") && !text.contains(elsewhere, "Authorization")
             && !text.contains(elsewhere, "Cookie"));
     assert(proving.join() == 20000002);
+    // an Accept and a User-Agent given replace those of the client: each sent once
+    auto choosing = thread.spawn(&arena, ask, Ask{ port: server.port(), kind: 4 });
+    str chosen = answer(&arena, server, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 0);
+    assert(text.contains(chosen, "\r\naccept: application/octet-stream\r\n") && !text.contains(chosen, "Accept: */*"));
+    assert(text.contains(chosen, "\r\nUser-Agent: sozohub\r\n") && !text.contains(chosen, "sosu-net"));
+    assert(text.contains(chosen, "\r\nAccept-Encoding: identity\r\n") && text.count(chosen, "ccept:") == 1);
+    assert(choosing.join() == 20000002);
     // a URL refused before any connection
     match (http.get(&arena, "http://bad url/")) {
         ok(r) => {

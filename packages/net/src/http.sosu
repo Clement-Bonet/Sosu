@@ -49,7 +49,9 @@ pub struct Header {
 pub struct Request {
     pub mut str method;  // "GET", "POST"...
     pub mut str url;
-    pub mut Header[] headers;  // besides Host, User-Agent, Accept, Connection and Content-Length
+    // Besides Host, Connection and Content-Length, which the client writes; a User-Agent, an Accept or
+    // an Accept-Encoding given here replaces the one it writes otherwise.
+    pub mut Header[] headers;
     pub mut ui8[] body;
     pub mut i32 timeout_ms;  // the longest each connect, read and write waits (0: no limit)
     pub mut usize max_size;  // the largest answer, headers and body
@@ -254,7 +256,19 @@ Body*!HttpError start(
     b.push(target.target);
     b.push(" HTTP/1.1\r\nHost: ");
     b.push(target.authority(arena));
-    b.push("\r\nUser-Agent: sosu-net/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
+    b.push("\r\n");
+    // the defaults, but those the request gives itself (a download that asks for the file, not its
+    // description: `Accept: application/octet-stream`)
+    if (!given(headers, "User-Agent")) {
+        b.push("User-Agent: sosu-net/0.1\r\n");
+    }
+    if (!given(headers, "Accept")) {
+        b.push("Accept: */*\r\n");
+    }
+    if (!given(headers, "Accept-Encoding")) {
+        b.push("Accept-Encoding: identity\r\n");
+    }
+    b.push("Connection: close\r\n");
     for (Header h in headers) {
         b.push(h.name);
         b.push(": ");
@@ -349,7 +363,8 @@ pub Body*!HttpError body_of(Arena* arena, keeps Reader* reader, str method, keep
     }
     return match (length) {
         some(l) => match (text.parse_u64(text.trim(l))) {
-            ok(n) => n > reader.max as ui64 ? err(HttpError.TooLarge) : ok(arena.new(Body, head, reader, LENGTH, n as i64)),
+            ok(n) => n > reader.max as ui64 ? err(HttpError.TooLarge)
+                    : ok(arena.new(Body, head, reader, LENGTH, n as i64)),
             err(e) => err(HttpError.BadResponse),
         },
         none => ok(arena.new(Body, head, reader, UNTIL_CLOSED, -1)),
@@ -641,12 +656,23 @@ ui8[] copied(Arena* arena, ui8[] bytes) {
     return out;
 }
 
+// Whether `headers` has one named `name`.
+bool given(Header[] headers, str name) {
+    for (Header h in headers) {
+        if (same_name(h.name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // `headers` but those that prove who asks: not sent to another origin after a redirect.
 Header[] without_credentials(Arena* arena, Header[] headers) {
     Header[] kept = arena.alloc_slice(Header, headers.len);
     mut usize n = 0;
     for (Header h in headers) {
-        if (!same_name(h.name, "Authorization") && !same_name(h.name, "Proxy-Authorization") && !same_name(h.name, "Cookie")) {
+        if (!same_name(h.name, "Authorization") && !same_name(h.name, "Proxy-Authorization")
+                && !same_name(h.name, "Cookie")) {
             kept[n] = h;
             n += 1;
         }

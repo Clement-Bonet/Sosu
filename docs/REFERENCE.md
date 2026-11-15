@@ -5765,7 +5765,7 @@ pub struct Request
   "GET", "POST"...
 - `pub mut str url`
 - `pub mut Header[] headers`  
-  besides Host, User-Agent, Accept, Connection and Content-Length
+  Besides Host, Connection and Content-Length, which the client writes; a User-Agent, an Accept or an Accept-Encoding given here replaces the one it writes otherwise.
 - `pub mut ui8[] body`
 - `pub mut i32 timeout_ms`  
   the longest each connect, read and write waits (0: no limit)
