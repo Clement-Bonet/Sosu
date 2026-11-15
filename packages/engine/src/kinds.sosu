@@ -29,6 +29,9 @@ pub interface Kind {
     void remove(scene.Entity e);
     // The field `i` of the component of `e`, none if it has none.
     describe.Value? get(scene.Entity e, usize i);
+    // The field `i` of a component as it is made new (`Describe.fresh`): what a field is reset to;
+    // none past its fields.
+    describe.Value? fresh(usize i);
     // `v` given to the field `i` of the component of `e`, held within its bounds, a text copied
     // where the world lives: false if it has none.
     bool set(scene.Entity e, usize i, describe.Value v);
@@ -44,6 +47,14 @@ pub describe.Value? table_get<T>(scene.Table<T>* table, describe.Describe<T>* d,
         some(c) => some(d.get(c, i)),
         none => none,
     };
+}
+
+pub describe.Value? table_fresh<T>(describe.Describe<T>* d, usize i) {
+    if (i >= d.count()) {
+        return none;
+    }
+    mut T made = d.fresh();
+    return some(d.get(&made, i));
 }
 
 pub bool table_set<T>(
@@ -189,6 +200,10 @@ class MeshKind : Kind {
         return table_get(c.meshes, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.meshes, d(), e, i, v);
     }
@@ -233,6 +248,10 @@ class LightKind : Kind {
 
     override describe.Value? get(scene.Entity e, usize i) {
         return table_get(c.lights, d(), e, i);
+    }
+
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
     }
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
@@ -281,6 +300,10 @@ class ViewKind : Kind {
         return table_get(c.views, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.views, d(), e, i, v);
     }
@@ -325,6 +348,10 @@ class BodyKind : Kind {
 
     override describe.Value? get(scene.Entity e, usize i) {
         return table_get(c.bodies, d(), e, i);
+    }
+
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
     }
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
@@ -373,6 +400,10 @@ class SoundKind : Kind {
         return table_get(c.sounds, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.sounds, d(), e, i, v);
     }
@@ -419,6 +450,10 @@ class EmitterKind : Kind {
         return table_get(c.emitters, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.emitters, d(), e, i, v);
     }
@@ -463,6 +498,10 @@ class AnimatorKind : Kind {
 
     override describe.Value? get(scene.Entity e, usize i) {
         return table_get(c.animators, d(), e, i);
+    }
+
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
     }
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
@@ -553,6 +592,10 @@ class SpeedKind : Kind {
         return table_get(speeds, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, speeds, d(), e, i, v);
     }
@@ -641,6 +684,12 @@ test "the kinds of components: the common ones and one of a game, each read and 
     assert(text_in(speed.get(crate, 1)) == "slow");
     speed.set(crate, 0, describe.Value.Number(25.0));
     assert(number_in(speed.get(crate, 0)) == 10.0);  // its bounds
+    // what a field is reset to: that of a component made new; nothing past its fields
+    assert(number_in(speed.fresh(0)) == 1.0 && text_in(speed.fresh(1)) == "slow");
+    assert(match (speed.fresh(2)) {
+        some(v) => false,
+        none => true,
+    });
     assert(match (speeds.get(crate)) {
         some(s) => s.value == 10.0,
         none => false,

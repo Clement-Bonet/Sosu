@@ -98,6 +98,10 @@ class LiftKind : kinds.Kind, host.Saved {
         return kinds.table_get(lifts, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return kinds.table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return kinds.table_set(arena, lifts, d(), e, i, v);
     }
