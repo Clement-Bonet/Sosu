@@ -28,7 +28,7 @@ import engine.kinds;
 import engine.engine;
 
 // The version of the contract: the editor refuses a library of another one.
-pub ui32 CONTRACT = 1;
+pub ui32 CONTRACT = 2;
 
 // ---- What crosses to C ----
 
@@ -539,6 +539,18 @@ export "C" Value sozo_get(Game* g, scene.Entity e, usize kind, usize field) {
     };
 }
 
+// The field `field` of the component `kind` as it is made new: what a field is reset to; `Empty`
+// past its fields.
+export "C" Value sozo_fresh(Game* g, usize kind, usize field) {
+    if (kind >= g.level.registry.count()) {
+        return Value{ };
+    }
+    return match (g.level.registry.at(kind).fresh(field)) {
+        some(v) => to_c(v),
+        none => Value{ },
+    };
+}
+
 // `v` given to the field `field` of the component `kind` of `e`, held within its bounds, a text
 // copied; false when it has none (or `v` is empty). What the engine gave `e` is made again.
 export "C" bool sozo_set(Game* g, scene.Entity e, usize kind, usize field, Value v) {
@@ -693,6 +705,10 @@ class SpinKind : kinds.Kind, Saved {
         return kinds.table_get(spins, d(), e, i);
     }
 
+    override describe.Value? fresh(usize i) {
+        return kinds.table_fresh(d(), i);
+    }
+
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return kinds.table_set(arena, spins, d(), e, i, v);
     }
@@ -786,6 +802,13 @@ test "the contract: entities, components of engine and of the game, saved, playe
     sozo_add(g, lid, spin);
     sozo_set(g, lid, spin, 0, Value{ tag: Tag.Number, number: 1000.0 });
     assert(sozo_get(g, lid, spin, 0).number == 720.0);  // its bounds
+    assert(sozo_fresh(g, spin, 0).number == 90.0 && sozo_fresh(g, spin, 1).flag);  // what a reset gives
+    match (sozo_fresh(g, spin, 2).tag) {
+        Empty => { },
+        _ => {
+            assert(false);
+        },
+    }
     // saved, cleared, loaded back: the game's table with the rest
     mut Arena keep = Arena.new(4 * KB);
     defer keep.free();
