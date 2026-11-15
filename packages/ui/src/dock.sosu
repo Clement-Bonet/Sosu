@@ -5,7 +5,9 @@
 //
 // - A tab dragged shows the guides: a cross of five squares on the group under the mouse (into its
 //   tabs, or beside it on one of its sides) and one square on each side of the dock; released over
-//   a guide, the panel goes there, a preview showing where before.
+//   a guide, the panel goes there, a preview showing where before. When the program opens floating
+//   windows, the panel is torn off as the drag starts, into a window the mouse carries (its widgets
+//   shown all along, as in Visual Studio), and the guides show under it.
 // - The pin of a group hides its panels on the side of the dock nearest to it: a tab each on a bar
 //   along that side; the mouse over a tab slides its panel out over the others, the mouse away
 //   slides it back; the pin of that panel docks it again where it was.
@@ -19,12 +21,13 @@
 //   }
 //   dock.end(f, d)                          the guides of a drag, and the drop
 //
-// Floating windows (when the program opens them: `can_float`): a tab dropped over no guide goes
-// into a window of its own, which holds a tree of its own, as the dock does. `windows` lists them;
-// each is drawn in its window as the dock is (`begin_window`, `next`, `end_window`). A tab or a
-// whole window dragged shows the guides of the window under the mouse, the dock's or a floating
-// one's: panels go from one window to another. The pin of a floating window docks its panels back
-// where they were. See spec §10.13.
+// Floating windows (when the program opens them: `can_float`): a tab dragged is torn off into a
+// window of its own, carried by the mouse (`carried`), that stays where it is dropped over no guide.
+// Each window holds a tree of its own, as the dock does. `windows` lists them; each is drawn in its
+// window as the dock is (`begin_window`, `next`, `end_window`). A tab or a whole window dragged
+// shows the guides of the window under the mouse, the dock's or a floating one's: panels go from
+// one window to another. The pin of a floating window docks its panels back where they were. See
+// spec §10.13.
 //
 // What changes the arrangement (a click on a pin, a drop) is applied at the next `begin`: a
 // frame of `ui` describes what it shows, the arrangement under it does not move meanwhile.
@@ -263,6 +266,32 @@ pub class Dock {
 
     pub bool moves_window() {
         return drag_win >= 0;
+    }
+
+    // The floating window the mouse carries (held whole, or a tab just torn off into it), -1: none.
+    // The program moves its window with the mouse (`grab`), wherever the mouse is given from: the
+    // window of the dock or the one the drag started in (`held_window`).
+    pub i32 carried() {
+        return drag_win >= 0 && moving ? drag_win : -1;
+    }
+
+    // The panel dragged torn off into a floating window of its own under the mouse (mx, my), which
+    // the drag now carries whole: the guides show under it, a drop over one docks it there.
+    void tear_off(f32 mx, f32 my, f32 s) {
+        i32 p = dragging;
+        canvas.Rect r = canvas.Rect{
+            x: mx - grab_x,
+            y: my - grab_y,
+            w: max(drag_w, 160.0 * s),
+            h: max(drag_h, 120.0 * s)
+        };
+        leave_dock(p);
+        detach(p);
+        drag_win = new_win(p, r);
+        dragging = -1;
+        if (flyout == p) {
+            flyout = -1;
+        }
     }
 
     // Where the window held was taken, from its top left corner.
@@ -1258,6 +1287,21 @@ bool held_down(widgets.Frame* f, Dock* d) {
 pub void begin(widgets.Frame* f, Dock* d, canvas.Rect area) {
     d.apply();
     f32 s = f.ui_scale();
+    // a tab held: far enough, it is a drag; when the program opens floating windows, the panel is
+    // torn off at once into a window of its own that the mouse carries, its widgets shown all along
+    // (as Visual Studio does)
+    if (d.dragging >= 0 && !d.moving && held_down(f, d)) {
+        f32[2] m = pointer(f, d);
+        f32 dx = m[0] - d.press_x;
+        f32 dy = m[1] - d.press_y;
+        if (dx * dx + dy * dy > 36.0 * s * s) {
+            d.moving = true;
+            d.flyout = -1;
+            if (d.can_float) {
+                d.tear_off(m[0], m[1], s);
+            }
+        }
+    }
     canvas.Canvas* c = f.drawing();
     d.area = area;
     d.drawing = -1;
@@ -1274,16 +1318,6 @@ pub void begin(widgets.Frame* f, Dock* d, canvas.Rect area) {
     d.in_panel = false;
     d.shown = -1;
     c.fill(area, f.window_color());
-    // a tab held: far enough, it is a drag
-    if (d.dragging >= 0 && !d.moving && held_down(f, d)) {
-        f32[2] m = pointer(f, d);
-        f32 dx = m[0] - d.press_x;
-        f32 dy = m[1] - d.press_y;
-        if (dx * dx + dy * dy > 36.0 * s * s) {
-            d.moving = true;
-            d.flyout = -1;
-        }
-    }
     tree(f, d, -1, 0.0, 0.0, s);
     bars(f, d, area, s);
 }
@@ -2169,6 +2203,39 @@ test "a panel floated into a window of its own, held back onto a guide, and dock
     assert(frame(&arena, &ui, &surface, d) == "a b" && d.is_floating("c"));
     d.dock_back(d.window_of("c"));
     assert(frame(&arena, &ui, &surface, d) == "a b c" && d.windows(&arena).len == 0);
+}
+
+test "a tab dragged out is torn off at once into a window the mouse carries, docked where it is dropped" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    d.can_float = true;
+    frame(&arena, &ui, &surface, d);
+    // held, not yet moved: still docked, nothing carried
+    at(&ui, d.tab_of("c"));
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    assert(!d.is_floating("c") && d.carried() == -1);
+    // moved, still held: already in a window of its own, under the mouse, carried
+    ui.mouse_move(120.0, 80.0);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d) == "a b");
+    i32 k = d.window_of("c");
+    assert(k >= 0 && d.carried() == k && d.moves_window() && d.held_window() == -1 && d.busy());
+    canvas.Rect r = d.window_rect(k);
+    f32[2] held_at = d.grab();
+    assert(r.x + held_at[0] == 120.0 && r.y + held_at[1] == 80.0);
+    // released over the guide of the left of the dock: docked there, its window gone
+    canvas.Rect g = guide_of(d, "", Edge.Left, 1.0);
+    ui.mouse_move(g.x + g.w / 2.0, g.y + g.h / 2.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    frame(&arena, &ui, &surface, d);
+    assert(frame(&arena, &ui, &surface, d).len == 5);  // the three panels shown
+    assert(!d.is_floating("c") && d.rect_of("c").x < 20.0 && d.carried() == -1);
+    assert(d.windows(&arena).len == 0);
 }
 
 test "floating windows: one dropped into another, a tab of the dock into one, all docked back" {

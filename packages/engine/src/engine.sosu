@@ -140,6 +140,23 @@ pub class Engine {
         models.push(ModelSlot{ path: path, handle: none, loaded: some(m), uploaded: none, failed: false });
     }
 
+    // The names of the models made in code (`adopt_model`), in the order they were given: what a
+    // mesh can name without a file (an editor offers them beside the files of the project).
+    pub str[] adopted_models(keeps Arena* into) {
+        vec.Vec<str>* out = vec.new<str>(into);
+        for (usize i in 0..models.len()) {
+            ModelSlot* s = models.at(i);
+            bool made_in_code = match (s.handle) {
+                some(h) => false,
+                none => true,
+            };
+            if (made_in_code) {
+                out.push(text.repeat(into, s.path, 1));  // its own copy: the slot may go
+            }
+        }
+        return out.items();
+    }
+
     // The sound of `path`, made in code.
     pub void adopt_sound(keeps str path, keeps audio.Sound s) {
         for (usize i in 0..sounds.len()) {
@@ -977,6 +994,8 @@ test "an animator plays a clip of the model of its mesh" {
     Engine* g = engine(&arena, c, none, none, none, none);
     defer g.close();
     g.adopt_model("models/rig", rig);
+    str[] made = g.adopted_models(&arena);
+    assert(made.len == 1 && made[0] == "models/rig");
     scene.Entity hero = placed(w, "hero", linear.vec3(0.0, 0.0, 0.0));
     c.meshes.set(hero, components.Mesh{ model: "models/rig" });
     c.animators.set(hero, components.Animator{ clip: "slide" });
