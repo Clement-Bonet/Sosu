@@ -4456,7 +4456,12 @@ pub struct Frame {
             str label = ui.carried_label.text();
             canvas.Rect size = text_size(label, 0.0);
             f32 s = ui_scale();
-            canvas.Rect tag = canvas.Rect{ x: ui.mouse_x + 14.0 * s, y: ui.mouse_y + 10.0 * s, w: size.w + 16.0 * s, h: size.h + 10.0 * s };
+            canvas.Rect tag = canvas.Rect{
+                x: ui.mouse_x + 14.0 * s,
+                y: ui.mouse_y + 10.0 * s,
+                w: size.w + 16.0 * s,
+                h: size.h + 10.0 * s
+            };
             surface.fill_rounded(tag, 4.0 * s, field_color());
             surface.stroke_rounded(tag, 4.0 * s, accent_color(), 1.0);
             text_at(tag.x + 8.0 * s, tag.y, tag.h, label, text_color(), 0.0);
