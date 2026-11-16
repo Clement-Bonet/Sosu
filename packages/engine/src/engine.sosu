@@ -17,6 +17,10 @@
 // give a model or a sound made in code for a path, without a file.
 import std.vec;
 import std.text;
+import std.io;
+import std.os;
+import std.time;
+import std.random;
 import math.linear;
 import math.curve;
 import math.geometry;
@@ -33,6 +37,8 @@ import particles.particles;
 import particles.draw;
 import anim.anim;
 import assets.assets;
+import assets.ids;
+import std.fs;
 import engine.components;
 
 bool present<T>(T? x) {
@@ -123,6 +129,10 @@ pub class Engine {
     // Paused (an editor that edits): the files still load and the world matrices follow the
     // transforms, but nothing moves, burns, plays or is given a body until it is not.
     pub mut bool paused;
+    // Where the files of the project are (`use_files`): the folder relative paths start from, and
+    // the identities of its files, whose GUIDs the components name.
+    mut str root;
+    mut ids.Catalog*? catalog;
 
     void init(keeps Arena* arena, keeps components.Components* c, keeps assets.Assets*? store,
             keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer, keeps mixer.Mixer*? mix) {
@@ -142,6 +152,8 @@ pub class Engine {
         sounds = vec.new<SoundSlot>(arena);
         looking = none;
         paused = false;
+        root = "";
+        catalog = none;
         // the models every scene can name without a file
         adopt_model("crate", render3d.cube(arena, [0.72, 0.52, 0.3, 1.0]));
         adopt_model("ground", render3d.ground(arena, 20.0, [0.34, 0.4, 0.3, 1.0]));
@@ -202,6 +214,32 @@ pub class Engine {
         sounds.push(SoundSlot{ path: path, handle: none, loaded: some(s), failed: false });
     }
 
+    // The files of a project: `root`, the folder relative paths start from, and `catalog` (none:
+    // paths only), the identities of its files (`assets.ids`): a component that names a GUID names
+    // the file of that GUID, wherever it was moved since. Before the first file is asked.
+    pub void use_files(keeps str root, keeps ids.Catalog*? catalog) {
+        self.root = root;
+        self.catalog = catalog;
+    }
+
+    // The file a component names by `name`: that of its GUID, else `name` from the root of the
+    // project (unless it is absolute), else `name` itself.
+    pub str located(str name) {
+        match (catalog) {
+            some(cat) => {
+                match (cat.path_of(name)) {
+                    some(relative) => {
+                        return fs.join(arena, root, relative);
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+        bool absolute = text.starts_with(name, "/") || text.contains(name, ":");
+        return root.len > 0 && !absolute ? fs.join(arena, root, name) : text.repeat(arena, name, 1);
+    }
+
     ModelSlot*? model_slot(keeps str path) uses io, threads {
         if (path.len == 0) {
             return none;
@@ -213,7 +251,7 @@ pub class Engine {
         }
         match (store) {
             some(s) => {
-                models.push(ModelSlot{ path: path, handle: some(s.model_file(path)), loaded: none, uploaded: none, failed: false });
+                models.push(ModelSlot{ path: path, handle: some(s.model_file(located(path))), loaded: none, uploaded: none, failed: false });
                 return some(models.at(models.len() - 1));
             },
             none => {
@@ -233,7 +271,7 @@ pub class Engine {
         }
         match (store) {
             some(s) => {
-                sounds.push(SoundSlot{ path: path, handle: some(s.sound(path)), loaded: none, failed: false });
+                sounds.push(SoundSlot{ path: path, handle: some(s.sound(located(path))), loaded: none, failed: false });
                 return some(sounds.at(sounds.len() - 1));
             },
             none => {
@@ -1166,4 +1204,90 @@ test "the box of each entity: its model's, its body's, a marker, none; the model
         some(b) => false,
         none => true,
     });
+}
+
+test "the files of a project: a model named by its GUID loaded, found again after it moved" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    str temp = match (os.env(&arena, "TEMP")) {
+        some(t) => t,
+        none => match (os.env(&arena, "TMPDIR")) {
+            some(t) => t,
+            none => "/tmp",
+        },
+    };
+    mut random.Rng rng = random.from_system();
+    text.TextBuilder* b = text.builder(&arena);
+    b.push("sosu-engine-files-");
+    b.push_u64(rng.next());
+    str root = fs.join(&arena, temp, b.text());
+    str folder = fs.join(&arena, root, "assets");
+    match (fs.create_dirs(&arena, folder)) {
+        ok => { },
+        err(e) => { },
+    }
+    match (io.write_file(&arena, fs.join(&arena, folder, "wedge.obj"), "v 0 0 0\nv 2 0 0\nv 0 3 0\nf 1 2 3\n")) {
+        ok => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    ids.Catalog* cat = ids.catalog(&arena, root, ".asset.sozo");
+    defer cat.close();
+    cat.scan();
+    str guid = match (cat.guid_of("assets/wedge.obj")) {
+        some(x) => text.repeat(&arena, x, 1),
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assets.Assets* store = assets.open(&arena, none, 1);
+    defer store.close();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, some(store), none, none, none);
+    defer g.close();
+    g.use_files(root, some(cat));
+    scene.Entity wedge = placed(w, "wedge", linear.vec3(0.0, 0.0, 0.0));
+    c.meshes.set(wedge, components.Mesh{ model: guid });
+    mut bool loaded = false;
+    for (i32 i in 0..2000) {
+        g.update(0.0);
+        match (g.model_of(guid)) {
+            some(m) => {
+                loaded = true;
+                break;
+            },
+            none => {
+                time.sleep_ms(1);
+            },
+        }
+    }
+    assert(loaded);
+    match (g.bounds_of(wedge)) {
+        some(bx) => {
+            assert(bx.box.max.near(linear.vec3(2.0, 3.0, 0.0), 0.001));
+        },
+        none => assert(false),
+    }
+    // moved with its companion: the same GUID names it where it is now; a plain path starts from
+    // the root of the project
+    assert(cat.move("assets/wedge.obj", "assets/shapes/wedge.obj"));
+    assert(text.ends_with(g.located(guid), "wedge.obj") && text.contains(g.located(guid), "shapes"));
+    assert(g.located("assets/x.png") == fs.join(&arena, root, "assets/x.png"));
+    // a path given by an arena that goes before the store (the world of an editor made again): the
+    // store keeps its own copy, which it looks at when it watches the files
+    store.watch(true);
+    mut Arena brief = Arena.new(1 * KB);
+    str cone = fs.join(&brief, root, "assets/shapes/wedge.obj");
+    store.model_file(text.repeat(&brief, cone, 1));
+    brief.free();
+    time.sleep_ms(600);
+    store.update(4);  // the files watched: their paths read
+
+    match (fs.remove_all(&arena, root)) {
+        ok => { },
+        err(e) => { },
+    }
 }

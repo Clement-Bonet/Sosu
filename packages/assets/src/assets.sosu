@@ -262,7 +262,9 @@ pub class Assets {
     }
 
     // The handle of `path` of `kind`: the one given before, or a new one, its load asked.
-    Handle ask(keeps str path, ui8 kind) uses io, threads {
+    // `path` is copied into the arena of the store: the store outlives what asks it (the world of an
+    // editor, made again), and reads the path again when it watches the files.
+    Handle ask(str path, ui8 kind) uses io, threads {
         assert(!closed);
         for (usize i in 0..slots.len()) {
             Slot s = slots.items()[i];
@@ -279,7 +281,7 @@ pub class Assets {
         }
         Slot fresh = Slot{
             kind: kind,
-            path: path,
+            path: text.repeat(arena, path, 1),
             generation: index < slots.len() ? slots.items()[index].generation + 1 : 1,
             alive: true,
             version: 0,
@@ -333,23 +335,23 @@ pub class Assets {
     }
 
     // A texture (PNG, JPEG), sent to the GPU with its mipmaps once decoded.
-    pub Handle texture(keeps str path) uses io, threads {
+    pub Handle texture(str path) uses io, threads {
         return ask(path, TEXTURE);
     }
 
     // A sound (WAV, Ogg Vorbis, MP3, FLAC).
-    pub Handle sound(keeps str path) uses io, threads {
+    pub Handle sound(str path) uses io, threads {
         return ask(path, SOUND);
     }
 
     // A model (glTF, OBJ, FBX, by the extension of `path`), with the textures it names. (Not
     // `model`: the name of the package of models.)
-    pub Handle model_file(keeps str path) uses io, threads {
+    pub Handle model_file(str path) uses io, threads {
         return ask(path, MODEL);
     }
 
     // A shader of `sosuc shaders`: `path` is its source without `.hlsl`.
-    pub Handle shader(keeps str path) uses io, threads {
+    pub Handle shader(str path) uses io, threads {
         return ask(path, SHADER);
     }
 

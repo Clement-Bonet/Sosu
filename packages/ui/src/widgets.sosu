@@ -596,6 +596,14 @@ struct WidgetState {
 
 // The state of an interface between frames.
 pub struct Ui {
+    // What is dragged from one widget to another (`drag_source`, `drop_target`): its text and the
+    // label shown under the mouse; pressed on a source (`may_carry`), carried once the mouse moved.
+    mut TextBuffer carried = TextBuffer{ };
+    mut TextBuffer carried_label = TextBuffer{ };
+    mut bool may_carry = false;
+    mut bool carrying = false;
+    mut f32 carry_x = 0.0;
+    mut f32 carry_y = 0.0;
     // The input since the last frame.
     mut f32 mouse_x = 0.0;
     mut f32 mouse_y = 0.0;
@@ -4391,6 +4399,74 @@ pub struct Frame {
     // follow, until `end_context_menu()`. A press of the right button on that widget opens it
     // under the mouse; when context menus are nested (one for an item, one for its list), the
     // first one described opens.
+    // ---- Dragged from one widget to another (spec §10.10) ----
+
+    // The widget just placed can be dragged, carrying `payload` (a text: a path, an identity), shown
+    // as `label` under the mouse once it moved more than 6 pixels with the button held; the widget
+    // under the mouse when the button is let go takes it (`drop_target`, `drop_in`), else it is lost.
+    pub void drag_source(str payload, str label) {
+        if (ui.pressed && !ui.carrying && over(last)) {
+            ui.may_carry = true;
+            ui.carried.set(payload);
+            ui.carried_label.set(label);
+            ui.carry_x = ui.mouse_x;
+            ui.carry_y = ui.mouse_y;
+        }
+    }
+
+    // Whether something is being dragged (`drag_source`), and what.
+    pub bool carrying() {
+        return ui.carrying;
+    }
+
+    pub str carried() {
+        return ui.carrying ? ui.carried.text() : "";
+    }
+
+    // The widget just placed takes what is dropped on it (`drop_in` of its rectangle).
+    pub str? drop_target() {
+        return drop_in(last);
+    }
+
+    // What is dropped in `r` (a widget, a view the program draws), once, on the frame the button is
+    // let go over it; while something is carried over it, `r` is outlined.
+    pub str? drop_in(canvas.Rect r) {
+        if (!ui.carrying || !over(r)) {
+            return none;
+        }
+        surface.stroke(r, accent_color(), 2.0);
+        if (!ui.released) {
+            return none;
+        }
+        ui.carrying = false;
+        return some(ui.carried.text());
+    }
+
+    // A drag going on: carried once the mouse moved far enough; the label under the mouse; let go,
+    // what no widget took is lost.
+    void carry() {
+        if (ui.may_carry && ui.down && !ui.carrying) {
+            f32 dx = ui.mouse_x - ui.carry_x;
+            f32 dy = ui.mouse_y - ui.carry_y;
+            if (dx * dx + dy * dy > 36.0 * ui_scale() * ui_scale()) {
+                ui.carrying = true;
+            }
+        }
+        if (ui.carrying) {
+            str label = ui.carried_label.text();
+            canvas.Rect size = text_size(label, 0.0);
+            f32 s = ui_scale();
+            canvas.Rect tag = canvas.Rect{ x: ui.mouse_x + 14.0 * s, y: ui.mouse_y + 10.0 * s, w: size.w + 16.0 * s, h: size.h + 10.0 * s };
+            surface.fill_rounded(tag, 4.0 * s, field_color());
+            surface.stroke_rounded(tag, 4.0 * s, accent_color(), 1.0);
+            text_at(tag.x + 8.0 * s, tag.y, tag.h, label, text_color(), 0.0);
+        }
+        if (!ui.down) {
+            ui.may_carry = false;
+            ui.carrying = false;
+        }
+    }
+
     pub void context_menu() {
         ui64 target = last_id;  // the widget it is for, before its own identity replaces it
         ui64 id = take_id();
@@ -4788,7 +4864,8 @@ pub struct Frame {
             ui.dimmed = false;
         }
         finish_menus();
-        draw_tooltip();  // above everything
+        draw_tooltip();
+        carry();  // what is dragged, above everything
         if (ui.released) {
             ui.active = 0;
         }
@@ -9716,4 +9793,60 @@ test "drag and drop: an item of a list dragged below another" {
     reorder_frame(&ui, &surface);
     ui.mouse_button(false);
     assert(reorder_frame(&ui, &surface) == -1);
+}
+
+// A frame of the test of dragging: a label that can be dragged, then a field that takes a drop;
+// what it took, "" when nothing.
+str carry_frame(Ui* ui, canvas.Canvas* surface, TextBuffer* field) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.column(8.0, 8.0);
+    f.label("crate.glb");
+    f.drag_source("assets/crate.glb", "crate.glb");
+    f.text_field(field, 200.0);
+    str took = match (f.drop_target()) {
+        some(t) => t,
+        none => "",
+    };
+    f.finish();
+    return took;
+}
+
+// What is carried now ("" when nothing), read from a frame of its own.
+str carried_now(Ui* ui, canvas.Canvas* surface) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    str now = f.carrying() ? f.carried() : "";
+    f.finish();
+    return now;
+}
+
+test "dragged from one widget to another: carried once moved, taken by the widget it is let go on" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    Ui* ui = arena.alloc(Ui);  // in the arena: a `Ui` and frames on the stack overflow it
+    *ui = Ui{ };
+    TextBuffer* field = arena.alloc(TextBuffer);
+    *field = TextBuffer{ };
+    carry_frame(ui, &surface, field);
+    // pressed on the label, not moved: nothing carried yet
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    carry_frame(ui, &surface, field);
+    assert(carried_now(ui, &surface) == "");
+    // moved down to the field: carried, and let go there: taken
+    ui.mouse_move(40.0, 60.0);
+    assert(carry_frame(ui, &surface, field) == "");
+    assert(carried_now(ui, &surface) == "assets/crate.glb");
+    ui.mouse_button(false);
+    assert(carry_frame(ui, &surface, field) == "assets/crate.glb");
+    assert(carried_now(ui, &surface) == "");
+    // dragged, then let go over nothing: lost
+    ui.mouse_move(20.0, 16.0);
+    ui.mouse_button(true);
+    carry_frame(ui, &surface, field);
+    ui.mouse_move(250.0, 180.0);
+    carry_frame(ui, &surface, field);
+    ui.mouse_button(false);
+    assert(carry_frame(ui, &surface, field) == "");
+    assert(carried_now(ui, &surface) == "");
 }
