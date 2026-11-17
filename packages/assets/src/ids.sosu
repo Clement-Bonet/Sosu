@@ -48,6 +48,11 @@ pub class Catalog {
     str root;
     str suffix;
     vec.Vec<Entry>* entries;
+    // Where each GUID and each path is in `entries`: made again after they change (`stale`), so
+    // that a panel asking for the path of each of its rows finds it at once.
+    map.HashMap<str, usize>* by_guid;
+    map.HashMap<str, usize>* by_path;
+    mut bool stale;
     mut Arena work;  // what a scan finds, made again at each scan
 
     void init(keeps Arena* arena, keeps str root, keeps str suffix) {
@@ -55,6 +60,9 @@ pub class Catalog {
         self.root = root;
         self.suffix = suffix;
         entries = vec.new<Entry>(arena);
+        by_guid = map.new<str, usize>(arena);
+        by_path = map.new<str, usize>(arena);
+        stale = true;
         work = Arena.new(4 * KB);
     }
 
@@ -67,24 +75,37 @@ pub class Catalog {
         return entries.len();
     }
 
-    // The path (relative to the root, with `/`) of the file of `guid`, none if there is none.
-    pub str? path_of(str guid) {
-        for (Entry e in entries.items()) {
-            if (e.guid == guid) {
-                return some(e.path);
-            }
+    // The places in `entries` found again, once after they changed.
+    void index() keeps self {
+        if (!stale) {
+            return;
         }
-        return none;
+        by_guid.clear();
+        by_path.clear();
+        for (usize i in 0..entries.len()) {
+            Entry e = entries.items()[i];
+            by_guid.put(e.guid, i);
+            by_path.put(e.path, i);
+        }
+        stale = false;
+    }
+
+    // The path (relative to the root, with `/`) of the file of `guid`, none if there is none.
+    pub str? path_of(str guid) keeps self {
+        index();
+        return match (by_guid.get(guid)) {
+            some(i) => some(entries.items()[i].path),
+            none => none,
+        };
     }
 
     // The GUID of the file at `path` (relative to the root, with `/`), none if it has none.
-    pub str? guid_of(str path) {
-        for (Entry e in entries.items()) {
-            if (e.path == path) {
-                return some(e.guid);
-            }
-        }
-        return none;
+    pub str? guid_of(str path) keeps self {
+        index();
+        return match (by_path.get(path)) {
+            some(i) => some(entries.items()[i].guid),
+            none => none,
+        };
     }
 
     // The file at `from` and its companion renamed to `to` (paths relative to the root, with
@@ -129,6 +150,7 @@ pub class Catalog {
             Entry e = entries.items()[i];
             if (e.path == from) {
                 entries.set(i, Entry{ guid: e.guid, path: text.repeat(arena, to, 1), hash: e.hash });
+                stale = true;
             }
         }
         return true;
@@ -148,6 +170,7 @@ pub class Catalog {
         mut Arena scratch = Arena.new(64 * KB);
         defer scratch.free();
         entries.clear();
+        stale = true;
         work.free();
         work = Arena.new(64 * KB);
         vec.Vec<str>* files = vec.new<str>(&work);
@@ -278,6 +301,7 @@ pub class Catalog {
         str kept = text.repeat(arena, guid, 1);
         entries.push(Entry{ guid: kept, path: text.repeat(arena, file, 1), hash: text.repeat(arena, hash, 1) });
         taken.put(kept, true);
+        stale = true;
     }
 
     // The files and companions under `relative`: names starting with `.` and the folder `build` of

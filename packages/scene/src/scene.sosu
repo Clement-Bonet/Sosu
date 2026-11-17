@@ -189,6 +189,7 @@ pub class World {
     Arena* arena;
     vec.Vec<ui32>* generations;  // by index: the generation of the entity there now
     vec.Vec<bool>* living;
+    mut usize living_count;  // how many of `living` are true: `count` without going through them
     vec.Vec<ui32>* free;  // indices of dead entities, given again
     pub Table<linear.Transform>* transforms;  // local to the parent
     pub Table<Entity>* parents;
@@ -201,6 +202,7 @@ pub class World {
         self.arena = arena;
         generations = vec.new(arena);
         living = vec.new(arena);
+        living_count = 0;
         free = vec.new(arena);
         stamps = vec.new(arena);
         stamp = 0;
@@ -220,12 +222,14 @@ pub class World {
         match (free.pop()) {
             some(index) => {
                 living.set(index as usize, true);
+                living_count += 1;
                 return Entity{ index: index, generation: generations.items()[index as usize] };
             },
             none => { },
         }
         generations.push(1);
         living.push(true);
+        living_count += 1;
         return Entity{ index: (generations.len() - 1) as ui32, generation: 1 };
     }
 
@@ -267,6 +271,7 @@ pub class World {
             }
         }
         living.set(e.index as usize, false);
+        living_count -= 1;
         generations.set(e.index as usize, generations.items()[e.index as usize] + 1);
         free.push(e.index);
         for (Entity c in children.items()) {
@@ -365,15 +370,9 @@ pub class World {
         return world;
     }
 
-    // How many entities are alive.
+    // How many entities are alive (kept as they are spawned and despawned).
     pub usize count() {
-        mut usize n = 0;
-        for (bool l in living.items()) {
-            if (l) {
-                n += 1;
-            }
-        }
-        return n;
+        return living_count;
     }
 
     // Every living entity, in the order of their indices.
