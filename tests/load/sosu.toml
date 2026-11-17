@@ -1,0 +1,17 @@
+# The load tests: what the engine, physics, particles, the identities of files and drawing must
+# hold, measured at several sizes by `testing.bench`. `sosuc test tests/load` runs each once on small sizes; `sosuc test --bench
+# --release tests/load` measures them at their real sizes and fails when a time grows clearly
+# faster than the work (`bench.scales`). The CI runs them in a job of its own.
+[package]
+name = "load"
+version = "0.1.0"
+
+[dependencies]
+engine = { path = "../../packages/engine" }
+scene = { path = "../../packages/scene" }
+math = { path = "../../packages/math" }
+assets = { path = "../../packages/assets" }
+particles = { path = "../../packages/particles" }
+render3d = { path = "../../packages/render3d" }
+gpu = { path = "../../packages/gpu" }
+testing = { path = "../../packages/testing" }

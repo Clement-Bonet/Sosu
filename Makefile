@@ -97,6 +97,12 @@ bench: build/bench
 build/bench: $(LIB_SRC) $(LIB_HDR) tests/bench.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -O2 -o $@ $(LIB_SRC) tests/bench.c
 
+# The load tests of the engine, physics, particles, the identities of files and drawing
+# (tests/load): measured at their sizes, optimized; fails if a time grows clearly
+# faster than the work (`testing.bench.scales`). Without a GPU, the measures of the GPU are skipped.
+load: build/sosuc
+	./build/sosuc test --bench --release tests/load
+
 # The fuzzing of the parser, the semantic analysis and code generation (tests/fuzz.c), by
 # libFuzzer, with clang: FUZZ_TIME seconds, the inputs found kept in build/fuzz_corpus, a crash
 # written to build/fuzz_crashes/. build/fuzz_replay runs files once each, without libFuzzer.
@@ -234,4 +240,4 @@ build/docgen: src/docgen/docgen.c src/lib/docgen.c src/lib/docgen.h src/lib/comm
 clean:
 	rm -rf build
 
-.PHONY: all test clean playground doc fuzz-ogg fuzz-coded fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp fuzz-models
+.PHONY: all test clean playground doc load fuzz-ogg fuzz-coded fuzz-manifest fuzz-ui fuzz-bindgen fuzz-lsp fuzz-models

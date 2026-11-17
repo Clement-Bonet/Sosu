@@ -6465,6 +6465,30 @@ Gives `value` to a C function the compiler cannot see into: the work that comput
 pub void keep<T: Number>(T value)
 ```
 
+### `measuring_now`
+
+True when `sosuc test --bench` measures the benchmarks; without it each runs once, so a test may choose smaller sizes.
+
+```sosu
+pub bool measuring_now() uses io
+```
+
+### `SLACK`
+
+How much more the time may grow than the work before `scales` fails: a linear algorithm stays well under it (caches, noise), a quadratic one over ten times the work goes far past it.
+
+```sosu
+pub f64 SLACK = 2.5
+```
+
+### `scales`
+
+`small` and `large`, the same measure for `small_work` and `large_work` (entities, files...): prints how much the time grew against the work, adds a row to the summary of the job of the CI (`GITHUB_STEP_SUMMARY`), and is false when the time grew more than `SLACK` times as much as the work. Without `--bench` it says nothing and is true: a single run is noise.
+
+```sosu
+pub bool scales(str what, f64 small_work, Measure small, f64 large_work, Measure large) uses io
+```
+
 ## testing.check
 
 Comparisons that show what differs (spec §8.3). Each says whether its values agree, and prints what differs when they do not. Written in an `assert`, a failure stops the test at the line of the `assert`, which the message names:     assert(check.same_text(report, expected)); `assert(a == b)` already shows both sides for numbers, `bool`, `char` and short texts.
