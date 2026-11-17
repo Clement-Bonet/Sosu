@@ -441,7 +441,10 @@ pub class Engine {
                     Capsule => linear.vec3(s.x, s.y + s.x, s.x),
                     Cylinder => linear.vec3(s.x, s.y, s.x),
                 };
-                return some(Bounds{ box: geometry.aabb(half.scale(-1.0), half), space: BoxSpace.Turned });
+                // turned and moved in its entity (`Body.rotation`, `center`): the box around it
+                linear.Mat4 turn = components.turn_of(*b).to_mat4();
+                linear.Vec3 reach = linear.vec3(reach_of(turn, 0, half), reach_of(turn, 1, half), reach_of(turn, 2, half));
+                return some(Bounds{ box: geometry.aabb(b.center.sub(reach), b.center.add(reach)), space: BoxSpace.Turned });
             },
             none => { },
         }
@@ -462,6 +465,19 @@ pub class Engine {
         };
     }
 
+    // How far a box of half sizes `half`, turned by `turn`, reaches along the axis `row`.
+    f32 reach_of(linear.Mat4 turn, usize row, linear.Vec3 half) {
+        return abs(turn.at(row, 0)) * half.x + abs(turn.at(row, 1)) * half.y + abs(turn.at(row, 2)) * half.z;
+    }
+
+    // The `Body` of `e` (a fresh one when it has none any more).
+    components.Body body_desc(scene.Entity e) {
+        return match (c.bodies.get(e)) {
+            some(x) => *x,
+            none => components.Body{ },
+        };
+    }
+
     // The bodies of the entities that have a `Body` and none yet.
     void make_bodies() {
         for (scene.Entity e in c.bodies.entities_now()) {
@@ -473,7 +489,7 @@ pub class Engine {
                 some(x) => *x,
                 none => components.Body{ },
             };
-            linear.Transform at = linear.decompose(matrix_of(e));
+            linear.Transform at = components.shape_place(b, linear.decompose(matrix_of(e)));
             linear.Vec3 s = b.size;
             physics.Shape shape = match (b.shape) {
                 Box => physics.box(linear.vec3(max(s.x, 0.001), max(s.y, 0.001), max(s.z, 0.001))),
@@ -646,7 +662,7 @@ pub class Engine {
             if (l.kinematic) {
                 match (l.body) {
                     some(b) => {
-                        linear.Transform at = linear.decompose(matrix_of(e));
+                        linear.Transform at = components.shape_place(body_desc(e), linear.decompose(matrix_of(e)));
                         b.move_to(at.position, at.rotation, max(dt, 0.0001));
                     },
                     none => { },
@@ -663,7 +679,8 @@ pub class Engine {
             match (l.body) {
                 some(b) => {
                     physics.State s = b.state();
-                    linear.Mat4 placed = linear.translation(s.position).mul(s.rotation.to_mat4());
+                    linear.Transform there = components.entity_place(body_desc(e), s.position, s.rotation);
+                    linear.Mat4 placed = linear.translation(there.position).mul(there.rotation.to_mat4());
                     linear.Mat4 local = match (world.parent_of(e)) {
                         some(p) => match (matrix_of(p).inverse()) {
                             some(inv) => inv.mul(placed),
@@ -1152,6 +1169,61 @@ test "an animator plays a clip of the model of its mesh" {
         some(p) => false,
         none => true,
     });
+}
+
+test "a body moved and turned in its entity: it falls and rests so, its entity following; its box" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, none, none, none, none);
+    defer g.close();
+    scene.Entity floor = placed(w, "floor", linear.vec3(0.0, 0.0, 0.0));
+    c.bodies.set(floor, components.Body{ kind: components.BodyKind.Static, size: linear.vec3(10.0, 0.5, 10.0) });
+    // a crate whose collider is a meter above its entity: the entity rests a meter lower
+    scene.Entity raised = placed(w, "raised", linear.vec3(0.0, 4.0, 0.0));
+    c.bodies.set(raised, components.Body{ size: linear.vec3(0.5, 0.5, 0.5), center: linear.vec3(0.0, 1.0, 0.0) });
+    // a plank lying along x, its collider turned a quarter about z: it stands, 2 m high
+    scene.Entity plank = placed(w, "plank", linear.vec3(5.0, 4.0, 0.0));
+    c.bodies.set(plank, components.Body{ size: linear.vec3(1.0, 0.25, 0.25), rotation: linear.vec3(0.0, 0.0, 90.0) });
+    // a kinematic body moved off its entity: the body is there
+    scene.Entity pusher = placed(w, "pusher", linear.vec3(-5.0, 3.0, 0.0));
+    c.bodies.set(pusher, components.Body{ kind: components.BodyKind.Kinematic, shape: components.ShapeKind.Sphere,
+            center: linear.vec3(0.0, 0.0, 2.0) });
+    // the boxes: around the collider moved, around the collider turned
+    match (g.bounds_of(raised)) {
+        some(b) => {
+            assert(b.box.min.near(linear.vec3(-0.5, 0.5, -0.5), 0.001) && b.box.max.near(linear.vec3(0.5, 1.5, 0.5), 0.001));
+        },
+        none => assert(false),
+    }
+    match (g.bounds_of(plank)) {
+        some(b) => {
+            assert(b.box.max.near(linear.vec3(0.25, 1.0, 0.25), 0.001));
+        },
+        none => assert(false),
+    }
+    for (i32 i in 0..240) {
+        g.update(1.0 / 60.0);
+    }
+    f32 y = match (w.transforms.get(raised)) {
+        some(t) => t.position.y,
+        none => 99.0,
+    };
+    assert(abs(y - 0.0) < 0.05);  // its collider on the floor (0.5 + 0.5), the entity a meter under it
+    linear.Transform p = match (w.transforms.get(plank)) {
+        some(t) => *t,
+        none => linear.transform(),
+    };
+    assert(abs(p.position.y - 1.5) < 0.05 && p.rotation.near(linear.identity_quat(), 0.05));  // standing, unturned
+    linear.Vec3 there = match (g.body_of(pusher)) {
+        some(b) => b.position(),
+        none => linear.vec3(0.0, 0.0, 0.0),
+    };
+    assert(there.near(linear.vec3(-5.0, 3.0, 2.0), 0.01));
+    // saved and read back with them
+    str saved = components.save_scene(&arena, c);
+    assert(text.contains(saved, "\"center\"") && text.contains(saved, "\"rotation\""));
 }
 
 test "the box of each entity: its model's, its body's, a marker, none; the models of the engine" {
