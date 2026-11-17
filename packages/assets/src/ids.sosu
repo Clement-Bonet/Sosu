@@ -13,6 +13,7 @@
 import std.io;
 import std.fs;
 import std.vec;
+import std.map;
 import std.text;
 import std.json;
 import std.random;
@@ -152,6 +153,12 @@ pub class Catalog {
         vec.Vec<str>* files = vec.new<str>(&work);
         vec.Vec<str>* companions = vec.new<str>(&work);
         walk("", files, companions);
+        // the files found and the GUIDs given, looked up at once: a scan stays linear in the files
+        map.HashMap<str, bool>* listed = map.new<str, bool>(&scratch);
+        for (str f in files.items()) {
+            listed.put(f, true);
+        }
+        map.HashMap<str, bool>* taken = map.new<str, bool>(&scratch);
         mut random.Rng rng = random.from_system();
         mut Report report = Report{ files: 0, made: 0, joined: 0, orphans: 0 };
         // the companions whose file is gone: candidates for the moved files
@@ -159,7 +166,7 @@ pub class Catalog {
         vec.Vec<Companion>* lonely_read = vec.new<Companion>(&scratch);
         for (str c in companions.items()) {
             str file = text.slice(c, 0, c.len - suffix.len);
-            if (!contains(files.items(), file)) {
+            if (!has(listed, file)) {
                 match (read_companion(&scratch, full(&scratch, c))) {
                     some(read) => {
                         lonely.push(c);
@@ -193,7 +200,7 @@ pub class Catalog {
                 some(c) => {
                     // its content changed: its hash follows; the same GUID as another file (a copy
                     // made with its companion): a GUID of its own
-                    bool copy = guid_taken(c.guid);
+                    bool copy = has(taken, c.guid);
                     bool changed = c.size != info.size || c.modified != info.modified;
                     str hash = changed ? hash_file(&scratch, path) : c.hash;
                     str guid = copy ? new_guid(&scratch, &rng) : c.guid;
@@ -213,11 +220,7 @@ pub class Catalog {
                     if (copy) {
                         report.made += 1;
                     }
-                    entries.push(Entry{
-                        guid: text.repeat(arena, guid, 1),
-                        path: text.repeat(arena, file, 1),
-                        hash: text.repeat(arena, hash, 1)
-                    });
+                    give(taken, guid, file, hash);
                 },
                 none => {
                     str hash = hash_file(&scratch, path);
@@ -225,7 +228,7 @@ pub class Catalog {
                     mut i32 found = -1;
                     for (usize i in 0..lonely.len()) {
                         if (!used.items()[i] && lonely_read.items()[i].hash == hash
-                                && !guid_taken(lonely_read.items()[i].guid)) {
+                                && !has(taken, lonely_read.items()[i].guid)) {
                             found = i as i32;
                             break;
                         }
@@ -257,11 +260,7 @@ pub class Catalog {
                             settings: settings
                         }
                     );
-                    entries.push(Entry{
-                        guid: text.repeat(arena, guid, 1),
-                        path: text.repeat(arena, file, 1),
-                        hash: text.repeat(arena, hash, 1)
-                    });
+                    give(taken, guid, file, hash);
                 },
             }
             report.files += 1;
@@ -274,13 +273,11 @@ pub class Catalog {
         return report;
     }
 
-    bool guid_taken(str guid) {
-        for (Entry e in entries.items()) {
-            if (e.guid == guid) {
-                return true;
-            }
-        }
-        return false;
+    // The entry of `file` added, its GUID taken from now on.
+    void give(map.HashMap<str, bool>* taken, str guid, str file, str hash) keeps self {
+        str kept = text.repeat(arena, guid, 1);
+        entries.push(Entry{ guid: kept, path: text.repeat(arena, file, 1), hash: text.repeat(arena, hash, 1) });
+        taken.put(kept, true);
     }
 
     // The files and companions under `relative`: names starting with `.` and the folder `build` of
@@ -320,13 +317,11 @@ str slash(Arena* into, str a, str b) {
     return text.join(into, parts[0..3], "");
 }
 
-bool contains(str[] list, str s) {
-    for (str x in list) {
-        if (x == s) {
-            return true;
-        }
-    }
-    return false;
+bool has(map.HashMap<str, bool>* set, str s) {
+    return match (set.get(s)) {
+        some(x) => true,
+        none => false,
+    };
 }
 
 // 128 random bits, as 32 hexadecimal digits.
