@@ -5108,7 +5108,8 @@ pub struct Transform
 - `pub mut Vec3 position`
 - `pub mut Quat rotation`
 - `pub mut Vec3 scale`
-- `pub Mat4 to_mat4()`
+- `pub Mat4 to_mat4()`  
+  The translation times the rotation times the scale, made at once: the columns of the rotation scaled, the position in the last one.
 - `pub Vec3 apply(Vec3 p)`
 - `pub Transform then(Transform inner)`  
   This transform after `inner` (the transform of a child, relative to its parent); exact when the scale of this one is the same on the three axes.
