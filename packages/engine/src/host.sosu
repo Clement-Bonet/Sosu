@@ -559,6 +559,16 @@ export "C" bool sozo_set_parent(Game* g, scene.Entity e, scene.Entity parent, bo
     return true;
 }
 
+// The camera the game is seen through, as it draws itself (its active view), whatever camera the
+// editor gives `sozo_render` (contract 5): the editor draws over it, and picks through it, in Play.
+export "C" render3d.Camera sozo_camera(Game* g) {
+    render3d.Camera? was = g.level.runner.looking;
+    g.level.runner.looking = none;
+    render3d.Camera c = g.level.runner.camera();
+    g.level.runner.looking = was;
+    return c;
+}
+
 // `e` placed among its siblings just before `next`, or after all of them when `last` (contract 5).
 export "C" void sozo_move_before(Game* g, scene.Entity e, scene.Entity next, bool last) {
     g.level.world.move_before(e, last ? none : some(next));
