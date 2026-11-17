@@ -39,7 +39,7 @@ import assets.assets;
 import assets.ids;
 
 // The version of the contract: the editor refuses a library of another one.
-pub ui32 CONTRACT = 4;
+pub ui32 CONTRACT = 5;
 
 // ---- What crosses to C ----
 
@@ -500,8 +500,9 @@ export "C" usize sozo_count(Game* g) {
 }
 
 // Every living entity, in the order of their indices.
+// The living entities, siblings in their order (`World.in_order`).
 export "C" scene.Entity[] sozo_entities(Game* g) {
-    return g.level.world.entities(g.fresh_out());
+    return g.level.world.in_order(g.fresh_out());
 }
 
 export "C" bool sozo_alive(Game* g, scene.Entity e) {
@@ -556,6 +557,11 @@ export "C" bool sozo_set_parent(Game* g, scene.Entity e, scene.Entity parent, bo
         keep_at(g.level, e, was);
     }
     return true;
+}
+
+// `e` placed among its siblings just before `next`, or after all of them when `last` (contract 5).
+export "C" void sozo_move_before(Game* g, scene.Entity e, scene.Entity next, bool last) {
+    g.level.world.move_before(e, last ? none : some(next));
 }
 
 // `e` at the root again, where it is in the world when `keep_world`.

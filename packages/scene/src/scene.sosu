@@ -5,6 +5,7 @@
 // checks the generation of what it holds, so the handle of a dead entity never reaches the
 // components of another that took its place.
 import std.vec;
+import std.sort;
 import math.linear;
 
 // An entity: its place in the world and the generation of that place.
@@ -190,6 +191,13 @@ pub class World {
     vec.Vec<ui32>* generations;  // by index: the generation of the entity there now
     vec.Vec<bool>* living;
     mut usize living_count;  // how many of `living` are true: `count` without going through them
+    // The order of siblings: by index, the rank of the entity there, given when it is spawned and
+    // changed by `move_before`; `children` and `in_order` follow it, and a scene file is written in
+    // it, so that reading the file gives the same order back.
+    vec.Vec<f64>* ranks;
+    mut f64 next_rank;
+    vec.Vec<Entity>* ordered;  // `in_order`, made again after a change (`reordered`)
+    mut bool reordered;
     vec.Vec<ui32>* free;  // indices of dead entities, given again
     pub Table<linear.Transform>* transforms;  // local to the parent
     pub Table<Entity>* parents;
@@ -203,6 +211,10 @@ pub class World {
         generations = vec.new(arena);
         living = vec.new(arena);
         living_count = 0;
+        ranks = vec.new(arena);
+        next_rank = 0.0;
+        ordered = vec.new(arena);
+        reordered = true;
         free = vec.new(arena);
         stamps = vec.new(arena);
         stamp = 0;
@@ -223,6 +235,9 @@ pub class World {
             some(index) => {
                 living.set(index as usize, true);
                 living_count += 1;
+                ranks.set(index as usize, next_rank);
+                next_rank += 1.0;
+                reordered = true;
                 return Entity{ index: index, generation: generations.items()[index as usize] };
             },
             none => { },
@@ -230,6 +245,9 @@ pub class World {
         generations.push(1);
         living.push(true);
         living_count += 1;
+        ranks.push(next_rank);
+        next_rank += 1.0;
+        reordered = true;
         return Entity{ index: (generations.len() - 1) as ui32, generation: 1 };
     }
 
@@ -272,6 +290,7 @@ pub class World {
         }
         living.set(e.index as usize, false);
         living_count -= 1;
+        reordered = true;
         generations.set(e.index as usize, generations.items()[e.index as usize] + 1);
         free.push(e.index);
         for (Entity c in children.items()) {
@@ -317,7 +336,7 @@ pub class World {
         };
     }
 
-    // The living children of `e`, in `into`.
+    // The living children of `e`, in `into`, in their order (`move_before`).
     pub Entity[] children(Arena* into, Entity e) {
         vec.Vec<Entity>* found = vec.new(into);
         for (Entity c in parents.entities_now()) {
@@ -332,7 +351,9 @@ pub class World {
                 }
             }
         }
-        return found.items();
+        Entity[] all = found.items();
+        sort.sort_by_key(all, (Entity c) => ranks.items()[c.index as usize]);
+        return all;
     }
 
     // The world matrix of every entity that has a transform, parents first: `world_matrices`. An
@@ -368,6 +389,79 @@ pub class World {
         world_matrices.set(e, world);
         stamps.set(e.index as usize, stamp);
         return world;
+    }
+
+    // The rank of `e` among its siblings (lower first).
+    pub f64 rank_of(Entity e) {
+        return alive(e) ? ranks.items()[e.index as usize] : 0.0;
+    }
+
+    // `e` placed among its siblings just before `next` (one of them), or after all of them when
+    // there is none; `e` keeps its parent.
+    pub void move_before(Entity e, Entity? next) {
+        if (!alive(e)) {
+            return;
+        }
+        Entity before = match (next) {
+            some(n) => n,
+            none => e,
+        };
+        if (before.same(e) || !alive(before)) {
+            ranks.set(e.index as usize, next_rank);
+            next_rank += 1.0;
+            reordered = true;
+            return;
+        }
+        // the sibling just before `before`, `e` left out: the rank between the two
+        f64 at = ranks.items()[before.index as usize];
+        mut f64 previous = at - 2.0;
+        mut bool found = false;
+        for (usize i in 0..living.len()) {
+            if (!living.items()[i] || i == e.index as usize || i == before.index as usize) {
+                continue;
+            }
+            Entity other = Entity{ index: i as ui32, generation: generations.items()[i] };
+            f64 r = ranks.items()[i];
+            if (r < at && same_parent(other, before) && (!found || r > previous)) {
+                previous = r;
+                found = true;
+            }
+        }
+        ranks.set(e.index as usize, found ? (previous + at) / 2.0 : at - 1.0);
+        reordered = true;
+    }
+
+    bool same_parent(Entity a, Entity b) {
+        return match (parent_of(a)) {
+            some(p) => match (parent_of(b)) {
+                some(q) => p.same(q),
+                none => false,
+            },
+            none => match (parent_of(b)) {
+                some(q) => false,
+                none => true,
+            },
+        };
+    }
+
+    // Every living entity in the order of the ranks: siblings in their order (what an editor
+    // lists, what a scene file is written in).
+    pub Entity[] in_order(Arena* into) {
+        if (reordered) {
+            ordered.clear();
+            for (usize i in 0..living.len()) {
+                if (living.items()[i]) {
+                    ordered.push(Entity{ index: i as ui32, generation: generations.items()[i] });
+                }
+            }
+            sort.sort_by_key(ordered.items(), (Entity c) => ranks.items()[c.index as usize]);
+            reordered = false;
+        }
+        Entity[] out = into.alloc_slice(Entity, ordered.len());
+        for (usize i in 0..out.len) {
+            out[i] = ordered.items()[i];
+        }
+        return out;
     }
 
     // How many entities are alive (kept as they are spawned and despawned).
