@@ -407,13 +407,13 @@ pub struct Mat4 {
     // This matrix after `o`: `a.mul(b).mul_vec(v)` is `a.mul_vec(b.mul_vec(v))`.
     pub Mat4 mul(Mat4 o) {
         mut Mat4 r = Mat4{ };
-        for (usize row in 0..4) {
-            for (usize col in 0..4) {
-                mut f32 s = 0.0;
-                for (usize k in 0..4) {
-                    s += at(row, k) * o.at(k, col);
-                }
-                r.set(row, col, s);
+        for (usize col in 0..4) {
+            f32 b0 = o.m[col * 4];
+            f32 b1 = o.m[col * 4 + 1];
+            f32 b2 = o.m[col * 4 + 2];
+            f32 b3 = o.m[col * 4 + 3];
+            for (usize row in 0..4) {
+                r.m[col * 4 + row] = m[row] * b0 + m[4 + row] * b1 + m[8 + row] * b2 + m[12 + row] * b3;
             }
         }
         return r;
@@ -838,8 +838,19 @@ pub struct Transform {
     pub mut Quat rotation;
     pub mut Vec3 scale;
 
+    // The translation times the rotation times the scale, made at once: the columns of the
+    // rotation scaled, the position in the last one.
     pub Mat4 to_mat4() {
-        return translation(position).mul(rotation.to_mat4()).mul(scaling(scale));
+        mut Mat4 r = rotation.to_mat4();
+        for (usize row in 0..3) {
+            r.m[row] = r.m[row] * scale.x;
+            r.m[4 + row] = r.m[4 + row] * scale.y;
+            r.m[8 + row] = r.m[8 + row] * scale.z;
+        }
+        r.m[12] = position.x;
+        r.m[13] = position.y;
+        r.m[14] = position.z;
+        return r;
     }
 
     pub Vec3 apply(Vec3 p) {

@@ -671,11 +671,13 @@ pub class Engine {
         }
         physics_world.advance(dt);
         // the entities of the dynamic bodies go where their bodies are (in the space of their parent)
+        mut bool moved = false;
         for (scene.Entity e in live.entities_now()) {
             Live* l = live_of(e);
             if (!l.dynamic) {
                 continue;
             }
+            moved = true;
             match (l.body) {
                 some(b) => {
                     physics.State s = b.state();
@@ -700,7 +702,9 @@ pub class Engine {
                 none => { },
             }
         }
-        world.propagate();
+        if (moved) {
+            world.propagate();  // the world matrices of what the bodies moved, and under them
+        }
         // the emitters where their entities are
         for (scene.Entity e in c.emitters.entities_now()) {
             Live* l = live_of(e);
