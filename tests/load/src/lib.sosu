@@ -1,0 +1,381 @@
+// The load tests of the engine and what it rests on: each measure at a size and at ten times it (a
+// hundred for the engine), judged by `bench.scales`. Run once on small sizes by `sosuc test`,
+// measured at the real ones by `sosuc test --bench --release`.
+import std.fs;
+import std.io;
+import std.text;
+import std.vec;
+import math.linear;
+import scene.scene;
+import engine.components;
+import engine.engine;
+import engine.kinds;
+import assets.ids;
+import particles.particles;
+import particles.compute;
+import gpu.gpu;
+import render3d.render3d;
+import testing.bench;
+import testing.fixture;
+
+// The sizes measured: the real ones with `--bench`, small ones otherwise (a test run once).
+usize[] sizes(Arena* arena, usize small, usize steps) uses io {
+    usize[] out = arena.alloc_slice(usize, steps);
+    usize first = bench.measuring_now() ? small : max(small / 100, 10);
+    mut usize n = first;
+    for (usize i in 0..steps) {
+        out[i] = n;
+        n *= 10;
+    }
+    return out;
+}
+
+str named(Arena* arena, str what, usize n) {
+    text.TextBuilder* t = text.builder(arena);
+    t.push(what);
+    t.push(" (");
+    t.push(text.format_u64(arena, n as ui64));
+    t.push(")");
+    return t.text();
+}
+
+// A world of `n` entities: groups of ten, a parent and nine children, each with a mesh of the
+// models of the engine and a light now and then; `bodies`: each a dynamic box above a ground.
+scene.World* filled(Arena* arena, usize n, bool bodies) {
+    scene.World* w = scene.world(arena);
+    components.Components* c = components.components(arena, w);
+    mut scene.Entity? parent = none;
+    for (usize i in 0..n) {
+        f32 x = (i % 100) as f32 * 1.5;
+        f32 z = (i / 100 % 100) as f32 * 1.5;
+        f32 y = 1.0 + (i / 10000) as f32 * 1.5;
+        mut linear.Transform t = linear.transform();
+        t.position = bodies || i % 10 == 0 ? linear.vec3(x, y, z) : linear.vec3(0.1, 0.0, 0.0);
+        scene.Entity e = w.spawn_at("e", t, bodies || i % 10 == 0 ? none : parent);
+        if (!bodies && i % 10 == 0) {
+            parent = some(e);
+        }
+        c.meshes.set(e, components.Mesh{ model: "crate" });
+        if (bodies) {
+            c.bodies.set(e, components.Body{ size: linear.vec3(0.5, 0.5, 0.5) });
+        } else if (i % 100 == 50) {
+            c.lights.set(e, components.Light{ });
+        }
+    }
+    if (bodies) {
+        scene.Entity ground = w.spawn_at("ground", linear.transform(), none);
+        c.bodies.set(ground, components.Body{ kind: components.BodyKind.Static, size: linear.vec3(200.0, 0.5, 200.0) });
+    }
+    return w;
+}
+
+test "the engine: a step, a save, a load and the queries of the kinds, from 1 000 to 100 000 entities" {
+    mut Arena arena = Arena.new(16 * MB);
+    defer arena.free();
+    usize[] ns = sizes(&arena, 1000, 3);
+    bench.Measure[] steps = arena.alloc_slice(bench.Measure, ns.len);
+    bench.Measure[] saves = arena.alloc_slice(bench.Measure, ns.len);
+    bench.Measure[] loads = arena.alloc_slice(bench.Measure, ns.len);
+    bench.Measure[] queries = arena.alloc_slice(bench.Measure, ns.len);
+    for (usize k in 0..ns.len) {
+        mut Arena place = Arena.new(16 * MB);
+        defer place.free();
+        scene.World* w = filled(&place, ns[k], false);
+        components.Components* c = components.components(&place, w);
+        engine.Engine* g = engine.engine(&place, c, none, none, none, none);
+        defer g.close();
+        g.paused = false;
+        g.update(1.0 / 60.0);
+        steps[k] = bench.run(named(&arena, "engine step", ns[k]), () => {
+            g.update(1.0 / 60.0);
+        });
+        str saved = components.save_scene(&place, c);
+        saves[k] = bench.run(named(&arena, "scene saved", ns[k]), () => {
+            mut Arena out = Arena.new(1 * MB);
+            // the writer, made in `out` with the world, is freed with it: nothing of `out` stays
+            unsafe {
+                bench.keep(components.save_scene(&out, c).len);
+            }
+            out.free();
+        });
+        loads[k] = bench.run(named(&arena, "scene loaded", ns[k]), () => {
+            mut Arena a = Arena.new(1 * MB);
+            scene.World* other = scene.world(&a);
+            components.Components* oc = components.components(&a, other);
+            match (components.load_scene(&a, oc, saved)) {
+                ok(r) => {
+                    bench.keep(other.count());
+                },
+                err(e) => {
+                    assert(false);
+                },
+            }
+            a.free();
+        });
+        kinds.Kinds* all = kinds.common(&place, c);
+        mut Arena listing = Arena.new(1 * MB);
+        defer listing.free();
+        scene.Entity[] every = w.entities(&listing);
+        assert(every.len == ns[k]);
+        queries[k] = bench.run(named(&arena, "kinds queried", ns[k]), () => {
+            mut usize found = 0;
+            for (usize i in 0..all.count()) {
+                kinds.Kind* kind = all.at(i);
+                for (scene.Entity e in every) {
+                    if (kind.has(e)) {
+                        match (kind.get(e, 0)) {
+                            some(v) => {
+                                found += 1;
+                            },
+                            none => { },
+                        }
+                    }
+                }
+            }
+            bench.keep(found);
+        });
+    }
+    mut bool ok = true;
+    for (usize k in 1..ns.len) {
+        f64 a = ns[k - 1] as f64;
+        f64 b = ns[k] as f64;
+        ok = bench.scales(named(&arena, "engine step", ns[k]), a, steps[k - 1], b, steps[k]) && ok;
+        ok = bench.scales(named(&arena, "scene saved", ns[k]), a, saves[k - 1], b, saves[k]) && ok;
+        ok = bench.scales(named(&arena, "scene loaded", ns[k]), a, loads[k - 1], b, loads[k]) && ok;
+        ok = bench.scales(named(&arena, "kinds queried", ns[k]), a, queries[k - 1], b, queries[k]) && ok;
+    }
+    assert(ok);
+}
+
+test "physics: 1 000 and 10 000 bodies falling on a ground, a step" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    usize[] ns = sizes(&arena, 1000, 2);
+    bench.Measure[] steps = arena.alloc_slice(bench.Measure, ns.len);
+    for (usize k in 0..ns.len) {
+        mut Arena place = Arena.new(16 * MB);
+        defer place.free();
+        scene.World* w = filled(&place, ns[k], true);
+        components.Components* c = components.components(&place, w);
+        engine.Engine* g = engine.engine(&place, c, none, none, none, none);
+        defer g.close();
+        g.paused = false;
+        g.update(1.0 / 60.0);
+        steps[k] = bench.run(named(&arena, "bodies falling", ns[k]), () => {
+            g.update(1.0 / 60.0);
+        });
+    }
+    assert(bench.scales("bodies falling", ns[0] as f64, steps[0], ns[1] as f64, steps[1]));
+}
+
+test "particles on the processor: 10 000 and 100 000 alive, a step" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    usize[] ns = sizes(&arena, 10000, 2);
+    bench.Measure[] steps = arena.alloc_slice(bench.Measure, ns.len);
+    for (usize k in 0..ns.len) {
+        mut Arena place = Arena.new(16 * MB);
+        defer place.free();
+        particles.Emitter e = particles.Emitter{
+            rate: 0.0,
+            max: ns[k],
+            life: particles.exactly(1000.0),
+            gravity: 1.0,
+            turbulence: 0.5
+        };
+        particles.System* s = particles.system(&place, e);
+        s.burst(ns[k]);
+        s.advance(1.0 / 60.0);
+        assert(s.count() == ns[k]);
+        steps[k] = bench.run(named(&arena, "particles", ns[k]), () => {
+            s.advance(1.0 / 60.0);
+        });
+    }
+    assert(bench.scales("particles", ns[0] as f64, steps[0], ns[1] as f64, steps[1]));
+}
+
+test "the identities of files: a scan of 1 000 and 10 000 files" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    usize[] ns = sizes(&arena, 1000, 2);
+    bench.Measure[] scans = arena.alloc_slice(bench.Measure, ns.len);
+    for (usize k in 0..ns.len) {
+        mut Arena place = Arena.new(16 * MB);
+        defer place.free();
+        str dir = fixture.temp_dir(&place, "sosu-load-ids");
+        defer fixture.remove(dir);
+        // a hundred folders of files, each named differently and holding something of its own
+        for (usize i in 0..ns[k]) {
+            str folder = fs.join(&place, dir, text.format_u64(&place, (i % 100) as ui64));
+            if (i < 100) {
+                match (fs.create_dirs(&place, folder)) {
+                    ok => { },
+                    err(e) => {
+                        assert(false);
+                    },
+                }
+            }
+            str file = fs.join(&place, folder, text.format_u64(&place, i as ui64));
+            match (io.write_file(&place, file, file)) {
+                ok => { },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        }
+        ids.Catalog* catalog = ids.catalog(&place, dir, ".asset");
+        defer catalog.close();
+        catalog.scan();  // the companions made: the scans after it are those of an editor open
+        assert(catalog.count() == ns[k]);
+        scans[k] = bench.run_for(named(&arena, "files scanned", ns[k]), 500, () => {
+            bench.keep(catalog.scan().files);
+        });
+    }
+    assert(bench.scales("files scanned", ns[0] as f64, scans[0], ns[1] as f64, scans[1]));
+}
+
+test "drawing: 1 000 and 10 000 meshes into a target, and a grid of lines (skipped without a GPU)" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("    no GPU: skipped");
+            return;
+        },
+    };
+    defer device.close();
+    usize[] ns = sizes(&arena, 1000, 2);
+    bench.Measure[] frames = arena.alloc_slice(bench.Measure, ns.len);
+    bench.Measure[] grids = arena.alloc_slice(bench.Measure, ns.len);
+    render3d.Renderer* r = match (render3d.create(&arena, device, render3d.Options{ shadow_size: 1024 })) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    defer r.close();
+    render3d.Uploaded* box = match (r.upload(&arena, render3d.cube(&arena, [0.8, 0.3, 0.2, 1.0]))) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    gpu.Texture target = match (device.target(256, 256)) {
+        ok(t) => t,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    render3d.Camera camera = render3d.Camera{
+        position: linear.vec3(50.0, 60.0, 160.0),
+        target: linear.vec3(50.0, 0.0, 50.0)
+    };
+    for (usize k in 0..ns.len) {
+        vec.Vec<render3d.Item>* made = vec.new<render3d.Item>(&arena);
+        for (usize i in 0..ns[k]) {
+            linear.Vec3 at = linear.vec3((i % 100) as f32, (i / 10000) as f32, (i / 100 % 100) as f32);
+            made.push(render3d.item(box, linear.translation(at).mul(linear.scaling(linear.vec3(0.4, 0.4, 0.4)))));
+        }
+        render3d.Item[] items = made.items();
+        frames[k] = bench.run(named(&arena, "meshes drawn", ns[k]), () => {
+            match (device.commands()) {
+                ok(frame) => {
+                    r.draw_into(frame, target, camera, items);
+                    match (frame.submit_and_wait()) {
+                        ok => { },
+                        err(e) => {
+                            assert(false);
+                        },
+                    }
+                },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        });
+        // a grid of 2 x 100 lines, then 2 x 1 000 (a step ten times smaller)
+        f32 step = k == 0 ? 1.0 : 0.1;
+        grids[k] = bench.run(named(&arena, "grid lines", ns[k] / 10 * 2), () => {
+            match (device.commands()) {
+                ok(frame) => {
+                    render3d.grid(r, 50.0, 50.0, 50.0, step);
+                    r.draw_into(frame, target, camera, items[0..0]);
+                    match (frame.submit_and_wait()) {
+                        ok => { },
+                        err(e) => {
+                            assert(false);
+                        },
+                    }
+                },
+                err(e) => {
+                    assert(false);
+                },
+            }
+        });
+    }
+    // the GPU of the CI (lavapipe) draws on the processor: a frame does more than its meshes, so the
+    // time grows less than they do; a time growing faster is what is looked for
+    mut bool ok = bench.scales("meshes drawn", ns[0] as f64, frames[0], ns[1] as f64, frames[1]);
+    ok = bench.scales("grid lines", 200.0, grids[0], 2000.0, grids[1]) && ok;
+    assert(ok);
+}
+
+test "particles on the GPU: 10 000 and 100 000 places, a step (skipped without a GPU)" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    gpu.Device* device = match (gpu.open_headless(&arena, gpu.Options{ })) {
+        ok(d) => d,
+        err(e) => {
+            io.print("    no GPU: skipped");
+            return;
+        },
+    };
+    defer device.close();
+    usize[] ns = sizes(&arena, 10000, 2);
+    bench.Measure[] steps = arena.alloc_slice(bench.Measure, ns.len);
+    render3d.Camera camera = render3d.Camera{
+        position: linear.vec3(0.0, 2.0, 10.0),
+        target: linear.vec3(0.0, 0.0, 0.0)
+    };
+    for (usize k in 0..ns.len) {
+        mut Arena place = Arena.new(1 * MB);
+        defer place.free();
+        particles.Emitter e = particles.Emitter{
+            rate: 0.0,
+            max: ns[k],
+            life: particles.exactly(1000.0),
+            gravity: 1.0,
+            turbulence: 0.5
+        };
+        compute.GpuSystem* s = match (compute.gpu_system(&place, device, e)) {
+            ok(x) => x,
+            err(x) => {
+                assert(false);
+                return;
+            },
+        };
+        defer s.close();
+        s.burst(ns[k]);
+        steps[k] = bench.run(named(&arena, "particles on the GPU", ns[k]), () => {
+            match (device.commands()) {
+                ok(frame) => {
+                    s.simulate_for(frame, 1.0 / 60.0, camera, 256, 256);
+                    match (frame.submit_and_wait()) {
+                        ok => { },
+                        err(x) => {
+                            assert(false);
+                        },
+                    }
+                },
+                err(x) => {
+                    assert(false);
+                },
+            }
+        });
+    }
+    assert(bench.scales("particles on the GPU", ns[0] as f64, steps[0], ns[1] as f64, steps[1]));
+}

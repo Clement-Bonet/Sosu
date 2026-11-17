@@ -66,6 +66,15 @@ jobs:
         if: matrix.cc == 'gcc'
         timeout-minutes: 5
         run: make bench
+      # The load tests (tests/load): the engine at 1 000 to 100 000 entities,
+      # bodies, particles, a scan of 10 000 files, meshes drawn by lavapipe; their times in the
+      # summary of the job. They fail if a time grows clearly faster than the work.
+      - name: Load tests
+        if: matrix.cc == 'gcc'
+        timeout-minutes: 15
+        run: |
+          printf '### Load tests (tests/load)\n\n| measure | smaller | larger | growth |\n|---|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+          make load
       - name: docs/REFERENCE.md is up to date
         if: matrix.cc == 'gcc'
         run: |

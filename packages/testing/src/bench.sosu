@@ -102,3 +102,58 @@ str with_unit(Arena* arena, f64 x, str unit) {
     b.push(unit);
     return b.text();
 }
+
+// True when `sosuc test --bench` measures the benchmarks; without it each runs once, so a test may
+// choose smaller sizes.
+pub bool measuring_now() uses io {
+    mut Arena arena = Arena.new(1 * KB);
+    defer arena.free();
+    return measuring(&arena);
+}
+
+// How much more the time may grow than the work before `scales` fails: a linear algorithm stays
+// well under it (caches, noise), a quadratic one over ten times the work goes far past it.
+pub f64 SLACK = 2.5;
+
+// `small` and `large`, the same measure for `small_work` and `large_work` (entities, files...):
+// prints how much the time grew against the work, adds a row to the summary of the job of the CI
+// (`GITHUB_STEP_SUMMARY`), and is false when the time grew more than `SLACK` times as much as the
+// work. Without `--bench` it says nothing and is true: a single run is noise.
+pub bool scales(str what, f64 small_work, Measure small, f64 large_work, Measure large) uses io {
+    mut Arena arena = Arena.new(4 * KB);
+    defer arena.free();
+    if (!measuring(&arena)) {
+        return true;
+    }
+    f64 work = small_work > 0.0 ? large_work / small_work : 0.0;
+    f64 grew = small.ns_per_run() > 0.0 ? large.ns_per_run() / small.ns_per_run() : 0.0;
+    bool ok = grew <= work * SLACK;
+    text.TextBuilder* line = text.builder(&arena);
+    line.push_f64(work, 1);
+    line.push(" times the work: ");
+    line.push_f64(grew, 1);
+    line.push(" times the time");
+    io.print("scale {} ... {}{}", what, line.text(), ok ? "" : " (grows faster than the work)");
+    match (os.env(&arena, "GITHUB_STEP_SUMMARY")) {
+        some(file) => {
+            if (file.len > 0) {
+                text.TextBuilder* row = text.builder(&arena);
+                row.push("| ");
+                row.push(what);
+                row.push(" | ");
+                row.push(duration(&arena, small.ns_per_run()));
+                row.push(" | ");
+                row.push(duration(&arena, large.ns_per_run()));
+                row.push(" | ");
+                row.push(line.text());
+                row.push(ok ? " |\n" : " (too fast a growth) |\n");
+                match (io.append_file(&arena, file, row.text())) {
+                    ok => { },
+                    err(e) => { },
+                }
+            }
+        },
+        none => { },
+    }
+    return ok;
+}
