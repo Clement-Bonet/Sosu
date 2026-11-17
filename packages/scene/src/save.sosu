@@ -166,10 +166,11 @@ pub class Writer {
     }
 }
 
-// A writer of every living entity of `world`.
+// A writer of every living entity of `world`, in the order of its siblings (`World.in_order`):
+// the file read again spawns them in that order, which gives the same order back.
 pub Writer* writer(keeps Arena* arena, keeps scene.World* world) {
     Writer* w = arena.new(Writer, arena, world);
-    for (scene.Entity e in world.entities(arena)) {
+    for (scene.Entity e in world.in_order(arena)) {
         w.take(e);
     }
     return w;
@@ -543,6 +544,54 @@ test "a world saved, and read back into another" {
         some(t) => t.speed == 0.5 && t.label == "slow",
         none => false,
     });
+}
+
+// The names of `all`, joined by spaces.
+str names_of(Arena* arena, scene.World* w, scene.Entity[] all) {
+    text.TextBuilder* b = text.builder(arena);
+    for (scene.Entity e in all) {
+        if (b.text().len > 0) {
+            b.push(" ");
+        }
+        b.push(match (w.names.get(e)) {
+            some(n) => *n,
+            none => "?",
+        });
+    }
+    return b.text();
+}
+
+test "the order of siblings: changed, kept by the file read again" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    scene.Entity room = w.spawn_at("room", linear.transform(), none);
+    scene.Entity a = w.spawn_at("a", linear.transform(), some(room));
+    scene.Entity b = w.spawn_at("b", linear.transform(), some(room));
+    scene.Entity c = w.spawn_at("c", linear.transform(), some(room));
+    scene.Entity lamp = w.spawn_at("lamp", linear.transform(), none);
+    assert(names_of(&arena, w, w.children(&arena, room)) == "a b c");
+    w.move_before(c, some(a));  // first
+    assert(names_of(&arena, w, w.children(&arena, room)) == "c a b");
+    w.move_before(c, some(b));  // between a and b
+    assert(names_of(&arena, w, w.children(&arena, room)) == "a c b");
+    w.move_before(a, none);  // last
+    assert(names_of(&arena, w, w.children(&arena, room)) == "c b a");
+    w.move_before(lamp, some(room));  // among the roots
+    assert(names_of(&arena, w, w.in_order(&arena)) == "lamp room c b a");
+    // written in that order: read again, the same order
+    str text_of_it = writer(&arena, w).written();
+    scene.World* again = scene.world(&arena);
+    match (read(&arena, again, text_of_it, none)) {
+        ok(r) => { },
+        err(e) => {
+            assert(false);
+        },
+    }
+    scene.Entity[] roots = again.in_order(&arena);
+    assert(names_of(&arena, again, roots) == "lamp room c b a");
+    assert(names_of(&arena, again, again.children(&arena, roots[1])) == "c b a");
+    assert(w.count() == 5 && again.count() == 5);
 }
 
 test "a prefab instantiated twice" {
