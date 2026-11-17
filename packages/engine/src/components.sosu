@@ -265,6 +265,11 @@ pub struct Body {
     pub mut BodyKind kind = BodyKind.Dynamic;
     pub mut ShapeKind shape = ShapeKind.Box;
     pub mut linear.Vec3 size = linear.Vec3{ x: 0.5, y: 0.5, z: 0.5 };
+    // Where the shape is in its entity (meters, in the space of the entity without its scale, as
+    // `size`) and how it is turned there (degrees, as `linear.Quat.euler`): a collider moved off the
+    // center of its mesh, or turned against it.
+    pub mut linear.Vec3 center = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
+    pub mut linear.Vec3 rotation = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
     pub mut f32 mass = 0.0;  // kg; 0: from the shape
     pub mut f32 friction = 0.2;
     pub mut f32 restitution = 0.0;
@@ -273,6 +278,28 @@ pub struct Body {
     pub mut i64 layers = 1;
     pub mut i64 mask = 4294967295;
     pub mut bool sensor = false;
+}
+
+// The turn of the shape of `b` in its entity, from its angles in degrees.
+pub linear.Quat turn_of(Body b) {
+    return linear.from_euler(b.rotation.scale(3.14159265 / 180.0));
+}
+
+// Where the shape of `b` is in the world, its entity placed at `at` (its scale left out).
+pub linear.Transform shape_place(Body b, linear.Transform at) {
+    mut linear.Transform t = linear.transform();
+    t.position = at.position.add(at.rotation.rotate(b.center));
+    t.rotation = at.rotation.mul(turn_of(b)).normalized();
+    return t;
+}
+
+// Where the entity of `b` is when its shape is at `position`, turned by `rotation`: what
+// `shape_place` undoes.
+pub linear.Transform entity_place(Body b, linear.Vec3 position, linear.Quat rotation) {
+    mut linear.Transform t = linear.transform();
+    t.rotation = rotation.mul(turn_of(b).inverse()).normalized();
+    t.position = position.sub(t.rotation.rotate(b.center));
+    return t;
 }
 
 pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
@@ -302,7 +329,7 @@ pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
     }
 
     override usize count() {
-        return 11;
+        return 13;
     }
 
     override describe.Field field(usize i) {
@@ -316,24 +343,30 @@ pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
             return describe.vector("size", "Size");
         }
         if (i == 3) {
-            return describe.number("mass", "Mass", 0.0, 1000000.0);
+            return describe.vector("center", "Position");
         }
         if (i == 4) {
-            return describe.number("friction", "Friction", 0.0, 10.0);
+            return describe.vector("rotation", "Rotation");
         }
         if (i == 5) {
-            return describe.number("restitution", "Bounce", 0.0, 1.0);
+            return describe.number("mass", "Mass", 0.0, 1000000.0);
         }
         if (i == 6) {
-            return describe.number("damping", "Damping", 0.0, 100.0);
+            return describe.number("friction", "Friction", 0.0, 10.0);
         }
         if (i == 7) {
-            return describe.number("gravity_scale", "Gravity", -100.0, 100.0);
+            return describe.number("restitution", "Bounce", 0.0, 1.0);
         }
         if (i == 8) {
-            return describe.whole("layers", "Layers", 0.0, 4294967295.0);
+            return describe.number("damping", "Damping", 0.0, 100.0);
         }
         if (i == 9) {
+            return describe.number("gravity_scale", "Gravity", -100.0, 100.0);
+        }
+        if (i == 10) {
+            return describe.whole("layers", "Layers", 0.0, 4294967295.0);
+        }
+        if (i == 11) {
             return describe.whole("mask", "Mask", 0.0, 4294967295.0);
         }
         return describe.flag("sensor", "Sensor");
@@ -359,24 +392,30 @@ pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
             return describe.Value.Vector(b.size);
         }
         if (i == 3) {
-            return describe.Value.Number(b.mass);
+            return describe.Value.Vector(b.center);
         }
         if (i == 4) {
-            return describe.Value.Number(b.friction);
+            return describe.Value.Vector(b.rotation);
         }
         if (i == 5) {
-            return describe.Value.Number(b.restitution);
+            return describe.Value.Number(b.mass);
         }
         if (i == 6) {
-            return describe.Value.Number(b.damping);
+            return describe.Value.Number(b.friction);
         }
         if (i == 7) {
-            return describe.Value.Number(b.gravity_scale);
+            return describe.Value.Number(b.restitution);
         }
         if (i == 8) {
-            return describe.Value.Whole(b.layers);
+            return describe.Value.Number(b.damping);
         }
         if (i == 9) {
+            return describe.Value.Number(b.gravity_scale);
+        }
+        if (i == 10) {
+            return describe.Value.Whole(b.layers);
+        }
+        if (i == 11) {
             return describe.Value.Whole(b.mask);
         }
         return describe.Value.Flag(b.sensor);
@@ -392,18 +431,22 @@ pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
         } else if (i == 2) {
             b.size = describe.vector_of(v, b.size);
         } else if (i == 3) {
-            b.mass = describe.number_of(v, b.mass);
+            b.center = describe.vector_of(v, b.center);
         } else if (i == 4) {
-            b.friction = describe.number_of(v, b.friction);
+            b.rotation = describe.vector_of(v, b.rotation);
         } else if (i == 5) {
-            b.restitution = describe.number_of(v, b.restitution);
+            b.mass = describe.number_of(v, b.mass);
         } else if (i == 6) {
-            b.damping = describe.number_of(v, b.damping);
+            b.friction = describe.number_of(v, b.friction);
         } else if (i == 7) {
-            b.gravity_scale = describe.number_of(v, b.gravity_scale);
+            b.restitution = describe.number_of(v, b.restitution);
         } else if (i == 8) {
-            b.layers = describe.whole_of(v, b.layers);
+            b.damping = describe.number_of(v, b.damping);
         } else if (i == 9) {
+            b.gravity_scale = describe.number_of(v, b.gravity_scale);
+        } else if (i == 10) {
+            b.layers = describe.whole_of(v, b.layers);
+        } else if (i == 11) {
             b.mask = describe.whole_of(v, b.mask);
         } else {
             b.sensor = describe.flag_of(v, b.sensor);
