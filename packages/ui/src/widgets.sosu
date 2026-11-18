@@ -4542,7 +4542,7 @@ pub struct Frame {
                 menu_pressed = true;
             }
         }
-        if (shortcut.len == 0) {
+        if (shortcut.len == 0 || ui.edit_count == 0) {  // no key pressed: no shortcut to read
             return false;
         }
         Shortcut s = parse_shortcut(shortcut);
@@ -4592,8 +4592,10 @@ pub struct Frame {
             p.count += 1;
         }
         p.h += h;
-        f32 key_w = key.len > 0 ? measure(key, 2).w + 32.0 : 0.0;
-        p.widest = max(p.widest, measure_label(label, 18.0).w + key_w + (kind == 2 ? 24.0 : 0.0));
+        if (p.open && kind != 1) {  // measured only when it is drawn: a closed menu costs little
+            f32 key_w = key.len > 0 ? measure(key, 2).w + 32.0 : 0.0;
+            p.widest = max(p.widest, measure_label(label, 18.0).w + key_w + (kind == 2 ? 24.0 : 0.0));
+        }
         if (p.open && kind != 2 && ui.moved && contains(r, ui.mouse_x, ui.mouse_y)) {
             ui.close_menus(menu_level);
         }
@@ -4638,6 +4640,16 @@ pub struct Frame {
     // Closes the menus a click elsewhere, a right press elsewhere or Escape closes, or whose
     // menu was not described; draws those still open, and remembers them for the next frame.
     void finish_menus() {
+        // each menu at its own width and height, known now that its entries are described (its
+        // place was taken from the last frame, or from another menu of its level): no first frame
+        // drawn at the width of another
+        for (usize i in 0..shown_count) {
+            mut Popup p = shown[i];
+            p.w = max(p.widest + 40.0, 160.0);
+            p.x = max(min(p.x, surface.width as f32 - p.w), 0.0);
+            p.y = max(min(p.y, surface.height as f32 - p.h - 8.0), 0.0);
+            shown[i] = p;
+        }
         mut bool inside = false;
         mut bool first_shown = false;
         for (usize i in 0..shown_count) {

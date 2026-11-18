@@ -1480,8 +1480,7 @@ void tree(widgets.Frame* f, Dock* d, i32 win, f32 ox, f32 oy, f32 s) {
         // a group: its tabs, its pin, the background of its panel
         f32 h = STRIP * s;
         canvas.Rect bar_r = canvas.Rect{ x: node.rect.x, y: node.rect.y, w: node.rect.w, h: h };
-        c.fill(bar_r, strip);
-        c.fill(canvas.Rect{ x: node.rect.x, y: node.rect.y + h, w: node.rect.w, h: max(0.0, node.rect.h - h) }, window);
+        c.fill(bar_r, strip);  // its panel on the background of the window, filled by `begin`
         c.stroke(node.rect, line, 1.0);
         // the pin first: the tabs stop before it
         canvas.Rect pin = canvas.Rect{ x: node.rect.x + node.rect.w - h, y: node.rect.y, w: h, h: h };
