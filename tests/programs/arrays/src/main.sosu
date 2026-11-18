@@ -9,6 +9,18 @@ i32 sum(i32[4] values) {
     return total;
 }
 
+struct Shelf {
+    pub mut i32[] items = [];
+}
+
+i32 summed(i32[] xs) {
+    mut i32 t = 0;
+    for (i32 x in xs) {
+        t += x;
+    }
+    return t;
+}
+
 i32 main() uses io {
     i32[4] a = [1, 2, 3, 4];
     io.print("sum = {}", sum(a));
@@ -37,6 +49,11 @@ i32 main() uses io {
         err(e) => "?",
     };
     io.print("bytes 1 to 3 of hello: {}", word);
+
+    // `[]` where a slice is expected: an empty slice (a default of a field, a variable, an argument)
+    Shelf shelf = Shelf{ };
+    i32[] nothing = [];
+    io.print("empty slices: {} {} {}", shelf.items.len, nothing.len, summed([]));
 
     i32 result = 42;  // `result` is a name like any other outside `ensures`
     io.print("result = {}", result);

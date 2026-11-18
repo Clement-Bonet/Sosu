@@ -2075,8 +2075,12 @@ static Type *check_array(Body *b, Expr *e, Type *expected) {
         }
         size = e->as.array.count;
     }
+    if (size == 0 && expected && expected->tag == T_SLICE && !e->as.array.repeat) {
+        return expected;  /* `[]` where a slice is expected: an empty slice, holding no memory */
+    }
     if (size == 0) {
-        sema_error_expr(b, "E0308", e, "an array has at least one element");
+        Diagnostic *d = sema_error_expr(b, "E0308", e, "an array has at least one element");
+        if (e->as.array.count == 0) diag_help(d, "`[]` is an empty slice where a slice is expected (`T[] x = [];`)");
         return sema_error_type(b);
     }
     if (!element || sema_is_error(element)) return sema_error_type(b);

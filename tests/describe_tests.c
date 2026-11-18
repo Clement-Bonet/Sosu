@@ -136,8 +136,11 @@ static void test_errors(void) {
     r = describe_one("// component\npub struct A {\n    pub mut f64 x = 0.0;\n}\n");
     CHECK(said(&r, "E0602", "`f64` cannot be a field"), "a type it does not know");
     done(&r);
-    r = describe_one("// component\npub struct A {\n    pub mut f32[] xs = empty();\n}\n");
-    CHECK(said(&r, "E0602", "list"), "a list");
+    r = describe_one("// component\npub struct A {\n    pub mut f32[][] xs = [];\n}\n");
+    CHECK(said(&r, "E0602", "a list of lists"), "a list of lists");
+    done(&r);
+    r = describe_one("// component\npub struct A {\n    pub mut f64[] xs = [];\n}\n");
+    CHECK(said(&r, "E0602", "`f64` cannot be a field"), "a list of a type it does not know");
     done(&r);
     r = describe_one("pub enum Shape {\n    Circle(f32 r),\n}\n// component\npub struct A {\n    pub mut Shape s = Shape.Circle(1.0);\n}\n");
     CHECK(said(&r, "E0602", "variants carry nothing"), "an enum with payloads");

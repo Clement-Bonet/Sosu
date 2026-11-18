@@ -5,4 +5,8 @@ import garden.parts;
 pub struct FruitTree {
     pub mut f32 height = 3.0;  // range 0.5..40.0; unit "m"
     pub mut parts.Spray watered_by = parts.Spray.Mist;
+    // the hours it is watered at: a list, each held within the range
+    pub mut f32[] hours = [];  // range 0..24; unit "h"
+    pub mut str[] fruits = [];  // asset
+    pub mut parts.Spray[] sprays = [];
 }

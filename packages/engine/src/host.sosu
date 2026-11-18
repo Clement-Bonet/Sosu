@@ -39,7 +39,7 @@ import assets.assets;
 import assets.ids;
 
 // The version of the contract: the editor refuses a library of another one.
-pub ui32 CONTRACT = 6;
+pub ui32 CONTRACT = 7;
 
 // ---- What crosses to C ----
 
@@ -78,6 +78,7 @@ pub struct FieldInfo {
     pub str group = "";
     pub str tooltip = "";
     pub bool hidden = false;
+    pub describe.Kind item = describe.Kind.Number;  // contract 7: a list, the kind of its items
 }
 
 // `v` as C sees it.
@@ -709,7 +710,7 @@ export "C" FieldInfo sozo_field(Game* g, usize kind, usize field) {
         none => 0,
     };
     return FieldInfo{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, choices: choices,
-            unit: f.unit, group: f.group, tooltip: f.tooltip, hidden: f.hidden };
+            unit: f.unit, group: f.group, tooltip: f.tooltip, hidden: f.hidden, item: f.item };
 }
 
 // The name of the choice `choice` of a field of kind `Choice`.
@@ -778,6 +779,47 @@ export "C" bool sozo_set(Game* g, scene.Entity e, usize kind, usize field, Value
         },
     };
     bool done = g.level.registry.at(kind).set(e, field, given);
+    if (done) {
+        g.level.runner.refresh(e);
+    }
+    return done;
+}
+
+// A list (contract 7): the number of the items of the field `field` of the component `kind` of `e`
+// (0 without it, or for a field that is not a list).
+export "C" usize sozo_item_count(Game* g, scene.Entity e, usize kind, usize field) {
+    return kind < g.level.registry.count() ? g.level.registry.at(kind).item_count(e, field) : 0;
+}
+
+// Its item `index`; `Empty` past its items.
+export "C" Value sozo_item(Game* g, scene.Entity e, usize kind, usize field, usize index) {
+    if (kind >= g.level.registry.count()) {
+        return Value{ };
+    }
+    return match (g.level.registry.at(kind).item(e, field, index)) {
+        some(v) => to_c(v),
+        none => Value{ },
+    };
+}
+
+// All its items given at once, each held within the bounds of the field, texts copied; false when
+// it has none, the field is not a list, or an item is empty. What the engine gave `e` is made again.
+export "C" bool sozo_set_items(Game* g, scene.Entity e, usize kind, usize field, Value[] values) {
+    if (kind >= g.level.registry.count()) {
+        return false;
+    }
+    mut Arena scratch = Arena.new(1 * KB);
+    defer scratch.free();
+    describe.Value[] given = scratch.alloc_slice(describe.Value, values.len);
+    for (usize j in 0..values.len) {
+        given[j] = match (from_c(values[j])) {
+            some(x) => x,
+            none => {
+                return false;
+            },
+        };
+    }
+    bool done = g.level.registry.at(kind).set_items(e, field, given);
     if (done) {
         g.level.runner.refresh(e);
     }
@@ -932,10 +974,15 @@ export "C" scene.Entity[] sozo_place_branch(Game* g, str source, scene.Entity pa
 pub struct Spin {
     pub mut f32 speed = 90.0;
     pub mut bool on = true;
+    pub mut f32[] stops = [];  // a list: where it stops, in degrees
 }
 
 class SpinFields : describe.Describe<Spin>, save.Codec<Spin> {
-    void init() { }
+    Arena* arena;  // where its lists are made
+
+    void init(keeps Arena* arena) {
+        self.arena = arena;
+    }
 
     override str name() {
         return "spin";
@@ -946,21 +993,27 @@ class SpinFields : describe.Describe<Spin>, save.Codec<Spin> {
     }
 
     override usize count() {
-        return 2;
+        return 3;
     }
 
     override describe.Field field(usize i) {
+        if (i == 2) {
+            return describe.list("stops", "Stops", describe.number("", "", 0.0, 360.0));
+        }
         return i == 0 ? describe.number("speed", "Speed", -720.0, 720.0) : describe.flag("on", "On");
     }
 
     override describe.Value get(Spin* s, usize i) {
+        if (i == 2) {
+            return describe.Value.Whole(s.stops.len as i64);
+        }
         return i == 0 ? describe.Value.Number(s.speed) : describe.Value.Flag(s.on);
     }
 
     override void set(Spin* s, usize i, describe.Value v) {
         if (i == 0) {
             s.speed = describe.number_of(v, s.speed);
-        } else {
+        } else if (i == 1) {
             s.on = describe.flag_of(v, s.on);
         }
     }
@@ -972,6 +1025,23 @@ class SpinFields : describe.Describe<Spin>, save.Codec<Spin> {
     override Spin? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Spin>*, v);
     }
+    override usize items(Spin* c, usize i) {
+        return i == 2 ? c.stops.len : 0;
+    }
+
+    override describe.Value item(Spin* c, usize i, usize j) {
+        return describe.Value.Number(c.stops[j]);
+    }
+
+    override void set_items(Spin* c, usize i, describe.Value[] values) keeps self {
+        if (i == 2) {
+            f32[] made = arena.alloc_slice(f32, values.len);
+            for (usize j in 0..values.len) {
+                made[j] = describe.number_of(values[j], 0.0);
+            }
+            c.stops = made;
+        }
+    }
 }
 
 class SpinKind : kinds.Kind, Saved {
@@ -982,7 +1052,7 @@ class SpinKind : kinds.Kind, Saved {
     void init(keeps Arena* arena, keeps scene.Table<Spin>* spins) {
         self.arena = arena;
         self.spins = spins;
-        fields = arena.new(SpinFields);
+        fields = arena.new(SpinFields, arena);
     }
 
     describe.Describe<Spin>* d() {
@@ -1023,6 +1093,18 @@ class SpinKind : kinds.Kind, Saved {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return kinds.table_set(arena, spins, d(), e, i, v);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return kinds.table_item_count(spins, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return kinds.table_item(spins, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return kinds.table_set_items(arena, spins, d(), e, i, values);
     }
 
     override void write(save.Writer* out) {
@@ -1118,7 +1200,16 @@ test "the contract: entities, components of engine and of the game, saved, playe
     sozo_set(g, lid, spin, 0, Value{ tag: Tag.Number, number: 1000.0 });
     assert(sozo_get(g, lid, spin, 0).number == 720.0);  // its bounds
     assert(sozo_fresh(g, spin, 0).number == 90.0 && sozo_fresh(g, spin, 1).flag);  // what a reset gives
-    match (sozo_fresh(g, spin, 2).tag) {
+    // a list (contract 7): its items given at once, each held within its bounds, read one by one
+    FieldInfo stops = sozo_field(g, spin, 2);
+    assert(stops.kind == describe.Kind.List && stops.item == describe.Kind.Number && stops.high == 360.0);
+    assert(sozo_item_count(g, lid, spin, 2) == 0 && sozo_item_count(g, lid, spin, 0) == 0);
+    mut Value[3] given = [Value{ tag: Tag.Number, number: 90.0 }, Value{ tag: Tag.Number, number: 500.0 }, Value{ tag: Tag.Number, number: 45.0 }];
+    assert(sozo_set_items(g, lid, spin, 2, given[0..3]));
+    assert(sozo_item_count(g, lid, spin, 2) == 3 && sozo_item(g, lid, spin, 2, 1).number == 360.0);
+    assert(!sozo_set_items(g, lid, spin, 0, given[0..3]));  // not a list
+    assert(text.contains(sozo_save(g), "\"stops\": [90, 360, 45]"));
+    match (sozo_fresh(g, spin, 3).tag) {
         Empty => { },
         _ => {
             assert(false);

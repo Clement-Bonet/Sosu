@@ -96,6 +96,16 @@ pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
     override Mesh? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Mesh>*, v);
     }
+    // No list among its fields.
+    override usize items(Mesh* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Mesh* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Mesh* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- Light ----
@@ -191,6 +201,16 @@ pub class LightFields : describe.Describe<Light>, save.Codec<Light> {
     override Light? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Light>*, v);
     }
+    // No list among its fields.
+    override usize items(Light* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Light* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Light* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- View ----
@@ -262,6 +282,16 @@ pub class ViewFields : describe.Describe<View>, save.Codec<View> {
     override View? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<View>*, v);
     }
+    // No list among its fields.
+    override usize items(View* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(View* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(View* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- Body ----
@@ -478,6 +508,16 @@ pub class BodyFields : describe.Describe<Body>, save.Codec<Body> {
     override Body? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Body>*, v);
     }
+    // No list among its fields.
+    override usize items(Body* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Body* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Body* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- Sound ----
@@ -576,6 +616,16 @@ pub class SoundFields : describe.Describe<Sound>, save.Codec<Sound> {
     override Sound? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Sound>*, v);
     }
+    // No list among its fields.
+    override usize items(Sound* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Sound* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Sound* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- Emitter ----
@@ -747,6 +797,16 @@ pub class EmitterFields : describe.Describe<Emitter>, save.Codec<Emitter> {
     override Emitter? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Emitter>*, v);
     }
+    // No list among its fields.
+    override usize items(Emitter* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Emitter* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Emitter* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- Animator ----
@@ -818,6 +878,16 @@ pub class AnimatorFields : describe.Describe<Animator>, save.Codec<Animator> {
     override Animator? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Animator>*, v);
     }
+    // No list among its fields.
+    override usize items(Animator* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Animator* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Animator* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // ---- All of them ----
@@ -941,6 +1011,16 @@ pub class TextFields : describe.Describe<Text>, save.Codec<Text> {
     override Text? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Text>*, v);
     }
+    // No list among its fields.
+    override usize items(Text* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Text* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Text* c, usize i, describe.Value[] values) keeps self { }
 }
 
 // The tables of the common components of a world, and their descriptions.

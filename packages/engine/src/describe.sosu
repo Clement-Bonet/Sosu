@@ -9,6 +9,11 @@
 // written by its name, and a number is held within its bounds.
 //
 //   {"kind": "point", "color": [1, 0.9, 0.8], "intensity": 12, "range": 8, "shadows": false}
+//
+// A field may be a list of values of one kind (`List`, the kind of its items `Field.item`): the
+// items are read one by one (`items`, `item`) and given all at once (`set_items`), which is how they
+// cross a boundary of C too; `get` gives a list as the number of its items, `set` leaves it. Saved
+// as a JSON array of its items.
 import std.json;
 import std.text;
 import math.linear;
@@ -24,6 +29,7 @@ pub enum Kind {
     Color,   // three numbers from 0 to 1: red, green, blue
     Choice,  // one of `choices`, by its index
     Asset,   // the path of a file of the project (a model, a sound...), relative to its folder
+    List,    // values of the kind `item`, as many as the program wants
 }
 
 pub struct Field {
@@ -37,6 +43,7 @@ pub struct Field {
     pub str group = "";         // the fields of a group follow each other, under its name as a header
     pub str tooltip = "";       // shown when the mouse rests on it
     pub bool hidden = false;    // saved, but not shown by an inspector
+    pub Kind item = Kind.Number;  // `List`: the kind of its items (its bounds, choices, unit theirs)
 }
 
 // The value of a field.
@@ -60,6 +67,12 @@ pub interface Describe<T> {
     Value get(T* component, usize i);
     // `v` given to the field `i` (texts already copied where the component lives).
     void set(T* component, usize i, Value v);
+    // A list (`Kind.List`): the number of its items (0 for a field that is not one), the item `j`
+    // (`j` below that number), and all its items given at once: the description makes them in the
+    // arena it keeps (that of the world), texts too.
+    usize items(T* component, usize i);
+    Value item(T* component, usize i, usize j);
+    void set_items(T* component, usize i, Value[] values) keeps self;
 }
 
 // ---- Helpers for the descriptions ----
@@ -94,6 +107,42 @@ pub Field choice(str name, str label, keeps str[] choices) {
 
 pub Field asset(str name, str label) {
     return Field{ name: name, label: label, kind: Kind.Asset };
+}
+
+// A list of the values of `of` (its kind, bounds, choices and unit those of each item).
+pub Field list(str name, str label, Field of) {
+    return Field{
+        name: name,
+        label: label,
+        kind: Kind.List,
+        item: of.kind,
+        low: of.low,
+        high: of.high,
+        choices: of.choices,
+        unit: of.unit
+    };
+}
+
+// What each item of the list `f` is: a field of the kind of its items, with its bounds and choices.
+pub Field item_of(Field f) {
+    return Field{
+        name: f.name,
+        label: f.label,
+        kind: f.item,
+        low: f.low,
+        high: f.high,
+        choices: f.choices,
+        unit: f.unit,
+        tooltip: f.tooltip
+    };
+}
+
+// Whether `f` is a list.
+pub bool is_list(Field f) {
+    return match (f.kind) {
+        List => true,
+        _ => false,
+    };
 }
 
 // The number of `v`, or `otherwise`.
@@ -234,6 +283,7 @@ Value? read_value(Arena* arena, Field f, json.Value v) {
             some(s) => choice_named(f, s),
             none => none,
         },
+        List => none,  // read item by item (`read_object`)
     };
 }
 
@@ -295,14 +345,26 @@ pub void write_object<T>(text.TextBuilder* out, Describe<T>* fields, T* value) {
         out.push("\"");
         out.push(f.name);
         out.push("\": ");
-        write_value(out, f, fields.get(value, i));
+        if (is_list(f)) {  // an array of its items
+            Field one = item_of(f);
+            out.push("[");
+            for (usize j in 0..fields.items(value, i)) {
+                if (j > 0) {
+                    out.push(", ");
+                }
+                write_value(out, one, fields.item(value, i, j));
+            }
+            out.push("]");
+        } else {
+            write_value(out, f, fields.get(value, i));
+        }
     }
     out.push("}");
 }
 
 // The component of `v`, an object of its fields: what the `read` of a `scene.Codec<T>` gives. A
 // field missing, or of another kind, keeps its value of `fresh`.
-pub T? read_object<T>(Arena* arena, Describe<T>* fields, json.Value v) {
+pub T? read_object<T>(Arena* arena, keeps Describe<T>* fields, json.Value v) {
     match (v) {
         Object(members) => { },
         _ => {
@@ -314,11 +376,32 @@ pub T? read_object<T>(Arena* arena, Describe<T>* fields, json.Value v) {
         Field f = fields.field(i);
         match (json.get(v, f.name)) {
             some(member) => {
-                match (read_value(arena, f, member)) {
-                    some(x) => {
-                        fields.set(&component, i, bounded(f, x));
-                    },
-                    none => { },
+                if (is_list(f)) {  // its items, those that are not of its kind left out
+                    Field one = item_of(f);
+                    Value[] read = arena.alloc_slice(Value, json.len(member));
+                    mut usize n = 0;
+                    for (usize j in 0..json.len(member)) {
+                        match (json.at(member, j)) {
+                            some(x) => {
+                                match (read_value(arena, one, x)) {
+                                    some(item) => {
+                                        read[n] = bounded(one, item);
+                                        n += 1;
+                                    },
+                                    none => { },
+                                }
+                            },
+                            none => { },
+                        }
+                    }
+                    fields.set_items(&component, i, read[0..n]);
+                } else {
+                    match (read_value(arena, f, member)) {
+                        some(x) => {
+                            fields.set(&component, i, bounded(f, x));
+                        },
+                        none => { },
+                    }
                 }
             },
             none => { },
@@ -427,6 +510,16 @@ class LampFields : Describe<Lamp>, save.Codec<Lamp> {
             l.sound = text_of(v, l.sound);
         }
     }
+    // No list among its fields.
+    override usize items(Lamp* c, usize i) {
+        return 0;
+    }
+
+    override Value item(Lamp* c, usize i, usize j) {
+        return Value.Flag(false);
+    }
+
+    override void set_items(Lamp* c, usize i, Value[] values) keeps self { }
 }
 
 test "a component described once: saved, read back, and an older file read with its defaults" {
@@ -481,4 +574,103 @@ test "a component described once: saved, read back, and an older file read with 
     // what an inspector reads
     assert(fields.count() == 7 && fields.field(2).label == "Power" && fields.field(2).high == 100.0);
     assert(number_of(fields.get(&l, 2), 0.0) == 42.5);
+}
+
+// A component with lists: the heights of its steps (numbers within 0 to 2), the names of its sounds.
+struct Stair {
+    mut f32[] steps = [];
+    mut str[] sounds = [];
+}
+
+class StairFields : Describe<Stair>, save.Codec<Stair> {
+    Arena* arena;  // where its lists are made
+
+    void init(keeps Arena* arena) {
+        self.arena = arena;
+    }
+
+    override str name() {
+        return "stair";
+    }
+
+    override void write(text.TextBuilder* out, Stair* value) {
+        write_object(out, self as Describe<Stair>*, value);
+    }
+
+    override Stair? read(Arena* arena, json.Value v) {
+        return read_object(arena, self as Describe<Stair>*, v);
+    }
+
+    override Stair fresh() {
+        return Stair{ };
+    }
+
+    override usize count() {
+        return 2;
+    }
+
+    override Field field(usize i) {
+        return i == 0 ? list("steps", "Steps", number("", "", 0.0, 2.0)) : list("sounds", "Sounds", asset("", ""));
+    }
+
+    override Value get(Stair* s, usize i) {
+        return Value.Whole((i == 0 ? s.steps.len : s.sounds.len) as i64);
+    }
+
+    override void set(Stair* s, usize i, Value v) { }
+
+    override usize items(Stair* s, usize i) {
+        return i == 0 ? s.steps.len : s.sounds.len;
+    }
+
+    override Value item(Stair* s, usize i, usize j) {
+        return i == 0 ? Value.Number(s.steps[j]) : Value.Text(s.sounds[j]);
+    }
+
+    override void set_items(Stair* s, usize i, Value[] values) keeps self {
+        if (i == 0) {
+            f32[] made = arena.alloc_slice(f32, values.len);
+            for (usize j in 0..values.len) {
+                made[j] = number_of(values[j], 0.0);
+            }
+            s.steps = made;
+        } else {
+            str[] made = arena.alloc_slice(str, values.len);
+            for (usize j in 0..values.len) {
+                made[j] = text.repeat(arena, text_of(values[j], ""), 1);
+            }
+            s.sounds = made;
+        }
+    }
+}
+
+test "lists: written as arrays, read back item by item, each held within the bounds of the list" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    StairFields* f = arena.new(StairFields, &arena);
+    Describe<Stair>* d = f as Describe<Stair>*;
+    assert(is_list(d.field(0)) && item_of(d.field(0)).high == 2.0 && !is_list(item_of(d.field(0))));
+    mut Stair s = d.fresh();
+    assert(d.items(&s, 0) == 0);
+    mut Value[3] heights = [Value.Number(0.5), Value.Number(1.0), Value.Number(1.5)];
+    d.set_items(&s, 0, heights[0..3]);
+    mut Value[1] names = [Value.Text("sounds/step.ogg")];
+    d.set_items(&s, 1, names[0..1]);
+    text.TextBuilder* out = text.builder(&arena);
+    f.write(out, &s);
+    assert(out.text() == "{\"steps\": [0.5, 1, 1.5], \"sounds\": [\"sounds/step.ogg\"]}");
+    // read back: an item beyond the bounds held within them, one of another kind left out
+    json.Value v = match (json.parse(&arena, "{\"steps\": [0.25, 7, \"x\"], \"sounds\": []}")) {
+        ok(x) => x,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    match (f.read(&arena, v)) {
+        some(back) => {
+            assert(back.steps.len == 2 && back.steps[0] == 0.25 && back.steps[1] == 2.0 && back.sounds.len == 0);
+        },
+        none => assert(false),
+    }
 }
