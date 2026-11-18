@@ -16,6 +16,7 @@
 
 #include "bindgen.h"
 #include "codegen.h"
+#include "describe.h"
 #include "docgen.h"
 #include "fmt.h"
 #include "i18n.h"
@@ -3609,6 +3610,118 @@ static int command_deps(int argc, char **argv) {
 /* `sosuc doc`: the reference of what a package makes `pub`, with the comments written above it
    (spec 7.6), in Markdown: one section per module of the package, interface and catalog files
    aside. */
+/* `sosuc describe [package] [--check]`: src/described.sosu written from the structs marked
+   `// component` (spec 11.4), only when its text changes, so that a build does not start again
+   for nothing; --check only says whether it is up to date. */
+static int command_describe(int argc, char **argv) {
+    const char *dir = ".";
+    bool check = false;
+    DiagFormat format = FORMAT_TEXT;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--check") == 0) {
+            check = true;
+        } else if (strcmp(argv[i], "--format=json") == 0) {
+            format = FORMAT_JSON;
+        } else if (strcmp(argv[i], "--format=text") == 0) {
+            format = FORMAT_TEXT;
+        } else if (argv[i][0] != '-') {
+            dir = argv[i];
+        } else {
+            fprintf(stderr, "sosuc: unknown option `%s`\n", argv[i]);
+            fputs("usage: sosuc describe [package] [--check] [--format=json]\n", stderr);
+            return 2;
+        }
+    }
+    char *manifest_path = path_join(dir, "sosu.toml");
+    SourceFile manifest_file;
+    if (!source_load(&manifest_file, manifest_path)) {
+        fprintf(stderr, "sosuc: no sosu.toml in `%s`\n", dir);
+        free(manifest_path);
+        return 2;
+    }
+    free(manifest_path);
+    DiagList diags = {0};
+    Manifest manifest;
+    if (!manifest_parse(&manifest, &manifest_file, &diags)) {
+        print_diagnostics(&diags, format);
+        manifest_free(&manifest);
+        diag_free(&diags);
+        source_free(&manifest_file);
+        return 1;
+    }
+    char *src = path_join(dir, "src");
+    char *generated = path_join(src, DESCRIBE_MODULE ".sosu");
+    size_t found = 0;
+    char **names = shell_files_below(src, ".sosu", &found);
+    SourceFile *files = sosu_calloc(found + 1, sizeof *files);
+    DescribeSource *sources = sosu_calloc(found + 1, sizeof *sources);
+    char **modules = sosu_calloc(found + 1, sizeof *modules);
+    size_t count = 0;
+    int status = 0;
+    for (size_t i = 0; i < found; i++) {
+        const char *name = names[i];
+        if (has_suffix(name, ".ui.sosu") || strstr(name, ".locale.") || strcmp(name, DESCRIBE_MODULE ".sosu") == 0) continue;
+        char *path = path_join(src, name);
+        bool loaded = load(&files[count], path);
+        free(path);
+        if (!loaded) {
+            status = 1;
+            continue;
+        }
+        size_t length = strlen(name) - 5; /* without `.sosu` */
+        modules[count] = sosu_format("%.*s", (int)length, name);
+        for (char *p = modules[count]; *p; p++) {
+            if (*p == '/') *p = '.';
+        }
+        sources[count].module = modules[count];
+        sources[count].file = &files[count];
+        count++;
+    }
+    size_t components = 0;
+    char *text = status == 0 ? describe_package(manifest.name, sources, count, &diags, &components) : NULL;
+    if (!text) {
+        print_diagnostics(&diags, format);
+        status = 1;
+    } else {
+        SourceFile old = {0};
+        bool loaded = shell_file_exists(generated) && source_load(&old, generated);
+        bool same = loaded && old.length == strlen(text) && memcmp(old.text, text, old.length) == 0;
+        if (loaded) source_free(&old);
+        if (check) {
+            if (!same) {
+                fprintf(stderr, "sosuc: `%s` is not up to date: run `sosuc describe`\n", generated);
+                status = 1;
+            }
+        } else if (!same) {
+            FILE *f = fopen(generated, "wb"); /* "\n" line ends on every system */
+            if (!f || fwrite(text, 1, strlen(text), f) != strlen(text)) {
+                fprintf(stderr, "sosuc: cannot write `%s`\n", generated);
+                status = 1;
+            }
+            if (f) fclose(f);
+            if (status == 0) printf("%zu component%s described in %s\n", components, components == 1 ? "" : "s", generated);
+        } else {
+            printf("%zu component%s, %s up to date\n", components, components == 1 ? "" : "s", generated);
+        }
+        free(text);
+    }
+    for (size_t i = 0; i < found; i++) free(names[i]);
+    free(names);
+    for (size_t i = 0; i < count; i++) {
+        source_free(&files[i]);
+        free(modules[i]);
+    }
+    free(files);
+    free(sources);
+    free(modules);
+    free(generated);
+    free(src);
+    manifest_free(&manifest);
+    diag_free(&diags);
+    source_free(&manifest_file);
+    return status;
+}
+
 static int command_doc(int argc, char **argv, const char *argv0) {
     const char *path = ".";
     const char *out = NULL;
@@ -3745,6 +3858,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(command, "i18n") == 0) return command_i18n(argc - 2, argv + 2, argv[0]);
     if (strcmp(command, "doc") == 0) return command_doc(argc - 2, argv + 2, argv[0]);
+    if (strcmp(command, "describe") == 0) return command_describe(argc - 2, argv + 2);
     if (strcmp(command, "bindgen") == 0) return command_bindgen(argc - 2, argv + 2);
     if (strcmp(command, "shaders") == 0) return command_shaders(argc - 2, argv + 2);
     if (strcmp(command, "deps") == 0) return command_deps(argc - 2, argv + 2);

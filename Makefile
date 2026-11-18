@@ -5,7 +5,7 @@ CPPFLAGS += -Isrc/lib
 
 LIB_SRC := $(wildcard src/lib/*.c)
 LIB_HDR := $(wildcard src/lib/*.h src/lib/*.inc)
-TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/fmt_tests build/json_tests build/lsp_tests build/i18n_tests build/program_tests build/fuzz_replay
+TESTS := build/lexer_tests build/parser_tests build/package_tests build/sema_tests build/fmt_tests build/json_tests build/lsp_tests build/i18n_tests build/describe_tests build/program_tests build/fuzz_replay
 
 all: build/sosuc $(TESTS)
 
@@ -27,6 +27,7 @@ test: all
 	./build/json_tests
 	./build/lsp_tests
 	./build/i18n_tests
+	./build/describe_tests
 	./build/program_tests ./build/sosuc
 	./build/fuzz_replay tests/fuzz/* > /dev/null
 	@# the readers of models, fuzzed by `sosuc fuzz`: their seeds and the inputs that once failed

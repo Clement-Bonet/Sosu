@@ -1,0 +1,8 @@
+// A tree, in a module of a folder: `garden.plants.tree`.
+import garden.parts;
+
+// component
+pub struct FruitTree {
+    pub mut f32 height = 3.0;  // range 0.5..40.0; unit "m"
+    pub mut parts.Spray watered_by = parts.Spray.Mist;
+}

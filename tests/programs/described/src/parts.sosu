@@ -1,0 +1,44 @@
+// The components of the garden, described by their comments (`sosuc describe`).
+import math.linear;
+
+// How a sprinkler waters.
+pub enum Spray {
+    Mist,
+    Jet,
+    WideFan,  // a word of two parts: `wide_fan` in a file
+}
+
+// A sprinkler: it waters around it, in turns.
+// component
+pub struct Sprinkler {
+    // label "Water flow"; range 0..20; unit "l/min"; group "Water"
+    pub mut f32 flow = 4.0;
+    pub mut Spray spray = Spray.Jet;  // the next fields stay in the group "Water"
+    // range -3..3
+    pub mut i32 tilt = 0;
+    // group "Turns"
+    // range 0..86400; unit "s"; tooltip "The time between two turns, \"in seconds\""
+    pub mut i64 every = 600;
+    pub mut usize turns = 3;
+    pub mut bool on = true;
+    pub mut str sound = "";  // asset
+    pub mut str note = "";  // a text of the gardener, shown as it is
+    // color
+    pub mut linear.Vec3 tint = linear.Vec3{ x: 0.2, y: 0.5, z: 1.0 };
+    pub mut linear.Vec3 reach = linear.Vec3{ x: 1.0, y: 1.0, z: 1.0 };  // unit "m"
+    // hidden
+    pub mut usize served = 0;
+    pub mut f32 timer = 0.0;  // transient
+    f32 private_state = 0.0;
+}
+
+// The fence: a component named by its comment, of no field.
+// component "fence_post"
+pub struct Fence {
+    f32 seen = 0.0;
+}
+
+// Not a component: the comment above says nothing of the kind.
+pub struct Plain {
+    pub mut f32 x = 0.0;
+}

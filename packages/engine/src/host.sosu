@@ -39,7 +39,7 @@ import assets.assets;
 import assets.ids;
 
 // The version of the contract: the editor refuses a library of another one.
-pub ui32 CONTRACT = 5;
+pub ui32 CONTRACT = 6;
 
 // ---- What crosses to C ----
 
@@ -74,6 +74,10 @@ pub struct FieldInfo {
     pub f32 low;
     pub f32 high;
     pub usize choices;
+    pub str unit = "";  // contract 6: what `describe.Field` says of it beyond its kind
+    pub str group = "";
+    pub str tooltip = "";
+    pub bool hidden = false;
 }
 
 // `v` as C sees it.
@@ -662,7 +666,8 @@ export "C" FieldInfo sozo_field(Game* g, usize kind, usize field) {
         some(c) => c.len,
         none => 0,
     };
-    return FieldInfo{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, choices: choices };
+    return FieldInfo{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, choices: choices,
+            unit: f.unit, group: f.group, tooltip: f.tooltip, hidden: f.hidden };
 }
 
 // The name of the choice `choice` of a field of kind `Choice`.

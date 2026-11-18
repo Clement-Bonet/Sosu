@@ -351,6 +351,21 @@ static void test_doc(const char *sosuc) {
     CHECK(run(command) == 2, "sosuc doc: an unknown option is refused");
 }
 
+/* `sosuc describe` (spec §11.4): the module of tests/programs/described, generated from the
+   comments of its components, is the one committed, and its tests drive those components through
+   the contract of the editor. */
+static void test_describe(const char *sosuc) {
+    char command[512];
+    snprintf(command, sizeof command, "%s describe --check tests/programs/described > build/describe.out 2> build/describe.err",
+             sosuc);
+    CHECK(run(command) == 0, "sosuc describe: src/described.sosu is not up to date (see build/describe.err)");
+    snprintf(command, sizeof command, "%s test tests/programs/described > build/described.out 2> build/described.err", sosuc);
+    CHECK(run(command) == 0, "the components described fail their tests (see build/described.out)");
+    snprintf(command, sizeof command, "%s describe tests/programs/described --html > build/describe.out 2> build/describe.err",
+             sosuc);
+    CHECK(run(command) == 2, "sosuc describe: an unknown option is refused");
+}
+
 /* `sosuc bindgen` (spec §11.6): the module of tests/programs/bindgen, written again from its header
    and checked against it by the C compiler, is the one committed (but its first lines, which name
    the system and the command); `long` is warned about. */
@@ -796,6 +811,7 @@ int main(int argc, char **argv) {
     test_object_cache(argv[1]);
     test_gpu(argv[1]);
     test_doc(argv[1]);
+    test_describe(argv[1]);
     test_guide(argv[1], "quick", "docs/QUICK_GUIDE.md", 30);
     test_guide(argv[1], "guide", "docs/GUIDE.md", 55);
     test_freed_arena(argv[1]);

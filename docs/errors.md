@@ -130,6 +130,20 @@ worded differently from one version to the next: a tool reads the code. Ranges: 
 | E0501 | classes and interfaces are not generated yet | not given any more: they are generated since arenas exist |
 | E0502 | no valid `main` | `sosuc run` on a library, or `i32 main(i32 x)` |
 
+## Descriptions (`sosuc describe`)
+
+The comments of the components of a package, read by `sosuc describe` (spec §11.4).
+
+| Code | Message | Example |
+|---|---|---|
+| E0601 | invalid `// component` | above a class, an enum, or a struct that is not `pub` or is generic; `// component "Door-Lock"`; a name of engine (`body`); two components of one name |
+| E0602 | a field of a component of a type that cannot be described | `pub mut f64 x;`, `pub mut f32[] xs;`, an enum whose variants carry values, a struct |
+| E0603 | an unknown word in a comment of a component | `// lable "Speed"` |
+| E0604 | an invalid value of a word | `// label 5`, `// label "Speed` (no closing quote), `// range 10..0`, `// range 0..2.5` on an i32, `// range 0..5 unit "m"` (no `;`) |
+| E0605 | a word that does not apply there | `// range` on a bool, `// color` on an f32, `// asset` on a number, `// component` above a field, `// unit` above a struct |
+| E0606 | a `pub` field of a component that is not `mut` | `pub f32 speed = 1.0;`: the editor could not change it, nor a scene read it (`// transient` leaves it out) |
+| E0607 | a field of a component without a default value | `pub mut f32 speed;`, `f32 seen;`: a component is made new with `T{ }` |
+
 ## Packages and imports
 
 | Code | Message | Example |
