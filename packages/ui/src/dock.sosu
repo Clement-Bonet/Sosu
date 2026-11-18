@@ -11,6 +11,9 @@
 // - The pin of a group hides its panels on the side of the dock nearest to it: a tab each on a bar
 //   along that side; the mouse over a tab slides its panel out over the others, the mouse away
 //   slides it back; the pin of that panel docks it again where it was.
+// - When the program lets panels close (`can_close`), each tab has a cross: the panel leaves the
+//   dock, its place kept, until `show` brings it back there (a menu of the windows, as in Visual
+//   Studio). `close` does the same from the program.
 //
 // Each frame, between the widgets of a frame of `ui.widgets`:
 //
@@ -84,7 +87,8 @@ struct Win {
     mut canvas.Rect rect;  // in the coordinates of the dock (those of the window of the dock)
 }
 
-// What changes the arrangement, applied at the next `begin`.
+// What changes the arrangement, applied at the next `begin`: one from the mouse a frame, those the
+// program asks in order.
 enum Change {
     Nothing,
     Hide(i32 node),
@@ -93,6 +97,8 @@ enum Change {
     MoveWindow(i32 window, i32 node, Edge edge),  // all the panels of a floating window
     Float(i32 panel, canvas.Rect rect),  // into a window of its own, there
     DockBack(i32 window),  // the panels of a floating window back where they were
+    Close(i32 panel),  // out of the dock, where it was kept
+    Show(i32 panel),  // back where it was (closed or hidden), and shown in its group
 }
 
 pub class Dock {
@@ -118,8 +124,10 @@ pub class Dock {
     mut f32 press_y;
     mut i32 sizing;  // the split whose splitter is held, -1: none
     mut i32 sizing_win;  // the window of that split
-    mut Change pending;
+    mut Change pending;  // from the mouse
+    vec.Vec<Change>* asked;  // from the program
     pub mut bool can_float;
+    pub mut bool can_close;  // a cross on each tab closes its panel
     mut bool remote;  // the drag started in a floating window: the mouse is that of `follow`
     mut i32 source;  // that window
     mut f32 remote_x;
@@ -158,7 +166,9 @@ pub class Dock {
         sizing = -1;
         sizing_win = -1;
         pending = Change.Nothing;
+        asked = vec.new<Change>(arena);
         can_float = false;
+        can_close = false;
         remote = false;
         source = -1;
         remote_x = 0.0;
@@ -493,8 +503,9 @@ pub class Dock {
         }
         for (usize i in 0..panels.len()) {
             Panel o = panels.items()[i];
-            bool away_too = o.hidden || o.node >= 0 && win_of_node(o.node) >= 0;
-            if (i as i32 != p && away_too && o.home == q.home && o.home_serial == q.home_serial) {
+            // hidden, floating or closed: away from the same place
+            bool away_too = o.hidden || o.node < 0 || win_of_node(o.node) >= 0;
+            if (i as i32 != p && q.home >= 0 && away_too && o.home == q.home && o.home_serial == q.home_serial) {
                 mut Panel moved = o;
                 moved.home = g;
                 moved.home_serial = nodes.items()[g as usize].serial;
@@ -753,6 +764,35 @@ pub class Dock {
         return p >= 0 && panels.items()[p as usize].hidden;
     }
 
+    // Closed (by its cross or `close`), or never placed: in no group and on no bar.
+    pub bool is_closed(str id) {
+        i32 p = index_of(id);
+        return p >= 0 && closed(p);
+    }
+
+    bool closed(i32 p) {
+        Panel q = panels.items()[p as usize];
+        return q.node < 0 && !q.hidden;
+    }
+
+    // `id` closed at the next `begin`: out of the dock (or of its floating window, or of its bar),
+    // where it was kept for `show`.
+    pub void close(str id) {
+        i32 p = index_of(id);
+        if (p >= 0 && !closed(p)) {
+            asked.push(Change.Close(p));
+        }
+    }
+
+    // `id` shown at the next `begin`: closed, back where it was (else on the side of the dock it
+    // was nearest to); hidden on a side, docked again; then the panel shown of its group.
+    pub void show(str id) {
+        i32 p = index_of(id);
+        if (p >= 0) {
+            asked.push(Change.Show(p));
+        }
+    }
+
     // The panel shown in place of the others of its group.
     pub bool is_active(str id) {
         i32 p = index_of(id);
@@ -848,6 +888,8 @@ pub class Dock {
             write_text(b, q.id);
             b.push(",\"hidden\":");
             b.push(q.hidden ? "true" : "false");
+            b.push(",\"closed\":");
+            b.push(closed(i as i32) ? "true" : "false");
             b.push(",\"side\":\"");
             b.push(edge_name(q.side));
             b.push("\",\"size\":");
@@ -924,8 +966,9 @@ pub class Dock {
         for (usize i in 0..json.len(panels_v)) {
             json.Value q = or_null(json.at(panels_v, i));
             i32 p = index_of(text_of(json.get(q, "id")));
-            if (p >= 0 && flag_of(json.get(q, "hidden")) && seen[p as usize]) {
-                return false;  // hidden, and in a tree too
+            bool away = flag_of(json.get(q, "hidden")) || flag_of(json.get(q, "closed"));
+            if (p >= 0 && away && seen[p as usize]) {
+                return false;  // hidden or closed, and in a tree too
             }
         }
         // the arrangement made again
@@ -941,6 +984,7 @@ pub class Dock {
         sizing = -1;
         target = -2;
         pending = Change.Nothing;
+        asked.clear();
         for (usize i in 0..panels.len()) {
             mut Panel q = panels.items()[i];
             q.node = -1;
@@ -962,12 +1006,17 @@ pub class Dock {
             };
             wins.push(Win{ used: true, root: build(or_null(json.get(w, "tree")), -1), rect: r });
         }
+        bool[] shut = scratch.alloc_slice(bool, panels.len());  // closed when it was saved
+        for (usize i in 0..shut.len) {
+            shut[i] = false;
+        }
         for (usize i in 0..json.len(panels_v)) {
             json.Value item = or_null(json.at(panels_v, i));
             i32 p = index_of(text_of(json.get(item, "id")));
             if (p < 0) {
                 continue;
             }
+            shut[p as usize] = flag_of(json.get(item, "closed"));
             mut Panel q = panels.items()[p as usize];
             q.side = edge_of(text_of(json.get(item, "side")));
             q.size = max(0.05, min(0.95, number_of(json.get(item, "size"), 0.25) as f32));
@@ -976,7 +1025,7 @@ pub class Dock {
         }
         for (usize i in 0..panels.len()) {
             Panel q = panels.items()[i];
-            if (q.node < 0 && !q.hidden) {
+            if (q.node < 0 && !q.hidden && !shut[i]) {
                 put(i as i32, -1, Edge.Right, 0.25);
             }
         }
@@ -1059,6 +1108,15 @@ pub class Dock {
     void apply() {
         Change c = pending;
         pending = Change.Nothing;
+        apply_change(c);
+        // then what the program asked (`close`, `show`), in order: several in a frame
+        for (Change a in asked.items()) {
+            apply_change(a);
+        }
+        asked.clear();
+    }
+
+    void apply_change(Change c) {
         mut Arena scratch = Arena.new(1 * KB);
         defer scratch.free();
         match (c) {
@@ -1120,6 +1178,37 @@ pub class Dock {
                 });
                 if (was_hidden) {
                     flyout = -1;
+                }
+            },
+            Close(p) => {
+                if (closed(p)) {
+                    return;
+                }
+                leave_dock(p);  // in the dock: where it was kept (hidden or floating: kept already)
+                detach(p);
+                if (flyout == p) {
+                    flyout = -1;
+                }
+                if (dragging == p) {
+                    dragging = -1;
+                    moving = false;
+                }
+            },
+            Show(p) => {
+                if (closed(p)) {
+                    go_home(p);
+                } else if (panels.items()[p as usize].hidden) {
+                    mut Panel back = panels.items()[p as usize];
+                    back.hidden = false;
+                    panels.set(p as usize, back);
+                    go_home(p);
+                    flyout = -1;
+                }
+                i32 g = panels.items()[p as usize].node;
+                if (g >= 0) {
+                    mut Node group = nodes.items()[g as usize];
+                    group.active = p;
+                    nodes.set(g as usize, group);
                 }
             },
             MoveWindow(k, n, e) => {
@@ -1403,8 +1492,11 @@ void tree(widgets.Frame* f, Dock* d, i32 win, f32 ox, f32 oy, f32 s) {
         for (usize p in d.members(&scratch, n as i32)) {
             Panel q = d.panels.items()[p];
             canvas.Rect size = f.text_size(q.title, 0.0);
-            canvas.Rect tab = canvas.Rect{ x: x, y: node.rect.y, w: size.w + 18.0 * s, h: h };
+            f32 cross_w = d.can_close ? 16.0 * s : 0.0;
+            canvas.Rect tab = canvas.Rect{ x: x, y: node.rect.y, w: size.w + 18.0 * s + cross_w, h: h };
+            canvas.Rect cross = canvas.Rect{ x: tab.x + tab.w - cross_w - 4.0 * s, y: tab.y, w: cross_w, h: h };
             bool chosen = node.active == p as i32;
+            bool over_cross = d.can_close && f.hovering(cross) && !over_pin && idle;
             c.push_clip(tabs_r);
             if (chosen) {
                 c.fill(tab, window);
@@ -1413,13 +1505,25 @@ void tree(widgets.Frame* f, Dock* d, i32 win, f32 ox, f32 oy, f32 s) {
                 c.fill(tab, mixed(strip, window, 0.5));
             }
             f.text_at(tab.x + 9.0 * s, tab.y, h, q.title, chosen ? text : mixed(text, strip, 0.35), 0.0);
+            // its cross: on the tab shown, or under the mouse
+            if (d.can_close && (chosen || f.hovering(tab))) {
+                if (over_cross) {
+                    c.fill(
+                        canvas.Rect{ x: cross.x, y: cross.y + 4.0 * s, w: cross.w, h: max(0.0, cross.h - 8.0 * s) },
+                        mixed(strip, text, 0.2)
+                    );
+                }
+                draw_cross(c, cross, over_cross ? text : mixed(text, strip, 0.35), s);
+            }
             c.pop_clip();
             mut Panel kept = q;
             kept.tab = tab;
             d.panels.set(p, kept);
             bool over_tab = f.hovering(tab) && !over_pin;
             on_tab = on_tab || over_tab;
-            if (over_tab && f.mouse_pressed() && idle) {
+            if (over_cross && f.mouse_pressed()) {
+                d.pending = Change.Close(p as i32);
+            } else if (over_tab && f.mouse_pressed() && idle) {
                 mut Node g = d.nodes.items()[n];
                 g.active = p as i32;
                 d.nodes.set(n, g);
@@ -1612,6 +1716,18 @@ void vertical_text(widgets.Frame* f, canvas.Rect tab, str title, canvas.Color co
         f.text_at(tab.x + (tab.w - w.w) / 2.0, y, line, letter, color, 0.0);
         y += line;
         i = j;
+    }
+}
+
+// The cross that closes a tab, in the middle of `r`.
+void draw_cross(canvas.Canvas* c, canvas.Rect r, canvas.Color color, f32 s) {
+    i32 k = (3.5 * s) as i32;
+    i32 cx = (r.x + r.w / 2.0) as i32;
+    i32 cy = (r.y + r.h / 2.0) as i32;
+    i32 thick = max(1, (s + 0.5) as i32) + 1;  // a line a little thicker than a pixel
+    for (i32 o in 0..thick) {
+        c.line(cx - k + o, cy - k, cx + k + o, cy + k, color);
+        c.line(cx - k + o, cy + k, cx + k + o, cy - k, color);
     }
 }
 
@@ -2451,4 +2567,58 @@ test "an arrangement that does not fit the panels is not read; a panel added sin
     assert(e.restore(before));
     frame(&arena, &ui, &surface, e);
     assert(e.rect_of("e").x > 250.0 && e.rect_of("a").x < 10.0);
+}
+
+test "a panel closed by its cross shown again where it was; closed in the arrangement saved" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut widgets.Ui ui = widgets.Ui{ };
+    Dock* d = three(&arena);
+    d.can_close = true;
+    frame(&arena, &ui, &surface, d);
+    canvas.Rect was = d.rect_of("a");
+    // the cross of a, at the end of its tab
+    canvas.Rect t = d.tab_of("a");
+    ui.mouse_move(t.x + t.w - 12.0, t.y + t.h / 2.0);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(true);
+    frame(&arena, &ui, &surface, d);
+    ui.mouse_button(false);
+    ui.mouse_move(300.0, 200.0);
+    assert(frame(&arena, &ui, &surface, d) == "c");
+    assert(d.is_closed("a") && !d.is_closed("b") && !d.busy());
+    assert(d.rect_of("c").x < 5.0);
+    str saved = d.save(&arena);
+    // shown again: where it was
+    d.show("a");
+    assert(frame(&arena, &ui, &surface, d) == "a c");
+    canvas.Rect back = d.rect_of("a");
+    assert(abs(back.x - was.x) < 1.0 && abs(back.y - was.y) < 1.0 && abs(back.w - was.w) < 1.0
+            && abs(back.h - was.h) < 1.0);
+    // closed by the program: its group shows another; shown again, back into its tabs, shown
+    d.close("c");
+    assert(frame(&arena, &ui, &surface, d) == "a b" && d.is_closed("c"));
+    d.show("c");
+    assert(frame(&arena, &ui, &surface, d) == "a c" && d.is_active("c"));
+    assert(d.pin_of("c").x == d.pin_of("b").x);
+    // the arrangement saved while a was closed: still closed when read back, then shown on its side
+    Dock* e = three(&arena);
+    e.can_close = true;
+    assert(e.restore(saved));
+    mut widgets.Ui other = widgets.Ui{ };
+    assert(frame(&arena, &other, &surface, e) == "c" && e.is_closed("a"));
+    e.show("a");
+    frame(&arena, &other, &surface, e);
+    assert(!e.is_closed("a") && e.rect_of("a").x < 5.0 && e.rect_of("c").x > 100.0);
+    // several asked in a frame: all done, in order
+    e.close("b");
+    e.close("c");
+    assert(frame(&arena, &other, &surface, e) == "a" && e.is_closed("b") && e.is_closed("c"));
+    e.show("c");
+    e.show("b");
+    frame(&arena, &other, &surface, e);
+    assert(!e.is_closed("b") && !e.is_closed("c") && e.is_active("b") && e.rect_of("b").w > 0.0);
+    assert(!e.restore(text.replace(&arena, saved, "\"id\":\"b\",\"hidden\":false,\"closed\":false",
+            "\"id\":\"b\",\"hidden\":false,\"closed\":true")));  // closed, and in a tree too
 }
