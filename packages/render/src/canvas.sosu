@@ -87,6 +87,19 @@ pub struct Canvas {
         i32 y0 = max(clamp(rect.y, height), clip.y0);
         i32 x1 = min(clamp(rect.x + rect.w, width), clip.x1);
         i32 y1 = min(clamp(rect.y + rect.h, height), clip.y1);
+        if (color.a == 0) {
+            return;
+        }
+        if (color.a == 255) {  // opaque: written row after row, no pixel below to mix with
+            ui32 value = pack(color);
+            for (mut i32 y = y0; y < y1; y += 1) {
+                usize row = (y * width) as usize;
+                for (mut usize i = row + x0 as usize; i < row + x1 as usize; i += 1) {
+                    pixels[i] = value;
+                }
+            }
+            return;
+        }
         for (mut i32 y = y0; y < y1; y += 1) {
             for (mut i32 x = x0; x < x1; x += 1) {
                 blend(x, y, color);
