@@ -407,7 +407,8 @@ pub class Engine {
                     some(loaded) => {
                         mut Arena scratch = Arena.new(4 * KB);
                         defer scratch.free();
-                        linear.Mat4[] places = model.world_matrices(&scratch, loaded, linear.identity4());
+                        // the model where its offset puts it in the entity
+                        linear.Mat4[] places = model.world_matrices(&scratch, loaded, linear.translation(m.offset));
                         mut geometry.Aabb? box = none;
                         for (usize n in 0..loaded.nodes.len) {
                             for (usize k in loaded.nodes[n].meshes) {
@@ -829,7 +830,8 @@ pub class Engine {
                                 },
                                 none => none,
                             };
-                            out.push(render3d.Item{ model: up, transform: matrix_of(e), palette: palette });
+                            linear.Mat4 at = matrix_of(e).mul(linear.translation(m.offset));  // its pivot, then its offset
+                            out.push(render3d.Item{ model: up, transform: at, palette: palette });
                         },
                         none => { },
                     }
@@ -1366,4 +1368,26 @@ test "the files of a project: a model named by its GUID loaded, found again afte
         ok => { },
         err(e) => { },
     }
+}
+
+test "a mesh drawn from its offset: its pivot elsewhere, its box and its item moved with it" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, none, none, none, none);
+    defer g.close();
+    scene.Entity crate = placed(w, "crate", linear.vec3(0.0, 1.0, 0.0));
+    // the pivot at the bottom of the crate: the model drawn a meter above it
+    c.meshes.set(crate, components.Mesh{ model: "crate", offset: linear.vec3(0.0, 1.0, 0.0) });
+    g.update(0.0);
+    match (g.bounds_of(crate)) {
+        some(b) => {
+            assert(b.box.min.near(linear.vec3(-1.0, 0.0, -1.0), 0.001) && b.box.max.near(linear.vec3(1.0, 2.0, 1.0), 0.001));
+        },
+        none => assert(false),
+    }
+    // saved and read back: older scenes without it read as no offset
+    str saved = components.save_scene(&arena, c);
+    assert(text.contains(saved, "\"offset\""));
 }
