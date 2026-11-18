@@ -304,8 +304,9 @@ pub class Catalog {
         stale = true;
     }
 
-    // The files and companions under `relative`: names starting with `.` and the folder `build` of
-    // the root are passed over.
+    // The files and companions under `relative`: names starting with `.`, the folder `build` of
+    // the root and the folders of a package (a `sosu.toml`: code, not files of the project) are
+    // passed over.
     void walk(keeps str relative, vec.Vec<str>* files, vec.Vec<str>* companions) keeps self uses io {
         str[] names = match (fs.list(&work, full(&work, relative))) {
             ok(x) => x,
@@ -320,7 +321,9 @@ pub class Catalog {
             str rel = relative.len == 0 ? name : slash(&work, relative, name);
             str path = full(&work, rel);
             if (fs.is_dir(&work, path)) {
-                walk(rel, files, companions);
+                if (!fs.is_file(&work, fs.join(&work, path, "sosu.toml"))) {  // a package: code, not files of the project
+                    walk(rel, files, companions);
+                }
             } else if (text.ends_with(name, suffix)) {
                 companions.push(rel);
             } else {
@@ -511,15 +514,18 @@ test "files known by their GUID: made, kept, moved outside, copied, moved, gone"
     put(&arena, root, "a.txt", "alpha");
     put(&arena, root, "sub/b.txt", "beta, longer");
     put(&arena, root, "build/out.txt", "not a file of the project");
+    put(&arena, root, "code/game/sosu.toml", "[package]");
+    put(&arena, root, "code/game/src/lib.sosu", "a package: its code, not a file of the project");
     Catalog* c = catalog(&arena, root, ".asset.sozo");
     defer c.close();
-    // companions made, one for each file (not those of build/)
+    // companions made, one for each file (not those of build/, nor of a package)
     mut Report r = c.scan();
     assert(r.files == 2 && r.made == 2 && r.joined == 0 && r.orphans == 0);
     str a = text.repeat(&arena, guid_or(c, "a.txt"), 1);
     str b = text.repeat(&arena, guid_or(c, "sub/b.txt"), 1);
     assert(a.len == 32 && b.len == 32 && a != b);
     assert(fs.is_file(&arena, fs.join(&arena, root, "a.txt.asset.sozo")));
+    assert(!fs.exists(&arena, fs.join(&arena, root, "code/game/sosu.toml.asset.sozo")));
     assert(match (c.path_of(b)) {
         some(p) => p == "sub/b.txt",
         none => false,
