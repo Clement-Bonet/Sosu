@@ -24,6 +24,10 @@ pub struct Mesh {
     pub mut str model = "";  // its file: glTF, OBJ or FBX
     pub mut bool shadows = true;
     pub mut bool visible = true;
+    // Where its model is drawn in its entity (in the space of the entity, scaled with it): the point
+    // of the entity (its pivot) need not be the origin of the model. An editor moves the pivot by
+    // moving the entity and this the other way, so that the model stays where it is.
+    pub mut linear.Vec3 offset = linear.Vec3{ x: 0.0, y: 0.0, z: 0.0 };
 }
 
 pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
@@ -38,7 +42,7 @@ pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
     }
 
     override usize count() {
-        return 3;
+        return 4;
     }
 
     override describe.Field field(usize i) {
@@ -48,7 +52,16 @@ pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
         if (i == 1) {
             return describe.flag("shadows", "Shadows");
         }
-        return describe.flag("visible", "Visible");
+        if (i == 2) {
+            return describe.flag("visible", "Visible");
+        }
+        describe.Field f = describe.vector("offset", "Offset");
+        return describe.Field{
+            name: f.name,
+            label: f.label,
+            kind: f.kind,
+            tooltip: "Where the model is drawn from the point of the entity (its pivot)"
+        };
     }
 
     override describe.Value get(Mesh* m, usize i) {
@@ -58,7 +71,10 @@ pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
         if (i == 1) {
             return describe.Value.Flag(m.shadows);
         }
-        return describe.Value.Flag(m.visible);
+        if (i == 2) {
+            return describe.Value.Flag(m.visible);
+        }
+        return describe.Value.Vector(m.offset);
     }
 
     override void set(Mesh* m, usize i, describe.Value v) {
@@ -66,8 +82,10 @@ pub class MeshFields : describe.Describe<Mesh>, save.Codec<Mesh> {
             m.model = describe.text_of(v, m.model);
         } else if (i == 1) {
             m.shadows = describe.flag_of(v, m.shadows);
-        } else {
+        } else if (i == 2) {
             m.visible = describe.flag_of(v, m.visible);
+        } else {
+            m.offset = describe.vector_of(v, m.offset);
         }
     }
 
