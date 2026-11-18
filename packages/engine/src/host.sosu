@@ -109,6 +109,14 @@ pub describe.Value? from_c(Value v) {
 
 // Tables of the game saved with the scene beside the common components: `write` adds them to the
 // writer (`out.add(table, codec)`), `read` to the reader.
+// Where a kind of the game is written (`Level.add_source`): its file, relative to the project, and
+// the line of its struct.
+struct Source {
+    str name;
+    str file;
+    i64 line;
+}
+
 pub interface Saved {
     void write(save.Writer* out);
     bool read(save.Reader* r);
@@ -155,6 +163,7 @@ pub class Level {
     pub engine.Engine* runner;
     pub Logs* logs;
     vec.Vec<Saved*>* saved;
+    vec.Vec<Source>* sources;
 
     void init(keeps Arena* arena, keeps Logs* logs, keeps render3d.Renderer*? renderer, keeps draw.Drawer*? drawer,
             keeps assets.Assets*? store, keeps str root, keeps ids.Catalog*? catalog) keeps self {
@@ -167,6 +176,7 @@ pub class Level {
         runner.use_files(root, catalog);
         runner.paused = true;
         saved = vec.new<Saved*>(arena);
+        sources = vec.new<Source>(arena);
     }
 
     // A kind of component of the game, shown and changed by the editor (one of the same name
@@ -178,6 +188,21 @@ pub class Level {
     // A table of the game saved and read with the scene.
     pub void add_saved(keeps Saved* s) {
         saved.push(s);
+    }
+
+    // The kind named `name` written at `line` of `file` (relative to the project): what the editor
+    // opens from it (`sozo_kind_file`).
+    pub void add_source(keeps str name, keeps str file, i64 line) {
+        sources.push(Source{ name: name, file: file, line: line });
+    }
+
+    Source? source_of(str name) {
+        for (Source s in sources.items()) {
+            if (s.name == name) {
+                return some(s);
+            }
+        }
+        return none;
     }
 
     // The whole world as a scene file.
@@ -653,6 +678,23 @@ export "C" str sozo_kind_name(Game* g, usize kind) {
     return kind < g.level.registry.count() ? g.level.registry.at(kind).name() : "";
 }
 
+// The file where `kind` is written, relative to the project: "" for those of `engine`, or a kind
+// added without `add_source`.
+export "C" str sozo_kind_file(Game* g, usize kind) {
+    return match (g.level.source_of(sozo_kind_name(g, kind))) {
+        some(s) => s.file,
+        none => "",
+    };
+}
+
+// The line of its struct in that file, 0 without one.
+export "C" i64 sozo_kind_line(Game* g, usize kind) {
+    return match (g.level.source_of(sozo_kind_name(g, kind))) {
+        some(s) => s.line,
+        none => 0,
+    };
+}
+
 export "C" usize sozo_field_count(Game* g, usize kind) {
     return kind < g.level.registry.count() ? g.level.registry.at(kind).count() : 0;
 }
@@ -997,6 +1039,7 @@ void add_spin(Level* l) {
     SpinKind* k = l.arena.new(SpinKind, l.arena, l.world.table<Spin>());
     l.add(k as kinds.Kind*);
     l.add_saved(k as Saved*);
+    l.add_source("spin", "src/spin.sosu", 12);
 }
 
 // What it does each step: what spins turns, and it says so once.
@@ -1034,6 +1077,8 @@ test "the contract: entities, components of engine and of the game, saved, playe
     on_world(g, add_spin);
     on_step(g, turn);
     assert(sozo_kind_count(g) == 8 && sozo_kind_name(g, 7) == "spin");
+    assert(sozo_kind_file(g, 7) == "src/spin.sosu" && sozo_kind_line(g, 7) == 12);
+    assert(sozo_kind_file(g, 0) == "" && sozo_kind_line(g, 0) == 0 && sozo_kind_file(g, 99) == "");
     // entities, names, parents
     scene.Entity crate = sozo_spawn(g, "crate");
     scene.Entity lid = sozo_spawn(g, "lid");

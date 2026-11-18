@@ -514,10 +514,13 @@ pub void add_all(host.Level* l) {
     SprinklerKind* k0 = sprinkler_kind(l.arena, l.world);
     l.add(k0 as kinds.Kind*);
     l.add_saved(k0 as host.Saved*);
+    l.add_source("sprinkler", "src/parts.sosu", 13);
     FenceKind* k1 = fence_post_kind(l.arena, l.world);
     l.add(k1 as kinds.Kind*);
     l.add_saved(k1 as host.Saved*);
+    l.add_source("fence_post", "src/parts.sosu", 37);
     FruitTreeKind* k2 = fruit_tree_kind(l.arena, l.world);
     l.add(k2 as kinds.Kind*);
     l.add_saved(k2 as host.Saved*);
+    l.add_source("fruit_tree", "src/plants/tree.sosu", 5);
 }

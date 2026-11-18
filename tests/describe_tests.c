@@ -83,6 +83,7 @@ static void test_component_and_fields(void) {
     CHECK(has(r.text, "c.mode = parts_mode_at(describe.choice_of(v, parts_mode_index(c.mode)));"),
           "an enum through its index");
     CHECK(has(r.text, "    l.add(k0 as kinds.Kind*);\n    l.add_saved(k0 as host.Saved*);"), "add_all");
+    CHECK(has(r.text, "    l.add_source(\"door_lock\", \"src/parts.sosu\", 10);"), "where it is written, for the editor");
     done(&r);
 }
 
@@ -186,6 +187,7 @@ static void test_two_modules(void) {
     CHECK(has(text, "import game.ai.kinds;") && has(text, "import game.plants.tree;"), "both modules imported");
     CHECK(has(text, "kinds.Size kinds_size_at(usize i) {") && has(text, "return kinds.Size.Large;"),
           "the enum named from its module");
+    CHECK(has(text, "l.add_source(\"tree\", \"src/plants/tree.sosu\", 3);"), "the file of a module in a folder");
     char *again = describe_package("game", sources, 2, &diags, NULL);
     CHECK(again && strcmp(text, again) == 0, "the same text each time");
     free(again);

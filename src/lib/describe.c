@@ -1034,6 +1034,14 @@ static char *write_module(const char *package, const Reader *reader) {
         put(&out, "    %.*sKind* k%zu = %s_kind(l.arena, l.world);\n", (int)c->decl->as.type.name.length,
             c->decl->as.type.name.text, i, c->table);
         put(&out, "    l.add(k%zu as kinds.Kind*);\n    l.add_saved(k%zu as host.Saved*);\n", i, i);
+        /* where its struct is written, for the editor to open: `src/a/b.sosu` of module `a.b` */
+        char *path = sosu_format("src/%s.sosu", reader->sources[c->source].module);
+        for (char *p = path; *p; p++) {
+            if (*p == '.' && strcmp(p, ".sosu") != 0) *p = '/';
+        }
+        put(&out, "    l.add_source(\"%s\", \"%s\", %zu);\n", c->table, path,
+            source_line_of(reader->sources[c->source].file, c->decl->offset));
+        free(path);
     }
     put(&out, "}\n");
     SOSU_VEC_PUSH(&out, '\0');
