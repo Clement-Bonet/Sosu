@@ -139,6 +139,9 @@ static void test_errors(void) {
     r = describe_one("// component\npub struct A {\n    pub mut f32[][] xs = [];\n}\n");
     CHECK(said(&r, "E0602", "a list of lists"), "a list of lists");
     done(&r);
+    r = describe_one("import math.curve;\n// component\npub struct A {\n    pub mut curve.Curve[] cs = [];\n}\n");
+    CHECK(said(&r, "E0602", "a list of curves"), "a list of curves");
+    done(&r);
     r = describe_one("// component\npub struct A {\n    pub mut f64[] xs = [];\n}\n");
     CHECK(said(&r, "E0602", "`f64` cannot be a field"), "a list of a type it does not know");
     done(&r);

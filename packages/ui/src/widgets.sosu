@@ -2625,6 +2625,16 @@ pub struct Frame {
         end();
     }
 
+    // A box of `w` by `h` placed as a widget is, that the program draws in itself (`drawing()`, the
+    // mouse read by `hovering`, `mouse_x`, `mouse_pressed`...): an editor of curves, a preview. Its
+    // rectangle, in the pixels of the canvas.
+    pub canvas.Rect area(f32 w, f32 h) {
+        take_styles();
+        canvas.Rect r = place(w, h);
+        interactive(r);
+        return r;
+    }
+
     // Empty space after the last widget.
     pub void space(f32 size) {
         if (layouts[depth].horizontal) {
@@ -10278,4 +10288,17 @@ test "a color field: its picker opened, the hue and the square dragged, a bar of
     ui.key(27, true, false, false);
     picker_frame(&ui, &surface, &c);
     assert(ui.open == 0 && c.b > 0.99);
+}
+
+test "an area placed as a widget is, for the program to draw in" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 200);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.label("above");
+    canvas.Rect r = f.area(120.0, 60.0);
+    f.label("below");
+    f.finish();
+    assert(r.w == 120.0 && r.h == 60.0 && r.y > 10.0);
 }

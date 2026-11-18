@@ -8,6 +8,7 @@ import engine.host;
 import engine.kinds;
 import garden.parts;
 import garden.plants.tree;
+import math.curve;
 import math.linear;
 import scene.save;
 import scene.scene;
@@ -429,7 +430,7 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
     }
 
     override usize count() {
-        return 5;
+        return 7;
     }
 
     override describe.Field field(usize i) {
@@ -470,12 +471,28 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
                 item: describe.Kind.Asset
             };
         }
+        if (i == 4) {
+            return describe.Field{
+                name: "sprays",
+                label: "Sprays",
+                kind: describe.Kind.List,
+                item: describe.Kind.Choice,
+                choices: some(choices_4)
+            };
+        }
+        if (i == 5) {
+            return describe.Field{
+                name: "growth",
+                label: "Growth over the years",
+                kind: describe.Kind.Curve,
+                item: describe.Kind.Key
+            };
+        }
         return describe.Field{
-            name: "sprays",
-            label: "Sprays",
-            kind: describe.Kind.List,
-            item: describe.Kind.Choice,
-            choices: some(choices_4)
+            name: "leaves",
+            label: "Leaves",
+            kind: describe.Kind.Gradient,
+            item: describe.Kind.Stop
         };
     }
 
@@ -492,7 +509,13 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
         if (i == 3) {
             return describe.Value.Whole(c.fruits.len as i64);
         }
-        return describe.Value.Whole(c.sprays.len as i64);
+        if (i == 4) {
+            return describe.Value.Whole(c.sprays.len as i64);
+        }
+        if (i == 5) {
+            return describe.Value.Whole(c.growth.keys.len as i64);
+        }
+        return describe.Value.Whole(c.leaves.stops.len as i64);
     }
 
     override void set(tree.FruitTree* c, usize i, describe.Value v) {
@@ -501,11 +524,15 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
         } else if (i == 1) {
             c.watered_by = parts_spray_at(describe.choice_of(v, parts_spray_index(c.watered_by)));
         } else if (i == 2) {
-            // a list: given by `set_items`
+            // its items: given by `set_items`
         } else if (i == 3) {
-            // a list: given by `set_items`
+            // its items: given by `set_items`
+        } else if (i == 4) {
+            // its items: given by `set_items`
+        } else if (i == 5) {
+            // its items: given by `set_items`
         } else {
-            // a list: given by `set_items`
+            // its items: given by `set_items`
         }
     }
 
@@ -519,6 +546,12 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
         if (i == 4) {
             return c.sprays.len;
         }
+        if (i == 5) {
+            return c.growth.keys.len;
+        }
+        if (i == 6) {
+            return c.leaves.stops.len;
+        }
         return 0;
     }
 
@@ -531,6 +564,12 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
         }
         if (i == 4) {
             return describe.Value.Choice(parts_spray_index(c.sprays[j]));
+        }
+        if (i == 5) {
+            return describe.key_value(c.growth.keys[j]);
+        }
+        if (i == 6) {
+            return describe.stop_value(c.leaves.stops[j]);
         }
         return describe.Value.Flag(false);
     }
@@ -556,6 +595,12 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
                 made[j] = parts_spray_at(describe.choice_of(values[j], 0));
             }
             c.sprays = made;
+        }
+        if (i == 5) {
+            c.growth = curve.Curve{ keys: describe.keys_of(arena, values), mode: c.growth.mode };
+        }
+        if (i == 6) {
+            c.leaves = curve.Gradient{ stops: describe.stops_of(arena, values) };
         }
     }
 
@@ -679,5 +724,5 @@ pub void add_all(host.Level* l) {
     FruitTreeKind* k2 = fruit_tree_kind(l.arena, l.world);
     l.add(k2 as kinds.Kind*);
     l.add_saved(k2 as host.Saved*);
-    l.add_source("fruit_tree", "src/plants/tree.sosu", 5);
+    l.add_source("fruit_tree", "src/plants/tree.sosu", 6);
 }

@@ -1,4 +1,5 @@
 // A tree, in a module of a folder: `garden.plants.tree`.
+import math.curve;
 import garden.parts;
 
 // component
@@ -9,4 +10,6 @@ pub struct FruitTree {
     pub mut f32[] hours = [];  // range 0..24; unit "h"
     pub mut str[] fruits = [];  // asset
     pub mut parts.Spray[] sprays = [];
+    pub mut curve.Curve growth = curve.Curve{ keys: [] };  // label "Growth over the years"
+    pub mut curve.Gradient leaves = curve.Gradient{ stops: [] };  // the colors of its leaves over a year
 }

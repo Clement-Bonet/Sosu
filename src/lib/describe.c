@@ -78,6 +78,8 @@ typedef enum {
     TYPE_STR,
     TYPE_VEC3,
     TYPE_ENUM,
+    TYPE_CURVE,    /* math.curve.Curve: its keys, items */
+    TYPE_GRADIENT, /* math.curve.Gradient: its stops, items */
 } FieldType;
 
 typedef struct {
@@ -513,6 +515,18 @@ static bool type_of(Reader *reader, size_t source, const Field *field, Described
         out->type = TYPE_VEC3;
         return true;
     }
+    if (type->kind == TYPE_NAME && type->arg_count == 0 && type->as.name.count == 2 &&
+        name_is(type->as.name.items[0], "curve") &&
+        (name_is(type->as.name.items[1], "Curve") || name_is(type->as.name.items[1], "Gradient"))) {
+        if (out->list) {
+            Diagnostic *d = diag_error(reader->diags, "E0602", file, field->type->offset, field->type->length,
+                                       "a list of curves or of gradients cannot be a field of a component");
+            diag_help(d, "a curve and a gradient hold their keys and stops already");
+            return false;
+        }
+        out->type = name_is(type->as.name.items[1], "Curve") ? TYPE_CURVE : TYPE_GRADIENT;
+        return true;
+    }
     int e = find_enum(reader, source, type);
     if (e >= 0) {
         out->type = TYPE_ENUM;
@@ -527,8 +541,8 @@ static bool type_of(Reader *reader, size_t source, const Field *field, Described
         d = diag_error(reader->diags, "E0602", file, type->offset, type->length,
                        "`%.*s` cannot be a field of a component", (int)type->length, file->text + type->offset);
     }
-    diag_help(d, "a field is f32, i32, i64, usize, bool, str, linear.Vec3 or an enum of this package, or a list "
-                 "of one of them (`T[]`); `// transient` leaves it out");
+    diag_help(d, "a field is f32, i32, i64, usize, bool, str, linear.Vec3, curve.Curve, curve.Gradient or an enum "
+                 "of this package, or a list of one of them (`T[]`); `// transient` leaves it out");
     return false;
 }
 
@@ -784,8 +798,14 @@ static char *enum_prefix(const Reader *reader, const EnumRef *e) {
     return prefix;
 }
 
+/* Whether `f` holds items: a list, a curve (its keys), a gradient (its stops). */
+static bool has_items(const Described *f) {
+    return f->list || f->type == TYPE_CURVE || f->type == TYPE_GRADIENT;
+}
+
 static void put_field(Out *out, const Described *f, size_t index) {
-    static const char *const kinds[] = { "Number", "Whole", "Whole", "Whole", "Flag", "Text", "Vector", "Choice" };
+    static const char *const kinds[] = { "Number", "Whole", "Whole", "Whole", "Flag", "Text", "Vector", "Choice",
+                                         "Curve", "Gradient" };
     const char *kind = f->asset ? "Asset" : f->color ? "Color" : kinds[f->type];
     put(out, "describe.Field{ name: ");
     put_string(out, f->field->name.text, f->field->name.length);
@@ -798,6 +818,8 @@ static void put_field(Out *out, const Described *f, size_t index) {
         free(words);
     }
     if (f->list) put(out, ", kind: describe.Kind.List, item: describe.Kind.%s", kind);
+    else if (f->type == TYPE_CURVE) put(out, ", kind: describe.Kind.Curve, item: describe.Kind.Key");
+    else if (f->type == TYPE_GRADIENT) put(out, ", kind: describe.Kind.Gradient, item: describe.Kind.Stop");
     else put(out, ", kind: describe.Kind.%s", kind);
     if (f->low.set) {
         put(out, ", low: ");
@@ -833,6 +855,8 @@ static void put_value(Out *out, const Reader *reader, const Described *f, const 
         free(prefix);
         break;
     }
+    case TYPE_CURVE:
+    case TYPE_GRADIENT: put(out, "describe.Value.Flag(false)"); break; /* read by its items */
     }
 }
 
@@ -840,6 +864,8 @@ static void put_get(Out *out, const Reader *reader, const Described *f) {
     Name n = f->field->name;
     char *expr = sosu_format("c.%.*s", (int)n.length, n.text);
     if (f->list) put(out, "describe.Value.Whole(%s.len as i64)", expr);  /* a list: the number of its items */
+    else if (f->type == TYPE_CURVE) put(out, "describe.Value.Whole(%s.keys.len as i64)", expr);
+    else if (f->type == TYPE_GRADIENT) put(out, "describe.Value.Whole(%s.stops.len as i64)", expr);
     else put_value(out, reader, f, expr);
     free(expr);
 }
@@ -874,8 +900,8 @@ static void put_item_of(Out *out, const Reader *reader, const Described *f) {
 static void put_set(Out *out, const Reader *reader, const Described *f) {
     Name n = f->field->name;
     int length = (int)n.length;
-    if (f->list) {
-        put(out, "// a list: given by `set_items`");
+    if (has_items(f)) {
+        put(out, "// its items: given by `set_items`");
         return;
     }
     static const char *const of[] = { "number_of", "i32_of", "whole_of", "usize_of", "flag_of", "text_of", "vector_of" };
@@ -897,7 +923,7 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     bool choices = false;
     bool lists = false;
     for (size_t i = 0; i < n; i++) choices = choices || c->fields.items[i].type == TYPE_ENUM;
-    for (size_t i = 0; i < n; i++) lists = lists || c->fields.items[i].list;
+    for (size_t i = 0; i < n; i++) lists = lists || has_items(&c->fields.items[i]);
     bool arena_kept = choices || lists; /* its init takes the arena of the world */
 
     put(out, "\n// ---- %s: %s ----\n\n", c->table, t);
@@ -979,27 +1005,46 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     put(out, "\n    override usize items(%s* c, usize i) {\n", t);
     for (size_t i = 0; i < n; i++) {
         const Described *f = &c->fields.items[i];
-        if (!f->list) continue;
-        put(out, "        if (i == %zu) {\n            return c.%.*s.len;\n        }\n", i, (int)f->field->name.length,
-            f->field->name.text);
+        if (!has_items(f)) continue;
+        const char *part = f->type == TYPE_CURVE ? ".keys" : f->type == TYPE_GRADIENT ? ".stops" : "";
+        put(out, "        if (i == %zu) {\n            return c.%.*s%s.len;\n        }\n", i, (int)f->field->name.length,
+            f->field->name.text, part);
     }
     put(out, "        return 0;\n    }\n");
     put(out, "\n    override describe.Value item(%s* c, usize i, usize j) {\n", t);
     for (size_t i = 0; i < n; i++) {
         const Described *f = &c->fields.items[i];
-        if (!f->list) continue;
-        char *expr = sosu_format("c.%.*s[j]", (int)f->field->name.length, f->field->name.text);
+        if (!has_items(f)) continue;
         put(out, "        if (i == %zu) {\n            return ", i);
-        put_value(out, reader, f, expr);
+        if (f->type == TYPE_CURVE) {
+            put(out, "describe.key_value(c.%.*s.keys[j])", (int)f->field->name.length, f->field->name.text);
+        } else if (f->type == TYPE_GRADIENT) {
+            put(out, "describe.stop_value(c.%.*s.stops[j])", (int)f->field->name.length, f->field->name.text);
+        } else {
+            char *expr = sosu_format("c.%.*s[j]", (int)f->field->name.length, f->field->name.text);
+            put_value(out, reader, f, expr);
+            free(expr);
+        }
         put(out, ";\n        }\n");
-        free(expr);
     }
     put(out, "        return describe.Value.Flag(false);\n    }\n");
     if (lists) {
         put(out, "\n    override void set_items(%s* c, usize i, describe.Value[] values) keeps self {\n", t);
         for (size_t i = 0; i < n; i++) {
             const Described *f = &c->fields.items[i];
-            if (!f->list) continue;
+            if (!has_items(f)) continue;
+            int nl = (int)f->field->name.length;
+            const char *nt = f->field->name.text;
+            if (f->type == TYPE_CURVE) {
+                put(out, "        if (i == %zu) {\n            c.%.*s = curve.Curve{ keys: describe.keys_of(arena, values), "
+                         "mode: c.%.*s.mode };\n        }\n", i, nl, nt, nl, nt);
+                continue;
+            }
+            if (f->type == TYPE_GRADIENT) {
+                put(out, "        if (i == %zu) {\n            c.%.*s = curve.Gradient{ stops: describe.stops_of(arena, values) };\n"
+                         "        }\n", i, nl, nt);
+                continue;
+            }
             char *type = type_text(reader, f);
             put(out, "        if (i == %zu) {\n", i);
             put(out, "            %s[] made = arena.alloc_slice(%s, values.len);\n", type, type);
@@ -1111,6 +1156,14 @@ static char *write_module(const char *package, const Reader *reader) {
         for (size_t f = 0; f < c->fields.count; f++) vec3 = vec3 || c->fields.items[f].type == TYPE_VEC3;
     }
     if (vec3) imports[count++] = "math.linear";
+    bool curves = false;
+    for (size_t i = 0; i < reader->components.count; i++) {
+        const Component *c = &reader->components.items[i];
+        for (size_t f = 0; f < c->fields.count; f++) {
+            curves = curves || c->fields.items[f].type == TYPE_CURVE || c->fields.items[f].type == TYPE_GRADIENT;
+        }
+    }
+    if (curves) imports[count++] = "math.curve";
     char **owned = sosu_calloc(reader->count + 1, sizeof *owned);
     for (size_t i = 0; i < reader->count; i++) {
         bool used = false;
