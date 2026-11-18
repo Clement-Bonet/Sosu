@@ -2908,7 +2908,7 @@ Values come first, in order; then properties, by name, in any order. `{ }` says 
 | `Item` | one item of a list, a tree or a table, made of several widgets | - | `gap`, `padding`, `vertical`, `enabled`, `style` | yes |
 | `MenuBar` | the menus of the window | - | `style` | yes |
 | `Menu` | a menu | the title | `plural`, `count`, `context`, `style` | yes |
-| `MenuItem` | an entry of a menu | the label | `on_click`, `shortcut`, `enabled`, `plural`, `count`, `context` | - |
+| `MenuItem` | an entry of a menu | the label | `on_click`, `shortcut`, `enabled`, `checked`, `plural`, `count`, `context` | - |
 | `Separator` | a line between entries of a menu | - | - | - |
 | `ContextMenu` | the menu of a right click | - | - | yes |
 
@@ -2951,6 +2951,7 @@ Inside a `Grid`, every node also takes `row`, `col`, `span` and `row_span`, its 
 | `placement` | `Tabs` | where the row of tabs goes: `Top` (default) or `Bottom` |
 | `closable`, `on_close` | `Tab` | a cross on the tab, and what runs when it is clicked |
 | `shortcut` | `MenuItem` | the keys shown next to the entry |
+| `checked` | `MenuItem` | a `bool`: a check before the label when true (an option on or off, the one chosen among others); the entries of its menu leave room for it |
 | `open` | `Dialog` | a `bool`: whether the dialog is shown |
 | `size` | `Image` | its height in pixels; its width follows its proportions |
 

@@ -78,7 +78,7 @@ static const UiNodeKind ui_nodes[] = {
     { "Item", 0, false, { "gap", "padding", "vertical", "enabled", "style", NULL }, true },
     { "MenuBar", 0, false, { "style", NULL }, true },
     { "Menu", 1, false, { "plural", "count", "context", "style", NULL }, true },
-    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "plural", "count", "context", NULL }, false },
+    { "MenuItem", 1, false, { "on_click", "shortcut", "enabled", "checked", "plural", "count", "context", NULL }, false },
     { "Separator", 0, false, { NULL }, false },
     { "ContextMenu", 0, false, { NULL }, true },
 };
@@ -1202,11 +1202,25 @@ static void ui_parse_node(Parser *p, StmtVec *out, bool window_top) {
             p->ui_in_menu_bar = in_bar;
             SOSU_VEC_PUSH(out, ui_stmt(p, ui_frame_call(p, start, length, close, NULL, 0)));
         } else if (name_text_is(node, "MenuItem")) {
-            /* f.menu_item(s), f.menu_item_enabled(s, c) or f.menu_item_with(s, key, c) */
+            /* f.menu_item(s), f.menu_item_enabled(s, c), f.menu_item_with(s, key, c), or with
+               `checked:` f.menu_item_checked(s, c, checked) or f.menu_item_checked_with(s, key, c, checked) */
             Expr *key = ui_prop(&args, "shortcut");
             Expr *enabled = ui_prop(&args, "enabled");
+            Expr *checked = ui_prop(&args, "checked");
             Expr *item;
-            if (key) {
+            if (checked) {
+                if (!enabled) {
+                    enabled = ui_expr(p, EXPR_BOOL, start, length);
+                    enabled->as.bool_value = true;
+                }
+                if (key) {
+                    Expr *call_args[4] = { value, key, enabled, checked };
+                    item = ui_frame_call(p, start, length, "menu_item_checked_with", call_args, 4);
+                } else {
+                    Expr *call_args[3] = { value, enabled, checked };
+                    item = ui_frame_call(p, start, length, "menu_item_checked", call_args, 3);
+                }
+            } else if (key) {
                 if (!enabled) {
                     enabled = ui_expr(p, EXPR_BOOL, start, length);
                     enabled->as.bool_value = true;
