@@ -33,6 +33,10 @@ pub struct Field {
     pub f32 low = 0.0;
     pub f32 high = 0.0;
     pub str[]? choices = none;  // `Choice`: the names of the choices
+    pub str unit = "";          // shown after its value: "m/s"
+    pub str group = "";         // the fields of a group follow each other, under its name as a header
+    pub str tooltip = "";       // shown when the mouse rests on it
+    pub bool hidden = false;    // saved, but not shown by an inspector
 }
 
 // The value of a field.
@@ -107,6 +111,18 @@ pub i64 whole_of(Value v, i64 otherwise) {
         Number(x) => x as i64,
         _ => otherwise,
     };
+}
+
+// A whole held within i32, for a field of that type (`sosuc describe`).
+pub i32 i32_of(Value v, i32 otherwise) {
+    i64 n = whole_of(v, otherwise as i64);
+    return max(-2147483647 as i64 - 1, min(2147483647 as i64, n)) as i32;
+}
+
+// A whole held within usize, never below 0, for a field of that type (`sosuc describe`).
+pub usize usize_of(Value v, usize otherwise) {
+    i64 n = whole_of(v, otherwise as i64);
+    return n < 0 ? 0 : n as usize;
 }
 
 pub bool flag_of(Value v, bool otherwise) {

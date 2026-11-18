@@ -1,0 +1,10 @@
+# The components of a game described by `sosuc describe` (spec 11.4): src/described.sosu is
+# generated from the comments of src/parts.sosu and src/plants/tree.sosu, and checked by its tests.
+[package]
+name = "garden"
+version = "0.1.0"
+
+[dependencies]
+engine = { path = "../../../packages/engine" }
+scene = { path = "../../../packages/scene" }
+math = { path = "../../../packages/math" }

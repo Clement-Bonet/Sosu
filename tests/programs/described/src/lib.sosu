@@ -1,0 +1,95 @@
+// The game garden: its components (src/parts.sosu, src/plants/tree.sosu) described by
+// `sosuc describe` into src/described.sosu, tried here through the contract of the editor as Sozo
+// calls it (engine.host).
+import std.text;
+import math.linear;
+import scene.scene;
+import engine.describe;
+import engine.host;
+import garden.parts;
+import garden.plants.tree;
+import garden.described;
+
+// What the game does in `sozo_setup`.
+pub void setup(host.Game* g) {
+    host.on_world(g, described.add_all);
+}
+
+usize kind_named(host.Game* g, str name) {
+    for (usize i in 0..host.sozo_kind_count(g)) {
+        if (host.sozo_kind_name(g, i) == name) {
+            return i;
+        }
+    }
+    return host.sozo_kind_count(g);
+}
+
+test "the components described: their kinds, fields, words and defaults" {
+    host.Game* g = host.sozo_open();
+    defer host.sozo_close(g);
+    setup(g);
+    assert(host.sozo_kind_count(g) == 10);  // the seven of engine, then those of the game, in order
+    assert(host.sozo_kind_name(g, 7) == "sprinkler" && host.sozo_kind_name(g, 8) == "fence_post");
+    assert(host.sozo_kind_name(g, 9) == "fruit_tree");
+    usize s = kind_named(g, "sprinkler");
+    // `pub mut` fields, in order: not the transient nor the private one
+    assert(host.sozo_field_count(g, s) == 11);
+    host.FieldInfo flow = host.sozo_field(g, s, 0);
+    assert(flow.name == "flow" && flow.label == "Water flow" && flow.low == 0.0 && flow.high == 20.0);
+    assert(flow.unit == "l/min" && flow.group == "Water" && !flow.hidden);
+    host.FieldInfo spray = host.sozo_field(g, s, 1);
+    assert(spray.label == "Spray" && spray.choices == 3 && spray.group == "Water");
+    assert(host.sozo_choice(g, s, 1, 2) == "wide_fan");
+    assert(host.sozo_field(g, s, 2).low == -3.0);
+    host.FieldInfo every = host.sozo_field(g, s, 3);
+    assert(every.group == "Turns" && every.unit == "s"
+            && every.tooltip == "The time between two turns, \"in seconds\"");
+    assert(host.sozo_field(g, s, 6).kind == describe.Kind.Asset && host.sozo_field(g, s, 7).kind == describe.Kind.Text);
+    assert(host.sozo_field(g, s, 8).kind == describe.Kind.Color && host.sozo_field(g, s, 9).unit == "m");
+    assert(host.sozo_field(g, s, 10).name == "served" && host.sozo_field(g, s, 10).hidden);
+    assert(host.sozo_field_count(g, kind_named(g, "fence_post")) == 0);
+    usize t = kind_named(g, "fruit_tree");
+    assert(host.sozo_field(g, t, 1).label == "Watered by" && host.sozo_field(g, t, 0).high == 40.0);
+    // what a field is made new with: the default of the struct
+    assert(host.sozo_fresh(g, s, 0).number == 4.0 && host.sozo_fresh(g, s, 1).choice == 1);
+    assert(host.sozo_fresh(g, s, 3).whole == 600 && host.sozo_fresh(g, s, 8).z == 1.0);
+}
+
+test "the components described: changed within their bounds, saved and read again" {
+    host.Game* g = host.sozo_open();
+    defer host.sozo_close(g);
+    setup(g);
+    usize s = kind_named(g, "sprinkler");
+    usize t = kind_named(g, "fruit_tree");
+    scene.Entity lawn = host.sozo_spawn(g, "lawn");
+    host.sozo_add(g, lawn, s);
+    host.sozo_add(g, lawn, t);
+    host.sozo_add(g, lawn, kind_named(g, "fence_post"));
+    assert(host.sozo_set(g, lawn, s, 0, host.Value{ tag: host.Tag.Number, number: 50.0 }));  // held at 20
+    assert(host.sozo_set(g, lawn, s, 1, host.Value{ tag: host.Tag.Choice, choice: 2 }));
+    assert(host.sozo_set(g, lawn, s, 2, host.Value{ tag: host.Tag.Whole, whole: -9 }));  // held at -3
+    assert(host.sozo_set(g, lawn, s, 4, host.Value{ tag: host.Tag.Whole, whole: -5 }));  // a usize: 0
+    assert(host.sozo_set(g, lawn, s, 6, host.Value{ tag: host.Tag.Text, text: "sounds/hiss.ogg" }));
+    assert(host.sozo_set(g, lawn, s, 10, host.Value{ tag: host.Tag.Whole, whole: 7 }));
+    assert(host.sozo_set(g, lawn, t, 1, host.Value{ tag: host.Tag.Choice, choice: 1 }));
+    assert(host.sozo_get(g, lawn, s, 0).number == 20.0 && host.sozo_get(g, lawn, s, 2).whole == -3);
+    assert(host.sozo_get(g, lawn, s, 4).whole == 0);
+    // the scene file holds them by name, the choices by the names of their variants
+    str file = host.sozo_save(g);
+    assert(text.contains(file, "\"sprinkler\"") && text.contains(file, "\"spray\": \"wide_fan\""));
+    assert(text.contains(file, "\"fence_post\"") && text.contains(file, "\"watered_by\": \"jet\""));
+    host.sozo_clear(g);
+    assert(host.sozo_count(g) == 0);
+    assert(host.sozo_load(g, file));
+    scene.Entity again = host.sozo_entities(g)[0];
+    assert(host.sozo_get(g, again, s, 0).number == 20.0 && host.sozo_get(g, again, s, 1).choice == 2);
+    assert(host.sozo_get(g, again, s, 6).text == "sounds/hiss.ogg" && host.sozo_get(g, again, s, 10).whole == 7);
+    assert(host.sozo_get(g, again, t, 1).choice == 1 && host.sozo_has(g, again, kind_named(g, "fence_post")));
+}
+
+test "the structs themselves stay plain values" {
+    parts.Sprinkler made = parts.Sprinkler{ };
+    tree.FruitTree high = tree.FruitTree{ height: 12.0 };
+    assert(made.flow == 4.0 && made.tint.y == 0.5 && high.height == 12.0);
+    assert(linear.vec3(1.0, 0.0, 0.0).x == 1.0);
+}

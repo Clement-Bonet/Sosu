@@ -4,7 +4,7 @@
 // every component, the common ones of `engine` and those of a game alike, and what a graph of Kumi
 // will call. A generic class cannot implement an interface in Sosu, so each kind is a small class
 // of its own, whose methods call the generic functions of this module (`table_get`...); a game
-// writes one for each of its components (later, `sosuc describe` writes them).
+// writes one for each of its components, or `sosuc describe` writes them from its comments.
 //
 //   kinds.Kinds* all = kinds.common(arena, components);   // the seven of engine
 //   all.add(arena.new(SpeedKind, arena, speeds));           // one of the game
