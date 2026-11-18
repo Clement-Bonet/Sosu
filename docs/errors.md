@@ -143,6 +143,7 @@ The comments of the components of a package, read by `sosuc describe` (spec §11
 | E0605 | a word that does not apply there | `// range` on a bool, `// color` on an f32, `// asset` on a number, `// component` above a field, `// unit` above a struct |
 | E0606 | a `pub` field of a component that is not `mut` | `pub f32 speed = 1.0;`: the editor could not change it, nor a scene read it (`// transient` leaves it out) |
 | E0607 | a field of a component without a default value | `pub mut f32 speed;`, `f32 seen;`: a component is made new with `T{ }` |
+| E0608 | a warning: components described, but no module imports `<package>.described` | a project made before `sosuc describe`, its `sozo_setup` empty: the editor would not see them; the module is written all the same |
 
 ## Packages and imports
 

@@ -3683,6 +3683,7 @@ static int command_describe(int argc, char **argv) {
         print_diagnostics(&diags, format);
         status = 1;
     } else {
+        if (diags.count > 0) print_diagnostics(&diags, format); /* warnings */
         SourceFile old = {0};
         bool loaded = shell_file_exists(generated) && source_load(&old, generated);
         bool same = loaded && old.length == strlen(text) && memcmp(old.text, text, old.length) == 0;
