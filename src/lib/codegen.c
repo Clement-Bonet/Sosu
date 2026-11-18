@@ -1297,6 +1297,7 @@ static char *gen_field(Fn *f, Expr *e) {
 /* [a, b, c] as a compound literal; [value; n] fills a temporary in a loop. */
 static char *gen_array(Fn *f, Expr *e) {
     const char *type = value_type(f->g, e->type);
+    if (e->type->tag == T_SLICE) return sosu_format("((%s){ NULL, 0 })", type);  /* `[]`: an empty slice */
     if (e->as.array.repeat) {
         Expr *repeat = e->as.array.repeat;
         char *value = materialize(f, repeat->type, gen_expr(f, repeat));

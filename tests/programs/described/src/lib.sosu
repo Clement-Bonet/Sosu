@@ -72,12 +72,30 @@ test "the components described: changed within their bounds, saved and read agai
     assert(host.sozo_set(g, lawn, s, 6, host.Value{ tag: host.Tag.Text, text: "sounds/hiss.ogg" }));
     assert(host.sozo_set(g, lawn, s, 10, host.Value{ tag: host.Tag.Whole, whole: 7 }));
     assert(host.sozo_set(g, lawn, t, 1, host.Value{ tag: host.Tag.Choice, choice: 1 }));
+    // lists: each item held within the range of its field, texts and choices as the others
+    host.FieldInfo hours = host.sozo_field(g, t, 2);
+    assert(hours.kind == describe.Kind.List && hours.item == describe.Kind.Number && hours.high == 24.0
+            && hours.unit == "h");
+    assert(host.sozo_field(g, t, 3).item == describe.Kind.Asset
+            && host.sozo_field(g, t, 4).item == describe.Kind.Choice);
+    mut host.Value[2] at = [
+        host.Value{ tag: host.Tag.Number, number: 6.5 }, host.Value{ tag: host.Tag.Number, number: 30.0 },
+    ];
+    assert(host.sozo_set_items(g, lawn, t, 2, at[0..2]));
+    mut host.Value[1] fruit = [host.Value{ tag: host.Tag.Text, text: "models/apple.glb" }];
+    assert(host.sozo_set_items(g, lawn, t, 3, fruit[0..1]));
+    mut host.Value[2] sprays = [
+        host.Value{ tag: host.Tag.Choice, choice: 2 }, host.Value{ tag: host.Tag.Choice, choice: 0 },
+    ];
+    assert(host.sozo_set_items(g, lawn, t, 4, sprays[0..2]));
+    assert(host.sozo_item_count(g, lawn, t, 2) == 2 && host.sozo_item(g, lawn, t, 2, 1).number == 24.0);
     assert(host.sozo_get(g, lawn, s, 0).number == 20.0 && host.sozo_get(g, lawn, s, 2).whole == -3);
     assert(host.sozo_get(g, lawn, s, 4).whole == 0);
     // the scene file holds them by name, the choices by the names of their variants
     str file = host.sozo_save(g);
     assert(text.contains(file, "\"sprinkler\"") && text.contains(file, "\"spray\": \"wide_fan\""));
     assert(text.contains(file, "\"fence_post\"") && text.contains(file, "\"watered_by\": \"jet\""));
+    assert(text.contains(file, "\"hours\": [6.5, 24]") && text.contains(file, "\"sprays\": [\"wide_fan\", \"mist\"]"));
     host.sozo_clear(g);
     assert(host.sozo_count(g) == 0);
     assert(host.sozo_load(g, file));
@@ -85,6 +103,8 @@ test "the components described: changed within their bounds, saved and read agai
     assert(host.sozo_get(g, again, s, 0).number == 20.0 && host.sozo_get(g, again, s, 1).choice == 2);
     assert(host.sozo_get(g, again, s, 6).text == "sounds/hiss.ogg" && host.sozo_get(g, again, s, 10).whole == 7);
     assert(host.sozo_get(g, again, t, 1).choice == 1 && host.sozo_has(g, again, kind_named(g, "fence_post")));
+    assert(host.sozo_item_count(g, again, t, 3) == 1 && host.sozo_item(g, again, t, 3, 0).text == "models/apple.glb");
+    assert(host.sozo_item(g, again, t, 4, 0).choice == 2 && host.sozo_item(g, again, t, 2, 0).number == 6.5);
 }
 
 test "the structs themselves stay plain values" {

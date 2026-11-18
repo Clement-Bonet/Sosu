@@ -53,6 +53,17 @@ class LiftFields : describe.Describe<Lift>, save.Codec<Lift> {
     override Lift? read(Arena* arena, json.Value v) {
         return describe.read_object(arena, self as describe.Describe<Lift>*, v);
     }
+
+    // No list among its fields.
+    override usize items(Lift* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Lift* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Lift* c, usize i, describe.Value[] values) keeps self { }
 }
 
 class LiftKind : kinds.Kind, host.Saved {
@@ -112,6 +123,18 @@ class LiftKind : kinds.Kind, host.Saved {
 
     override bool read(save.Reader* r) {
         return r.add(lifts, fields as save.Codec<Lift>*);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return kinds.table_item_count(lifts, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return kinds.table_item(lifts, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return kinds.table_set_items(arena, lifts, d(), e, i, values);
     }
 }
 

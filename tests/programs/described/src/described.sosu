@@ -176,6 +176,16 @@ pub class SprinklerFields : describe.Describe<parts.Sprinkler>, save.Codec<parts
         }
     }
 
+    override usize items(parts.Sprinkler* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(parts.Sprinkler* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(parts.Sprinkler* c, usize i, describe.Value[] values) keeps self { }
+
     override void write(text.TextBuilder* out, parts.Sprinkler* value) {
         describe.write_object(out, self as describe.Describe<parts.Sprinkler>*, value);
     }
@@ -237,6 +247,18 @@ pub class SprinklerKind : kinds.Kind, host.Saved {
         return kinds.table_set(arena, table, d(), e, i, v);
     }
 
+    override usize item_count(scene.Entity e, usize i) {
+        return kinds.table_item_count(table, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return kinds.table_item(table, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return kinds.table_set_items(arena, table, d(), e, i, values);
+    }
+
     override void write(save.Writer* out) {
         out.add(table, fields as save.Codec<parts.Sprinkler>*);
     }
@@ -278,6 +300,16 @@ pub class FenceFields : describe.Describe<parts.Fence>, save.Codec<parts.Fence> 
     }
 
     override void set(parts.Fence* c, usize i, describe.Value v) { }
+
+    override usize items(parts.Fence* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(parts.Fence* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(parts.Fence* c, usize i, describe.Value[] values) keeps self { }
 
     override void write(text.TextBuilder* out, parts.Fence* value) {
         describe.write_object(out, self as describe.Describe<parts.Fence>*, value);
@@ -340,6 +372,18 @@ pub class FenceKind : kinds.Kind, host.Saved {
         return kinds.table_set(arena, table, d(), e, i, v);
     }
 
+    override usize item_count(scene.Entity e, usize i) {
+        return kinds.table_item_count(table, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return kinds.table_item(table, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return kinds.table_set_items(arena, table, d(), e, i, values);
+    }
+
     override void write(save.Writer* out) {
         out.add(table, fields as save.Codec<parts.Fence>*);
     }
@@ -359,13 +403,21 @@ pub FenceKind* fence_post_kind(keeps Arena* arena, keeps scene.World* world) {
 // What describes `tree.FruitTree` and saves it.
 pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.FruitTree> {
     str[] choices_1;
+    str[] choices_4;
+    Arena* arena;  // where its lists are made
 
     void init(keeps Arena* arena) {
+        self.arena = arena;
         mut str[] made_1 = arena.alloc_slice(str, 3);
         made_1[0] = "mist";
         made_1[1] = "jet";
         made_1[2] = "wide_fan";
         choices_1 = made_1;
+        mut str[] made_4 = arena.alloc_slice(str, 3);
+        made_4[0] = "mist";
+        made_4[1] = "jet";
+        made_4[2] = "wide_fan";
+        choices_4 = made_4;
     }
 
     override str name() {
@@ -377,7 +429,7 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
     }
 
     override usize count() {
-        return 2;
+        return 5;
     }
 
     override describe.Field field(usize i) {
@@ -391,11 +443,39 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
                 unit: "m"
             };
         }
+        if (i == 1) {
+            return describe.Field{
+                name: "watered_by",
+                label: "Watered by",
+                kind: describe.Kind.Choice,
+                choices: some(choices_1)
+            };
+        }
+        if (i == 2) {
+            return describe.Field{
+                name: "hours",
+                label: "Hours",
+                kind: describe.Kind.List,
+                item: describe.Kind.Number,
+                low: 0.0,
+                high: 24.0,
+                unit: "h"
+            };
+        }
+        if (i == 3) {
+            return describe.Field{
+                name: "fruits",
+                label: "Fruits",
+                kind: describe.Kind.List,
+                item: describe.Kind.Asset
+            };
+        }
         return describe.Field{
-            name: "watered_by",
-            label: "Watered by",
-            kind: describe.Kind.Choice,
-            choices: some(choices_1)
+            name: "sprays",
+            label: "Sprays",
+            kind: describe.Kind.List,
+            item: describe.Kind.Choice,
+            choices: some(choices_4)
         };
     }
 
@@ -403,14 +483,79 @@ pub class FruitTreeFields : describe.Describe<tree.FruitTree>, save.Codec<tree.F
         if (i == 0) {
             return describe.Value.Number(c.height);
         }
-        return describe.Value.Choice(parts_spray_index(c.watered_by));
+        if (i == 1) {
+            return describe.Value.Choice(parts_spray_index(c.watered_by));
+        }
+        if (i == 2) {
+            return describe.Value.Whole(c.hours.len as i64);
+        }
+        if (i == 3) {
+            return describe.Value.Whole(c.fruits.len as i64);
+        }
+        return describe.Value.Whole(c.sprays.len as i64);
     }
 
     override void set(tree.FruitTree* c, usize i, describe.Value v) {
         if (i == 0) {
             c.height = describe.number_of(v, c.height);
-        } else {
+        } else if (i == 1) {
             c.watered_by = parts_spray_at(describe.choice_of(v, parts_spray_index(c.watered_by)));
+        } else if (i == 2) {
+            // a list: given by `set_items`
+        } else if (i == 3) {
+            // a list: given by `set_items`
+        } else {
+            // a list: given by `set_items`
+        }
+    }
+
+    override usize items(tree.FruitTree* c, usize i) {
+        if (i == 2) {
+            return c.hours.len;
+        }
+        if (i == 3) {
+            return c.fruits.len;
+        }
+        if (i == 4) {
+            return c.sprays.len;
+        }
+        return 0;
+    }
+
+    override describe.Value item(tree.FruitTree* c, usize i, usize j) {
+        if (i == 2) {
+            return describe.Value.Number(c.hours[j]);
+        }
+        if (i == 3) {
+            return describe.Value.Text(c.fruits[j]);
+        }
+        if (i == 4) {
+            return describe.Value.Choice(parts_spray_index(c.sprays[j]));
+        }
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(tree.FruitTree* c, usize i, describe.Value[] values) keeps self {
+        if (i == 2) {
+            f32[] made = arena.alloc_slice(f32, values.len);
+            for (usize j in 0..values.len) {
+                made[j] = describe.number_of(values[j], 0.0);
+            }
+            c.hours = made;
+        }
+        if (i == 3) {
+            str[] made = arena.alloc_slice(str, values.len);
+            for (usize j in 0..values.len) {
+                made[j] = text.repeat(arena, describe.text_of(values[j], ""), 1);
+            }
+            c.fruits = made;
+        }
+        if (i == 4) {
+            parts.Spray[] made = arena.alloc_slice(parts.Spray, values.len);
+            for (usize j in 0..values.len) {
+                made[j] = parts_spray_at(describe.choice_of(values[j], 0));
+            }
+            c.sprays = made;
         }
     }
 
@@ -473,6 +618,18 @@ pub class FruitTreeKind : kinds.Kind, host.Saved {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return kinds.table_set(arena, table, d(), e, i, v);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return kinds.table_item_count(table, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return kinds.table_item(table, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return kinds.table_set_items(arena, table, d(), e, i, values);
     }
 
     override void write(save.Writer* out) {

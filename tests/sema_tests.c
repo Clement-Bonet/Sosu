@@ -364,6 +364,8 @@ static void test_body_errors(void) {
     expect_codes("void f() { auto grid = [[1, 2], [3, 4]]; i32 x = grid[1][0]; }", "");
     expect_codes("void f() { i32[3] a = [1, 2]; }", "E0355");
     expect_codes("void f() { auto a = []; }", "E0308");
+    expect_codes("void f() { i32[] a = []; }", "");  /* an empty slice where a slice is expected */
+    expect_help("void f() { auto a = []; }", "E0308", "`[]` is an empty slice where a slice is expected (`T[] x = [];`)");
     expect_codes("void f() { auto a = [1, 2.0]; }", "E0331");
 
     /* `&x` needs `mut x` */

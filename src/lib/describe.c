@@ -97,6 +97,7 @@ typedef struct {
     size_t enum_index; /* TYPE_ENUM: in `Reader.enums` */
     Word label, unit, group, tooltip, low, high;
     bool asset, color, hidden;
+    bool list; /* `T[]`: a list of values of `type`, which the words of the field are about */
 } Described;
 
 typedef struct {
@@ -485,6 +486,16 @@ static int find_enum(Reader *reader, size_t source, const TypeExpr *type) {
 static bool type_of(Reader *reader, size_t source, const Field *field, Described *out) {
     const TypeExpr *type = field->type;
     const SourceFile *file = reader->read[source].file;
+    if (type->kind == TYPE_SLICE) {  /* a list: its items are of one of the types below */
+        if (type->as.inner->kind == TYPE_SLICE) {
+            Diagnostic *d = diag_error(reader->diags, "E0602", file, type->offset, type->length,
+                                       "a list of lists cannot be a field of a component");
+            diag_help(d, "a list is of f32, i32, i64, usize, bool, str, linear.Vec3 or an enum of this package");
+            return false;
+        }
+        out->list = true;
+        type = type->as.inner;
+    }
     if (type->kind == TYPE_NAME && type->arg_count == 0 && type->as.name.count == 1) {
         static const struct { const char *name; FieldType type; } plain[] = {
             { "f32", TYPE_F32 }, { "i32", TYPE_I32 }, { "i64", TYPE_I64 },
@@ -512,15 +523,12 @@ static bool type_of(Reader *reader, size_t source, const Field *field, Described
     if (e == -2) {
         d = diag_error(reader->diags, "E0602", file, type->offset, type->length,
                        "a field of a component can be an enum only if it is `pub`, not generic, and its variants carry nothing");
-    } else if (type->kind == TYPE_SLICE) {
-        d = diag_error(reader->diags, "E0602", file, type->offset, type->length,
-                       "a list cannot be a field of a component yet");
     } else {
         d = diag_error(reader->diags, "E0602", file, type->offset, type->length,
                        "`%.*s` cannot be a field of a component", (int)type->length, file->text + type->offset);
     }
-    diag_help(d, "a field is f32, i32, i64, usize, bool, str, linear.Vec3 or an enum of this package; "
-                 "`// transient` leaves it out");
+    diag_help(d, "a field is f32, i32, i64, usize, bool, str, linear.Vec3 or an enum of this package, or a list "
+                 "of one of them (`T[]`); `// transient` leaves it out");
     return false;
 }
 
@@ -789,7 +797,8 @@ static void put_field(Out *out, const Described *f, size_t index) {
         put_string(out, words, strlen(words));
         free(words);
     }
-    put(out, ", kind: describe.Kind.%s", kind);
+    if (f->list) put(out, ", kind: describe.Kind.List, item: describe.Kind.%s", kind);
+    else put(out, ", kind: describe.Kind.%s", kind);
     if (f->low.set) {
         put(out, ", low: ");
         put_f32(out, f->low);
@@ -808,29 +817,67 @@ static void put_field(Out *out, const Described *f, size_t index) {
     put(out, " }");
 }
 
-static void put_get(Out *out, const Reader *reader, const Described *f) {
-    Name n = f->field->name;
-    int length = (int)n.length;
+/* The value of `expr`, of the type of `f` (an item, for a list). */
+static void put_value(Out *out, const Reader *reader, const Described *f, const char *expr) {
     switch (f->type) {
-    case TYPE_F32: put(out, "describe.Value.Number(c.%.*s)", length, n.text); break;
-    case TYPE_I64: put(out, "describe.Value.Whole(c.%.*s)", length, n.text); break;
+    case TYPE_F32: put(out, "describe.Value.Number(%s)", expr); break;
+    case TYPE_I64: put(out, "describe.Value.Whole(%s)", expr); break;
     case TYPE_I32:
-    case TYPE_USIZE: put(out, "describe.Value.Whole(c.%.*s as i64)", length, n.text); break;
-    case TYPE_BOOL: put(out, "describe.Value.Flag(c.%.*s)", length, n.text); break;
-    case TYPE_STR: put(out, "describe.Value.Text(c.%.*s)", length, n.text); break;
-    case TYPE_VEC3: put(out, "describe.Value.Vector(c.%.*s)", length, n.text); break;
+    case TYPE_USIZE: put(out, "describe.Value.Whole(%s as i64)", expr); break;
+    case TYPE_BOOL: put(out, "describe.Value.Flag(%s)", expr); break;
+    case TYPE_STR: put(out, "describe.Value.Text(%s)", expr); break;
+    case TYPE_VEC3: put(out, "describe.Value.Vector(%s)", expr); break;
     case TYPE_ENUM: {
         char *prefix = enum_prefix(reader, &reader->enums.items[f->enum_index]);
-        put(out, "describe.Value.Choice(%s_index(c.%.*s))", prefix, length, n.text);
+        put(out, "describe.Value.Choice(%s_index(%s))", prefix, expr);
         free(prefix);
         break;
     }
     }
 }
 
+static void put_get(Out *out, const Reader *reader, const Described *f) {
+    Name n = f->field->name;
+    char *expr = sosu_format("c.%.*s", (int)n.length, n.text);
+    if (f->list) put(out, "describe.Value.Whole(%s.len as i64)", expr);  /* a list: the number of its items */
+    else put_value(out, reader, f, expr);
+    free(expr);
+}
+
+/* The type of `f` (of its items, for a list), as Sosu writes it. */
+static char *type_text(const Reader *reader, const Described *f) {
+    static const char *const names[] = { "f32", "i32", "i64", "usize", "bool", "str", "linear.Vec3" };
+    if (f->type == TYPE_ENUM) {
+        const EnumRef *e = &reader->enums.items[f->enum_index];
+        Name n = e->decl->as.enum_.name;
+        return sosu_format("%s.%.*s", short_module(reader->sources[e->source].module), (int)n.length, n.text);
+    }
+    return sosu_format("%s", names[f->type]);
+}
+
+/* `values[j]` as an item of the list `f`, a text copied into the arena of the description. */
+static void put_item_of(Out *out, const Reader *reader, const Described *f) {
+    static const char *const of[] = { "number_of(values[j], 0.0)", "i32_of(values[j], 0)", "whole_of(values[j], 0)",
+                                      "usize_of(values[j], 0)", "flag_of(values[j], false)", "",
+                                      "vector_of(values[j], linear.vec3(0.0, 0.0, 0.0))" };
+    if (f->type == TYPE_ENUM) {
+        char *prefix = enum_prefix(reader, &reader->enums.items[f->enum_index]);
+        put(out, "%s_at(describe.choice_of(values[j], 0))", prefix);
+        free(prefix);
+    } else if (f->type == TYPE_STR) {
+        put(out, "text.repeat(arena, describe.text_of(values[j], \"\"), 1)");
+    } else {
+        put(out, "describe.%s", of[f->type]);
+    }
+}
+
 static void put_set(Out *out, const Reader *reader, const Described *f) {
     Name n = f->field->name;
     int length = (int)n.length;
+    if (f->list) {
+        put(out, "// a list: given by `set_items`");
+        return;
+    }
     static const char *const of[] = { "number_of", "i32_of", "whole_of", "usize_of", "flag_of", "text_of", "vector_of" };
     if (f->type == TYPE_ENUM) {
         char *prefix = enum_prefix(reader, &reader->enums.items[f->enum_index]);
@@ -848,7 +895,10 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     char *t = sosu_format("%s.%.*s", short_module(reader->sources[c->source].module), sl, s.text);
     size_t n = c->fields.count;
     bool choices = false;
+    bool lists = false;
     for (size_t i = 0; i < n; i++) choices = choices || c->fields.items[i].type == TYPE_ENUM;
+    for (size_t i = 0; i < n; i++) lists = lists || c->fields.items[i].list;
+    bool arena_kept = choices || lists; /* its init takes the arena of the world */
 
     put(out, "\n// ---- %s: %s ----\n\n", c->table, t);
     put(out, "// What describes `%s` and saves it.\n", t);
@@ -856,8 +906,10 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     for (size_t i = 0; i < n; i++) {
         if (c->fields.items[i].type == TYPE_ENUM) put(out, "    str[] choices_%zu;\n", i);
     }
-    if (choices) {
+    if (lists) put(out, "    Arena* arena;  // where its lists are made\n");
+    if (arena_kept) {
         put(out, "\n    void init(keeps Arena* arena) {\n");
+        if (lists) put(out, "        self.arena = arena;\n");
         for (size_t i = 0; i < n; i++) {
             const Described *f = &c->fields.items[i];
             if (f->type != TYPE_ENUM) continue;
@@ -923,6 +975,45 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     }
     put(out, "    }\n");
 
+    /* the lists: their items read one by one, given all at once */
+    put(out, "\n    override usize items(%s* c, usize i) {\n", t);
+    for (size_t i = 0; i < n; i++) {
+        const Described *f = &c->fields.items[i];
+        if (!f->list) continue;
+        put(out, "        if (i == %zu) {\n            return c.%.*s.len;\n        }\n", i, (int)f->field->name.length,
+            f->field->name.text);
+    }
+    put(out, "        return 0;\n    }\n");
+    put(out, "\n    override describe.Value item(%s* c, usize i, usize j) {\n", t);
+    for (size_t i = 0; i < n; i++) {
+        const Described *f = &c->fields.items[i];
+        if (!f->list) continue;
+        char *expr = sosu_format("c.%.*s[j]", (int)f->field->name.length, f->field->name.text);
+        put(out, "        if (i == %zu) {\n            return ", i);
+        put_value(out, reader, f, expr);
+        put(out, ";\n        }\n");
+        free(expr);
+    }
+    put(out, "        return describe.Value.Flag(false);\n    }\n");
+    if (lists) {
+        put(out, "\n    override void set_items(%s* c, usize i, describe.Value[] values) keeps self {\n", t);
+        for (size_t i = 0; i < n; i++) {
+            const Described *f = &c->fields.items[i];
+            if (!f->list) continue;
+            char *type = type_text(reader, f);
+            put(out, "        if (i == %zu) {\n", i);
+            put(out, "            %s[] made = arena.alloc_slice(%s, values.len);\n", type, type);
+            put(out, "            for (usize j in 0..values.len) {\n                made[j] = ");
+            put_item_of(out, reader, f);
+            put(out, ";\n            }\n            c.%.*s = made;\n        }\n", (int)f->field->name.length,
+                f->field->name.text);
+            free(type);
+        }
+        put(out, "    }\n");
+    } else {
+        put(out, "\n    override void set_items(%s* c, usize i, describe.Value[] values) keeps self { }\n", t);
+    }
+
     put(out, "\n    override void write(text.TextBuilder* out, %s* value) {\n", t);
     put(out, "        describe.write_object(out, self as describe.Describe<%s>*, value);\n    }\n", t);
     put(out, "\n    override %s? read(Arena* arena, json.Value v) {\n", t);
@@ -933,7 +1024,7 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     put(out, "    Arena* arena;\n    scene.Table<%s>* table;\n    %.*sFields* fields;\n\n", t, sl, s.text);
     put(out, "    void init(keeps Arena* arena, keeps scene.Table<%s>* table) {\n", t);
     put(out, "        self.arena = arena;\n        self.table = table;\n");
-    if (choices) put(out, "        fields = arena.new(%.*sFields, arena);\n    }\n", sl, s.text);
+    if (arena_kept) put(out, "        fields = arena.new(%.*sFields, arena);\n    }\n", sl, s.text);
     else put(out, "        fields = arena.new(%.*sFields);\n    }\n", sl, s.text);
     put(out, "\n    describe.Describe<%s>* d() {\n        return fields as describe.Describe<%s>*;\n    }\n", t, t);
     put(out, "\n    override str name() {\n        return d().name();\n    }\n");
@@ -947,6 +1038,12 @@ static void put_component(Out *out, const Reader *reader, const Component *c) {
     put(out, "\n    override describe.Value? fresh(usize i) {\n        return kinds.table_fresh(d(), i);\n    }\n");
     put(out, "\n    override bool set(scene.Entity e, usize i, describe.Value v) {\n"
              "        return kinds.table_set(arena, table, d(), e, i, v);\n    }\n");
+    put(out, "\n    override usize item_count(scene.Entity e, usize i) {\n"
+             "        return kinds.table_item_count(table, d(), e, i);\n    }\n");
+    put(out, "\n    override describe.Value? item(scene.Entity e, usize i, usize j) {\n"
+             "        return kinds.table_item(table, d(), e, i, j);\n    }\n");
+    put(out, "\n    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {\n"
+             "        return kinds.table_set_items(arena, table, d(), e, i, values);\n    }\n");
     put(out, "\n    override void write(save.Writer* out) {\n        out.add(table, fields as save.Codec<%s>*);\n    }\n", t);
     put(out, "\n    override bool read(save.Reader* r) {\n        return r.add(table, fields as save.Codec<%s>*);\n    }\n}\n",
         t);

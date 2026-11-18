@@ -35,6 +35,12 @@ pub interface Kind {
     // `v` given to the field `i` of the component of `e`, held within its bounds, a text copied
     // where the world lives: false if it has none.
     bool set(scene.Entity e, usize i, describe.Value v);
+    // A list (`describe.Kind.List`): the number of its items (0 without the component or for a field
+    // that is not one), the item `j`, and all its items given at once (held within the bounds of its
+    // field, texts copied where the world lives): false if it has none.
+    usize item_count(scene.Entity e, usize i);
+    describe.Value? item(scene.Entity e, usize i, usize j);
+    bool set_items(scene.Entity e, usize i, describe.Value[] values);
 }
 
 // What every kind does, on its table and its description.
@@ -60,7 +66,7 @@ pub describe.Value? table_fresh<T>(describe.Describe<T>* d, usize i) {
 pub bool table_set<T>(
     Arena* texts,
     scene.Table<T>* table,
-    describe.Describe<T>* d,
+    keeps describe.Describe<T>* d,
     scene.Entity e,
     usize i,
     describe.Value v
@@ -75,6 +81,61 @@ pub bool table_set<T>(
                 _ => v,
             };
             d.set(c, i, describe.bounded(d.field(i), kept));
+            return true;
+        },
+        none => {
+            return false;
+        },
+    }
+}
+
+pub usize table_item_count<T>(scene.Table<T>* table, describe.Describe<T>* d, scene.Entity e, usize i) {
+    if (i >= d.count()) {
+        return 0;
+    }
+    return match (table.get(e)) {
+        some(c) => d.items(c, i),
+        none => 0,
+    };
+}
+
+pub describe.Value? table_item<T>(scene.Table<T>* table, describe.Describe<T>* d, scene.Entity e, usize i, usize j) {
+    if (i >= d.count()) {
+        return none;
+    }
+    match (table.get(e)) {
+        some(c) => {
+            return j < d.items(c, i) ? some(d.item(c, i, j)) : none;
+        },
+        none => {
+            return none;
+        },
+    }
+}
+
+pub bool table_set_items<T>(
+    Arena* texts,
+    scene.Table<T>* table,
+    keeps describe.Describe<T>* d,
+    scene.Entity e,
+    usize i,
+    describe.Value[] values
+) {
+    if (i >= d.count() || !describe.is_list(d.field(i))) {
+        return false;
+    }
+    match (table.get(e)) {
+        some(c) => {
+            describe.Field one = describe.item_of(d.field(i));
+            describe.Value[] kept = texts.alloc_slice(describe.Value, values.len);
+            for (usize j in 0..values.len) {
+                describe.Value v = match (values[j]) {
+                    Text(s) => describe.Value.Text(text.repeat(texts, s, 1)),
+                    _ => values[j],
+                };
+                kept[j] = describe.bounded(one, v);
+            }
+            d.set_items(c, i, kept);
             return true;
         },
         none => {
@@ -208,6 +269,18 @@ class MeshKind : Kind {
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.meshes, d(), e, i, v);
     }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.meshes, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.meshes, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.meshes, d(), e, i, values);
+    }
 }
 
 class TextKind : Kind {
@@ -257,6 +330,18 @@ class TextKind : Kind {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.texts, d(), e, i, v);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.texts, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.texts, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.texts, d(), e, i, values);
     }
 }
 
@@ -308,6 +393,18 @@ class LightKind : Kind {
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.lights, d(), e, i, v);
     }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.lights, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.lights, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.lights, d(), e, i, values);
+    }
 }
 
 class ViewKind : Kind {
@@ -357,6 +454,18 @@ class ViewKind : Kind {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.views, d(), e, i, v);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.views, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.views, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.views, d(), e, i, values);
     }
 }
 
@@ -408,6 +517,18 @@ class BodyKind : Kind {
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.bodies, d(), e, i, v);
     }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.bodies, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.bodies, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.bodies, d(), e, i, values);
+    }
 }
 
 class SoundKind : Kind {
@@ -457,6 +578,18 @@ class SoundKind : Kind {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.sounds, d(), e, i, v);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.sounds, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.sounds, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.sounds, d(), e, i, values);
     }
 }
 
@@ -508,6 +641,18 @@ class EmitterKind : Kind {
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.emitters, d(), e, i, v);
     }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.emitters, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.emitters, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.emitters, d(), e, i, values);
+    }
 }
 
 class AnimatorKind : Kind {
@@ -558,6 +703,18 @@ class AnimatorKind : Kind {
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.animators, d(), e, i, v);
     }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(c.animators, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(c.animators, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, c.animators, d(), e, i, values);
+    }
 }
 
 // ---- Tests ----
@@ -598,6 +755,16 @@ class SpeedFields : describe.Describe<Speed> {
             s.tag = describe.text_of(v, s.tag);
         }
     }
+    // No list among its fields.
+    override usize items(Speed* c, usize i) {
+        return 0;
+    }
+
+    override describe.Value item(Speed* c, usize i, usize j) {
+        return describe.Value.Flag(false);
+    }
+
+    override void set_items(Speed* c, usize i, describe.Value[] values) keeps self { }
 }
 
 class SpeedKind : Kind {
@@ -649,6 +816,18 @@ class SpeedKind : Kind {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, speeds, d(), e, i, v);
+    }
+
+    override usize item_count(scene.Entity e, usize i) {
+        return table_item_count(speeds, d(), e, i);
+    }
+
+    override describe.Value? item(scene.Entity e, usize i, usize j) {
+        return table_item(speeds, d(), e, i, j);
+    }
+
+    override bool set_items(scene.Entity e, usize i, describe.Value[] values) {
+        return table_set_items(arena, speeds, d(), e, i, values);
     }
 }
 
