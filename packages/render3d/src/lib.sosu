@@ -1,2 +1,3 @@
 // render3d: 3D scenes on gpu (spec §8.2). Programs import `render3d.render3d`.
 import render3d.render3d;
+import render3d.text3d;

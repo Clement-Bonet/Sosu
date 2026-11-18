@@ -28,9 +28,9 @@ test "the components described: their kinds, fields, words and defaults" {
     host.Game* g = host.sozo_open();
     defer host.sozo_close(g);
     setup(g);
-    assert(host.sozo_kind_count(g) == 10);  // the seven of engine, then those of the game, in order
-    assert(host.sozo_kind_name(g, 7) == "sprinkler" && host.sozo_kind_name(g, 8) == "fence_post");
-    assert(host.sozo_kind_name(g, 9) == "fruit_tree");
+    assert(host.sozo_kind_count(g) == 11);  // the eight of engine, then those of the game, in order
+    assert(host.sozo_kind_name(g, 8) == "sprinkler" && host.sozo_kind_name(g, 9) == "fence_post");
+    assert(host.sozo_kind_name(g, 10) == "fruit_tree");
     usize s = kind_named(g, "sprinkler");
     // `pub mut` fields, in order: not the transient nor the private one
     assert(host.sozo_field_count(g, s) == 11);

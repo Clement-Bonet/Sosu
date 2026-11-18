@@ -648,7 +648,7 @@ static bool read_field(Reader *reader, size_t source, const Field *field, Word *
 }
 
 static bool reserved_table(const char *name) {
-    static const char *const common[] = { "mesh", "light", "view", "body", "sound", "emitter", "animator" };
+    static const char *const common[] = { "mesh", "light", "view", "body", "sound", "emitter", "animator", "text" };
     for (size_t i = 0; i < sizeof common / sizeof common[0]; i++) {
         if (strcmp(common[i], name) == 0) return true;
     }

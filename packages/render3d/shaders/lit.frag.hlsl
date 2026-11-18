@@ -16,7 +16,8 @@ cbuffer Lights : register(b0, space3)
 cbuffer Material : register(b1, space3)
 {
     float4 base_color;
-    float4 factors;  // x: metallic; y: roughness; z: 1 when there is a texture
+    float4 factors;  // x: metallic; y: roughness; z: 1 when there is a texture; w: the alpha cut under
+    float4 options;  // x: 1 when unlit (its color as it is)
 };
 
 Texture2D<float4> albedo : register(t0, space2);
@@ -91,6 +92,14 @@ float4 main(float3 world : TEXCOORD0, float3 normal : TEXCOORD1, float2 uv : TEX
     {
         float4 texel = albedo.Sample(albedo_sampler, uv);
         color *= float4(pow(texel.rgb, 2.2), texel.a);  // sRGB to linear
+    }
+    if (factors.w > 0.0 && color.a < factors.w)
+    {
+        discard;  // cut out (alphaMode MASK): leaves, the glyphs of a text
+    }
+    if (options.x > 0.5)
+    {
+        return float4(pow(max(color.rgb, 0.0), 1.0 / 2.2), 1.0);  // unlit
     }
     float metallic = saturate(factors.x);
     float roughness = clamp(factors.y, 0.04, 1.0);

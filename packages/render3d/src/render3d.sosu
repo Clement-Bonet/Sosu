@@ -102,6 +102,7 @@ pub struct Options {
 pub struct Item {
     pub Uploaded* model;
     pub linear.Mat4 transform;
+    pub bool shadows = true;  // it casts shadows (a text does not)
     pub linear.Mat4[]? palette = none;
     pub Morphed[]? morphs = none;  // the weights of the morph targets of its meshes
 }
@@ -197,7 +198,8 @@ struct LightsUniform {
 
 struct MaterialUniform {
     f32[4] base_color;
-    f32[4] factors;
+    f32[4] factors;  // metallic, roughness, textured, the alpha cut under
+    f32[4] options;  // unlit
 }
 
 // A mesh to draw in this frame, and where.
@@ -593,7 +595,9 @@ pub class Renderer {
                         palette: it.palette,
                         morph: morph_of(mesh, up.data.meshes[m], m, it.morphs)
                     };
-                    casters.push(d);
+                    if (it.shadows) {
+                        casters.push(d);
+                    }
                     if (mesh.skinned || frustum.sees_box(mesh.bounds.transformed(worlds[n]))) {
                         seen.push(d);
                     } else {
@@ -707,7 +711,8 @@ pub class Renderer {
             mut gpu.Texture albedo = white;
             mut MaterialUniform material = MaterialUniform{
                 base_color: [1.0, 1.0, 1.0, 1.0],
-                factors: [0.0, 0.8, 0.0, 0.0]
+                factors: [0.0, 0.8, 0.0, 0.0],
+                options: [0.0, 0.0, 0.0, 0.0]
             };
             match (d.mesh.material) {
                 some(i) => {
@@ -725,7 +730,8 @@ pub class Renderer {
                         }
                         material = MaterialUniform{
                             base_color: mat.base_color,
-                            factors: [mat.metallic, mat.roughness, textured, 0.0]
+                            factors: [mat.metallic, mat.roughness, textured, mat.alpha_cutoff],
+                            options: [mat.unlit ? 1.0 : 0.0, 0.0, 0.0, 0.0]
                         };
                     }
                 },

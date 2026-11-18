@@ -6,7 +6,7 @@
 // of its own, whose methods call the generic functions of this module (`table_get`...); a game
 // writes one for each of its components, or `sosuc describe` writes them from its comments.
 //
-//   kinds.Kinds* all = kinds.common(arena, components);   // the seven of engine
+//   kinds.Kinds* all = kinds.common(arena, components);   // the eight of engine
 //   all.add(arena.new(SpeedKind, arena, speeds));           // one of the game
 //   kinds.Kind* k = all.named("body");
 //   k.set(crate, 3, describe.Value.Number(12.5));           // its mass
@@ -143,7 +143,7 @@ pub Kinds* kinds(keeps Arena* arena) {
     return arena.new(Kinds, arena);
 }
 
-// The seven common kinds of `engine`, on the tables of `c`; texts set are copied into `arena`, which
+// The eight common kinds of `engine`, on the tables of `c`; texts set are copied into `arena`, which
 // must live as long as the world.
 pub Kinds* common(keeps Arena* arena, keeps components.Components* c) {
     Kinds* k = kinds(arena);
@@ -154,6 +154,7 @@ pub Kinds* common(keeps Arena* arena, keeps components.Components* c) {
     k.add(arena.new(SoundKind, arena, c) as Kind*);
     k.add(arena.new(EmitterKind, arena, c) as Kind*);
     k.add(arena.new(AnimatorKind, arena, c) as Kind*);
+    k.add(arena.new(TextKind, arena, c) as Kind*);
     return k;
 }
 
@@ -206,6 +207,56 @@ class MeshKind : Kind {
 
     override bool set(scene.Entity e, usize i, describe.Value v) {
         return table_set(arena, c.meshes, d(), e, i, v);
+    }
+}
+
+class TextKind : Kind {
+    Arena* arena;
+    components.Components* c;
+
+    void init(keeps Arena* arena, keeps components.Components* c) {
+        self.arena = arena;
+        self.c = c;
+    }
+
+    describe.Describe<components.Text>* d() {
+        return c.text_fields as describe.Describe<components.Text>*;
+    }
+
+    override str name() {
+        return d().name();
+    }
+
+    override usize count() {
+        return d().count();
+    }
+
+    override describe.Field field(usize i) {
+        return d().field(i);
+    }
+
+    override bool has(scene.Entity e) {
+        return c.texts.has(e);
+    }
+
+    override void add(scene.Entity e) {
+        table_add(c.texts, d(), e);
+    }
+
+    override void remove(scene.Entity e) {
+        c.texts.remove(e);
+    }
+
+    override describe.Value? get(scene.Entity e, usize i) {
+        return table_get(c.texts, d(), e, i);
+    }
+
+    override describe.Value? fresh(usize i) {
+        return table_fresh(d(), i);
+    }
+
+    override bool set(scene.Entity e, usize i, describe.Value v) {
+        return table_set(arena, c.texts, d(), e, i, v);
     }
 }
 
@@ -631,7 +682,7 @@ test "the kinds of components: the common ones and one of a game, each read and 
     scene.World* w = scene.world(&arena);
     components.Components* c = components.components(&arena, w);
     Kinds* all = common(&arena, c);
-    assert(all.count() == 7 && all.at(0).name() == "mesh");
+    assert(all.count() == 8 && all.at(0).name() == "mesh" && all.at(7).name() == "text");
     scene.Entity crate = w.spawn_at("crate", linear.transform(), none);
     Kind* body = match (all.named("body")) {
         some(k) => k,
@@ -672,7 +723,7 @@ test "the kinds of components: the common ones and one of a game, each read and 
     // a kind of the game, added to them
     scene.Table<Speed>* speeds = w.table<Speed>();
     all.add(arena.new(SpeedKind, &arena, speeds) as Kind*);
-    assert(all.count() == 8);
+    assert(all.count() == 9);
     Kind* speed = match (all.named("speed")) {
         some(k) => k,
         none => {

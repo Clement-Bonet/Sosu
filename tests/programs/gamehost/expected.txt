@@ -1,6 +1,6 @@
 contract 6
-kinds before setup 7
-kinds 8, the last lift
+kinds before setup 8
+kinds 9, the last lift
 body.shape: Shape, kind 6, 4 choices, the second sphere
 mass 4.0
 parented 1

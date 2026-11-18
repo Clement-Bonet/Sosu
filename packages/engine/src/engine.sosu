@@ -40,6 +40,8 @@ import assets.assets;
 import assets.ids;
 import std.fs;
 import engine.components;
+import render.truetype;
+import render3d.text3d;
 
 bool present<T>(T? x) {
     return match (x) {
@@ -112,6 +114,28 @@ struct Live {
     mut bool animation_tried;  // its model was ready and gave no clip: not tried again
 }
 
+// The model of a text (`components.Text`): made again when what it shows changes (`key`), its
+// memory freed then.
+class TextMade {
+    mut str key;
+    mut Arena memory;
+    mut model.Model? made;
+    mut render3d.Uploaded*? uploaded;
+
+    void init() {
+        key = "";
+        memory = Arena.new(4 * KB);
+        made = none;
+        uploaded = none;
+    }
+}
+
+// A font a text names, read once.
+struct FontSlot {
+    str path;
+    truetype.Font*? font;
+}
+
 pub class Engine {
     Arena* arena;
     pub components.Components* c;
@@ -124,6 +148,8 @@ pub class Engine {
     scene.Table<Live>* live;
     vec.Vec<ModelSlot>* models;
     vec.Vec<SoundSlot>* sounds;
+    scene.Table<TextMade*>* texts_made;
+    vec.Vec<FontSlot>* fonts;
     // The camera the scene is seen through in place of its active view: that of an editor.
     pub mut render3d.Camera? looking;
     // Paused (an editor that edits): the files still load and the world matrices follow the
@@ -150,6 +176,8 @@ pub class Engine {
         live = world.table<Live>();
         models = vec.new<ModelSlot>(arena);
         sounds = vec.new<SoundSlot>(arena);
+        texts_made = world.table<TextMade*>();
+        fonts = vec.new<FontSlot>(arena);
         looking = none;
         paused = false;
         root = "";
@@ -427,6 +455,17 @@ pub class Engine {
                             },
                             none => { },
                         }
+                    },
+                    none => { },
+                }
+            },
+            none => { },
+        }
+        match (text_of(e)) {
+            some(t) => {
+                match (t.made) {
+                    some(m) => {
+                        return some(Bounds{ box: m.meshes[0].bounds, space: BoxSpace.Scaled });
                     },
                     none => { },
                 }
@@ -839,7 +878,146 @@ pub class Engine {
                 none => { },
             }
         }
+        // the texts: no shadow; turned toward the camera when they face it
+        for (scene.Entity e in c.texts.entities_now()) {
+            match (text_of(e)) {
+                some(t) => {
+                    match (t.uploaded) {
+                        some(up) => {
+                            bool facing = match (c.texts.get(e)) {
+                                some(x) => x.face_camera,
+                                none => false,
+                            };
+                            out.push(render3d.Item{ model: up, transform: facing ? facing_camera(e) : matrix_of(e), shadows: false });
+                        },
+                        none => { },
+                    }
+                },
+                none => { },
+            }
+        }
         return out.items();
+    }
+
+    // ---- Texts ----
+
+    // The model of the text of `e`, made again when what it shows changed, sent to the GPU when
+    // there is a renderer; none without a text, or with nothing to show.
+    TextMade*? text_of(scene.Entity e) uses io, threads {
+        components.Text t = match (c.texts.get(e)) {
+            some(x) => *x,
+            none => {
+                return none;
+            },
+        };
+        if (!texts_made.has(e)) {
+            texts_made.set(e, arena.new(TextMade));
+        }
+        TextMade* made = match (texts_made.get(e)) {
+            some(x) => *x,
+            none => {
+                return none;
+            },
+        };
+        mut Arena scratch = Arena.new(1 * KB);
+        defer scratch.free();
+        text.TextBuilder* k = text.builder(&scratch);
+        k.push(t.text);
+        k.push("\u{0}");
+        k.push(t.font);
+        k.push("\u{0}");
+        for (f32 x in [t.height, t.color.x, t.color.y, t.color.z]) {
+            k.push_f64(x as f64, 4);
+            k.push(" ");
+        }
+        k.push(match (t.align) {
+            Left => "l",
+            Center => "c",
+            Right => "r",
+        });
+        k.push(t.lit ? "1" : "0");
+        str key = k.text();
+        if (key != made.key) {
+            match (made.uploaded) {
+                some(up) => {
+                    match (renderer) {
+                        some(r) => {
+                            r.release(up);
+                        },
+                        none => { },
+                    }
+                },
+                none => { },
+            }
+            made.memory.free();
+            made.memory = Arena.new(4 * KB);
+            made.key = text.repeat(&made.memory, key, 1);
+            made.uploaded = none;
+            text3d.TextLook look = text3d.TextLook{
+                height: max(t.height, 0.001),
+                align: match (t.align) {
+                    Left => text3d.Align.Left,
+                    Center => text3d.Align.Center,
+                    Right => text3d.Align.Right,
+                },
+                color: [t.color.x, t.color.y, t.color.z, 1.0],
+                unlit: !t.lit
+            };
+            made.made = text3d.text_model(&made.memory, font_of(t.font), t.text, look);
+        }
+        match (made.made) {
+            some(m) => {
+                if (!present(made.uploaded)) {
+                    match (renderer) {
+                        some(r) => {
+                            made.uploaded = match (r.upload(&made.memory, m)) {
+                                ok(up) => some(up),
+                                err(failed) => none,
+                            };
+                        },
+                        none => { },
+                    }
+                }
+            },
+            none => { },
+        }
+        return some(made);
+    }
+
+    // The font of the file `name` (a GUID or a path of the project), read once; none for "" (the
+    // built-in font) or a file that is not one.
+    truetype.Font*? font_of(str name) uses io {
+        if (name.len == 0) {
+            return none;
+        }
+        for (usize i in 0..fonts.len()) {
+            if (fonts.items()[i].path == name) {
+                return fonts.items()[i].font;
+            }
+        }
+        truetype.Font*? read = match (truetype.load(arena, located(name))) {
+            ok(f) => some(f),
+            err(e) => none,
+        };
+        fonts.push(FontSlot{ path: text.repeat(arena, name, 1), font: read });
+        return read;
+    }
+
+    // Where `e` is, turned so that its +z looks at the camera (its up kept up), at its scale.
+    linear.Mat4 facing_camera(scene.Entity e) {
+        linear.Mat4 m = matrix_of(e);
+        linear.Vec3 at = m.transform_point(linear.vec3(0.0, 0.0, 0.0));
+        render3d.Camera cam = camera();
+        linear.Vec3 away = at.add(at.sub(cam.position));  // its -z from the camera
+        linear.Vec3 size = linear.vec3(
+            m.transform_vector(linear.vec3(1.0, 0.0, 0.0)).length(),
+            m.transform_vector(linear.vec3(0.0, 1.0, 0.0)).length(),
+            m.transform_vector(linear.vec3(0.0, 0.0, 1.0)).length()
+        );
+        return match (linear.look_at(at, away, cam.up).inverse()) {
+            some(turned) => turned.mul(linear.scaling(size)),
+            none => m,
+        };
     }
 
     // The lights of the scene given to the renderer: the first sun, and the first point lights
@@ -974,6 +1152,14 @@ pub class Engine {
 
     pub void close() {
         physics_world.close();
+        for (scene.Entity e in texts_made.entities_now()) {
+            match (texts_made.get(e)) {
+                some(t) => {
+                    (*t).memory.free();
+                },
+                none => { },
+            }
+        }
     }
 }
 
@@ -1390,4 +1576,42 @@ test "a mesh drawn from its offset: its pivot elsewhere, its box and its item mo
     // saved and read back: older scenes without it read as no offset
     str saved = components.save_scene(&arena, c);
     assert(text.contains(saved, "\"offset\""));
+}
+
+test "a text: its box as high as its lines, made again when it changes, saved and read back" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    scene.World* w = scene.world(&arena);
+    components.Components* c = components.components(&arena, w);
+    Engine* g = engine(&arena, c, none, none, none, none);
+    defer g.close();
+    scene.Entity sign = placed(w, "sign", linear.vec3(0.0, 2.0, 0.0));
+    c.texts.set(sign, components.Text{ text: "Lantern", height: 0.5 });
+    g.update(0.0);
+    mut f32 wide = 0.0;
+    match (g.bounds_of(sign)) {
+        some(b) => {
+            assert(b.box.max.y - b.box.min.y > 0.5 && b.box.max.y - b.box.min.y < 0.6);
+            assert(abs(b.box.min.x + b.box.max.x) < 0.001);  // centered
+            wide = b.box.max.x - b.box.min.x;
+        },
+        none => assert(false),
+    }
+    // two lines, aligned on the left: twice as high, from its point
+    c.texts.set(sign, components.Text{ text: "Lantern\nOn", height: 0.5, align: components.TextAlign.Left });
+    match (g.bounds_of(sign)) {
+        some(b) => {
+            assert(b.box.max.y - b.box.min.y > 1.0 && abs(b.box.min.x) < 0.05 && abs(b.box.max.x - b.box.min.x - wide) < 0.01);
+        },
+        none => assert(false),
+    }
+    // nothing to show: no box
+    c.texts.set(sign, components.Text{ text: "" });
+    assert(match (g.bounds_of(sign)) {
+        some(b) => false,
+        none => true,
+    });
+    c.texts.set(sign, components.Text{ text: "Exit", face_camera: true, lit: true });
+    str saved = components.save_scene(&arena, c);
+    assert(text.contains(saved, "\"text\"") && text.contains(saved, "\"face_camera\": true"));
 }
