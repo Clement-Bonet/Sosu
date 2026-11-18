@@ -1858,6 +1858,7 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `Slider`, `Progress` | available | an `i64` dragged or moved by keys; a bar with a value, or busy (§10.9) |
 | `DateField` | available | a mask and a calendar above the rest (§10.9) |
 | `color_field` | available (in code) | a color, and its picker above the rest: hue, saturation and brightness, red, green and blue (§10.9) |
+| `area` | available (in code) | `f.area(w, h)`: a box placed as a widget, its rectangle given back, which the program draws in itself (`drawing()`) and reads the mouse over (`hovering`, `mouse_x`, `mouse_pressed`): an editor of curves, a preview |
 | `Dialog` | available | modal, centered, above the rest (§10.9) |
 | `Table` | available | columns of sizes, sorting, borders dragged, rows chosen, only those in view (§10.9) |
 | `TextArea` (several lines) | available | bound to a `LongText`: lines, wrapping, Up and Down, undo, scrolling (§10.9) |
