@@ -11,16 +11,23 @@ typedef struct {
     size_t components;
 } Result;
 
-/* The module written for a package `game` of one module `parts` of text `code`. */
-static Result describe_one(const char *code) {
-    SourceFile file;
+/* The module written for a package `game` of a module `parts` of text `code`, and of a module `lib`
+   that imports it (as `sozo_setup` does) unless `alone`. */
+static Result describe_in(const char *code, bool alone) {
+    SourceFile file, lib;
     source_from_string(&file, "parts.sosu", code);
-    DescribeSource source = { "parts", &file };
+    source_from_string(&lib, "lib.sosu", "import game.described;\n");
+    DescribeSource sources[2] = { { "parts", &file }, { "lib", &lib } };
     Result r;
     memset(&r, 0, sizeof r);
-    r.text = describe_package("game", &source, 1, &r.diags, &r.components);
+    r.text = describe_package("game", sources, alone ? 1 : 2, &r.diags, &r.components);
     source_free(&file);
+    source_free(&lib);
     return r;
+}
+
+static Result describe_one(const char *code) {
+    return describe_in(code, false);
 }
 
 static bool has(const char *text, const char *part) {
@@ -96,6 +103,14 @@ static void test_named_and_none(void) {
     CHECK(r.text && r.components == 0 && has(r.text, "pub void add_all(host.Level* l) { }") &&
               !has(r.text, "import std.json;"),
           "no component: add_all does nothing");
+    done(&r);
+    r = describe_in("// component\npub struct Lone {\n    pub mut f32 x = 0.0;\n}\n", true);
+    CHECK(r.text && r.components == 1 && r.diags.count == 1 && r.diags.error_count == 0 &&
+              said(&r, "E0608", "no module imports `game.described`") && r.diags.items[0].severity == SEVERITY_WARNING,
+          "components that no module imports: a warning, the module written all the same");
+    done(&r);
+    r = describe_in("// A plain struct.\npub struct Plain {\n    pub mut f32 x = 0.0;\n}\n", true);
+    CHECK(r.text && r.diags.count == 0, "no component, no warning");
     done(&r);
     r = describe_one("// component\n\npub struct Apart {\n    pub mut f32 x = 0.0;\n}\n");
     CHECK(r.text && r.components == 0, "a comment apart, a blank line before the struct, is not its own");

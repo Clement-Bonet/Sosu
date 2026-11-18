@@ -26,6 +26,15 @@
 
 /* ---- Text written ---- */
 
+static Diagnostic *warning(DiagList *list, const char *code, const SourceFile *file, size_t offset, size_t length,
+                           const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    Diagnostic *d = diag_vwarning(list, code, file, offset, length, fmt, args);
+    va_end(args);
+    return d;
+}
+
 typedef struct {
     char *items;
     size_t count;
@@ -1050,6 +1059,31 @@ static char *write_module(const char *package, const Reader *reader) {
 
 /* ---- Entry point ---- */
 
+static bool is_name(Name n, const char *text) {
+    return n.length == strlen(text) && memcmp(n.text, text, n.length) == 0;
+}
+
+/* Components described, but no module imports the module written: `add_all` is never called, and
+   the editor would not see them (a project made before `sosuc describe`). A warning, on the first. */
+static void warn_unused(const char *package, const Reader *reader) {
+    for (size_t i = 0; i < reader->count; i++) {
+        const Module *m = reader->read[i].module;
+        for (size_t d = 0; m && d < m->count; d++) {
+            const Decl *decl = m->decls[d];
+            if (decl->kind == DECL_IMPORT && decl->as.import.count == 2 && is_name(decl->as.import.items[0], package) &&
+                is_name(decl->as.import.items[1], DESCRIBE_MODULE)) {
+                return;
+            }
+        }
+    }
+    const Component *c = &reader->components.items[0];
+    Diagnostic *d = warning(reader->diags, "E0608", reader->sources[c->source].file, c->decl->offset, c->decl->length,
+                            "components are described, but no module imports `%s.%s`: the editor will not see them",
+                            package, DESCRIBE_MODULE);
+    diag_help(d, "import `%s.%s` and call `host.on_world(g, described.add_all);` in `sozo_setup`", package,
+              DESCRIBE_MODULE);
+}
+
 char *describe_package(const char *package, const DescribeSource *sources, size_t count, DiagList *diags,
                        size_t *components) {
     Reader reader;
@@ -1072,6 +1106,7 @@ char *describe_package(const char *package, const DescribeSource *sources, size_
             for (size_t d = 0; m && d < m->count; d++) read_decl(&reader, i, m->decls[d]);
         }
     }
+    if (diags->error_count == errors && reader.components.count > 0) warn_unused(package, &reader);
     char *text = NULL;
     if (diags->error_count == errors) {
         /* in the canonical form of `sosuc fmt`, so that the package stays formatted */
