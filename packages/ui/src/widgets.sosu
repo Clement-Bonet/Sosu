@@ -779,6 +779,12 @@ pub struct Ui {
     mut i32 cal_year = 2000;
     mut i32 cal_month = 1;
     mut i32 cal_day = 1;
+    // The picker of a color field open: its hue (0 to 360), saturation and brightness (0 to 1), and
+    // what the mouse drags in it (1 the square, 2 the hue, 3 to 5 red, green, blue; 0 nothing).
+    mut f32 pick_h = 0.0;
+    mut f32 pick_s = 0.0;
+    mut f32 pick_v = 0.0;
+    mut i32 pick_drag = 0;
     mut ui64 number_of = 0;
     mut TextBuffer number_text = TextBuffer{ };
 
@@ -2357,6 +2363,9 @@ pub struct Frame {
     mut ui64 cal_owner = 0;
     mut Date*? cal_date = none;
     mut bool cal_monday = true;
+    // The color field whose picker is open (0: none), and its color this frame.
+    mut ui64 color_owner = 0;
+    mut Rgb color_now = Rgb{ };
     mut bool no_edit = false;
     mut TableBuild table_build = TableBuild{ };  // the table being described (one at a time)
     // The items being described, the outermost first; while one is placed, its list neither paints it
@@ -3328,6 +3337,198 @@ pub struct Frame {
         WidgetState* s = &ui.states[b.slot];
         s.content_w = r.w;
         s.content_h = r.h;
+    }
+
+    // ---- A color and its picker ----
+
+    // A field of a color, `color` shown in it; a click opens its picker above the rest: a square
+    // of saturation (across) and brightness (down) for the hue chosen on the bar beside it, and a
+    // bar for each of red, green and blue, each dragged. The color follows at once (true when it
+    // changed); a click elsewhere, or Escape, closes the picker.
+    pub bool color_field(Rgb* color, f32 width) {
+        ui64 id = take_id();
+        take_styles();
+        Look l = look(TextField, 0);
+        canvas.Rect r = place(width, l.height);
+        interactive(r);
+        focusable(id, r);
+        if (ui.pressed && over(r)) {
+            dropdown_pressed = true;  // the click that opens or closes it is its own
+        }
+        if (click(id, r)) {
+            if (ui.open == id) {
+                ui.open = 0;
+            } else {
+                ui.open = id;
+                ui.focus = id;
+                Hsv h = hsv_of(*color);
+                ui.pick_s = h.s;
+                ui.pick_v = h.v;
+                if (h.s > 0.0 && h.v > 0.0) {  // a gray keeps the hue it had
+                    ui.pick_h = h.h;
+                }
+                ui.pick_drag = 0;
+            }
+        }
+        mut Rgb next = *color;
+        if (ui.open == id) {
+            for (usize i in 0..ui.edit_count) {  // Escape: closed, whatever has the keyboard
+                if (ui.edits[i].key == 27) {
+                    ui.open = 0;
+                }
+            }
+            // under the field, else above it; within the window
+            f32 w = PICK * 2.0 + PICK_SQUARE_W + PICK_HUE_W + PICK;
+            f32 h = PICK * 2.0 + PICK_SQUARE_H + 3.0 * (PICK_BAR_H + 6.0) + 2.0;
+            f32 below = r.y + r.h + 2.0;
+            f32 top = below + h <= surface.height as f32 ? below : max(r.y - h - 2.0, 0.0);
+            canvas.Rect popup = canvas.Rect{ x: max(min(r.x, surface.width as f32 - w), 0.0), y: top, w: w, h: h };
+            layer = popup;
+            layer_owner = id;
+            color_owner = id;
+            f32 mx = ui.mouse_x - popup.x;
+            f32 my = ui.mouse_y - popup.y;
+            if (ui.pressed && contains(ui.layer, ui.mouse_x, ui.mouse_y)) {
+                dropdown_pressed = true;
+                ui.pick_drag = picker_part(mx, my);
+            }
+            if (!ui.down) {
+                ui.pick_drag = 0;
+            } else if (ui.pick_drag == 1) {  // the square
+                ui.pick_s = unit((mx - PICK) / PICK_SQUARE_W);
+                ui.pick_v = 1.0 - unit((my - PICK) / PICK_SQUARE_H);
+                next = rgb_of(Hsv{ h: ui.pick_h, s: ui.pick_s, v: ui.pick_v });
+            } else if (ui.pick_drag == 2) {  // the hue
+                ui.pick_h = unit((my - PICK) / PICK_SQUARE_H) * 360.0;
+                next = rgb_of(Hsv{ h: ui.pick_h, s: ui.pick_s, v: ui.pick_v });
+            } else if (ui.pick_drag >= 3) {  // red, green or blue
+                f32 at = unit((mx - PICK_BAR_X) / PICK_BAR_W);
+                if (ui.pick_drag == 3) {
+                    next.r = at;
+                } else if (ui.pick_drag == 4) {
+                    next.g = at;
+                } else {
+                    next.b = at;
+                }
+                Hsv hv = hsv_of(next);
+                ui.pick_s = hv.s;
+                ui.pick_v = hv.v;
+                if (hv.s > 0.0 && hv.v > 0.0) {
+                    ui.pick_h = hv.h;
+                }
+            }
+        }
+        // the field: the color, framed
+        Look shown = look(TextField, (over(r) ? state_hover() : 0) | (ui.focus == id ? state_focus() : 0));
+        surface.fill_rounded(r, shown.radius, shown.background);
+        surface.fill(
+            canvas.Rect{ x: r.x + 4.0, y: r.y + 4.0, w: max(r.w - 8.0, 0.0), h: max(r.h - 8.0, 0.0) },
+            color_of(next)
+        );
+        surface.stroke_rounded(r, shown.radius, ui.open == id ? shown.accent : shown.border, 1.0);
+        if (ui.focus == id) {
+            ring(r, shown.accent);
+        }
+        bool changed = next.r != color.r || next.g != color.g || next.b != color.b;
+        *color = next;
+        color_now = next;
+        return changed;
+    }
+
+    // The part of the picker under (x, y), from its top left corner: 1 the square, 2 the hue,
+    // 3 to 5 red, green and blue; 0 none.
+    i32 picker_part(f32 x, f32 y) {
+        if (y >= PICK && y < PICK + PICK_SQUARE_H) {
+            if (x >= PICK && x < PICK + PICK_SQUARE_W) {
+                return 1;
+            }
+            f32 hue_x = PICK * 2.0 + PICK_SQUARE_W;
+            if (x >= hue_x && x < hue_x + PICK_HUE_W) {
+                return 2;
+            }
+            return 0;
+        }
+        f32 bars = PICK * 2.0 + PICK_SQUARE_H;
+        for (i32 k in 0..3) {
+            f32 y0 = bars + k as f32 * (PICK_BAR_H + 6.0);
+            if (y >= y0 && y < y0 + PICK_BAR_H && x >= PICK_BAR_X - 4.0 && x < PICK_BAR_X + PICK_BAR_W + 4.0) {
+                return 3 + k;
+            }
+        }
+        return 0;
+    }
+
+    // The picker of the color field that has it open, above everything.
+    void draw_picker() {
+        canvas.Rect r = layer;
+        Look l = look(Calendar, 0);
+        paint(r, l);
+        // the square: the saturation across, the brightness down, in cells of 4 by 5 pixels
+        for (i32 j in 0..30) {
+            for (i32 i in 0..50) {
+                Rgb c = rgb_of(Hsv{ h: ui.pick_h, s: (i as f32 + 0.5) / 50.0, v: 1.0 - (j as f32 + 0.5) / 30.0 });
+                surface.fill(
+                    canvas.Rect{ x: r.x + PICK + i as f32 * 4.0, y: r.y + PICK + j as f32 * 5.0, w: 4.0, h: 5.0 },
+                    color_of(c)
+                );
+            }
+        }
+        f32 sx = r.x + PICK + ui.pick_s * PICK_SQUARE_W;
+        f32 sy = r.y + PICK + (1.0 - ui.pick_v) * PICK_SQUARE_H;
+        surface.stroke(
+            canvas.Rect{ x: sx - 5.0, y: sy - 5.0, w: 10.0, h: 10.0 },
+            canvas.Color{ r: 255, g: 255, b: 255, a: 255 },
+            1.0
+        );
+        surface.stroke(
+            canvas.Rect{ x: sx - 6.0, y: sy - 6.0, w: 12.0, h: 12.0 },
+            canvas.Color{ r: 0, g: 0, b: 0, a: 255 },
+            1.0
+        );
+        // the hue, down its bar
+        f32 hue_x = r.x + PICK * 2.0 + PICK_SQUARE_W;
+        for (i32 j in 0..75) {
+            Rgb c = rgb_of(Hsv{ h: (j as f32 + 0.5) / 75.0 * 360.0, s: 1.0, v: 1.0 });
+            surface.fill(canvas.Rect{ x: hue_x, y: r.y + PICK + j as f32 * 2.0, w: PICK_HUE_W, h: 2.0 }, color_of(c));
+        }
+        f32 hy = r.y + PICK + ui.pick_h / 360.0 * PICK_SQUARE_H;
+        surface.fill(canvas.Rect{ x: hue_x - 2.0, y: hy - 1.0, w: PICK_HUE_W + 4.0, h: 3.0 }, l.color);
+        // red, green and blue: each bar from 0 to 1, the others as they are
+        mut str[3] names = ["R", "G", "B"];
+        f32 bars = r.y + PICK * 2.0 + PICK_SQUARE_H;
+        for (i32 k in 0..3) {
+            f32 y = bars + k as f32 * (PICK_BAR_H + 6.0);
+            write_px(r.x + PICK, y, PICK_BAR_H, names[k as usize], l.color, l.font_size);
+            for (i32 i in 0..42) {
+                f32 t = (i as f32 + 0.5) / 42.0;
+                mut Rgb c = color_now;
+                if (k == 0) {
+                    c.r = t;
+                } else if (k == 1) {
+                    c.g = t;
+                } else {
+                    c.b = t;
+                }
+                surface.fill(
+                    canvas.Rect{ x: r.x + PICK_BAR_X + i as f32 * 4.0, y: y + 3.0, w: 4.0, h: PICK_BAR_H - 6.0 },
+                    color_of(c)
+                );
+            }
+            f32 value = k == 0 ? color_now.r : k == 1 ? color_now.g : color_now.b;
+            surface.fill(
+                canvas.Rect{ x: r.x + PICK_BAR_X + value * PICK_BAR_W - 1.0, y: y, w: 3.0, h: PICK_BAR_H },
+                l.color
+            );
+            write_px(
+                r.x + PICK_BAR_X + PICK_BAR_W + 8.0,
+                y,
+                PICK_BAR_H,
+                decimal((value * 255.0 + 0.5) as i64),
+                l.color,
+                l.font_size * 0.9
+            );
+        }
+        surface.stroke_rounded(r, l.radius, l.accent, 2.0);
     }
 
     // ---- Sliders, progress, tooltips (spec §10.9) ----
@@ -4907,11 +5108,13 @@ pub struct Frame {
         if (ui.open != 0) {
             if (ui.open == cal_owner) {
                 draw_calendar();
+            } else if (ui.open == color_owner) {
+                draw_picker();
             } else {
                 draw_layer();
             }
             ui.layer = layer;
-            ui.dimmed = ui.touch_screen && ui.open != cal_owner;
+            ui.dimmed = ui.touch_screen && ui.open != cal_owner && ui.open != color_owner;
         } else {
             ui.layer = nowhere();
             ui.dimmed = false;
@@ -9955,4 +10158,124 @@ test "menu items checked: a check before the one checked, room for it before eve
     assert(checked_frame(&ui, &surface, true, false) == 1 && ui.menus[0] == 0);
     ui.key(103, true, false, true);  // Ctrl+G, the menu closed
     assert(checked_frame(&ui, &surface, false, true) == 2);
+}
+
+// A color, three numbers from 0 to 1 (`Frame.color_field`).
+pub struct Rgb {
+    pub mut f32 r = 0.0;
+    pub mut f32 g = 0.0;
+    pub mut f32 b = 0.0;
+}
+
+// A hue (0 to 360), a saturation and a brightness (0 to 1).
+struct Hsv {
+    f32 h;
+    f32 s;
+    f32 v;
+}
+
+// The sizes of the picker of a color: its margin, its square, the bar of the hue, those of red,
+// green and blue (where they start, how wide, how high).
+f32 PICK = 8.0;
+f32 PICK_SQUARE_W = 200.0;
+f32 PICK_SQUARE_H = 150.0;
+f32 PICK_HUE_W = 20.0;
+f32 PICK_BAR_X = 28.0;
+f32 PICK_BAR_W = 168.0;
+f32 PICK_BAR_H = 20.0;
+
+f32 unit(f32 x) {
+    return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
+}
+
+canvas.Color color_of(Rgb c) {
+    return canvas.Color{
+        r: (unit(c.r) * 255.0 + 0.5) as ui8,
+        g: (unit(c.g) * 255.0 + 0.5) as ui8,
+        b: (unit(c.b) * 255.0 + 0.5) as ui8,
+        a: 255
+    };
+}
+
+Hsv hsv_of(Rgb c) {
+    f32 r = unit(c.r);
+    f32 g = unit(c.g);
+    f32 b = unit(c.b);
+    f32 high = max(r, max(g, b));
+    f32 low = min(r, min(g, b));
+    f32 d = high - low;
+    mut f32 h = 0.0;
+    if (d > 0.0) {
+        if (high == r) {
+            h = 60.0 * ((g - b) / d);
+        } else if (high == g) {
+            h = 60.0 * ((b - r) / d + 2.0);
+        } else {
+            h = 60.0 * ((r - g) / d + 4.0);
+        }
+        if (h < 0.0) {
+            h += 360.0;
+        }
+    }
+    return Hsv{ h: h, s: high > 0.0 ? d / high : 0.0, v: high };
+}
+
+Rgb rgb_of(Hsv c) {
+    f32 h = (c.h >= 360.0 ? 0.0 : c.h) / 60.0;
+    i32 sector = h as i32;
+    f32 f = h - sector as f32;
+    f32 v = c.v;
+    f32 p = v * (1.0 - c.s);
+    f32 q = v * (1.0 - c.s * f);
+    f32 t = v * (1.0 - c.s * (1.0 - f));
+    return sector == 0 ? Rgb{ r: v, g: t, b: p }
+            : sector == 1 ? Rgb{ r: q, g: v, b: p }
+            : sector == 2 ? Rgb{ r: p, g: v, b: t }
+            : sector == 3 ? Rgb{ r: p, g: q, b: v }
+            : sector == 4 ? Rgb{ r: t, g: p, b: v }
+            : Rgb{ r: v, g: p, b: q };
+}
+
+// A frame of one color field, 120 pixels wide: whether its color changed.
+bool picker_frame(Ui* ui, canvas.Canvas* surface, Rgb* c) {
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    bool changed = f.color_field(c, 120.0);
+    f.finish();
+    return changed;
+}
+
+test "a color field: its picker opened, the hue and the square dragged, a bar of blue, closed by Escape" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 400);
+    mut Ui ui = Ui{ };
+    mut Rgb c = Rgb{ r: 1.0, g: 0.0, b: 0.0 };
+    picker_frame(&ui, &surface, &c);
+    click_at(&ui, 40.0, 10.0);  // it opens on the release
+    picker_frame(&ui, &surface, &c);
+    picker_frame(&ui, &surface, &c);
+    assert(ui.open != 0 && ui.layer.h > 200.0);
+    canvas.Rect p = ui.layer;
+    // the hue at a third of its bar: green
+    ui.mouse_move(p.x + PICK * 2.0 + PICK_SQUARE_W + 10.0, p.y + PICK + PICK_SQUARE_H / 3.0);
+    ui.mouse_button(true);
+    bool changed = picker_frame(&ui, &surface, &c);
+    ui.mouse_button(false);
+    assert(changed && c.g > 0.95 && c.r < 0.05 && c.b < 0.05);
+    // the square at its middle: half saturated, half bright
+    ui.mouse_move(p.x + PICK + PICK_SQUARE_W / 2.0, p.y + PICK + PICK_SQUARE_H / 2.0);
+    ui.mouse_button(true);
+    picker_frame(&ui, &surface, &c);
+    ui.mouse_button(false);
+    assert(abs(c.g - 0.5) < 0.02 && abs(c.r - 0.25) < 0.02 && abs(c.b - 0.25) < 0.02);
+    // the bar of blue at its end
+    ui.mouse_move(p.x + PICK_BAR_X + PICK_BAR_W, p.y + PICK * 2.0 + PICK_SQUARE_H + 2.0 * (PICK_BAR_H + 6.0) + 10.0);
+    ui.mouse_button(true);
+    picker_frame(&ui, &surface, &c);
+    ui.mouse_button(false);
+    assert(c.b > 0.99 && ui.open != 0);
+    // Escape closes it, the color kept
+    ui.key(27, true, false, false);
+    picker_frame(&ui, &surface, &c);
+    assert(ui.open == 0 && c.b > 0.99);
 }

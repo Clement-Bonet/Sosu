@@ -1855,6 +1855,7 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `MoneyField` | available | a `NumberField` with a symbol and groups of thousands, 2 decimals by default (§10.9) |
 | `Slider`, `Progress` | available | an `i64` dragged or moved by keys; a bar with a value, or busy (§10.9) |
 | `DateField` | available | a mask and a calendar above the rest (§10.9) |
+| `color_field` | available (in code) | a color, and its picker above the rest: hue, saturation and brightness, red, green and blue (§10.9) |
 | `Dialog` | available | modal, centered, above the rest (§10.9) |
 | `Table` | available | columns of sizes, sorting, borders dragged, rows chosen, only those in view (§10.9) |
 | `TextArea` (several lines) | available | bound to a `LongText`: lines, wrapping, Up and Down, undo, scrolling (§10.9) |
@@ -2228,6 +2229,10 @@ Status: available. Everything the interface still lacked, in one branch, in batc
 
 - `DateField(bind: s.due, monday_first: true, format: "dd/mm/yyyy")`: a field with a mask (§10.4) and a button that opens a calendar of the month on the layer above (as a dropdown): arrows for the months, a click or Enter on a day chooses it, Escape closes. `widgets.Date { year, month, day }`; a date not valid in the field leaves the value as it was.
 - The names of the months and days are English texts translated by the catalog (§10.7), as the other literals of `ui`.
+
+#### A color and its picker
+
+- `f.color_field(&rgb, width)`: a field filled with a color (`widgets.Rgb { r, g, b }`, each from 0 to 1); a click opens its picker on the layer above (as a dropdown, under the field or above it when there is no room): a square of saturation (across) and brightness (down) for the hue chosen on a bar beside it, and a bar for each of red, green and blue with its value from 0 to 255. Each is dragged, the color following at once (true when it changed); a gray keeps the hue it had. A click elsewhere or Escape closes it. In code for now; not yet a node of `.ui.sosu` files.
 
 #### Long lists and `Table`
 
