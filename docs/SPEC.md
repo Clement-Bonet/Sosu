@@ -1781,7 +1781,7 @@ Translation in v0:
 | `Text(s)`, `Title(s)`, `Space(n)` | `f.label(s)`, `f.title(s)`, `f.space(n)` |
 | `Image(img, size: s)` | `f.image(img, s)`: an `image.Image` (§10.4), `s` pixels high, as wide as its proportions say; its own size when `size` is left out |
 | `MenuBar { ... }`, `Menu(s) { ... }`, `ContextMenu { ... }` | `f.menu_bar()`, `f.menu(s)` or `f.context_menu()`, the nodes, then `f.end_menu_bar()`, `f.end_menu()` or `f.end_context_menu()`; a `MenuBar` holds `Menu`s, a menu holds `MenuItem`, `Separator` and `Menu` nodes (a submenu) |
-| `MenuItem(s, on_click: h, shortcut: k, enabled: c)` | `if (f.menu_item(s)) { h(); }`, or `f.menu_item_enabled(s, c)`, or with a shortcut `f.menu_item_with(s, k, c)`; `Separator` is `f.separator()` |
+| `MenuItem(s, on_click: h, shortcut: k, enabled: c, checked: b)` | `if (f.menu_item(s)) { h(); }`, or `f.menu_item_enabled(s, c)`, or with a shortcut `f.menu_item_with(s, k, c)`; with `checked:`, `f.menu_item_checked(s, c, b)` or `f.menu_item_checked_with(s, k, c, b)`: a check before its label when `b`, and room for it before the labels of its menu (an option on or off, the one chosen among others); `Separator` is `f.separator()` |
 | `Button(s, on_click: h, enabled: c)` | `if (f.button_enabled(s, c)) { h(); }`; `h` is a function or a method (`state.save`), or a call (`state.save(1)`) |
 | `TextField(bind: x, width: w, on_enter: h)` | `if (f.text_field(&x, w)) { h(); }`; `bind:` is required, `width` is 200 by default |
 | `TextField(bind: x, accept: Digits, max: n, mask: m)` | `f.text_field_with(&x, w, widgets.Format{ accept: widgets.Accept.Digits, max: n, mask: m })`: `accept:` names a variant of `widgets.Accept` |
@@ -1862,7 +1862,7 @@ Widgets of `ui`: available and planned. The names are those of a `.ui.sosu` file
 | `List` | available | `List(selected: index, height: 200) { for (...) { ... } }`: scrolling (wheel, bar), selection by click and by keyboard; `Ui` keeps the scroll position between frames. A `Scroll` with items: its bar can be dragged; with the keyboard, Up, Down, Home, End, Page Up and Page Down. With `count:` and `item:`, a long list: only the items in view are described (§10.9). Several items chosen with `selection:`, items of several widgets with `Item`, reordered by dragging with `on_drop:` (§10.10) |
 | `Scroll` | available | `Scroll(width: 300, height: 200) { ... }`: any content, scrolled by the wheel (the innermost area first), its bars and the keyboard (§10.6) |
 | `Dropdown` | available | `Dropdown(bind: country) { Option("France", value: FR) ... }`: the open list is drawn above the rest, and takes the clicks before the widgets under it. With the keyboard: Space, Enter or Alt+Down opens it, Up and Down choose (§10.6). 64 options at most; a long list scrolls, and a letter typed goes to an option (§10.10) |
-| `MenuBar`, `Menu`, `MenuItem`, `Separator` | available | menus drawn by `ui`, in a title bar as in VS Code, or anywhere; submenus; shortcuts |
+| `MenuBar`, `Menu`, `MenuItem`, `Separator` | available | menus drawn by `ui`, in a title bar as in VS Code, or anywhere; submenus; shortcuts; items checked |
 | `ContextMenu` | available | the menu of the widget placed before it, opened by the right button |
 | `TitleBar` | available | a title bar drawn by the program, with widgets in it (§10.5) |
 | `Grid` | available | columns and rows in pixels, `Auto` or `Fill`; cells, spans, alignment (§10.8) |
@@ -1876,7 +1876,7 @@ Foundations, to build first, since most planned widgets rely on them:
 1. Clipping in `render`: a stack of clip rectangles on the `Canvas`, so that nothing overflows a field, a list or a text area. Done.
 2. The editing core of text fields: a cursor (Left, Right, Home, End, Delete), a selection (Shift, the mouse), the clipboard (through SDL in `platform`), key repeat. Done (key repeat comes from the system); not yet: moving by word (Ctrl+Left), undo.
 3. Text buffers that grow, in an arena, beside the fixed `TextBuffer`. Done: `LongText` (§10.9).
-4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame. Done for dropdowns and menus: `Ui` keeps the rectangles of the open list of a dropdown and of the open menus, and the widgets under them do not see the mouse.
+4. A layer above the others: what is drawn at the end of the frame (open dropdowns, later tooltips and menus), and takes the input first, from its rectangle at the previous frame. Done for dropdowns and menus: `Ui` keeps the rectangles of the open list of a dropdown and of the open menus, and the widgets under them do not see the mouse. `ui.on_layer(x, y)` says whether a point is there (or under a dialog), for a program that reads the mouse itself.
 5. Keyboard navigation (Tab, Shift+Tab from field to field), and the mouse wheel as an event of `platform` (done: `Wheel`). Done, with the identity of the widgets and the scrolling of any area (§10.6).
 
 Order: the editing core and formatted one-line fields, `Radio`, `List` with scrolling, `Dropdown` with the layer above, then the foundations of §10.6, the themes of §10.7, the containers of §10.8, and the rest of §10.9 (text areas, numbers, dates, sliders, progress bars, tooltips, dialogs, tables, mnemonics): all done.

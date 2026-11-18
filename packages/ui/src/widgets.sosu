@@ -981,8 +981,10 @@ pub struct Ui {
         wheel_x += steps;
     }
 
-    // Whether (x, y) is on the layer above: the list of a dropdown or a menu, open.
-    bool on_layer(f32 x, f32 y) {
+    // Whether (x, y) is on the layer above: the list of a dropdown or a menu, open (as drawn at the
+    // last frame), or under a dialog. A program that reads the mouse itself (a view of a scene)
+    // leaves it to `ui` there.
+    pub bool on_layer(f32 x, f32 y) {
         if (dimmed || contains(layer, x, y)) {
             return true;
         }
@@ -2018,6 +2020,9 @@ pub struct Window {
 
 // A menu being described, open or not: its place, and its entries, drawn by `finish()` when
 // it is open.
+// The room the check of a menu item takes before the labels of its menu.
+f32 CHECK_ROOM = 22.0;
+
 struct Popup {
     mut ui64 id = 0;
     mut bool open = false;
@@ -2032,6 +2037,8 @@ struct Popup {
     mut str[24] keys = [""; 24];  // the shortcuts
     mut ui8[24] kinds = [0; 24];  // 0: an item, 1: a separator, 2: a submenu
     mut bool[24] enabled = [true; 24];
+    mut ui8[24] checks = [0; 24];  // 0: an item without a check, 1: unchecked, 2: checked
+    mut bool checkable = false;  // one of its items can be checked: their labels leave room for it
     mut ui64[24] submenus = [0; 24];  // the identity of a submenu
 }
 
@@ -4517,12 +4524,33 @@ pub struct Frame {
     // its right, that works even with its menu closed. A shortcut without Ctrl does nothing
     // while a text field has the keyboard, unless it is a function key.
     pub bool menu_item_with(keeps str text, keeps str shortcut, bool enabled) {
+        return item_of_menu(text, shortcut, enabled, 0);
+    }
+
+    // An item with a check before its label when `checked` (an option on or off, the one chosen
+    // among others): the items of its menu leave room for it.
+    pub bool menu_item_checked(keeps str text, bool enabled, bool checked) {
+        return item_of_menu(text, "", enabled, checked ? 2 : 1);
+    }
+
+    // The same, with a shortcut.
+    pub bool menu_item_checked_with(keeps str text, keeps str shortcut, bool enabled, bool checked) {
+        return item_of_menu(text, shortcut, enabled, checked ? 2 : 1);
+    }
+
+    bool item_of_menu(keeps str text, keeps str shortcut, bool enabled, ui8 check) {
         if (menu_level == 0 || menu_level > 4) {
             return false;
         }
         Popup* p = &menu_popups[menu_level - 1];
         i32 index = p.count as i32;
         canvas.Rect r = add_entry(text, shortcut, 0, enabled);
+        if (check > 0) {
+            if (index < 24) {
+                p.checks[index as usize] = check;
+            }
+            p.checkable = true;
+        }
         if (!enabled) {
             return false;
         }
@@ -4622,7 +4650,15 @@ pub struct Frame {
                 surface.fill(r, m.selection);
             }
             canvas.Color color = p.enabled[i] ? m.color : face(true, false);
-            write_label(p.x + 12.0, y, 28.0, p.labels[i], color, m.font_size);
+            if (p.checks[i] == 2) {  // a check, drawn with lines
+                i32 cx = (p.x + 12.0 + CHECK_ROOM / 2.0 - 3.0) as i32;
+                i32 cy = (y + 15.0) as i32;
+                for (i32 o in 0..2) {
+                    surface.line(cx - 5, cy - 1 + o, cx - 2, cy + 2 + o, color);
+                    surface.line(cx - 2, cy + 2 + o, cx + 5, cy - 5 + o, color);
+                }
+            }
+            write_label(p.x + 12.0 + (p.checkable ? CHECK_ROOM : 0.0), y, 28.0, p.labels[i], color, m.font_size);
             if (p.keys[i].len > 0) {
                 f32 kw = measure(p.keys[i], 2).w;
                 write(p.x + p.w - 12.0 - kw, y, 28.0, p.keys[i], face(true, false), 2);
@@ -4645,7 +4681,7 @@ pub struct Frame {
         // drawn at the width of another
         for (usize i in 0..shown_count) {
             mut Popup p = shown[i];
-            p.w = max(p.widest + 40.0, 160.0);
+            p.w = max(p.widest + 40.0 + (p.checkable ? CHECK_ROOM : 0.0), 160.0);
             p.x = max(min(p.x, surface.width as f32 - p.w), 0.0);
             p.y = max(min(p.y, surface.height as f32 - p.h - 8.0), 0.0);
             shown[i] = p;
@@ -4675,7 +4711,7 @@ pub struct Frame {
                     draw_popup(p);
                     ui.popups[ui.popup_count] = canvas.Rect{ x: p.x, y: p.y, w: p.w, h: p.h + 8.0 };
                     ui.popup_count += 1;
-                    ui.menu_w[level] = max(p.widest + 40.0, 160.0);
+                    ui.menu_w[level] = p.w;
                     ui.menu_h[level] = p.h + 8.0;
                 }
             }
@@ -9866,4 +9902,57 @@ test "dragged from one widget to another: carried once moved, taken by the widge
     ui.mouse_button(false);
     assert(carry_frame(ui, &surface, field) == "");
     assert(carried_now(ui, &surface) == "");
+}
+
+// A menu of two options, one checked: 1 Grid clicked, 2 Snap clicked.
+i32 checked_frame(Ui* ui, canvas.Canvas* surface, bool grid, bool snap) {
+    mut i32 clicked = 0;
+    mut Frame f = begin(ui, surface, 0.0, 0.0);
+    f.menu_bar();
+    f.menu("View");  // its menu from y 32: Grid y 36 to 64, Snap 64 to 92
+    if (f.menu_item_checked("Grid", true, grid)) {
+        clicked += 1;
+    }
+    if (f.menu_item_checked_with("Snap", "Ctrl+G", true, snap)) {
+        clicked += 2;
+    }
+    f.end_menu();
+    f.end_menu_bar();
+    f.finish();
+    return clicked;
+}
+
+test "menu items checked: a check before the one checked, room for it before every label" {
+    mut Arena arena = Arena.new(512 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 400, 300);
+    mut Ui ui = Ui{ };
+    checked_frame(&ui, &surface, true, false);
+    click_at(&ui, 20.0, 10.0);  // View opens
+    checked_frame(&ui, &surface, true, false);
+    ui.mouse_move(390.0, 290.0);  // away: no entry lit
+    checked_frame(&ui, &surface, true, false);
+    assert(ui.popup_count == 1);
+    canvas.Rect menu = ui.popups[0];
+    // the open menu is on the layer above: a view under it leaves it the mouse
+    assert(ui.on_layer(menu.x + 5.0, menu.y + 5.0) && !ui.on_layer(390.0, 290.0));
+    // the check of Grid, in the room before the labels; none before Snap
+    mut i32 grid_ink = 0;
+    mut i32 snap_ink = 0;
+    ui32 bg = surface.at(menu.x as i32 + 4, 40);
+    for (i32 x in menu.x as i32 + 10..menu.x as i32 + 12 + CHECK_ROOM as i32) {
+        for (i32 y in 40..60) {
+            grid_ink += surface.at(x, y) != bg ? 1 : 0;
+        }
+        for (i32 y in 68..88) {
+            snap_ink += surface.at(x, y) != bg ? 1 : 0;
+        }
+    }
+    assert(grid_ink > 6 && snap_ink == 0);
+    // its width: the labels, the shortcut and the room of the check
+    assert(menu.w >= 160.0);
+    click_at(&ui, 20.0, 50.0);  // Grid
+    assert(checked_frame(&ui, &surface, true, false) == 1 && ui.menus[0] == 0);
+    ui.key(103, true, false, true);  // Ctrl+G, the menu closed
+    assert(checked_frame(&ui, &surface, false, true) == 2);
 }

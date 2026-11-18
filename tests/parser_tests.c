@@ -482,6 +482,23 @@ static void test_ui_files(void) {
               "    (return (lit widgets.Window (icon \"app.png\")))))\n"
               "(import ui.widgets)\n");
     expect_ui_error("window W(T* t) {\n    Image()\n}\n", "E0215", 2, 5);
+    expect_ui("component C(T* t) {\n    MenuBar {\n        Menu(\"View\") {\n"
+              "            MenuItem(\"Grid\", on_click: t.grid, checked: t.on)\n"
+              "            MenuItem(\"Snap\", shortcut: \"Ctrl+G\", enabled: t.ok, checked: t.snap)\n"
+              "        }\n    }\n}\n",
+              "(fn pub void C ((widgets.Frame* ui_frame) (T* t))\n"
+              "  (block\n"
+              "    (call (. ui_frame menu_bar))\n"
+              "    (call (. ui_frame at) 42)\n"
+              "    (call (. ui_frame menu) (call (. ui_frame tr) \"View\"))\n"
+              "    (if (call (. ui_frame menu_item_checked) (call (. ui_frame tr) \"Grid\") true (. t on))\n"
+              "      (block\n"
+              "        (call (. t grid))))\n"
+              "    (call (. ui_frame menu_item_checked_with) (call (. ui_frame tr) \"Snap\") \"Ctrl+G\" (. t ok) "
+              "(. t snap))\n"
+              "    (call (. ui_frame end_menu))\n"
+              "    (call (. ui_frame end_menu_bar))))\n"
+              "(import ui.widgets)\n");
     expect_ui("component C(T* t) {\n    MenuBar {\n        Menu(\"File\") {\n"
               "            MenuItem(\"New\", on_click: t.new, shortcut: \"Ctrl+N\")\n            Separator\n"
               "            Menu(\"Recent\") {\n                MenuItem(\"a\", enabled: t.ok)\n            }\n"
