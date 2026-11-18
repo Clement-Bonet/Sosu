@@ -97,6 +97,10 @@ pub struct Material {
     pub mut str texture_path;  // the file named by an OBJ (`map_Kd`) or an FBX; "" else
     pub mut f32 metallic;
     pub mut f32 roughness;
+    // Cut out where its alpha (of its color times its texture) is under this, 0: never (glTF's
+    // `alphaMode` MASK and its `alphaCutoff`): leaves, a fence, the glyphs of a text.
+    pub mut f32 alpha_cutoff = 0.0;
+    pub mut bool unlit = false;  // its color as it is, the lights left out (glTF's KHR_materials_unlit)
 }
 
 // A node of the tree: where it is relative to its parent, its meshes and its children.

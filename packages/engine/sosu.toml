@@ -18,3 +18,4 @@ particles = { path = "../particles" }
 anim = { path = "../anim" }
 assets = { path = "../assets" }
 image = { path = "../image" }
+render = { path = "../render" }  # the fonts of the texts

@@ -14,3 +14,4 @@ gpu = { path = "../gpu" }
 model = { path = "../model" }
 math = { path = "../math" }
 image = { path = "../image" }
+render = { path = "../render" }  # a text drawn into an image (render3d.text)

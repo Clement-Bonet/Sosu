@@ -822,6 +822,127 @@ pub class AnimatorFields : describe.Describe<Animator>, save.Codec<Animator> {
 
 // ---- All of them ----
 
+// ---- Text ----
+
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+// A text in the scene, on a quad that faces the forward of its entity backwards (+z, toward a
+// camera that looks along its forward), or the camera: a sign, a label over a character.
+pub struct Text {
+    pub mut str text = "Text";  // `\n` starts a new line
+    pub mut str font = "";  // a TrueType file of the project; "": the built-in font
+    pub mut f32 height = 0.25;  // of a line, in meters
+    pub mut linear.Vec3 color = linear.Vec3{ x: 1.0, y: 1.0, z: 1.0 };
+    pub mut TextAlign align = TextAlign.Center;
+    pub mut bool lit = false;  // lit as the rest; else its color as it is
+    pub mut bool face_camera = false;  // turned toward the camera, whatever the turn of its entity
+}
+
+pub class TextFields : describe.Describe<Text>, save.Codec<Text> {
+    str[] aligns;
+
+    void init(keeps Arena* arena) {
+        mut str[] a = arena.alloc_slice(str, 3);
+        a[0] = "left";
+        a[1] = "center";
+        a[2] = "right";
+        aligns = a;
+    }
+
+    override str name() {
+        return "text";
+    }
+
+    override Text fresh() {
+        return Text{ };
+    }
+
+    override usize count() {
+        return 7;
+    }
+
+    override describe.Field field(usize i) {
+        if (i == 0) {
+            return describe.text_field("text", "Text");
+        }
+        if (i == 1) {
+            describe.Field f = describe.asset("font", "Font");
+            return describe.Field{ name: f.name, label: f.label, kind: f.kind, tooltip: "A TrueType file; none: the built-in font" };
+        }
+        if (i == 2) {
+            describe.Field f = describe.number("height", "Height", 0.01, 100.0);
+            return describe.Field{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, unit: "m", tooltip: "Of a line" };
+        }
+        if (i == 3) {
+            return describe.color("color", "Color");
+        }
+        if (i == 4) {
+            return describe.choice("align", "Align", aligns);
+        }
+        if (i == 5) {
+            return describe.flag("lit", "Lit");
+        }
+        return describe.flag("face_camera", "Face the camera");
+    }
+
+    override describe.Value get(Text* t, usize i) {
+        if (i == 0) {
+            return describe.Value.Text(t.text);
+        }
+        if (i == 1) {
+            return describe.Value.Text(t.font);
+        }
+        if (i == 2) {
+            return describe.Value.Number(t.height);
+        }
+        if (i == 3) {
+            return describe.Value.Vector(t.color);
+        }
+        if (i == 4) {
+            return describe.Value.Choice(match (t.align) {
+                Left => 0,
+                Center => 1,
+                Right => 2,
+            });
+        }
+        if (i == 5) {
+            return describe.Value.Flag(t.lit);
+        }
+        return describe.Value.Flag(t.face_camera);
+    }
+
+    override void set(Text* t, usize i, describe.Value v) {
+        if (i == 0) {
+            t.text = describe.text_of(v, t.text);
+        } else if (i == 1) {
+            t.font = describe.text_of(v, t.font);
+        } else if (i == 2) {
+            t.height = describe.number_of(v, t.height);
+        } else if (i == 3) {
+            t.color = describe.vector_of(v, t.color);
+        } else if (i == 4) {
+            usize a = describe.choice_of(v, 1);
+            t.align = a == 0 ? TextAlign.Left : a == 2 ? TextAlign.Right : TextAlign.Center;
+        } else if (i == 5) {
+            t.lit = describe.flag_of(v, t.lit);
+        } else {
+            t.face_camera = describe.flag_of(v, t.face_camera);
+        }
+    }
+
+    override void write(text.TextBuilder* out, Text* value) {
+        describe.write_object(out, self as describe.Describe<Text>*, value);
+    }
+
+    override Text? read(Arena* arena, json.Value v) {
+        return describe.read_object(arena, self as describe.Describe<Text>*, v);
+    }
+}
+
 // The tables of the common components of a world, and their descriptions.
 pub class Components {
     pub scene.World* world;
@@ -832,6 +953,7 @@ pub class Components {
     pub scene.Table<Sound>* sounds;
     pub scene.Table<Emitter>* emitters;
     pub scene.Table<Animator>* animators;
+    pub scene.Table<Text>* texts;
     pub MeshFields* mesh_fields;
     pub LightFields* light_fields;
     pub ViewFields* view_fields;
@@ -839,6 +961,7 @@ pub class Components {
     pub SoundFields* sound_fields;
     pub EmitterFields* emitter_fields;
     pub AnimatorFields* animator_fields;
+    pub TextFields* text_fields;
 
     void init(keeps Arena* arena, keeps scene.World* world) {
         self.world = world;
@@ -849,6 +972,7 @@ pub class Components {
         sounds = world.table<Sound>();
         emitters = world.table<Emitter>();
         animators = world.table<Animator>();
+        texts = world.table<Text>();
         mesh_fields = arena.new(MeshFields);
         light_fields = arena.new(LightFields, arena);
         view_fields = arena.new(ViewFields);
@@ -856,6 +980,7 @@ pub class Components {
         sound_fields = arena.new(SoundFields);
         emitter_fields = arena.new(EmitterFields, arena);
         animator_fields = arena.new(AnimatorFields);
+        text_fields = arena.new(TextFields, arena);
     }
 
     // Each table of components added to a writer of the world.
@@ -867,6 +992,7 @@ pub class Components {
         out.add(sounds, sound_fields as save.Codec<Sound>*);
         out.add(emitters, emitter_fields as save.Codec<Emitter>*);
         out.add(animators, animator_fields as save.Codec<Animator>*);
+        out.add(texts, text_fields as save.Codec<Text>*);
     }
 
     // Each table of components read from a reader of the world; false when one is damaged.
@@ -879,6 +1005,7 @@ pub class Components {
         good = r.add(sounds, sound_fields as save.Codec<Sound>*) && good;
         good = r.add(emitters, emitter_fields as save.Codec<Emitter>*) && good;
         good = r.add(animators, animator_fields as save.Codec<Animator>*) && good;
+        good = r.add(texts, text_fields as save.Codec<Text>*) && good;
         return good;
     }
 }

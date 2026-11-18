@@ -833,6 +833,27 @@ pub model.Model!model.ModelError decode_with(Arena* arena, ui8[] data, File[] fi
                 made.metallic = 1.0;  // the defaults of glTF
             },
         }
+        // cut out under its cutoff (MASK; BLEND is drawn opaque until transparency comes)
+        match (json.get(mat, "alphaMode")) {
+            some(mode) => {
+                if (match (json.as_str(mode)) {
+                    some(s) => s == "MASK",
+                    none => false,
+                }) {
+                    made.alpha_cutoff = max(0.0, min(1.0, number(mat, "alphaCutoff", 0.5) as f32));
+                }
+            },
+            none => { },
+        }
+        match (json.get(mat, "extensions")) {
+            some(ext) => {
+                made.unlit = match (json.get(ext, "KHR_materials_unlit")) {
+                    some(u) => true,
+                    none => false,
+                };
+            },
+            none => { },
+        }
         materials.push(made);
     }
 
@@ -1280,6 +1301,24 @@ test "a material, its color and its texture of PNG" {
         some(i) => i == 0,
         none => false,
     });
+}
+
+test "a material cut out (alphaMode MASK, its cutoff) and unlit (KHR_materials_unlit)" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    str uri = joined(&arena, "data:application/octet-stream;base64,", base64.encode(&arena, triangle_bytes(&arena)));
+    str extra = ", \"materials\": [{\"name\": \"leaf\", \"alphaMode\": \"MASK\", \"alphaCutoff\": 0.3, \"extensions\": {\"KHR_materials_unlit\": {}}}, {\"name\": \"glass\", \"alphaMode\": \"BLEND\"}]";
+    model.Model m = match (decode(&arena, bytes_of(triangle_json(&arena, uri, extra)))) {
+        ok(read) => read,
+        err(e) => {
+            io.print("{}", model.message(e));
+            assert(false);
+            return;
+        },
+    };
+    assert(m.materials.len == 2);
+    assert(abs(m.materials[0].alpha_cutoff - 0.3) < 0.0001 && m.materials[0].unlit);
+    assert(m.materials[1].alpha_cutoff == 0.0 && !m.materials[1].unlit);  // BLEND: opaque for now
 }
 
 test "damaged and unsupported documents" {

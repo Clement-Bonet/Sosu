@@ -1073,11 +1073,11 @@ usize field_named(Game* g, usize kind, str name) {
 test "the contract: entities, components of engine and of the game, saved, played and stopped" {
     Game* g = sozo_open();
     defer sozo_close(g);
-    assert(sozo_contract() == CONTRACT && sozo_count(g) == 0 && sozo_kind_count(g) == 7);
+    assert(sozo_contract() == CONTRACT && sozo_count(g) == 0 && sozo_kind_count(g) == 8);
     on_world(g, add_spin);
     on_step(g, turn);
-    assert(sozo_kind_count(g) == 8 && sozo_kind_name(g, 7) == "spin");
-    assert(sozo_kind_file(g, 7) == "src/spin.sosu" && sozo_kind_line(g, 7) == 12);
+    assert(sozo_kind_count(g) == 9 && sozo_kind_name(g, 8) == "spin");
+    assert(sozo_kind_file(g, 8) == "src/spin.sosu" && sozo_kind_line(g, 8) == 12);
     assert(sozo_kind_file(g, 0) == "" && sozo_kind_line(g, 0) == 0 && sozo_kind_file(g, 99) == "");
     // entities, names, parents
     scene.Entity crate = sozo_spawn(g, "crate");
@@ -1129,7 +1129,7 @@ test "the contract: entities, components of engine and of the game, saved, playe
     defer keep.free();
     str saved = text.repeat(&keep, sozo_save(g), 1);
     sozo_clear(g);
-    assert(sozo_count(g) == 0 && sozo_kind_count(g) == 8);
+    assert(sozo_count(g) == 0 && sozo_kind_count(g) == 9);
     assert(sozo_load(g, saved) && sozo_count(g) == 2 && sozo_message(g) == "");
     scene.Entity[] back = sozo_entities(g);
     assert(sozo_name_of(g, back[1]) == "top" && sozo_get(g, back[1], kind_named(g, "spin"), 0).number == 720.0);

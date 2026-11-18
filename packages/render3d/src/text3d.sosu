@@ -1,0 +1,173 @@
+// render3d.text3d: a text placed in a scene (a sign, a label over a character): its lines drawn into
+// an image with `render` (a TrueType font, or the built-in one without), on a quad that faces +z,
+// cut out where the glyphs are not (`Material.alpha_cutoff`), lit or not. The quad is as high as
+// its lines (`TextLook.height` each, in meters), centered on its origin up and down, and on it, on
+// its left or on its right across, as its lines are aligned.
+import std.text;
+import math.linear;
+import math.geometry;
+import image.image;
+import model.model;
+import render.canvas;
+import render.truetype;
+
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+pub struct TextLook {
+    pub f32 height = 0.25;  // of a line, in meters
+    pub Align align = Align.Center;
+    pub f32[4] color = [1.0, 1.0, 1.0, 1.0];  // linear RGBA
+    pub bool unlit = true;  // its color as it is; else lit as the rest
+    pub f32 pixels = 64.0;  // of a line in its image: how sharp it is up close
+}
+
+// The model of `words` as `look` says, in `arena`: one mesh, one material, its image; none when
+// there is nothing to draw (no line with a glyph).
+pub model.Model? text_model(Arena* arena, truetype.Font*? face, str words, TextLook look) {
+    str[] lines = text.split(arena, words, "\n");
+    // each line measured, in pixels of the image
+    i32 scale = max((look.pixels / 10.0) as i32, 1);  // of the built-in font, when there is no face
+    f32 line = match (face) {
+        some(f) => max(f.line_height(look.pixels), 1.0),
+        none => canvas.text_size("M", scale).h,
+    };
+    f32[] widths = arena.alloc_slice(f32, lines.len);
+    mut f32 widest = 0.0;
+    for (usize i in 0..lines.len) {
+        widths[i] = match (face) {
+            some(f) => f.measure(lines[i], look.pixels),
+            none => canvas.text_size(lines[i], scale).w,
+        };
+        widest = max(widest, widths[i]);
+    }
+    if (widest < 1.0) {
+        return none;
+    }
+    i32 pad = 2;
+    i32 w = (widest + 0.999) as i32 + 2 * pad;
+    i32 h = (line * lines.len as f32 + 0.999) as i32 + 2 * pad;
+    mut canvas.Canvas c = canvas.create(arena, w, h);
+    c.clear(canvas.Color{ r: 255, g: 255, b: 255, a: 0 });  // white, transparent: its color tints it
+    canvas.Color ink = canvas.Color{ r: 255, g: 255, b: 255, a: 255 };
+    for (usize i in 0..lines.len) {
+        f32 x = pad as f32 + match (look.align) {
+            Left => 0.0,
+            Center => (widest - widths[i]) / 2.0,
+            Right => widest - widths[i],
+        };
+        f32 y = pad as f32 + line * i as f32;
+        match (face) {
+            some(f) => {
+                c.text_with(f, look.pixels, x, y, lines[i], ink);
+            },
+            none => {
+                c.text(x, y, lines[i], ink, scale);
+            },
+        }
+    }
+    // the quad, in meters: as high as its lines
+    f32 metre = look.height / line;  // meters per pixel
+    f32 qw = w as f32 * metre;
+    f32 qh = h as f32 * metre;
+    f32 left = match (look.align) {
+        Left => -(pad as f32) * metre,
+        Center => -qw / 2.0,
+        Right => -qw + pad as f32 * metre,
+    };
+    f32 top = qh / 2.0;
+    model.Vertex[] vertices = arena.alloc_slice(model.Vertex, 4);
+    vertices[0] = model.Vertex{ position: [left, top, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] };
+    vertices[1] = model.Vertex{ position: [left + qw, top, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0] };
+    vertices[2] = model.Vertex{ position: [left + qw, top - qh, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0] };
+    vertices[3] = model.Vertex{ position: [left, top - qh, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0] };
+    ui32[] indices = arena.alloc_slice(ui32, 6);
+    mut ui32[6] order = [0, 3, 2, 0, 2, 1];  // counterclockwise seen from +z
+    for (usize i in 0..6) {
+        indices[i] = order[i];
+    }
+    mut model.Material ink_of = model.default_material("text");
+    ink_of.base_color = look.color;
+    ink_of.texture = some(0);
+    ink_of.alpha_cutoff = 0.5;
+    ink_of.unlit = look.unlit;
+    model.Mesh[] meshes = arena.alloc_slice(model.Mesh, 1);
+    meshes[0] = model.Mesh{
+        name: "text",
+        vertices: vertices,
+        indices: indices,
+        material: some(0),
+        bounds: geometry.aabb(linear.vec3(left, top - qh, 0.0), linear.vec3(left + qw, top, 0.0))
+    };
+    model.Material[] materials = arena.alloc_slice(model.Material, 1);
+    materials[0] = ink_of;
+    image.Image[] images = arena.alloc_slice(image.Image, 1);
+    images[0] = c.image();
+    usize[] mine = arena.alloc_slice(usize, 1);
+    mine[0] = 0;
+    model.Node[] nodes = arena.alloc_slice(model.Node, 1);
+    nodes[0] = model.Node{ name: "text", local: linear.identity4(), meshes: mine, children: arena.alloc_slice(usize, 0) };
+    usize[] roots = arena.alloc_slice(usize, 1);
+    roots[0] = 0;
+    return some(model.Model{ meshes: meshes, materials: materials, images: images, nodes: nodes, roots: roots });
+}
+
+test "a text of two lines, centered: one quad as high as its lines, its image cut out around the glyphs" {
+    mut Arena arena = Arena.new(1 * MB);
+    defer arena.free();
+    TextLook look = TextLook{ height: 0.5 };
+    model.Model m = match (text_model(&arena, none, "Lantern\nOn", look)) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(m.meshes.len == 1 && m.meshes[0].vertices.len == 4 && m.meshes[0].indices.len == 6);
+    geometry.Aabb b = m.meshes[0].bounds;
+    // two lines of 0.5 m, a little margin; centered on the origin
+    assert(b.max.y - b.min.y > 1.0 && b.max.y - b.min.y < 1.2);
+    assert(abs(b.min.x + b.max.x) < 0.001 && abs(b.min.y + b.max.y) < 0.001 && b.max.x - b.min.x > 1.0);
+    // the image: glyphs opaque, the rest transparent; the material cuts it out, unlit
+    image.Image img = m.images[0];
+    mut usize ink = 0;
+    mut usize clear = 0;
+    for (ui32 p in img.pixels) {
+        if (p >> 24 == 255) {
+            ink += 1;
+        } else if (p >> 24 == 0) {
+            clear += 1;
+        }
+    }
+    assert(ink > 100 && clear > ink);
+    assert(m.materials[0].alpha_cutoff == 0.5 && m.materials[0].unlit);
+    // aligned on the left: the quad starts at its origin; nothing to draw: none
+    model.Model l = match (text_model(&arena, none, "Lantern", TextLook{ align: Align.Left })) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    assert(abs(l.meshes[0].bounds.min.x) < 0.05);
+    assert(match (text_model(&arena, none, "", look)) {
+        some(x) => false,
+        none => true,
+    });
+    // in a TrueType font (the tests run from the root of the repository)
+    match (truetype.load(&arena, "packages/render/fonts/NotoSans-Regular.ttf")) {
+        ok(face) => {
+            match (text_model(&arena, some(face), "Lantern", look)) {
+                some(t) => {
+                    geometry.Aabb tb = t.meshes[0].bounds;
+                    assert(tb.max.y - tb.min.y > 0.5 && tb.max.y - tb.min.y < 0.6 && tb.max.x - tb.min.x > 1.0);
+                },
+                none => assert(false),
+            }
+        },
+        err(e) => assert(false),
+    }
+}
