@@ -1,4 +1,4 @@
-contract 7
+contract 8
 kinds before setup 8
 kinds 9, the last lift
 body.shape: Shape, kind 6, 4 choices, the second sphere

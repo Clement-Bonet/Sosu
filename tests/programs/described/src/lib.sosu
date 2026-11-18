@@ -89,6 +89,16 @@ test "the components described: changed within their bounds, saved and read agai
     ];
     assert(host.sozo_set_items(g, lawn, t, 4, sprays[0..2]));
     assert(host.sozo_item_count(g, lawn, t, 2) == 2 && host.sozo_item(g, lawn, t, 2, 1).number == 24.0);
+    // a curve and a gradient (contract 8): their keys and stops as items, sorted
+    assert(host.sozo_field(g, t, 5).kind == describe.Kind.Curve && host.sozo_field(g, t, 5).label == "Growth over the years");
+    assert(host.sozo_field(g, t, 6).kind == describe.Kind.Gradient && host.sozo_field(g, t, 6).item == describe.Kind.Stop);
+    mut host.Value[2] keys = [
+        host.Value{ tag: host.Tag.Key, number: 10.0, x: 8.0 }, host.Value{ tag: host.Tag.Key, number: 0.0, x: 0.5 },
+    ];
+    assert(host.sozo_set_items(g, lawn, t, 5, keys[0..2]));
+    assert(host.sozo_item(g, lawn, t, 5, 0).number == 0.0 && host.sozo_item(g, lawn, t, 5, 1).x == 8.0);
+    mut host.Value[1] green = [host.Value{ tag: host.Tag.Stop, number: 0.5, x: 0.25, y: 0.75, z: 0.25, w: 1.0 }];
+    assert(host.sozo_set_items(g, lawn, t, 6, green[0..1]));
     assert(host.sozo_get(g, lawn, s, 0).number == 20.0 && host.sozo_get(g, lawn, s, 2).whole == -3);
     assert(host.sozo_get(g, lawn, s, 4).whole == 0);
     // the scene file holds them by name, the choices by the names of their variants
@@ -105,6 +115,7 @@ test "the components described: changed within their bounds, saved and read agai
     assert(host.sozo_get(g, again, t, 1).choice == 1 && host.sozo_has(g, again, kind_named(g, "fence_post")));
     assert(host.sozo_item_count(g, again, t, 3) == 1 && host.sozo_item(g, again, t, 3, 0).text == "models/apple.glb");
     assert(host.sozo_item(g, again, t, 4, 0).choice == 2 && host.sozo_item(g, again, t, 2, 0).number == 6.5);
+    assert(host.sozo_item_count(g, again, t, 5) == 2 && host.sozo_item(g, again, t, 6, 0).y == 0.75);
 }
 
 test "the structs themselves stay plain values" {

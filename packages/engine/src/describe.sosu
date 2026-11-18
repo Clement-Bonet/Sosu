@@ -13,10 +13,13 @@
 // A field may be a list of values of one kind (`List`, the kind of its items `Field.item`): the
 // items are read one by one (`items`, `item`) and given all at once (`set_items`), which is how they
 // cross a boundary of C too; `get` gives a list as the number of its items, `set` leaves it. Saved
-// as a JSON array of its items.
+// as a JSON array of its items. A curve (`Curve`, of `math.curve`) is the list of its keys
+// (`Value.Key`), a gradient (`Gradient`) that of its stops (`Value.Stop`), read and given the same way;
+// a key is saved as `[time, value, in tangent, out tangent]`, a stop as `[at, red, green, blue, alpha]`.
 import std.json;
 import std.text;
 import math.linear;
+import math.curve;
 import scene.scene;
 import scene.save;
 
@@ -30,6 +33,10 @@ pub enum Kind {
     Choice,  // one of `choices`, by its index
     Asset,   // the path of a file of the project (a model, a sound...), relative to its folder
     List,    // values of the kind `item`, as many as the program wants
+    Curve,     // a value over time (`math.curve.Curve`): its keys, items of kind `Key`
+    Gradient,  // colors along 0 to 1 (`math.curve.Gradient`): its stops, items of kind `Stop`
+    Key,       // a key of a curve: a time, a value, its tangents
+    Stop,      // a stop of a gradient: where it is, its color (linear RGBA)
 }
 
 pub struct Field {
@@ -54,6 +61,8 @@ pub enum Value {
     Text(str s),       // `Text` and `Asset`
     Vector(linear.Vec3 v),  // `Vector` and `Color`
     Choice(usize index),
+    Key(f32 time, f32 value, f32 in_tangent, f32 out_tangent),  // a key of a curve
+    Stop(f32 at, linear.Vec4 color),  // a stop of a gradient
 }
 
 // The fields of a component of type T.
@@ -137,12 +146,24 @@ pub Field item_of(Field f) {
     };
 }
 
-// Whether `f` is a list.
+// Whether `f` holds items read one by one and given all at once: a list, a curve, a gradient.
 pub bool is_list(Field f) {
     return match (f.kind) {
         List => true,
+        Curve => true,
+        Gradient => true,
         _ => false,
     };
+}
+
+// A curve, its keys its items.
+pub Field curve_field(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Curve, item: Kind.Key };
+}
+
+// A gradient, its stops its items.
+pub Field gradient_field(str name, str label) {
+    return Field{ name: name, label: label, kind: Kind.Gradient, item: Kind.Stop };
 }
 
 // The number of `v`, or `otherwise`.
@@ -248,6 +269,30 @@ void write_value(text.TextBuilder* out, Field f, Value v) {
             write_number(out, x.z);
             out.push("]");
         },
+        Key(time, value, a, b) => {
+            out.push("[");
+            write_number(out, time);
+            out.push(", ");
+            write_number(out, value);
+            out.push(", ");
+            write_number(out, a);
+            out.push(", ");
+            write_number(out, b);
+            out.push("]");
+        },
+        Stop(at, c) => {
+            out.push("[");
+            write_number(out, at);
+            out.push(", ");
+            write_number(out, c.x);
+            out.push(", ");
+            write_number(out, c.y);
+            out.push(", ");
+            write_number(out, c.z);
+            out.push(", ");
+            write_number(out, c.w);
+            out.push("]");
+        },
         Choice(i) => {
             str chosen = match (f.choices) {
                 some(c) => i < c.len ? c[i] : "",
@@ -284,7 +329,98 @@ Value? read_value(Arena* arena, Field f, json.Value v) {
             none => none,
         },
         List => none,  // read item by item (`read_object`)
+        Curve => none,
+        Gradient => none,
+        Key => match (numbers_in(v, 4)) {
+            some(n) => some(Value.Key(n[0], n[1], n[2], n[3])),
+            none => none,
+        },
+        Stop => match (numbers_in(v, 5)) {
+            some(n) => some(Value.Stop(n[0], linear.Vec4{ x: n[1], y: n[2], z: n[3], w: n[4] })),
+            none => none,
+        },
     };
+}
+
+// The `count` numbers of the array `v` (at most 5), none when it is not one of them.
+f32[5]? numbers_in(json.Value v, usize count) {
+    if (json.len(v) != count) {
+        return none;
+    }
+    mut f32[5] out = [0.0; 5];
+    for (usize i in 0..count) {
+        match (json.at(v, i)) {
+            some(item) => {
+                match (json.as_f64(item)) {
+                    some(n) => {
+                        out[i] = n as f32;
+                    },
+                    none => {
+                        return none;
+                    },
+                }
+            },
+            none => {
+                return none;
+            },
+        }
+    }
+    return some(out);
+}
+
+// The keys of a curve given as items (`Value.Key`), in `arena`: those that are not keys left out,
+// sorted by time.
+pub curve.Key[] keys_of(Arena* arena, Value[] values) {
+    curve.Key[] out = arena.alloc_slice(curve.Key, values.len);
+    mut usize n = 0;
+    for (Value v in values) {
+        match (v) {
+            Key(time, value, a, b) => {
+                mut usize at = n;  // kept sorted by time
+                while (at > 0 && out[at - 1].time > time) {
+                    out[at] = out[at - 1];
+                    at -= 1;
+                }
+                out[at] = curve.Key{ time: time, value: value, in_tangent: a, out_tangent: b };
+                n += 1;
+            },
+            _ => { },
+        }
+    }
+    return out[0..n];
+}
+
+// The stops of a gradient given as items (`Value.Stop`), in `arena`: those that are not stops left
+// out, sorted by where they are, each held within 0 to 1.
+pub curve.Stop[] stops_of(Arena* arena, Value[] values) {
+    curve.Stop[] out = arena.alloc_slice(curve.Stop, values.len);
+    mut usize n = 0;
+    for (Value v in values) {
+        match (v) {
+            Stop(where, c) => {
+                f32 at = max(0.0, min(1.0, where));
+                mut usize i = n;
+                while (i > 0 && out[i - 1].at > at) {
+                    out[i] = out[i - 1];
+                    i -= 1;
+                }
+                out[i] = curve.Stop{ at: at, color: c };
+                n += 1;
+            },
+            _ => { },
+        }
+    }
+    return out[0..n];
+}
+
+// A key of a curve as an item.
+pub Value key_value(curve.Key k) {
+    return Value.Key(k.time, k.value, k.in_tangent, k.out_tangent);
+}
+
+// A stop of a gradient as an item.
+pub Value stop_value(curve.Stop s) {
+    return Value.Stop(s.at, s.color);
 }
 
 Value? text_in(Arena* arena, json.Value v) {
@@ -670,6 +806,99 @@ test "lists: written as arrays, read back item by item, each held within the bou
     match (f.read(&arena, v)) {
         some(back) => {
             assert(back.steps.len == 2 && back.steps[0] == 0.25 && back.steps[1] == 2.0 && back.sounds.len == 0);
+        },
+        none => assert(false),
+    }
+}
+
+// A component with a curve and a gradient: how a light fades, and its colors over that time.
+struct Fade {
+    mut curve.Curve fade = curve.Curve{ keys: [] };
+    mut curve.Gradient tint = curve.Gradient{ stops: [] };
+}
+
+class FadeFields : Describe<Fade>, save.Codec<Fade> {
+    Arena* arena;
+
+    void init(keeps Arena* arena) {
+        self.arena = arena;
+    }
+
+    override str name() {
+        return "fade";
+    }
+
+    override void write(text.TextBuilder* out, Fade* value) {
+        write_object(out, self as Describe<Fade>*, value);
+    }
+
+    override Fade? read(Arena* arena, json.Value v) {
+        return read_object(arena, self as Describe<Fade>*, v);
+    }
+
+    override Fade fresh() {
+        return Fade{ };
+    }
+
+    override usize count() {
+        return 2;
+    }
+
+    override Field field(usize i) {
+        return i == 0 ? curve_field("fade", "Fade") : gradient_field("tint", "Tint");
+    }
+
+    override Value get(Fade* f, usize i) {
+        return Value.Whole((i == 0 ? f.fade.keys.len : f.tint.stops.len) as i64);
+    }
+
+    override void set(Fade* f, usize i, Value v) { }
+
+    override usize items(Fade* f, usize i) {
+        return i == 0 ? f.fade.keys.len : f.tint.stops.len;
+    }
+
+    override Value item(Fade* f, usize i, usize j) {
+        return i == 0 ? key_value(f.fade.keys[j]) : stop_value(f.tint.stops[j]);
+    }
+
+    override void set_items(Fade* f, usize i, Value[] values) keeps self {
+        if (i == 0) {
+            f.fade = curve.Curve{ keys: keys_of(arena, values), mode: f.fade.mode };
+        } else {
+            f.tint = curve.Gradient{ stops: stops_of(arena, values) };
+        }
+    }
+}
+
+test "a curve and a gradient: their keys and stops as items, sorted, saved and read back" {
+    mut Arena arena = Arena.new(64 * KB);
+    defer arena.free();
+    FadeFields* f = arena.new(FadeFields, &arena);
+    Describe<Fade>* d = f as Describe<Fade>*;
+    assert(is_list(d.field(0)) && is_list(d.field(1)));
+    mut Fade x = d.fresh();
+    // given out of order: sorted by time; a stop beyond 1 held at 1
+    mut Value[2] keys = [Value.Key(1.0, 0.0, 0.0, 0.0), Value.Key(0.0, 1.0, 0.0, -1.0)];
+    d.set_items(&x, 0, keys[0..2]);
+    mut Value[2] stops = [Value.Stop(0.0, linear.Vec4{ x: 1.0, y: 0.75, z: 0.5, w: 1.0 }), Value.Stop(4.0, linear.Vec4{ x: 0.25, y: 0.0, z: 0.0, w: 0.0 })];
+    d.set_items(&x, 1, stops[0..2]);
+    assert(x.fade.keys[0].time == 0.0 && x.fade.keys[1].time == 1.0 && x.tint.stops[1].at == 1.0);
+    assert(abs(x.fade.sample(0.5) - 0.5) < 0.001);
+    text.TextBuilder* out = text.builder(&arena);
+    f.write(out, &x);
+    assert(out.text() == "{\"fade\": [[0, 1, 0, -1], [1, 0, 0, 0]], \"tint\": [[0, 1, 0.75, 0.5, 1], [1, 0.25, 0, 0, 0]]}");
+    json.Value v = match (json.parse(&arena, out.text())) {
+        ok(p) => p,
+        err(e) => {
+            assert(false);
+            return;
+        },
+    };
+    match (f.read(&arena, v)) {
+        some(back) => {
+            assert(back.fade.keys.len == 2 && back.fade.keys[0].out_tangent == -1.0);
+            assert(back.tint.stops.len == 2 && back.tint.stops[0].color.y == 0.75);
         },
         none => assert(false),
     }
