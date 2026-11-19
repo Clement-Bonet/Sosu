@@ -2391,6 +2391,9 @@ pub struct Frame {
     mut bool tab_typed = false;  // a text area with `tabs` has the keyboard: Tab types
     // The rectangle of the last widget placed, or of the last list: what a context menu is for.
     mut canvas.Rect last = nowhere();
+    // The room on the right of the next text field that its text leaves to its buttons (the arrows of a
+    // number field).
+    mut f32 field_buttons = 0.0;
     // The titles of the bar of menus being described (`menu_bar`): its layout, their identities.
     mut usize menu_bar_depth = 0;
     mut ui64[16] bar_titles = [0; 16];
@@ -2684,15 +2687,22 @@ pub struct Frame {
     // A button that can be disabled: dimmed, and never clicked.
     // With the keyboard, Space or Enter clicks it.
     pub bool button_enabled(str text, bool enabled) {
+        return button_sized(text, 0.0, enabled);
+    }
+
+    // A button `width` pixels wide at least, its text centered in it: buttons of icons of different
+    // widths (a chevron right, then down) keep the same size.
+    pub bool button_sized(str text, f32 width, bool enabled) {
         ui64 id = take_id();
         take_styles();
         Look first = look(Button, enabled ? 0 : state_disabled());
         canvas.Rect size = measure_label(text, first.font_size);
-        canvas.Rect r = place(size.w + 2.0 * first.padding, first.height);
+        canvas.Rect r = place(max(width, size.w + 2.0 * first.padding), first.height);
+        f32 inset = (r.w - size.w) / 2.0;  // the padding, for a button as wide as its text
         interactive(r);
         if (!enabled) {
             paint(r, first);
-            write_label(r.x + first.padding, r.y, r.h, text, first.color, first.font_size);
+            write_label(r.x + inset, r.y, r.h, text, first.color, first.font_size);
             return false;
         }
         focusable(id, r);
@@ -2702,7 +2712,7 @@ pub struct Frame {
                 | (ui.focus == id ? state_focus() : 0);
         Look l = look(Button, states);
         paint(r, l);
-        write_label(r.x + l.padding, r.y, r.h, text, l.color, l.font_size);
+        write_label(r.x + inset, r.y, r.h, text, l.color, l.font_size);
         if (ui.focus == id) {
             ring(r, l.accent);
         }
@@ -2805,9 +2815,10 @@ pub struct Frame {
         canvas.Rect inner = canvas.Rect{
             x: r.x + first.padding,
             y: r.y,
-            w: max(width - 2.0 * first.padding, 0.0),
+            w: max(width - 2.0 * first.padding - field_buttons, 0.0),
             h: r.h
         };
+        field_buttons = 0.0;
         if (ui.pressed && over(r)) {
             if (ui.focus != id) {
                 ui.focus = id;
@@ -3137,6 +3148,7 @@ pub struct Frame {
         }
         mut TextBuffer shown = format_number(*value, n, true);
         Format accept = Format{ accept: n.decimals > 0 ? Decimal : Integer };
+        field_buttons = 18.0;  // its text stops before its arrows
         field_id(id, focused ? short_target(&ui.number_text) : short_target(&shown), width, accept);
         canvas.Rect r = last;
         focused = ui.focus == id;
@@ -7562,6 +7574,59 @@ test "a button is clicked by a press and a release over it" {
     f = begin(&ui, &surface, 10.0, 10.0);
     assert(!f.button("OK"));
     f.finish();
+}
+
+test "buttons of a width given: the same size whatever their text, wider when their text needs it" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 300, 100);
+    mut Ui ui = Ui{ };
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.row();
+    f.button("i");
+    canvas.Rect plain = f.last;
+    f.button("WW");
+    canvas.Rect plain_wide = f.last;
+    f32 w = plain_wide.w + 10.0;
+    f.button_sized("i", w, true);
+    canvas.Rect narrow = f.last;
+    f.button_sized("WW", w, true);
+    canvas.Rect wide = f.last;
+    f.button_sized("WW", 1.0, false);
+    canvas.Rect longer = f.last;
+    f.end_row();
+    f.finish();
+    assert(plain.w < plain_wide.w && narrow.w == w && wide.w == w && longer.w == plain_wide.w);
+}
+
+test "a number field: its text stops before its arrows" {
+    mut Arena arena = Arena.new(256 * KB);
+    defer arena.free();
+    mut canvas.Canvas surface = canvas.create(&arena, 200, 60);
+    mut Ui ui = Ui{ };
+    mut i64 v = -1234567;  // long: it would run under the arrows
+    mut Frame f = begin(&ui, &surface, 0.0, 0.0);
+    f.number_field(&v, 70.0, Number{ decimals: 3 });
+    canvas.Rect r = f.last;
+    f.finish();
+    // between the arrows (their middle column, away from their marks) and the border: no text
+    mut Arena blank_arena = Arena.new(256 * KB);
+    defer blank_arena.free();
+    mut canvas.Canvas blank = canvas.create(&blank_arena, 200, 60);
+    mut Ui blank_ui = Ui{ };
+    mut i64 none_v = 0;
+    mut Frame g = begin(&blank_ui, &blank, 0.0, 0.0);
+    g.number_field(&none_v, 70.0, Number{ decimals: 0 });
+    g.finish();
+    mut i32 differ = 0;
+    for (i32 y in (r.y + 3.0) as i32..(r.y + r.h - 3.0) as i32) {
+        for (i32 x in (r.x + r.w - 18.0) as i32..(r.x + r.w - 3.0) as i32) {
+            if (surface.at(x, y) != blank.at(x, y)) {
+                differ += 1;
+            }
+        }
+    }
+    assert(differ == 0);
 }
 
 test "a text field takes the keyboard when clicked" {
