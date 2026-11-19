@@ -2,8 +2,12 @@
 // an image with `render` (a TrueType font, or the built-in one without), on a quad that faces +z,
 // cut out where the glyphs are not (`Material.alpha_cutoff`), lit or not. The quad is as high as
 // its lines (`TextLook.height` each, in meters), centered on its origin up and down, and on it, on
-// its left or on its right across, as its lines are aligned.
+// its left or on its right across, as its lines are aligned. With a depth, its letters are solid: the
+// same face behind, turned back, and their sides between both, along the edge of the cut (where the
+// image is half opaque, as the cut is), in a shade of its color.
+import std.math;
 import std.text;
+import std.vec;
 import math.linear;
 import math.geometry;
 import image.image;
@@ -23,7 +27,12 @@ pub struct TextLook {
     pub f32[4] color = [1.0, 1.0, 1.0, 1.0];  // linear RGBA
     pub bool unlit = true;  // its color as it is; else lit as the rest
     pub f32 pixels = 64.0;  // of a line in its image: how sharp it is up close
+    pub f32 depth = 0.0;  // in meters, behind its face (toward -z): 0, a flat text
 }
+
+// The shade of the sides of a solid text, of 255: darker unlit (where nothing shades them) than lit.
+ui8 SIDE_UNLIT = 150;
+ui8 SIDE_LIT = 235;
 
 // The model of `words` as `look` says, in `arena`: one mesh, one material, its image; none when
 // there is nothing to draw (no line with a glyph).
@@ -50,8 +59,15 @@ pub model.Model? text_model(Arena* arena, truetype.Font*? face, str words, TextL
     i32 pad = 2;
     i32 w = (widest + 0.999) as i32 + 2 * pad;
     i32 h = (line * lines.len as f32 + 0.999) as i32 + 2 * pad;
-    mut canvas.Canvas c = canvas.create(arena, w, h);
+    bool solid = look.depth > 0.0;
+    // a solid text: under its lines, after a transparent row, a block of the shade of its sides
+    i32 tall = solid ? h + 4 : h;
+    mut canvas.Canvas c = canvas.create(arena, w, tall);
     c.clear(canvas.Color{ r: 255, g: 255, b: 255, a: 0 });  // white, transparent: its color tints it
+    if (solid) {
+        ui8 shade = look.unlit ? SIDE_UNLIT : SIDE_LIT;
+        c.fill(canvas.Rect{ x: 0.0, y: (h + 1) as f32, w: 3.0, h: 3.0 }, canvas.Color{ r: shade, g: shade, b: shade, a: 255 });
+    }
     canvas.Color ink = canvas.Color{ r: 255, g: 255, b: 255, a: 255 };
     for (usize i in 0..lines.len) {
         f32 x = pad as f32 + match (look.align) {
@@ -79,15 +95,34 @@ pub model.Model? text_model(Arena* arena, truetype.Font*? face, str words, TextL
         Right => -qw + pad as f32 * metre,
     };
     f32 top = qh / 2.0;
-    model.Vertex[] vertices = arena.alloc_slice(model.Vertex, 4);
-    vertices[0] = model.Vertex{ position: [left, top, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] };
-    vertices[1] = model.Vertex{ position: [left + qw, top, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0] };
-    vertices[2] = model.Vertex{ position: [left + qw, top - qh, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 1.0] };
-    vertices[3] = model.Vertex{ position: [left, top - qh, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 1.0] };
-    ui32[] indices = arena.alloc_slice(ui32, 6);
-    mut ui32[6] order = [0, 3, 2, 0, 2, 1];  // counterclockwise seen from +z
-    for (usize i in 0..6) {
-        indices[i] = order[i];
+    f32 v = h as f32 / tall as f32;  // the lines, of the image
+    vec.Vec<model.Vertex>* vertices = vec.new<model.Vertex>(arena);
+    vec.Vec<ui32>* indices = vec.new<ui32>(arena);
+    vertices.push(model.Vertex{ position: [left, top, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] });
+    vertices.push(model.Vertex{ position: [left + qw, top, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0] });
+    vertices.push(model.Vertex{ position: [left + qw, top - qh, 0.0], normal: [0.0, 0.0, 1.0], uv: [1.0, v] });
+    vertices.push(model.Vertex{ position: [left, top - qh, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, v] });
+    push_all(indices, 0, [0, 3, 2, 0, 2, 1]);  // counterclockwise seen from +z
+    if (solid) {
+        f32 z = -look.depth;
+        // its face behind, the same image turned back (its letters read mirrored from there)
+        vertices.push(model.Vertex{ position: [left, top, z], normal: [0.0, 0.0, -1.0], uv: [0.0, 0.0] });
+        vertices.push(model.Vertex{ position: [left + qw, top, z], normal: [0.0, 0.0, -1.0], uv: [1.0, 0.0] });
+        vertices.push(model.Vertex{ position: [left + qw, top - qh, z], normal: [0.0, 0.0, -1.0], uv: [1.0, v] });
+        vertices.push(model.Vertex{ position: [left, top - qh, z], normal: [0.0, 0.0, -1.0], uv: [0.0, v] });
+        push_all(indices, 4, [0, 2, 3, 0, 1, 2]);  // counterclockwise seen from -z
+        mut Sides s = Sides{
+            img: c.image(),
+            lines: h,
+            left: left,
+            top: top,
+            metre: metre,
+            depth: look.depth,
+            shade: [1.5 / w as f32, (h as f32 + 2.5) / tall as f32],
+            vertices: vertices,
+            indices: indices
+        };
+        s.walk();
     }
     mut model.Material ink_of = model.default_material("text");
     ink_of.base_color = look.color;
@@ -97,10 +132,10 @@ pub model.Model? text_model(Arena* arena, truetype.Font*? face, str words, TextL
     model.Mesh[] meshes = arena.alloc_slice(model.Mesh, 1);
     meshes[0] = model.Mesh{
         name: "text",
-        vertices: vertices,
-        indices: indices,
+        vertices: vertices.items(),
+        indices: indices.items(),
         material: some(0),
-        bounds: geometry.aabb(linear.vec3(left, top - qh, 0.0), linear.vec3(left + qw, top, 0.0))
+        bounds: geometry.aabb(linear.vec3(left, top - qh, solid ? -look.depth : 0.0), linear.vec3(left + qw, top, 0.0))
     };
     model.Material[] materials = arena.alloc_slice(model.Material, 1);
     materials[0] = ink_of;
@@ -113,6 +148,141 @@ pub model.Model? text_model(Arena* arena, truetype.Font*? face, str words, TextL
     usize[] roots = arena.alloc_slice(usize, 1);
     roots[0] = 0;
     return some(model.Model{ meshes: meshes, materials: materials, images: images, nodes: nodes, roots: roots });
+}
+
+// The six indices of two triangles, from `first`.
+void push_all(vec.Vec<ui32>* indices, ui32 first, ui32[6] order) {
+    for (ui32 i in order) {
+        indices.push(first + i);
+    }
+}
+
+// The sides of a solid text: a quad for each piece of the edge of its cut, found square by square
+// between the centers of the pixels of its lines (marching squares, on the alpha at a half, as the
+// cut has it), from its face back to `depth`, turned outward (toward the transparent).
+struct Sides {
+    image.Image img;
+    i32 lines;  // the rows of the image that hold its lines
+    f32 left;  // where the image starts on the quad, and its meters per pixel
+    f32 top;
+    f32 metre;
+    f32 depth;
+    f32[2] shade;  // where the sides find their color in the image
+    vec.Vec<model.Vertex>* vertices;
+    vec.Vec<ui32>* indices;
+
+    // The alpha of the pixel at (x, y), of 1; 0 outside the lines.
+    f32 alpha(i32 x, i32 y) {
+        if (x < 0 || y < 0 || x >= img.width || y >= lines) {
+            return 0.0;
+        }
+        return (img.pixels[(y * img.width + x) as usize] >> 24) as f32 / 255.0;
+    }
+
+    void walk() {
+        for (mut i32 y = 0; y + 1 < lines; y += 1) {
+            for (mut i32 x = 0; x + 1 < img.width; x += 1) {
+                square(x, y);
+            }
+        }
+    }
+
+    // The square between the centers of the pixels (x, y) and (x + 1, y + 1): where its edges cross
+    // the half (in the order top, right, bottom, left), joined two by two.
+    void square(i32 x, i32 y) {
+        f32 a = alpha(x, y);
+        f32 b = alpha(x + 1, y);
+        f32 c = alpha(x + 1, y + 1);
+        f32 d = alpha(x, y + 1);
+        bool ia = a >= 0.5;
+        bool ib = b >= 0.5;
+        bool ic = c >= 0.5;
+        bool id = d >= 0.5;
+        if (ia == ib && ia == ic && ia == id) {
+            return;  // all in, or all out
+        }
+        mut f32[8] at = [0.0; 8];  // the crossings: x then y, within the square
+        mut usize n = 0;
+        if (ia != ib) {
+            at[2 * n] = across(a, b);
+            at[2 * n + 1] = 0.0;
+            n += 1;
+        }
+        if (ib != ic) {
+            at[2 * n] = 1.0;
+            at[2 * n + 1] = across(b, c);
+            n += 1;
+        }
+        if (ic != id) {
+            at[2 * n] = 1.0 - across(c, d);
+            at[2 * n + 1] = 1.0;
+            n += 1;
+        }
+        if (id != ia) {
+            at[2 * n] = 0.0;
+            at[2 * n + 1] = 1.0 - across(d, a);
+            n += 1;
+        }
+        if (n == 2) {
+            side(x, y, at[0], at[1], at[2], at[3], a, b, c, d);
+        } else if (n == 4) {  // a saddle: the middle tells which corners the pieces cut off
+            bool middle = (a + b + c + d) / 4.0 >= 0.5;
+            if (ia == middle) {  // top with right, bottom with left
+                side(x, y, at[0], at[1], at[2], at[3], a, b, c, d);
+                side(x, y, at[4], at[5], at[6], at[7], a, b, c, d);
+            } else {  // top with left, right with bottom
+                side(x, y, at[0], at[1], at[6], at[7], a, b, c, d);
+                side(x, y, at[2], at[3], at[4], at[5], a, b, c, d);
+            }
+        }
+    }
+
+    // Where between `from` and `to` (of 1) the alpha is a half.
+    f32 across(f32 from, f32 to) {
+        f32 span = to - from;
+        return abs(span) < 0.0001 ? 0.5 : min(max((0.5 - from) / span, 0.0), 1.0);
+    }
+
+    // The quad of the piece from (px, py) to (qx, qy) of the square (x, y), whose corners hold the
+    // alphas `a` to `d` (top left, top right, bottom right, bottom left).
+    void side(i32 x, i32 y, f32 px, f32 py, f32 qx, f32 qy, f32 a, f32 b, f32 c, f32 d) {
+        f32 dx = qx - px;
+        f32 dy = qy - py;
+        f32 len = math.sqrt((dx * dx + dy * dy) as f64) as f32;
+        if (len < 0.0001) {
+            return;
+        }
+        // across the piece, within the image (y down); turned toward the transparent
+        mut f32 nx = dy / len;
+        mut f32 ny = -dx / len;
+        f32 sx = min(max((px + qx) / 2.0 + nx * 0.05, 0.0), 1.0);
+        f32 sy = min(max((py + qy) / 2.0 + ny * 0.05, 0.0), 1.0);
+        f32 inside = (a * (1.0 - sx) + b * sx) * (1.0 - sy) + (d * (1.0 - sx) + c * sx) * sy;
+        if (inside >= 0.5) {
+            nx = -nx;
+            ny = -ny;
+        }
+        // in meters: from the centers of the pixels, y up
+        f32 x0 = left + (x as f32 + 0.5 + px) * metre;
+        f32 y0 = top - (y as f32 + 0.5 + py) * metre;
+        f32 x1 = left + (x as f32 + 0.5 + qx) * metre;
+        f32 y1 = top - (y as f32 + 0.5 + qy) * metre;
+        f32[3] normal = [nx, -ny, 0.0];
+        ui32 first = vertices.len() as ui32;
+        vertices.push(model.Vertex{ position: [x0, y0, 0.0], normal: normal, uv: shade });
+        vertices.push(model.Vertex{ position: [x1, y1, 0.0], normal: normal, uv: shade });
+        vertices.push(model.Vertex{ position: [x1, y1, -depth], normal: normal, uv: shade });
+        vertices.push(model.Vertex{ position: [x0, y0, -depth], normal: normal, uv: shade });
+        // counterclockwise seen from outside: the triangle 0, 1, 2 faces (e x back), e = 1 - 0,
+        // back = (0, 0, -1): (-ey, ex, 0); reversed when that is not its normal
+        f32 ex = x1 - x0;
+        f32 ey = y1 - y0;
+        if (ex * normal[1] - ey * normal[0] > 0.0) {
+            push_all(indices, first, [0, 1, 2, 0, 2, 3]);
+        } else {
+            push_all(indices, first, [0, 2, 1, 0, 3, 2]);
+        }
+    }
 }
 
 test "a text of two lines, centered: one quad as high as its lines, its image cut out around the glyphs" {
@@ -170,4 +340,49 @@ test "a text of two lines, centered: one quad as high as its lines, its image cu
         },
         err(e) => assert(false),
     }
+}
+
+test "a solid text: its face behind, turned back, and its sides along its cut, turned outward" {
+    mut Arena arena = Arena.new(4 * MB);
+    defer arena.free();
+    model.Model m = match (text_model(&arena, none, "Lo", TextLook{ height: 0.5, depth: 0.1 })) {
+        some(x) => x,
+        none => {
+            assert(false);
+            return;
+        },
+    };
+    model.Mesh mesh = m.meshes[0];
+    assert(abs(mesh.bounds.min.z + 0.1) < 0.0001 && mesh.bounds.max.z == 0.0);
+    assert(mesh.vertices.len > 8 + 40 && mesh.indices.len == 12 + (mesh.vertices.len - 8) / 4 * 6);
+    // its face behind: toward -z, as wide as the front
+    assert(mesh.vertices[4].normal[2] == -1.0 && mesh.vertices[4].position[2] == -0.1);
+    // each side: across, and each of its triangles facing its normal (seen from outside)
+    for (usize t in 2..mesh.indices.len / 3) {
+        model.Vertex p = mesh.vertices[mesh.indices[3 * t] as usize];
+        model.Vertex q = mesh.vertices[mesh.indices[3 * t + 1] as usize];
+        model.Vertex r = mesh.vertices[mesh.indices[3 * t + 2] as usize];
+        linear.Vec3 e1 = linear.vec3(q.position[0] - p.position[0], q.position[1] - p.position[1], q.position[2] - p.position[2]);
+        linear.Vec3 e2 = linear.vec3(r.position[0] - p.position[0], r.position[1] - p.position[1], r.position[2] - p.position[2]);
+        linear.Vec3 facing = e1.cross(e2);
+        f32 along = facing.x * p.normal[0] + facing.y * p.normal[1] + facing.z * p.normal[2];
+        if (t >= 4) {
+            assert(p.normal[2] == 0.0 && abs(p.normal[0] * p.normal[0] + p.normal[1] * p.normal[1] - 1.0) < 0.001);
+        }
+        assert(along > 0.0);
+    }
+    // outward: the side at the left of the "L" faces -x
+    mut bool left_side = false;
+    for (usize i in 8..mesh.vertices.len) {
+        model.Vertex v = mesh.vertices[i];
+        if (v.position[0] < mesh.bounds.min.x + 0.06 && v.normal[0] < -0.9) {
+            left_side = true;
+        }
+    }
+    assert(left_side);
+    // the color of the sides: an opaque block under the lines, out of the face
+    image.Image img = m.images[0];
+    model.Vertex side = mesh.vertices[8];
+    assert(img.at((side.uv[0] * img.width as f32) as i32, (side.uv[1] * img.height as f32) as i32) >> 24 == 255);
+    assert(mesh.vertices[2].uv[1] < 1.0 && img.at(1, img.height - 1) >> 24 == 255);
 }
