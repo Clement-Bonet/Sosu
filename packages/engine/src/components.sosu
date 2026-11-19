@@ -906,6 +906,7 @@ pub struct Text {
     pub mut str text = "Text";  // `\n` starts a new line
     pub mut str font = "";  // a TrueType file of the project; "": the built-in font
     pub mut f32 height = 0.25;  // of a line, in meters
+    pub mut f32 depth = 0.0;  // in meters, behind its face: 0, flat; else solid letters
     pub mut linear.Vec3 color = linear.Vec3{ x: 1.0, y: 1.0, z: 1.0 };
     pub mut TextAlign align = TextAlign.Center;
     pub mut bool lit = false;  // lit as the rest; else its color as it is
@@ -932,7 +933,7 @@ pub class TextFields : describe.Describe<Text>, save.Codec<Text> {
     }
 
     override usize count() {
-        return 7;
+        return 8;
     }
 
     override describe.Field field(usize i) {
@@ -948,12 +949,17 @@ pub class TextFields : describe.Describe<Text>, save.Codec<Text> {
             return describe.Field{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, unit: "m", tooltip: "Of a line" };
         }
         if (i == 3) {
-            return describe.color("color", "Color");
+            describe.Field f = describe.number("depth", "Depth", 0.0, 10.0);
+            return describe.Field{ name: f.name, label: f.label, kind: f.kind, low: f.low, high: f.high, unit: "m",
+                tooltip: "Behind its face: 0, a flat text; else solid letters" };
         }
         if (i == 4) {
-            return describe.choice("align", "Align", aligns);
+            return describe.color("color", "Color");
         }
         if (i == 5) {
+            return describe.choice("align", "Align", aligns);
+        }
+        if (i == 6) {
             return describe.flag("lit", "Lit");
         }
         return describe.flag("face_camera", "Face the camera");
@@ -970,16 +976,19 @@ pub class TextFields : describe.Describe<Text>, save.Codec<Text> {
             return describe.Value.Number(t.height);
         }
         if (i == 3) {
-            return describe.Value.Vector(t.color);
+            return describe.Value.Number(t.depth);
         }
         if (i == 4) {
+            return describe.Value.Vector(t.color);
+        }
+        if (i == 5) {
             return describe.Value.Choice(match (t.align) {
                 Left => 0,
                 Center => 1,
                 Right => 2,
             });
         }
-        if (i == 5) {
+        if (i == 6) {
             return describe.Value.Flag(t.lit);
         }
         return describe.Value.Flag(t.face_camera);
@@ -993,11 +1002,13 @@ pub class TextFields : describe.Describe<Text>, save.Codec<Text> {
         } else if (i == 2) {
             t.height = describe.number_of(v, t.height);
         } else if (i == 3) {
-            t.color = describe.vector_of(v, t.color);
+            t.depth = describe.number_of(v, t.depth);
         } else if (i == 4) {
+            t.color = describe.vector_of(v, t.color);
+        } else if (i == 5) {
             usize a = describe.choice_of(v, 1);
             t.align = a == 0 ? TextAlign.Left : a == 2 ? TextAlign.Right : TextAlign.Center;
-        } else if (i == 5) {
+        } else if (i == 6) {
             t.lit = describe.flag_of(v, t.lit);
         } else {
             t.face_camera = describe.flag_of(v, t.face_camera);

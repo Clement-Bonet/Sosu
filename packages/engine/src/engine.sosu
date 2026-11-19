@@ -926,7 +926,7 @@ pub class Engine {
         k.push("\u{0}");
         k.push(t.font);
         k.push("\u{0}");
-        for (f32 x in [t.height, t.color.x, t.color.y, t.color.z]) {
+        for (f32 x in [t.height, t.depth, t.color.x, t.color.y, t.color.z]) {
             k.push_f64(x as f64, 4);
             k.push(" ");
         }
@@ -961,7 +961,8 @@ pub class Engine {
                     Right => text3d.Align.Right,
                 },
                 color: [t.color.x, t.color.y, t.color.z, 1.0],
-                unlit: !t.lit
+                unlit: !t.lit,
+                depth: max(t.depth, 0.0)
             };
             made.made = text3d.text_model(&made.memory, font_of(t.font), t.text, look);
         }
@@ -1602,6 +1603,14 @@ test "a text: its box as high as its lines, made again when it changes, saved an
     match (g.bounds_of(sign)) {
         some(b) => {
             assert(b.box.max.y - b.box.min.y > 1.0 && abs(b.box.min.x) < 0.05 && abs(b.box.max.x - b.box.min.x - wide) < 0.01);
+        },
+        none => assert(false),
+    }
+    // solid: as deep as it says, behind its face
+    c.texts.set(sign, components.Text{ text: "Lantern", height: 0.5, depth: 0.2 });
+    match (g.bounds_of(sign)) {
+        some(b) => {
+            assert(abs(b.box.max.z - b.box.min.z - 0.2) < 0.001);
         },
         none => assert(false),
     }
